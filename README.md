@@ -1,12 +1,18 @@
 # Aru_Agentic_SDLC - AI Engineering Playbook & Template
 
-A vendor-neutral, GitHub-centric **Agentic Software Development Life Cycle (SDLC)** template and AI Engineering Playbook. Standardized for compliance with **SkillsMP (Agent Skills Marketplace)** specs.
+A vendor-neutral, GitHub-centric **Agentic Software Development Life Cycle (SDLC)** template and AI Engineering Playbook. Standardized for compliance with **SkillsMP (Agent Skills Marketplace)** specs and enforcing the **Issue-First Governance Law**.
+
+---
+
+## 🚨 Core Governance: The Issue-First Law
+
+> **No code change, refactor, or feature implementation may begin without first originating from a tracked issue on the GitHub Project Board.**
 
 ---
 
 ## 🌟 Overview
 
-`Aru_Agentic_SDLC` establishes standardized rules, declarative skill procedures (`SKILL.md`), git worktree isolation, and automation scripts for AI coding agents (Gemini, Claude, Codex, Antigravity, AutoGen, CrewAI, etc.). It enables autonomous or semi-autonomous development teams to maintain high quality, strict git hygiene, and clear issue traceability.
+`Aru_Agentic_SDLC` establishes standardized rules, declarative skill procedures (`SKILL.md`), git worktree isolation, automated CI/CD pipelines, and project bootstrap tools for AI coding agents (Gemini, Claude, Codex, Antigravity, AutoGen, CrewAI, etc.).
 
 ---
 
@@ -17,9 +23,13 @@ Aru_Agentic_SDLC/
 ├── AGENTS.md                        # Master playbook & operating directives for AI agents
 ├── README.md                        # Project documentation & guidelines
 ├── .github/
-│   ├── PULL_REQUEST_TEMPLATE.md     # Standard PR template with issue linking
-│   └── ISSUE_TEMPLATE/              # Issue templates (feature, bug, task)
+│   ├── PULL_REQUEST_TEMPLATE.md     # Standard PR template with mandatory issue linking
+│   ├── ISSUE_TEMPLATE/              # Issue templates (feature, bug, task)
+│   └── workflows/
+│       └── ci.yml                   # Built-in GitHub Actions CI pipeline template
 ├── skills/                          # SkillsMP-compliant markdown skills
+│   ├── init-agent-project/
+│   │   └── SKILL.md                 # NEW: Bootstrap repo, AGENTS.md, CI workflow & Multi-view Project Board
 │   ├── implement-next-issue/
 │   │   └── SKILL.md                 # Primary workflow: Session recovery -> Next Issue -> Worktree -> Implementation -> PR -> CI
 │   ├── code-review/
@@ -32,6 +42,7 @@ Aru_Agentic_SDLC/
 │       └── SKILL.md                 # Fetch inline PR review comments, build checklist, resolve & reply
 ├── scripts/                         # Reusable GitHub helper automation tools
 │   ├── common.py                    # Shared Git / Worktree / GitHub API / gh CLI helpers
+│   ├── init_project.py              # NEW: Bootstraps AGENTS.md, .gitignore, CI workflow, private repo & multi-view project board
 │   ├── fetch_next_issue.py          # Identifies next unblocked issue respecting dependencies
 │   ├── fetch_pr_feedback.py         # Fetches inline PR comments into actionable task list
 │   ├── claim_issue.py               # Assigns issue & updates board status
@@ -40,7 +51,7 @@ Aru_Agentic_SDLC/
 │   ├── check_ci.py                  # Polls and verifies CI build status
 │   └── update_issue_status.py       # Manages board status transitions
 └── docs/
-    ├── project_board_workflow.md    # Issue lifecycle, dependencies, worktrees & parallel multi-agent rules
+    ├── project_board_workflow.md    # Issue lifecycle, dependencies, worktrees & multi-view board standards
     └── coding_standards.md          # Commit hygiene & testing standards
 ```
 
@@ -48,19 +59,10 @@ Aru_Agentic_SDLC/
 
 ## 🚀 Quick Start for AI Agents
 
-1. **Read `AGENTS.md`**: Understand repository guardrails, worktree isolation rules, and operating directives.
-2. **Execute Primary Skill**: Follow [`skills/implement-next-issue/SKILL.md`](file:///Users/aravindgillella/projects/Aru_Agentic_SDLC/skills/implement-next-issue/SKILL.md) to inspect session state, pick the next actionable issue, create a clean worktree, and execute the implementation lifecycle.
-3. **Use Helper Tools**: Execute GitHub operations via `python3 scripts/<script_name>.py`.
-
----
-
-## 🛡️ Key Features
-
-- **Tool-Agnostic Skills**: Skills contain pure declarative markdown instructions with zero hardcoded agent CLI syntax.
-- **Git Worktree Isolation**: All feature development and code reviews run in clean worktree directories (`.worktrees/`).
-- **Session Continuity**: Agents automatically detect recent commits and active PRs to resume work seamlessly across sessions.
-- **Progressive & Parallel Order**: Issues with dependencies are executed sequentially; independent issues are claimed in parallel by spawning subagents.
-- **Automated CI & PR Remediation**: Integrated skills for log-based CI failure remediation (`remediate-ci-failure`) and PR reviewer comment resolution (`address-pr-feedback`).
+1. **Bootstrap New Project**: Run `skills/init-agent-project/SKILL.md` or `python3 scripts/init_project.py --name <NAME> --create-board`.
+2. **Read `AGENTS.md`**: Understand repository guardrails, worktree isolation rules, and the Issue-First Law.
+3. **Execute Primary Skill**: Follow [`skills/implement-next-issue/SKILL.md`](file:///Users/aravindgillella/projects/Aru_Agentic_SDLC/skills/implement-next-issue/SKILL.md) to inspect session state, pick the next actionable issue, create a clean worktree, and execute the implementation lifecycle.
+4. **Use Helper Tools**: Execute GitHub operations via `python3 scripts/<script_name>.py`.
 
 ---
 

@@ -1,10 +1,24 @@
 # GitHub Project Board & Issue Lifecycle Standards
 
-This document establishes the GitHub Project Board columns, issue state transitions, dependency management, worktree isolation, and parallel multi-agent rules for **Aru_Agentic_SDLC**.
+This document establishes the GitHub Project Board multi-view standards, issue state transitions, dependency management, worktree isolation, and parallel multi-agent rules for **Aru_Agentic_SDLC**.
 
 ---
 
-## 📌 Project Board Columns
+## 🚨 Core Law: Issue-First Governance
+
+No developer or AI agent may begin code modifications without first claiming an open issue from the GitHub Project Board. All work MUST originate from a tracked issue in `Backlog` / `Ready`.
+
+---
+
+## 📌 Project Board Views & Columns
+
+When a repository is bootstrapped via `skills/init-agent-project/SKILL.md`, it provisions a GitHub Project v2 with 3 pre-configured views:
+
+1. **Kanban View**: Visual lifecycle columns (`Backlog` $\rightarrow$ `Ready` $\rightarrow$ `In Progress` $\rightarrow$ `In Review` $\rightarrow$ `Done`).
+2. **Jira-Style Backlog View**: Tabular list with fields (`Priority`, `Story Points`, `Assignee`, `depends-on`).
+3. **Sprint View**: Grouped by active iteration cycles (`Sprint 1`, `Sprint 2`).
+
+### Lifecycle Column Definitions:
 
 | Column | Description | Trigger / Action |
 |---|---|---|
