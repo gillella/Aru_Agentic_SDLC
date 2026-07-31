@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
-Provides robust execution of gh CLI commands and fallback git commands.
+Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
 """
 
 import json
+import os
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 
-def run_cmd(cmd: List[str], check: bool = True) -> Tuple[int, str, str]:
+def run_cmd(cmd: List[str], check: bool = True, cwd: Optional[str] = None) -> Tuple[int, str, str]:
     """Runs a system command and returns (returncode, stdout, stderr)."""
     try:
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
         if check and res.returncode != 0:
             print(f"[ERROR] Command failed ({' '.join(cmd)}):\n{res.stderr.strip()}", file=sys.stderr)
         return res.returncode, res.stdout.strip(), res.stderr.strip()
@@ -41,10 +42,18 @@ def get_current_branch() -> str:
     return stdout or "main"
 
 
-def get_git_status() -> str:
-    """Returns brief git status."""
-    _, stdout, _ = run_cmd(["git", "status", "--porcelain"], check=False)
-    return stdout
+def create_worktree(branch_name: str, path: str = None) -> str:
+    """Creates a git worktree directory for isolated feature development/review."""
+    if not path:
+        path = os.path.join(".worktrees", branch_name.replace("/", "-"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    code, stdout, stderr = run_cmd(["git", "worktree", "add", "-b", branch_name, path], check=False)
+    if code != 0:
+        # Branch might already exist, checkout existing branch in worktree
+        run_cmd(["git", "worktree", "add", path, branch_name], check=False)
+    print(f"✅ Git worktree initialized at: '{path}'")
+    return path
 
 
 def list_open_issues() -> List[Dict[str, Any]]:
@@ -59,6 +68,13 @@ def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
     cmd = ["gh", "issue", "view", str(issue_id), "--json", "number,title,labels,assignees,body,state"]
     res = run_gh_json(cmd)
     return res if isinstance(res, dict) else None
+
+
+def fetch_pr_comments(pr_id: int) -> List[Dict[str, Any]]:
+    """Fetches inline review comments for a Pull Request."""
+    cmd = ["gh", "api", f"repos/{{owner}}/{{repo}}/pulls/{pr_id}/comments"]
+    res = run_gh_json(cmd)
+    return res if isinstance(res, list) else []
 
 
 if __name__ == "__main__":

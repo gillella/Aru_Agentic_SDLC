@@ -1,6 +1,14 @@
 ---
 name: create-github-issue
 description: Procedure for creating well-structured, prioritized GitHub issues with dependency tags and project board placement.
+triggers:
+  - "create issue"
+  - "file a bug"
+  - "create feature request"
+  - "add task to backlog"
+do_not_trigger_for:
+  - "implementing an issue (use implement-next-issue instead)"
+  - "opening a pull request (use create_pr script instead)"
 ---
 
 # Create GitHub Issue Procedure
