@@ -77,5 +77,137 @@ def fetch_pr_comments(pr_id: int) -> List[Dict[str, Any]]:
     return res if isinstance(res, list) else []
 
 
+# --- GitHub Project v2 board helpers --------------------------------------
+# The board is the monitoring surface; the status:* labels are what the CLI
+# reads. Both must move together or they drift. These helpers exist so
+# claim_issue.py and update_issue_status.py can move the board item too.
+
+
+def get_repo_slug() -> Optional[str]:
+    """Returns 'owner/repo' for the current working directory's repo."""
+    cmd = ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]
+    code, stdout, _ = run_cmd(cmd, check=False)
+    return stdout or None
+
+
+def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
+    """Returns every project item for an issue, with the project's Status field
+    and its available options resolved in one round trip."""
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return []
+    owner, repo = slug.split("/", 1)
+
+    query = """
+    query($owner:String!, $repo:String!, $number:Int!) {
+      repository(owner:$owner, name:$repo) {
+        issue(number:$number) {
+          id
+          url
+          projectItems(first:10) {
+            nodes {
+              id
+              project {
+                id
+                number
+                title
+                field(name:"Status") {
+                  ... on ProjectV2SingleSelectField {
+                    id
+                    options { id name }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    cmd = [
+        "gh", "api", "graphql",
+        "-f", f"query={query}",
+        "-F", f"owner={owner}",
+        "-F", f"repo={repo}",
+        "-F", f"number={issue_number}",
+    ]
+    res = run_gh_json(cmd)
+    if not res:
+        return []
+    try:
+        return res["data"]["repository"]["issue"]["projectItems"]["nodes"]
+    except (KeyError, TypeError):
+        return []
+
+
+def set_board_status(issue_number: int, status: str) -> bool:
+    """Moves an issue's board item(s) to the named Status option.
+
+    Returns True only if at least one board item actually moved, so callers can
+    tell the difference between 'moved' and 'issue is not on any board'.
+    """
+    items = get_issue_project_items(issue_number)
+    if not items:
+        return False
+
+    moved = False
+    for item in items:
+        project = item.get("project") or {}
+        field = project.get("field") or {}
+        field_id = field.get("id")
+        if not field_id:
+            continue
+        option = next(
+            (o for o in field.get("options", []) if o.get("name", "").lower() == status.lower()),
+            None,
+        )
+        if not option:
+            print(
+                f"[WARN] Project '{project.get('title')}' has no Status option "
+                f"'{status}'. Available: {[o['name'] for o in field.get('options', [])]}",
+                file=sys.stderr,
+            )
+            continue
+
+        mutation = """
+        mutation($project:ID!, $item:ID!, $field:ID!, $option:String!) {
+          updateProjectV2ItemFieldValue(input:{
+            projectId:$project, itemId:$item, fieldId:$field,
+            value:{ singleSelectOptionId:$option }
+          }) { projectV2Item { id } }
+        }
+        """
+        cmd = [
+            "gh", "api", "graphql",
+            "-f", f"query={mutation}",
+            "-F", f"project={project['id']}",
+            "-F", f"item={item['id']}",
+            "-F", f"field={field_id}",
+            "-F", f"option={option['id']}",
+        ]
+        code, _, err = run_cmd(cmd, check=False)
+        if code == 0:
+            moved = True
+        else:
+            print(f"[WARN] Board move failed for project '{project.get('title')}': {err}", file=sys.stderr)
+    return moved
+
+
+def add_issue_to_project(issue_number: int, project_number: int, owner: str = "@me") -> bool:
+    """Adds an issue to a project board. Idempotent - re-adding is a no-op."""
+    slug = get_repo_slug()
+    if not slug:
+        return False
+    url = f"https://github.com/{slug}/issues/{issue_number}"
+    code, out, err = run_cmd(
+        ["gh", "project", "item-add", str(project_number), "--owner", owner, "--url", url],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not add issue #{issue_number} to project #{project_number}: {err or out}", file=sys.stderr)
+        return False
+    return True
+
+
 if __name__ == "__main__":
     print("Aru_Agentic_SDLC Common Utilities Loaded Cleanly.")

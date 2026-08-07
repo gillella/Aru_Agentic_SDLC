@@ -24,6 +24,16 @@ def parse_dependencies(body: str) -> List[int]:
     return [int(d) for d in deps]
 
 
+def is_epic(labels: List[Dict[str, Any]]) -> bool:
+    """Epics are phase-level containers, never directly implementable.
+
+    They carry no depends-on, so without this filter they are always 'unblocked'
+    and always the lowest-numbered candidate - meaning the picker would hand an
+    agent an epic every single time.
+    """
+    return "type:epic" in [l.get("name", "").lower() for l in labels]
+
+
 def is_parallel_eligible(body: str, labels: List[Dict[str, Any]]) -> bool:
     """Checks if issue is flagged as parallel-eligible."""
     label_names = [l.get("name", "").lower() for l in labels]
@@ -61,6 +71,9 @@ def main():
 
         # Check if any dependency is still open (unresolved)
         unresolved_deps = [d for d in deps if d in open_issue_numbers]
+
+        if is_epic(labels):
+            continue
 
         if not unresolved_deps:
             unblocked_issues.append(issue)
