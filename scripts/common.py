@@ -238,6 +238,9 @@ def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
                 id
                 number
                 title
+                repositories(first:100) {
+                  nodes { nameWithOwner }
+                }
                 field(name:"Status") {
                   ... on ProjectV2SingleSelectField {
                     id
@@ -267,6 +270,39 @@ def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
         return []
 
 
+def select_governed_project_items(
+    items: List[Dict[str, Any]],
+    repo_slug: str,
+) -> List[Dict[str, Any]]:
+    """Selects only the repository's Aru_Agentic_SDLC project item.
+
+    Issues can appear on several roadmaps.  A status transition must not move
+    all of them just because they expose an identically named Status option.
+    Prefer the board name created by ``init_project.py``; fall back only when
+    exactly one project is linked to this repository.  Ambiguity fails closed.
+    """
+    repo_name = repo_slug.split("/", 1)[-1]
+    expected_title = f"{repo_name} Board".lower()
+    linked = []
+    for item in items:
+        project = item.get("project") or {}
+        repositories = (project.get("repositories") or {}).get("nodes") or []
+        linked_slugs = {repo.get("nameWithOwner") for repo in repositories}
+        if repo_slug in linked_slugs:
+            linked.append(item)
+
+    named = [
+        item
+        for item in linked
+        if (item.get("project") or {}).get("title", "").lower() == expected_title
+    ]
+    if len(named) == 1:
+        return named
+    if not named and len(linked) == 1:
+        return linked
+    return []
+
+
 def set_board_status(issue_number: int, status: str) -> bool:
     """Moves an issue's board item(s) to the named Status option.
 
@@ -275,6 +311,16 @@ def set_board_status(issue_number: int, status: str) -> bool:
     """
     items = get_issue_project_items(issue_number)
     if not items:
+        return False
+    slug = get_repo_slug()
+    if not slug:
+        return False
+    items = select_governed_project_items(items, slug)
+    if not items:
+        print(
+            f"[WARN] Could not identify one governed project board for '{slug}'.",
+            file=sys.stderr,
+        )
         return False
 
     moved = False
