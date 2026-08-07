@@ -49,6 +49,13 @@ class ProjectBootstrapTests(unittest.TestCase):
 
     def test_documented_private_flag_is_accepted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
+            env = os.environ.copy()
+            env.update({
+                "GIT_AUTHOR_NAME": "Aru SDLC Test",
+                "GIT_AUTHOR_EMAIL": "aru-sdlc-test@example.invalid",
+                "GIT_COMMITTER_NAME": "Aru SDLC Test",
+                "GIT_COMMITTER_EMAIL": "aru-sdlc-test@example.invalid",
+            })
             result = subprocess.run(
                 [
                     sys.executable,
@@ -61,6 +68,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=False,
+                env=env,
             )
 
         self.assertEqual(result.returncode, 0, result.stderr)
