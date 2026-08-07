@@ -22,23 +22,26 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from common import (
-    AGENT_LABEL_PREFIX,
     agent_labels,
     claimed_by,
     get_current_branch,
-    label_names,
     list_open_issues,
     parse_touches,
     run_cmd,
     touches_conflict,
 )
+from update_issue_status import update_status
 
 
 def parse_dependencies(body: str) -> List[int]:
     """Parses 'depends-on: #12, #14' pattern from issue body."""
     if not body:
         return []
-    match = re.search(r"depends-on\s*:\s*([^\n]+)", body, re.IGNORECASE)
+    match = re.search(
+        r"^\s*depends-on\s*:\s*(.*?)\s*$",
+        body,
+        re.IGNORECASE | re.MULTILINE,
+    )
     if not match:
         return []
     return [int(d) for d in re.findall(r"#(\d+)", match.group(1))]
@@ -51,12 +54,12 @@ def is_epic(labels: List[Dict[str, Any]]) -> bool:
     'unblocked' and always the lowest-numbered candidate - meaning the picker
     would hand an agent an epic every single time.
     """
-    return "type:epic" in [l.get("name", "").lower() for l in labels]
+    return "type:epic" in [label.get("name", "").lower() for label in labels]
 
 
 def is_parallel_eligible(body: str, labels: List[Dict[str, Any]]) -> bool:
     """Checks if issue is flagged as parallel-eligible."""
-    names = [l.get("name", "").lower() for l in labels]
+    names = [label.get("name", "").lower() for label in labels]
     if "parallel-eligible" in names or "independent" in names:
         return True
     return bool(body) and "parallel-eligible: true" in body.lower()
@@ -74,12 +77,30 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
         return []
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    prs = run_cmd(["gh", "pr", "list", "--state", "open", "--limit", "200",
-                   "--json", "number,body,headRefName"], check=False)[1]
+    pr_code, prs, pr_err = run_cmd(
+        ["gh", "pr", "list", "--state", "open", "--limit", "200",
+         "--json", "number,body,headRefName"],
+        check=False,
+    )
+    if pr_code != 0:
+        print(f"[WARN] Could not verify open PRs; no claims were reaped: {pr_err}", file=sys.stderr)
+        return []
     try:
         open_prs = json.loads(prs) if prs else []
     except json.JSONDecodeError:
-        open_prs = []
+        print("[WARN] Could not parse open PRs; no claims were reaped.", file=sys.stderr)
+        return []
+
+    branch_code, remote_branches, branch_err = run_cmd(
+        ["git", "ls-remote", "--heads", "origin"],
+        check=False,
+    )
+    if branch_code != 0:
+        print(
+            f"[WARN] Could not verify remote branches; no claims were reaped: {branch_err}",
+            file=sys.stderr,
+        )
+        return []
 
     def has_open_pr(num: int) -> bool:
         pat = re.compile(rf"closes\s+#{num}\b", re.IGNORECASE)
@@ -87,8 +108,7 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
                    for p in open_prs)
 
     def has_remote_branch(num: int) -> bool:
-        out = run_cmd(["git", "ls-remote", "--heads", "origin"], check=False)[1]
-        return f"issue-{num}-" in out
+        return f"issue-{num}-" in remote_branches
 
     released = []
     for issue in issues:
@@ -105,14 +125,26 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
         if ts > cutoff or has_open_pr(num) or has_remote_branch(num):
             continue
 
-        cmd = ["gh", "issue", "edit", str(num), "--add-label", "status:ready",
-               "--remove-label", "status:in-progress"]
+        if not update_status(num, "Ready", require_board=True):
+            print(
+                f"[WARN] Could not synchronize #{num} to Ready; claim retained.",
+                file=sys.stderr,
+            )
+            continue
+
+        cmd = ["gh", "issue", "edit", str(num), "--remove-assignee", "@me"]
         for lbl in agent_labels(issue):
             cmd += ["--remove-label", lbl]
         if run_cmd(cmd, check=False)[0] == 0:
             released.append(num)
             print(f"♻️  Released stale claim on #{num} (idle > {hours}h, no PR, no branch).",
                   file=sys.stderr)
+        else:
+            update_status(num, "In Progress", require_board=True)
+            print(
+                f"[WARN] Could not remove the claim markers on #{num}; status restored.",
+                file=sys.stderr,
+            )
     return released
 
 
@@ -121,7 +153,7 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
     open_numbers = {i["number"] for i in issues}
 
     in_flight_paths: List[str] = []
-    my_in_flight: Optional[Dict[str, Any]] = None
+    my_in_flight_issues: List[Dict[str, Any]] = []
 
     for issue in issues:
         holder = claimed_by(issue)
@@ -129,9 +161,9 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
             continue
         in_flight_paths.extend(parse_touches(issue.get("body") or ""))
         if agent and holder == agent:
-            my_in_flight = issue
+            my_in_flight_issues.append(issue)
 
-    candidates, blocked, conflicted = [], [], []
+    candidates, blocked, conflicted, not_ready, missing_touches = [], [], [], [], []
 
     for issue in issues:
         num = issue["number"]
@@ -142,6 +174,9 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
             continue
         if claimed_by(issue):
             continue  # held by someone; not selectable
+        if "status:ready" not in {label.get("name", "").lower() for label in labels}:
+            not_ready.append(num)
+            continue
 
         unresolved = [d for d in parse_dependencies(body) if d in open_numbers]
         if unresolved:
@@ -149,6 +184,9 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
             continue
 
         my_paths = parse_touches(body)
+        if not my_paths:
+            missing_touches.append(num)
+            continue
         clash = touches_conflict(my_paths, in_flight_paths) if my_paths else None
         if clash:
             conflicted.append({"number": num, "conflict": list(clash)})
@@ -161,7 +199,10 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
         "candidates": candidates,
         "blocked": blocked,
         "conflicted": conflicted,
-        "my_in_flight": my_in_flight,
+        "not_ready": not_ready,
+        "missing_touches": missing_touches,
+        "my_in_flight": min(my_in_flight_issues, key=lambda x: x["number"])
+        if my_in_flight_issues else None,
     }
 
 
@@ -174,8 +215,6 @@ def main():
                         help="Claim the first candidate that can be claimed. Requires --agent.")
     parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
                         help="Release claims idle longer than HOURS with no PR and no branch.")
-    parser.add_argument("--include-claimed", action="store_true",
-                        help="Do not exclude issues held by other agents (diagnostic).")
     args = parser.parse_args()
 
     if args.claim and not args.agent:
@@ -208,14 +247,21 @@ def main():
             claimed_now = resume
             print(f"[INFO] Resuming your in-flight issue #{resume}; not claiming new work.")
         else:
-            from claim_issue import EXIT_OK, claim_issue
+            from claim_issue import EXIT_CONFLICT, EXIT_OK, claim_issue
             for cand in candidates:
                 rc = claim_issue(cand["number"], args.agent)
                 if rc == EXIT_OK:
                     claimed_now = cand["number"]
                     break
-                print(f"[INFO] #{cand['number']} unavailable; trying next candidate.",
-                      file=sys.stderr)
+                if rc == EXIT_CONFLICT:
+                    print(f"[INFO] #{cand['number']} unavailable; trying next candidate.",
+                          file=sys.stderr)
+                    continue
+                print(
+                    f"[ERROR] Claiming #{cand['number']} failed; aborting candidate walk.",
+                    file=sys.stderr,
+                )
+                break
             if claimed_now is None:
                 print("[INFO] No claimable issue available.", file=sys.stderr)
 
@@ -235,6 +281,8 @@ def main():
         ],
         "blocked_by_dependencies": parts["blocked"],
         "blocked_by_file_conflict": parts["conflicted"],
+        "not_ready": parts["not_ready"],
+        "missing_touches": parts["missing_touches"],
         "held_by_other_agents": [
             {"number": i["number"], "agent": claimed_by(i)}
             for i in issues if claimed_by(i) and claimed_by(i) != args.agent
@@ -264,6 +312,8 @@ def main():
     if res["blocked_by_file_conflict"]:
         cf = ", ".join(f"#{c['number']}" for c in res["blocked_by_file_conflict"])
         print(f"📁 Deferred - file conflict with in-flight work: {cf}")
+    if res["missing_touches"]:
+        print(f"📝 Deferred - missing touches declaration: {res['missing_touches']}")
 
 
 if __name__ == "__main__":

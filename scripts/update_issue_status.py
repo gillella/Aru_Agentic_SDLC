@@ -12,7 +12,7 @@ held.
 import argparse
 import sys
 
-from common import run_cmd, set_board_status
+from common import get_issue, label_names, run_cmd, set_board_status
 
 VALID_STATUSES = ["Backlog", "Ready", "In Progress", "In Review", "Done"]
 
@@ -30,21 +30,28 @@ def update_status(issue_id: int, status: str, require_board: bool = False) -> bo
         )
         return False
 
+    issue = get_issue(issue_id)
+    if not issue:
+        print(f"[ERROR] Issue #{issue_id} not found.", file=sys.stderr)
+        return False
+
     target_label = _slug(canonical)
-    stale_labels = [_slug(s) for s in VALID_STATUSES if _slug(s) != target_label]
+    current_labels = set(label_names(issue))
+    stale_labels = [
+        _slug(s)
+        for s in VALID_STATUSES
+        if _slug(s) != target_label and _slug(s) in current_labels
+    ]
+    previous_status = next(
+        (s for s in VALID_STATUSES if _slug(s) in current_labels),
+        None,
+    )
 
     print(f"Moving Issue #{issue_id} to '{canonical}'...")
 
-    cmd = ["gh", "issue", "edit", str(issue_id), "--add-label", target_label]
-    for lbl in stale_labels:
-        cmd += ["--remove-label", lbl]
-    code, out, err = run_cmd(cmd, check=False)
-    label_ok = code == 0
-    if label_ok:
-        print(f"✅ Label '{target_label}' applied; superseded status labels removed.")
-    else:
-        print(f"[WARN] Label update failed: {err or out}", file=sys.stderr)
-
+    # When the board is mandatory, move it first.  This prevents a failed
+    # board lookup from changing the label and leaving the two representations
+    # out of sync while still returning an error to the caller.
     board_ok = set_board_status(issue_id, canonical)
     if board_ok:
         print(f"✅ Project board item moved to '{canonical}'.")
@@ -53,9 +60,29 @@ def update_status(issue_id: int, status: str, require_board: bool = False) -> bo
         if require_board:
             print(f"[ERROR] {msg}", file=sys.stderr)
             return False
-        print(f"[WARN] {msg} Label was still applied.", file=sys.stderr)
+        print(f"[WARN] {msg} Proceeding with a label-only update.", file=sys.stderr)
 
-    return label_ok
+    cmd = ["gh", "issue", "edit", str(issue_id), "--add-label", target_label]
+    for lbl in stale_labels:
+        cmd += ["--remove-label", lbl]
+    code, out, err = run_cmd(cmd, check=False)
+    if code == 0:
+        print(f"✅ Label '{target_label}' applied; superseded status labels removed.")
+        return True
+
+    print(f"[WARN] Label update failed: {err or out}", file=sys.stderr)
+    if board_ok and previous_status:
+        if set_board_status(issue_id, previous_status):
+            print(
+                f"[WARN] Restored project board item to '{previous_status}' after label failure.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[ERROR] Could not restore project board item to '{previous_status}'.",
+                file=sys.stderr,
+            )
+    return False
 
 
 def main():

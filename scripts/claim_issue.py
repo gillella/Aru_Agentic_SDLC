@@ -6,7 +6,7 @@ GitHub exposes no compare-and-swap on issue state, so a true lock is not
 available. The protocol here is optimistic:
 
   1. Read the issue. If another agent already holds it, abort (exit 2).
-  2. Write our agent:<id> label and status:in-progress.
+  2. Write our agent:<id> label.
   3. Read back. If two agents raced, both now see both labels and both compute
      the same winner - the lowest-sorting agent id. The loser releases.
   4. Move the board item.
@@ -47,15 +47,21 @@ def _label_for(agent: str) -> str:
     return f"{AGENT_LABEL_PREFIX}{agent}"
 
 
-def _release(issue_id: int, agent: str) -> None:
-    """Removes our claim after losing a race, and returns the issue to Ready."""
-    run_cmd(
-        ["gh", "issue", "edit", str(issue_id),
-         "--remove-label", _label_for(agent),
-         "--remove-label", "status:in-progress",
-         "--add-label", "status:ready"],
+def _remove_agent_label(issue_id: int, agent: str) -> bool:
+    """Removes only this agent's claim marker.
+
+    Shared status labels must never be changed by a losing contender: the
+    winner may already have moved the issue to In Progress, and removing that
+    label here would make the outcome depend on which cleanup request lands
+    last.
+    """
+    code, _, err = run_cmd(
+        ["gh", "issue", "edit", str(issue_id), "--remove-label", _label_for(agent)],
         check=False,
     )
+    if code != 0:
+        print(f"[WARN] Could not remove claim label for '{agent}': {err}", file=sys.stderr)
+    return code == 0
 
 
 def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
@@ -76,7 +82,9 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
 
     # --- Step 2: write our claim ------------------------------------------
     my_label = _label_for(agent)
-    ensure_label(my_label, "1d76db", f"Claimed by agent '{agent}'")
+    if not ensure_label(my_label, "1d76db", f"Claimed by agent '{agent}'"):
+        print(f"[ERROR] Could not provision claim label '{my_label}'.", file=sys.stderr)
+        return EXIT_ERROR
 
     code, _, err = run_cmd(
         ["gh", "issue", "edit", str(issue_id), "--add-label", my_label], check=False
@@ -87,8 +95,19 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
 
     # --- Step 3: read back and resolve any race ---------------------------
     time.sleep(READBACK_DELAY_S)
-    issue = get_issue(issue_id) or {}
+    issue = get_issue(issue_id)
+    if not issue:
+        print(f"[ERROR] Could not read back Issue #{issue_id} after claiming.", file=sys.stderr)
+        _remove_agent_label(issue_id, agent)
+        return EXIT_ERROR
     holders = agent_labels(issue)
+
+    if my_label not in holders:
+        print(
+            f"[ERROR] Claim label '{my_label}' was not present during read-back.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
 
     if len(holders) > 1:
         winner = holders[0]  # deterministic: lowest-sorting label wins
@@ -99,7 +118,7 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
                 f"'{winner[len(AGENT_LABEL_PREFIX):]}' wins. Releasing.",
                 file=sys.stderr,
             )
-            _release(issue_id, agent)
+            _remove_agent_label(issue_id, agent)
             return EXIT_CONFLICT
         print(f"[INFO] Race on #{issue_id} between [{contenders}]; '{agent}' wins.")
 
@@ -114,7 +133,12 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
     # previous version ran ["python3", "scripts/update_issue_status.py", ...],
     # which resolves against the target project's cwd rather than the
     # framework's, so it silently did nothing from a project repo root.
-    if not update_status(issue_id, status):
+    if not update_status(issue_id, status, require_board=True):
+        _remove_agent_label(issue_id, agent)
+        run_cmd(
+            ["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee],
+            check=False,
+        )
         return EXIT_ERROR
 
     print(f"✅ Issue #{issue_id} claimed by '{agent}'.")
@@ -133,14 +157,21 @@ def release_issue(issue_id: int, agent: str) -> int:
         return EXIT_ERROR
 
     holder = claimed_by(issue)
-    if holder and holder != agent and holder != "unknown":
+    if holder != agent:
         print(f"[CONFLICT] Issue #{issue_id} is held by '{holder}', not '{agent}'.", file=sys.stderr)
         return EXIT_CONFLICT
 
-    _release(issue_id, agent)
-    run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", "@me"], check=False)
-    from common import set_board_status
-    set_board_status(issue_id, "Ready")
+    if not update_status(issue_id, "Ready", require_board=True):
+        return EXIT_ERROR
+    if not _remove_agent_label(issue_id, agent):
+        update_status(issue_id, "In Progress", require_board=True)
+        return EXIT_ERROR
+    code, _, err = run_cmd(
+        ["gh", "issue", "edit", str(issue_id), "--remove-assignee", "@me"],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Unable to remove assignee: {err}", file=sys.stderr)
     print(f"♻️  Issue #{issue_id} released by '{agent}' and returned to Ready.")
     return EXIT_OK
 

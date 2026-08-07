@@ -102,7 +102,7 @@ ACTIVE_STATUS_LABELS = {"status:in-progress", "status:in-review"}
 
 
 def label_names(issue: Dict[str, Any]) -> List[str]:
-    return [l.get("name", "") for l in issue.get("labels", [])]
+    return [label.get("name", "") for label in issue.get("labels", [])]
 
 
 def agent_labels(issue: Dict[str, Any]) -> List[str]:
@@ -143,7 +143,10 @@ def parse_touches(body: str) -> List[str]:
     """
     if not body:
         return []
-    match = re.search(r"touches\s*:\s*([^\n]*)", body, re.IGNORECASE)
+    # Treat this as issue metadata, not prose.  An unanchored search would
+    # parse the first sentence containing ``touches:`` (including Markdown
+    # code spans) and silently ignore the real declaration later in the body.
+    match = re.search(r"^\s*touches\s*:\s*(.*?)\s*$", body, re.IGNORECASE | re.MULTILINE)
     if not match:
         return []
     return [p.strip() for p in match.group(1).split(",") if p.strip()]
@@ -175,9 +178,11 @@ def paths_overlap(a: str, b: str) -> bool:
 
 
 def touches_conflict(a_paths: List[str], b_paths: List[str]) -> Optional[Tuple[str, str]]:
-    """Returns the first conflicting pair, or None. An issue that declares no
-    touches is treated as conflicting with nothing - undeclared work is the
-    author's responsibility, not the picker's."""
+    """Returns the first conflicting pair, or None.
+
+    Empty declarations have no pair to compare; the issue picker rejects them
+    before calling this primitive.
+    """
     for a in a_paths:
         for b in b_paths:
             if paths_overlap(a, b):

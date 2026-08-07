@@ -82,9 +82,9 @@ releases automatically.
 1. Give each agent a distinct id (`agent-1`, `agent-2`, …).
 2. Every issue MUST declare `touches:` in its body listing the paths it will
    modify. `parallel-eligible` only means "no unresolved `depends-on`" — it says
-   nothing about two agents editing the same file. An issue with no `touches:`
-   declaration is treated as conflicting with nothing, so an undeclared
-   collision is the author's fault, not the picker's.
+   nothing about two agents editing the same file. The picker rejects a Ready
+   issue whose `touches:` declaration is empty, so triage must complete this
+   metadata before an agent can claim it.
 3. Release abandoned claims periodically:
    `python3 "$ARU_SDLC_HOME/scripts/fetch_next_issue.py" --agent <ID> --reap-after 4`
 4. Beyond ~3 concurrent agents, give each its own clone rather than sharing one

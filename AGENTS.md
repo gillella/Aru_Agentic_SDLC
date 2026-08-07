@@ -37,7 +37,7 @@ When assigned to work on the repository, perform all tasks by following the decl
 The skills in `skills/` are 100% declarative and tool-agnostic. Concrete Git, Worktree, and GitHub API interactions MUST be executed using the Python automation scripts in `scripts/`:
 * `python3 scripts/init_project.py --name <NAME> [--private] [--create-board]` - Bootstraps project, CI, private repo & multi-view project board.
 * `python3 scripts/fetch_next_issue.py` - Identifies next actionable issue.
-* `python3 scripts/claim_issue.py --issue <ID>` - Claims issue & updates status.
+* `python3 scripts/claim_issue.py --issue <ID> --agent <AGENT_ID>` - Claims issue & updates status.
 * `python3 scripts/create_branch.py --issue <ID> --type <feat|fix|docs> [--worktree]` - Creates standardized git branch or worktree.
 * `python3 scripts/create_pr.py --issue <ID> --title "<Title>" --body "<body>"` - Opens PR pre-populated with `Closes #<ID>`.
 * `python3 scripts/check_ci.py --pr <ID>` - Polls and returns CI run status.

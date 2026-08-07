@@ -25,6 +25,7 @@ This skill defines the declarative workflow for creating clear, actionable GitHu
 
 ### 2. Specify Dependencies & Parallel Eligibility
 - Identify if the issue depends on prior issues being completed (`depends-on: #X`).
+- Declare every path the work may modify (`touches: src/**, tests/**`).
 - Mark whether the issue can be implemented independently in parallel (`parallel-eligible: true`).
 
 ### 3. Format & Submit Issue
