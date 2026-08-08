@@ -442,6 +442,44 @@ def init_git_repo(target_dir: str) -> bool:
     return True
 
 
+def ensure_git_identity(target_dir: str) -> bool:
+    """Supply a local author/committer when the environment has none.
+
+    Clean CI runners and empty HOMEs often lack user.name/user.email and the
+    GIT_AUTHOR_* / GIT_COMMITTER_* variables. Without an identity, `git commit`
+    fails with "Author identity unknown" after staging the scaffold. Prefer
+    env vars and existing git config; only write *local* repo config as a
+    last resort so we never mutate the operator's global git settings.
+    """
+    if os.environ.get("GIT_AUTHOR_NAME") and os.environ.get("GIT_AUTHOR_EMAIL"):
+        return True
+
+    _, name, _ = run_cmd(["git", "config", "--get", "user.name"], cwd=target_dir, check=False)
+    _, email, _ = run_cmd(["git", "config", "--get", "user.email"], cwd=target_dir, check=False)
+    if name and email:
+        return True
+
+    bootstrap_name = "Aru Agentic SDLC"
+    bootstrap_email = "aru-agentic-sdlc@users.noreply.github.com"
+    code1, _, err1 = run_cmd(
+        ["git", "config", "user.name", bootstrap_name], cwd=target_dir, check=False
+    )
+    code2, _, err2 = run_cmd(
+        ["git", "config", "user.email", bootstrap_email], cwd=target_dir, check=False
+    )
+    if code1 != 0 or code2 != 0:
+        print(
+            f"[ERROR] Could not configure local git identity: {err1 or err2}",
+            file=sys.stderr,
+        )
+        return False
+    print(
+        f"[INFO] No git author configured; using local identity "
+        f"'{bootstrap_name} <{bootstrap_email}>'."
+    )
+    return True
+
+
 def initial_commit(target_dir: str, project_name: str) -> bool:
     """SKILL.md step 7. Previously unimplemented."""
     code, _, err = run_cmd(["git", "add", "-A"], cwd=target_dir, check=False)
@@ -455,6 +493,8 @@ def initial_commit(target_dir: str, project_name: str) -> bool:
     if not out:
         print("[INFO] Nothing to commit.")
         return True
+    if not ensure_git_identity(target_dir):
+        return False
     msg = (
         f"feat: initialize {project_name} under Aru_Agentic_SDLC governance\n\n"
         "Scaffolds directory layout, AGENTS.md governance, CI pipeline, and\n"
@@ -478,6 +518,8 @@ def commit_project_template_link(target_dir: str, project_ref: str) -> bool:
     )
     if code != 0:
         print(f"[ERROR] Could not stage project-linked templates: {err}", file=sys.stderr)
+        return False
+    if not ensure_git_identity(target_dir):
         return False
     code, _, err = run_cmd(
         ["git", "commit", "-m", "chore: link issue forms to project board"],
