@@ -171,11 +171,40 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok)
 
 
-def labelled(*names, reviews=None):
+def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella"):
+    """A PR whose reviews come from the same GitHub account by default.
+
+    Same-account is the interesting case: every agent authenticates as one user,
+    so only the identity labels distinguish them.
+    """
+    default = [{"state": "APPROVED", "author": {"login": review_login}}]
     return {
-        "reviews": reviews if reviews is not None else [{"state": "APPROVED"}],
+        "author": {"login": pr_login},
+        "reviews": reviews if reviews is not None else default,
         "labels": [{"name": n} for n in names],
     }
+
+
+class ExternalReviewerTests(unittest.TestCase):
+    """A different GitHub account is proof enough on its own."""
+
+    def test_a_bot_review_counts_without_any_label(self):
+        # Codex and Bugbot post as their own apps and will never stamp
+        # reviewed-by:. Requiring the label would block every bot-reviewed PR.
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", review_login="chatgpt-codex-connector"), 0)
+        self.assertTrue(ok)
+        self.assertIn("chatgpt-codex-connector", msg)
+
+    def test_a_human_review_counts_without_any_label(self):
+        ok, _ = merge_pr.check_reviews(
+            labelled("author:agent-1", review_login="some-colleague"), 0)
+        self.assertTrue(ok)
+
+    def test_same_account_still_needs_the_labels(self):
+        ok, msg = merge_pr.check_reviews(labelled("author:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("reviewed-by", msg)
 
 
 class SelfReviewTests(unittest.TestCase):

@@ -39,7 +39,7 @@ EXIT_BLOCKED = 3
 SIZE_SOFT_LIMIT = 400
 
 PR_FIELDS = (
-    "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,"
+    "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,author,"
     "headRefName,headRefOid,additions,deletions,reviews,statusCheckRollup,labels"
 )
 
@@ -230,6 +230,24 @@ def check_reviews(pr, threads):
     # authenticates as the same user, so every review looks like it came from
     # the same person who opened the PR. The agent identity labels are the only
     # thing that distinguishes them.
+    # A review from a *different GitHub account* is provably not a self-review,
+    # whatever the labels say. This is how external reviewers count: Codex and
+    # Bugbot post as their own apps and will never stamp reviewed-by:, so
+    # requiring the label would block every bot-reviewed PR forever.
+    pr_login = ((pr.get("author") or {}).get("login") or "").lower()
+    other_accounts = sorted({
+        ((r.get("author") or {}).get("login") or "").lower()
+        for r in substantive
+    } - {"", pr_login})
+    if other_accounts:
+        note = f"{len(substantive)} review(s) from {', '.join(other_accounts)}, no unresolved threads."
+        if any((lab.get("name") or "") == "same-family-review"
+               for lab in (pr.get("labels") or [])):
+            note += " ⚠️  Same-family review: no cross-family agent was available."
+        return True, note
+
+    # Everything below is the same-account case: agents all authenticate as one
+    # GitHub user, so only the identity labels can tell them apart.
     authors = label_values(pr, "author:")
     if not authors:
         # Unstamped PR - predates create_pr.py --agent, or a human opened it.
