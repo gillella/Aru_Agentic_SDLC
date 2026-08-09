@@ -24,30 +24,15 @@ import re
 import sys
 from typing import Any
 
-from common import claimed_by, label_names, list_open_issues, touches_conflict
+from common import (
+    claimed_by,
+    label_names,
+    list_open_issues,
+    parse_touches,
+    touches_conflict,
+)
 from fetch_next_issue import is_epic, parse_dependencies
 from update_issue_status import update_status
-
-
-def declared_touches(body: str) -> list[str]:
-    """Reads the touches: declaration from an issue body.
-
-    Deliberately not common.parse_touches: that one matches `(.*?)\\s*$`, and
-    because \\s matches newlines, an *empty* `touches:` line swallows the line
-    below it and reports 'parallel-eligible: true' as a declared path. Tracked
-    separately; triage must not inherit the bug while deciding what is Ready.
-    """
-    if not body:
-        return []
-    match = re.search(
-        r"^[ \t]*touches[ \t]*:[ \t]*([^\n]*)", body, re.IGNORECASE | re.MULTILINE
-    )
-    if not match:
-        return []
-    raw = match.group(1).strip()
-    if raw.startswith("("):
-        return []
-    return [p.strip() for p in raw.split(",") if p.strip()]
 
 
 def acceptance_criteria(body: str) -> list[str]:
@@ -96,7 +81,7 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set) -> list[str]:
         gaps.append("no acceptance criteria checkboxes")
     if not has_verification(body):
         gaps.append("no verification section")
-    if not declared_touches(body):
+    if not parse_touches(body):
         gaps.append("no touches: declaration")
 
     unresolved = [d for d in parse_dependencies(body) if d in open_numbers]
@@ -129,11 +114,11 @@ def capacity(ready: list[dict[str, Any]], held: list[dict[str, Any]]) -> dict[st
     """
     in_flight_paths: list[str] = []
     for issue in held:
-        in_flight_paths.extend(declared_touches(issue.get("body") or ""))
+        in_flight_paths.extend(parse_touches(issue.get("body") or ""))
 
     concurrent, deferred = [], []
     for issue in sorted(ready, key=lambda i: i["number"]):
-        paths = declared_touches(issue.get("body") or "")
+        paths = parse_touches(issue.get("body") or "")
         if not paths:
             deferred.append((issue["number"], "no touches declaration"))
             continue
