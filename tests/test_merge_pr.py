@@ -15,6 +15,18 @@ class IssueLinkTests(unittest.TestCase):
     def test_missing_footer_is_none(self):
         self.assertIsNone(merge_pr.linked_issue("Implements the thing. See #42."))
 
+    def test_all_closed_issues_are_collected(self):
+        # A PR closing three issues must have all three sets of acceptance
+        # criteria checked, not just the first.
+        body = "Work.\n\nCloses #4\nCloses #5\n\nCloses #3\n"
+        self.assertEqual(merge_pr.linked_issues(body), [4, 5, 3])
+
+    def test_duplicate_references_collapse(self):
+        self.assertEqual(merge_pr.linked_issues("Closes #7\ncloses #7"), [7])
+
+    def test_no_footer_yields_empty_list(self):
+        self.assertEqual(merge_pr.linked_issues("See #42 for context."), [])
+
 
 class AcceptanceCriteriaTests(unittest.TestCase):
     BODY = """## Summary
@@ -154,6 +166,12 @@ class IssueLinkGateTests(unittest.TestCase):
         ok, msg = merge_pr.check_issue_link({"body": "no link"})
         self.assertFalse(ok)
         self.assertIn("Closes", msg)
+
+    def test_every_linked_issue_is_reported(self):
+        ok, msg = merge_pr.check_issue_link({"body": "Closes #3\nCloses #4"})
+        self.assertTrue(ok)
+        self.assertIn("#3", msg)
+        self.assertIn("#4", msg)
 
 
 if __name__ == "__main__":

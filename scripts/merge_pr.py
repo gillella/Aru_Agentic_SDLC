@@ -61,10 +61,26 @@ def fetch_pr(pr_id):
     return _gh_json(["gh", "pr", "view", str(pr_id), "--json", PR_FIELDS])
 
 
+def linked_issues(body):
+    """Every issue this PR closes, in order of appearance.
+
+    A PR may legitimately close several issues, and GitHub closes all of them.
+    Checking only the first would let the acceptance criteria of the others
+    through unverified - which is the exact hole this script exists to close.
+    """
+    seen, out = set(), []
+    for match in re.finditer(r"\bcloses\s+#(\d+)\b", body or "", re.IGNORECASE):
+        num = int(match.group(1))
+        if num not in seen:
+            seen.add(num)
+            out.append(num)
+    return out
+
+
 def linked_issue(body):
-    """Extracts the issue number from the mandatory 'Closes #N' footer."""
-    match = re.search(r"\bcloses\s+#(\d+)\b", body or "", re.IGNORECASE)
-    return int(match.group(1)) if match else None
+    """The first closed issue, or None. Kept for callers that want just one."""
+    issues = linked_issues(body)
+    return issues[0] if issues else None
 
 
 def unresolved_threads(pr_id):
@@ -184,10 +200,10 @@ def check_rebased(pr):
 
 
 def check_issue_link(pr):
-    issue = linked_issue(pr.get("body"))
-    if not issue:
+    issues = linked_issues(pr.get("body"))
+    if not issues:
         return False, "PR body has no 'Closes #<issue>'. Every PR must close a tracked issue."
-    return True, f"Linked to issue #{issue}."
+    return True, "Linked to " + ", ".join(f"#{i}" for i in issues) + "."
 
 
 def check_acceptance(issue_num, issue_body):
@@ -251,13 +267,13 @@ def main():
     if not pr:
         return EXIT_ERROR
 
-    issue_num = linked_issue(pr.get("body"))
-    issue_body = ""
-    if issue_num:
-        issue = _gh_json(["gh", "issue", "view", str(issue_num), "--json", "body"])
+    issue_nums = linked_issues(pr.get("body"))
+    issue_bodies = {}
+    for num in issue_nums:
+        issue = _gh_json(["gh", "issue", "view", str(num), "--json", "body"])
         if issue is None:
             return EXIT_ERROR
-        issue_body = issue.get("body") or ""
+        issue_bodies[num] = issue.get("body") or ""
 
     threads = unresolved_threads(args.pr)
 
@@ -269,8 +285,10 @@ def main():
         ("rebased", check_rebased(pr)),
         ("size", check_size(pr, args.force_human_review)),
     ]
-    if issue_num:
-        gates.append(("acceptance", check_acceptance(issue_num, issue_body)))
+    # One acceptance gate per closed issue: GitHub will close them all, so all
+    # of them must be satisfied.
+    for num in issue_nums:
+        gates.append((f"accept #{num}", check_acceptance(num, issue_bodies[num])))
 
     print(f"=== Definition of Done — PR #{args.pr}: {pr.get('title','')} ===")
     blocked = []
@@ -303,11 +321,11 @@ def main():
     if code == 0 and root:
         prune_worktree(root.strip(), pr.get("headRefName", ""))
 
-    if issue_num:
-        if update_status(issue_num, "Done"):
-            print(f"✅ Issue #{issue_num} moved to Done.")
+    for num in issue_nums:
+        if update_status(num, "Done"):
+            print(f"✅ Issue #{num} moved to Done.")
         else:
-            print(f"[WARN] Could not move #{issue_num} to Done; do it by hand.", file=sys.stderr)
+            print(f"[WARN] Could not move #{num} to Done; do it by hand.", file=sys.stderr)
 
     return EXIT_OK
 
