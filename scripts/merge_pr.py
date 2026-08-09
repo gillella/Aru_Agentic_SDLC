@@ -40,7 +40,7 @@ SIZE_SOFT_LIMIT = 400
 
 PR_FIELDS = (
     "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,"
-    "headRefName,additions,deletions,reviews,statusCheckRollup"
+    "headRefName,additions,deletions,reviews,statusCheckRollup,labels"
 )
 
 
@@ -174,6 +174,15 @@ def check_ci(pr):
     return True, f"CI green ({len(rollup)} checks)."
 
 
+def label_values(pr, prefix):
+    """All values of labels sharing a prefix, e.g. every reviewed-by:<id>."""
+    return [
+        (lab.get("name") or "")[len(prefix):]
+        for lab in (pr.get("labels") or [])
+        if (lab.get("name") or "").startswith(prefix)
+    ]
+
+
 def check_reviews(pr, threads):
     reviews = pr.get("reviews") or []
     substantive = [r for r in reviews if (r.get("state") or "").upper() != "PENDING"]
@@ -185,7 +194,33 @@ def check_reviews(pr, threads):
         return False, "Could not determine review-thread state; refusing rather than guessing."
     if threads > 0:
         return False, f"{threads} unresolved review thread(s)."
-    return True, f"{len(substantive)} review(s), no unresolved threads."
+
+    # GitHub cannot tell a self-review from a peer review here: every agent
+    # authenticates as the same user, so every review looks like it came from
+    # the same person who opened the PR. The agent identity labels are the only
+    # thing that distinguishes them.
+    authors = label_values(pr, "author:")
+    if not authors:
+        # Unstamped PR - predates create_pr.py --agent, or a human opened it.
+        # Falling back to "any review counts" keeps those mergeable; refusing
+        # would strand every PR opened before stamping existed.
+        return True, f"{len(substantive)} review(s), no unresolved threads (author unstamped)."
+
+    author = authors[0]
+    reviewers = label_values(pr, "reviewed-by:")
+    peers = [r for r in reviewers if r != author]
+    if reviewers and not peers:
+        return False, (f"The only review is from '{author}', who wrote this PR. "
+                       "A self-review does not satisfy the gate.")
+    if not reviewers:
+        return False, (f"A review exists but no reviewed-by:<agent> label identifies who left "
+                       f"it, so it cannot be distinguished from a self-review by '{author}'. "
+                       "The reviewing agent must stamp reviewed-by:<id>.")
+
+    note = f"{len(substantive)} review(s) from {', '.join(peers)}, no unresolved threads."
+    if any((lab.get("name") or "") == "same-family-review" for lab in (pr.get("labels") or [])):
+        note += " ⚠️  Same-family review: no cross-family agent was available."
+    return True, note
 
 
 def check_rebased(pr):

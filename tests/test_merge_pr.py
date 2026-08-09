@@ -121,6 +121,61 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok)
 
 
+def labelled(*names, reviews=None):
+    return {
+        "reviews": reviews if reviews is not None else [{"state": "APPROVED"}],
+        "labels": [{"name": n} for n in names],
+    }
+
+
+class SelfReviewTests(unittest.TestCase):
+    """Every agent is the same GitHub user, so GitHub cannot catch this."""
+
+    def test_self_review_is_refused(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
+
+    def test_peer_review_passes(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2"), 0)
+        self.assertTrue(ok)
+        self.assertIn("agent-2", msg)
+
+    def test_a_peer_alongside_a_self_review_passes(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
+        self.assertTrue(ok)
+        self.assertIn("agent-3", msg)
+
+    def test_review_without_a_reviewed_by_label_is_refused(self):
+        # Unattributable on a stamped PR: it cannot be told apart from a
+        # self-review, so it must not pass.
+        ok, msg = merge_pr.check_reviews(labelled("author:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("reviewed-by", msg)
+
+    def test_unstamped_pr_falls_back_to_the_old_behaviour(self):
+        # PRs predating author stamping must stay mergeable.
+        ok, msg = merge_pr.check_reviews(labelled(), 0)
+        self.assertTrue(ok)
+        self.assertIn("unstamped", msg)
+
+    def test_same_family_review_warns_but_does_not_refuse(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2", "same-family-review"), 0)
+        self.assertTrue(ok)
+        self.assertIn("Same-family", msg)
+
+    def test_self_review_refusal_outranks_nothing_else_being_wrong(self):
+        # CI green, threads resolved, criteria ticked - still refused.
+        ok, _ = merge_pr.check_reviews(
+            labelled("author:solo", "reviewed-by:solo",
+                     reviews=[{"state": "APPROVED"}, {"state": "COMMENTED"}]), 0)
+        self.assertFalse(ok)
+
+
 class RebaseGateTests(unittest.TestCase):
     def test_behind_blocks(self):
         ok, msg = merge_pr.check_rebased({"mergeStateStatus": "BEHIND"})
