@@ -183,3 +183,30 @@ class PriorityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewDecisionTests(unittest.TestCase):
+    """A decided PR waits on a human or its author, not on another reviewer."""
+
+    def test_approved_pr_is_not_offered_again(self):
+        verdict = eligible(pr(1, "author:agent-1", "family:anthropic", decision="APPROVED"))
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("already approved", verdict["reason"])
+
+    def test_changes_requested_pr_is_not_offered_to_a_reviewer(self):
+        verdict = eligible(pr(1, "author:agent-1", "family:anthropic",
+                              decision="CHANGES_REQUESTED"))
+        self.assertFalse(verdict["eligible"])
+
+    def test_undecided_pr_is_still_offered(self):
+        self.assertTrue(eligible(pr(1, "author:agent-1", "family:anthropic"))["eligible"])
+
+
+class UnreadableQueueTests(unittest.TestCase):
+    def test_selector_fails_closed_when_prs_cannot_be_listed(self):
+        # Treating an unreadable queue as empty would claim new implementation
+        # work as though no review or feedback were waiting.
+        with patch.object(fnw, "list_open_prs", return_value=None):
+            res = fnw.select("agent-2", "openai", 3, 30)
+        self.assertEqual(res["work"]["type"], "error")
+        self.assertIn("could not be read", res["work"]["reason"])

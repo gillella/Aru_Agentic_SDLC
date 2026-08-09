@@ -9,8 +9,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import init_project  # noqa: E402
-from init_project import (  # noqa: E402
+import init_project
+from init_project import (
     render_ci_workflow,
     render_gitignore,
     write_templates,

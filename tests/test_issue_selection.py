@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import fetch_next_issue  # noqa: E402
-from fetch_next_issue import build_candidates, parse_dependencies  # noqa: E402
+import fetch_next_issue
+from fetch_next_issue import build_candidates, parse_dependencies
 
 
 def issue(number, body="", labels=()):

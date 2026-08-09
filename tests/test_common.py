@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from common import (  # noqa: E402
+from common import (
     parse_touches,
     paths_overlap,
     select_governed_project_items,

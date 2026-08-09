@@ -42,6 +42,7 @@ adds diverse blind spots on top of that; it is not the whole value.
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -93,6 +94,28 @@ def list_open_prs() -> list[dict[str, Any]] | None:
 
 def label_names(pr: dict[str, Any]) -> list[str]:
     return [lab.get("name", "") for lab in pr.get("labels", [])]
+
+
+def _authored_via_branch(pr: dict[str, Any], agent: str) -> bool:
+    """Infers authorship from the linked issue's claim when the PR is unstamped.
+
+    `create_pr.py` stamps author:<id> best-effort, so a failed label write or a
+    PR predating stamping leaves no author on the PR. The branch still encodes
+    the issue number, and that issue still carries the agent:<id> claim of
+    whoever implemented it - so authorship survives even when the stamp does
+    not. Without this, an agent could be handed its own unstamped PR to review.
+    """
+    match = re.search(r"issue-(\d+)", pr.get("headRefName") or "", re.IGNORECASE)
+    if not match:
+        return False
+    code, out, _ = run_cmd(
+        ["gh", "issue", "view", match.group(1), "--json", "labels",
+         "-q", "[.labels[].name] | join(\"\\n\")"],
+        check=False,
+    )
+    if code != 0:
+        return False  # Unknown; the label check already said "not mine".
+    return f"agent:{agent}" in [line.strip() for line in out.splitlines()]
 
 
 def ci_state(pr: dict[str, Any]) -> str:
@@ -164,11 +187,20 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
         return no(f"already being reviewed by '{holder}'")
     if author and author == agent:
         return no("you wrote it")
-    if not author:
-        # Unstamped PRs predate create_pr.py --agent. Allowing review is right:
-        # refusing would make every legacy PR unreviewable, and the worst case
-        # is a self-review, which merge_pr.py rejects separately.
-        pass
+    if not author and _authored_via_branch(pr, agent):
+        # Unstamped PR - stamping is best-effort and legacy PRs predate it.
+        # The branch still names the issue, and the issue still carries the
+        # agent:<id> claim of whoever implemented it, so authorship is
+        # recoverable without the label. Refusing outright would make every
+        # legacy PR unreviewable; this refuses only the ones provably mine.
+        return no("you wrote it (inferred from the linked issue's claim)")
+
+    decision = (pr.get("reviewDecision") or "").upper()
+    if decision in {"APPROVED", "CHANGES_REQUESTED"}:
+        # A decided PR is waiting on a human merge or on its author, not on
+        # another reviewer. Re-offering it burns the round budget and
+        # eventually mislabels an approved PR as needing human review.
+        return no(f"already {decision.lower().replace('_', ' ')}")
 
     rounds = review_rounds(pr)
     if rounds >= round_cap:
@@ -209,7 +241,16 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     """Builds the full picture, then picks by priority."""
     prs = list_open_prs()
     if prs is None:
-        prs = []
+        # Fail closed. Treating an unreadable queue as empty makes the selector
+        # claim new implementation work as though no feedback or review were
+        # waiting - growing the queue precisely while it cannot be observed.
+        return {"agent": agent, "family": family,
+                "work": {"type": "error", "skill": None,
+                         "reason": "the pull request queue could not be read"},
+                "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
+                "escalated_prs": [], "claimable_issues": [],
+                "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
+                "missing_touches": []}
 
     # 1. Finish what I started.
     mine = [p for p in prs if needs_my_attention(p, agent)]
@@ -329,12 +370,18 @@ def main():
             # Every candidate was taken while we were deciding. Fall through to
             # implementation work rather than idling.
             work["claim_result"] = "all_taken"
-            if parts_candidates := res["claimable_issues"]:
+            if res["claimable_issues"]:
                 from claim_issue import claim_issue
-                for number in parts_candidates:
+                for number in res["claimable_issues"]:
                     if claim_issue(number, args.agent) == EXIT_OK:
-                        work = {"type": "issue", "issue": number, "skill": "implement-next-issue",
-                                "title": "", "resuming": False, "claimed": True}
+                        work = {"type": "issue", "issue": number,
+                                "skill": "implement-next-issue", "title": "",
+                                "resuming": False, "claimed": True}
+                        # Rebind the result too. Rebinding only the local name
+                        # left --json reporting the unclaimed review while the
+                        # issue was claimed and In Progress, so the agent would
+                        # work the wrong item and strand the real claim.
+                        res["work"] = work
                         break
     elif args.claim and work["type"] == "issue" and not work.get("resuming"):
         from claim_issue import claim_issue

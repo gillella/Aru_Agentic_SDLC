@@ -44,6 +44,20 @@ EXIT_CONFLICT = 2
 # racing agent's label write lands on GitHub's side.
 READBACK_DELAY_S = 2.0
 
+# A second confirmation read before the claim is treated as settled.
+#
+# One read-back does not establish a common snapshot. If B's write lands after
+# A's read, A sees only itself and proceeds, while B sees both labels and - if
+# B sorts first - also proceeds. Both then hold the same work.
+#
+# GitHub offers no compare-and-swap on labels, so this cannot be closed at this
+# layer. Confirming again after a longer delay moves the window from "any write
+# after the first read" to "any write after the second", which removes the
+# realistic cases. The residual damage is bounded: two agents on one issue
+# collide on the same declared paths, and the CI touches gate refuses the
+# second PR rather than letting both land.
+CONFIRM_DELAY_S = 4.0
+
 
 def _label_for(agent: str) -> str:
     return f"{AGENT_LABEL_PREFIX}{agent}"
@@ -123,6 +137,21 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
             _remove_agent_label(issue_id, agent)
             return EXIT_CONFLICT
         print(f"[INFO] Race on #{issue_id} between [{contenders}]; '{agent}' wins.")
+
+    # --- Step 3b: confirm, catching a contender that wrote late -----------
+    time.sleep(CONFIRM_DELAY_S)
+    confirm = get_issue(issue_id)
+    if confirm:
+        holders = agent_labels(confirm)
+        if len(holders) > 1 and holders[0] != my_label:
+            contenders = ", ".join(h[len(AGENT_LABEL_PREFIX):] for h in holders)
+            print(
+                f"[CONFLICT] Late contender on #{issue_id} [{contenders}]; "
+                f"'{holders[0][len(AGENT_LABEL_PREFIX):]}' wins. Releasing.",
+                file=sys.stderr,
+            )
+            _remove_agent_label(issue_id, agent)
+            return EXIT_CONFLICT
 
     # --- Step 4: commit the claim -----------------------------------------
     code, _, err = run_cmd(
@@ -280,6 +309,17 @@ def claim_review(pr_id: int, agent: str) -> int:
             return EXIT_CONFLICT
         print(f"[INFO] Race to review #{pr_id} between [{contenders}]; '{agent}' wins.")
 
+    time.sleep(CONFIRM_DELAY_S)
+    confirm = _pr_labels(pr_id)
+    if confirm is not None:
+        holders = reviewer_labels(confirm)
+        if len(holders) > 1 and holders[0] != my_label:
+            print(f"[CONFLICT] Late contender on PR #{pr_id}; "
+                  f"'{holders[0][len(REVIEWER_LABEL_PREFIX):]}' wins. Releasing.",
+                  file=sys.stderr)
+            _remove_reviewer_label(pr_id, agent)
+            return EXIT_CONFLICT
+
     print(f"✅ PR #{pr_id} claimed for review by '{agent}'.")
     return EXIT_OK
 
@@ -336,8 +376,23 @@ def reap_stale_reviews(hours: int = 4) -> list:
         holder = reviewed_by(names)
         if not holder:
             continue
-        if pr.get("reviews"):
-            continue  # The review landed; the claim is spent, not stale.
+        # Only a review submitted since the idle cutoff proves this claim did
+        # its job. Any historical review used to make `reviews` permanently
+        # non-empty, so a claim taken after an earlier review round and then
+        # abandoned could never be reaped - the label excluded the PR from
+        # every future picker run, forever.
+        recent = False
+        for review in pr.get("reviews") or []:
+            try:
+                when = datetime.fromisoformat(
+                    (review.get("submittedAt") or "").replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if when > cutoff:
+                recent = True
+                break
+        if recent:
+            continue  # A review landed in this window; the claim is spent.
         try:
             ts = datetime.fromisoformat((pr.get("updatedAt") or "").replace("Z", "+00:00"))
         except ValueError:

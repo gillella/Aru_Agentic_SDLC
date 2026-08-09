@@ -26,7 +26,7 @@ class ClaimReviewTests(unittest.TestCase):
     @patch.object(claim_issue, "ensure_label", return_value=True)
     @patch.object(claim_issue, "_pr_labels")
     def test_uncontested_claim_succeeds(self, labels, _ensure, _run, _sleep):
-        labels.side_effect = [[], ["reviewer:agent-2"]]
+        labels.side_effect = [[], ["reviewer:agent-2"], ["reviewer:agent-2"]]
         self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
 
     @patch.object(claim_issue, "_pr_labels", return_value=["reviewer:agent-9"])
@@ -56,7 +56,8 @@ class ClaimReviewTests(unittest.TestCase):
     @patch.object(claim_issue, "ensure_label", return_value=True)
     @patch.object(claim_issue, "_pr_labels")
     def test_race_winner_keeps_the_claim(self, labels, _ensure, _run, _sleep):
-        labels.side_effect = [[], ["reviewer:agent-a", "reviewer:agent-b"]]
+        labels.side_effect = [[], ["reviewer:agent-a", "reviewer:agent-b"],
+                              ["reviewer:agent-a", "reviewer:agent-b"]]
         self.assertEqual(claim_issue.claim_review(7, "agent-a"), claim_issue.EXIT_OK)
 
     @patch.object(claim_issue, "_pr_labels", return_value=None)
@@ -70,7 +71,7 @@ class ClaimReviewTests(unittest.TestCase):
     def test_claiming_a_review_never_moves_the_board(self, labels, _ensure, _run, _sleep):
         # The linked issue stays In Review while its PR is reviewed; a review
         # is not separate board work.
-        labels.side_effect = [[], ["reviewer:agent-2"]]
+        labels.side_effect = [[], ["reviewer:agent-2"], ["reviewer:agent-2"]]
         with patch.object(claim_issue, "update_status") as update:
             claim_issue.claim_review(7, "agent-2")
             update.assert_not_called()
@@ -104,13 +105,28 @@ class ReapStaleReviewsTests(unittest.TestCase):
         self.assertEqual(claim_issue.reap_stale_reviews(4), [5])
 
     @patch.object(claim_issue, "run_cmd")
-    def test_a_claim_that_produced_a_review_is_left_alone(self, run_cmd):
-        # The claim is spent, not stale. Clearing it could invite a duplicate.
+    def test_a_recent_review_means_the_claim_is_spent_not_stale(self, run_cmd):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         run_cmd.side_effect = [
             self._prs([{"number": 5, "labels": [{"name": "reviewer:done"}],
-                        "updatedAt": self.OLD, "reviews": [{"state": "APPROVED"}]}]),
+                        "updatedAt": self.OLD,
+                        "reviews": [{"state": "APPROVED", "submittedAt": now}]}]),
         ]
         self.assertEqual(claim_issue.reap_stale_reviews(4), [])
+
+    @patch.object(claim_issue, "run_cmd")
+    def test_an_old_review_does_not_protect_a_later_abandoned_claim(self, run_cmd):
+        # A PR reviewed once, then claimed again by an agent that crashed: any
+        # historical review used to make the claim permanently unreapable, so
+        # the reviewer:* label excluded the PR from the queue forever.
+        run_cmd.side_effect = [
+            self._prs([{"number": 5, "labels": [{"name": "reviewer:crashed"}],
+                        "updatedAt": self.OLD,
+                        "reviews": [{"state": "APPROVED", "submittedAt": self.OLD}]}]),
+            (0, "", ""),
+        ]
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [5])
 
     @patch.object(claim_issue, "run_cmd")
     def test_recent_claim_is_left_alone(self, run_cmd):

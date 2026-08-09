@@ -5,7 +5,7 @@ from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import claim_issue  # noqa: E402
+import claim_issue
 
 
 def issue_with_labels(*names):
@@ -49,6 +49,9 @@ class ClaimProtocolTests(unittest.TestCase):
     ):
         get_issue.side_effect = [
             issue_with_labels("status:ready"),
+            issue_with_labels("agent:agent-a"),
+            # Third read: the confirmation pass that catches a contender whose
+            # label write landed after the first read-back.
             issue_with_labels("agent:agent-a"),
         ]
 
