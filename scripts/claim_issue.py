@@ -21,8 +21,10 @@ Exit codes:
 """
 
 import argparse
+import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 from common import (
     AGENT_LABEL_PREFIX,
@@ -176,16 +178,201 @@ def release_issue(issue_id: int, agent: str) -> int:
     return EXIT_OK
 
 
+# --- Reviewing a pull request ----------------------------------------------
+# Review is work an agent claims off the board, not a CI job calling a provider
+# API - agents run the loop under their own subscriptions. Two agents reviewing
+# the same PR is the same waste as two agents implementing the same issue, so
+# it uses the same optimistic protocol: write, read back, deterministic
+# lowest-id tie-break, loser releases.
+#
+# Differences from an issue claim, both deliberate:
+#   * no board status change - the linked issue stays In Review while its PR is
+#     being reviewed; the review is not separate board work.
+#   * no assignee - assignment is already meaningless here, since every agent
+#     authenticates as the same GitHub user.
+
+REVIEWER_LABEL_PREFIX = "reviewer:"
+
+
+def _reviewer_label_for(agent: str) -> str:
+    return f"{REVIEWER_LABEL_PREFIX}{agent}"
+
+
+def _pr_labels(pr_id: int):
+    """Returns the PR's label names, or None when the PR cannot be read."""
+    code, out, _ = run_cmd(
+        ["gh", "pr", "view", str(pr_id), "--json", "labels", "-q",
+         "[.labels[].name] | join(\"\\n\")"],
+        check=False,
+    )
+    if code != 0:
+        return None
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def reviewer_labels(labels) -> list:
+    return sorted(name for name in (labels or []) if name.startswith(REVIEWER_LABEL_PREFIX))
+
+
+def reviewed_by(labels):
+    """The agent currently holding the review claim, if any."""
+    held = reviewer_labels(labels)
+    return held[0][len(REVIEWER_LABEL_PREFIX):] if held else None
+
+
+def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--remove-label", _reviewer_label_for(agent)],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not remove review claim for '{agent}': {err}", file=sys.stderr)
+    return code == 0
+
+
+def claim_review(pr_id: int, agent: str) -> int:
+    """Claims a pull request for review. Same exit codes as claim_issue."""
+    labels = _pr_labels(pr_id)
+    if labels is None:
+        print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
+        return EXIT_ERROR
+
+    holder = reviewed_by(labels)
+    if holder and holder != agent:
+        print(f"[CONFLICT] PR #{pr_id} is already being reviewed by '{holder}'.", file=sys.stderr)
+        return EXIT_CONFLICT
+    if holder == agent:
+        print(f"[INFO] PR #{pr_id} is already yours to review; resuming.")
+        return EXIT_OK
+
+    my_label = _reviewer_label_for(agent)
+    if not ensure_label(my_label, "0e8a16", f"Under review by agent '{agent}'"):
+        print(f"[ERROR] Could not provision review label '{my_label}'.", file=sys.stderr)
+        return EXIT_ERROR
+
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--add-label", my_label], check=False
+    )
+    if code != 0:
+        print(f"[ERROR] Could not apply review claim: {err}", file=sys.stderr)
+        return EXIT_ERROR
+
+    time.sleep(READBACK_DELAY_S)
+    labels = _pr_labels(pr_id)
+    if labels is None:
+        print(f"[ERROR] Could not read back PR #{pr_id} after claiming.", file=sys.stderr)
+        _remove_reviewer_label(pr_id, agent)
+        return EXIT_ERROR
+
+    holders = reviewer_labels(labels)
+    if my_label not in holders:
+        print(f"[ERROR] Review label '{my_label}' was not present during read-back.",
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    if len(holders) > 1:
+        winner = holders[0]
+        contenders = ", ".join(h[len(REVIEWER_LABEL_PREFIX):] for h in holders)
+        if winner != my_label:
+            print(f"[CONFLICT] Race to review #{pr_id} between [{contenders}]; "
+                  f"'{winner[len(REVIEWER_LABEL_PREFIX):]}' wins. Releasing.", file=sys.stderr)
+            _remove_reviewer_label(pr_id, agent)
+            return EXIT_CONFLICT
+        print(f"[INFO] Race to review #{pr_id} between [{contenders}]; '{agent}' wins.")
+
+    print(f"✅ PR #{pr_id} claimed for review by '{agent}'.")
+    return EXIT_OK
+
+
+def release_review(pr_id: int, agent: str) -> int:
+    labels = _pr_labels(pr_id)
+    if labels is None:
+        print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
+        return EXIT_ERROR
+    holder = reviewed_by(labels)
+    if holder != agent:
+        print(f"[CONFLICT] PR #{pr_id} review is held by '{holder}', not '{agent}'.",
+              file=sys.stderr)
+        return EXIT_CONFLICT
+    if not _remove_reviewer_label(pr_id, agent):
+        return EXIT_ERROR
+    print(f"♻️  Review claim on PR #{pr_id} released by '{agent}'.")
+    return EXIT_OK
+
+
+def reap_stale_reviews(hours: int = 4) -> list:
+    """Releases review claims that have gone quiet.
+
+    An agent that dies mid-review leaves the PR claimed forever, and a claimed
+    PR is excluded from selection - so without this, one crash removes a PR
+    from the review queue permanently and merge_pr.py blocks on it for good.
+
+    A claim is stale when the PR has not been updated for `hours` and carries no
+    submitted review from this round. Deliberately conservative: a PR that has
+    been reviewed is left alone even if the label lingers, because the label is
+    then harmless and removing it could invite a duplicate review.
+    """
+    if hours <= 0:
+        return []
+
+    code, out, _ = run_cmd(
+        ["gh", "pr", "list", "--state", "open", "--limit", "200",
+         "--json", "number,labels,updatedAt,reviews"],
+        check=False,
+    )
+    if code != 0:
+        print("[WARN] Could not list PRs; no review claims were reaped.", file=sys.stderr)
+        return []
+    try:
+        prs = json.loads(out) if out else []
+    except json.JSONDecodeError:
+        print("[WARN] Could not parse PR list; no review claims were reaped.", file=sys.stderr)
+        return []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    released = []
+    for pr in prs:
+        names = [lab.get("name", "") for lab in pr.get("labels", [])]
+        holder = reviewed_by(names)
+        if not holder:
+            continue
+        if pr.get("reviews"):
+            continue  # The review landed; the claim is spent, not stale.
+        try:
+            ts = datetime.fromisoformat((pr.get("updatedAt") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts > cutoff:
+            continue
+        if _remove_reviewer_label(pr["number"], holder):
+            released.append(pr["number"])
+            print(f"♻️  Released stale review claim on PR #{pr['number']} "
+                  f"(held by '{holder}', idle > {hours}h, no review submitted).",
+                  file=sys.stderr)
+    return released
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Claim or release a GitHub issue for one agent.")
-    parser.add_argument("--issue", type=int, required=True, help="GitHub Issue Number")
+    parser = argparse.ArgumentParser(description="Claim or release a GitHub issue or PR review for one agent.")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--issue", type=int, help="GitHub Issue Number")
+    target.add_argument("--pr", type=int, help="Pull Request number to claim for review")
     parser.add_argument("--agent", type=str, required=True,
                         help="Agent id, e.g. 'agent-1'. Becomes the agent:<id> label.")
     parser.add_argument("--assignee", type=str, default="@me", help="GitHub assignee (default: @me)")
     parser.add_argument("--status", type=str, default="In Progress", help="Target status column")
     parser.add_argument("--release", action="store_true",
-                        help="Give up this claim and return the issue to Ready")
+                        help="Give up this claim and return the work to the queue")
+    parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
+                        help="Release review claims idle longer than HOURS with no review submitted")
     args = parser.parse_args()
+
+    if args.reap_after:
+        reap_stale_reviews(args.reap_after)
+
+    if args.pr is not None:
+        rc = release_review(args.pr, args.agent) if args.release else claim_review(args.pr, args.agent)
+        sys.exit(rc)
 
     if args.release:
         sys.exit(release_issue(args.issue, args.agent))
