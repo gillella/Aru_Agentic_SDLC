@@ -14,6 +14,12 @@ if [ "${ARU_ALLOW_MAIN_PUSH:-0}" = "1" ]; then
   exit 0
 fi
 
+# Buffer stdin so a chained hook installed before this one can still read it.
+# git feeds the ref list on stdin exactly once; consuming it in the loop below
+# would leave any pre-existing hook with nothing to work from.
+STDIN_COPY="$(cat)"
+export STDIN_COPY
+
 # stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref.
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
   [ -z "${remote_ref:-}" ] && continue
@@ -32,6 +38,15 @@ while read -r _local_ref _local_sha remote_ref _remote_sha; do
 EOF
     exit 1
   fi
-done
+done <<< "$STDIN_COPY"
+
+# Hand off to whatever pre-push hook was here before Aru was installed, so
+# installing enforcement never silently disables a repo's existing tests, secret
+# scanning, or policy checks. install_hooks.sh moves it aside under this name;
+# absent that file this is a no-op.
+PRIOR="$(dirname "$0")/pre-push.pre-aru"
+if [ -x "$PRIOR" ]; then
+  printf '%s\n' "$STDIN_COPY" | "$PRIOR" "$@" || exit $?
+fi
 
 exit 0

@@ -43,9 +43,28 @@ if [ "$CHECK_ONLY" = "1" ]; then
 fi
 
 mkdir -p "$GIT_DIR/hooks"
-cp "$HOOK_SRC/pre-push" "$GIT_DIR/hooks/pre-push"
-chmod +x "$GIT_DIR/hooks/pre-push"
-echo "✅ pre-push hook installed at $GIT_DIR/hooks/pre-push"
+EXISTING="$GIT_DIR/hooks/pre-push"
+
+# Never clobber an existing hook. A repo's pre-push may already run tests,
+# secret scanning, or policy checks, and silently deleting those while
+# installing "enforcement" would remove more protection than it adds. The
+# Claude settings are merged rather than overwritten for the same reason.
+if [ -f "$EXISTING" ] && ! grep -q "Aru_Agentic_SDLC pre-push" "$EXISTING" 2>/dev/null; then
+  PRESERVED="$GIT_DIR/hooks/pre-push.pre-aru"
+  if [ ! -f "$PRESERVED" ]; then
+    mv "$EXISTING" "$PRESERVED"
+    chmod +x "$PRESERVED"
+  fi
+  # The Aru hook chains to pre-push.pre-aru itself, before its own exit -
+  # appending the chain here put it after that exit, where it never ran.
+  cp "$HOOK_SRC/pre-push" "$EXISTING"
+  chmod +x "$EXISTING"
+  echo "✅ pre-push installed; the previous hook was preserved as pre-push.pre-aru and is chained after it"
+else
+  cp "$HOOK_SRC/pre-push" "$EXISTING"
+  chmod +x "$EXISTING"
+  echo "✅ pre-push hook installed at $EXISTING"
+fi
 
 # Merge the PreToolUse entry into .claude/settings.json without clobbering
 # whatever else the project already configures there.

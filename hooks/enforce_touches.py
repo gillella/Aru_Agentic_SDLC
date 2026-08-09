@@ -80,14 +80,34 @@ def issue_from_branch(branch):
     return int(match.group(1)) if match else None
 
 
+def _git_common_dir(root):
+    """The shared .git directory, resolved from inside a worktree.
+
+    In a worktree `<root>/.git` is a *file* pointing elsewhere, so joining a
+    cache path onto it raises ENOTDIR. Since the framework mandates that all
+    development happens in worktrees, the naive path meant the cache never
+    worked anywhere real: every Edit and Bash call re-queried GitHub, paying up
+    to the full timeout per tool call during an outage.
+    """
+    rc, out = _run(["git", "rev-parse", "--git-common-dir"], cwd=root)
+    if rc != 0 or not out:
+        return None
+    return out if os.path.isabs(out) else os.path.join(root, out)
+
+
 def _cache_path(root, issue):
-    # Lives in .git/ so it is never committed and is shared across worktrees.
-    return os.path.join(root, ".git", f"aru-touches-{issue}.json")
+    common = _git_common_dir(root)
+    if not common:
+        return None
+    return os.path.join(common, f"aru-touches-{issue}.json")
 
 
 def _read_cache(root, issue):
+    path = _cache_path(root, issue)
+    if not path:
+        return None
     try:
-        with open(_cache_path(root, issue)) as fh:
+        with open(path) as fh:
             blob = json.load(fh)
         if time.time() - blob.get("fetched_at", 0) < CACHE_TTL_S:
             return blob.get("touches")
@@ -97,8 +117,11 @@ def _read_cache(root, issue):
 
 
 def _write_cache(root, issue, touches):
+    path = _cache_path(root, issue)
+    if not path:
+        return
     try:
-        with open(_cache_path(root, issue), "w") as fh:
+        with open(path, "w") as fh:
             json.dump({"fetched_at": time.time(), "touches": touches}, fh)
     except OSError:
         # A read-only .git is unusual but must not break the hook.

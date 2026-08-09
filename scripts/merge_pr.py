@@ -40,7 +40,7 @@ SIZE_SOFT_LIMIT = 400
 
 PR_FIELDS = (
     "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,"
-    "headRefName,additions,deletions,reviews,statusCheckRollup,labels"
+    "headRefName,headRefOid,additions,deletions,reviews,statusCheckRollup,labels"
 )
 
 
@@ -155,6 +155,13 @@ def check_ci(pr):
     rollup = pr.get("statusCheckRollup") or []
     if not rollup:
         return False, "No CI checks reported on the head commit. A PR with no checks is not verified."
+    # Allowlist, not denylist. Enumerating the failure conclusions let unknown
+    # ones - STARTUP_FAILURE, STALE, anything GitHub adds later - fall through
+    # to "green" and merge an unverified head. Only these three mean "passed";
+    # every other completed conclusion fails closed.
+    passing = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+    in_progress = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
+
     failing, pending = [], []
     for check in rollup:
         # Check runs use 'conclusion'; legacy statuses use 'state'.
@@ -163,10 +170,10 @@ def check_ci(pr):
         name = check.get("name") or check.get("context") or "check"
         if status and status != "COMPLETED" and not result:
             pending.append(name)
-        elif result in {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
-            failing.append(f"{name}={result.lower()}")
-        elif result in {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS"}:
+        elif result in in_progress:
             pending.append(name)
+        elif result not in passing:
+            failing.append(f"{name}={result.lower() or 'unknown'}")
     if failing:
         return False, f"CI is red: {', '.join(failing)}."
     if pending:
@@ -183,13 +190,37 @@ def label_values(pr, prefix):
     ]
 
 
+def latest_state_per_reviewer(reviews):
+    """Collapses review history to each reviewer's most recent verdict.
+
+    `reviews` is the full submission history, so a reviewer who requested
+    changes and later approved still has the CHANGES_REQUESTED entry in it.
+    Reading the raw list blocks such a PR forever, contradicting the message
+    that says re-approval is supported. Only the last word from each reviewer
+    counts.
+    """
+    latest = {}
+    for review in reviews:
+        state = (review.get("state") or "").upper()
+        if state in {"PENDING", "COMMENTED"}:
+            # A comment-only review does not change a prior verdict, and a
+            # pending one was never submitted.
+            continue
+        who = ((review.get("author") or {}).get("login")
+               or review.get("id") or "unknown")
+        latest[who] = (review.get("submittedAt") or "", state)
+    return {who: state for who, (_, state) in latest.items()}
+
+
 def check_reviews(pr, threads):
     reviews = pr.get("reviews") or []
     substantive = [r for r in reviews if (r.get("state") or "").upper() != "PENDING"]
     if not substantive:
         return False, "No review on this PR. At least one review is required."
-    if any((r.get("state") or "").upper() == "CHANGES_REQUESTED" for r in substantive):
-        return False, "A reviewer requested changes and has not re-approved."
+    verdicts = latest_state_per_reviewer(reviews)
+    blocking = [who for who, state in verdicts.items() if state == "CHANGES_REQUESTED"]
+    if blocking:
+        return False, (f"{', '.join(blocking)} requested changes and has not re-approved.")
     if threads is None:
         return False, "Could not determine review-thread state; refusing rather than guessing."
     if threads > 0:
@@ -343,10 +374,16 @@ def main():
     # ARU_ALLOW_MAIN_PUSH lets the pre-push hook distinguish this sanctioned
     # path from an agent pushing to main directly.
     env = dict(os.environ, ARU_ALLOW_MAIN_PUSH="1")
-    proc = subprocess.run(
-        ["gh", "pr", "merge", str(args.pr), f"--{args.merge_method}", "--delete-branch"],
-        capture_output=True, text=True, env=env, check=False,
-    )
+    # Pin the head we actually gated. Between fetch_pr() and this call an
+    # agent can push again, and without this every gate above would describe
+    # the old head while gh merges a new, unreviewed and untested one.
+    merge_cmd = ["gh", "pr", "merge", str(args.pr), f"--{args.merge_method}", "--delete-branch"]
+    head_sha = pr.get("headRefOid")
+    if head_sha:
+        merge_cmd += ["--match-head-commit", head_sha]
+    else:
+        print("[WARN] No head SHA available; merging without pinning it.", file=sys.stderr)
+    proc = subprocess.run(merge_cmd, capture_output=True, text=True, env=env, check=False)
     if proc.returncode != 0:
         print(f"[ERROR] Merge failed: {proc.stderr.strip()}", file=sys.stderr)
         return EXIT_ERROR

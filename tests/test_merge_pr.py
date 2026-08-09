@@ -83,6 +83,23 @@ class CiGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("not finished", msg)
 
+    def test_unknown_conclusions_fail_closed(self):
+        # STARTUP_FAILURE and STALE are neither in the old failure list nor the
+        # pending list, so a denylist reported them as green and merged an
+        # unverified head. Anything not explicitly successful now blocks.
+        for conclusion in ("STARTUP_FAILURE", "STALE", "SOMETHING_NEW"):
+            pr = {"statusCheckRollup": [
+                {"name": "verify", "status": "COMPLETED", "conclusion": conclusion}]}
+            ok, msg = merge_pr.check_ci(pr)
+            self.assertFalse(ok, f"{conclusion} should block")
+            self.assertIn("verify", msg)
+
+    def test_neutral_and_skipped_count_as_passing(self):
+        for conclusion in ("NEUTRAL", "SKIPPED"):
+            pr = {"statusCheckRollup": [
+                {"name": "verify", "status": "COMPLETED", "conclusion": conclusion}]}
+            self.assertTrue(merge_pr.check_ci(pr)[0], f"{conclusion} should pass")
+
     def test_no_checks_at_all_blocks(self):
         # A PR with zero checks is unverified, not verified-by-default. This is
         # the exact hole that let a green-looking PR certify nothing.
@@ -100,6 +117,39 @@ class ReviewGateTests(unittest.TestCase):
     def test_changes_requested_blocks(self):
         ok, _ = merge_pr.check_reviews({"reviews": [{"state": "CHANGES_REQUESTED"}]}, 0)
         self.assertFalse(ok)
+
+    def test_re_approval_after_changes_requested_unblocks(self):
+        # The reviews list is history, so the CHANGES_REQUESTED entry survives
+        # re-approval. Reading it raw blocked the PR forever, contradicting the
+        # refusal message that promised re-approval was supported.
+        pr = {"reviews": [
+            {"state": "CHANGES_REQUESTED", "author": {"login": "bob"},
+             "submittedAt": "2026-01-01T00:00:00Z"},
+            {"state": "APPROVED", "author": {"login": "bob"},
+             "submittedAt": "2026-01-02T00:00:00Z"},
+        ]}
+        ok, _ = merge_pr.check_reviews(pr, 0)
+        self.assertTrue(ok)
+
+    def test_another_reviewer_still_blocking_is_respected(self):
+        pr = {"reviews": [
+            {"state": "APPROVED", "author": {"login": "bob"},
+             "submittedAt": "2026-01-02T00:00:00Z"},
+            {"state": "CHANGES_REQUESTED", "author": {"login": "eve"},
+             "submittedAt": "2026-01-03T00:00:00Z"},
+        ]}
+        ok, msg = merge_pr.check_reviews(pr, 0)
+        self.assertFalse(ok)
+        self.assertIn("eve", msg)
+
+    def test_a_later_comment_does_not_clear_a_change_request(self):
+        pr = {"reviews": [
+            {"state": "CHANGES_REQUESTED", "author": {"login": "bob"},
+             "submittedAt": "2026-01-01T00:00:00Z"},
+            {"state": "COMMENTED", "author": {"login": "bob"},
+             "submittedAt": "2026-01-05T00:00:00Z"},
+        ]}
+        self.assertFalse(merge_pr.check_reviews(pr, 0)[0])
 
     def test_unresolved_threads_block(self):
         ok, msg = merge_pr.check_reviews({"reviews": [{"state": "COMMENTED"}]}, 3)
