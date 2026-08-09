@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Aru_Agentic_SDLC pre-push hook: main is merged into, never pushed to.
+#
+# This is the backstop that does not care which agent or human is driving.
+# Claude Code's PreToolUse hook only sees Claude Code; Codex, Cursor, a stray
+# terminal, and a tired human all go through this one.
+#
+# Override for the merge path only:  ARU_ALLOW_MAIN_PUSH=1 git push ...
+set -euo pipefail
+
+protected_re='^refs/heads/(main|master)$'
+
+if [ "${ARU_ALLOW_MAIN_PUSH:-0}" = "1" ]; then
+  exit 0
+fi
+
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref.
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  [ -z "${remote_ref:-}" ] && continue
+  if [[ "$remote_ref" =~ $protected_re ]]; then
+    branch="${remote_ref#refs/heads/}"
+    cat >&2 <<EOF
+
+  ✋ Aru_Agentic_SDLC: direct push to '$branch' refused.
+
+  Changes reach $branch through a reviewed PR:
+      python3 "\$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --title "..." --body "..."
+      python3 "\$ARU_SDLC_HOME/scripts/merge_pr.py"  --pr <PR>
+
+  If you are the merge tooling, set ARU_ALLOW_MAIN_PUSH=1 for that one command.
+
+EOF
+    exit 1
+  fi
+done
+
+exit 0
