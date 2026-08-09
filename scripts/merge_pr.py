@@ -168,9 +168,7 @@ def check_ci(pr):
         status = (check.get("status") or "").upper()
         result = (check.get("conclusion") or check.get("state") or "").upper()
         name = check.get("name") or check.get("context") or "check"
-        if status and status != "COMPLETED" and not result:
-            pending.append(name)
-        elif result in in_progress:
+        if status and status != "COMPLETED" and not result or result in in_progress:
             pending.append(name)
         elif result not in passing:
             failing.append(f"{name}={result.lower() or 'unknown'}")
