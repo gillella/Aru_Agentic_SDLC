@@ -273,6 +273,21 @@ def check_reviews(pr, threads):
         ((r.get("author") or {}).get("login") or "").lower()
         for r in substantive
     } - {"", pr_login})
+
+    # Authorship is required before any approval path can pass. Without the
+    # governed author stamp, even a genuine external approval cannot prove the
+    # PR did not bypass create_pr.py or establish who must be excluded from
+    # same-account agent review.
+    authors = label_values(pr, "author:")
+    if not authors:
+        return False, (
+            "PR has no author:<id> label, so the gate cannot prove that the "
+            "reviewer is independent. Create PRs with "
+            "`scripts/create_pr.py --issue <n> --agent <id>`; stamp the verified "
+            "author on a legacy PR before retrying."
+        )
+    author = authors[0]
+
     external_approvers = sorted(
         who for who, state in verdicts.items()
         if who.lower() in other_accounts
@@ -291,16 +306,6 @@ def check_reviews(pr, threads):
 
     # Everything below is the same-account case: agents all authenticate as one
     # GitHub user, so only the identity labels can tell them apart.
-    authors = label_values(pr, "author:")
-    if not authors:
-        return False, (
-            "PR has no author:<id> label, so the gate cannot prove that the "
-            "reviewer is independent. Create PRs with "
-            "`scripts/create_pr.py --issue <n> --agent <id>`; stamp the verified "
-            "author on a legacy PR before retrying."
-        )
-
-    author = authors[0]
     # Only completed attribution counts. Active reviewer claims were rejected
     # above because they represent work still in progress, not attestation.
     reviewers = label_values(pr, REVIEWED_BY_LABEL)

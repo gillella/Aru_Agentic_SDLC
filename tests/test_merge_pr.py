@@ -136,7 +136,9 @@ class ReviewGateTests(unittest.TestCase):
         # The reviews list is history, so the CHANGES_REQUESTED entry survives
         # re-approval. Reading it raw blocked the PR forever, contradicting the
         # refusal message that promised re-approval was supported.
-        pr = {"reviews": [
+        pr = {"author": {"login": "alice"},
+              "labels": [{"name": "author:agent-1"}],
+              "reviews": [
             {"state": "CHANGES_REQUESTED", "author": {"login": "bob"},
              "submittedAt": "2026-01-01T00:00:00Z"},
             {"state": "APPROVED", "author": {"login": "bob"},
@@ -276,6 +278,12 @@ class SelfReviewTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("author:<id>", msg)
         self.assertIn("create_pr.py", msg)
+
+    def test_unstamped_pr_with_external_approval_still_fails_closed(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled(review_login="some-colleague"), 0)
+        self.assertFalse(ok)
+        self.assertIn("author:<id>", msg)
 
     def test_same_family_review_warns_but_does_not_refuse(self):
         ok, msg = merge_pr.check_reviews(
@@ -481,7 +489,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             ],
             "reviews": [{"state": "APPROVED", "author": {"login": "peer"}}],
             "author": {"login": "author"},
-            "labels": [],
+            "labels": [{"name": "author:agent-1"}],
             "mergeStateStatus": "CLEAN",
             "mergeable": "MERGEABLE",
             "additions": 2,
