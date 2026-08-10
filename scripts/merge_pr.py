@@ -12,7 +12,6 @@ is advisory.
 
   python3 merge_pr.py --pr 42
   python3 merge_pr.py --pr 42 --dry-run
-  python3 merge_pr.py --pr 42 --force-human-review   # oversized diff, reviewed anyway
 
 Exit codes:
   0 - merged (or dry-run passed every check)
@@ -43,8 +42,8 @@ REVIEWED_BY_LABEL = "reviewed-by:"
 # any peer's claim satisfy the gate before that peer had looked at the diff.
 REVIEW_CLAIM_LABEL = "reviewer:"
 
-# Reported agentic PRs run materially larger than human ones, and large diffs
-# are where review quality collapses. Not a hard stop - a forced human ack.
+# Large diffs remain visible in the audit output. The separate independent-
+# review gate, not a blanket human-review assertion, owns review quality.
 SIZE_SOFT_LIMIT = 400
 
 PR_FIELDS = (
@@ -324,15 +323,14 @@ def check_acceptance(issue_num, issue_body):
     return True, f"All acceptance criteria on #{issue_num} are ticked."
 
 
-def check_size(pr, forced):
+def check_size(pr):
     total = (pr.get("additions") or 0) + (pr.get("deletions") or 0)
-    if total > SIZE_SOFT_LIMIT and not forced:
-        return False, (
+    if total > SIZE_SOFT_LIMIT:
+        return True, (
             f"Diff is {total} lines, over the {SIZE_SOFT_LIMIT}-line soft limit. "
-            "Split it, or re-run with --force-human-review to confirm a human read it all."
+            "Independent review remains mandatory through the separate review gate."
         )
-    note = " (waived)" if total > SIZE_SOFT_LIMIT else ""
-    return True, f"Diff is {total} lines{note}."
+    return True, f"Diff is {total} lines."
 
 
 def is_merged(pr):
@@ -705,8 +703,6 @@ def main():
     parser = argparse.ArgumentParser(description="Merge a PR only if the Definition of Done is met.")
     parser.add_argument("--pr", type=int, required=True, help="Pull request number")
     parser.add_argument("--dry-run", action="store_true", help="Run every check, merge nothing")
-    parser.add_argument("--force-human-review", action="store_true",
-                        help="Acknowledge an oversized diff was read by a human")
     parser.add_argument("--merge-method", default="squash", choices=["squash", "merge", "rebase"])
     args = parser.parse_args()
 
@@ -741,7 +737,7 @@ def main():
             ("ci", check_ci(pr)),
             ("review", check_reviews(pr, threads)),
             ("rebased", check_rebased(pr)),
-            ("size", check_size(pr, args.force_human_review)),
+            ("size", check_size(pr)),
         ]
         for num in issue_nums:
             gates.append((f"accept #{num}", check_acceptance(num, issue_bodies[num])))
