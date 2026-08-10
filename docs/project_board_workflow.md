@@ -41,6 +41,26 @@ When a repository is bootstrapped via `skills/init-agent-project/SKILL.md`, it p
 
 ---
 
+## 📝 Pre-Edit Plan Gate
+
+Issues labeled `type:feat` or `needs-design` require a durable implementation
+plan comment before the first file edit. So does any issue whose acceptance
+criteria, declared `touches:`, or intended implementation changes money
+semantics, PII handling, schemas, migrations, or another irreversible
+contract, regardless of its type labels. The comment records the approach,
+files, schema/API or money-semantics changes, verification strategy, and
+rejected alternatives. It must remain inside the issue so it survives agent
+handoffs and context compaction.
+
+The normal mode is post-and-proceed. For money, PII, schema, migrations, other
+irreversible paths, or an explicit operator escalation, select the
+`--require-plan-ack` mode of the `implement-next-issue` skill. This is a
+workflow mode, not a standalone executable flag. In that mode the claim
+remains held, but implementation pauses until a repository owner or designated
+maintainer comments `Plan approved` after the latest plan.
+
+---
+
 ## 🔗 Issue Dependencies & Progressive Claiming
 
 1. **Dependency Syntax**:
@@ -60,3 +80,19 @@ When a repository is bootstrapped via `skills/init-agent-project/SKILL.md`, it p
    Each parallel subagent MUST execute in its own isolated worktree (`.worktrees/issue-<ID>-<slug>`).
 3. **Merge Conflict Resolution**:
    If parallel branches touch adjacent code paths, subagents must rebase on the latest `main` inside their worktree before opening PRs.
+
+---
+
+## 🏭 Process Ownership and Merge Authority
+
+Aru_Agentic_SDLC owns the lifecycle from issue intake through claim, plan,
+worktree, PR, review, merge, and cleanup. Other installed frameworks may help
+with a step, but their session-resume files, brainstorming flows, memory, or PR
+bots cannot replace board state or start a competing lifecycle.
+
+After an independent review and all Definition-of-Done checks pass, a factory
+agent may execute a routine merge only through
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Direct pushes and
+ad-hoc merge commands have no merge authority. Human acknowledgement is
+required only for the high-risk and irreversible categories identified by the
+plan or merge gate, plus explicit escalations.

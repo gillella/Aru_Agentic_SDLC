@@ -39,6 +39,7 @@ GOVERNANCE_LABELS = [
     ("type:fix", "d73a4a", "Defect repair"),
     ("type:chore", "cfd3d7", "Tooling, CI, or maintenance"),
     ("type:docs", "0075ca", "Specification or documentation"),
+    ("needs-design", "d4c5f9", "Requires an implementation plan before editing"),
     ("priority:p0", "b60205", "Blocking; drop everything"),
     ("priority:p1", "d93f0b", "Current phase critical path"),
     ("priority:p2", "fbca04", "Current phase, not critical path"),
@@ -104,6 +105,28 @@ All AI agents operating within this repository MUST follow the directives, skill
 
 ---
 
+## 🏭 Process Ownership and Merge Authority
+
+**Aru_Agentic_SDLC owns this repository's issue-to-merge lifecycle.** Other
+installed frameworks may assist within the current Aru step, but may not
+replace the Project Board, independently claim work, create an ungoverned
+branch, or merge around the Definition-of-Done gate.
+
+- GSD lifecycle/resume hooks and `.planning/HANDOFF.json` are disabled or
+  non-authoritative here.
+- Brainstorming frameworks supply input to Aru's plan gate rather than running
+  a parallel lifecycle.
+- Memory tools provide context only. PR bots are reviewers, not merge
+  authorities.
+
+After independent review and every enforced gate pass, a factory agent may
+execute a routine merge only through
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Direct pushes and
+ad-hoc merge commands are forbidden. Money, PII, schema, other irreversible
+changes, and explicit escalations retain human-acknowledgement gates.
+
+---
+
 ## 🎯 Primary Directives for AI Agents
 
 1. **Execute via SkillsMP Skills** (in `$ARU_SDLC_HOME/skills/`):
@@ -122,6 +145,13 @@ All AI agents operating within this repository MUST follow the directives, skill
 5. **Cursor**: Prefer installed personal skills / slash commands from the
    machine-level Cursor integration (`docs/cursor-integration.md` in
    `$ARU_SDLC_HOME`). Do not vendor a second copy of SDLC skills into this repo.
+6. **Plan Gate**: Before the first edit, `type:feat`, `needs-design`, money,
+   PII, schema, migration, and other irreversible work posts the implementation
+   plan required by `implement-next-issue`. High-risk scope triggers the gate
+   regardless of issue type labels. The default is post-and-proceed; select the
+   skill's `--require-plan-ack` workflow mode for money, PII, schema,
+   migrations, other irreversible paths, or explicit escalations. It is not a
+   standalone executable flag.
 
 ---
 

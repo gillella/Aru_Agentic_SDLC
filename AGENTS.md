@@ -16,6 +16,32 @@ All AI agents operating within this repository MUST follow the directives, skill
 
 ---
 
+## Process Ownership and Merge Authority
+
+**Aru_Agentic_SDLC owns the complete issue-to-merge lifecycle in this
+repository.** Other installed frameworks and tools may assist inside the
+current Aru step, but they do not start a second lifecycle, replace the Project
+Board, claim work independently, create an ungoverned branch, or merge around
+the Definition-of-Done gate.
+
+- GSD lifecycle/resume hooks and `.planning/HANDOFF.json` are disabled or
+  non-authoritative in Aru-governed repositories.
+- Brainstorming workflows such as Superpowers supply input to Aru's plan gate;
+  they do not run a parallel implementation process.
+- Memory tools provide context only. PR bots and review tools are reviewers,
+  not workflow owners or merge authorities.
+- If lifecycle instructions conflict, follow Aru. Higher-priority explicit
+  system, developer, or user instructions still take precedence.
+
+Routine merge execution is automated and may be performed by a factory agent
+only through `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`, after an
+independent review and every enforced gate pass. No agent or human may bypass
+that command with a direct push or an ad-hoc merge. Human acknowledgement is
+reserved for money, PII, schema, other irreversible changes, and explicit
+escalations identified by the governing workflow.
+
+---
+
 ## Primary Directives for AI Agents
 
 ### 1. Execute via SkillsMP Skills
@@ -72,6 +98,12 @@ Inside this playbook repo itself, `$ARU_SDLC_HOME` may be `.` / the repo root.
 5. **Local Test Verification First**: Never commit or push without a green local suite.
 6. **CI Green Gate**: If CI fails, invoke `remediate-ci-failure`.
 7. **Session State Memory**: Inspect git log, branches, open PRs, and board status before claiming new work.
+8. **Plan Before Editing**: For `type:feat`, `needs-design`, money, PII,
+   schema, migration, or other irreversible work, post the implementation plan
+   required by `implement-next-issue` before the first edit. High-risk scope
+   triggers the gate regardless of the issue's type labels. Select the
+   `--require-plan-ack` workflow mode when human acknowledgement is required;
+   it is a skill mode, not a standalone executable flag.
 
 ---
 

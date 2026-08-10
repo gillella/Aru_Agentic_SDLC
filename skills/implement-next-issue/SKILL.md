@@ -30,7 +30,8 @@ flowchart TD
     C -- No --> E[3. Claim Issue & Set Status: In Progress]
     D --> E
     E --> F[4. Create Isolated Git Worktree / Branch]
-    F --> G[5. Research & Implement Solution]
+    F --> P[4b. Plan Gate Before First Edit]
+    P --> G[5. Research & Implement Solution]
     G --> H[6. Run Local Tests & Linting]
     H --> I[7. Commit & Push Changes]
     I --> J[8. Open Pull Request 'Closes #ID']
@@ -99,9 +100,51 @@ releases automatically.
 2. **Worktree Isolation**: Create a dedicated git worktree for the branch in `.worktrees/<branch-name>` so the main working directory remains pristine.
 3. Execute: `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ISSUE_ID> --worktree`
 
+### Step 4b: Plan Gate Before the First Edit
+
+The plan is durable issue state, not private scratch reasoning. Apply this gate
+when either condition is true:
+
+- the issue has the `type:feat` or `needs-design` label; or
+- its acceptance criteria, declared `touches:`, or intended implementation
+  changes money semantics, PII handling, schemas, migrations, or another
+  irreversible contract.
+
+High-risk scope is an independent trigger. A `type:fix` or `type:chore` label,
+or a missing `needs-design` label, never exempts money, PII, schema, migration,
+or other irreversible work from the plan gate.
+
+1. Inspect the issue and relevant source read-only. Before editing any file,
+   post an issue comment headed `## Implementation Plan` containing:
+   - the proposed approach and important boundaries;
+   - the exact files expected to change, consistent with `touches:`;
+   - schema, migration, public API, state-machine, or money-semantics deltas
+     (write `None` when there are none);
+   - the local test and verification strategy; and
+   - rejected alternatives and why they were rejected.
+   Post the durable comment with
+   `gh issue comment <ISSUE_ID> --body-file <PLAN_FILE>`. This direct command is
+   explicitly sanctioned for implementation-plan comments because the
+   framework has no issue-comment helper; every GitHub mutation covered by a
+   framework helper must still use that helper.
+2. Default behavior is **post-and-proceed**. Once the comment is visible on the
+   issue, continue without waiting for a human response.
+3. `--require-plan-ack` changes the gate to post-and-block. Use this mode for
+   money, PII, schema, migration, or other irreversible paths, and whenever the
+   issue or operator explicitly requires it. Keep the issue claimed but make no
+   edits until the repository owner or designated maintainer comments
+   `Plan approved` after the latest plan comment.
+4. If the approach materially changes before implementation, post an amended
+   plan. In acknowledgement mode, the amendment also requires a fresh
+   `Plan approved` comment.
+
+`--require-plan-ack` names a mode of this skill, not a standalone executable or
+helper-script flag. Selecting that governed workflow mode is not permission to
+bypass the issue claim, path budget, review, or merge gates.
+
 ### Step 5: Implement Solution
-1. Inspect files inside the isolated worktree directory.
-2. Formulate a minimal, targeted implementation plan.
+1. Confirm the plan gate is satisfied when it applies.
+2. Inspect files inside the isolated worktree directory.
 3. Perform source code modifications while preserving existing docstrings, formatting, and public API contracts.
 
 ### Step 6: Run Local Tests & Verification
@@ -139,3 +182,17 @@ releases automatically.
 2. Assign relevant maintainers or peer agents for code review.
 3. Execute: `python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" --issue <ISSUE_ID> --status "In Review"`
 4. Clean up worktree directory if needed and summarize work completed.
+
+### Step 12: Merge Authority and Completion
+
+1. The implementation author cannot satisfy the independent-review gate with a
+   self-review. Wait for the peer review and resolve every review thread.
+2. Routine merges may be executed automatically by a factory agent, but only
+   with `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID>`. This is the
+   sole merge authority; do not use a direct push or ad-hoc `gh pr merge`.
+3. Money, PII, schema, other irreversible changes, and explicit escalations
+   require the human acknowledgement named by their governing gate before the
+   merge helper is invoked.
+4. The merge helper must prove green CI, independent review, resolved threads,
+   completed acceptance criteria, and an up-to-date branch, then close the
+   issue, move it to Done, and clean up the issue branch/worktree.
