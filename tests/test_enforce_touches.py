@@ -164,6 +164,14 @@ class RedirectFalsePositiveTests(unittest.TestCase):
     def test_empty_target_is_never_reported(self):
         self.assertNotIn("", et._redirect_targets('git commit -m "trailing >"'))
 
+    def test_issue_body_documenting_redirects_is_not_a_redirect(self):
+        # Filing the bug report was itself blocked: the body had to quote the
+        # offending characters to describe them.
+        body = "| `a -> b` | `x => y` | `if p > q` |"
+        self.assertEqual(
+            et._redirect_targets(f'gh issue create --title t --body "{body}"'), []
+        )
+
 
 class HookDecisionTests(unittest.TestCase):
     """End-to-end main() behaviour with GitHub and git stubbed out."""
