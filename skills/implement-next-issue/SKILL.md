@@ -118,7 +118,9 @@ releases automatically.
 1. Open a Pull Request from the feature branch targeting the default branch (`main`).
 2. Populate the PR title and description using the project's PR template.
 3. **CRITICAL REQUIREMENT**: Include `Closes #<ISSUE_ID>` in the PR description body.
-4. Execute: `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ISSUE_ID> --title "<TITLE>" --body "<body>"`
+4. Execute: `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ISSUE_ID> --agent <AGENT_ID> [--model-family <FAMILY>] --title "<TITLE>" --body "<body>"`
+   - `--agent` is **required**. It stamps `author:<id>` on the PR, which is what lets the merge gate tell a peer review from a self-review. Omitting it exits non-zero and opens nothing.
+   - `--model-family` is optional but recommended: it steers review routing toward an agent whose blind spots differ from yours.
 
 ### Step 9: Poll & Verify CI Status
 1. Wait for automated CI pipeline checks (GitHub Actions / CI runner) to trigger and complete.
