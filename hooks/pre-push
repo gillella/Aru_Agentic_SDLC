@@ -30,7 +30,7 @@ while read -r _local_ref _local_sha remote_ref _remote_sha; do
   ✋ Aru_Agentic_SDLC: direct push to '$branch' refused.
 
   Changes reach $branch through a reviewed PR:
-      python3 "\$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --title "..." --body "..."
+      python3 "\$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> --title "..." --body "..."
       python3 "\$ARU_SDLC_HOME/scripts/merge_pr.py"  --pr <PR>
 
   If you are the merge tooling, set ARU_ALLOW_MAIN_PUSH=1 for that one command.
