@@ -26,6 +26,32 @@ class AgentFlagTests(unittest.TestCase):
         self.assertNotEqual(caught.exception.code, 0)
         opened.assert_not_called()  # nothing was opened unstamped
 
+    def test_empty_agent_is_refused_at_the_cli(self):
+        # required=True only proves the token was typed. `--agent ""` slips past
+        # it and lands an unstamped PR, which is the hole this change closes.
+        # The realistic source is `--agent "$AGENT_ID"` with the variable unset.
+        for empty in ("", "   ", "\t"):
+            with self.subTest(agent=repr(empty)):
+                argv = ["create_pr.py", "--issue", "7", "--title", "t",
+                        "--body", "b", "--agent", empty]
+                with patch.object(sys, "argv", argv), \
+                        patch.object(create_pr, "create_pr") as opened:
+                    with self.assertRaises(SystemExit) as caught:
+                        create_pr.main()
+                self.assertNotEqual(caught.exception.code, 0)
+                opened.assert_not_called()
+
+    def test_surrounding_whitespace_is_stripped_from_agent(self):
+        argv = ["create_pr.py", "--issue", "7", "--title", "t", "--body", "b",
+                "--agent", "  agent-1  ", "--model-family", "anthropic"]
+        with patch.object(sys, "argv", argv), \
+                patch.object(create_pr, "create_pr", return_value=True) as opened:
+            with self.assertRaises(SystemExit) as caught:
+                create_pr.main()
+        self.assertEqual(caught.exception.code, 0)
+        # A padded id must not become a second, distinct author identity.
+        self.assertEqual(opened.call_args.args[3], "agent-1")
+
     def test_agent_is_passed_through_to_the_pr(self):
         argv = ["create_pr.py", "--issue", "7", "--title", "t", "--body", "b",
                 "--agent", "agent-1", "--model-family", "anthropic"]

@@ -114,6 +114,19 @@ def main():
                         help=f"Authoring model family, one of: {', '.join(MODEL_FAMILIES)}")
     args = parser.parse_args()
 
+    # `required=True` only proves the option token was typed; `--agent ""` gets
+    # past it and reopens exactly the hole this script is meant to close - an
+    # empty id means create_pr() skips apply_identity() and the PR lands
+    # unstamped. This is a realistic accident, not a contrived one: `--agent
+    # "$AGENT_ID"` with the variable unset produces precisely this.
+    args.agent = args.agent.strip()
+    if not args.agent:
+        print("[ERROR] --agent is empty. It stamps author:<id>, which is what "
+              "lets the merge gate tell a peer review from a self-review; an "
+              "empty id would open an unstamped PR. If you passed a shell "
+              "variable, it is unset.", file=sys.stderr)
+        sys.exit(1)
+
     if args.family and args.family.lower() not in MODEL_FAMILIES:
         print(f"[ERROR] Unknown model family '{args.family}'. Valid values: "
               f"{', '.join(MODEL_FAMILIES)}", file=sys.stderr)
