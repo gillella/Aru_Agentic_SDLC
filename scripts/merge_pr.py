@@ -449,9 +449,15 @@ def prune_worktree(repo_root, branch, expected_sha):
     return False, f"Left worktree {path} in place: {err.strip()}"
 
 
-def delete_local_branch(repo_root, branch, expected_sha):
+def retain_local_branch(repo_root, branch, expected_sha):
+    """Leaves the local ref intact because Git cannot lease worktree attachment.
+
+    A compare-and-delete can protect the ref OID, but it cannot atomically stop
+    another process from attaching a new worktree to that ref. Keeping the
+    local branch is the only fail-closed behavior in a concurrent factory.
+    """
     if not branch or not expected_sha:
-        return False, "Branch and gated head SHA are required; no local branch removed."
+        return False, "Branch and gated head SHA are required; local branch state is unknown."
     code, actual_sha, _ = run_cmd(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
         check=False, cwd=repo_root,
@@ -459,31 +465,13 @@ def delete_local_branch(repo_root, branch, expected_sha):
     if code != 0:
         return True, "Local branch already absent."
     if actual_sha.strip() != expected_sha:
-        return False, (
-            f"Local branch {branch} now points to {actual_sha.strip() or 'unknown'}, not "
-            f"gated head {expected_sha}; left untouched."
+        return True, (
+            f"Local branch {branch} was reused at {actual_sha.strip() or 'unknown'}; "
+            "unrelated ref retained."
         )
-    code, worktrees, worktree_err = run_cmd(
-        ["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root
-    )
-    if code != 0:
-        return False, f"Could not verify branch worktrees: {worktree_err.strip()}"
-    path, _ = find_branch_worktree(worktrees, branch)
-    if path:
-        return False, (
-            f"Local branch {branch} is still attached to worktree {path}; left untouched."
-        )
-    ref = f"refs/heads/{branch}"
-    code, _, err = run_cmd(
-        ["git", "update-ref", "-d", ref, expected_sha],
-        check=False,
-        cwd=repo_root,
-    )
-    if code == 0:
-        return True, f"Deleted local branch {branch}."
-    return False, (
-        f"Could not atomically delete local branch {branch}; it may have changed: "
-        f"{err.strip()}"
+    return True, (
+        f"Retained local branch {branch}; Git cannot atomically lease worktree "
+        "attachment during ref deletion."
     )
 
 
@@ -589,7 +577,7 @@ def run_closeout(pr, issue_nums, repo_root):
     head_repo_slug = head_repository_slug(pr)
     steps = [
         ("worktree", lambda: prune_worktree(repo_root, branch, expected_sha)),
-        ("local branch", lambda: delete_local_branch(repo_root, branch, expected_sha)),
+        ("local branch", lambda: retain_local_branch(repo_root, branch, expected_sha)),
         ("remote branch", lambda: delete_remote_branch(
             repo_root, branch, expected_sha, head_repo_slug
         )),
