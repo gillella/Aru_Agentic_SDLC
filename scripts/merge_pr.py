@@ -468,7 +468,31 @@ def prune_worktree(repo_root, branch, expected_sha):
         lock_fd = os.open(head_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except OSError as exc:
         return False, f"Could not lock worktree HEAD for exact ownership check: {exc}"
+    ref_lock_fd = None
+    ref_lock = ""
     try:
+        ref_lock_root = os.path.realpath(
+            os.path.join(repo_root, ".git", "refs", "heads")
+        )
+        ref_lock = os.path.realpath(
+            os.path.join(ref_lock_root, f"{branch}.lock")
+        )
+        try:
+            inside_ref_root = os.path.commonpath(
+                [ref_lock, ref_lock_root]
+            ) == ref_lock_root
+        except ValueError:
+            inside_ref_root = False
+        if not inside_ref_root:
+            return False, f"Branch lock points outside {ref_lock_root}; left untouched."
+        try:
+            os.makedirs(os.path.dirname(ref_lock), exist_ok=True)
+            ref_lock_fd = os.open(
+                ref_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+            )
+        except OSError as exc:
+            return False, f"Could not lock branch ref for exact ownership check: {exc}"
+
         ref_code, current_ref, ref_err = run_cmd(
             ["git", "rev-parse", "--symbolic-full-name", "HEAD"],
             check=False,
@@ -515,6 +539,10 @@ def prune_worktree(repo_root, branch, expected_sha):
             f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
         )
     finally:
+        if ref_lock_fd is not None:
+            os.close(ref_lock_fd)
+            if os.path.exists(ref_lock):
+                os.unlink(ref_lock)
         os.close(lock_fd)
         if os.path.exists(head_lock):
             os.unlink(head_lock)
