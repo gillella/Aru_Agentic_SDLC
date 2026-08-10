@@ -37,6 +37,89 @@ class ClaimReviewTests(unittest.TestCase):
     def test_already_mine_resumes(self, _labels):
         self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
 
+    @patch.object(claim_issue, "_pr_labels", return_value=["author:agent-2"])
+    def test_the_prs_own_author_may_not_claim_review(self, _labels):
+        """The guarantee has to live where the label is written.
+
+        fetch_next_work filters own-authored PRs when handing out review work,
+        but `--pr <n> --agent <me>` goes straight past the picker. merge_pr
+        now reads this claim as the reviewer's identity, so allowing the
+        author to write it would hand back the self-review the gate exists to
+        refuse.
+        """
+        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "_pr_labels")
+    def test_a_different_agent_may_claim_a_stamped_pr(self, labels, _ensure, _run, _sleep):
+        labels.side_effect = [
+            ["author:agent-1"],
+            ["author:agent-1", "reviewer:agent-2"],
+            ["author:agent-1", "reviewer:agent-2"],
+        ]
+        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
+
+    @patch.object(claim_issue, "_remove_reviewer_label", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "_pr_labels",
+                  return_value=["author:agent-1", "reviewer:agent-2"])
+    def test_completing_a_held_review_attributes_and_releases(
+            self, _labels, _ensure, run, remove):
+        """The step that had no command.
+
+        fleet-worker.md told the reviewer to label the PR in prose and gave a
+        command only for the release, so the prose half got skipped and PRs
+        arrived claimed but unattributed.
+        """
+        self.assertEqual(
+            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_OK)
+        stamped = " ".join(" ".join(c.args[0]) for c in run.call_args_list)
+        self.assertIn("reviewed-by:agent-2", stamped)
+        remove.assert_called_once()
+
+    @patch.object(claim_issue, "_pr_labels",
+                  return_value=["author:agent-1", "reviewer:agent-9"])
+    def test_completing_a_review_you_do_not_hold_is_refused(self, _labels):
+        # Attribution is not something a passer-by may write.
+        self.assertEqual(
+            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
+
+    @patch.object(claim_issue, "_pr_labels", return_value=["author:agent-1"])
+    def test_completing_without_any_claim_is_refused(self, _labels):
+        self.assertEqual(
+            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
+
+    @patch.object(claim_issue, "_pr_labels",
+                  return_value=["author:agent-2", "reviewer:agent-2"])
+    def test_the_author_may_not_attribute_a_review_of_its_own_pr(self, _labels):
+        self.assertEqual(
+            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
+
+    @patch.object(claim_issue, "_remove_reviewer_label", return_value=False)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "_pr_labels",
+                  return_value=["author:agent-1", "reviewer:agent-2"])
+    def test_a_failed_release_still_reports_success(
+            self, _labels, _ensure, _run, _remove):
+        # The attribution is what the gate reads. A leftover claim gets reaped;
+        # an unattributed review blocks the merge. Do not fail on the lesser.
+        self.assertEqual(
+            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_OK)
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "_pr_labels")
+    def test_an_unstamped_pr_can_still_be_claimed(self, labels, _ensure, _run, _sleep):
+        # No author: label means nothing to compare against; refusing would
+        # strand every PR opened before stamping existed.
+        labels.side_effect = [[], ["reviewer:agent-2"], ["reviewer:agent-2"]]
+        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
+
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
     @patch.object(claim_issue, "ensure_label", return_value=True)

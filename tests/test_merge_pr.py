@@ -204,7 +204,10 @@ class ExternalReviewerTests(unittest.TestCase):
     def test_same_account_still_needs_the_labels(self):
         ok, msg = merge_pr.check_reviews(labelled("author:agent-1"), 0)
         self.assertFalse(ok)
-        self.assertIn("reviewed-by", msg)
+        # Names the attribution the gate reads and the command that writes it,
+        # so the remedy is executable rather than a label to invent.
+        self.assertIn("reviewed-by:", msg)
+        self.assertIn("--complete-review", msg)
 
 
 class SelfReviewTests(unittest.TestCase):
@@ -228,12 +231,13 @@ class SelfReviewTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("agent-3", msg)
 
-    def test_review_without_a_reviewed_by_label_is_refused(self):
+    def test_review_without_attribution_is_refused(self):
         # Unattributable on a stamped PR: it cannot be told apart from a
         # self-review, so it must not pass.
         ok, msg = merge_pr.check_reviews(labelled("author:agent-1"), 0)
         self.assertFalse(ok)
-        self.assertIn("reviewed-by", msg)
+        self.assertIn("reviewed-by:", msg)
+
 
     def test_unstamped_pr_falls_back_to_the_old_behaviour(self):
         # PRs predating author stamping must stay mergeable.
@@ -253,6 +257,48 @@ class SelfReviewTests(unittest.TestCase):
             labelled("author:solo", "reviewed-by:solo",
                      reviews=[{"state": "APPROVED"}, {"state": "COMMENTED"}]), 0)
         self.assertFalse(ok)
+
+
+class ClaimIsNotAttestationTests(unittest.TestCase):
+    """A review claim records queue occupancy, not that anyone read the diff.
+
+    An earlier revision of this fix accepted `reviewer:` as proof of review.
+    That let the author leave a same-account COMMENTED review, any peer claim
+    the PR, and the gate pass before that peer had looked at anything. On the
+    repository's only merge gate.
+    """
+
+    def test_a_peer_claim_alone_does_not_satisfy_the_gate(self):
+        # The exploit, verbatim: author's own review + a peer's bare claim.
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewer:agent-2"), 0)
+        self.assertFalse(ok)
+        self.assertIn("complete-review", msg)
+
+    def test_the_refusal_names_the_claimant_and_the_command(self):
+        _, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewer:agent-2"), 0)
+        self.assertIn("agent-2", msg)
+        self.assertIn("--complete-review", msg)
+
+    def test_completed_attribution_satisfies_the_gate(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2"), 0)
+        self.assertTrue(ok)
+        self.assertIn("agent-2", msg)
+
+    def test_a_claim_alongside_completed_attribution_is_fine(self):
+        # Completion normally releases the claim, but a failed release must
+        # not block a merge the attribution has already earned.
+        ok, _ = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewer:agent-2", "reviewed-by:agent-2"), 0)
+        self.assertTrue(ok)
+
+    def test_self_attribution_is_still_a_self_review(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
 
 
 class RebaseGateTests(unittest.TestCase):
