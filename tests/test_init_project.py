@@ -9,6 +9,12 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+try:  # PyYAML is optional: the suite must stay runnable with the stdlib alone.
+    import yaml as _yaml  # noqa: F401
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
+
 import init_project  # noqa: E402
 from init_project import (  # noqa: E402
     render_ci_workflow,
@@ -130,6 +136,84 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertIn('name:"Kanban"', mutations)
         self.assertIn('name:"Jira-Style Backlog"', mutations)
         self.assertIn('name:"Sprint"', mutations)
+
+
+class CiGateTests(unittest.TestCase):
+    """The generated CI must fail, not warn.
+
+    A bootstrapped project inherits whatever this renders, so a gate that
+    skips is worse than no gate: it reports green and certifies nothing.
+    """
+
+    STACKS = (("python", "pytest -q"), ("node", "npm test"), ("go", "go test ./..."))
+
+    def test_test_gate_keys_on_source_not_on_tests(self):
+        # Keying on tests is self-defeating - a repo with code and no tests
+        # takes the skip branch and passes, which is the state being guarded.
+        for stack, runner in self.STACKS:
+            with self.subTest(stack=stack):
+                ci = render_ci_workflow(stack, runner)
+                self.assertIn("has_src=", ci)
+                self.assertIn("::error::", ci)
+                self.assertIn("exit 1", ci)
+                self.assertNotIn("becomes mandatory at first source commit", ci)
+
+    def test_every_stack_scans_secrets_over_full_history(self):
+        for stack, runner in self.STACKS:
+            with self.subTest(stack=stack):
+                ci = render_ci_workflow(stack, runner)
+                self.assertIn("gitleaks/gitleaks-action", ci)
+                # depth-1 would hide a secret added then removed later.
+                self.assertIn("fetch-depth: 0", ci)
+
+    def test_every_stack_audits_dependencies(self):
+        expected = {"python": "pip-audit", "node": "npm audit", "go": "govulncheck"}
+        for stack, runner in self.STACKS:
+            with self.subTest(stack=stack):
+                self.assertIn(expected[stack], render_ci_workflow(stack, runner))
+
+    def test_github_expressions_survive_template_formatting(self):
+        # The steps templates go through .format(); a stray brace would eat
+        # ${{ secrets.* }} and produce a workflow that silently loses its token.
+        for stack, runner in self.STACKS:
+            with self.subTest(stack=stack):
+                ci = render_ci_workflow(stack, runner)
+                self.assertIn("${{ secrets.GITHUB_TOKEN }}", ci)
+                self.assertNotIn("{test_runner}", ci)
+
+    def test_generated_workflow_is_structurally_wellformed(self):
+        """Always runs. YAML is indentation-sensitive and tabs are illegal in it.
+
+        Kept separate from the PyYAML parse below so this coverage is never
+        reported as skipped: a suite that says "skipped" where it actually
+        checked something teaches people to ignore skips.
+        """
+        for stack, runner in self.STACKS:
+            with self.subTest(stack=stack):
+                ci = render_ci_workflow(stack, runner)
+                self.assertNotIn("\t", ci)
+                for line in ci.splitlines():
+                    if line.strip():
+                        indent = len(line) - len(line.lstrip(" "))
+                        self.assertEqual(indent % 2, 0, f"odd indent: {line!r}")
+
+    @unittest.skipUnless(_HAS_YAML, "PyYAML not installed")
+    def test_generated_workflow_parses_as_yaml(self):
+        """The real parse, where the parser is available.
+
+        The suite is deliberately stdlib-only and the repo ships no
+        requirements.txt, so PyYAML cannot be a hard dependency without
+        changing how CI installs. Verified against PyYAML for all three
+        stacks during development; this pins it wherever the lib exists.
+        """
+        import yaml
+
+        for stack, runner in self.STACKS:
+            with self.subTest(stack=stack):
+                parsed = yaml.safe_load(render_ci_workflow(stack, runner))
+                steps = parsed["jobs"]["verify"]["steps"]
+                self.assertEqual(steps[0]["with"]["fetch-depth"], 0)
+                self.assertIn("Secret scan", [s.get("name") for s in steps])
 
 
 class CursorProjectRuleTests(unittest.TestCase):
