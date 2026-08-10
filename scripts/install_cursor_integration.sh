@@ -8,11 +8,15 @@ CURSOR_HOME="${HOME}/.cursor"
 AGENTS_SKILLS="${HOME}/.agents/skills"
 DEFAULT_ARU_PATH="${SDLC_HOME}"
 
+# Must stay in step with skills/ on disk: a procedure that exists but is not
+# listed here is unreachable from an external workspace, even though AGENTS.md
+# and the README promise every SDLC procedure is installed.
 SKILLS=(
   aru-agentic-sdlc
   implement-next-issue
   init-agent-project
   create-github-issue
+  triage-backlog
   code-review
   remediate-ci-failure
   address-pr-feedback
@@ -29,12 +33,17 @@ link_skill() {
   fi
 
   mkdir -p "$(dirname "${dest}")"
-  # Only replace our own symlink or an exact same-named skill dir.
-  # Never touch siblings (.skill-lock.json, nested marketplace trees, etc.).
+  # Only ever remove a symlink outright. A real directory at this path is
+  # somebody's own skill - possibly hand-edited and unversioned - and deleting
+  # it to install ours would be irreversible data loss, so it is moved aside
+  # and reported instead. Never touch siblings (.skill-lock.json, nested
+  # marketplace trees, etc.).
   if [[ -L "${dest}" ]]; then
     rm -f "${dest}"
   elif [[ -d "${dest}" ]]; then
-    rm -rf "${dest}"
+    local backup="${dest}.pre-aru.$(date +%Y%m%d%H%M%S)"
+    mv "${dest}" "${backup}"
+    echo "note: preserved your existing ${name} skill as ${backup}" >&2
   elif [[ -e "${dest}" ]]; then
     echo "error: refusing to overwrite non-skill path ${dest}" >&2
     exit 1
@@ -60,7 +69,13 @@ ensure_env_export() {
       { print }
       END { if (!done) print repl }
     ' "${profile}" > "${tmp}"
-    mv "${tmp}" "${profile}"
+    # Write through the path rather than mv onto it. A dotfile manager often
+    # symlinks .zshrc/.bashrc at its own store; mv would replace the symlink
+    # with a regular file, silently detaching the profile from the manager and
+    # leaving the real file unchanged. Redirection follows the link and keeps
+    # the existing inode and permissions.
+    cat "${tmp}" > "${profile}"
+    rm -f "${tmp}"
     echo "updated ARU_SDLC_HOME in ${profile}"
   else
     {

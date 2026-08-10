@@ -26,6 +26,7 @@ and refuse to invent a second copy of these skills inside the target repo.
 | New governed repo / board / CI | `init-agent-project` |
 | Pick up / continue backlog work | `implement-next-issue` |
 | File a bug/feature/task | `create-github-issue` |
+| Promote Backlog → Ready; board has no ready work | `triage-backlog` |
 | Review someone else's PR | `code-review` |
 | Fix red CI on an open PR | `remediate-ci-failure` |
 | Address review comments on your PR | `address-pr-feedback` |
