@@ -286,6 +286,51 @@ def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
         return []
 
 
+def get_repo_projects(repo_slug: str) -> List[Dict[str, Any]]:
+    """Returns Project v2 boards linked to ``owner/repo``.
+
+    Issue creation cannot discover its destination from project items because
+    a newly-created issue has none yet.  Resolve from the repository's linked
+    projects instead, using the same title/linkage contract as status moves.
+    """
+    if not repo_slug or "/" not in repo_slug:
+        return []
+    owner, repo = repo_slug.split("/", 1)
+    query = """
+    query($owner:String!, $repo:String!) {
+      repository(owner:$owner, name:$repo) {
+        projectsV2(first:100) {
+          nodes {
+            id
+            number
+            title
+            owner {
+              ... on User { login }
+              ... on Organization { login }
+            }
+            repositories(first:100) {
+              nodes { nameWithOwner }
+            }
+          }
+        }
+      }
+    }
+    """
+    cmd = [
+        "gh", "api", "graphql",
+        "-f", f"query={query}",
+        "-F", f"owner={owner}",
+        "-F", f"repo={repo}",
+    ]
+    res = run_gh_json(cmd)
+    if not res:
+        return []
+    try:
+        return res["data"]["repository"]["projectsV2"]["nodes"]
+    except (KeyError, TypeError):
+        return []
+
+
 def select_governed_project_items(
     items: List[Dict[str, Any]],
     repo_slug: str,
@@ -319,19 +364,95 @@ def select_governed_project_items(
     return []
 
 
+def select_governed_projects(
+    projects: List[Dict[str, Any]],
+    repo_slug: str,
+) -> List[Dict[str, Any]]:
+    """Applies the governed-board selector before an issue has project items."""
+    wrapped = [{"project": project} for project in projects]
+    return [
+        item["project"]
+        for item in select_governed_project_items(wrapped, repo_slug)
+    ]
+
+
+def resolve_governed_project(repo_slug: str) -> Optional[Dict[str, Any]]:
+    """Resolves the exact ``<repo> Board`` or sole linked project."""
+    projects = select_governed_projects(get_repo_projects(repo_slug), repo_slug)
+    if len(projects) == 1:
+        return projects[0]
+    print(
+        f"[WARN] Could not identify one governed project board for '{repo_slug}'.",
+        file=sys.stderr,
+    )
+    return None
+
+
+def attach_issue_to_governed_project(issue_number: int) -> bool:
+    """Idempotently attaches an issue to its repository's governed board."""
+    slug = get_repo_slug()
+    if not slug:
+        print(
+            f"[WARN] Could not resolve the repository for issue #{issue_number}.",
+            file=sys.stderr,
+        )
+        print(
+            f"[WARN] Manual remedy: gh project item-add <PROJECT_NUMBER> "
+            f"--owner <OWNER> --url <ISSUE_URL>",
+            file=sys.stderr,
+        )
+        return False
+
+    project = resolve_governed_project(slug)
+    if not project:
+        print(
+            f"[WARN] Manual remedy: gh project item-add <PROJECT_NUMBER> "
+            f"--owner <OWNER> --url https://github.com/{slug}/issues/{issue_number}",
+            file=sys.stderr,
+        )
+        return False
+
+    project_id = project.get("id")
+    existing = get_issue_project_items(issue_number)
+    if project_id and any(
+        (item.get("project") or {}).get("id") == project_id
+        for item in existing
+    ):
+        return True
+
+    project_number = project.get("number")
+    owner = (project.get("owner") or {}).get("login")
+    if project_number is None or not owner:
+        print(
+            f"[WARN] Governed project metadata is incomplete for '{slug}'.",
+            file=sys.stderr,
+        )
+        print(
+            f"[WARN] Manual remedy: gh project item-add <PROJECT_NUMBER> "
+            f"--owner <OWNER> --url https://github.com/{slug}/issues/{issue_number}",
+            file=sys.stderr,
+        )
+        return False
+    return add_issue_to_project(issue_number, int(project_number), owner)
+
+
 def set_board_status(issue_number: int, status: str) -> bool:
     """Moves an issue's board item(s) to the named Status option.
 
     Returns True only if at least one board item actually moved, so callers can
     tell the difference between 'moved' and 'issue is not on any board'.
     """
-    items = get_issue_project_items(issue_number)
-    if not items:
-        return False
     slug = get_repo_slug()
     if not slug:
         return False
+    items = get_issue_project_items(issue_number)
     items = select_governed_project_items(items, slug)
+    if not items:
+        if not attach_issue_to_governed_project(issue_number):
+            return False
+        items = select_governed_project_items(
+            get_issue_project_items(issue_number), slug
+        )
     if not items:
         print(
             f"[WARN] Could not identify one governed project board for '{slug}'.",
@@ -394,6 +515,11 @@ def add_issue_to_project(issue_number: int, project_number: int, owner: str = "@
     )
     if code != 0:
         print(f"[WARN] Could not add issue #{issue_number} to project #{project_number}: {err or out}", file=sys.stderr)
+        print(
+            f"[WARN] Manual remedy: gh project item-add {project_number} "
+            f"--owner {owner} --url {url}",
+            file=sys.stderr,
+        )
         return False
     return True
 
