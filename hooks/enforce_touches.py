@@ -28,6 +28,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -241,27 +242,81 @@ def _git_write_to_protected(command, branch):
     return None
 
 
+# A redirect token: optional fd, the operator, and any target stuck to it.
+# `>f`, `>>f`, `2>f` all write; `2>&1` and `>&2` only duplicate a descriptor.
+_REDIRECT_TOKEN = re.compile(r"^(?P<fd>\d*)(?P<op>>>?)(?P<rest>.*)$", re.DOTALL)
+
+
+def _shell_tokens(command):
+    """Splits a command the way a shell would, or None if it cannot.
+
+    Quoting is the whole point. A regex cannot tell `> out.txt` from the `>`
+    inside `-m "if x > y"`, and the previous implementation could not either:
+    it read arrows, comparisons, and the `<email>` in a Co-Authored-By trailer
+    as redirects and blocked commits that wrote nothing.
+
+    Returns None when the command does not lex - unbalanced quotes, an
+    interrupted heredoc. That is deliberately fail-open, matching this
+    module's contract: block only on positive proof of a write. The pre-push
+    hook and review remain the backstop for anything this misses.
+    """
+    if not command:
+        return None
+    for posix in (True, False):
+        try:
+            return shlex.split(command, comments=False, posix=posix)
+        except ValueError:
+            continue
+    return None
+
+
 def _redirect_targets(command):
     """Best-effort extraction of shell writes: redirects, tee, sed -i.
 
-    Intentionally incomplete - a shell can write a file in ways no regex will
+    Intentionally incomplete - a shell can write a file in ways no lexer will
     catch. This covers the honest-mistake cases; adversarial evasion is out of
     scope and is handled by review and by the pre-push hook.
     """
-    if not command:
+    tokens = _shell_tokens(command)
+    if not tokens:
         return []
+
     found = []
-    found += re.findall(r"(?<![0-9<>])>>?\s*([^\s;|&]+)", command)
-    found += re.findall(r"\btee\s+(?:-a\s+)?([^\s;|&]+)", command)
+    for index, token in enumerate(tokens):
+        match = _REDIRECT_TOKEN.match(token)
+        if match:
+            rest = match.group("rest")
+            # `2>&1` duplicates a descriptor; nothing is created on disk.
+            if rest.startswith("&"):
+                continue
+            if rest:
+                found.append(rest)
+            elif index + 1 < len(tokens):
+                found.append(tokens[index + 1])
+            continue
+
+        if token == "tee":
+            # Skip tee's own flags to reach the first path argument.
+            for candidate in tokens[index + 1:]:
+                if candidate.startswith("-"):
+                    continue
+                found.append(candidate)
+                break
+
     # sed -i rewrites its last argument. The script itself may contain spaces
     # and quotes, so pick the final token of the segment rather than trying to
     # parse sed's own grammar.
-    for segment in re.split(r"[;|&]+", command):
+    for segment in re.split(r"[;|&]+", command or ""):
         if re.search(r"\bsed\b[^\n]*\s-i(\.\S+)?\b", segment):
-            tokens = segment.split()
-            if tokens:
-                found.append(tokens[-1])
-    return [f.strip("'\"") for f in found if not f.startswith("-")]
+            segment_tokens = segment.split()
+            if segment_tokens:
+                found.append(segment_tokens[-1])
+
+    return [
+        target.strip("'\"")
+        for target in found
+        if target.strip("'\"") and not target.startswith("-")
+    ]
 
 
 def deny(reason, detail):

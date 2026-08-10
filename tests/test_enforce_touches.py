@@ -107,6 +107,63 @@ class RedirectDetectionTests(unittest.TestCase):
     def test_pipe_without_write_yields_nothing(self):
         self.assertEqual(et._redirect_targets("grep -n foo bar.py | head"), [])
 
+    def test_fd_duplication_is_not_a_write(self):
+        # 2>&1 and >&2 rebind a descriptor; nothing is created on disk.
+        self.assertEqual(et._redirect_targets("cmd 2>&1"), [])
+        self.assertEqual(et._redirect_targets("cmd >&2"), [])
+
+    def test_redirect_target_glued_to_the_operator_is_found(self):
+        self.assertIn("out.txt", et._redirect_targets("echo hi >out.txt"))
+        self.assertIn("err.log", et._redirect_targets("cmd 2> err.log"))
+
+    def test_quoted_target_containing_a_space_is_read_whole(self):
+        # The old character-class scan stopped at the space and reported '"my'.
+        self.assertEqual(et._redirect_targets('echo hi > "my file.txt"'), ["my file.txt"])
+
+
+class RedirectFalsePositiveTests(unittest.TestCase):
+    """Prose containing '>' is not a write.
+
+    Every case here blocked a real commit before the lexer replaced the regex
+    scan. The module's contract is to block only on positive proof of a write,
+    so a '>' inside a quoted argument must never count: the agent's only
+    escapes are to mangle the message or to widen touches: past what it
+    actually writes, and both dissolve the guarantee the hook exists to give.
+    """
+
+    TRAILER = 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>'
+
+    def test_ascii_arrow_in_a_message_is_not_a_redirect(self):
+        self.assertEqual(
+            et._redirect_targets('git commit -m "tests present -> run them"'), []
+        )
+
+    def test_fat_arrow_is_not_a_redirect(self):
+        self.assertEqual(et._redirect_targets('echo "a => b"'), [])
+
+    def test_comparison_in_prose_is_not_a_redirect(self):
+        self.assertEqual(et._redirect_targets('echo "if x > y then"'), [])
+
+    def test_co_authored_by_trailer_via_m_flag_is_not_a_redirect(self):
+        # The mandated trailer in docs/coding_standards.md ends in '>'.
+        # Reading it as a redirect blocked every conforming commit.
+        self.assertEqual(
+            et._redirect_targets(f'git commit -m "msg" -m "{self.TRAILER}"'), []
+        )
+
+    def test_co_authored_by_trailer_in_a_heredoc_is_not_a_redirect(self):
+        # '\\s*' used to span the newline, so the trailing '>' swallowed the
+        # heredoc terminator and the hook reported a write to 'EOF'.
+        command = "git commit -F - <<'EOF'\nsubject\n\n" + self.TRAILER + "\nEOF"
+        self.assertEqual(et._redirect_targets(command), [])
+
+    def test_unlexable_command_fails_open(self):
+        # Unbalanced quotes must not block; the contract is fail-open.
+        self.assertEqual(et._redirect_targets('echo "unterminated'), [])
+
+    def test_empty_target_is_never_reported(self):
+        self.assertNotIn("", et._redirect_targets('git commit -m "trailing >"'))
+
 
 class HookDecisionTests(unittest.TestCase):
     """End-to-end main() behaviour with GitHub and git stubbed out."""
