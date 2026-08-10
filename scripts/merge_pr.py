@@ -398,6 +398,20 @@ def execute_merge(pr_id, pr, merge_method):
     return fresh, "GitHub accepted the merge."
 
 
+def find_branch_worktree(porcelain, branch):
+    """Returns the exact branch's worktree path and HEAD from porcelain data."""
+    expected_ref = f"refs/heads/{branch}"
+    for block in porcelain.split("\n\n"):
+        fields = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(" ")
+            if value:
+                fields[key] = value
+        if fields.get("branch") == expected_ref:
+            return fields.get("worktree"), fields.get("HEAD")
+    return None, None
+
+
 def prune_worktree(repo_root, branch, expected_sha):
     """Idempotently removes only the exact clean worktree at ``expected_sha``."""
     if not branch or not expected_sha:
@@ -405,19 +419,7 @@ def prune_worktree(repo_root, branch, expected_sha):
     code, out, _ = run_cmd(["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root)
     if code != 0:
         return False, "Could not list worktrees."
-    path = None
-    actual_sha = None
-    expected_ref = f"refs/heads/{branch}"
-    for block in out.split("\n\n"):
-        fields = {}
-        for line in block.splitlines():
-            key, _, value = line.partition(" ")
-            if value:
-                fields[key] = value
-        if fields.get("branch") == expected_ref:
-            path = fields.get("worktree")
-            actual_sha = fields.get("HEAD")
-            break
+    path, actual_sha = find_branch_worktree(out, branch)
     if not path:
         return True, "Worktree already absent."
     if actual_sha != expected_sha:
@@ -428,12 +430,19 @@ def prune_worktree(repo_root, branch, expected_sha):
     if os.path.abspath(path) == os.path.abspath(repo_root):
         return False, "Refusing to remove the primary worktree."
     status_code, status, status_err = run_cmd(
-        ["git", "status", "--porcelain"], check=False, cwd=path
+        [
+            "git", "status", "--porcelain", "--untracked-files=all",
+            "--ignored=matching",
+        ],
+        check=False,
+        cwd=path,
     )
     if status_code != 0:
         return False, f"Could not inspect worktree {path}: {status_err.strip()}"
     if status:
-        return False, f"Worktree {path} has uncommitted changes; left untouched."
+        return False, (
+            f"Worktree {path} has tracked, untracked, or ignored files; left untouched."
+        )
     code, _, err = run_cmd(["git", "worktree", "remove", path], check=False, cwd=repo_root)
     if code == 0:
         return True, f"Pruned worktree {path}."
@@ -453,6 +462,16 @@ def delete_local_branch(repo_root, branch, expected_sha):
         return False, (
             f"Local branch {branch} now points to {actual_sha.strip() or 'unknown'}, not "
             f"gated head {expected_sha}; left untouched."
+        )
+    code, worktrees, worktree_err = run_cmd(
+        ["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root
+    )
+    if code != 0:
+        return False, f"Could not verify branch worktrees: {worktree_err.strip()}"
+    path, _ = find_branch_worktree(worktrees, branch)
+    if path:
+        return False, (
+            f"Local branch {branch} is still attached to worktree {path}; left untouched."
         )
     ref = f"refs/heads/{branch}"
     code, _, err = run_cmd(
