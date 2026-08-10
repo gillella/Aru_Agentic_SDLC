@@ -63,3 +63,25 @@ class GovernedProjectSelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BlankTouchesRegressionTests(unittest.TestCase):
+    """`\\s` matches newlines, so a lazy capture ran past the line ending."""
+
+    def test_blank_declaration_does_not_swallow_the_next_line(self):
+        body = "depends-on:\ntouches:\nparallel-eligible: true\n"
+        self.assertEqual(parse_touches(body), [])
+
+    def test_blank_declaration_at_end_of_body(self):
+        self.assertEqual(parse_touches("touches:"), [])
+
+    def test_real_declaration_still_parses(self):
+        self.assertEqual(
+            parse_touches("touches: src/a.py, docs/b.md\nparallel-eligible: true"),
+            ["src/a.py", "docs/b.md"])
+
+    def test_markdown_emphasis_is_tolerated(self):
+        self.assertEqual(parse_touches("**touches:** a.py, b.py"), ["a.py", "b.py"])
+
+    def test_parenthesised_prose_is_not_a_path(self):
+        self.assertEqual(parse_touches("touches: (github settings only)"), [])
