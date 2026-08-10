@@ -22,13 +22,13 @@ Carried forward from the source document, verified and agreed:
 
 ## 2. Corrections to the baseline
 
-Three claims in the source document are stale or wrong. They matter because two of them would misdirect P0 work.
+Three claims in the source document are stale or wrong. They matter because two of them would misdirect P0 work. The first has since been fixed in flight — it is kept here with its status marked, because the shape of the near-miss is worth more than the ticket.
 
-### 2.1 F0.1 would land a broken fix — #24 is misdiagnosed
+### 2.1 F0.1's first revision would have landed a broken fix — since corrected
 
-The source lists "land in-flight review/stamp fixes (#19, #24, #27, #25)" as P0. **#24 rests on a false premise, and PR #25 as written introduces a security hole in the only merge gate.**
+The source lists "land in-flight review/stamp fixes (#19, #24, #27, #25)" as P0. PR #25's **first revision** rested on a false premise and introduced a security hole in the only merge gate. It has since been reworked; this section is kept because the failure shape is instructive, not because the work is outstanding.
 
-#24 asserts that nothing writes `reviewed-by:`. It does: `prompts/fleet-worker.md:104`, step 6 of the documented review workflow. The two labels are not a mismatch — they are two distinct states that were collapsed into one:
+#24 originally asserted that nothing writes `reviewed-by:`. Something does: `prompts/fleet-worker.md:104`, step 6 of the documented review workflow. The two labels are not a mismatch — they are two distinct states that the first revision collapsed into one:
 
 | label | meaning | lifetime |
 |---|---|---|
@@ -37,9 +37,11 @@ The source lists "land in-flight review/stamp fixes (#19, #24, #27, #25)" as P0.
 
 Accepting `reviewer:` as proof of review means: author leaves a same-account `COMMENTED` review, any peer merely *claims* the PR, and the gate passes before that peer has read a line.
 
-**The real defect is narrower and more interesting:** the reviewing agent claimed but never performed step 6, because step 6 lives in a prompt. This is Principle 1 failing inside the review workflow itself. The correct fix is to make the completion stamp mechanical, not to merge the two states.
+**The real defect is narrower and more interesting:** the reviewing agent claimed but never performed step 6, because step 6 lived in a prompt and supplied a command only for the release that followed it. This is Principle 1 failing inside the review workflow itself. The correct fix is to make the completion stamp mechanical, not to merge the two states.
 
-**Action:** rewrite #24, rework PR #25, before any of F0.1 lands.
+**Status:** done in `6e07316`. `complete_review` now attributes and releases in one command, refuses a non-holder and refuses the author, and `check_reviews` still requires `reviewed-by:` and explicitly does not accept `reviewer:`. The exploit above is now a regression test.
+
+**Standing lesson:** the review that caught this read the diff against the *claim in the PR body* rather than against the gate's actual behaviour. Both halves of a two-state protocol have to be checked against the state machine, not against the narrative.
 
 ### 2.2 F0.3 understates the dogfooding gap
 
@@ -58,6 +60,24 @@ The factory currently ships five gates it does not run on itself. Every defect f
 ### 2.3 "Recently hardened" overstates the review layer
 
 `author:`/`reviewer:` stamping is listed as hardened. It is written but **opt-in and therefore absent in practice** — `create_pr.py --agent` defaulted to empty, so PR #18 was opened through the sanctioned path with no labels at all. A stamp nothing enforces is not hardening. (#19 / PR #27 fixes the cause.)
+
+### 2.4 The `create_pr.py` call-site survey, corrected
+
+S0.3 originally named three stale call sites. Re-checked against the branch, the tally is:
+
+| site | state |
+|---|---|
+| `AGENTS.md:52` | fixed in PR #27's original commit |
+| `skills/implement-next-issue/SKILL.md:121` | **was broken** — the master directive routes every feature and bug task through this skill, so the canonical workflow would have exited 2 at the open-PR step. Fixed in `45eae46`. |
+| `hooks/pre-push:33` | **was broken** — the refusal message printed on a direct push to `main` handed the operator a `create_pr.py` command with no `--agent`. Fixed in `2b55cfc`. |
+| `scripts/fetch_next_work.py:102` | stale docstring, not a breakage. Fixed in `45eae46`. |
+| `prompts/fleet-worker.md:145` | already correct; S0.3 was wrong to list it |
+
+**Two method notes, both of which cost a defect here.**
+
+The first survey of these sites grepped `*.md`, `*.py` and `*.sh` and therefore never opened `hooks/pre-push`, which is extensionless. An executable-file survey filtered by extension will silently skip hooks, which is precisely the class of file that hands instructions to a blocked operator.
+
+More generally: a required flag is an API break, and the blast radius is every place the command is *written down*, not just every place it is *called*. Prose, help text, hook output and skill files are all call sites when the reader is an agent or an operator following instructions literally.
 
 ---
 
@@ -180,9 +200,9 @@ Nothing else matters while the merge gate can fall open.
 
 | ID | Work | Rationale | Depends on |
 |---|---|---|---|
-| **S0.1** | Rewrite #24; rework PR #25 to keep claim and completion distinct | As written it opens a hole in the only gate | — |
-| **S0.2** | Make the `reviewed-by:` stamp mechanical, not a prompt step | Root cause of #24; Principle 1 inside review | S0.1 |
-| **S0.3** | Fix #27's three stale call sites (`implement-next-issue:121`, `pre-push:33`, `fleet-worker:145`) | Required flag breaks the canonical workflow | — |
+| **S0.1** | ~~Rewrite #24; rework PR #25 to keep claim and completion distinct~~ | **Done** in `6e07316` — see §2.1 | — |
+| **S0.2** | ~~Make the `reviewed-by:` stamp mechanical, not a prompt step~~ | **Done** in `6e07316`: `complete_review` replaces the prose step | S0.1 |
+| **S0.3** | ~~Fix #27's stale `create_pr.py` call sites~~ | **Done** in `45eae46` + `2b55cfc` — see §2.4 | — |
 | **S0.4** | Fix `_git_write_to_protected` quoting (#28) | Blocks read-only work on `main`; same class as #21 | — |
 | **S0.5** | Fix `merge_pr.py` close-out ordering | Merges silently leave the board stale | — |
 | **S0.6** | Align this repo's CI with the template it ships (#F0.3) | The factory does not run its own gates | — |
