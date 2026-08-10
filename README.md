@@ -48,10 +48,13 @@ Aru_Agentic_SDLC/
 │   └── update_issue_status.py       # Board status transitions
 ├── templates/cursor/                # Cursor User Rules, project rules, slash commands
 └── docs/
+    ├── ARU-SOFTWARE-FACTORY.md      # The working build plan — start here
     ├── cursor-integration.md        # Cross-project Cursor setup
     ├── project_board_workflow.md    # Board, dependencies, worktrees
     └── coding_standards.md          # Commit hygiene & testing standards
 ```
+
+**Where the project is going:** [`docs/ARU-SOFTWARE-FACTORY.md`](docs/ARU-SOFTWARE-FACTORY.md) is the working plan — what is settled, what is being corrected, and the sequenced roadmap from here to idea-to-deployment. Read it before proposing structural changes.
 
 ---
 
