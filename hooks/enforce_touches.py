@@ -28,7 +28,6 @@ import fnmatch
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 import time
@@ -242,11 +241,15 @@ def _git_write_to_protected(command, branch):
     return None
 
 
-# Operators that create or truncate a file. The fd, when written, lexes as its
-# own token ahead of these, so `2> log` arrives as ['2', '>', 'log'].
-_WRITE_OPS = frozenset({">", ">>", "&>", "&>>"})
-# Descriptor duplication: `2>&1`, `>&2`. Rebinds a descriptor, writes nothing.
-_DUP_OPS = frozenset({">&", ">>&"})
+# `>&` is ambiguous and cannot be classified without looking at its target:
+# `2>&1` and `>&-` rebind or close a descriptor and write nothing, but
+# `>&out.txt` creates or truncates a file exactly like `>`. Resolved in
+# _redirect_targets by inspecting what follows; see _IS_DESCRIPTOR.
+_AMBIGUOUS_DUP_OPS = frozenset({">&", ">>&"})
+# A descriptor target is a bare number (`2`) or `-` (close). Anything else is
+# a filename, and treating it as a descriptor is the dangerous direction: a
+# real write goes undetected.
+_IS_DESCRIPTOR = re.compile(r"\A(?:\d+|-)\Z")
 
 
 # A heredoc and its body: `<<EOF`, `<<'EOF'`, `<<-EOF`, terminated by a line
@@ -254,8 +257,14 @@ _DUP_OPS = frozenset({">&", ">>&"})
 # `rest` is whatever follows the opener on the same line and is deliberately
 # kept: real redirects live there, as in `cat <<'EOF' > out.txt`. The body
 # only begins at the newline.
+# The delimiter is any run of characters a shell would read as one word, not
+# just \w+. `END-MSG` is a valid delimiter and a natural thing to write; with
+# \w+ the opener did not match, the body was never stripped, and a '>' inside
+# it - the closing angle of a Co-Authored-By trailer, say - lexed as a real
+# redirect whose target was the terminator. Shell metacharacters, quotes and
+# whitespace are excluded because they would end the word.
 _HEREDOC = re.compile(
-    r"<<-?[ \t]*(?P<q>['\"]?)(?P<delim>\w+)(?P=q)(?P<rest>[^\n]*)\n"
+    r"<<-?[ \t]*(?P<q>['\"]?)(?P<delim>[^\s'\"<>|&;()\\]+)(?P=q)(?P<rest>[^\n]*)\n"
     r"(?P<body>.*?)(?:^[ \t]*(?P=delim)[ \t]*$|\Z)",
     re.DOTALL | re.MULTILINE,
 )
@@ -276,35 +285,117 @@ def _strip_heredocs(command):
     return _HEREDOC.sub(lambda match: " " + match.group("rest") + " ", command or "")
 
 
+# Output redirection operators, longest first so the scanner matches greedily
+# and `&>>` is never read as `&>` followed by a stray `>`.
+_REDIR_OPS = ("&>>", ">>&", "&>", ">>", ">&", ">")
+
+
 def _shell_tokens(command):
-    """Lexes a command the way a shell would, or None if it cannot.
+    """Splits a command into ('word' | 'op', text) pairs, or None if malformed.
 
-    ``punctuation_chars=True`` is load-bearing twice over, and plain
-    ``shlex.split`` is wrong on both counts:
+    Hand-written rather than delegated to shlex, because neither shlex mode
+    answers the question this module actually asks - *was this operator
+    quoted?* - and each fails in a different direction:
 
-    * It emits an unquoted operator as its own token even when glued to the
-      previous word, so ``echo hi>out.txt`` yields ['echo', 'hi', '>',
-      'out.txt']. ``shlex.split`` leaves 'hi>out.txt' whole and the write
-      disappears - a false negative that would let an agent write outside its
-      declaration.
-    * It leaves quoted text as a single token, so ``-m "> fix parser"`` never
-      produces a bare operator. ``shlex.split`` discards that distinction and
-      hands back a token starting with '>', which is indistinguishable from a
-      real redirect and blocks prose.
+    * ``posix=True`` resolves quoting correctly but discards it, so a quoted
+      ``">"`` and a real redirect both arrive as a bare '>' token. That
+      blocked prose such as ``echo ">" file.txt``.
+    * ``posix=False`` keeps the quotes but stops processing escapes, so
+      ``-m "use \\">\\" here"`` terminates the string at the escaped quote and
+      manufactures a redirect that was never there.
 
-    Returns None when the command does not lex - unbalanced quotes, an
-    interrupted heredoc. That is deliberately fail-open, matching this
-    module's contract: block only on positive proof of a write. The pre-push
-    hook and review remain the backstop for anything this misses.
+    Tracking quote state directly costs about thirty lines and gets both:
+    quoting is resolved the way bash resolves it, and an operator is reported
+    only when it is genuinely unquoted and unescaped. Words come back already
+    unquoted, so callers compare values rather than spellings.
+
+    Returns None on unbalanced quotes or a trailing escape. That is
+    deliberately fail-open, matching this module's contract: block only on
+    positive proof of a write. The pre-push hook and review remain the
+    backstop for anything this misses.
     """
     if not command:
         return None
-    lexer = shlex.shlex(_strip_heredocs(command), posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    try:
-        return list(lexer)
-    except ValueError:
-        return None
+    text = _strip_heredocs(command)
+
+    tokens = []
+    word = []
+    quoted = False  # this word contained quotes, so it is never an operator
+    index = 0
+    length = len(text)
+
+    def flush():
+        if word or quoted:
+            tokens.append(("word", "".join(word)))
+        del word[:]
+
+    while index < length:
+        char = text[index]
+
+        if char == "\\":
+            # An escape makes the next character literal wherever it appears
+            # outside single quotes, which is exactly what stops `\>` from
+            # redirecting. A trailing backslash means the command is truncated.
+            if index + 1 >= length:
+                return None
+            word.append(text[index + 1])
+            index += 2
+            continue
+
+        if char == "'":
+            end = text.find("'", index + 1)
+            if end == -1:
+                return None
+            word.append(text[index + 1:end])
+            quoted = True
+            index = end + 1
+            continue
+
+        if char == '"':
+            index += 1
+            while index < length and text[index] != '"':
+                if text[index] == "\\" and index + 1 < length:
+                    # Inside double quotes bash only treats a backslash as an
+                    # escape before these; elsewhere it stays literal.
+                    if text[index + 1] in '"\\$`':
+                        word.append(text[index + 1])
+                        index += 2
+                        continue
+                word.append(text[index])
+                index += 1
+            if index >= length:
+                return None
+            quoted = True
+            index += 1
+            continue
+
+        if char.isspace():
+            flush()
+            quoted = False
+            index += 1
+            continue
+
+        operator = next((op for op in _REDIR_OPS if text.startswith(op, index)), None)
+        if operator:
+            flush()
+            quoted = False
+            tokens.append(("op", operator))
+            index += len(operator)
+            continue
+
+        # Any other shell metacharacter ends the current word. Their meaning
+        # does not matter here; only that they are not part of a filename.
+        if char in "<|;&()":
+            flush()
+            quoted = False
+            index += 1
+            continue
+
+        word.append(char)
+        index += 1
+
+    flush()
+    return tokens
 
 
 def _redirect_targets(command):
@@ -319,21 +410,28 @@ def _redirect_targets(command):
         return []
 
     found = []
-    for index, token in enumerate(tokens):
-        # Exact match only. A token that merely *starts* with an operator came
-        # from inside quotes - the lexer emits real operators standalone - so
-        # treating it as a redirect is what blocked `-m "> fix parser"`.
-        if token in _DUP_OPS:
-            continue
-        if token in _WRITE_OPS:
-            if index + 1 < len(tokens):
-                found.append(tokens[index + 1])
+    for index, (kind, text) in enumerate(tokens):
+        # Only an 'op' token is a real operator. Quoted and escaped angle
+        # brackets are folded into words by the scanner, so `echo ">" file.txt`
+        # and `-m "> fix parser"` never reach here.
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        target = following[1] if following and following[0] == "word" else None
+
+        if kind == "op":
+            if text in _AMBIGUOUS_DUP_OPS:
+                # `>&` writes a file unless its target is a descriptor.
+                # Classifying it as duplication unconditionally hid real writes
+                # such as `echo hi >&out.txt`, the dangerous failure direction.
+                if target is not None and not _IS_DESCRIPTOR.match(target):
+                    found.append(target)
+            elif target is not None:
+                found.append(target)
             continue
 
-        if token == "tee":
+        if text == "tee":
             # Skip tee's own flags to reach the first path argument.
-            for candidate in tokens[index + 1:]:
-                if candidate.startswith("-"):
+            for kind_after, candidate in tokens[index + 1:]:
+                if kind_after != "word" or candidate.startswith("-"):
                     continue
                 found.append(candidate)
                 break
@@ -345,13 +443,10 @@ def _redirect_targets(command):
         if re.search(r"\bsed\b[^\n]*\s-i(\.\S+)?\b", segment):
             segment_tokens = segment.split()
             if segment_tokens:
-                found.append(segment_tokens[-1])
+                found.append(segment_tokens[-1].strip("'\""))
 
-    return [
-        target.strip("'\"")
-        for target in found
-        if target.strip("'\"") and not target.startswith("-")
-    ]
+    # The scanner already resolved quoting, so these are values, not spellings.
+    return [value for value in found if value and not value.startswith("-")]
 
 
 def deny(reason, detail):

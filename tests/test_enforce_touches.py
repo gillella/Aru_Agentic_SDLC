@@ -207,6 +207,63 @@ class RedirectFalsePositiveTests(unittest.TestCase):
         )
 
 
+class PostPr23ParserGapTests(unittest.TestCase):
+    """The gaps found on #23's merged head, each checked against real Bash.
+
+    Every expectation here was taken from running the command in a scratch
+    directory and listing what appeared, not from reading the parser. Two
+    directions of failure, and they are not equally bad: a false positive
+    blocks legitimate work and is visible immediately, while a false negative
+    lets a write escape the touches budget silently.
+    """
+
+    def test_quoted_operator_followed_by_an_argument_is_not_a_redirect(self):
+        # `echo ">" file.txt` prints two arguments and writes nothing.
+        self.assertEqual(et._redirect_targets('echo ">" file.txt'), [])
+        self.assertEqual(et._redirect_targets("echo '>' file.txt"), [])
+        self.assertEqual(et._redirect_targets('echo ">>" file.txt'), [])
+
+    def test_escaped_operator_followed_by_an_argument_is_not_a_redirect(self):
+        # Backslash escapes survive lexing only as trailing backslashes on the
+        # preceding token; the operator token itself looks entirely ordinary.
+        self.assertEqual(et._redirect_targets(r"echo \> file.txt"), [])
+        self.assertEqual(et._redirect_targets(r"echo \>\> file.txt"), [])
+        self.assertEqual(et._redirect_targets(r"echo a\>b"), [])
+
+    def test_an_even_run_of_backslashes_does_not_escape_the_operator(self):
+        # `echo \\ > f.txt` prints a literal backslash and really does redirect.
+        # Treating this as escaped would be a false negative.
+        self.assertEqual(et._redirect_targets(r"echo \\ > realbs.txt"), ["realbs.txt"])
+
+    def test_heredoc_delimiter_may_contain_shell_safe_punctuation(self):
+        # `\w+` did not match END-MSG, so the body was never stripped and the
+        # '>' closing the trailer address lexed as a redirect onto the
+        # terminator. This is the case that blocked committing this very fix.
+        command = (
+            'git commit -F - <<"END-MSG"\n'
+            "fix: something\n\n"
+            "Co-Authored-By: Claude <noreply@anthropic.com>\n"
+            "END-MSG\n"
+        )
+        self.assertEqual(et._redirect_targets(command), [])
+
+    def test_a_real_redirect_on_the_heredoc_opener_survives_body_stripping(self):
+        # Stripping the body must not cost the redirect beside it; that would
+        # trade a false positive for the worse failure.
+        command = "cat <<'END-MSG' > out.txt\nbody\nEND-MSG\n"
+        self.assertEqual(et._redirect_targets(command), ["out.txt"])
+
+    def test_dup_operator_writes_a_file_when_the_target_is_not_a_descriptor(self):
+        # The dangerous one. `echo hi >&out.txt` creates or truncates out.txt,
+        # and classifying >& as duplication unconditionally hid it entirely.
+        self.assertEqual(et._redirect_targets("echo hi >&out.txt"), ["out.txt"])
+
+    def test_dup_operator_with_a_descriptor_target_is_not_a_write(self):
+        for command in ("echo hi >&2", "echo hi 2>&1", "echo hi >&-"):
+            with self.subTest(command=command):
+                self.assertEqual(et._redirect_targets(command), [])
+
+
 class HookDecisionTests(unittest.TestCase):
     """End-to-end main() behaviour with GitHub and git stubbed out."""
 
@@ -266,6 +323,26 @@ class HookDecisionTests(unittest.TestCase):
             "feat/issue-9-api", ["src/api/*"],
         )
         self.assertEqual(rc, et.EXIT_BLOCK)
+
+    def test_dup_operator_write_outside_declaration_is_blocked(self):
+        # The bypass, end to end: `>&` reaches the filesystem exactly like `>`,
+        # so the hook must refuse it outside the budget. Before the fix this
+        # returned EXIT_ALLOW and the write landed unrecorded.
+        rc = self._run(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "echo x >&/repo/pyproject.toml"}, "cwd": "/repo"},
+            "feat/issue-9-api", ["src/api/*"],
+        )
+        self.assertEqual(rc, et.EXIT_BLOCK)
+
+    def test_quoted_operator_in_a_commit_message_is_not_blocked(self):
+        # The other direction: legitimate work must not be refused.
+        rc = self._run(
+            {"tool_name": "Bash",
+             "tool_input": {"command": 'git commit -m "use \\">\\" for redirects"'}, "cwd": "/repo"},
+            "feat/issue-9-api", ["src/api/*"],
+        )
+        self.assertEqual(rc, et.EXIT_ALLOW)
 
     def test_push_to_main_blocked_even_without_a_claim(self):
         rc = self._run(
