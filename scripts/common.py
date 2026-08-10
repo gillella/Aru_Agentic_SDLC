@@ -146,10 +146,26 @@ def parse_touches(body: str) -> List[str]:
     # Treat this as issue metadata, not prose.  An unanchored search would
     # parse the first sentence containing ``touches:`` (including Markdown
     # code spans) and silently ignore the real declaration later in the body.
-    match = re.search(r"^\s*touches\s*:\s*(.*?)\s*$", body, re.IGNORECASE | re.MULTILINE)
+    #
+    # [^\n]* rather than a lazy match with a trailing \s*: \s matches newlines,
+    # so an *empty* declaration used to run past the line ending and adopt the
+    # next line. "touches:\nparallel-eligible: true" reported
+    # ['parallel-eligible: true'] as a declared path, which made an issue with
+    # no path budget look claimable to build_candidates() while the enforcement
+    # hook's stricter parser saw nothing and failed open - so two agents could
+    # be handed overlapping files.
+    match = re.search(
+        r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
+        body, re.IGNORECASE | re.MULTILINE,
+    )
     if not match:
         return []
-    return [p.strip() for p in match.group(1).split(",") if p.strip()]
+    raw = match.group(1).strip().strip("*_").strip()
+    # "(github settings only)" and similar prose mean the issue changes nothing
+    # in the tree - not that it declared a directory called "(github".
+    if raw.startswith("("):
+        return []
+    return [p.strip().strip("`") for p in raw.split(",") if p.strip()]
 
 
 def _norm_path(p: str) -> str:
