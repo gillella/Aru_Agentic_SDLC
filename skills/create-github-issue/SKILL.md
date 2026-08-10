@@ -31,4 +31,14 @@ This skill defines the declarative workflow for creating clear, actionable GitHu
 ### 3. Format & Submit Issue
 - Apply appropriate title prefixes (`feat: `, `fix: `, `chore: `).
 - Use structured Markdown issue templates from `.github/ISSUE_TEMPLATE/`.
-- Submit issue and assign initial labels and project board status (`Backlog` / `Ready`).
+- Submit the issue and record the issue number from the created URL.
+- Immediately attach it to the governed project and assign its initial board
+  status (`Backlog` / `Ready`) with:
+  `python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" --issue <ID> --status "<STATUS>" --require-board`
+  The helper resolves the exact `<repo> Board`, or the sole project linked to
+  the repository; never hardcode a project number.
+- Board attachment is idempotent. Re-running the command for an already-added
+  issue only updates its status.
+- If attachment fails, the issue still exists. Treat the warning as incomplete
+  coordination and run the printed `gh project item-add` manual remedy before
+  considering the issue ready for pickup.

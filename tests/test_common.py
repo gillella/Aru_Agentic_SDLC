@@ -1,13 +1,18 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import common  # noqa: E402
 from common import (  # noqa: E402
+    add_issue_to_project,
+    attach_issue_to_governed_project,
     parse_touches,
     paths_overlap,
     select_governed_project_items,
+    select_governed_projects,
 )
 
 
@@ -59,6 +64,86 @@ class GovernedProjectSelectionTests(unittest.TestCase):
         ]
 
         self.assertEqual(select_governed_project_items(items, "octocat/widgets"), [])
+
+    def test_project_resolution_uses_the_same_governed_board_contract(self):
+        projects = [
+            self.project_item("Team Roadmap", "octocat/widgets")["project"],
+            self.project_item("widgets Board", "octocat/widgets")["project"],
+        ]
+
+        selected = select_governed_projects(projects, "octocat/widgets")
+
+        self.assertEqual([project["title"] for project in selected], ["widgets Board"])
+
+
+class GovernedProjectAttachmentTests(unittest.TestCase):
+    def project(self):
+        return {
+            "id": "PROJECT_7",
+            "number": 7,
+            "title": "widgets Board",
+            "owner": {"login": "octocat"},
+            "repositories": {
+                "nodes": [{"nameWithOwner": "octocat/widgets"}],
+            },
+        }
+
+    @patch.object(common, "add_issue_to_project", return_value=True)
+    @patch.object(common, "get_repo_projects")
+    @patch.object(common, "get_issue_project_items", return_value=[])
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_resolves_and_attaches_without_hardcoding(
+        self, _slug, _items, projects, add
+    ):
+        projects.return_value = [self.project()]
+
+        self.assertTrue(attach_issue_to_governed_project(42))
+
+        add.assert_called_once_with(42, 7, "octocat")
+
+    @patch.object(common, "add_issue_to_project")
+    @patch.object(common, "get_repo_projects")
+    @patch.object(common, "get_issue_project_items")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_already_attached_is_a_no_op(self, _slug, items, projects, add):
+        project = self.project()
+        projects.return_value = [project]
+        items.return_value = [{"id": "ITEM_42", "project": project}]
+
+        self.assertTrue(attach_issue_to_governed_project(42))
+
+        add.assert_not_called()
+
+    @patch.object(common, "run_cmd", return_value=(1, "", "permission denied"))
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_attachment_failure_names_the_manual_remedy(self, _slug, _run):
+        with patch("sys.stderr") as stderr:
+            self.assertFalse(add_issue_to_project(42, 7, "octocat"))
+
+        rendered = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn(
+            "gh project item-add 7 --owner octocat "
+            "--url https://github.com/octocat/widgets/issues/42",
+            rendered,
+        )
+
+    @patch.object(common, "run_cmd", return_value=(0, "", ""))
+    @patch.object(common, "attach_issue_to_governed_project", return_value=True)
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    @patch.object(common, "get_issue_project_items")
+    def test_status_move_attaches_an_unboarded_issue_first(
+        self, items, _slug, attach, _run
+    ):
+        project = self.project()
+        project["field"] = {
+            "id": "STATUS_FIELD",
+            "options": [{"id": "READY", "name": "Ready"}],
+        }
+        items.side_effect = [[], [{"id": "ITEM_42", "project": project}]]
+
+        self.assertTrue(common.set_board_status(42, "Ready"))
+
+        attach.assert_called_once_with(42)
 
 
 if __name__ == "__main__":
