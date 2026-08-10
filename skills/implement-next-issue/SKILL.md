@@ -122,6 +122,11 @@ or other irreversible work from the plan gate.
      (write `None` when there are none);
    - the local test and verification strategy; and
    - rejected alternatives and why they were rejected.
+   Post the durable comment with
+   `gh issue comment <ISSUE_ID> --body-file <PLAN_FILE>`. This direct command is
+   explicitly sanctioned for implementation-plan comments because the
+   framework has no issue-comment helper; every GitHub mutation covered by a
+   framework helper must still use that helper.
 2. Default behavior is **post-and-proceed**. Once the comment is visible on the
    issue, continue without waiting for a human response.
 3. `--require-plan-ack` changes the gate to post-and-block. Use this mode for
