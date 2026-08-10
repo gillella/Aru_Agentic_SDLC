@@ -34,6 +34,13 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_BLOCKED = 3
 
+# Written by claim_review in claim_issue.py. Kept in sync deliberately: the two
+# used to disagree, so a PR claimed and reviewed through the normal loop was
+# refused at merge because nothing wrote the prefix this file read.
+REVIEWER_LABEL = "reviewer:"
+# Hand-stamped on PRs from before the prefixes agreed. Nothing writes it now.
+REVIEWER_LABEL_ALIAS = "reviewed-by:"
+
 # Reported agentic PRs run materially larger than human ones, and large diffs
 # are where review quality collapses. Not a hard stop - a forced human ack.
 SIZE_SOFT_LIMIT = 400
@@ -254,15 +261,27 @@ def check_reviews(pr, threads):
         return True, f"{len(substantive)} review(s), no unresolved threads (author unstamped)."
 
     author = authors[0]
-    reviewers = label_values(pr, "reviewed-by:")
+    # `reviewer:` is canonical: claim_review writes it when an agent takes the
+    # PR off the board, so it is the one identity the normal loop produces.
+    # `reviewed-by:` is kept as an alias for PRs stamped by hand before the two
+    # halves agreed on a prefix; nothing writes it automatically.
+    #
+    # A claim is not by itself proof that a review happened - it is read only
+    # once GitHub already shows a substantive review above, so its job is to
+    # say *who*, not *whether*. The residual gap is inherent to one shared
+    # account: if agent A holds the claim and the author leaves the review,
+    # nothing here can tell them apart. claim_review refusing the author
+    # narrows that to the case where an agent claims and then does not review.
+    reviewers = label_values(pr, REVIEWER_LABEL) + label_values(pr, REVIEWER_LABEL_ALIAS)
     peers = [r for r in reviewers if r != author]
     if reviewers and not peers:
         return False, (f"The only review is from '{author}', who wrote this PR. "
                        "A self-review does not satisfy the gate.")
     if not reviewers:
-        return False, (f"A review exists but no reviewed-by:<agent> label identifies who left "
-                       f"it, so it cannot be distinguished from a self-review by '{author}'. "
-                       "The reviewing agent must stamp reviewed-by:<id>.")
+        return False, (f"A review exists but no {REVIEWER_LABEL}<agent> label identifies who "
+                       f"left it, so it cannot be distinguished from a self-review by "
+                       f"'{author}'. Claim the PR with "
+                       f"`claim_issue.py --pr <n> --agent <id>` before reviewing.")
 
     note = f"{len(substantive)} review(s) from {', '.join(peers)}, no unresolved threads."
     if any((lab.get("name") or "") == "same-family-review" for lab in (pr.get("labels") or [])):

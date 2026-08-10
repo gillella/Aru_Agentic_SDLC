@@ -37,6 +37,40 @@ class ClaimReviewTests(unittest.TestCase):
     def test_already_mine_resumes(self, _labels):
         self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
 
+    @patch.object(claim_issue, "_pr_labels", return_value=["author:agent-2"])
+    def test_the_prs_own_author_may_not_claim_review(self, _labels):
+        """The guarantee has to live where the label is written.
+
+        fetch_next_work filters own-authored PRs when handing out review work,
+        but `--pr <n> --agent <me>` goes straight past the picker. merge_pr
+        now reads this claim as the reviewer's identity, so allowing the
+        author to write it would hand back the self-review the gate exists to
+        refuse.
+        """
+        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "_pr_labels")
+    def test_a_different_agent_may_claim_a_stamped_pr(self, labels, _ensure, _run, _sleep):
+        labels.side_effect = [
+            ["author:agent-1"],
+            ["author:agent-1", "reviewer:agent-2"],
+            ["author:agent-1", "reviewer:agent-2"],
+        ]
+        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "_pr_labels")
+    def test_an_unstamped_pr_can_still_be_claimed(self, labels, _ensure, _run, _sleep):
+        # No author: label means nothing to compare against; refusing would
+        # strand every PR opened before stamping existed.
+        labels.side_effect = [[], ["reviewer:agent-2"], ["reviewer:agent-2"]]
+        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
+
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
     @patch.object(claim_issue, "ensure_label", return_value=True)

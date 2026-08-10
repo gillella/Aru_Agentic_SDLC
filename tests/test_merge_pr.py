@@ -204,7 +204,9 @@ class ExternalReviewerTests(unittest.TestCase):
     def test_same_account_still_needs_the_labels(self):
         ok, msg = merge_pr.check_reviews(labelled("author:agent-1"), 0)
         self.assertFalse(ok)
-        self.assertIn("reviewed-by", msg)
+        # Names the prefix claim_review actually writes, so the remedy in the
+        # message is one an agent can follow.
+        self.assertIn("reviewer:", msg)
 
 
 class SelfReviewTests(unittest.TestCase):
@@ -228,12 +230,13 @@ class SelfReviewTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("agent-3", msg)
 
-    def test_review_without_a_reviewed_by_label_is_refused(self):
+    def test_review_without_any_reviewer_label_is_refused(self):
         # Unattributable on a stamped PR: it cannot be told apart from a
         # self-review, so it must not pass.
         ok, msg = merge_pr.check_reviews(labelled("author:agent-1"), 0)
         self.assertFalse(ok)
-        self.assertIn("reviewed-by", msg)
+        self.assertIn("reviewer:", msg)
+
 
     def test_unstamped_pr_falls_back_to_the_old_behaviour(self):
         # PRs predating author stamping must stay mergeable.
@@ -253,6 +256,39 @@ class SelfReviewTests(unittest.TestCase):
             labelled("author:solo", "reviewed-by:solo",
                      reviews=[{"state": "APPROVED"}, {"state": "COMMENTED"}]), 0)
         self.assertFalse(ok)
+
+
+class ReviewerLabelPrefixTests(unittest.TestCase):
+    """The gate must read the label the framework writes.
+
+    claim_review stamps `reviewer:<id>`; this file used to read only
+    `reviewed-by:<id>`, which nothing wrote. A PR claimed and reviewed through
+    the normal loop was refused, and merging needed a hand-added duplicate.
+    """
+
+    def test_claim_label_identifies_the_reviewer(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewer:agent-2"), 0)
+        self.assertTrue(ok)
+        self.assertIn("agent-2", msg)
+
+    def test_claim_label_matching_the_author_is_a_self_review(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewer:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
+
+    def test_legacy_alias_still_merges(self):
+        # PRs hand-stamped before the prefixes agreed must not strand.
+        ok, _ = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2"), 0)
+        self.assertTrue(ok)
+
+    def test_either_prefix_satisfies_the_gate_together(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewer:agent-1", "reviewed-by:agent-3"), 0)
+        self.assertTrue(ok)
+        self.assertIn("agent-3", msg)
 
 
 class RebaseGateTests(unittest.TestCase):

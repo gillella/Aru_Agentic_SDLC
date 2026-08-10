@@ -278,6 +278,7 @@ def release_issue(issue_id: int, agent: str) -> int:
 #     authenticates as the same GitHub user.
 
 REVIEWER_LABEL_PREFIX = "reviewer:"
+AUTHOR_LABEL_PREFIX = "author:"
 
 
 def _reviewer_label_for(agent: str) -> str:
@@ -300,10 +301,28 @@ def reviewer_labels(labels) -> list:
     return sorted(name for name in (labels or []) if name.startswith(REVIEWER_LABEL_PREFIX))
 
 
-def reviewed_by(labels):
-    """The agent currently holding the review claim, if any."""
+def review_claimant(labels):
+    """The agent currently holding the review claim, if any.
+
+    Named for the prefix it actually reads. It was called reviewed_by(), which
+    described a different label - merge_pr.py read `reviewed-by:` while this
+    wrote `reviewer:`, and the mismatch went unnoticed partly because the
+    function name matched the key nobody wrote.
+    """
     held = reviewer_labels(labels)
     return held[0][len(REVIEWER_LABEL_PREFIX):] if held else None
+
+
+# Retained so existing callers keep working; prefer review_claimant.
+reviewed_by = review_claimant
+
+
+def pr_author(labels):
+    """The agent stamped as the PR's author, or None if unstamped."""
+    for name in labels or []:
+        if name.startswith(AUTHOR_LABEL_PREFIX):
+            return name[len(AUTHOR_LABEL_PREFIX):]
+    return None
 
 
 def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
@@ -323,7 +342,18 @@ def claim_review(pr_id: int, agent: str) -> int:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
 
-    holder = reviewed_by(labels)
+    # Refuse the PR's own author here, not only in the picker. fetch_next_work
+    # filters own-authored PRs when it hands out review work, but a direct
+    # `--pr <n> --agent <me>` bypasses that, and merge_pr.py now treats this
+    # claim as the identity of the reviewer. The guarantee has to live where
+    # the label is written.
+    author = pr_author(labels)
+    if author and author == agent:
+        print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}'. "
+              "An agent may not claim review of its own PR.", file=sys.stderr)
+        return EXIT_CONFLICT
+
+    holder = review_claimant(labels)
     if holder and holder != agent:
         print(f"[CONFLICT] PR #{pr_id} is already being reviewed by '{holder}'.", file=sys.stderr)
         return EXIT_CONFLICT
