@@ -107,6 +107,105 @@ class RedirectDetectionTests(unittest.TestCase):
     def test_pipe_without_write_yields_nothing(self):
         self.assertEqual(et._redirect_targets("grep -n foo bar.py | head"), [])
 
+    def test_fd_duplication_is_not_a_write(self):
+        # 2>&1 and >&2 rebind a descriptor; nothing is created on disk.
+        self.assertEqual(et._redirect_targets("cmd 2>&1"), [])
+        self.assertEqual(et._redirect_targets("cmd >&2"), [])
+
+    def test_redirect_target_glued_to_the_operator_is_found(self):
+        self.assertIn("out.txt", et._redirect_targets("echo hi >out.txt"))
+        self.assertIn("err.log", et._redirect_targets("cmd 2> err.log"))
+
+    def test_operator_glued_to_the_preceding_word_is_still_a_write(self):
+        """No token starts with the operator here, yet all three write.
+
+        A lexer without punctuation_chars leaves 'hi>out.txt' whole and the
+        write vanishes. That is the dangerous direction: a missed write lets
+        an agent edit outside its declaration, which is the whole point of
+        the hook.
+        """
+        self.assertIn("out.txt", et._redirect_targets("echo hi>out.txt"))
+        self.assertIn("out.txt", et._redirect_targets("echo hi>>out.txt"))
+        self.assertIn("out.txt", et._redirect_targets("echo hi &> out.txt"))
+
+    def test_quoted_target_containing_a_space_is_read_whole(self):
+        # The old character-class scan stopped at the space and reported '"my'.
+        self.assertEqual(et._redirect_targets('echo hi > "my file.txt"'), ["my file.txt"])
+
+
+class RedirectFalsePositiveTests(unittest.TestCase):
+    """Prose containing '>' is not a write.
+
+    Every case here blocked a real commit before the lexer replaced the regex
+    scan. The module's contract is to block only on positive proof of a write,
+    so a '>' inside a quoted argument must never count: the agent's only
+    escapes are to mangle the message or to widen touches: past what it
+    actually writes, and both dissolve the guarantee the hook exists to give.
+    """
+
+    TRAILER = 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>'
+
+    def test_ascii_arrow_in_a_message_is_not_a_redirect(self):
+        self.assertEqual(
+            et._redirect_targets('git commit -m "tests present -> run them"'), []
+        )
+
+    def test_fat_arrow_is_not_a_redirect(self):
+        self.assertEqual(et._redirect_targets('echo "a => b"'), [])
+
+    def test_comparison_in_prose_is_not_a_redirect(self):
+        self.assertEqual(et._redirect_targets('echo "if x > y then"'), [])
+
+    def test_co_authored_by_trailer_via_m_flag_is_not_a_redirect(self):
+        # The mandated trailer in docs/coding_standards.md ends in '>'.
+        # Reading it as a redirect blocked every conforming commit.
+        self.assertEqual(
+            et._redirect_targets(f'git commit -m "msg" -m "{self.TRAILER}"'), []
+        )
+
+    def test_co_authored_by_trailer_in_a_heredoc_is_not_a_redirect(self):
+        # '\\s*' used to span the newline, so the trailing '>' swallowed the
+        # heredoc terminator and the hook reported a write to 'EOF'.
+        command = "git commit -F - <<'EOF'\nsubject\n\n" + self.TRAILER + "\nEOF"
+        self.assertEqual(et._redirect_targets(command), [])
+
+    def test_quoted_argument_beginning_with_the_operator_is_not_a_redirect(self):
+        """The operator is the first character *inside* the quotes.
+
+        Lexing with shlex.split was not enough: it discards quoting, so this
+        arrived as a token starting with '>' and was indistinguishable from a
+        real redirect. punctuation_chars keeps a genuine operator standalone,
+        so an operator with content attached can only have come from quotes.
+        """
+        self.assertEqual(et._redirect_targets('git commit -m "> fix parser"'), [])
+        self.assertEqual(et._redirect_targets('git commit -m ">"'), [])
+        self.assertEqual(et._redirect_targets('echo ">> appending"'), [])
+
+    def test_heredoc_body_is_data_but_a_redirect_beside_it_still_counts(self):
+        """Stripping the body must not swallow the rest of the opener line.
+
+        A first attempt consumed from the delimiter to the terminator, which
+        hid the `> out.txt` in `cat <<'EOF' > out.txt` - turning a fix for
+        false positives into a false negative, the more dangerous direction.
+        """
+        command = "cat <<'EOF' > out.txt\nbody line\nEOF"
+        self.assertEqual(et._redirect_targets(command), ["out.txt"])
+
+    def test_unlexable_command_fails_open(self):
+        # Unbalanced quotes must not block; the contract is fail-open.
+        self.assertEqual(et._redirect_targets('echo "unterminated'), [])
+
+    def test_empty_target_is_never_reported(self):
+        self.assertNotIn("", et._redirect_targets('git commit -m "trailing >"'))
+
+    def test_issue_body_documenting_redirects_is_not_a_redirect(self):
+        # Filing the bug report was itself blocked: the body had to quote the
+        # offending characters to describe them.
+        body = "| `a -> b` | `x => y` | `if p > q` |"
+        self.assertEqual(
+            et._redirect_targets(f'gh issue create --title t --body "{body}"'), []
+        )
+
 
 class HookDecisionTests(unittest.TestCase):
     """End-to-end main() behaviour with GitHub and git stubbed out."""
