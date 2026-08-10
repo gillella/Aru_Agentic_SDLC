@@ -49,7 +49,10 @@ Skills are declarative. Git / worktree / GitHub actions MUST use:
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --agent <AGENT_ID>` — claim a PR for review
 * `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree]`
-* `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --title "<Title>" --body "<body>"`
+* `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> [--model-family <family>] --title "<Title>" --body "<body>"`
+  — `--agent` is required. It stamps `author:<id>`, which is the only thing
+  that lets the merge gate tell a peer review from a self-review, since every
+  agent authenticates as the same GitHub user.
 * `python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr <ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" --issue <ID> --status "<Status>"`

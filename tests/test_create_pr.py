@@ -1,0 +1,119 @@
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import create_pr  # noqa: E402
+
+
+class AgentFlagTests(unittest.TestCase):
+    """--agent is what the merge gate reads to tell peer review from self-review.
+
+    It was optional and defaulted to "", so a caller who simply forgot opened a
+    PR with no author:<id>, and check_reviews then accepted any review on it.
+    An identity a gate depends on cannot be opt-in.
+    """
+
+    def test_missing_agent_is_refused_at_the_cli(self):
+        argv = ["create_pr.py", "--issue", "7", "--title", "t", "--body", "b"]
+        with patch.object(sys, "argv", argv), \
+                patch.object(create_pr, "create_pr") as opened:
+            with self.assertRaises(SystemExit) as caught:
+                create_pr.main()
+        self.assertNotEqual(caught.exception.code, 0)
+        opened.assert_not_called()  # nothing was opened unstamped
+
+    def test_empty_agent_is_refused_at_the_cli(self):
+        # required=True only proves the token was typed. `--agent ""` slips past
+        # it and lands an unstamped PR, which is the hole this change closes.
+        # The realistic source is `--agent "$AGENT_ID"` with the variable unset.
+        for empty in ("", "   ", "\t"):
+            with self.subTest(agent=repr(empty)):
+                argv = ["create_pr.py", "--issue", "7", "--title", "t",
+                        "--body", "b", "--agent", empty]
+                with patch.object(sys, "argv", argv), \
+                        patch.object(create_pr, "create_pr") as opened:
+                    with self.assertRaises(SystemExit) as caught:
+                        create_pr.main()
+                self.assertNotEqual(caught.exception.code, 0)
+                opened.assert_not_called()
+
+    def test_surrounding_whitespace_is_stripped_from_agent(self):
+        argv = ["create_pr.py", "--issue", "7", "--title", "t", "--body", "b",
+                "--agent", "  agent-1  ", "--model-family", "anthropic"]
+        with patch.object(sys, "argv", argv), \
+                patch.object(create_pr, "create_pr", return_value=True) as opened:
+            with self.assertRaises(SystemExit) as caught:
+                create_pr.main()
+        self.assertEqual(caught.exception.code, 0)
+        # A padded id must not become a second, distinct author identity.
+        self.assertEqual(opened.call_args.args[3], "agent-1")
+
+    def test_agent_is_passed_through_to_the_pr(self):
+        argv = ["create_pr.py", "--issue", "7", "--title", "t", "--body", "b",
+                "--agent", "agent-1", "--model-family", "anthropic"]
+        with patch.object(sys, "argv", argv), \
+                patch.object(create_pr, "create_pr", return_value=True) as opened:
+            with self.assertRaises(SystemExit) as caught:
+                create_pr.main()
+        self.assertEqual(caught.exception.code, 0)
+        self.assertEqual(opened.call_args.args[3], "agent-1")
+        self.assertEqual(opened.call_args.args[4], "anthropic")
+
+    def test_unknown_model_family_is_refused(self):
+        argv = ["create_pr.py", "--issue", "7", "--agent", "a",
+                "--model-family", "anthropc"]
+        with patch.object(sys, "argv", argv), \
+                patch.object(create_pr, "create_pr") as opened:
+            with self.assertRaises(SystemExit) as caught:
+                create_pr.main()
+        self.assertNotEqual(caught.exception.code, 0)
+        opened.assert_not_called()
+
+    def test_missing_family_warns_but_proceeds(self):
+        # Family only steers reviewer diversity; its absence must not block.
+        argv = ["create_pr.py", "--issue", "7", "--agent", "agent-1"]
+        with patch.object(sys, "argv", argv), \
+                patch.object(create_pr, "create_pr", return_value=True) as opened:
+            with self.assertRaises(SystemExit) as caught:
+                create_pr.main()
+        self.assertEqual(caught.exception.code, 0)
+        opened.assert_called_once()
+
+
+class IdentityStampTests(unittest.TestCase):
+    @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_successful_stamp_reports_success(self, _label, _run):
+        self.assertTrue(create_pr.apply_identity("7", "agent-1", "anthropic"))
+
+    @patch.object(create_pr, "run_cmd", return_value=(1, "", "label does not exist"))
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_failed_label_write_is_an_error_not_a_warning(self, _label, _run):
+        """An unstamped PR is a hole in the gate, not a cosmetic problem.
+
+        This was best-effort and returned success, so a caller moved on
+        believing the identity had landed while merge_pr.py would accept any
+        review on the PR, self-review included.
+        """
+        self.assertFalse(create_pr.apply_identity("7", "agent-1", "anthropic"))
+
+    @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_nothing_to_stamp_is_not_a_failure(self, _label, run):
+        self.assertTrue(create_pr.apply_identity("7", "", ""))
+        run.assert_not_called()
+
+    @patch.object(create_pr, "get_issue", return_value={"title": "t"})
+    @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
+    def test_create_pr_propagates_a_failed_stamp(self, _branch, _issue):
+        with patch.object(create_pr, "run_cmd", return_value=(0, "https://x/pull/7", "")), \
+                patch.object(create_pr, "apply_identity", return_value=False):
+            self.assertFalse(create_pr.create_pr(7, "t", "b", "agent-1", "anthropic"))
+
+
+if __name__ == "__main__":
+    unittest.main()
