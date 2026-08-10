@@ -44,6 +44,23 @@ depends-on: #2, #4
         self.assertEqual([item["number"] for item in result["candidates"]], [3])
         self.assertEqual(result["conflicted"][0]["number"], 2)
 
+    def test_in_review_issue_contributes_touches_and_is_not_candidate(self):
+        issues = [
+            issue(
+                20,
+                "touches: src/auth.py\n",
+                labels=("status:in-review",),
+            ),
+            issue(21, "touches: src/auth.py\n", labels=("status:ready",)),
+            issue(22, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        result = build_candidates(issues, "agent-a")
+
+        # Issue 20 (in-review) is not a candidate, and its touches block candidate 21
+        self.assertEqual([item["number"] for item in result["candidates"]], [22])
+        self.assertEqual(result["conflicted"][0]["number"], 21)
+
     def test_backlog_and_missing_touches_are_not_claimable(self):
         issues = [
             issue(4, "touches: docs/**\n", labels=("status:backlog",)),

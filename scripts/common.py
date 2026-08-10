@@ -115,11 +115,17 @@ def claimed_by(issue: Dict[str, Any]) -> Optional[str]:
 
     When two agents raced, the lowest-sorting label wins. Both agents compute
     the same winner from the same data, so no coordinator is required.
+
+    An issue claim (agent:<id>) represents active In Progress implementation only.
+    Once handed off to In Review or Done, the implementation claim is released.
     """
+    names = set(label_names(issue))
+    if {"status:in-review", "status:done"} & names:
+        return None
     labels = agent_labels(issue)
     if labels:
         return labels[0][len(AGENT_LABEL_PREFIX):]
-    if ACTIVE_STATUS_LABELS & set(label_names(issue)):
+    if "status:in-progress" in names:
         return "unknown"  # in flight but pre-dates agent labelling
     return None
 

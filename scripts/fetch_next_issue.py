@@ -156,12 +156,13 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
     my_in_flight_issues: List[Dict[str, Any]] = []
 
     for issue in issues:
+        names = {label.get("name", "").lower() for label in issue.get("labels", [])}
         holder = claimed_by(issue)
-        if not holder:
-            continue
-        in_flight_paths.extend(parse_touches(issue.get("body") or ""))
-        if agent and holder == agent:
-            my_in_flight_issues.append(issue)
+        if holder or "status:in-progress" in names or "status:in-review" in names:
+            in_flight_paths.extend(parse_touches(issue.get("body") or ""))
+        if holder:
+            if agent and holder == agent:
+                my_in_flight_issues.append(issue)
 
     candidates, blocked, conflicted, not_ready, missing_touches = [], [], [], [], []
 
@@ -169,12 +170,13 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
         num = issue["number"]
         body = issue.get("body") or ""
         labels = issue.get("labels", [])
+        names = {label.get("name", "").lower() for label in labels}
 
         if is_epic(labels):
             continue
-        if claimed_by(issue):
-            continue  # held by someone; not selectable
-        if "status:ready" not in {label.get("name", "").lower() for label in labels}:
+        if claimed_by(issue) or "status:in-progress" in names or "status:in-review" in names:
+            continue  # held or in flight; not claimable as new implementation
+        if "status:ready" not in names:
             not_ready.append(num)
             continue
 
