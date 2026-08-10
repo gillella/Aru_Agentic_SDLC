@@ -783,6 +783,52 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
             self.assertTrue(secret.exists())
             self.assertEqual(secret.read_text(), "keep me\n")
 
+    def test_ignored_file_created_after_preflight_is_atomically_retained(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "race-secret"
+            branch = "fix/race-secret"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            (repo / ".gitignore").write_text("secret.txt\n")
+            self._git(repo, "add", ".gitignore")
+            self._git(repo, "commit", "-m", "ignore local secret")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            secret = worktree / "secret.txt"
+            retained = (
+                repo / ".worktrees" / ".retained" /
+                f"{expected_sha[:12]}-{worktree.name}"
+            )
+            real_run_cmd = merge_pr.run_cmd
+            raced = False
+
+            def inject_secret_after_preflight(command, **kwargs):
+                nonlocal raced
+                result = real_run_cmd(command, **kwargs)
+                if command[:3] == ["git", "status", "--porcelain"]:
+                    secret.write_text("late secret\n")
+                    raced = True
+                return result
+
+            with patch.object(
+                merge_pr, "run_cmd", side_effect=inject_secret_after_preflight
+            ):
+                pruned, message = merge_pr.prune_worktree(
+                    repo, branch, expected_sha
+                )
+
+            self.assertTrue(raced)
+            self.assertTrue(pruned)
+            self.assertIn("Retained worktree", message)
+            self.assertFalse(worktree.exists())
+            self.assertEqual((retained / "secret.txt").read_text(), "late secret\n")
+            listed = self._git(repo, "worktree", "list", "--porcelain")
+            self.assertNotIn(f"refs/heads/{branch}", listed)
+
     @patch.object(merge_pr, "_gh_json", return_value={"state": "CLOSED"})
     def test_closed_issue_is_already_done(self, _gh):
         ok, message = merge_pr.ensure_issue_closed(7)

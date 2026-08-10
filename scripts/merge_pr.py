@@ -413,7 +413,7 @@ def find_branch_worktree(porcelain, branch):
 
 
 def prune_worktree(repo_root, branch, expected_sha):
-    """Idempotently removes only the exact clean worktree at ``expected_sha``."""
+    """Deregisters the exact worktree after atomically retaining its directory."""
     if not branch or not expected_sha:
         return False, "Branch and gated head SHA are required; no worktree removed."
     code, out, _ = run_cmd(["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root)
@@ -429,6 +429,19 @@ def prune_worktree(repo_root, branch, expected_sha):
         )
     if os.path.abspath(path) == os.path.abspath(repo_root):
         return False, "Refusing to remove the primary worktree."
+    retained_root = os.path.join(repo_root, ".worktrees", ".retained")
+    retained_path = os.path.join(
+        retained_root, f"{expected_sha[:12]}-{os.path.basename(path)}"
+    )
+    if not os.path.exists(path):
+        if not os.path.isdir(retained_path):
+            return False, f"Worktree path {path} disappeared; no retained copy found."
+        code, _, err = run_cmd(
+            ["git", "worktree", "remove", path], check=False, cwd=repo_root
+        )
+        if code == 0:
+            return True, f"Worktree already retained at {retained_path}; registration pruned."
+        return False, f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
     status_code, status, status_err = run_cmd(
         [
             "git", "status", "--porcelain", "--untracked-files=all",
@@ -443,10 +456,19 @@ def prune_worktree(repo_root, branch, expected_sha):
         return False, (
             f"Worktree {path} has tracked, untracked, or ignored files; left untouched."
         )
-    code, _, err = run_cmd(["git", "worktree", "remove", path], check=False, cwd=repo_root)
+    if os.path.exists(retained_path):
+        return False, f"Retention destination already exists: {retained_path}"
+    try:
+        os.makedirs(retained_root, exist_ok=True)
+        os.rename(path, retained_path)
+    except OSError as exc:
+        return False, f"Could not atomically retain worktree {path}: {exc}"
+    code, _, err = run_cmd(
+        ["git", "worktree", "remove", path], check=False, cwd=repo_root
+    )
     if code == 0:
-        return True, f"Pruned worktree {path}."
-    return False, f"Left worktree {path} in place: {err.strip()}"
+        return True, f"Retained worktree at {retained_path}; registration pruned."
+    return False, f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
 
 
 def retain_local_branch(repo_root, branch, expected_sha):
