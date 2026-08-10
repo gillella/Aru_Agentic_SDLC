@@ -158,6 +158,28 @@ class CiGateTests(unittest.TestCase):
                 self.assertIn("exit 1", ci)
                 self.assertNotIn("becomes mandatory at first source commit", ci)
 
+    def test_gate_recognises_every_layout_its_runner_collects(self):
+        """The gate must not be narrower than the test runner it gates.
+
+        A precheck that misses a convention the runner supports fails a
+        project whose suite runs perfectly well - the same false-positive
+        shape as the redirect scan in #21, and just as disruptive, because
+        the build stops before the runner gets a chance to disagree.
+        """
+        python_ci = render_ci_workflow("python", "pytest -q")
+        # pytest's default python_files is test_*.py AND *_test.py.
+        self.assertIn("test_*.py", python_ci)
+        self.assertIn("*_test.py", python_ci)
+
+        node_ci = render_ci_workflow("node", "npm test")
+        # Jest's default testMatch includes __tests__/ directories.
+        self.assertIn("__tests__", node_ci)
+        self.assertIn("*.test.*", node_ci)
+        self.assertIn("*.spec.*", node_ci)
+
+        go_ci = render_ci_workflow("go", "go test ./...")
+        self.assertIn("*_test.go", go_ci)
+
     def test_every_stack_scans_secrets_over_full_history(self):
         for stack, runner in self.STACKS:
             with self.subTest(stack=stack):
