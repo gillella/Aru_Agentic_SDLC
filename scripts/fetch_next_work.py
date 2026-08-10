@@ -97,33 +97,27 @@ def label_names(pr: dict[str, Any]) -> list[str]:
 
 
 def _authored_via_branch(pr: dict[str, Any], agent: str) -> bool:
-    """Infers authorship from the linked issue's claim or assignee when the PR is unstamped.
+    """Infers authorship from the linked issue's retained agent label.
 
     `create_pr.py` now requires --agent and fails loudly on a bad stamp, so new
     PRs opened through it always carry author:<id>. This covers what that cannot
     reach: PRs predating stamping, and PRs a human opened by hand with `gh`.
     Those leave no author on the PR. The branch still encodes
-    the issue number, and that issue records the agent's claim or assignment -
-    so authorship survives even when the PR stamp does not.
+    the issue number, and an In Review issue retains the implementing agent's
+    label as a legacy authorship backstop even though it no longer consumes an
+    active implementation slot.
     """
     match = re.search(r"issue-(\d+)", pr.get("headRefName") or "", re.IGNORECASE)
     if not match:
         return False
     code, out, _ = run_cmd(
-        ["gh", "issue", "view", match.group(1), "--json", "labels,assignees"],
+        ["gh", "issue", "view", match.group(1), "--json", "labels",
+         "-q", "[.labels[].name] | join(\"\\n\")"],
         check=False,
     )
-    if code != 0 or not out:
+    if code != 0:
         return False
-    try:
-        data = json.loads(out) if isinstance(out, str) and out.startswith("{") else {}
-        labels = [l.get("name", "") for l in data.get("labels", [])]
-        assignees = [a.get("login", "") for a in data.get("assignees", [])]
-        if f"agent:{agent}" in labels or agent in assignees:
-            return True
-    except Exception:
-        pass
-    return False
+    return f"agent:{agent}" in [line.strip() for line in out.splitlines()]
 
 
 def ci_state(pr: dict[str, Any]) -> str:

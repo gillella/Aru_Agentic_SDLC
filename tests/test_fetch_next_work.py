@@ -236,12 +236,14 @@ class ParkedInReviewTests(unittest.TestCase):
         self.assertFalse(res["work"]["resuming"])
 
     @patch.object(fnw, "run_cmd")
-    def test_authored_via_branch_checks_assignees_on_unstamped_pr(self, mock_run_cmd):
-        # An unstamped PR linked to issue 20 where agent-1 is an assignee
-        # must be identified as authored by agent-1.
+    def test_authored_via_branch_uses_retained_agent_label_on_unstamped_pr(
+        self, mock_run_cmd
+    ):
+        # GitHub assignees identify the shared account, not the implementing
+        # agent. The retained issue label is the legacy authorship backstop.
         mock_run_cmd.return_value = (
             0,
-            '{"labels": [{"name": "status:in-review"}], "assignees": [{"login": "agent-1"}]}',
+            "status:in-review\nagent:agent-1\n",
             "",
         )
         test_pr = pr(36, title="Unstamped PR")

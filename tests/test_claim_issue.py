@@ -165,7 +165,7 @@ class InReviewHandoffStatusTests(unittest.TestCase):
     @patch("update_issue_status.run_cmd", return_value=(0, "", ""))
     @patch("update_issue_status.set_board_status", return_value=True)
     @patch("update_issue_status.get_issue")
-    def test_update_status_removes_agent_claim_label_when_moving_to_in_review(
+    def test_update_status_retains_authorship_backstop_when_moving_to_in_review(
         self, mock_get_issue, _mock_set_board, mock_run_cmd
     ):
         import update_issue_status
@@ -182,7 +182,7 @@ class InReviewHandoffStatusTests(unittest.TestCase):
         self.assertIn("status:in-review", cmd)
         self.assertIn("--remove-label", cmd)
         self.assertIn("status:in-progress", cmd)
-        self.assertIn("agent:agent-1", cmd)
+        self.assertNotIn("agent:agent-1", cmd)
 
 
 if __name__ == "__main__":
