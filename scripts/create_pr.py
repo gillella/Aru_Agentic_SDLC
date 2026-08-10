@@ -25,12 +25,18 @@ from common import ensure_label, get_current_branch, get_issue, run_cmd
 MODEL_FAMILIES = ("anthropic", "openai", "google", "meta", "mistral", "xai", "human")
 
 
-def apply_identity(pr_ref: str, agent: str = "", family: str = "") -> None:
+def apply_identity(pr_ref: str, agent: str = "", family: str = "") -> bool:
     """Labels the PR with its author agent and model family.
 
-    Best-effort: a PR that opened successfully must not be reported as failed
-    because a label did not stick. An unlabelled PR degrades to "unknown
-    author", which the picker treats conservatively.
+    Returns False if the author label could not be attached.
+
+    This used to be best-effort, on the reasoning that a PR which opened
+    successfully should not be reported as failed over a label. That held
+    while an unstamped PR merely degraded review routing. It no longer does:
+    merge_pr.py reads `author:` to tell a peer review from a self-review, and
+    an unstamped PR takes the fallback branch where any review counts. Silently
+    producing one opens the hole the gate exists to close, so the caller is
+    told and the operator is given the command to fix it.
     """
     labels = []
     if agent:
@@ -42,18 +48,21 @@ def apply_identity(pr_ref: str, agent: str = "", family: str = "") -> None:
         ensure_label(name, "d4a27f", f"PR authored by a {family}-family model")
         labels.append(name)
     if not labels:
-        return
+        return True
 
     cmd = ["gh", "pr", "edit", pr_ref]
     for label in labels:
         cmd += ["--add-label", label]
     code, _, err = run_cmd(cmd, check=False)
     if code != 0:
-        print(f"[WARN] Could not stamp {', '.join(labels)}: {err.strip()}", file=sys.stderr)
-        print("[WARN] Review routing will treat this PR as having an unknown author.",
-              file=sys.stderr)
-    else:
-        print(f"🏷️  Stamped {', '.join(labels)}")
+        print(f"[ERROR] Could not stamp {', '.join(labels)}: {err.strip()}", file=sys.stderr)
+        print("[ERROR] The PR exists but is unstamped, so the merge gate cannot tell a "
+              "peer review from a self-review on it.", file=sys.stderr)
+        print(f"[ERROR] Fix with: gh pr edit {pr_ref} "
+              f"{' '.join('--add-label ' + name for name in labels)}", file=sys.stderr)
+        return False
+    print(f"🏷️  Stamped {', '.join(labels)}")
+    return True
 
 
 def create_pr(issue_id: int, title: str = "", body: str = "",
@@ -82,7 +91,10 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
         # would do. Falling back to the branch keeps this working if the output
         # format ever changes.
         pr_ref = out.strip().splitlines()[-1].strip() if out.strip() else current_branch
-        apply_identity(pr_ref, agent, family)
+        # Reported as failure even though the PR opened: an unstamped PR is a
+        # hole in the review gate, and a zero exit here would let a caller
+        # move on believing the identity landed.
+        return apply_identity(pr_ref, agent, family)
 
     return True
 
@@ -92,7 +104,11 @@ def main():
     parser.add_argument("--issue", type=int, required=True, help="GitHub Issue Number")
     parser.add_argument("--title", type=str, default="", help="Pull Request Title")
     parser.add_argument("--body", type=str, default="", help="Pull Request Description Body")
-    parser.add_argument("--agent", type=str, default="",
+    # Required, matching claim_issue.py. It was optional and defaulted to "",
+    # so a caller who simply forgot produced a PR with no author:<id>, and
+    # merge_pr.py then accepted any review on it - including a self-review.
+    # An identity the gate depends on cannot be opt-in.
+    parser.add_argument("--agent", type=str, required=True,
                         help="Authoring agent id; stamped as author:<id> for review eligibility")
     parser.add_argument("--model-family", type=str, default="", dest="family",
                         help=f"Authoring model family, one of: {', '.join(MODEL_FAMILIES)}")
@@ -102,6 +118,14 @@ def main():
         print(f"[ERROR] Unknown model family '{args.family}'. Valid values: "
               f"{', '.join(MODEL_FAMILIES)}", file=sys.stderr)
         sys.exit(1)
+
+    # Left optional rather than required: family only steers cross-family
+    # review preference, so its absence degrades routing without opening the
+    # self-review hole that --agent guards. Loud, because a fleet that stops
+    # passing it silently loses the reviewer-diversity property.
+    if not args.family:
+        print("[WARN] No --model-family given. Review routing cannot prefer a "
+              "reviewer whose blind spots differ from this author's.", file=sys.stderr)
 
     ok = create_pr(args.issue, args.title, args.body, args.agent, args.family.lower())
     sys.exit(0 if ok else 1)
