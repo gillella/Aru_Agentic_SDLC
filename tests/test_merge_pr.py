@@ -608,6 +608,7 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
     def test_local_branch_moved_after_observation_survives_atomic_delete(self, run):
         run.side_effect = [
             (0, "gated-sha\n", ""),
+            (0, "worktree /repo\nHEAD main-sha\nbranch refs/heads/main\n", ""),
             (1, "", "cannot lock ref: is at new-sha but expected gated-sha"),
         ]
         ok, message = merge_pr.delete_local_branch(
@@ -616,7 +617,7 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("atomically", message)
         self.assertEqual(
-            run.call_args_list[1].args[0],
+            run.call_args_list[2].args[0],
             [
                 "git", "update-ref", "-d", "refs/heads/fix/issue-7-x",
                 "gated-sha",
@@ -739,6 +740,64 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
                 repo, "ls-remote", "--heads", "origin", f"refs/heads/{branch}"
             )
             self.assertEqual(remote.split()[0], replacement_sha)
+
+    def test_real_dirty_worktree_preserves_file_and_local_branch_ref(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "dirty"
+            branch = "fix/dirty"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            tracked = repo / "tracked.txt"
+            tracked.write_text("clean\n")
+            self._git(repo, "add", "tracked.txt")
+            self._git(repo, "commit", "-m", "seed")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            dirty_file = worktree / "tracked.txt"
+            dirty_file.write_text("user change\n")
+
+            pruned, _ = merge_pr.prune_worktree(repo, branch, expected_sha)
+            deleted, message = merge_pr.delete_local_branch(
+                repo, branch, expected_sha
+            )
+
+            self.assertFalse(pruned)
+            self.assertFalse(deleted)
+            self.assertIn("still attached", message)
+            self.assertEqual(dirty_file.read_text(), "user change\n")
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"),
+                expected_sha,
+            )
+
+    def test_real_ignored_file_survives_worktree_prune_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "ignored"
+            branch = "fix/ignored"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            (repo / ".gitignore").write_text("secret.txt\n")
+            self._git(repo, "add", ".gitignore")
+            self._git(repo, "commit", "-m", "ignore local secret")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            secret = worktree / "secret.txt"
+            secret.write_text("keep me\n")
+
+            pruned, message = merge_pr.prune_worktree(repo, branch, expected_sha)
+
+            self.assertFalse(pruned)
+            self.assertIn("ignored", message)
+            self.assertTrue(secret.exists())
+            self.assertEqual(secret.read_text(), "keep me\n")
 
     @patch.object(merge_pr, "_gh_json", return_value={"state": "CLOSED"})
     def test_closed_issue_is_already_done(self, _gh):
