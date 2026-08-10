@@ -829,6 +829,45 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
             listed = self._git(repo, "worktree", "list", "--porcelain")
             self.assertNotIn(f"refs/heads/{branch}", listed)
 
+    def test_branch_switch_after_discovery_is_revalidated_under_head_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "switch-race"
+            branch = "fix/switch-race"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            self._git(repo, "commit", "--allow-empty", "-m", "seed")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            real_run_cmd = merge_pr.run_cmd
+            switched = False
+
+            def switch_after_discovery(command, **kwargs):
+                nonlocal switched
+                result = real_run_cmd(command, **kwargs)
+                if command[:3] == ["git", "worktree", "list"] and not switched:
+                    self._git(worktree, "switch", "-c", "unrelated")
+                    switched = True
+                return result
+
+            with patch.object(
+                merge_pr, "run_cmd", side_effect=switch_after_discovery
+            ):
+                pruned, message = merge_pr.prune_worktree(
+                    repo, branch, expected_sha
+                )
+
+            self.assertTrue(switched)
+            self.assertFalse(pruned)
+            self.assertIn("ownership changed", message)
+            self.assertTrue(worktree.exists())
+            self.assertEqual(self._git(worktree, "branch", "--show-current"), "unrelated")
+            listed = self._git(repo, "worktree", "list", "--porcelain")
+            self.assertIn("refs/heads/unrelated", listed)
+
     @patch.object(merge_pr, "_gh_json", return_value={"state": "CLOSED"})
     def test_closed_issue_is_already_done(self, _gh):
         ok, message = merge_pr.ensure_issue_closed(7)
