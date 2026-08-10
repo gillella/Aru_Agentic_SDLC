@@ -34,12 +34,14 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_BLOCKED = 3
 
-# Written by claim_review in claim_issue.py. Kept in sync deliberately: the two
-# used to disagree, so a PR claimed and reviewed through the normal loop was
-# refused at merge because nothing wrote the prefix this file read.
-REVIEWER_LABEL = "reviewer:"
-# Hand-stamped on PRs from before the prefixes agreed. Nothing writes it now.
-REVIEWER_LABEL_ALIAS = "reviewed-by:"
+# Completed-review attribution, written by claim_issue.py --complete-review.
+# This is the only label that satisfies the gate.
+REVIEWED_BY_LABEL = "reviewed-by:"
+# The transient claim, written by claim_review. Deliberately NOT accepted here:
+# it records that an agent took the PR off the queue, not that it read anything.
+# Treating it as attestation would let an author's own same-account review plus
+# any peer's claim satisfy the gate before that peer had looked at the diff.
+REVIEW_CLAIM_LABEL = "reviewer:"
 
 # Reported agentic PRs run materially larger than human ones, and large diffs
 # are where review quality collapses. Not a hard stop - a forced human ack.
@@ -261,27 +263,29 @@ def check_reviews(pr, threads):
         return True, f"{len(substantive)} review(s), no unresolved threads (author unstamped)."
 
     author = authors[0]
-    # `reviewer:` is canonical: claim_review writes it when an agent takes the
-    # PR off the board, so it is the one identity the normal loop produces.
-    # `reviewed-by:` is kept as an alias for PRs stamped by hand before the two
-    # halves agreed on a prefix; nothing writes it automatically.
-    #
-    # A claim is not by itself proof that a review happened - it is read only
-    # once GitHub already shows a substantive review above, so its job is to
-    # say *who*, not *whether*. The residual gap is inherent to one shared
-    # account: if agent A holds the claim and the author leaves the review,
-    # nothing here can tell them apart. claim_review refusing the author
-    # narrows that to the case where an agent claims and then does not review.
-    reviewers = label_values(pr, REVIEWER_LABEL) + label_values(pr, REVIEWER_LABEL_ALIAS)
+    # Only completed attribution counts. A `reviewer:` claim is deliberately
+    # not consulted: it means an agent took the PR off the queue, which is not
+    # evidence anyone read the diff. Accepting it would let the author's own
+    # same-account review plus any peer's claim clear the gate.
+    reviewers = label_values(pr, REVIEWED_BY_LABEL)
     peers = [r for r in reviewers if r != author]
     if reviewers and not peers:
         return False, (f"The only review is from '{author}', who wrote this PR. "
                        "A self-review does not satisfy the gate.")
     if not reviewers:
-        return False, (f"A review exists but no {REVIEWER_LABEL}<agent> label identifies who "
-                       f"left it, so it cannot be distinguished from a self-review by "
-                       f"'{author}'. Claim the PR with "
-                       f"`claim_issue.py --pr <n> --agent <id>` before reviewing.")
+        claimants = [c for c in label_values(pr, REVIEW_CLAIM_LABEL) if c != author]
+        if claimants:
+            # The common case, and worth its own message: the reviewer claimed
+            # the PR and skipped the completion step, so the work happened but
+            # was never attributed.
+            return False, (
+                f"'{claimants[0]}' holds the review claim but never completed it, so no "
+                f"{REVIEWED_BY_LABEL}<agent> label attributes the review. Finish with "
+                f"`claim_issue.py --pr <n> --agent {claimants[0]} --complete-review`.")
+        return False, (f"A review exists but no {REVIEWED_BY_LABEL}<agent> label identifies "
+                       f"who left it, so it cannot be distinguished from a self-review by "
+                       f"'{author}'. The reviewing agent must finish with "
+                       f"`claim_issue.py --pr <n> --agent <id> --complete-review`.")
 
     note = f"{len(substantive)} review(s) from {', '.join(peers)}, no unresolved threads."
     if any((lab.get("name") or "") == "same-family-review" for lab in (pr.get("labels") or [])):

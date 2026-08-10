@@ -411,12 +411,75 @@ def claim_review(pr_id: int, agent: str) -> int:
     return EXIT_OK
 
 
+REVIEWED_BY_LABEL_PREFIX = "reviewed-by:"
+
+
+def _reviewed_by_label_for(agent: str) -> str:
+    return f"{REVIEWED_BY_LABEL_PREFIX}{agent}"
+
+
+def complete_review(pr_id: int, agent: str) -> int:
+    """Attributes a finished review, then releases the claim.
+
+    This exists because the step had no command. `fleet-worker.md` told the
+    reviewing agent to "label the PR reviewed-by:<id>" in prose and gave a
+    command only for the release that followed. The executable half got done
+    and the prose half did not, so PRs arrived claimed but unattributed and
+    the merge gate refused work that had genuinely been reviewed.
+
+    Ordering matters: attribute first, release second. The reverse would leave
+    a window where the PR is neither claimed nor attributed, and another agent
+    could pick it up for a review that had already happened.
+    """
+    labels = _pr_labels(pr_id)
+    if labels is None:
+        print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
+        return EXIT_ERROR
+
+    # Attribution is not something a passer-by may write. Requiring the claim
+    # keeps "who reviewed this" tied to the agent that actually took the work.
+    holder = review_claimant(labels)
+    if holder != agent:
+        print(f"[CONFLICT] PR #{pr_id} review is held by "
+              f"'{holder or 'nobody'}', not '{agent}'. Claim it before completing.",
+              file=sys.stderr)
+        return EXIT_CONFLICT
+
+    author = pr_author(labels)
+    if author and author == agent:
+        print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}'. "
+              "An agent may not attribute a review of its own PR.", file=sys.stderr)
+        return EXIT_CONFLICT
+
+    stamp = _reviewed_by_label_for(agent)
+    if not ensure_label(stamp, "0e8a16", f"Reviewed by agent '{agent}'"):
+        print(f"[ERROR] Could not provision attribution label '{stamp}'.", file=sys.stderr)
+        return EXIT_ERROR
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--add-label", stamp], check=False
+    )
+    if code != 0:
+        print(f"[ERROR] Could not attribute the review: {err}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"🏷️  Attributed review of PR #{pr_id} to '{agent}'.")
+
+    if not _remove_reviewer_label(pr_id, agent):
+        # The attribution landed, which is the part the gate reads. Report the
+        # stale claim rather than failing: a leftover claim is reaped, an
+        # unattributed review blocks the merge.
+        print(f"[WARN] Review attributed, but the claim label could not be released. "
+              f"Release it with --release.", file=sys.stderr)
+        return EXIT_OK
+    print(f"✅ Review of PR #{pr_id} completed by '{agent}'; claim released.")
+    return EXIT_OK
+
+
 def release_review(pr_id: int, agent: str) -> int:
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
-    holder = reviewed_by(labels)
+    holder = review_claimant(labels)
     if holder != agent:
         print(f"[CONFLICT] PR #{pr_id} review is held by '{holder}', not '{agent}'.",
               file=sys.stderr)
@@ -505,6 +568,9 @@ def main():
     parser.add_argument("--status", type=str, default="In Progress", help="Target status column")
     parser.add_argument("--release", action="store_true",
                         help="Give up this claim and return the work to the queue")
+    parser.add_argument("--complete-review", action="store_true", dest="complete",
+                        help="Attribute a finished PR review (reviewed-by:<id>) and "
+                             "release the claim. Run after submitting the GitHub review.")
     parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
                         help="Release review claims idle longer than HOURS with no review submitted")
     args = parser.parse_args()
@@ -513,8 +579,15 @@ def main():
         reap_stale_reviews(args.reap_after)
 
     if args.pr is not None:
+        if args.complete:
+            sys.exit(complete_review(args.pr, args.agent))
         rc = release_review(args.pr, args.agent) if args.release else claim_review(args.pr, args.agent)
         sys.exit(rc)
+
+    if args.complete:
+        print("[ERROR] --complete-review applies to a PR review; use --pr <n>.",
+              file=sys.stderr)
+        sys.exit(EXIT_ERROR)
 
     if args.release:
         sys.exit(release_issue(args.issue, args.agent))

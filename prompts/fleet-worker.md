@@ -101,8 +101,13 @@ review so the weaker check is on the record.
 5. **Submit a real GitHub review** — `gh pr review --approve` or
    `--request-changes` with inline comments. A chat message is not a review;
    `merge_pr.py` reads GitHub reviews and nothing else.
-6. Label the PR `reviewed-by:<AGENT_ID>`, then release your review claim:
-   `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --release`
+6. Complete the review. One command attributes it and releases your claim:
+   `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --complete-review`
+
+   This is not optional bookkeeping. `merge_pr.py` reads `reviewed-by:<id>` to
+   tell a peer review from a self-review, because every agent authenticates as
+   the same GitHub user. Skip it and the PR stays blocked with your claim on
+   it, and the next agent sees work that looks taken but unreviewed.
 
 **Approving without verifying is a failure, not efficiency.** A rubber stamp is
 worse than no review at all, because it satisfies the merge gate while
