@@ -160,6 +160,24 @@ class ClaimProtocolTests(unittest.TestCase):
         update_status.assert_not_called()
         run_cmd.assert_not_called()
 
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_parked_in_review_issue_cannot_be_reclaimed(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:in-review", "agent:agent-1"
+        )
+
+        result = claim_issue.claim_issue(39, "agent-0")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
 
 class InReviewHandoffStatusTests(unittest.TestCase):
     @patch("update_issue_status.run_cmd", return_value=(0, "", ""))

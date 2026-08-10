@@ -213,6 +213,22 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
         print(f"[INFO] Completing interrupted claim on #{issue_id}...")
         return _finalize_claim(issue_id, agent, status, assignee, my_label)
 
+    # A fresh claim may start only from Ready. In Review deliberately makes
+    # claimed_by() return None so the author can take new work, but that must
+    # not make the parked issue claimable again. The same-agent interrupted
+    # In Progress/Ready paths above remain explicitly resumable.
+    names = {name.lower() for name in label_names(issue)}
+    if "status:ready" not in names:
+        current = next(
+            (name.removeprefix("status:") for name in names if name.startswith("status:")),
+            "unknown",
+        )
+        print(
+            f"[CONFLICT] Issue #{issue_id} is {current}, not Ready; refusing a new claim.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFLICT
+
     # --- Step 2: write our claim ------------------------------------------
     if not ensure_label(my_label, "1d76db", f"Claimed by agent '{agent}'"):
         print(f"[ERROR] Could not provision claim label '{my_label}'.", file=sys.stderr)

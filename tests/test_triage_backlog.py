@@ -100,6 +100,20 @@ class PartitionTests(unittest.TestCase):
         self.assertEqual(ready, [])
         self.assertEqual([i["number"] for i in held], [4])
 
+    def test_in_review_issue_is_parked_and_conflict_protected(self):
+        issues = [
+            issue(39, "status:in-review", "agent:agent-1",
+                  body="touches: src/a.py"),
+            issue(40, "status:ready", body="touches: src/a.py"),
+        ]
+
+        _backlog, ready, held = tb.partition(issues)
+        cap = tb.capacity(ready, held)
+
+        self.assertEqual([i["number"] for i in held], [39])
+        self.assertEqual(cap["concurrent"], [])
+        self.assertEqual([n for n, _ in cap["deferred"]], [40])
+
 
 class CapacityTests(unittest.TestCase):
     def test_non_overlapping_issues_are_all_concurrent(self):
