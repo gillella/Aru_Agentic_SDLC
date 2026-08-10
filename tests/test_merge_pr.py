@@ -1,6 +1,10 @@
 import sys
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -348,6 +352,583 @@ class IssueLinkGateTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("#3", msg)
         self.assertIn("#4", msg)
+
+
+def merged_pr():
+    return {
+        "number": 9,
+        "title": "merged",
+        "body": "Closes #7",
+        "state": "MERGED",
+        "mergedAt": "2026-08-10T00:00:00Z",
+        "mergeCommit": {"oid": "merge-sha"},
+        "headRefName": "fix/issue-7-example",
+        "headRefOid": "gated-sha",
+        "headRepository": {"name": "repo", "nameWithOwner": "owner/repo"},
+        "headRepositoryOwner": {"login": "owner"},
+    }
+
+
+class MergeExecutionRecoveryTests(unittest.TestCase):
+    @patch.object(merge_pr, "fetch_pr", return_value=merged_pr())
+    @patch.object(merge_pr.subprocess, "run")
+    def test_nonzero_merge_command_recovers_when_server_reports_merged(self, run, _fetch):
+        run.return_value = SimpleNamespace(returncode=1, stdout="", stderr="delete failed")
+        final, message = merge_pr.execute_merge(
+            9, {"headRefOid": "gated-sha"}, "squash"
+        )
+
+        self.assertEqual(final["state"], "MERGED")
+        self.assertIn("reports merged", message)
+        command = run.call_args.args[0]
+        self.assertNotIn("--delete-branch", command)
+        self.assertIn("--match-head-commit", command)
+
+    @patch.object(merge_pr, "fetch_pr", return_value={"state": "OPEN"})
+    @patch.object(merge_pr.subprocess, "run")
+    def test_nonzero_merge_command_distinguishes_not_merged(self, run, _fetch):
+        run.return_value = SimpleNamespace(returncode=1, stdout="", stderr="refused")
+        final, message = merge_pr.execute_merge(9, {"headRefOid": "sha"}, "squash")
+
+        self.assertIsNone(final)
+        self.assertIn("still reports OPEN", message)
+
+    @patch.object(merge_pr, "run_closeout", return_value=True)
+    @patch.object(merge_pr, "repository_root", return_value="/repo")
+    @patch.object(merge_pr, "execute_merge")
+    @patch.object(merge_pr, "fetch_pr", return_value=merged_pr())
+    def test_rerun_of_merged_pr_skips_second_merge(
+        self, _fetch, execute, _root, closeout
+    ):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+            self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
+
+        execute.assert_not_called()
+        closeout.assert_called_once()
+
+    @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
+    @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
+    @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
+    @patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed"))
+    @patch.object(merge_pr, "delete_remote_branch", return_value=(False, "delete failed"))
+    @patch.object(merge_pr, "retain_local_branch", return_value=(True, "local retained"))
+    @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree pruned"))
+    @patch.object(merge_pr.os, "chdir")
+    @patch.object(merge_pr, "repository_root", return_value="/repo")
+    @patch.object(merge_pr, "execute_merge", return_value=(merged_pr(), "merged"))
+    @patch.object(merge_pr, "unresolved_threads", return_value=0)
+    @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_successful_merge_with_branch_delete_failure_is_resumable(
+        self, fetch, _json, _threads, execute, _root, _chdir, _prune, _local,
+        _remote, _close, _done, _issue_claim, _review_claim,
+    ):
+        fetch.return_value = {
+            "number": 9,
+            "title": "open",
+            "body": "Closes #7",
+            "state": "OPEN",
+            "isDraft": False,
+            "headRefName": "fix/issue-7-example",
+            "headRefOid": "gated-sha",
+            "statusCheckRollup": [
+                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+            ],
+            "reviews": [{"state": "APPROVED", "author": {"login": "peer"}}],
+            "author": {"login": "author"},
+            "labels": [],
+            "mergeStateStatus": "CLEAN",
+            "mergeable": "MERGEABLE",
+            "additions": 2,
+            "deletions": 1,
+        }
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+            self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
+
+        execute.assert_called_once()
+        _close.assert_called_once_with(7)
+        _done.assert_called_once_with(7)
+        _issue_claim.assert_called_once_with(7)
+        _review_claim.assert_called_once_with(9)
+
+
+class CloseOutRecoveryTests(unittest.TestCase):
+    def _run(self, failing):
+        outcomes = {
+            "prune_worktree": (True, "worktree ok"),
+            "retain_local_branch": (True, "local ok"),
+            "delete_remote_branch": (True, "remote ok"),
+            "ensure_issue_closed": (True, "closed"),
+            "reconcile_issue_done": (True, "done"),
+            "clear_issue_claims": (True, "issue claim clear"),
+            "clear_review_claims": (True, "review claim clear"),
+        }
+        outcomes[failing] = (False, f"{failing} failed")
+        patches = {
+            name: patch.object(merge_pr, name, return_value=value)
+            for name, value in outcomes.items()
+        }
+        mocks = {name: item.start() for name, item in patches.items()}
+        try:
+            with patch.object(merge_pr.os, "chdir"):
+                ok = merge_pr.run_closeout(merged_pr(), [7], "/repo")
+        finally:
+            for item in patches.values():
+                item.stop()
+        return ok, mocks
+
+    def test_merge_success_plus_remote_branch_failure_runs_remaining_closeout(self):
+        ok, mocks = self._run("delete_remote_branch")
+        self.assertFalse(ok)
+        mocks["ensure_issue_closed"].assert_called_once_with(7)
+        mocks["reconcile_issue_done"].assert_called_once_with(7)
+        mocks["clear_review_claims"].assert_called_once_with(9)
+
+    def test_worktree_failure_does_not_skip_branch_or_board_cleanup(self):
+        ok, mocks = self._run("prune_worktree")
+        self.assertFalse(ok)
+        mocks["retain_local_branch"].assert_called_once()
+        mocks["delete_remote_branch"].assert_called_once()
+        mocks["reconcile_issue_done"].assert_called_once_with(7)
+
+    def test_board_failure_does_not_skip_claim_cleanup(self):
+        ok, mocks = self._run("reconcile_issue_done")
+        self.assertFalse(ok)
+        mocks["clear_issue_claims"].assert_called_once_with(7)
+        mocks["clear_review_claims"].assert_called_once_with(9)
+
+    @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
+    @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
+    @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
+    @patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed"))
+    @patch.object(merge_pr, "delete_remote_branch", return_value=(True, "remote"))
+    @patch.object(merge_pr, "retain_local_branch", return_value=(True, "local"))
+    @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree"))
+    @patch.object(merge_pr.os, "chdir")
+    def test_changes_to_surviving_root_before_pruning_caller_worktree(
+        self, chdir, prune, _local, _remote, _close, _done, _issue, _review
+    ):
+        def after_chdir(*_args):
+            chdir.assert_called_once_with("/repo")
+            return True, "worktree"
+
+        prune.side_effect = after_chdir
+        self.assertTrue(merge_pr.run_closeout(merged_pr(), [7], "/repo"))
+        chdir.assert_called_once_with("/repo")
+
+
+class IdempotentCloseOutStepTests(unittest.TestCase):
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "run_cmd", return_value=(0, "", ""))
+    def test_absent_remote_branch_is_already_done(self, run, _slug):
+        ok, message = merge_pr.delete_remote_branch(
+            "/repo", "fix/issue-7-x", "gated-sha", "owner/repo"
+        )
+        self.assertTrue(ok)
+        self.assertIn("already absent", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "run_cmd", return_value=(1, "", "missing"))
+    def test_absent_local_branch_is_already_done(self, run):
+        ok, message = merge_pr.retain_local_branch(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertTrue(ok)
+        self.assertIn("already absent", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "run_cmd", return_value=(0, "worktree /repo\nbranch refs/heads/main\n", ""))
+    def test_absent_issue_worktree_is_already_done(self, _run):
+        ok, message = merge_pr.prune_worktree(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertTrue(ok)
+        self.assertIn("already absent", message)
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_prefix_branch_worktree_is_not_selected(self, run):
+        run.return_value = (
+            0,
+            "worktree /repo/.worktrees/fix-xyz\n"
+            "HEAD other-sha\n"
+            "branch refs/heads/fix/xyz\n",
+            "",
+        )
+        ok, message = merge_pr.prune_worktree("/repo", "fix/x", "gated-sha")
+        self.assertTrue(ok)
+        self.assertIn("already absent", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_empty_branch_fails_closed_without_git_mutation(self, run):
+        ok, message = merge_pr.prune_worktree("/repo", "", "gated-sha")
+        self.assertFalse(ok)
+        self.assertIn("required", message)
+        run.assert_not_called()
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_reused_worktree_branch_at_new_sha_is_preserved(self, run):
+        run.return_value = (
+            0,
+            "worktree /repo/.worktrees/reused\n"
+            "HEAD new-sha\n"
+            "branch refs/heads/fix/issue-7-x\n",
+            "",
+        )
+        ok, message = merge_pr.prune_worktree(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertFalse(ok)
+        self.assertIn("left untouched", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "run_cmd", return_value=(0, "new-sha\n", ""))
+    def test_reused_local_branch_at_new_sha_is_preserved(self, run):
+        ok, message = merge_pr.retain_local_branch(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertTrue(ok)
+        self.assertIn("unrelated ref retained", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/base")
+    @patch.object(merge_pr, "run_cmd", return_value=(0, "new-sha\trefs/heads/fix/x\n", ""))
+    def test_reused_fork_branch_at_new_sha_is_preserved(self, run, _slug):
+        ok, message = merge_pr.delete_remote_branch(
+            "/repo", "fix/x", "gated-sha", "contributor/fork"
+        )
+        self.assertFalse(ok)
+        self.assertIn("left untouched", message)
+        command = run.call_args.args[0]
+        self.assertIn("https://github.com/contributor/fork.git", command)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "run_cmd")
+    def test_remote_branch_moved_after_observation_survives_lease_delete(
+        self, run, _slug
+    ):
+        run.side_effect = [
+            (0, "gated-sha\trefs/heads/fix/x\n", ""),
+            (1, "", "stale info"),
+        ]
+        ok, message = merge_pr.delete_remote_branch(
+            "/repo", "fix/x", "gated-sha", "owner/repo"
+        )
+        self.assertFalse(ok)
+        self.assertIn("atomically", message)
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [
+                "git", "push",
+                "--force-with-lease=refs/heads/fix/x:gated-sha",
+                "origin", ":refs/heads/fix/x",
+            ],
+        )
+
+    def test_real_worktree_attachment_interleaving_keeps_local_ref(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            worktree = repo / ".worktrees" / "race"
+            self._git(directory, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            self._git(repo, "commit", "--allow-empty", "-m", "seed")
+            expected_sha = self._git(repo, "rev-parse", "HEAD")
+            branch = "fix/race"
+            self._git(repo, "branch", branch, expected_sha)
+            worktree.parent.mkdir()
+
+            real_run_cmd = merge_pr.run_cmd
+            raced = False
+
+            def inject_attachment(command, **kwargs):
+                nonlocal raced
+                result = real_run_cmd(command, **kwargs)
+                if command[:3] == ["git", "rev-parse", "--verify"]:
+                    self._git(repo, "worktree", "add", str(worktree), branch)
+                    raced = True
+                return result
+
+            with patch.object(merge_pr, "run_cmd", side_effect=inject_attachment):
+                ok, message = merge_pr.retain_local_branch(
+                    repo, branch, expected_sha
+                )
+
+            self.assertTrue(raced)
+            self.assertTrue(ok)
+            self.assertIn("Retained local branch", message)
+            self.assertTrue(worktree.exists())
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"),
+                expected_sha,
+            )
+
+    def test_real_remote_ref_replacement_survives_lease_delete_race(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin = root / "origin.git"
+            repo = root / "repo"
+            self._git(root, "init", "--bare", "--initial-branch=main", str(origin))
+            self._git(root, "clone", str(origin), str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            self._git(repo, "commit", "--allow-empty", "-m", "old")
+            old_sha = self._git(repo, "rev-parse", "HEAD")
+            branch = "fix/race"
+            self._git(repo, "push", "origin", f"{old_sha}:refs/heads/{branch}")
+            self._git(repo, "commit", "--allow-empty", "-m", "replacement")
+            replacement_sha = self._git(repo, "rev-parse", "HEAD")
+            self._git(repo, "push", "origin", "main")
+
+            real_run_cmd = merge_pr.run_cmd
+            raced = False
+
+            def inject_replacement(command, **kwargs):
+                nonlocal raced
+                if command[:2] == ["git", "push"] and any(
+                    item.startswith("--force-with-lease=") for item in command
+                ):
+                    self._git(
+                        repo, "push", "--force", "origin",
+                        f"{replacement_sha}:refs/heads/{branch}",
+                    )
+                    raced = True
+                return real_run_cmd(command, **kwargs)
+
+            with (
+                patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"),
+                patch.object(merge_pr, "run_cmd", side_effect=inject_replacement),
+            ):
+                ok, message = merge_pr.delete_remote_branch(
+                    repo, branch, old_sha, "owner/repo"
+                )
+
+            self.assertTrue(raced)
+            self.assertFalse(ok)
+            self.assertIn("atomically", message)
+            remote = self._git(
+                repo, "ls-remote", "--heads", "origin", f"refs/heads/{branch}"
+            )
+            self.assertEqual(remote.split()[0], replacement_sha)
+
+    def test_real_dirty_worktree_preserves_file_and_local_branch_ref(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "dirty"
+            branch = "fix/dirty"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            tracked = repo / "tracked.txt"
+            tracked.write_text("clean\n")
+            self._git(repo, "add", "tracked.txt")
+            self._git(repo, "commit", "-m", "seed")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            dirty_file = worktree / "tracked.txt"
+            dirty_file.write_text("user change\n")
+
+            pruned, _ = merge_pr.prune_worktree(repo, branch, expected_sha)
+            retained, message = merge_pr.retain_local_branch(
+                repo, branch, expected_sha
+            )
+
+            self.assertFalse(pruned)
+            self.assertTrue(retained)
+            self.assertIn("Retained local branch", message)
+            self.assertEqual(dirty_file.read_text(), "user change\n")
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"),
+                expected_sha,
+            )
+
+    def test_real_ignored_file_survives_worktree_prune_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "ignored"
+            branch = "fix/ignored"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            (repo / ".gitignore").write_text("secret.txt\n")
+            self._git(repo, "add", ".gitignore")
+            self._git(repo, "commit", "-m", "ignore local secret")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            secret = worktree / "secret.txt"
+            secret.write_text("keep me\n")
+
+            pruned, message = merge_pr.prune_worktree(repo, branch, expected_sha)
+
+            self.assertFalse(pruned)
+            self.assertIn("ignored", message)
+            self.assertTrue(secret.exists())
+            self.assertEqual(secret.read_text(), "keep me\n")
+
+    def test_ignored_file_created_after_preflight_is_atomically_retained(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "race-secret"
+            branch = "fix/race-secret"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            (repo / ".gitignore").write_text("secret.txt\n")
+            self._git(repo, "add", ".gitignore")
+            self._git(repo, "commit", "-m", "ignore local secret")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            secret = worktree / "secret.txt"
+            retained = (
+                repo / ".worktrees" / ".retained" /
+                f"{expected_sha[:12]}-{worktree.name}"
+            )
+            real_run_cmd = merge_pr.run_cmd
+            raced = False
+
+            def inject_secret_after_preflight(command, **kwargs):
+                nonlocal raced
+                result = real_run_cmd(command, **kwargs)
+                if command[:3] == ["git", "status", "--porcelain"]:
+                    secret.write_text("late secret\n")
+                    raced = True
+                return result
+
+            with patch.object(
+                merge_pr, "run_cmd", side_effect=inject_secret_after_preflight
+            ):
+                pruned, message = merge_pr.prune_worktree(
+                    repo, branch, expected_sha
+                )
+
+            self.assertTrue(raced)
+            self.assertTrue(pruned)
+            self.assertIn("Retained worktree", message)
+            self.assertFalse(worktree.exists())
+            self.assertEqual((retained / "secret.txt").read_text(), "late secret\n")
+            listed = self._git(repo, "worktree", "list", "--porcelain")
+            self.assertNotIn(f"refs/heads/{branch}", listed)
+
+    def test_branch_switch_after_discovery_is_revalidated_under_head_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "switch-race"
+            branch = "fix/switch-race"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            self._git(repo, "commit", "--allow-empty", "-m", "seed")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            real_run_cmd = merge_pr.run_cmd
+            switched = False
+
+            def switch_after_discovery(command, **kwargs):
+                nonlocal switched
+                result = real_run_cmd(command, **kwargs)
+                if command[:3] == ["git", "worktree", "list"] and not switched:
+                    self._git(worktree, "switch", "-c", "unrelated")
+                    switched = True
+                return result
+
+            with patch.object(
+                merge_pr, "run_cmd", side_effect=switch_after_discovery
+            ):
+                pruned, message = merge_pr.prune_worktree(
+                    repo, branch, expected_sha
+                )
+
+            self.assertTrue(switched)
+            self.assertFalse(pruned)
+            self.assertIn("ownership changed", message)
+            self.assertTrue(worktree.exists())
+            self.assertEqual(self._git(worktree, "branch", "--show-current"), "unrelated")
+            listed = self._git(repo, "worktree", "list", "--porcelain")
+            self.assertIn("refs/heads/unrelated", listed)
+
+    def test_same_tree_ref_update_is_blocked_through_deregistration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "ref-race"
+            branch = "fix/ref-race"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            self._git(repo, "commit", "--allow-empty", "-m", "seed")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            self._git(repo, "commit", "--allow-empty", "-m", "same tree replacement")
+            replacement_sha = self._git(repo, "rev-parse", "HEAD")
+            retained = (
+                repo / ".worktrees" / ".retained" /
+                f"{expected_sha[:12]}-{worktree.name}"
+            )
+            real_run_cmd = merge_pr.run_cmd
+            update_attempt = None
+
+            def update_after_locked_sha_read(command, **kwargs):
+                nonlocal update_attempt
+                result = real_run_cmd(command, **kwargs)
+                if command == ["git", "rev-parse", "HEAD"]:
+                    update_attempt = subprocess.run(
+                        [
+                            "git", "-C", str(repo), "update-ref",
+                            f"refs/heads/{branch}", replacement_sha, expected_sha,
+                        ],
+                        text=True,
+                        capture_output=True,
+                    )
+                return result
+
+            with patch.object(
+                merge_pr, "run_cmd", side_effect=update_after_locked_sha_read
+            ):
+                pruned, message = merge_pr.prune_worktree(
+                    repo, branch, expected_sha
+                )
+
+            self.assertIsNotNone(update_attempt)
+            self.assertNotEqual(update_attempt.returncode, 0)
+            self.assertTrue(pruned)
+            self.assertIn("Retained worktree", message)
+            self.assertTrue(retained.is_dir())
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"),
+                expected_sha,
+            )
+            listed = self._git(repo, "worktree", "list", "--porcelain")
+            self.assertNotIn(f"refs/heads/{branch}", listed)
+
+    @patch.object(merge_pr, "_gh_json", return_value={"state": "CLOSED"})
+    def test_closed_issue_is_already_done(self, _gh):
+        ok, message = merge_pr.ensure_issue_closed(7)
+        self.assertTrue(ok)
+        self.assertIn("already closed", message)
+
+    @patch.object(merge_pr, "_gh_json", return_value={"labels": []})
+    def test_absent_claim_labels_are_already_done(self, _gh):
+        self.assertTrue(merge_pr.clear_issue_claims(7)[0])
+        self.assertTrue(merge_pr.clear_review_claims(9)[0])
 
 
 if __name__ == "__main__":

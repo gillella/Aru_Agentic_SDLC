@@ -15,7 +15,7 @@ is advisory.
 
 Exit codes:
   0 - merged (or dry-run passed every check)
-  1 - error talking to GitHub
+  1 - error, or merge completed with resumable close-out failures
   3 - DoD not met; nothing was merged
 """
 
@@ -48,7 +48,8 @@ SIZE_SOFT_LIMIT = 400
 
 PR_FIELDS = (
     "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,author,"
-    "headRefName,headRefOid,additions,deletions,reviews,statusCheckRollup,labels"
+    "headRefName,headRefOid,additions,deletions,reviews,statusCheckRollup,labels,"
+    "mergedAt,mergeCommit,headRepository,headRepositoryOwner,isCrossRepository"
 )
 
 
@@ -332,29 +333,370 @@ def check_size(pr):
     return True, f"Diff is {total} lines."
 
 
-def prune_worktree(repo_root, branch):
-    """Removes the worktree for a merged branch, if one exists.
+def is_merged(pr):
+    return (pr.get("state") or "").upper() == "MERGED" or bool(pr.get("mergedAt"))
 
-    Best-effort: a worktree with uncommitted changes is left alone and
-    reported, because discarding an agent's unpushed work to tidy up would be
-    worse than a stale directory.
+
+def merge_commit_oid(pr):
+    value = pr.get("mergeCommit")
+    if isinstance(value, dict):
+        return value.get("oid") or ""
+    return value or ""
+
+
+def head_repository_slug(pr):
+    repository = pr.get("headRepository") or {}
+    owner = pr.get("headRepositoryOwner") or {}
+    return repository.get("nameWithOwner") or (
+        f"{owner.get('login')}/{repository.get('name')}"
+        if owner.get("login") and repository.get("name") else ""
+    )
+
+
+def repository_root():
+    """Returns the primary worktree root even when invoked from a linked one."""
+    code, common_dir, _ = run_cmd(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        check=False,
+    )
+    if code != 0 or not common_dir:
+        return None
+    common_dir = os.path.abspath(common_dir.strip())
+    return os.path.dirname(common_dir) if os.path.basename(common_dir) == ".git" else None
+
+
+def execute_merge(pr_id, pr, merge_method):
+    """Runs only the server-side merge, then re-reads authoritative PR state.
+
+    The merge command deliberately does not delete either branch. Cleanup is a
+    separate, resumable phase. A non-zero command may still mean GitHub merged
+    successfully, so the return code is never interpreted without a re-read.
     """
+    env = dict(os.environ, ARU_ALLOW_MAIN_PUSH="1")
+    merge_cmd = ["gh", "pr", "merge", str(pr_id), f"--{merge_method}"]
+    head_sha = pr.get("headRefOid")
+    if head_sha:
+        merge_cmd += ["--match-head-commit", head_sha]
+    else:
+        print("[WARN] No head SHA available; merging without pinning it.", file=sys.stderr)
+
+    proc = subprocess.run(merge_cmd, capture_output=True, text=True, env=env, check=False)
+    fresh = fetch_pr(pr_id)
+    if not fresh:
+        return None, "Could not re-read the PR after the merge command."
+    if not is_merged(fresh):
+        detail = (proc.stderr or proc.stdout or "merge command returned no detail").strip()
+        return None, f"GitHub still reports {fresh.get('state', '?')}; {detail}"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "no command detail").strip()
+        return fresh, (
+            f"GitHub reports merged even though the merge command exited "
+            f"{proc.returncode}: {detail}"
+        )
+    return fresh, "GitHub accepted the merge."
+
+
+def find_branch_worktree(porcelain, branch):
+    """Returns the exact branch's worktree path and HEAD from porcelain data."""
+    expected_ref = f"refs/heads/{branch}"
+    for block in porcelain.split("\n\n"):
+        fields = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(" ")
+            if value:
+                fields[key] = value
+        if fields.get("branch") == expected_ref:
+            return fields.get("worktree"), fields.get("HEAD")
+    return None, None
+
+
+def prune_worktree(repo_root, branch, expected_sha):
+    """Deregisters the exact worktree after atomically retaining its directory."""
+    if not branch or not expected_sha:
+        return False, "Branch and gated head SHA are required; no worktree removed."
     code, out, _ = run_cmd(["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root)
     if code != 0:
-        return
-    path = None
-    for block in out.split("\n\n"):
-        if f"branch refs/heads/{branch}" in block:
-            first = block.splitlines()[0]
-            path = first.split(" ", 1)[1] if first.startswith("worktree ") else None
-            break
+        return False, "Could not list worktrees."
+    path, actual_sha = find_branch_worktree(out, branch)
     if not path:
-        return
-    code, _, err = run_cmd(["git", "worktree", "remove", path], check=False, cwd=repo_root)
+        return True, "Worktree already absent."
+    if actual_sha != expected_sha:
+        return False, (
+            f"Worktree {path} now points to {actual_sha or 'unknown'}, not gated head "
+            f"{expected_sha}; left untouched."
+        )
+    if os.path.abspath(path) == os.path.abspath(repo_root):
+        return False, "Refusing to remove the primary worktree."
+    retained_root = os.path.join(repo_root, ".worktrees", ".retained")
+    retained_path = os.path.join(
+        retained_root, f"{expected_sha[:12]}-{os.path.basename(path)}"
+    )
+    if not os.path.exists(path):
+        if not os.path.isdir(retained_path):
+            return False, f"Worktree path {path} disappeared; no retained copy found."
+        code, _, err = run_cmd(
+            ["git", "worktree", "remove", path], check=False, cwd=repo_root
+        )
+        if code == 0:
+            return True, f"Worktree already retained at {retained_path}; registration pruned."
+        return False, f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
+    marker = os.path.join(path, ".git")
+    try:
+        with open(marker, encoding="utf-8") as marker_file:
+            marker_text = marker_file.read().strip()
+    except OSError as exc:
+        return False, f"Could not read worktree metadata {marker}: {exc}"
+    if not marker_text.startswith("gitdir: "):
+        return False, f"Unexpected worktree metadata in {marker}; left untouched."
+    admin_dir = os.path.realpath(marker_text.split(": ", 1)[1])
+    allowed_admin_root = os.path.realpath(
+        os.path.join(repo_root, ".git", "worktrees")
+    )
+    try:
+        inside_admin_root = os.path.commonpath(
+            [admin_dir, allowed_admin_root]
+        ) == allowed_admin_root
+    except ValueError:
+        inside_admin_root = False
+    if not inside_admin_root:
+        return False, f"Worktree metadata points outside {allowed_admin_root}; left untouched."
+
+    head_lock = os.path.join(admin_dir, "HEAD.lock")
+    try:
+        lock_fd = os.open(head_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError as exc:
+        return False, f"Could not lock worktree HEAD for exact ownership check: {exc}"
+    ref_lock_fd = None
+    ref_lock = ""
+    try:
+        ref_lock_root = os.path.realpath(
+            os.path.join(repo_root, ".git", "refs", "heads")
+        )
+        ref_lock = os.path.realpath(
+            os.path.join(ref_lock_root, f"{branch}.lock")
+        )
+        try:
+            inside_ref_root = os.path.commonpath(
+                [ref_lock, ref_lock_root]
+            ) == ref_lock_root
+        except ValueError:
+            inside_ref_root = False
+        if not inside_ref_root:
+            return False, f"Branch lock points outside {ref_lock_root}; left untouched."
+        try:
+            os.makedirs(os.path.dirname(ref_lock), exist_ok=True)
+            ref_lock_fd = os.open(
+                ref_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+            )
+        except OSError as exc:
+            return False, f"Could not lock branch ref for exact ownership check: {exc}"
+
+        ref_code, current_ref, ref_err = run_cmd(
+            ["git", "rev-parse", "--symbolic-full-name", "HEAD"],
+            check=False,
+            cwd=path,
+        )
+        sha_code, current_sha, sha_err = run_cmd(
+            ["git", "rev-parse", "HEAD"], check=False, cwd=path
+        )
+        if ref_code != 0 or sha_code != 0:
+            detail = ref_err.strip() or sha_err.strip()
+            return False, f"Could not revalidate locked worktree ownership: {detail}"
+        if current_ref.strip() != f"refs/heads/{branch}" or current_sha.strip() != expected_sha:
+            return False, (
+                f"Worktree ownership changed to {current_ref.strip()} at "
+                f"{current_sha.strip()}; left untouched."
+            )
+        status_code, status, status_err = run_cmd(
+            [
+                "git", "status", "--porcelain", "--untracked-files=all",
+                "--ignored=matching",
+            ],
+            check=False,
+            cwd=path,
+        )
+        if status_code != 0:
+            return False, f"Could not inspect worktree {path}: {status_err.strip()}"
+        if status:
+            return False, (
+                f"Worktree {path} has tracked, untracked, or ignored files; left untouched."
+            )
+        if os.path.exists(retained_path):
+            return False, f"Retention destination already exists: {retained_path}"
+        try:
+            os.makedirs(retained_root, exist_ok=True)
+            os.rename(path, retained_path)
+        except OSError as exc:
+            return False, f"Could not atomically retain worktree {path}: {exc}"
+        code, _, err = run_cmd(
+            ["git", "worktree", "remove", path], check=False, cwd=repo_root
+        )
+        if code == 0:
+            return True, f"Retained worktree at {retained_path}; registration pruned."
+        return False, (
+            f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
+        )
+    finally:
+        if ref_lock_fd is not None:
+            os.close(ref_lock_fd)
+            if os.path.exists(ref_lock):
+                os.unlink(ref_lock)
+        os.close(lock_fd)
+        if os.path.exists(head_lock):
+            os.unlink(head_lock)
+
+
+def retain_local_branch(repo_root, branch, expected_sha):
+    """Leaves the local ref intact because Git cannot lease worktree attachment.
+
+    A compare-and-delete can protect the ref OID, but it cannot atomically stop
+    another process from attaching a new worktree to that ref. Keeping the
+    local branch is the only fail-closed behavior in a concurrent factory.
+    """
+    if not branch or not expected_sha:
+        return False, "Branch and gated head SHA are required; local branch state is unknown."
+    code, actual_sha, _ = run_cmd(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        check=False, cwd=repo_root,
+    )
+    if code != 0:
+        return True, "Local branch already absent."
+    if actual_sha.strip() != expected_sha:
+        return True, (
+            f"Local branch {branch} was reused at {actual_sha.strip() or 'unknown'}; "
+            "unrelated ref retained."
+        )
+    return True, (
+        f"Retained local branch {branch}; Git cannot atomically lease worktree "
+        "attachment during ref deletion."
+    )
+
+
+def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
+    if not branch or not expected_sha or not head_repo_slug:
+        return False, (
+            "Branch, gated head SHA, and head repository are required; "
+            "no remote branch removed."
+        )
+    base_repo_slug = get_repo_slug()
+    if not base_repo_slug:
+        return False, "Could not identify the base repository; no remote branch removed."
+    remote = (
+        "origin"
+        if head_repo_slug == base_repo_slug
+        else f"https://github.com/{head_repo_slug}.git"
+    )
+    ref = f"refs/heads/{branch}"
+    code, out, err = run_cmd(
+        ["git", "ls-remote", "--heads", remote, ref], check=False, cwd=repo_root
+    )
+    if code != 0:
+        return False, f"Could not inspect {head_repo_slug} branch {branch}: {err.strip()}"
+    if not out:
+        return True, "Remote branch already absent."
+    actual_sha = out.split()[0] if out.split() else ""
+    if actual_sha != expected_sha:
+        return False, (
+            f"Remote branch {head_repo_slug}:{branch} now points to "
+            f"{actual_sha or 'unknown'}, not gated head {expected_sha}; left untouched."
+        )
+    code, _, err = run_cmd(
+        [
+            "git", "push", f"--force-with-lease={ref}:{expected_sha}",
+            remote, f":{ref}",
+        ],
+        check=False,
+        cwd=repo_root,
+    )
     if code == 0:
-        print(f"🧹 Pruned worktree {path}")
-    else:
-        print(f"[WARN] Left worktree {path} in place: {err.strip()}", file=sys.stderr)
+        return True, f"Deleted remote branch {head_repo_slug}:{branch}."
+    return False, (
+        f"Could not atomically delete remote branch {head_repo_slug}:{branch}; "
+        f"it may have changed: {err.strip()}"
+    )
+
+
+def ensure_issue_closed(issue_num):
+    issue = _gh_json(["gh", "issue", "view", str(issue_num), "--json", "state"])
+    if issue is None:
+        return False, f"Could not read issue #{issue_num}."
+    if (issue.get("state") or "").upper() == "CLOSED":
+        return True, f"Issue #{issue_num} already closed."
+    code, _, err = run_cmd(
+        ["gh", "issue", "close", str(issue_num), "--reason", "completed"], check=False
+    )
+    if code == 0:
+        return True, f"Closed issue #{issue_num}."
+    return False, f"Could not close issue #{issue_num}: {err.strip()}"
+
+
+def reconcile_issue_done(issue_num):
+    if update_status(issue_num, "Done", require_board=True):
+        return True, f"Issue #{issue_num} board and status label reconciled to Done."
+    return False, f"Could not reconcile issue #{issue_num} to Done."
+
+
+def clear_labels(kind, number, prefix):
+    data = _gh_json(["gh", kind, "view", str(number), "--json", "labels"])
+    if data is None:
+        return False, f"Could not read {kind} #{number} labels."
+    names = [
+        label.get("name", "") for label in (data.get("labels") or [])
+        if label.get("name", "").startswith(prefix)
+    ]
+    for name in names:
+        code, _, err = run_cmd(
+            ["gh", kind, "edit", str(number), "--remove-label", name], check=False
+        )
+        if code != 0:
+            return False, f"Could not remove {name} from {kind} #{number}: {err.strip()}"
+    noun = "claims" if names else "claim"
+    return True, f"{kind.title()} #{number} {prefix}{noun} cleared or already absent."
+
+
+def clear_issue_claims(issue_num):
+    return clear_labels("issue", issue_num, "agent:")
+
+
+def clear_review_claims(pr_num):
+    return clear_labels("pr", pr_num, REVIEW_CLAIM_LABEL)
+
+
+def run_closeout(pr, issue_nums, repo_root):
+    """Runs every idempotent close-out step, even after an earlier failure."""
+    try:
+        os.chdir(repo_root)
+    except OSError as exc:
+        print(f"\n=== Post-merge close-out ===\n  ❌ working directory  {exc}")
+        return False
+    branch = pr.get("headRefName") or ""
+    expected_sha = pr.get("headRefOid") or ""
+    head_repo_slug = head_repository_slug(pr)
+    steps = [
+        ("worktree", lambda: prune_worktree(repo_root, branch, expected_sha)),
+        ("local branch", lambda: retain_local_branch(repo_root, branch, expected_sha)),
+        ("remote branch", lambda: delete_remote_branch(
+            repo_root, branch, expected_sha, head_repo_slug
+        )),
+    ]
+    for num in issue_nums:
+        steps.extend([
+            (f"close #{num}", lambda num=num: ensure_issue_closed(num)),
+            (f"done #{num}", lambda num=num: reconcile_issue_done(num)),
+            (f"issue claim #{num}", lambda num=num: clear_issue_claims(num)),
+        ])
+    steps.append(("review claim", lambda: clear_review_claims(pr.get("number"))))
+
+    all_ok = True
+    print("\n=== Post-merge close-out ===")
+    for name, action in steps:
+        try:
+            ok, message = action()
+        except Exception as exc:  # Keep later recovery steps running.
+            ok, message = False, f"Unexpected close-out error: {exc}"
+        print(f"  {'✅' if ok else '❌'} {name:<18} {message}")
+        all_ok = all_ok and ok
+    return all_ok
 
 
 def main():
@@ -369,71 +711,75 @@ def main():
         return EXIT_ERROR
 
     issue_nums = linked_issues(pr.get("body"))
-    issue_bodies = {}
-    for num in issue_nums:
-        issue = _gh_json(["gh", "issue", "view", str(num), "--json", "body"])
-        if issue is None:
-            return EXIT_ERROR
-        issue_bodies[num] = issue.get("body") or ""
-
-    threads = unresolved_threads(args.pr)
-
-    gates = [
-        ("open", check_open(pr)),
-        ("issue link", check_issue_link(pr)),
-        ("ci", check_ci(pr)),
-        ("review", check_reviews(pr, threads)),
-        ("rebased", check_rebased(pr)),
-        ("size", check_size(pr)),
-    ]
-    # One acceptance gate per closed issue: GitHub will close them all, so all
-    # of them must be satisfied.
-    for num in issue_nums:
-        gates.append((f"accept #{num}", check_acceptance(num, issue_bodies[num])))
-
-    print(f"=== Definition of Done — PR #{args.pr}: {pr.get('title','')} ===")
-    blocked = []
-    for name, (ok, message) in gates:
-        print(f"  {'✅' if ok else '❌'} {name:<11} {message}")
-        if not ok:
-            blocked.append(name)
-
-    if blocked:
-        print(f"\n🚫 Not merged. Unmet: {', '.join(blocked)}.")
-        return EXIT_BLOCKED
-
-    if args.dry_run:
-        print("\n✅ Every gate passed. --dry-run, so nothing was merged.")
-        return EXIT_OK
-
-    # ARU_ALLOW_MAIN_PUSH lets the pre-push hook distinguish this sanctioned
-    # path from an agent pushing to main directly.
-    env = dict(os.environ, ARU_ALLOW_MAIN_PUSH="1")
-    # Pin the head we actually gated. Between fetch_pr() and this call an
-    # agent can push again, and without this every gate above would describe
-    # the old head while gh merges a new, unreviewed and untested one.
-    merge_cmd = ["gh", "pr", "merge", str(args.pr), f"--{args.merge_method}", "--delete-branch"]
-    head_sha = pr.get("headRefOid")
-    if head_sha:
-        merge_cmd += ["--match-head-commit", head_sha]
-    else:
-        print("[WARN] No head SHA available; merging without pinning it.", file=sys.stderr)
-    proc = subprocess.run(merge_cmd, capture_output=True, text=True, env=env, check=False)
-    if proc.returncode != 0:
-        print(f"[ERROR] Merge failed: {proc.stderr.strip()}", file=sys.stderr)
+    if not issue_nums:
+        print("[ERROR] PR body has no 'Closes #<issue>'; close-out target is unknown.", file=sys.stderr)
         return EXIT_ERROR
-    print(f"\n✅ PR #{args.pr} merged and branch deleted.")
 
-    code, root, _ = run_cmd(["git", "rev-parse", "--show-toplevel"], check=False)
-    if code == 0 and root:
-        prune_worktree(root.strip(), pr.get("headRefName", ""))
+    gated_head = pr.get("headRefOid") or "unknown"
+    if is_merged(pr):
+        print(f"=== Merge execution — PR #{args.pr}: already merged; resuming close-out ===")
+        final_pr = pr
+        if args.dry_run:
+            print("No mutations performed in --dry-run mode.")
+            return EXIT_OK
+    else:
+        issue_bodies = {}
+        for num in issue_nums:
+            issue = _gh_json(["gh", "issue", "view", str(num), "--json", "body"])
+            if issue is None:
+                return EXIT_ERROR
+            issue_bodies[num] = issue.get("body") or ""
 
-    for num in issue_nums:
-        if update_status(num, "Done"):
-            print(f"✅ Issue #{num} moved to Done.")
-        else:
-            print(f"[WARN] Could not move #{num} to Done; do it by hand.", file=sys.stderr)
+        threads = unresolved_threads(args.pr)
+        gates = [
+            ("open", check_open(pr)),
+            ("issue link", check_issue_link(pr)),
+            ("ci", check_ci(pr)),
+            ("review", check_reviews(pr, threads)),
+            ("rebased", check_rebased(pr)),
+            ("size", check_size(pr)),
+        ]
+        for num in issue_nums:
+            gates.append((f"accept #{num}", check_acceptance(num, issue_bodies[num])))
 
+        print(f"=== Definition of Done — PR #{args.pr}: {pr.get('title','')} ===")
+        blocked = []
+        for name, (ok, message) in gates:
+            print(f"  {'✅' if ok else '❌'} {name:<11} {message}")
+            if not ok:
+                blocked.append(name)
+        if blocked:
+            print(f"\n🚫 Not merged. Unmet: {', '.join(blocked)}.")
+            return EXIT_BLOCKED
+        if args.dry_run:
+            print("\n✅ Every gate passed. --dry-run, so nothing was merged.")
+            return EXIT_OK
+
+        print("\n=== Merge execution ===")
+        final_pr, outcome = execute_merge(args.pr, pr, args.merge_method)
+        if not final_pr:
+            print(f"  ❌ not merged          {outcome}", file=sys.stderr)
+            return EXIT_ERROR
+        print(f"  ✅ server merge        {outcome}")
+
+    merged_sha = merge_commit_oid(final_pr) or "unknown"
+    audit_ok = merged_sha != "unknown"
+    print(
+        f"AUDIT pr=#{args.pr} gated_head_sha={gated_head} "
+        f"merged_sha={merged_sha}"
+    )
+    if not audit_ok:
+        print("[ERROR] GitHub reported merged but supplied no merge commit SHA.", file=sys.stderr)
+
+    root = repository_root()
+    if not root:
+        print("[ERROR] Merge succeeded but repository root could not be resolved; rerun close-out.", file=sys.stderr)
+        return EXIT_ERROR
+    closeout_ok = run_closeout(final_pr, issue_nums, root)
+    if not closeout_ok or not audit_ok:
+        print("\n❌ Merge is complete, but close-out is incomplete. Re-run this command to resume.")
+        return EXIT_ERROR
+    print("\n✅ Merge and every close-out step completed.")
     return EXIT_OK
 
 
