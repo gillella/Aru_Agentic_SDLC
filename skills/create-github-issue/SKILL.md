@@ -1,6 +1,6 @@
 ---
 name: create-github-issue
-description: Procedure for creating well-structured, prioritized GitHub issues with dependency tags and project board placement.
+description: Creates structured GitHub issues with depends-on, touches, parallel-eligible metadata and board placement under Aru_Agentic_SDLC. Use when the user says create issue, file a bug, create feature request, or add task to backlog.
 triggers:
   - "create issue"
   - "file a bug"

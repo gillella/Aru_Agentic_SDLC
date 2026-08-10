@@ -17,3 +17,10 @@ venv/
 .env
 .env.*
 !.env.example
+
+# Agent-tool session state, not project state
+.planning/
+scripts/.planning/
+
+# Local bootstrap test-bed: has its own .git, would commit as a broken gitlink
+dummy_calculator_app/

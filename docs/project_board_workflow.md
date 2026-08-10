@@ -35,7 +35,7 @@ When a repository is bootstrapped via `skills/init-agent-project/SKILL.md`, it p
 1. **Clean Workspace Isolation**:
    To prevent dirtying the main working directory during multi-agent or multi-branch development, all feature implementations and PR reviews MUST be run inside dedicated worktrees under `.worktrees/`.
 2. **Worktree Creation**:
-   Execute `python3 scripts/create_branch.py --issue <ID> --worktree` to generate `.worktrees/feat-issue-<ID>-<slug>`.
+   Execute `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --worktree` to generate `.worktrees/feat-issue-<ID>-<slug>`.
 3. **Worktree Cleanup**:
    Upon PR merge or review completion, remove temporary worktree directories with `git worktree remove .worktrees/<dir>`.
 

@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Procedure for AI agents to conduct thorough, constructive code reviews of open pull requests using isolated git worktrees, evaluating correctness, security, performance, test coverage, and git hygiene.
+description: Reviews an open pull request in an isolated git worktree for correctness, security, tests, and Closes #N linkage under Aru_Agentic_SDLC. Use when the user says code review, review PR, audit pull request, or review code.
 triggers:
   - "code review"
   - "review PR #<ID>"
