@@ -232,12 +232,32 @@ def main():
     my_in_flight = parts["my_in_flight"]
 
     # Session resume: a worktree branch named .../issue-<N>-... wins over
-    # anything else, so an interrupted agent returns to its own work.
+    # anything else only when that issue is still open and still claimed by
+    # this agent. A retained worktree after merge/close/release must not block
+    # claiming available work.
     current_branch = get_current_branch()
     branch_issue = None
     m = re.search(r"issue-(\d+)", current_branch, re.IGNORECASE)
     if m:
-        branch_issue = int(m.group(1))
+        branch_num = int(m.group(1))
+        match = next((i for i in issues if i["number"] == branch_num), None)
+        holder = claimed_by(match) if match else None
+        if match and args.agent and holder == args.agent:
+            branch_issue = branch_num
+        else:
+            if not match:
+                reason = "not open"
+            elif not args.agent:
+                reason = "no --agent to validate ownership"
+            elif holder and holder != args.agent:
+                reason = f"held by '{holder}'"
+            else:
+                reason = "not claimed by this agent"
+            print(
+                f"[INFO] Branch references #{branch_num} but it is {reason}; "
+                "ignoring stale resume.",
+                file=sys.stderr,
+            )
 
     resume = branch_issue or (my_in_flight["number"] if my_in_flight else None)
 
@@ -248,22 +268,36 @@ def main():
             print(f"[INFO] Resuming your in-flight issue #{resume}; not claiming new work.")
         else:
             from claim_issue import EXIT_CONFLICT, EXIT_OK, claim_issue
-            for cand in candidates:
+
+            # After a lost race, another agent's newly claimed touches: may
+            # invalidate later candidates from this snapshot. Rebuild before
+            # each retry so overlapping work is not claimed from stale data.
+            attempted = set()
+            while True:
+                parts = build_candidates(issues, args.agent)
+                candidates = parts["candidates"]
+                remaining = [c for c in candidates if c["number"] not in attempted]
+                if not remaining:
+                    print("[INFO] No claimable issue available.", file=sys.stderr)
+                    break
+                cand = remaining[0]
+                attempted.add(cand["number"])
                 rc = claim_issue(cand["number"], args.agent)
                 if rc == EXIT_OK:
                     claimed_now = cand["number"]
                     break
                 if rc == EXIT_CONFLICT:
-                    print(f"[INFO] #{cand['number']} unavailable; trying next candidate.",
-                          file=sys.stderr)
+                    print(
+                        f"[INFO] #{cand['number']} unavailable; rebuilding candidates.",
+                        file=sys.stderr,
+                    )
+                    issues = list_open_issues()
                     continue
                 print(
                     f"[ERROR] Claiming #{cand['number']} failed; aborting candidate walk.",
                     file=sys.stderr,
                 )
                 break
-            if claimed_now is None:
-                print("[INFO] No claimable issue available.", file=sys.stderr)
 
     next_issue = candidates[0] if candidates else None
     res = {

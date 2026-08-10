@@ -73,6 +73,40 @@ class ProjectBootstrapTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_bootstrap_commit_works_without_git_identity_env(self):
+        """Empty HOME / no GIT_* vars must still produce the initial commit."""
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as home:
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": home,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.path.join(home, "nonexistent-gitconfig"),
+            }
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "init_project.py"),
+                    "--name", "identity-smoke",
+                    "--private",
+                    "--no-remote",
+                    "--target-dir", temp_dir,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            log = subprocess.run(
+                ["git", "-C", temp_dir, "log", "-1", "--format=%an <%ae>"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(log.returncode, 0, log.stderr)
+            self.assertIn("Aru Agentic SDLC", log.stdout)
+            self.assertIn("aru-agentic-sdlc@users.noreply.github.com", log.stdout)
+
     @patch.object(init_project, "run_cmd", return_value=(0, "", ""))
     @patch.object(init_project, "run_gh_json")
     def test_three_project_views_are_configured(self, run_gh_json, run_cmd):

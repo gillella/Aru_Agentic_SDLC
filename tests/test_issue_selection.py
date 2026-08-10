@@ -1,3 +1,4 @@
+import io
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -78,6 +79,95 @@ depends-on: #2, #4
         release_command = run_cmd.call_args_list[-1].args[0]
         self.assertIn("--remove-assignee", release_command)
         self.assertIn("agent:agent-a", release_command)
+
+
+class ClaimWalkTests(unittest.TestCase):
+    @patch("claim_issue.claim_issue")
+    @patch.object(fetch_next_issue, "get_current_branch", return_value="main")
+    @patch.object(fetch_next_issue, "list_open_issues")
+    def test_claim_rebuilds_candidates_after_conflict(
+        self, list_open_issues, _branch, claim_issue_fn
+    ):
+        """After losing #10, rebuild so #11 overlapping touches is deferred."""
+        initial = [
+            issue(10, "touches: src/a.py\n", labels=("status:ready",)),
+            issue(11, "touches: src/a.py\n", labels=("status:ready",)),
+            issue(12, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+        after_conflict = [
+            issue(
+                10,
+                "touches: src/a.py\n",
+                labels=("agent:agent-a", "status:in-progress"),
+            ),
+            issue(11, "touches: src/a.py\n", labels=("status:ready",)),
+            issue(12, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+        list_open_issues.side_effect = [initial, after_conflict]
+        claim_issue_fn.side_effect = [
+            fetch_next_issue_claim_conflict(),
+            fetch_next_issue_claim_ok(),
+        ]
+
+        with patch.object(sys, "argv", ["fetch_next_issue.py", "--agent", "agent-b", "--claim", "--json"]):
+            buf = io.StringIO()
+            with patch.object(sys, "stdout", buf):
+                fetch_next_issue.main()
+            output = buf.getvalue()
+
+        self.assertIn('"claimed_now": 12', output)
+        self.assertEqual(
+            [call.args[0] for call in claim_issue_fn.call_args_list],
+            [10, 12],
+        )
+        self.assertEqual(list_open_issues.call_count, 2)
+
+    @patch.object(fetch_next_issue, "get_current_branch", return_value="feat/issue-99-stale")
+    @patch.object(fetch_next_issue, "list_open_issues")
+    def test_stale_branch_resume_is_ignored(self, list_open_issues, _branch):
+        list_open_issues.return_value = [
+            issue(12, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        with patch.object(sys, "argv", ["fetch_next_issue.py", "--agent", "agent-b", "--json"]):
+            buf = io.StringIO()
+            err = io.StringIO()
+            with patch.object(sys, "stdout", buf), patch.object(sys, "stderr", err):
+                fetch_next_issue.main()
+            output = buf.getvalue()
+
+        self.assertIn('"resumable_in_flight_issue": null', output)
+        self.assertIn("ignoring stale resume", err.getvalue())
+
+    @patch.object(fetch_next_issue, "get_current_branch", return_value="feat/issue-9-wip")
+    @patch.object(fetch_next_issue, "list_open_issues")
+    def test_active_branch_resume_is_honored(self, list_open_issues, _branch):
+        list_open_issues.return_value = [
+            issue(
+                9,
+                "touches: src/**\n",
+                labels=("agent:agent-b", "status:in-progress"),
+            ),
+            issue(12, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        with patch.object(sys, "argv", ["fetch_next_issue.py", "--agent", "agent-b", "--json"]):
+            buf = io.StringIO()
+            with patch.object(sys, "stdout", buf):
+                fetch_next_issue.main()
+            output = buf.getvalue()
+
+        self.assertIn('"resumable_in_flight_issue": 9', output)
+
+
+def fetch_next_issue_claim_conflict():
+    import claim_issue
+    return claim_issue.EXIT_CONFLICT
+
+
+def fetch_next_issue_claim_ok():
+    import claim_issue
+    return claim_issue.EXIT_OK
 
 
 if __name__ == "__main__":
