@@ -236,7 +236,11 @@ def check_reviews(pr, threads):
     if not substantive:
         return False, "No review on this PR. At least one review is required."
     verdicts = latest_state_per_reviewer(reviews)
-    blocking = [who for who, state in verdicts.items() if state == "CHANGES_REQUESTED"]
+    blocking = [
+        who for who, state in verdicts.items()
+        if state == "CHANGES_REQUESTED"
+        and not is_advisory_review_account(who)
+    ]
     if blocking:
         return False, (f"{', '.join(blocking)} requested changes and has not re-approved.")
     if threads is None:
@@ -289,21 +293,12 @@ def check_reviews(pr, threads):
     # GitHub user, so only the identity labels can tell them apart.
     authors = label_values(pr, "author:")
     if not authors:
-        if other_accounts:
-            advisory = [a for a in other_accounts if is_advisory_review_account(a)]
-            if advisory:
-                return False, (
-                    f"Automated review from {', '.join(advisory)} is advisory and "
-                    "does not satisfy independent approval."
-                )
-            return False, (
-                "A different-account review exists but its latest verdict is not "
-                "APPROVED, so it does not satisfy independent approval."
-            )
-        # Unstamped PR - predates create_pr.py --agent, or a human opened it.
-        # Falling back to "any review counts" keeps those mergeable; refusing
-        # would strand every PR opened before stamping existed.
-        return True, f"{len(substantive)} review(s), no unresolved threads (author unstamped)."
+        return False, (
+            "PR has no author:<id> label, so the gate cannot prove that the "
+            "reviewer is independent. Create PRs with "
+            "`scripts/create_pr.py --issue <n> --agent <id>`; stamp the verified "
+            "author on a legacy PR before retrying."
+        )
 
     author = authors[0]
     # Only completed attribution counts. Active reviewer claims were rejected

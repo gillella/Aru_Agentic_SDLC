@@ -122,6 +122,16 @@ class ReviewGateTests(unittest.TestCase):
         ok, _ = merge_pr.check_reviews({"reviews": [{"state": "CHANGES_REQUESTED"}]}, 0)
         self.assertFalse(ok)
 
+    def test_advisory_bot_changes_requested_does_not_block_after_threads_resolve(self):
+        reviews = [{
+            "state": "CHANGES_REQUESTED",
+            "author": {"login": "chatgpt-codex-connector"},
+        }]
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2", reviews=reviews), 0)
+        self.assertTrue(ok)
+        self.assertIn("agent-2", msg)
+
     def test_re_approval_after_changes_requested_unblocks(self):
         # The reviews list is history, so the CHANGES_REQUESTED entry survives
         # re-approval. Reading it raw blocked the PR forever, contradicting the
@@ -166,7 +176,8 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn("refusing", msg)
 
     def test_approved_and_resolved_passes(self):
-        ok, _ = merge_pr.check_reviews({"reviews": [{"state": "APPROVED"}]}, 0)
+        ok, _ = merge_pr.check_reviews(
+            labelled("author:agent-1", review_login="some-colleague"), 0)
         self.assertTrue(ok)
 
     def test_commented_review_with_no_open_threads_passes(self):
@@ -260,11 +271,11 @@ class SelfReviewTests(unittest.TestCase):
         self.assertIn("reviewed-by:", msg)
 
 
-    def test_unstamped_pr_falls_back_to_the_old_behaviour(self):
-        # PRs predating author stamping must stay mergeable.
+    def test_unstamped_pr_fails_closed(self):
         ok, msg = merge_pr.check_reviews(labelled(), 0)
-        self.assertTrue(ok)
-        self.assertIn("unstamped", msg)
+        self.assertFalse(ok)
+        self.assertIn("author:<id>", msg)
+        self.assertIn("create_pr.py", msg)
 
     def test_same_family_review_warns_but_does_not_refuse(self):
         ok, msg = merge_pr.check_reviews(

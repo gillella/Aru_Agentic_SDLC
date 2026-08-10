@@ -464,12 +464,14 @@ def complete_review(pr_id: int, agent: str) -> int:
     print(f"🏷️  Attributed review of PR #{pr_id} to '{agent}'.")
 
     if not _remove_reviewer_label(pr_id, agent):
-        # The attribution landed, which is the part the gate reads. Report the
-        # stale claim rather than failing: a leftover claim is reaped, an
-        # unattributed review blocks the merge.
-        print(f"[WARN] Review attributed, but the claim label could not be released. "
-              f"Release it with --release.", file=sys.stderr)
-        return EXIT_OK
+        # The merge gate deliberately blocks every live claim. Returning
+        # success here would tell the reviewer that completion finished while
+        # leaving the PR unable to merge. Attribution is idempotent, so a
+        # nonzero result makes the same --complete-review command safely
+        # retryable after a transient GitHub label-removal failure.
+        print(f"[ERROR] Review attributed, but the claim label could not be released. "
+              f"Retry --complete-review or release it with --release.", file=sys.stderr)
+        return EXIT_ERROR
     print(f"✅ Review of PR #{pr_id} completed by '{agent}'; claim released.")
     return EXIT_OK
 
