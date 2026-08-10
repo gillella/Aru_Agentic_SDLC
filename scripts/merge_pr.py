@@ -442,33 +442,82 @@ def prune_worktree(repo_root, branch, expected_sha):
         if code == 0:
             return True, f"Worktree already retained at {retained_path}; registration pruned."
         return False, f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
-    status_code, status, status_err = run_cmd(
-        [
-            "git", "status", "--porcelain", "--untracked-files=all",
-            "--ignored=matching",
-        ],
-        check=False,
-        cwd=path,
-    )
-    if status_code != 0:
-        return False, f"Could not inspect worktree {path}: {status_err.strip()}"
-    if status:
-        return False, (
-            f"Worktree {path} has tracked, untracked, or ignored files; left untouched."
-        )
-    if os.path.exists(retained_path):
-        return False, f"Retention destination already exists: {retained_path}"
+    marker = os.path.join(path, ".git")
     try:
-        os.makedirs(retained_root, exist_ok=True)
-        os.rename(path, retained_path)
+        with open(marker, encoding="utf-8") as marker_file:
+            marker_text = marker_file.read().strip()
     except OSError as exc:
-        return False, f"Could not atomically retain worktree {path}: {exc}"
-    code, _, err = run_cmd(
-        ["git", "worktree", "remove", path], check=False, cwd=repo_root
+        return False, f"Could not read worktree metadata {marker}: {exc}"
+    if not marker_text.startswith("gitdir: "):
+        return False, f"Unexpected worktree metadata in {marker}; left untouched."
+    admin_dir = os.path.realpath(marker_text.split(": ", 1)[1])
+    allowed_admin_root = os.path.realpath(
+        os.path.join(repo_root, ".git", "worktrees")
     )
-    if code == 0:
-        return True, f"Retained worktree at {retained_path}; registration pruned."
-    return False, f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
+    try:
+        inside_admin_root = os.path.commonpath(
+            [admin_dir, allowed_admin_root]
+        ) == allowed_admin_root
+    except ValueError:
+        inside_admin_root = False
+    if not inside_admin_root:
+        return False, f"Worktree metadata points outside {allowed_admin_root}; left untouched."
+
+    head_lock = os.path.join(admin_dir, "HEAD.lock")
+    try:
+        lock_fd = os.open(head_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError as exc:
+        return False, f"Could not lock worktree HEAD for exact ownership check: {exc}"
+    try:
+        ref_code, current_ref, ref_err = run_cmd(
+            ["git", "rev-parse", "--symbolic-full-name", "HEAD"],
+            check=False,
+            cwd=path,
+        )
+        sha_code, current_sha, sha_err = run_cmd(
+            ["git", "rev-parse", "HEAD"], check=False, cwd=path
+        )
+        if ref_code != 0 or sha_code != 0:
+            detail = ref_err.strip() or sha_err.strip()
+            return False, f"Could not revalidate locked worktree ownership: {detail}"
+        if current_ref.strip() != f"refs/heads/{branch}" or current_sha.strip() != expected_sha:
+            return False, (
+                f"Worktree ownership changed to {current_ref.strip()} at "
+                f"{current_sha.strip()}; left untouched."
+            )
+        status_code, status, status_err = run_cmd(
+            [
+                "git", "status", "--porcelain", "--untracked-files=all",
+                "--ignored=matching",
+            ],
+            check=False,
+            cwd=path,
+        )
+        if status_code != 0:
+            return False, f"Could not inspect worktree {path}: {status_err.strip()}"
+        if status:
+            return False, (
+                f"Worktree {path} has tracked, untracked, or ignored files; left untouched."
+            )
+        if os.path.exists(retained_path):
+            return False, f"Retention destination already exists: {retained_path}"
+        try:
+            os.makedirs(retained_root, exist_ok=True)
+            os.rename(path, retained_path)
+        except OSError as exc:
+            return False, f"Could not atomically retain worktree {path}: {exc}"
+        code, _, err = run_cmd(
+            ["git", "worktree", "remove", path], check=False, cwd=repo_root
+        )
+        if code == 0:
+            return True, f"Retained worktree at {retained_path}; registration pruned."
+        return False, (
+            f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
+        )
+    finally:
+        os.close(lock_fd)
+        if os.path.exists(head_lock):
+            os.unlink(head_lock)
 
 
 def retain_local_branch(repo_root, branch, expected_sha):
