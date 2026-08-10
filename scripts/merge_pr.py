@@ -50,7 +50,7 @@ SIZE_SOFT_LIMIT = 400
 PR_FIELDS = (
     "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,author,"
     "headRefName,headRefOid,additions,deletions,reviews,statusCheckRollup,labels,"
-    "mergedAt,mergeCommit"
+    "mergedAt,mergeCommit,headRepository,headRepositoryOwner,isCrossRepository"
 )
 
 
@@ -346,6 +346,15 @@ def merge_commit_oid(pr):
     return value or ""
 
 
+def head_repository_slug(pr):
+    repository = pr.get("headRepository") or {}
+    owner = pr.get("headRepositoryOwner") or {}
+    return repository.get("nameWithOwner") or (
+        f"{owner.get('login')}/{repository.get('name')}"
+        if owner.get("login") and repository.get("name") else ""
+    )
+
+
 def repository_root():
     """Returns the primary worktree root even when invoked from a linked one."""
     code, common_dir, _ = run_cmd(
@@ -389,19 +398,33 @@ def execute_merge(pr_id, pr, merge_method):
     return fresh, "GitHub accepted the merge."
 
 
-def prune_worktree(repo_root, branch):
-    """Idempotently removes only the clean worktree for ``branch``."""
+def prune_worktree(repo_root, branch, expected_sha):
+    """Idempotently removes only the exact clean worktree at ``expected_sha``."""
+    if not branch or not expected_sha:
+        return False, "Branch and gated head SHA are required; no worktree removed."
     code, out, _ = run_cmd(["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root)
     if code != 0:
         return False, "Could not list worktrees."
     path = None
+    actual_sha = None
+    expected_ref = f"refs/heads/{branch}"
     for block in out.split("\n\n"):
-        if f"branch refs/heads/{branch}" in block:
-            first = block.splitlines()[0]
-            path = first.split(" ", 1)[1] if first.startswith("worktree ") else None
+        fields = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(" ")
+            if value:
+                fields[key] = value
+        if fields.get("branch") == expected_ref:
+            path = fields.get("worktree")
+            actual_sha = fields.get("HEAD")
             break
     if not path:
         return True, "Worktree already absent."
+    if actual_sha != expected_sha:
+        return False, (
+            f"Worktree {path} now points to {actual_sha or 'unknown'}, not gated head "
+            f"{expected_sha}; left untouched."
+        )
     if os.path.abspath(path) == os.path.abspath(repo_root):
         return False, "Refusing to remove the primary worktree."
     status_code, status, status_err = run_cmd(
@@ -417,34 +440,60 @@ def prune_worktree(repo_root, branch):
     return False, f"Left worktree {path} in place: {err.strip()}"
 
 
-def delete_local_branch(repo_root, branch):
-    code, _, _ = run_cmd(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+def delete_local_branch(repo_root, branch, expected_sha):
+    if not branch or not expected_sha:
+        return False, "Branch and gated head SHA are required; no local branch removed."
+    code, actual_sha, _ = run_cmd(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
         check=False, cwd=repo_root,
     )
     if code != 0:
         return True, "Local branch already absent."
+    if actual_sha.strip() != expected_sha:
+        return False, (
+            f"Local branch {branch} now points to {actual_sha.strip() or 'unknown'}, not "
+            f"gated head {expected_sha}; left untouched."
+        )
     code, _, err = run_cmd(["git", "branch", "-D", branch], check=False, cwd=repo_root)
     if code == 0:
         return True, f"Deleted local branch {branch}."
     return False, f"Could not delete local branch {branch}: {err.strip()}"
 
 
-def delete_remote_branch(repo_root, branch):
+def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
+    if not branch or not expected_sha or not head_repo_slug:
+        return False, (
+            "Branch, gated head SHA, and head repository are required; "
+            "no remote branch removed."
+        )
+    base_repo_slug = get_repo_slug()
+    if not base_repo_slug:
+        return False, "Could not identify the base repository; no remote branch removed."
+    remote = (
+        "origin"
+        if head_repo_slug == base_repo_slug
+        else f"https://github.com/{head_repo_slug}.git"
+    )
     ref = f"refs/heads/{branch}"
     code, out, err = run_cmd(
-        ["git", "ls-remote", "--heads", "origin", ref], check=False, cwd=repo_root
+        ["git", "ls-remote", "--heads", remote, ref], check=False, cwd=repo_root
     )
     if code != 0:
-        return False, f"Could not inspect remote branch {branch}: {err.strip()}"
+        return False, f"Could not inspect {head_repo_slug} branch {branch}: {err.strip()}"
     if not out:
         return True, "Remote branch already absent."
+    actual_sha = out.split()[0] if out.split() else ""
+    if actual_sha != expected_sha:
+        return False, (
+            f"Remote branch {head_repo_slug}:{branch} now points to "
+            f"{actual_sha or 'unknown'}, not gated head {expected_sha}; left untouched."
+        )
     code, _, err = run_cmd(
-        ["git", "push", "origin", "--delete", branch], check=False, cwd=repo_root
+        ["git", "push", remote, "--delete", branch], check=False, cwd=repo_root
     )
     if code == 0:
-        return True, f"Deleted remote branch {branch}."
-    return False, f"Could not delete remote branch {branch}: {err.strip()}"
+        return True, f"Deleted remote branch {head_repo_slug}:{branch}."
+    return False, f"Could not delete remote branch {head_repo_slug}:{branch}: {err.strip()}"
 
 
 def ensure_issue_closed(issue_num):
@@ -495,11 +544,20 @@ def clear_review_claims(pr_num):
 
 def run_closeout(pr, issue_nums, repo_root):
     """Runs every idempotent close-out step, even after an earlier failure."""
+    try:
+        os.chdir(repo_root)
+    except OSError as exc:
+        print(f"\n=== Post-merge close-out ===\n  ❌ working directory  {exc}")
+        return False
     branch = pr.get("headRefName") or ""
+    expected_sha = pr.get("headRefOid") or ""
+    head_repo_slug = head_repository_slug(pr)
     steps = [
-        ("worktree", lambda: prune_worktree(repo_root, branch)),
-        ("local branch", lambda: delete_local_branch(repo_root, branch)),
-        ("remote branch", lambda: delete_remote_branch(repo_root, branch)),
+        ("worktree", lambda: prune_worktree(repo_root, branch, expected_sha)),
+        ("local branch", lambda: delete_local_branch(repo_root, branch, expected_sha)),
+        ("remote branch", lambda: delete_remote_branch(
+            repo_root, branch, expected_sha, head_repo_slug
+        )),
     ]
     for num in issue_nums:
         steps.extend([

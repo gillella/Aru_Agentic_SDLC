@@ -366,6 +366,8 @@ def merged_pr():
         "mergeCommit": {"oid": "merge-sha"},
         "headRefName": "fix/issue-7-example",
         "headRefOid": "gated-sha",
+        "headRepository": {"name": "repo", "nameWithOwner": "owner/repo"},
+        "headRepositoryOwner": {"login": "owner"},
     }
 
 
@@ -413,13 +415,14 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "delete_remote_branch", return_value=(False, "delete failed"))
     @patch.object(merge_pr, "delete_local_branch", return_value=(True, "local deleted"))
     @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree pruned"))
+    @patch.object(merge_pr.os, "chdir")
     @patch.object(merge_pr, "repository_root", return_value="/repo")
     @patch.object(merge_pr, "execute_merge", return_value=(merged_pr(), "merged"))
     @patch.object(merge_pr, "unresolved_threads", return_value=0)
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
     def test_successful_merge_with_branch_delete_failure_is_resumable(
-        self, fetch, _json, _threads, execute, _root, _prune, _local,
+        self, fetch, _json, _threads, execute, _root, _chdir, _prune, _local,
         _remote, _close, _done, _issue_claim, _review_claim,
     ):
         fetch.return_value = {
@@ -469,7 +472,8 @@ class CloseOutRecoveryTests(unittest.TestCase):
         }
         mocks = {name: item.start() for name, item in patches.items()}
         try:
-            ok = merge_pr.run_closeout(merged_pr(), [7], "/repo")
+            with patch.object(merge_pr.os, "chdir"):
+                ok = merge_pr.run_closeout(merged_pr(), [7], "/repo")
         finally:
             for item in patches.values():
                 item.stop()
@@ -495,27 +499,111 @@ class CloseOutRecoveryTests(unittest.TestCase):
         mocks["clear_issue_claims"].assert_called_once_with(7)
         mocks["clear_review_claims"].assert_called_once_with(9)
 
+    @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
+    @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
+    @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
+    @patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed"))
+    @patch.object(merge_pr, "delete_remote_branch", return_value=(True, "remote"))
+    @patch.object(merge_pr, "delete_local_branch", return_value=(True, "local"))
+    @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree"))
+    @patch.object(merge_pr.os, "chdir")
+    def test_changes_to_surviving_root_before_pruning_caller_worktree(
+        self, chdir, prune, _local, _remote, _close, _done, _issue, _review
+    ):
+        def after_chdir(*_args):
+            chdir.assert_called_once_with("/repo")
+            return True, "worktree"
+
+        prune.side_effect = after_chdir
+        self.assertTrue(merge_pr.run_closeout(merged_pr(), [7], "/repo"))
+        chdir.assert_called_once_with("/repo")
+
 
 class IdempotentCloseOutStepTests(unittest.TestCase):
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "run_cmd", return_value=(0, "", ""))
-    def test_absent_remote_branch_is_already_done(self, run):
-        ok, message = merge_pr.delete_remote_branch("/repo", "fix/issue-7-x")
+    def test_absent_remote_branch_is_already_done(self, run, _slug):
+        ok, message = merge_pr.delete_remote_branch(
+            "/repo", "fix/issue-7-x", "gated-sha", "owner/repo"
+        )
         self.assertTrue(ok)
         self.assertIn("already absent", message)
         self.assertEqual(run.call_count, 1)
 
     @patch.object(merge_pr, "run_cmd", return_value=(1, "", "missing"))
     def test_absent_local_branch_is_already_done(self, run):
-        ok, message = merge_pr.delete_local_branch("/repo", "fix/issue-7-x")
+        ok, message = merge_pr.delete_local_branch(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
         self.assertTrue(ok)
         self.assertIn("already absent", message)
         self.assertEqual(run.call_count, 1)
 
     @patch.object(merge_pr, "run_cmd", return_value=(0, "worktree /repo\nbranch refs/heads/main\n", ""))
     def test_absent_issue_worktree_is_already_done(self, _run):
-        ok, message = merge_pr.prune_worktree("/repo", "fix/issue-7-x")
+        ok, message = merge_pr.prune_worktree(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
         self.assertTrue(ok)
         self.assertIn("already absent", message)
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_prefix_branch_worktree_is_not_selected(self, run):
+        run.return_value = (
+            0,
+            "worktree /repo/.worktrees/fix-xyz\n"
+            "HEAD other-sha\n"
+            "branch refs/heads/fix/xyz\n",
+            "",
+        )
+        ok, message = merge_pr.prune_worktree("/repo", "fix/x", "gated-sha")
+        self.assertTrue(ok)
+        self.assertIn("already absent", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_empty_branch_fails_closed_without_git_mutation(self, run):
+        ok, message = merge_pr.prune_worktree("/repo", "", "gated-sha")
+        self.assertFalse(ok)
+        self.assertIn("required", message)
+        run.assert_not_called()
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_reused_worktree_branch_at_new_sha_is_preserved(self, run):
+        run.return_value = (
+            0,
+            "worktree /repo/.worktrees/reused\n"
+            "HEAD new-sha\n"
+            "branch refs/heads/fix/issue-7-x\n",
+            "",
+        )
+        ok, message = merge_pr.prune_worktree(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertFalse(ok)
+        self.assertIn("left untouched", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "run_cmd", return_value=(0, "new-sha\n", ""))
+    def test_reused_local_branch_at_new_sha_is_preserved(self, run):
+        ok, message = merge_pr.delete_local_branch(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertFalse(ok)
+        self.assertIn("left untouched", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/base")
+    @patch.object(merge_pr, "run_cmd", return_value=(0, "new-sha\trefs/heads/fix/x\n", ""))
+    def test_reused_fork_branch_at_new_sha_is_preserved(self, run, _slug):
+        ok, message = merge_pr.delete_remote_branch(
+            "/repo", "fix/x", "gated-sha", "contributor/fork"
+        )
+        self.assertFalse(ok)
+        self.assertIn("left untouched", message)
+        command = run.call_args.args[0]
+        self.assertIn("https://github.com/contributor/fork.git", command)
+        self.assertEqual(run.call_count, 1)
 
     @patch.object(merge_pr, "_gh_json", return_value={"state": "CLOSED"})
     def test_closed_issue_is_already_done(self, _gh):
