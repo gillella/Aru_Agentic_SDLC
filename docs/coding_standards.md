@@ -34,4 +34,4 @@ All git commit messages MUST follow Conventional Commits formatting:
 2. **Zero Masked Errors**:
    Never resolve failures by swallowing exceptions, adding dummy fallbacks, or deleting failing assertions. Always address the root cause.
 3. **CI Pipeline Gatekeeper**:
-   No code is merged without passing automated CI runs. If CI fails, inspect logs using `scripts/check_ci.py` and submit fix commits.
+   No code is merged without passing automated CI runs. If CI fails, inspect logs using `python3 "$ARU_SDLC_HOME/scripts/check_ci.py"` and submit fix commits.

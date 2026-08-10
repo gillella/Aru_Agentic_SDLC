@@ -132,5 +132,45 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertIn('name:"Sprint"', mutations)
 
 
+class CursorProjectRuleTests(unittest.TestCase):
+    """The don't-clobber guarantee is the whole point of this function.
+
+    A sibling installer shipped a branch that rm -rf'd a user's own skill
+    directory while claiming not to, so the equivalent path here is pinned by
+    a test rather than by a comment.
+    """
+
+    def test_rule_is_written_into_a_fresh_repo(self):
+        with tempfile.TemporaryDirectory() as target:
+            init_project.create_cursor_project_rule(target)
+
+            rule = Path(target) / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
+            self.assertTrue(rule.is_file())
+            self.assertIn("alwaysApply: true", rule.read_text())
+
+    def test_an_existing_rule_is_left_untouched(self):
+        with tempfile.TemporaryDirectory() as target:
+            rule = Path(target) / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
+            rule.parent.mkdir(parents=True)
+            rule.write_text("MY HAND-EDITED RULE")
+
+            init_project.create_cursor_project_rule(target)
+
+            self.assertEqual(rule.read_text(), "MY HAND-EDITED RULE")
+
+    def test_fallback_is_written_when_the_template_is_missing(self):
+        with tempfile.TemporaryDirectory() as target, \
+                tempfile.TemporaryDirectory() as empty_home:
+            # A partial checkout has no templates/ tree; the rule must still
+            # land, since a bootstrapped repo with no governance rule is worse
+            # than one with a terse fallback.
+            with patch.dict(os.environ, {"ARU_SDLC_HOME": empty_home}):
+                init_project.create_cursor_project_rule(target)
+
+            rule = Path(target) / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
+            self.assertTrue(rule.is_file())
+            self.assertIn("Issue-First Law", rule.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,36 @@
+---
+description: Aru_Agentic_SDLC Issue-First governance for this repository
+alwaysApply: true
+---
+
+# Aru Agentic SDLC (project rule)
+
+This repository is governed by **Aru_Agentic_SDLC**.
+
+## Before any code change
+
+1. Confirm work originates from a tracked GitHub issue (Issue-First Law).
+2. Read and follow the matching skill under `$ARU_SDLC_HOME/skills/`:
+   - `implement-next-issue` — claim/implement/PR
+   - `create-github-issue` — file work
+   - `code-review` — review a PR
+   - `remediate-ci-failure` — fix red CI
+   - `address-pr-feedback` — resolve review threads
+   - `init-agent-project` — bootstrap a new governed repo
+3. Prefer `python3 "$ARU_SDLC_HOME/scripts/<tool>.py"` over ad-hoc GitHub/git glue.
+
+## Hard constraints
+
+- No direct pushes to `main` / `master`
+- Feature and review work runs in `.worktrees/`
+- Local tests must pass before commit/push
+- Every PR body includes `Closes #<issue_number>`
+- Resume in-flight issues for this agent id before claiming new work
+
+## Issue body contract
+
+```
+depends-on: #12, #14
+parallel-eligible: true
+touches: src/**, tests/**
+```

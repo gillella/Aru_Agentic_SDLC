@@ -1,6 +1,6 @@
 ---
 name: implement-next-issue
-description: Workflow for claiming the next actionable GitHub issue in progressive order, managing session context recovery, building in isolated git worktrees, running tests, submitting PRs, monitoring CI, and requesting review.
+description: Claims the next actionable GitHub issue under Aru_Agentic_SDLC, recovers session state, implements in an isolated git worktree, runs tests, opens a PR with Closes #N, and monitors CI. Use when the user says implement next issue, pick up issue, work on backlog, start next task, or continue SDLC work.
 triggers:
   - "implement next issue"
   - "work on backlog"

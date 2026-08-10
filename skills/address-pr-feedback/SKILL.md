@@ -1,6 +1,6 @@
 ---
 name: address-pr-feedback
-description: Procedure for fetching inline PR review comments, converting reviewer feedback into a checklist, applying fixes, and replying to comments.
+description: Fetches unresolved PR review comments, builds a fix checklist, implements changes in the branch worktree, replies with commit hashes, and resolves threads. Use when the user says address PR feedback, fix reviewer comments, resolve PR review, or update PR from feedback.
 triggers:
   - "address PR feedback"
   - "fix reviewer comments"
@@ -20,7 +20,7 @@ This skill dictates the procedure for processing human developer or peer agent r
 ## Procedure Steps
 
 ### Step 1: Fetch Inline PR Comments & Build Checklist
-1. Fetch all unresolved inline PR comments using `python3 scripts/fetch_pr_feedback.py --pr <PR_ID>`.
+1. Fetch all unresolved inline PR comments using `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <PR_ID>`.
 2. Compile a Markdown task checklist mapping each comment to file location, line number, and requested change.
 
 ### Step 2: Implement Fixes in Branch Worktree

@@ -1,6 +1,6 @@
 ---
 name: init-agent-project
-description: Scaffolds a new agentic project repository enforcing the Issue-First Law, project-specific AGENTS.md governance, standardized directory layout, GitHub Actions CI/CD workflows, private GitHub repository setup, and multi-view GitHub Project boards.
+description: Bootstraps a new repository under Aru_Agentic_SDLC with AGENTS.md, CI, issue/PR templates, governance labels, and a multi-view GitHub Project board. Use when the user says init project, bootstrap repo, initialize agent project, or create a new agentic repository.
 triggers:
   - "init project"
   - "bootstrap repo"
@@ -65,7 +65,7 @@ flowchart TD
 1. Initialize git on default branch `main`: `git init -b main`.
 2. Create `.gitignore` tailored to the chosen tech stack.
 3. Create private GitHub repository via helper script:
-   `python3 scripts/init_project.py --name <NAME> --private`
+   `python3 "$ARU_SDLC_HOME/scripts/init_project.py" --name <NAME> --private`
 
 ### Step 6: Provision Multi-View GitHub Project Board
 1. Create a GitHub Project v2 linked to the repository:

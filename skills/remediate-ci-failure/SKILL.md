@@ -1,6 +1,6 @@
 ---
 name: remediate-ci-failure
-description: Procedure for fetching automated CI build/test failure logs, classifying root cause categories, applying targeted code fixes, and verifying resolution.
+description: Diagnoses failing GitHub Actions or CI runs from full logs, classifies the failure, applies a minimal fix in the worktree, and re-polls until green. Use when the user says fix CI failure, remediate broken build, debug CI run, or fix failing tests on PR.
 triggers:
   - "fix CI failure"
   - "remediate broken build"
@@ -20,7 +20,7 @@ This skill provides a structured failure diagnosis protocol for inspecting and f
 ## Remediation Workflow
 
 ### Step 1: Fetch Un-truncated CI Failure Logs
-1. Execute `python3 scripts/check_ci.py --pr <PR_ID>` to retrieve failing check run details.
+1. Execute `python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr <PR_ID>` to retrieve failing check run details.
 2. Fetch the full, un-truncated build log from the failed step using `gh run view --log-failed`.
 3. Do NOT hypothesize root cause without empirical log evidence.
 

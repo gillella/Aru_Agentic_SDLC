@@ -107,7 +107,9 @@ All AI agents operating within this repository MUST follow the directives, skill
 ## 🎯 Primary Directives for AI Agents
 
 1. **Execute via SkillsMP Skills** (in `$ARU_SDLC_HOME/skills/`):
+   - Router: `aru-agentic-sdlc/SKILL.md`
    - Primary Skill: `implement-next-issue/SKILL.md`
+   - Issue Creation: `create-github-issue/SKILL.md`
    - Code Review Skill: `code-review/SKILL.md`
    - CI Failure Remediation: `remediate-ci-failure/SKILL.md`
    - PR Review Feedback: `address-pr-feedback/SKILL.md`
@@ -117,6 +119,9 @@ All AI agents operating within this repository MUST follow the directives, skill
    - Run `{test_runner}` and confirm all tests pass before committing.
 4. **Mandatory Issue Linking**:
    - Every Pull Request MUST include `Closes #<issue_number>` in its body.
+5. **Cursor**: Prefer installed personal skills / slash commands from the
+   machine-level Cursor integration (`docs/cursor-integration.md` in
+   `$ARU_SDLC_HOME`). Do not vendor a second copy of SDLC skills into this repo.
 
 ---
 
@@ -294,6 +299,7 @@ def scaffold_directory_structure(target_dir: str):
         "docs",
         ".github/workflows",
         ".github/ISSUE_TEMPLATE",
+        ".cursor/rules",
     ]
     for d in dirs:
         path = os.path.join(target_dir, d)
@@ -303,6 +309,37 @@ def scaffold_directory_structure(target_dir: str):
             if not os.listdir(path):
                 open(keep, "a").close()
     print("✅ Standard directory structure scaffolded.")
+
+
+def create_cursor_project_rule(target_dir: str):
+    """Install the always-apply Cursor project rule pointing at $ARU_SDLC_HOME."""
+    sdlc_home = os.environ.get(
+        "ARU_SDLC_HOME",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+    )
+    template = os.path.join(
+        sdlc_home, "templates", "cursor", "rules", "aru-agentic-sdlc.mdc"
+    )
+    dest_dir = os.path.join(target_dir, ".cursor", "rules")
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, "aru-agentic-sdlc.mdc")
+    if os.path.exists(dest):
+        print("[INFO] .cursor/rules/aru-agentic-sdlc.mdc already exists; left untouched.")
+        return
+    if os.path.isfile(template):
+        with open(template, "r", encoding="utf-8") as src, open(dest, "w", encoding="utf-8") as out:
+            out.write(src.read())
+    else:
+        # Fallback if templates are missing from a partial checkout.
+        with open(dest, "w", encoding="utf-8") as out:
+            out.write(
+                "---\n"
+                "description: Aru_Agentic_SDLC Issue-First governance for this repository\n"
+                "alwaysApply: true\n"
+                "---\n\n"
+                "Follow `$ARU_SDLC_HOME/skills/` (Issue-First Law, worktrees, Closes #N).\n"
+            )
+    print("✅ Cursor project rule written to .cursor/rules/aru-agentic-sdlc.mdc")
 
 
 def create_gitignore(target_dir: str, stack: str = "python"):
@@ -796,6 +833,7 @@ def main():
     scaffold_directory_structure(target)
     create_gitignore(target, args.stack)
     create_agents_md(target, args.name, test_runner, args.stack)
+    create_cursor_project_rule(target)
     write_ci_workflow(target, test_runner, args.stack)
     write_templates(target)
     if not init_git_repo(target) or not initial_commit(target, args.name):

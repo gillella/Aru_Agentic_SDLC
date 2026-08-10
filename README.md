@@ -28,30 +28,28 @@ Aru_Agentic_SDLC/
 │   └── workflows/
 │       └── ci.yml                   # Built-in GitHub Actions CI pipeline template
 ├── skills/                          # SkillsMP-compliant markdown skills
-│   ├── init-agent-project/
-│   │   └── SKILL.md                 # NEW: Bootstrap repo, AGENTS.md, CI workflow & Multi-view Project Board
-│   ├── implement-next-issue/
-│   │   └── SKILL.md                 # Primary workflow: Session recovery -> Next Issue -> Worktree -> Implementation -> PR -> CI
-│   ├── code-review/
-│   │   └── SKILL.md                 # Code review & security audit procedure (with Worktree isolation)
-│   ├── create-github-issue/
-│   │   └── SKILL.md                 # Structured issue creation workflow
-│   ├── remediate-ci-failure/
-│   │   └── SKILL.md                 # Structured CI log parsing & targeted failure remediation loop
-│   └── address-pr-feedback/
-│       └── SKILL.md                 # Fetch inline PR review comments, build checklist, resolve & reply
+│   ├── aru-agentic-sdlc/            # Cursor router skill — pick the right procedure
+│   ├── init-agent-project/          # Bootstrap repo, AGENTS.md, CI & Project Board
+│   ├── implement-next-issue/        # Primary: claim → worktree → implement → PR → CI
+│   ├── code-review/                 # PR review in an isolated worktree
+│   ├── create-github-issue/         # Structured issue creation
+│   ├── remediate-ci-failure/        # CI log parse & fix loop
+│   └── address-pr-feedback/         # Resolve review threads
 ├── scripts/                         # Reusable GitHub helper automation tools
+│   ├── install_cursor_integration.sh # Wire skills/commands/env into local Cursor
 │   ├── common.py                    # Shared Git / Worktree / GitHub API / gh CLI helpers
-│   ├── init_project.py              # NEW: Bootstraps AGENTS.md, .gitignore, CI workflow, private repo & multi-view project board
-│   ├── fetch_next_issue.py          # Identifies next unblocked issue respecting dependencies
-│   ├── fetch_pr_feedback.py         # Fetches inline PR comments into actionable task list
+│   ├── init_project.py              # Bootstraps AGENTS.md, CI, private repo & board
+│   ├── fetch_next_issue.py          # Next unblocked issue respecting dependencies
+│   ├── fetch_pr_feedback.py         # Inline PR comments → checklist
 │   ├── claim_issue.py               # Assigns issue & updates board status
-│   ├── create_branch.py             # Creates standardized feature branch or worktree
+│   ├── create_branch.py             # Feature branch or worktree
 │   ├── create_pr.py                 # Opens PR linking 'Closes #X'
-│   ├── check_ci.py                  # Polls and verifies CI build status
-│   └── update_issue_status.py       # Manages board status transitions
+│   ├── check_ci.py                  # Polls CI status
+│   └── update_issue_status.py       # Board status transitions
+├── templates/cursor/                # Cursor User Rules, project rules, slash commands
 └── docs/
-    ├── project_board_workflow.md    # Issue lifecycle, dependencies, worktrees & multi-view board standards
+    ├── cursor-integration.md        # Cross-project Cursor setup
+    ├── project_board_workflow.md    # Board, dependencies, worktrees
     └── coding_standards.md          # Commit hygiene & testing standards
 ```
 
@@ -61,8 +59,29 @@ Aru_Agentic_SDLC/
 
 1. **Bootstrap New Project**: Run `skills/init-agent-project/SKILL.md` or `python3 scripts/init_project.py --name <NAME> --create-board`.
 2. **Read `AGENTS.md`**: Understand repository guardrails, worktree isolation rules, and the Issue-First Law.
-3. **Execute Primary Skill**: Follow [`skills/implement-next-issue/SKILL.md`](file:///Users/aravindgillella/projects/Aru_Agentic_SDLC/skills/implement-next-issue/SKILL.md) to inspect session state, pick the next actionable issue, create a clean worktree, and execute the implementation lifecycle.
-4. **Use Helper Tools**: Execute GitHub operations via `python3 scripts/<script_name>.py`.
+3. **Execute Primary Skill**: Follow [`skills/implement-next-issue/SKILL.md`](skills/implement-next-issue/SKILL.md) to inspect session state, pick the next actionable issue, create a clean worktree, and execute the implementation lifecycle.
+4. **Use Helper Tools**: Execute GitHub operations via `python3 "$ARU_SDLC_HOME/scripts/<script_name>.py"`.
+
+---
+
+## 🖥️ Use from Cursor across all projects
+
+One-time machine setup:
+
+```bash
+./scripts/install_cursor_integration.sh
+```
+
+Then paste `templates/cursor/user-rules-aru-agentic-sdlc.md` into
+**Cursor → Customize → Rules → User Rules**, and open a new Agent chat.
+
+That installs:
+
+- `ARU_SDLC_HOME` in your shell profile
+- Symlinked Agent Skills for every SDLC procedure
+- Slash commands (`/implement-next-issue`, `/init-agent-project`, …)
+
+Details: [`docs/cursor-integration.md`](docs/cursor-integration.md).
 
 ---
 
