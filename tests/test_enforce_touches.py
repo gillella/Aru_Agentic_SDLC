@@ -116,6 +116,18 @@ class RedirectDetectionTests(unittest.TestCase):
         self.assertIn("out.txt", et._redirect_targets("echo hi >out.txt"))
         self.assertIn("err.log", et._redirect_targets("cmd 2> err.log"))
 
+    def test_operator_glued_to_the_preceding_word_is_still_a_write(self):
+        """No token starts with the operator here, yet all three write.
+
+        A lexer without punctuation_chars leaves 'hi>out.txt' whole and the
+        write vanishes. That is the dangerous direction: a missed write lets
+        an agent edit outside its declaration, which is the whole point of
+        the hook.
+        """
+        self.assertIn("out.txt", et._redirect_targets("echo hi>out.txt"))
+        self.assertIn("out.txt", et._redirect_targets("echo hi>>out.txt"))
+        self.assertIn("out.txt", et._redirect_targets("echo hi &> out.txt"))
+
     def test_quoted_target_containing_a_space_is_read_whole(self):
         # The old character-class scan stopped at the space and reported '"my'.
         self.assertEqual(et._redirect_targets('echo hi > "my file.txt"'), ["my file.txt"])
@@ -156,6 +168,28 @@ class RedirectFalsePositiveTests(unittest.TestCase):
         # heredoc terminator and the hook reported a write to 'EOF'.
         command = "git commit -F - <<'EOF'\nsubject\n\n" + self.TRAILER + "\nEOF"
         self.assertEqual(et._redirect_targets(command), [])
+
+    def test_quoted_argument_beginning_with_the_operator_is_not_a_redirect(self):
+        """The operator is the first character *inside* the quotes.
+
+        Lexing with shlex.split was not enough: it discards quoting, so this
+        arrived as a token starting with '>' and was indistinguishable from a
+        real redirect. punctuation_chars keeps a genuine operator standalone,
+        so an operator with content attached can only have come from quotes.
+        """
+        self.assertEqual(et._redirect_targets('git commit -m "> fix parser"'), [])
+        self.assertEqual(et._redirect_targets('git commit -m ">"'), [])
+        self.assertEqual(et._redirect_targets('echo ">> appending"'), [])
+
+    def test_heredoc_body_is_data_but_a_redirect_beside_it_still_counts(self):
+        """Stripping the body must not swallow the rest of the opener line.
+
+        A first attempt consumed from the delimiter to the terminator, which
+        hid the `> out.txt` in `cat <<'EOF' > out.txt` - turning a fix for
+        false positives into a false negative, the more dangerous direction.
+        """
+        command = "cat <<'EOF' > out.txt\nbody line\nEOF"
+        self.assertEqual(et._redirect_targets(command), ["out.txt"])
 
     def test_unlexable_command_fails_open(self):
         # Unbalanced quotes must not block; the contract is fail-open.

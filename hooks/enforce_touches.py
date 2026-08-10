@@ -242,18 +242,55 @@ def _git_write_to_protected(command, branch):
     return None
 
 
-# A redirect token: optional fd, the operator, and any target stuck to it.
-# `>f`, `>>f`, `2>f` all write; `2>&1` and `>&2` only duplicate a descriptor.
-_REDIRECT_TOKEN = re.compile(r"^(?P<fd>\d*)(?P<op>>>?)(?P<rest>.*)$", re.DOTALL)
+# Operators that create or truncate a file. The fd, when written, lexes as its
+# own token ahead of these, so `2> log` arrives as ['2', '>', 'log'].
+_WRITE_OPS = frozenset({">", ">>", "&>", "&>>"})
+# Descriptor duplication: `2>&1`, `>&2`. Rebinds a descriptor, writes nothing.
+_DUP_OPS = frozenset({">&", ">>&"})
+
+
+# A heredoc and its body: `<<EOF`, `<<'EOF'`, `<<-EOF`, terminated by a line
+# holding just the delimiter (or by end of input, for a truncated command).
+# `rest` is whatever follows the opener on the same line and is deliberately
+# kept: real redirects live there, as in `cat <<'EOF' > out.txt`. The body
+# only begins at the newline.
+_HEREDOC = re.compile(
+    r"<<-?[ \t]*(?P<q>['\"]?)(?P<delim>\w+)(?P=q)(?P<rest>[^\n]*)\n"
+    r"(?P<body>.*?)(?:^[ \t]*(?P=delim)[ \t]*$|\Z)",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def _strip_heredocs(command):
+    """Removes heredoc bodies, which are data rather than shell syntax.
+
+    shlex has no notion of a heredoc, so the body is lexed as if it were part
+    of the command. A commit message passed this way is ordinary prose, and
+    the '>' closing the address in a Co-Authored-By trailer would otherwise
+    lex as a real redirect operator whose target is the heredoc terminator.
+
+    The remainder of the opener line survives, so a genuine redirect sitting
+    beside the heredoc is still seen. Dropping it would trade this module's
+    false positives for a false negative, which is the worse failure.
+    """
+    return _HEREDOC.sub(lambda match: " " + match.group("rest") + " ", command or "")
 
 
 def _shell_tokens(command):
-    """Splits a command the way a shell would, or None if it cannot.
+    """Lexes a command the way a shell would, or None if it cannot.
 
-    Quoting is the whole point. A regex cannot tell `> out.txt` from the `>`
-    inside `-m "if x > y"`, and the previous implementation could not either:
-    it read arrows, comparisons, and the `<email>` in a Co-Authored-By trailer
-    as redirects and blocked commits that wrote nothing.
+    ``punctuation_chars=True`` is load-bearing twice over, and plain
+    ``shlex.split`` is wrong on both counts:
+
+    * It emits an unquoted operator as its own token even when glued to the
+      previous word, so ``echo hi>out.txt`` yields ['echo', 'hi', '>',
+      'out.txt']. ``shlex.split`` leaves 'hi>out.txt' whole and the write
+      disappears - a false negative that would let an agent write outside its
+      declaration.
+    * It leaves quoted text as a single token, so ``-m "> fix parser"`` never
+      produces a bare operator. ``shlex.split`` discards that distinction and
+      hands back a token starting with '>', which is indistinguishable from a
+      real redirect and blocks prose.
 
     Returns None when the command does not lex - unbalanced quotes, an
     interrupted heredoc. That is deliberately fail-open, matching this
@@ -262,12 +299,12 @@ def _shell_tokens(command):
     """
     if not command:
         return None
-    for posix in (True, False):
-        try:
-            return shlex.split(command, comments=False, posix=posix)
-        except ValueError:
-            continue
-    return None
+    lexer = shlex.shlex(_strip_heredocs(command), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
 
 
 def _redirect_targets(command):
@@ -283,15 +320,13 @@ def _redirect_targets(command):
 
     found = []
     for index, token in enumerate(tokens):
-        match = _REDIRECT_TOKEN.match(token)
-        if match:
-            rest = match.group("rest")
-            # `2>&1` duplicates a descriptor; nothing is created on disk.
-            if rest.startswith("&"):
-                continue
-            if rest:
-                found.append(rest)
-            elif index + 1 < len(tokens):
+        # Exact match only. A token that merely *starts* with an operator came
+        # from inside quotes - the lexer emits real operators standalone - so
+        # treating it as a redirect is what blocked `-m "> fix parser"`.
+        if token in _DUP_OPS:
+            continue
+        if token in _WRITE_OPS:
+            if index + 1 < len(tokens):
                 found.append(tokens[index + 1])
             continue
 
