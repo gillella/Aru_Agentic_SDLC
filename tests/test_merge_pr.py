@@ -1,4 +1,6 @@
 import sys
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -516,6 +518,15 @@ class CloseOutRecoveryTests(unittest.TestCase):
 
 
 class IdempotentCloseOutStepTests(unittest.TestCase):
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "run_cmd", return_value=(0, "", ""))
     def test_absent_remote_branch_is_already_done(self, run, _slug):
@@ -589,6 +600,25 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         self.assertIn("left untouched", message)
         self.assertEqual(run.call_count, 1)
 
+    @patch.object(merge_pr, "run_cmd")
+    def test_local_branch_moved_after_observation_survives_atomic_delete(self, run):
+        run.side_effect = [
+            (0, "gated-sha\n", ""),
+            (1, "", "cannot lock ref: is at new-sha but expected gated-sha"),
+        ]
+        ok, message = merge_pr.delete_local_branch(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertFalse(ok)
+        self.assertIn("atomically", message)
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [
+                "git", "update-ref", "-d", "refs/heads/fix/issue-7-x",
+                "gated-sha",
+            ],
+        )
+
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/base")
     @patch.object(merge_pr, "run_cmd", return_value=(0, "new-sha\trefs/heads/fix/x\n", ""))
     def test_reused_fork_branch_at_new_sha_is_preserved(self, run, _slug):
@@ -600,6 +630,111 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("https://github.com/contributor/fork.git", command)
         self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "run_cmd")
+    def test_remote_branch_moved_after_observation_survives_lease_delete(
+        self, run, _slug
+    ):
+        run.side_effect = [
+            (0, "gated-sha\trefs/heads/fix/x\n", ""),
+            (1, "", "stale info"),
+        ]
+        ok, message = merge_pr.delete_remote_branch(
+            "/repo", "fix/x", "gated-sha", "owner/repo"
+        )
+        self.assertFalse(ok)
+        self.assertIn("atomically", message)
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [
+                "git", "push",
+                "--force-with-lease=refs/heads/fix/x:gated-sha",
+                "origin", ":refs/heads/fix/x",
+            ],
+        )
+
+    def test_real_local_ref_replacement_survives_compare_and_delete_race(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            self._git(directory, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            self._git(repo, "commit", "--allow-empty", "-m", "old")
+            old_sha = self._git(repo, "rev-parse", "HEAD")
+            branch = "fix/race"
+            self._git(repo, "branch", branch, old_sha)
+            self._git(repo, "commit", "--allow-empty", "-m", "replacement")
+            replacement_sha = self._git(repo, "rev-parse", "HEAD")
+
+            real_run_cmd = merge_pr.run_cmd
+            raced = False
+
+            def inject_replacement(command, **kwargs):
+                nonlocal raced
+                if command[:4] == ["git", "update-ref", "-d", f"refs/heads/{branch}"]:
+                    self._git(repo, "update-ref", f"refs/heads/{branch}", replacement_sha)
+                    raced = True
+                return real_run_cmd(command, **kwargs)
+
+            with patch.object(merge_pr, "run_cmd", side_effect=inject_replacement):
+                ok, message = merge_pr.delete_local_branch(repo, branch, old_sha)
+
+            self.assertTrue(raced)
+            self.assertFalse(ok)
+            self.assertIn("atomically", message)
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"),
+                replacement_sha,
+            )
+
+    def test_real_remote_ref_replacement_survives_lease_delete_race(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin = root / "origin.git"
+            repo = root / "repo"
+            self._git(root, "init", "--bare", "--initial-branch=main", str(origin))
+            self._git(root, "clone", str(origin), str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            self._git(repo, "commit", "--allow-empty", "-m", "old")
+            old_sha = self._git(repo, "rev-parse", "HEAD")
+            branch = "fix/race"
+            self._git(repo, "push", "origin", f"{old_sha}:refs/heads/{branch}")
+            self._git(repo, "commit", "--allow-empty", "-m", "replacement")
+            replacement_sha = self._git(repo, "rev-parse", "HEAD")
+            self._git(repo, "push", "origin", "main")
+
+            real_run_cmd = merge_pr.run_cmd
+            raced = False
+
+            def inject_replacement(command, **kwargs):
+                nonlocal raced
+                if command[:2] == ["git", "push"] and any(
+                    item.startswith("--force-with-lease=") for item in command
+                ):
+                    self._git(
+                        repo, "push", "--force", "origin",
+                        f"{replacement_sha}:refs/heads/{branch}",
+                    )
+                    raced = True
+                return real_run_cmd(command, **kwargs)
+
+            with (
+                patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"),
+                patch.object(merge_pr, "run_cmd", side_effect=inject_replacement),
+            ):
+                ok, message = merge_pr.delete_remote_branch(
+                    repo, branch, old_sha, "owner/repo"
+                )
+
+            self.assertTrue(raced)
+            self.assertFalse(ok)
+            self.assertIn("atomically", message)
+            remote = self._git(
+                repo, "ls-remote", "--heads", "origin", f"refs/heads/{branch}"
+            )
+            self.assertEqual(remote.split()[0], replacement_sha)
 
     @patch.object(merge_pr, "_gh_json", return_value={"state": "CLOSED"})
     def test_closed_issue_is_already_done(self, _gh):
