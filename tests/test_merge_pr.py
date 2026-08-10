@@ -170,8 +170,11 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_commented_review_with_no_open_threads_passes(self):
-        # A bot review that left no unresolved threads still counts as a review.
-        ok, _ = merge_pr.check_reviews({"reviews": [{"state": "COMMENTED"}]}, 0)
+        # Same-account agents cannot APPROVE through GitHub, so their governed
+        # reviewed-by attribution remains the proof of completed peer review.
+        ok, _ = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2",
+                     reviews=[{"state": "COMMENTED"}]), 0)
         self.assertTrue(ok)
 
 
@@ -190,20 +193,34 @@ def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella")
 
 
 class ExternalReviewerTests(unittest.TestCase):
-    """A different GitHub account is proof enough on its own."""
+    """Only approving, non-automation external reviewers count on their own."""
 
-    def test_a_bot_review_counts_without_any_label(self):
-        # Codex and Bugbot post as their own apps and will never stamp
-        # reviewed-by:. Requiring the label would block every bot-reviewed PR.
+    def test_a_bot_review_is_advisory_without_any_label(self):
+        reviews = [{"state": "COMMENTED", "author": {
+            "login": "chatgpt-codex-connector"}}]
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", reviews=reviews), 0)
+        self.assertFalse(ok)
+        self.assertIn("chatgpt-codex-connector", msg)
+        self.assertIn("advisory", msg)
+
+    def test_a_bot_approval_is_still_advisory(self):
         ok, msg = merge_pr.check_reviews(
             labelled("author:agent-1", review_login="chatgpt-codex-connector"), 0)
-        self.assertTrue(ok)
-        self.assertIn("chatgpt-codex-connector", msg)
+        self.assertFalse(ok)
+        self.assertIn("advisory", msg)
 
-    def test_a_human_review_counts_without_any_label(self):
+    def test_an_external_approval_counts_without_any_label(self):
         ok, _ = merge_pr.check_reviews(
             labelled("author:agent-1", review_login="some-colleague"), 0)
         self.assertTrue(ok)
+
+    def test_an_external_comment_does_not_count_without_approval(self):
+        reviews = [{"state": "COMMENTED", "author": {"login": "some-colleague"}}]
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", reviews=reviews), 0)
+        self.assertFalse(ok)
+        self.assertIn("reviewed-by:", msg)
 
     def test_same_account_still_needs_the_labels(self):
         ok, msg = merge_pr.check_reviews(labelled("author:agent-1"), 0)
@@ -291,12 +308,29 @@ class ClaimIsNotAttestationTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("agent-2", msg)
 
-    def test_a_claim_alongside_completed_attribution_is_fine(self):
-        # Completion normally releases the claim, but a failed release must
-        # not block a merge the attribution has already earned.
-        ok, _ = merge_pr.check_reviews(
+    def test_a_claim_alongside_completed_attribution_still_blocks(self):
+        # A held claim is live queue ownership and must be released even if an
+        # earlier reviewer already completed a separate review.
+        ok, msg = merge_pr.check_reviews(
             labelled("author:agent-1", "reviewer:agent-2", "reviewed-by:agent-2"), 0)
-        self.assertTrue(ok)
+        self.assertFalse(ok)
+        self.assertIn("still in progress", msg)
+
+    def test_bot_comment_plus_peer_claim_blocks(self):
+        reviews = [{"state": "COMMENTED", "author": {
+            "login": "chatgpt-codex-connector"}}]
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewer:agent-2", reviews=reviews), 0)
+        self.assertFalse(ok)
+        self.assertIn("agent-2", msg)
+        self.assertIn("still in progress", msg)
+
+    def test_external_approval_plus_peer_claim_blocks(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewer:agent-2",
+                     review_login="some-colleague"), 0)
+        self.assertFalse(ok)
+        self.assertIn("agent-2", msg)
 
     def test_self_attribution_is_still_a_self_review(self):
         ok, msg = merge_pr.check_reviews(
