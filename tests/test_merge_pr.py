@@ -1,6 +1,8 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -348,6 +350,179 @@ class IssueLinkGateTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("#3", msg)
         self.assertIn("#4", msg)
+
+
+def merged_pr():
+    return {
+        "number": 9,
+        "title": "merged",
+        "body": "Closes #7",
+        "state": "MERGED",
+        "mergedAt": "2026-08-10T00:00:00Z",
+        "mergeCommit": {"oid": "merge-sha"},
+        "headRefName": "fix/issue-7-example",
+        "headRefOid": "gated-sha",
+    }
+
+
+class MergeExecutionRecoveryTests(unittest.TestCase):
+    @patch.object(merge_pr, "fetch_pr", return_value=merged_pr())
+    @patch.object(merge_pr.subprocess, "run")
+    def test_nonzero_merge_command_recovers_when_server_reports_merged(self, run, _fetch):
+        run.return_value = SimpleNamespace(returncode=1, stdout="", stderr="delete failed")
+        final, message = merge_pr.execute_merge(
+            9, {"headRefOid": "gated-sha"}, "squash"
+        )
+
+        self.assertEqual(final["state"], "MERGED")
+        self.assertIn("reports merged", message)
+        command = run.call_args.args[0]
+        self.assertNotIn("--delete-branch", command)
+        self.assertIn("--match-head-commit", command)
+
+    @patch.object(merge_pr, "fetch_pr", return_value={"state": "OPEN"})
+    @patch.object(merge_pr.subprocess, "run")
+    def test_nonzero_merge_command_distinguishes_not_merged(self, run, _fetch):
+        run.return_value = SimpleNamespace(returncode=1, stdout="", stderr="refused")
+        final, message = merge_pr.execute_merge(9, {"headRefOid": "sha"}, "squash")
+
+        self.assertIsNone(final)
+        self.assertIn("still reports OPEN", message)
+
+    @patch.object(merge_pr, "run_closeout", return_value=True)
+    @patch.object(merge_pr, "repository_root", return_value="/repo")
+    @patch.object(merge_pr, "execute_merge")
+    @patch.object(merge_pr, "fetch_pr", return_value=merged_pr())
+    def test_rerun_of_merged_pr_skips_second_merge(
+        self, _fetch, execute, _root, closeout
+    ):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+            self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
+
+        execute.assert_not_called()
+        closeout.assert_called_once()
+
+    @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
+    @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
+    @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
+    @patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed"))
+    @patch.object(merge_pr, "delete_remote_branch", return_value=(False, "delete failed"))
+    @patch.object(merge_pr, "delete_local_branch", return_value=(True, "local deleted"))
+    @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree pruned"))
+    @patch.object(merge_pr, "repository_root", return_value="/repo")
+    @patch.object(merge_pr, "execute_merge", return_value=(merged_pr(), "merged"))
+    @patch.object(merge_pr, "unresolved_threads", return_value=0)
+    @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_successful_merge_with_branch_delete_failure_is_resumable(
+        self, fetch, _json, _threads, execute, _root, _prune, _local,
+        _remote, _close, _done, _issue_claim, _review_claim,
+    ):
+        fetch.return_value = {
+            "number": 9,
+            "title": "open",
+            "body": "Closes #7",
+            "state": "OPEN",
+            "isDraft": False,
+            "headRefName": "fix/issue-7-example",
+            "headRefOid": "gated-sha",
+            "statusCheckRollup": [
+                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+            ],
+            "reviews": [{"state": "APPROVED", "author": {"login": "peer"}}],
+            "author": {"login": "author"},
+            "labels": [],
+            "mergeStateStatus": "CLEAN",
+            "mergeable": "MERGEABLE",
+            "additions": 2,
+            "deletions": 1,
+        }
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+            self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
+
+        execute.assert_called_once()
+        _close.assert_called_once_with(7)
+        _done.assert_called_once_with(7)
+        _issue_claim.assert_called_once_with(7)
+        _review_claim.assert_called_once_with(9)
+
+
+class CloseOutRecoveryTests(unittest.TestCase):
+    def _run(self, failing):
+        outcomes = {
+            "prune_worktree": (True, "worktree ok"),
+            "delete_local_branch": (True, "local ok"),
+            "delete_remote_branch": (True, "remote ok"),
+            "ensure_issue_closed": (True, "closed"),
+            "reconcile_issue_done": (True, "done"),
+            "clear_issue_claims": (True, "issue claim clear"),
+            "clear_review_claims": (True, "review claim clear"),
+        }
+        outcomes[failing] = (False, f"{failing} failed")
+        patches = {
+            name: patch.object(merge_pr, name, return_value=value)
+            for name, value in outcomes.items()
+        }
+        mocks = {name: item.start() for name, item in patches.items()}
+        try:
+            ok = merge_pr.run_closeout(merged_pr(), [7], "/repo")
+        finally:
+            for item in patches.values():
+                item.stop()
+        return ok, mocks
+
+    def test_merge_success_plus_remote_branch_failure_runs_remaining_closeout(self):
+        ok, mocks = self._run("delete_remote_branch")
+        self.assertFalse(ok)
+        mocks["ensure_issue_closed"].assert_called_once_with(7)
+        mocks["reconcile_issue_done"].assert_called_once_with(7)
+        mocks["clear_review_claims"].assert_called_once_with(9)
+
+    def test_worktree_failure_does_not_skip_branch_or_board_cleanup(self):
+        ok, mocks = self._run("prune_worktree")
+        self.assertFalse(ok)
+        mocks["delete_local_branch"].assert_called_once()
+        mocks["delete_remote_branch"].assert_called_once()
+        mocks["reconcile_issue_done"].assert_called_once_with(7)
+
+    def test_board_failure_does_not_skip_claim_cleanup(self):
+        ok, mocks = self._run("reconcile_issue_done")
+        self.assertFalse(ok)
+        mocks["clear_issue_claims"].assert_called_once_with(7)
+        mocks["clear_review_claims"].assert_called_once_with(9)
+
+
+class IdempotentCloseOutStepTests(unittest.TestCase):
+    @patch.object(merge_pr, "run_cmd", return_value=(0, "", ""))
+    def test_absent_remote_branch_is_already_done(self, run):
+        ok, message = merge_pr.delete_remote_branch("/repo", "fix/issue-7-x")
+        self.assertTrue(ok)
+        self.assertIn("already absent", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "run_cmd", return_value=(1, "", "missing"))
+    def test_absent_local_branch_is_already_done(self, run):
+        ok, message = merge_pr.delete_local_branch("/repo", "fix/issue-7-x")
+        self.assertTrue(ok)
+        self.assertIn("already absent", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "run_cmd", return_value=(0, "worktree /repo\nbranch refs/heads/main\n", ""))
+    def test_absent_issue_worktree_is_already_done(self, _run):
+        ok, message = merge_pr.prune_worktree("/repo", "fix/issue-7-x")
+        self.assertTrue(ok)
+        self.assertIn("already absent", message)
+
+    @patch.object(merge_pr, "_gh_json", return_value={"state": "CLOSED"})
+    def test_closed_issue_is_already_done(self, _gh):
+        ok, message = merge_pr.ensure_issue_closed(7)
+        self.assertTrue(ok)
+        self.assertIn("already closed", message)
+
+    @patch.object(merge_pr, "_gh_json", return_value={"labels": []})
+    def test_absent_claim_labels_are_already_done(self, _gh):
+        self.assertTrue(merge_pr.clear_issue_claims(7)[0])
+        self.assertTrue(merge_pr.clear_review_claims(9)[0])
 
 
 if __name__ == "__main__":
