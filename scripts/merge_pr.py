@@ -454,10 +454,18 @@ def delete_local_branch(repo_root, branch, expected_sha):
             f"Local branch {branch} now points to {actual_sha.strip() or 'unknown'}, not "
             f"gated head {expected_sha}; left untouched."
         )
-    code, _, err = run_cmd(["git", "branch", "-D", branch], check=False, cwd=repo_root)
+    ref = f"refs/heads/{branch}"
+    code, _, err = run_cmd(
+        ["git", "update-ref", "-d", ref, expected_sha],
+        check=False,
+        cwd=repo_root,
+    )
     if code == 0:
         return True, f"Deleted local branch {branch}."
-    return False, f"Could not delete local branch {branch}: {err.strip()}"
+    return False, (
+        f"Could not atomically delete local branch {branch}; it may have changed: "
+        f"{err.strip()}"
+    )
 
 
 def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
@@ -489,11 +497,19 @@ def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
             f"{actual_sha or 'unknown'}, not gated head {expected_sha}; left untouched."
         )
     code, _, err = run_cmd(
-        ["git", "push", remote, "--delete", branch], check=False, cwd=repo_root
+        [
+            "git", "push", f"--force-with-lease={ref}:{expected_sha}",
+            remote, f":{ref}",
+        ],
+        check=False,
+        cwd=repo_root,
     )
     if code == 0:
         return True, f"Deleted remote branch {head_repo_slug}:{branch}."
-    return False, f"Could not delete remote branch {head_repo_slug}:{branch}: {err.strip()}"
+    return False, (
+        f"Could not atomically delete remote branch {head_repo_slug}:{branch}; "
+        f"it may have changed: {err.strip()}"
+    )
 
 
 def ensure_issue_closed(issue_num):
