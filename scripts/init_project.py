@@ -152,6 +152,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, not just the tip. The default depth-1
+          # checkout would hide a secret that was committed and then removed
+          # in a later commit - the exact case worth catching.
+          fetch-depth: 0
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 """
 
 PYTHON_CI_STEPS = """
@@ -183,11 +193,34 @@ PYTHON_CI_STEPS = """
 
       - name: Tests
         run: |
-          if find tests -type f ! -name '.gitkeep' -print -quit 2>/dev/null | grep -q .; then
+          # Keyed on source, not on tests. Keying on tests is self-defeating:
+          # a repo with code and no tests takes the skip branch and reports
+          # green, which is exactly the state the gate exists to catch.
+          has_src=$(find src -type f -name '*.py' ! -name '.gitkeep' -print -quit 2>/dev/null)
+          # Both of pytest's default python_files patterns. Recognising only
+          # test_*.py would fail a project that names its suite *_test.py,
+          # which pytest collects and passes - the gate must not be narrower
+          # than the runner it is gating.
+          has_tests=$(find tests -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) -print -quit 2>/dev/null)
+          if [ -n "$has_tests" ]; then
             pip install pytest
             {test_runner}
+          elif [ -n "$has_src" ]; then
+            echo "::error::Source exists under src/ but no test_*.py was found under tests/."
+            exit 1
           else
-            echo "No tests present yet; skipping. This step becomes mandatory at first source commit."
+            echo "No source and no tests yet; nothing to verify."
+          fi
+
+      - name: Dependency audit
+        run: |
+          pip install pip-audit
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            pip-audit
+          else
+            echo "No dependency manifest yet; nothing to audit."
           fi
 """
 
@@ -214,10 +247,30 @@ NODE_CI_STEPS = """
 
       - name: Tests
         run: |
-          if [ -f package.json ]; then
+          # See the Python job: the gate keys on source, not on tests.
+          has_src=$(find src -type f \\( -name '*.js' -o -name '*.ts' -o -name '*.jsx' -o -name '*.tsx' \\) -print -quit 2>/dev/null)
+          # Jest's default testMatch covers __tests__/ as well as the
+          # .test./.spec. suffixes, so both count as a suite here. A gate
+          # narrower than the runner fails projects whose tests do run.
+          has_tests=$(find . -path ./node_modules -prune -o -type f \\( -name '*.test.*' -o -name '*.spec.*' \\) -print -quit 2>/dev/null)
+          if [ -z "$has_tests" ]; then
+            has_tests=$(find . -path ./node_modules -prune -o -type d -name '__tests__' -print -quit 2>/dev/null)
+          fi
+          if [ -n "$has_tests" ]; then
             {test_runner}
+          elif [ -n "$has_src" ]; then
+            echo "::error::Source exists under src/ but no *.test.* or *.spec.* file was found."
+            exit 1
           else
-            echo "No package.json present yet; skipping. This step becomes mandatory at first source commit."
+            echo "No source and no tests yet; nothing to verify."
+          fi
+
+      - name: Dependency audit
+        run: |
+          if [ -f package.json ]; then
+            npm audit --audit-level=high
+          else
+            echo "No package.json yet; nothing to audit."
           fi
 """
 
@@ -234,10 +287,25 @@ GO_CI_STEPS = """
 
       - name: Tests
         run: |
-          if [ -f go.mod ]; then
+          # See the Python job: the gate keys on source, not on tests.
+          has_src=$(find . -type f -name '*.go' ! -name '*_test.go' -print -quit 2>/dev/null)
+          has_tests=$(find . -type f -name '*_test.go' -print -quit 2>/dev/null)
+          if [ -n "$has_tests" ]; then
             {test_runner}
+          elif [ -n "$has_src" ]; then
+            echo "::error::Go source exists but no *_test.go was found."
+            exit 1
           else
-            echo "No go.mod present yet; skipping. This step becomes mandatory at first source commit."
+            echo "No source and no tests yet; nothing to verify."
+          fi
+
+      - name: Dependency audit
+        run: |
+          if [ -f go.mod ]; then
+            go install golang.org/x/vuln/cmd/govulncheck@latest
+            govulncheck ./...
+          else
+            echo "No go.mod yet; nothing to audit."
           fi
 """
 
