@@ -316,18 +316,14 @@ class RebaseGateTests(unittest.TestCase):
 
 
 class SizeGateTests(unittest.TestCase):
-    def test_oversized_diff_blocks_without_ack(self):
-        ok, msg = merge_pr.check_size({"additions": 800, "deletions": 100}, forced=False)
-        self.assertFalse(ok)
-        self.assertIn("force-human-review", msg)
-
-    def test_oversized_diff_passes_with_ack(self):
-        ok, msg = merge_pr.check_size({"additions": 800, "deletions": 100}, forced=True)
+    def test_oversized_diff_passes_with_visible_independent_review_warning(self):
+        ok, msg = merge_pr.check_size({"additions": 800, "deletions": 100})
         self.assertTrue(ok)
-        self.assertIn("waived", msg)
+        self.assertIn("soft limit", msg)
+        self.assertIn("Independent review remains mandatory", msg)
 
     def test_small_diff_passes(self):
-        self.assertTrue(merge_pr.check_size({"additions": 10, "deletions": 2}, forced=False)[0])
+        self.assertTrue(merge_pr.check_size({"additions": 10, "deletions": 2})[0])
 
 
 class OpenStateTests(unittest.TestCase):
