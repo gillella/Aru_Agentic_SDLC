@@ -16,7 +16,7 @@ When a repository is bootstrapped via `skills/init-agent-project/SKILL.md`, it p
 
 1. **Kanban View**: Visual lifecycle columns (`Backlog` $\rightarrow$ `Ready` $\rightarrow$ `In Progress` $\rightarrow$ `In Review` $\rightarrow$ `Done`).
 2. **Jira-Style Backlog View**: Tabular list with fields (`Priority`, `Story Points`, `Assignee`, `depends-on`).
-3. **Sprint View**: Grouped by active iteration cycles (`Sprint 1`, `Sprint 2`).
+3. **Sprint View**: Tabular view with the `Phase` field available for sprint grouping and filtering.
 
 ### Lifecycle Column Definitions:
 
@@ -55,7 +55,7 @@ When a repository is bootstrapped via `skills/init-agent-project/SKILL.md`, it p
 ## ⚡ Parallel Multi-Agent Execution Rules
 
 1. **Parallel Eligibility**:
-   Issues marked with `parallel-eligible: true` or possessing zero shared file dependencies can be worked on concurrently by separate subagents.
+   Issues marked with `parallel-eligible: true` can be worked on concurrently only when their required `touches:` path declarations do not overlap in-flight work.
 2. **Subagent Worktree Isolation**:
    Each parallel subagent MUST execute in its own isolated worktree (`.worktrees/issue-<ID>-<slug>`).
 3. **Merge Conflict Resolution**:

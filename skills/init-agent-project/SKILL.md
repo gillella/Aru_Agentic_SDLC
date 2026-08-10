@@ -71,7 +71,7 @@ flowchart TD
 1. Create a GitHub Project v2 linked to the repository:
    - **Kanban View**: Columns (`Backlog` $\rightarrow$ `Ready` $\rightarrow$ `In Progress` $\rightarrow$ `In Review` $\rightarrow$ `Done`).
    - **Jira-Style Backlog View**: Tabular list with fields (`Priority`, `Story Points`, `Assignee`, `depends-on`).
-   - **Sprint View**: Iteration cycle grouping.
+   - **Sprint View**: Tabular view with `Phase` available for grouping and filtering.
 2. Link issue templates so filed issues automatically appear in the board's `Backlog`.
 
 ### Step 7: Initial Commit & Push

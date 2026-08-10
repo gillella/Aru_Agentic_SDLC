@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+env/
+venv/
+
+# Worktrees & logs
+.worktrees/
+*.log
+.DS_Store
+
+# Secrets
+.env
+.env.*
+!.env.example
