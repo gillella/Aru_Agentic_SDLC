@@ -101,7 +101,9 @@ Inside this playbook repo itself, `$ARU_SDLC_HOME` may be `.` / the repo root.
 8. **Plan Before Editing**: For `type:feat`, `needs-design`, money, PII,
    schema, migration, or other irreversible work, post the implementation plan
    required by `implement-next-issue` before the first edit. High-risk scope
-   triggers the gate regardless of the issue's type labels.
+   triggers the gate regardless of the issue's type labels. Select the
+   `--require-plan-ack` workflow mode when human acknowledgement is required;
+   it is a skill mode, not a standalone executable flag.
 
 ---
 

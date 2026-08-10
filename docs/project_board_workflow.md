@@ -53,10 +53,11 @@ rejected alternatives. It must remain inside the issue so it survives agent
 handoffs and context compaction.
 
 The normal mode is post-and-proceed. For money, PII, schema, migrations, other
-irreversible paths, or an explicit operator escalation, invoke the workflow as
-`implement-next-issue --require-plan-ack`. In that mode the claim remains held,
-but implementation pauses until a repository owner or designated maintainer
-comments `Plan approved` after the latest plan.
+irreversible paths, or an explicit operator escalation, select the
+`--require-plan-ack` mode of the `implement-next-issue` skill. This is a
+workflow mode, not a standalone executable flag. In that mode the claim
+remains held, but implementation pauses until a repository owner or designated
+maintainer comments `Plan approved` after the latest plan.
 
 ---
 

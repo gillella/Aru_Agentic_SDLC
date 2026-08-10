@@ -148,9 +148,10 @@ changes, and explicit escalations retain human-acknowledgement gates.
 6. **Plan Gate**: Before the first edit, `type:feat`, `needs-design`, money,
    PII, schema, migration, and other irreversible work posts the implementation
    plan required by `implement-next-issue`. High-risk scope triggers the gate
-   regardless of issue type labels. The default is post-and-proceed; use
-   `--require-plan-ack` for money, PII, schema, migrations, other irreversible
-   paths, or explicit escalations.
+   regardless of issue type labels. The default is post-and-proceed; select the
+   skill's `--require-plan-ack` workflow mode for money, PII, schema,
+   migrations, other irreversible paths, or explicit escalations. It is not a
+   standalone executable flag.
 
 ---
 

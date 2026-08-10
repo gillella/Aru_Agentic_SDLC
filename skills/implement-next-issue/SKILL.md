@@ -133,9 +133,9 @@ or other irreversible work from the plan gate.
    plan. In acknowledgement mode, the amendment also requires a fresh
    `Plan approved` comment.
 
-The flag describes the governed workflow invocation (for example,
-`implement-next-issue --require-plan-ack`); it is not permission to bypass the
-issue claim, path budget, review, or merge gates.
+`--require-plan-ack` names a mode of this skill, not a standalone executable or
+helper-script flag. Selecting that governed workflow mode is not permission to
+bypass the issue claim, path budget, review, or merge gates.
 
 ### Step 5: Implement Solution
 1. Confirm the plan gate is satisfied when it applies.
