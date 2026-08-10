@@ -42,6 +42,11 @@ REVIEWED_BY_LABEL = "reviewed-by:"
 # any peer's claim satisfy the gate before that peer had looked at the diff.
 REVIEW_CLAIM_LABEL = "reviewer:"
 
+# Review apps can add useful findings, but their comments are not independent
+# approval. GitHub exposes some bot logins with a ``[bot]`` suffix and the
+# Codex connector without one, so both forms must be recognized explicitly.
+ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
+
 # Large diffs remain visible in the audit output. The separate independent-
 # review gate, not a blanket human-review assertion, owns review quality.
 SIZE_SOFT_LIMIT = 400
@@ -219,13 +224,23 @@ def latest_state_per_reviewer(reviews):
     return {who: state for who, (_, state) in latest.items()}
 
 
+def is_advisory_review_account(login):
+    """Whether a GitHub reviewer identity belongs to review automation."""
+    normalized = (login or "").lower()
+    return normalized.endswith("[bot]") or normalized in ADVISORY_REVIEW_ACCOUNTS
+
+
 def check_reviews(pr, threads):
     reviews = pr.get("reviews") or []
     substantive = [r for r in reviews if (r.get("state") or "").upper() != "PENDING"]
     if not substantive:
         return False, "No review on this PR. At least one review is required."
     verdicts = latest_state_per_reviewer(reviews)
-    blocking = [who for who, state in verdicts.items() if state == "CHANGES_REQUESTED"]
+    blocking = [
+        who for who, state in verdicts.items()
+        if state == "CHANGES_REQUESTED"
+        and not is_advisory_review_account(who)
+    ]
     if blocking:
         return False, (f"{', '.join(blocking)} requested changes and has not re-approved.")
     if threads is None:
@@ -233,21 +248,57 @@ def check_reviews(pr, threads):
     if threads > 0:
         return False, f"{threads} unresolved review thread(s)."
 
+    # A claim means an independent agent is still reviewing. It must block
+    # before any external-account or completed-attribution shortcut, otherwise
+    # a bot comment can make the PR mergeable while that reviewer is working.
+    claimants = label_values(pr, REVIEW_CLAIM_LABEL)
+    if claimants:
+        return False, (
+            f"Review is still in progress: {', '.join(claimants)} holds a "
+            f"{REVIEW_CLAIM_LABEL}<agent> claim. Complete the review with "
+            "`claim_issue.py --pr <n> --agent <id> --complete-review`, or "
+            "release the claim if no review was performed."
+        )
+
     # GitHub cannot tell a self-review from a peer review here: every agent
     # authenticates as the same user, so every review looks like it came from
     # the same person who opened the PR. The agent identity labels are the only
     # thing that distinguishes them.
-    # A review from a *different GitHub account* is provably not a self-review,
-    # whatever the labels say. This is how external reviewers count: Codex and
-    # Bugbot post as their own apps and will never stamp reviewed-by:, so
-    # requiring the label would block every bot-reviewed PR forever.
+    # A review from a different non-automation GitHub account is provably not a
+    # self-review, but only its latest APPROVED verdict counts. Review apps are
+    # advisory: their comments and approvals can inform an agent review, but
+    # cannot satisfy the independent-review gate themselves.
     pr_login = ((pr.get("author") or {}).get("login") or "").lower()
     other_accounts = sorted({
         ((r.get("author") or {}).get("login") or "").lower()
         for r in substantive
     } - {"", pr_login})
-    if other_accounts:
-        note = f"{len(substantive)} review(s) from {', '.join(other_accounts)}, no unresolved threads."
+
+    # Authorship is required before any approval path can pass. Without the
+    # governed author stamp, even a genuine external approval cannot prove the
+    # PR did not bypass create_pr.py or establish who must be excluded from
+    # same-account agent review.
+    authors = label_values(pr, "author:")
+    if not authors:
+        return False, (
+            "PR has no author:<id> label, so the gate cannot prove that the "
+            "reviewer is independent. Create PRs with "
+            "`scripts/create_pr.py --issue <n> --agent <id>`; stamp the verified "
+            "author on a legacy PR before retrying."
+        )
+    author = authors[0]
+
+    external_approvers = sorted(
+        who for who, state in verdicts.items()
+        if who.lower() in other_accounts
+        and state == "APPROVED"
+        and not is_advisory_review_account(who)
+    )
+    if external_approvers:
+        note = (
+            f"Approved by external reviewer(s) {', '.join(external_approvers)}, "
+            "no unresolved threads."
+        )
         if any((lab.get("name") or "") == "same-family-review"
                for lab in (pr.get("labels") or [])):
             note += " ⚠️  Same-family review: no cross-family agent was available."
@@ -255,33 +306,21 @@ def check_reviews(pr, threads):
 
     # Everything below is the same-account case: agents all authenticate as one
     # GitHub user, so only the identity labels can tell them apart.
-    authors = label_values(pr, "author:")
-    if not authors:
-        # Unstamped PR - predates create_pr.py --agent, or a human opened it.
-        # Falling back to "any review counts" keeps those mergeable; refusing
-        # would strand every PR opened before stamping existed.
-        return True, f"{len(substantive)} review(s), no unresolved threads (author unstamped)."
-
-    author = authors[0]
-    # Only completed attribution counts. A `reviewer:` claim is deliberately
-    # not consulted: it means an agent took the PR off the queue, which is not
-    # evidence anyone read the diff. Accepting it would let the author's own
-    # same-account review plus any peer's claim clear the gate.
+    # Only completed attribution counts. Active reviewer claims were rejected
+    # above because they represent work still in progress, not attestation.
     reviewers = label_values(pr, REVIEWED_BY_LABEL)
     peers = [r for r in reviewers if r != author]
     if reviewers and not peers:
         return False, (f"The only review is from '{author}', who wrote this PR. "
                        "A self-review does not satisfy the gate.")
     if not reviewers:
-        claimants = [c for c in label_values(pr, REVIEW_CLAIM_LABEL) if c != author]
-        if claimants:
-            # The common case, and worth its own message: the reviewer claimed
-            # the PR and skipped the completion step, so the work happened but
-            # was never attributed.
+        advisory = [a for a in other_accounts if is_advisory_review_account(a)]
+        if advisory:
             return False, (
-                f"'{claimants[0]}' holds the review claim but never completed it, so no "
-                f"{REVIEWED_BY_LABEL}<agent> label attributes the review. Finish with "
-                f"`claim_issue.py --pr <n> --agent {claimants[0]} --complete-review`.")
+                f"Automated review from {', '.join(advisory)} is advisory; no "
+                f"{REVIEWED_BY_LABEL}<agent> label attributes a completed independent "
+                "agent review."
+            )
         return False, (f"A review exists but no {REVIEWED_BY_LABEL}<agent> label identifies "
                        f"who left it, so it cannot be distinguished from a self-review by "
                        f"'{author}'. The reviewing agent must finish with "

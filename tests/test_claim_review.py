@@ -6,6 +6,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import claim_issue
+import merge_pr
 
 
 class ReviewLabelParsingTests(unittest.TestCase):
@@ -103,12 +104,25 @@ class ClaimReviewTests(unittest.TestCase):
     @patch.object(claim_issue, "ensure_label", return_value=True)
     @patch.object(claim_issue, "_pr_labels",
                   return_value=["author:agent-1", "reviewer:agent-2"])
-    def test_a_failed_release_still_reports_success(
+    def test_a_failed_release_is_retryable_and_remains_merge_blocking(
             self, _labels, _ensure, _run, _remove):
-        # The attribution is what the gate reads. A leftover claim gets reaped;
-        # an unattributed review blocks the merge. Do not fail on the lesser.
+        # A completed attribution and a live claim deliberately leave the gate
+        # blocked. Completion must report failure so the reviewer retries the
+        # idempotent command instead of unknowingly stranding the PR.
         self.assertEqual(
-            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_OK)
+            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_ERROR)
+        pr = {
+            "author": {"login": "gillella"},
+            "reviews": [{"state": "COMMENTED", "author": {"login": "gillella"}}],
+            "labels": [
+                {"name": "author:agent-1"},
+                {"name": "reviewer:agent-2"},
+                {"name": "reviewed-by:agent-2"},
+            ],
+        }
+        ok, msg = merge_pr.check_reviews(pr, 0)
+        self.assertFalse(ok)
+        self.assertIn("still in progress", msg)
 
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
