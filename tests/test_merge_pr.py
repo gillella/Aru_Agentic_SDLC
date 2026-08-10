@@ -864,6 +864,61 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
             listed = self._git(repo, "worktree", "list", "--porcelain")
             self.assertIn("refs/heads/unrelated", listed)
 
+    def test_same_tree_ref_update_is_blocked_through_deregistration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "ref-race"
+            branch = "fix/ref-race"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            self._git(repo, "commit", "--allow-empty", "-m", "seed")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            self._git(repo, "commit", "--allow-empty", "-m", "same tree replacement")
+            replacement_sha = self._git(repo, "rev-parse", "HEAD")
+            retained = (
+                repo / ".worktrees" / ".retained" /
+                f"{expected_sha[:12]}-{worktree.name}"
+            )
+            real_run_cmd = merge_pr.run_cmd
+            update_attempt = None
+
+            def update_after_locked_sha_read(command, **kwargs):
+                nonlocal update_attempt
+                result = real_run_cmd(command, **kwargs)
+                if command == ["git", "rev-parse", "HEAD"]:
+                    update_attempt = subprocess.run(
+                        [
+                            "git", "-C", str(repo), "update-ref",
+                            f"refs/heads/{branch}", replacement_sha, expected_sha,
+                        ],
+                        text=True,
+                        capture_output=True,
+                    )
+                return result
+
+            with patch.object(
+                merge_pr, "run_cmd", side_effect=update_after_locked_sha_read
+            ):
+                pruned, message = merge_pr.prune_worktree(
+                    repo, branch, expected_sha
+                )
+
+            self.assertIsNotNone(update_attempt)
+            self.assertNotEqual(update_attempt.returncode, 0)
+            self.assertTrue(pruned)
+            self.assertIn("Retained worktree", message)
+            self.assertTrue(retained.is_dir())
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"),
+                expected_sha,
+            )
+            listed = self._git(repo, "worktree", "list", "--porcelain")
+            self.assertNotIn(f"refs/heads/{branch}", listed)
+
     @patch.object(merge_pr, "_gh_json", return_value={"state": "CLOSED"})
     def test_closed_issue_is_already_done(self, _gh):
         ok, message = merge_pr.ensure_issue_closed(7)
