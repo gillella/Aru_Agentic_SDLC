@@ -103,7 +103,16 @@ releases automatically.
 ### Step 4b: Plan Gate Before the First Edit
 
 The plan is durable issue state, not private scratch reasoning. Apply this gate
-when the issue has either the `type:feat` label or the `needs-design` label.
+when either condition is true:
+
+- the issue has the `type:feat` or `needs-design` label; or
+- its acceptance criteria, declared `touches:`, or intended implementation
+  changes money semantics, PII handling, schemas, migrations, or another
+  irreversible contract.
+
+High-risk scope is an independent trigger. A `type:fix` or `type:chore` label,
+or a missing `needs-design` label, never exempts money, PII, schema, migration,
+or other irreversible work from the plan gate.
 
 1. Inspect the issue and relevant source read-only. Before editing any file,
    post an issue comment headed `## Implementation Plan` containing:

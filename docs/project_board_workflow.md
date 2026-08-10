@@ -44,7 +44,10 @@ When a repository is bootstrapped via `skills/init-agent-project/SKILL.md`, it p
 ## 📝 Pre-Edit Plan Gate
 
 Issues labeled `type:feat` or `needs-design` require a durable implementation
-plan comment before the first file edit. The comment records the approach,
+plan comment before the first file edit. So does any issue whose acceptance
+criteria, declared `touches:`, or intended implementation changes money
+semantics, PII handling, schemas, migrations, or another irreversible
+contract, regardless of its type labels. The comment records the approach,
 files, schema/API or money-semantics changes, verification strategy, and
 rejected alternatives. It must remain inside the issue so it survives agent
 handoffs and context compaction.

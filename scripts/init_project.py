@@ -145,10 +145,12 @@ changes, and explicit escalations retain human-acknowledgement gates.
 5. **Cursor**: Prefer installed personal skills / slash commands from the
    machine-level Cursor integration (`docs/cursor-integration.md` in
    `$ARU_SDLC_HOME`). Do not vendor a second copy of SDLC skills into this repo.
-6. **Plan Gate**: Before the first edit, `type:feat` and `needs-design` issues
-   post the implementation plan required by `implement-next-issue`. The default
-   is post-and-proceed; use `--require-plan-ack` for money, PII, schema,
-   migrations, other irreversible paths, or explicit escalations.
+6. **Plan Gate**: Before the first edit, `type:feat`, `needs-design`, money,
+   PII, schema, migration, and other irreversible work posts the implementation
+   plan required by `implement-next-issue`. High-risk scope triggers the gate
+   regardless of issue type labels. The default is post-and-proceed; use
+   `--require-plan-ack` for money, PII, schema, migrations, other irreversible
+   paths, or explicit escalations.
 
 ---
 

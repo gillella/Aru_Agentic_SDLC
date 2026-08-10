@@ -98,8 +98,10 @@ Inside this playbook repo itself, `$ARU_SDLC_HOME` may be `.` / the repo root.
 5. **Local Test Verification First**: Never commit or push without a green local suite.
 6. **CI Green Gate**: If CI fails, invoke `remediate-ci-failure`.
 7. **Session State Memory**: Inspect git log, branches, open PRs, and board status before claiming new work.
-8. **Plan Before Editing**: For `type:feat` or `needs-design` issues, post the
-   implementation plan required by `implement-next-issue` before the first edit.
+8. **Plan Before Editing**: For `type:feat`, `needs-design`, money, PII,
+   schema, migration, or other irreversible work, post the implementation plan
+   required by `implement-next-issue` before the first edit. High-risk scope
+   triggers the gate regardless of the issue's type labels.
 
 ---
 
