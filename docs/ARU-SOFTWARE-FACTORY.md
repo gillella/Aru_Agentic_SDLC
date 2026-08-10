@@ -206,8 +206,13 @@ Nothing else matters while the merge gate can fall open.
 | **S0.4** | Fix `_git_write_to_protected` quoting (#28) | Blocks read-only work on `main`; same class as #21 | — |
 | **S0.5** | Fix `merge_pr.py` close-out ordering | Merges silently leave the board stale | — |
 | **S0.6** | Align this repo's CI with the template it ships (#F0.3) | The factory does not run its own gates | — |
-| **S0.7** | GitHub Pro + rulesets: no direct push to `main`, required checks, required review | Free plan confirmed: no server-side protection exists | purchase |
+| **S0.7** | GitHub Pro + rulesets: no direct push to `main`, required status checks. **Required-approval is deliberately excluded** — see below | Free plan confirmed: no server-side protection exists | purchase |
+| **S0.7a** | Separate reviewer identity (GitHub App or second account) before any required-approval rule | Without it, required approval deadlocks every fleet PR | S0.7 |
 | **S0.8** | Process ownership + merge authority doc (#7) | Agents receive contradictory process instructions | — |
+
+**Why S0.7 stops short of required approval.** §3.3 establishes that every agent authenticates as the same GitHub account. GitHub refuses to let an account approve or request changes on its own pull request — reproduced on PR #27: `Review Can not request changes on your own pull request`. A ruleset requiring an approving review would therefore deadlock **every** fleet-authored PR, turning a hardening step into a full stop.
+
+The ordering constraint is real and easy to get backwards: server-side approval enforcement is only available once reviewer identity is separable from author identity. Until S0.7a lands, the label-based gate in `merge_pr.py` stays the review authority, and the ruleset covers only direct-push protection and required status checks — both of which work fine under a single identity.
 
 ### Phase 1 — History, versioning, and the ability to roll back (days)
 
@@ -215,7 +220,7 @@ Prerequisite for drift control. Currently absent entirely.
 
 | ID | Work | Rationale | Depends on |
 |---|---|---|---|
-| **S1.1** | Switch `merge_pr.py` default from `--squash` to `--no-ff` | Stops deleting 87% of history; restores ancestry; ends conflict cascades | S0.5 |
+| **S1.1** | Switch `merge_pr.py` default from `squash` to `merge` (`gh pr merge --merge`; there is no `--no-ff` flag on `gh`) | Stops deleting 87% of history; restores ancestry; ends conflict cascades | S0.5 |
 | **S1.2** | Annotated `ckpt/*` tag on every merge, written by `merge_pr.py`, carrying PR, issues, author, reviewer, gate verdicts, test count, gated SHA | The rollback grid and the audit trail, with nothing to remember | S1.1 |
 | **S1.3** | SemVer `v0.x` release tags; MAJOR on consumed-CLI break | #27 is a breaking change shipping with no version signal | S1.2 |
 | **S1.4** | Consumer pinning: `ARU_SDLC_REF` honoured by `install_cursor_integration.sh`; scripts warn on major mismatch | Consumers currently track `main` live with no escape | S1.3 |
@@ -259,7 +264,7 @@ The binding constraint, per §3.3.
 
 | ID | Work |
 |---|---|
-| **S5.1** | Stack packs: Node/TS, Go — init stops being Python-shaped |
+| **S5.1** | Stack packs: **deployment and release templates** per stack. `init_project.py` already accepts `node`/`nodejs`/`typescript`/`react`/`go`, picks the test runner, and renders per-stack CI (`init_project.py:312-337`, covered in `tests/test_init_project.py:148-195`). The gap is after CI, not at init. |
 | **S5.2** | Trust boundary for untrusted issue/PR text (§3.6) — required before any repo accepts external issues |
 | **S5.3** | Degraded-mode decision (§3.7) — document the dependency or mitigate it |
 | **S5.4** | Golden-path demo repo exercising the full loop including deploy |
