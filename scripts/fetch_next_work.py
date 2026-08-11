@@ -61,7 +61,7 @@ from claim_issue import (
 from common import list_open_issues, run_cmd
 from fetch_next_issue import build_candidates, reap_stale_claims
 from fetch_pr_feedback import fetch_active_review_feedback
-from merge_pr import dod_status
+from merge_pr import closeout_incomplete, dod_status, is_merged
 
 # Retained as a backwards-compatible CLI default. Review count is audit data,
 # never an eligibility or human-intervention gate.
@@ -73,7 +73,7 @@ DEFAULT_ROUND_CAP = 3
 DEFAULT_CROSS_FAMILY_WAIT_MIN = 30
 
 PR_FIELDS = ("number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
-             "createdAt,headRefName,headRefOid,body,reviewDecision")
+             "createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt")
 
 
 def _label_value(labels: list[str], prefix: str) -> str | None:
@@ -96,6 +96,44 @@ def list_open_prs() -> list[dict[str, Any]] | None:
     except json.JSONDecodeError:
         print("[WARN] Could not parse the PR list.", file=sys.stderr)
         return None
+
+
+def list_merged_needing_closeout() -> list[dict[str, Any]] | None:
+    """Recently merged PRs whose close-out still needs ``merge_pr.py``.
+
+    Fail closed when the merged list cannot be read: otherwise a crashed
+    close-out becomes invisible and the board never reaches Done.
+    """
+    code, out, err = run_cmd(
+        ["gh", "pr", "list", "--state", "merged", "--limit", "50", "--json", PR_FIELDS],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not list merged PRs: {err.strip()}", file=sys.stderr)
+        return None
+    try:
+        prs = json.loads(out) if out else []
+    except json.JSONDecodeError:
+        print("[WARN] Could not parse the merged PR list.", file=sys.stderr)
+        return None
+    recovery = []
+    for pr in prs:
+        # Avoid GraphQL thread lookups for merged recovery candidates.
+        pr["_active_review_feedback"] = []
+        if closeout_incomplete(pr):
+            recovery.append(pr)
+    return recovery
+
+
+def list_work_prs() -> list[dict[str, Any]] | None:
+    """Open PRs plus merged PRs that still need close-out recovery."""
+    open_prs = list_open_prs()
+    if open_prs is None:
+        return None
+    recovery = list_merged_needing_closeout()
+    if recovery is None:
+        return None
+    return open_prs + recovery
 
 
 def label_names(pr: dict[str, Any]) -> list[str]:
@@ -262,7 +300,8 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:
 
     Cheap label/CI/thread filters run first. Only survivors call the shared
     ``merge_pr.dod_status`` evaluator so picker cost stays proportional to
-    near-ready PRs, not the whole open queue.
+    near-ready PRs, not the whole open queue. Already-merged PRs are eligible
+    only when close-out is still incomplete.
     """
     labels = label_names(pr)
     author = _label_value(labels, "author:")
@@ -275,6 +314,14 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:
         return no("draft")
     if holder and holder != agent:
         return no(f"already being merged by '{holder}'")
+
+    if is_merged(pr):
+        if not closeout_incomplete(pr):
+            return no("merged and close-out already complete")
+        ok, reason = dod_status(pr["number"])
+        if not ok:
+            return no(reason)
+        return {"eligible": True, "reason": reason}
 
     review_holder = reviewed_by(labels)
     if review_holder:
@@ -301,7 +348,6 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:
 
     state = ci_state(pr)
     if state != "green":
-        # Already-merged PRs needing close-out resume are handled by dod_status.
         if state != "none":
             return no(f"CI is {state}")
 
@@ -324,7 +370,7 @@ def mark(pr_number: int, label: str, colour: str, description: str) -> None:
 def select(agent: str, family: str | None, round_cap: int, cross_family_wait: int
            ) -> dict[str, Any]:
     """Builds the full picture, then picks by priority."""
-    prs = list_open_prs()
+    prs = list_work_prs()
     if prs is None:
         # Fail closed. Treating an unreadable queue as empty makes the selector
         # claim new implementation work as though no feedback or review were
@@ -418,7 +464,9 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     return {
         "agent": agent, "family": family, "work": work,
         "mergeable_detail": [
-            {"pr": p["number"], "title": p["title"]} for p in mergeable
+            {"pr": p["number"], "title": p["title"],
+             "head_sha": p.get("headRefOid")}
+            for p in mergeable
         ],
         "mergeable": [p["number"] for p in mergeable],
         "merge_skipped": merge_skipped,
@@ -473,6 +521,7 @@ def main():
             rc = claim_merge(candidate["pr"], args.agent)
             if rc == EXIT_OK:
                 work.update({"pr": candidate["pr"], "title": candidate["title"],
+                             "head_sha": candidate.get("head_sha"),
                              "claimed": True})
                 break
             if rc == EXIT_CONFLICT:

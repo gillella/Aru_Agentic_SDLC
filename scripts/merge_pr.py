@@ -404,6 +404,29 @@ def is_merged(pr):
     return (pr.get("state") or "").upper() == "MERGED" or bool(pr.get("mergedAt"))
 
 
+def closeout_incomplete(pr):
+    """True when a merged PR still needs ``merge_pr.py`` close-out resumed.
+
+    Server-side merge removes the PR from ``gh pr list --state open``. Without
+    this check, a crash after merge but before Done/claim cleanup leaves the
+    board permanently stranded. Signals: a lingering ``merger:`` claim, or any
+    linked ``Closes #N`` issue that is still open.
+    """
+    if not is_merged(pr):
+        return False
+    labels = [lab.get("name", "") for lab in (pr.get("labels") or [])]
+    if any(name.startswith(MERGER_CLAIM_LABEL) for name in labels):
+        return True
+    for num in linked_issues(pr.get("body")):
+        issue = _gh_json(["gh", "issue", "view", str(num), "--json", "state"])
+        if issue is None:
+            # Fail closed: an unreadable linked issue must be treated as unfinished.
+            return True
+        if (issue.get("state") or "").upper() == "OPEN":
+            return True
+    return False
+
+
 def merge_commit_oid(pr):
     value = pr.get("mergeCommit")
     if isinstance(value, dict):
@@ -765,7 +788,9 @@ def dod_status(pr_id):
     if not pr:
         return False, "could not fetch pull request"
     if is_merged(pr):
-        return True, "already merged; close-out may still be needed"
+        if closeout_incomplete(pr):
+            return True, "merged; close-out incomplete — resume merge_pr.py"
+        return False, "merged and close-out already complete"
     issue_nums = linked_issues(pr.get("body"))
     if not issue_nums:
         return False, "PR body has no Closes #<issue>"

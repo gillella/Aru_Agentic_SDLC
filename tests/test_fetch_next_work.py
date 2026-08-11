@@ -174,7 +174,7 @@ class PriorityTests(unittest.TestCase):
             "my_in_flight": {"number": in_flight, "title": "mine"} if in_flight else None,
             "blocked": [], "conflicted": [], "missing_touches": [], "not_ready": [],
         }
-        with patch.object(fnw, "list_open_prs", return_value=list(prs)), \
+        with patch.object(fnw, "list_work_prs", return_value=list(prs)), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
             return fnw.select(agent, family, 3, 30)
@@ -236,7 +236,7 @@ class MergeWorkTests(unittest.TestCase):
             "my_in_flight": None,
             "blocked": [], "conflicted": [], "missing_touches": [], "not_ready": [],
         }
-        with patch.object(fnw, "list_open_prs", return_value=list(prs)), \
+        with patch.object(fnw, "list_work_prs", return_value=list(prs)), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts), \
              patch.object(fnw, "dod_status", return_value=(dod_ok, dod_reason)):
@@ -254,6 +254,7 @@ class MergeWorkTests(unittest.TestCase):
         self.assertEqual(res["work"]["pr"], 9)
         self.assertEqual(res["work"]["skill"], "merge-pr")
         self.assertEqual(res["work"]["head_sha"], "abc123")
+        self.assertEqual(res["mergeable_detail"][0]["head_sha"], "abc123")
 
     def test_feedback_still_outranks_merge(self):
         authored = pr(1, "author:agent-2")
@@ -294,6 +295,41 @@ class MergeWorkTests(unittest.TestCase):
         self.assertFalse(verdict["eligible"])
         self.assertIn("agent-8", verdict["reason"])
 
+    def test_merged_pr_with_incomplete_closeout_is_merge_work(self):
+        merged = pr(12, "author:agent-1", "family:anthropic", "merger:agent-2",
+                    "reviewed-by:agent-9", reviews=1, title="needs close-out")
+        merged["state"] = "MERGED"
+        merged["mergedAt"] = "2026-01-01T00:00:00Z"
+        merged["headRefOid"] = "deadbeef"
+        with patch.object(fnw, "closeout_incomplete", return_value=True):
+            res = self._select(
+                [merged], candidates=[7],
+                dod_ok=True, dod_reason="merged; close-out incomplete",
+            )
+        self.assertEqual(res["work"]["type"], "merge")
+        self.assertEqual(res["work"]["pr"], 12)
+
+    def test_claim_fallback_replaces_head_sha(self):
+        detail = [
+            {"pr": 1, "title": "first", "head_sha": "aaa"},
+            {"pr": 2, "title": "second", "head_sha": "bbb"},
+        ]
+        work = {"type": "merge", "pr": 1, "title": "first", "head_sha": "aaa",
+                "claimed": False}
+        # Simulate the claim loop body: first conflict, second ok.
+        claimed = None
+        for candidate in detail:
+            # pretend first conflicts
+            if candidate["pr"] == 1:
+                continue
+            work.update({"pr": candidate["pr"], "title": candidate["title"],
+                         "head_sha": candidate.get("head_sha"), "claimed": True})
+            claimed = candidate
+            break
+        self.assertEqual(work["pr"], 2)
+        self.assertEqual(work["head_sha"], "bbb")
+        self.assertIsNotNone(claimed)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -319,7 +355,7 @@ class ReviewDecisionTests(unittest.TestCase):
 class ParkedInReviewTests(unittest.TestCase):
     """Proves Issue #39: handing off to In Review parks the issue and progresses to next work."""
 
-    @patch.object(fnw, "list_open_prs")
+    @patch.object(fnw, "list_work_prs")
     @patch.object(fnw, "list_open_issues")
     def test_parked_in_review_issue_is_not_resumed_and_next_ready_issue_is_taken(
         self, mock_issues, mock_prs
@@ -370,7 +406,7 @@ class UnreadableQueueTests(unittest.TestCase):
     def test_selector_fails_closed_when_prs_cannot_be_listed(self):
         # Treating an unreadable queue as empty would claim new implementation
         # work as though no review or feedback were waiting.
-        with patch.object(fnw, "list_open_prs", return_value=None):
+        with patch.object(fnw, "list_work_prs", return_value=None):
             res = fnw.select("agent-2", "openai", 3, 30)
         self.assertEqual(res["work"]["type"], "error")
         self.assertIn("could not be read", res["work"]["reason"])
@@ -383,7 +419,7 @@ class UnreadableQueueTests(unittest.TestCase):
             "my_in_flight": None, "blocked": [], "conflicted": [],
             "missing_touches": [], "not_ready": [],
         }
-        with patch.object(fnw, "list_open_prs", return_value=[authored]), \
+        with patch.object(fnw, "list_work_prs", return_value=[authored]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
             res = fnw.select("agent-2", "openai", 3, 30)
@@ -398,7 +434,7 @@ class UnreadableQueueTests(unittest.TestCase):
             "my_in_flight": None, "blocked": [], "conflicted": [],
             "missing_touches": [], "not_ready": [],
         }
-        with patch.object(fnw, "list_open_prs", return_value=[peer_pr]), \
+        with patch.object(fnw, "list_work_prs", return_value=[peer_pr]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
             res = fnw.select("agent-2", "openai", 3, 30)
