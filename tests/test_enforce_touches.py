@@ -1,8 +1,10 @@
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import mock_open, patch
 
@@ -111,6 +113,10 @@ class GovernedRepoTests(unittest.TestCase):
 
 
 class RealPathNormalizationTests(unittest.TestCase):
+    @staticmethod
+    def _case_insensitive_samefile(left, right):
+        return os.fspath(left).lower() == os.fspath(right).lower()
+
     def test_component_named_dot_dot_prefix_is_inside(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "repo"
@@ -133,6 +139,31 @@ class RealPathNormalizationTests(unittest.TestCase):
             outside.mkdir()
             (root / "alias-out").symlink_to(outside, target_is_directory=True)
             self.assertIsNone(et._norm(root / "alias-out" / "file.txt", str(root)))
+
+    def test_alternate_case_existing_and_new_paths_resolve_inside(self):
+        root = "/tmp/RepoCase"
+        with patch.object(
+                et.os.path, "samefile", side_effect=self._case_insensitive_samefile):
+            self.assertEqual(
+                et._norm("/tmp/repocase/Existing.txt", root), "Existing.txt")
+            self.assertEqual(et._norm("/tmp/repocase/new.txt", root), "new.txt")
+
+    def test_real_case_insensitive_filesystem_alias(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "RepoCase"
+            root.mkdir()
+            (root / "Existing.txt").write_text("fixture")
+            alternate = root.with_name(root.name.swapcase())
+            try:
+                same_directory = os.path.samefile(alternate, root)
+            except OSError:
+                same_directory = False
+            if not same_directory:
+                self.skipTest("fixture filesystem is case-sensitive")
+
+            self.assertEqual(
+                et._norm(alternate / "Existing.txt", str(root)), "Existing.txt")
+            self.assertEqual(et._norm(alternate / "new.txt", str(root)), "new.txt")
 
 
 class ProtectedBranchTests(unittest.TestCase):
@@ -409,7 +440,23 @@ class HookDecisionTests(unittest.TestCase):
     """End-to-end main() behaviour with GitHub and git stubbed out."""
 
     def _run(self, payload, branch, touches, governed=False, root="/repo"):
-        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
+        # Most decision tests use a synthetic /repo. Production repo_root()
+        # always returns an existing directory, so emulate its inode identity
+        # for that fixture; real temporary-directory tests use samefile itself.
+        samefile = (
+            patch.object(
+                et.os.path,
+                "samefile",
+                side_effect=lambda left, right: (
+                    os.path.normpath(os.fspath(left))
+                    == os.path.normpath(os.fspath(right))
+                ),
+            )
+            if root == "/repo"
+            else nullcontext()
+        )
+        with samefile, \
+             patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
              patch.object(et, "repo_root", return_value=root), \
              patch.object(et, "current_branch", return_value=branch), \
              patch.object(et, "governed_repo", return_value=governed), \
@@ -534,6 +581,29 @@ class HookDecisionTests(unittest.TestCase):
                  "cwd": str(root)},
                 "fix/issue-9-alias", ["README.md"], governed=True, root=str(root),
             ), et.EXIT_ALLOW)
+
+    def test_alternate_case_paths_are_governed_on_main_and_issue_branch(self):
+        root = "/tmp/RepoCase"
+
+        def case_insensitive_samefile(left, right):
+            return os.fspath(left).lower() == os.fspath(right).lower()
+
+        with patch.object(et.os.path, "samefile", side_effect=case_insensitive_samefile):
+            for target in ("/tmp/repocase/Existing.txt", "/tmp/repocase/new.txt"):
+                with self.subTest(branch="main", target=target):
+                    self.assertEqual(self._run(
+                        {"tool_name": "Edit", "tool_input": {"file_path": target},
+                         "cwd": root},
+                        "main", None, governed=True, root=root,
+                    ), et.EXIT_BLOCK)
+
+                with self.subTest(branch="issue", target=target):
+                    self.assertEqual(self._run(
+                        {"tool_name": "Edit", "tool_input": {"file_path": target},
+                         "cwd": root},
+                        "fix/issue-9-case", [os.path.basename(target)],
+                        governed=True, root=root,
+                    ), et.EXIT_ALLOW)
 
     def test_write_inside_declaration_is_allowed(self):
         rc = self._run(

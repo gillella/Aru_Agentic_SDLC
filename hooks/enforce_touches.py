@@ -202,20 +202,32 @@ def _norm(path, root):
     """Returns the repo-relative path, or None when the path is outside the repo.
 
     Paths outside the repository (a scratchpad, /tmp) are not the hook's
-    business, so they resolve to None and are always allowed.
+    business, so they resolve to None and are always allowed. Containment is
+    based on filesystem identity rather than string case: macOS commonly maps
+    ``Repo/File`` and ``repo/file`` to the same inode even though commonpath()
+    sees unrelated strings. Walking upward also preserves a nonexistent suffix
+    for a new file while resolving every existing symlink component.
     """
     if not path:
         return None
     real_root = os.path.realpath(root)
     abs_path = os.path.abspath(os.path.join(real_root, os.path.expanduser(path)))
     real_path = os.path.realpath(abs_path)
-    try:
-        if os.path.commonpath([real_root, real_path]) != real_root:
+    probe = real_path
+    suffix = []
+    while True:
+        try:
+            if os.path.samefile(probe, real_root):
+                return "/".join(reversed(suffix)) or "."
+        except (OSError, ValueError):
+            # Nonexistent new files and unreadable ancestors are expected.
+            # Keep walking; if identity can never be proven, fail open.
+            pass
+        parent = os.path.dirname(probe)
+        if parent == probe:
             return None
-        rel = os.path.relpath(real_path, real_root)
-    except ValueError:
-        return None
-    return rel.replace(os.sep, "/")
+        suffix.append(os.path.basename(probe))
+        probe = parent
 
 
 def path_allowed(rel_path, touches):
