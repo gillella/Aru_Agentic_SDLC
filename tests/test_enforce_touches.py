@@ -1,6 +1,7 @@
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import mock_open, patch
@@ -78,10 +79,26 @@ class GovernedRepoTests(unittest.TestCase):
             self.assertTrue(et.governed_repo("/repo"))
 
     @patch.object(et.os.path, "isfile", return_value=True)
+    def test_generated_emoji_heading_enables_governance(self, _isfile):
+        with patch("builtins.open", mock_open(
+                read_data="## 🚨 Core Governance: The Issue-First Law\n")):
+            self.assertTrue(et.governed_repo("/repo"))
+
+    @patch.object(et.os.path, "isfile", return_value=True)
     def test_unrelated_agents_file_is_not_aru_governance(self, _isfile):
         with patch("builtins.open", mock_open(
                 read_data="# Local development notes\n")):
             self.assertFalse(et.governed_repo("/repo"))
+
+    @patch.object(et.os.path, "isfile", return_value=True)
+    def test_negated_or_comparison_mentions_do_not_enable_governance(self, _isfile):
+        for text in (
+            "This repository does not use the Issue-First Law.\n",
+            "Compare against the Issue-First Law in another project.\n",
+            "## Notes about the Issue-First Law\n",
+        ):
+            with self.subTest(text=text), patch("builtins.open", mock_open(read_data=text)):
+                self.assertFalse(et.governed_repo("/repo"))
 
     @patch.object(et.os.path, "isfile", return_value=False)
     def test_missing_agents_file_is_ungoverned(self, _isfile):
@@ -91,6 +108,31 @@ class GovernedRepoTests(unittest.TestCase):
     def test_unreadable_agents_file_is_unknown(self, _isfile):
         with patch("builtins.open", side_effect=OSError("denied")):
             self.assertIsNone(et.governed_repo("/repo"))
+
+
+class RealPathNormalizationTests(unittest.TestCase):
+    def test_component_named_dot_dot_prefix_is_inside(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            root.mkdir()
+            self.assertEqual(et._norm(root / "..evil", str(root)), "..evil")
+
+    def test_external_symlink_alias_into_repo_is_governed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            root.mkdir()
+            alias = Path(temp_dir) / "repo-alias"
+            alias.symlink_to(root, target_is_directory=True)
+            self.assertEqual(et._norm(alias / "README.md", str(root)), "README.md")
+
+    def test_internal_symlink_alias_outside_repo_is_not_governed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            outside = Path(temp_dir) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (root / "alias-out").symlink_to(outside, target_is_directory=True)
+            self.assertIsNone(et._norm(root / "alias-out" / "file.txt", str(root)))
 
 
 class ProtectedBranchTests(unittest.TestCase):
@@ -366,9 +408,9 @@ class PostPr23ParserGapTests(unittest.TestCase):
 class HookDecisionTests(unittest.TestCase):
     """End-to-end main() behaviour with GitHub and git stubbed out."""
 
-    def _run(self, payload, branch, touches, governed=False):
+    def _run(self, payload, branch, touches, governed=False, root="/repo"):
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
-             patch.object(et, "repo_root", return_value="/repo"), \
+             patch.object(et, "repo_root", return_value=root), \
              patch.object(et, "current_branch", return_value=branch), \
              patch.object(et, "governed_repo", return_value=governed), \
              patch.object(et, "touches_for", return_value=touches):
@@ -424,6 +466,74 @@ class HookDecisionTests(unittest.TestCase):
             "scratch/experiment", None, governed=True,
         )
         self.assertEqual(rc, et.EXIT_ALLOW)
+
+    def test_detected_bash_writes_are_blocked_on_governed_main(self):
+        for command in (
+            "echo x > /repo/app.py",
+            "echo x | tee /repo/app.py",
+            "sed -i '' 's/x/y/' /repo/app.py",
+        ):
+            with self.subTest(command=command):
+                rc = self._run(
+                    {"tool_name": "Bash", "tool_input": {"command": command},
+                     "cwd": "/repo"},
+                    "main", None, governed=True,
+                )
+                self.assertEqual(rc, et.EXIT_BLOCK)
+
+    def test_bash_write_on_ungoverned_main_is_allowed(self):
+        rc = self._run(
+            {"tool_name": "Bash", "tool_input": {"command": "echo x > /repo/app.py"},
+             "cwd": "/repo"},
+            "main", None, governed=False,
+        )
+        self.assertEqual(rc, et.EXIT_ALLOW)
+
+    def test_real_path_aliases_are_correct_on_main_and_issue_branch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            outside = Path(temp_dir) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            alias_in = Path(temp_dir) / "repo-alias"
+            alias_in.symlink_to(root, target_is_directory=True)
+            alias_out = root / "alias-out"
+            alias_out.symlink_to(outside, target_is_directory=True)
+
+            inside_via_alias = str(alias_in / "README.md")
+            outside_via_alias = str(alias_out / "file.txt")
+            dot_dot_name = str(root / "..evil")
+
+            for target in (inside_via_alias, dot_dot_name):
+                with self.subTest(branch="main", target=target):
+                    rc = self._run(
+                        {"tool_name": "Edit", "tool_input": {"file_path": target},
+                         "cwd": str(root)},
+                        "main", None, governed=True, root=str(root),
+                    )
+                    self.assertEqual(rc, et.EXIT_BLOCK)
+
+            self.assertEqual(self._run(
+                {"tool_name": "Edit", "tool_input": {"file_path": outside_via_alias},
+                 "cwd": str(root)},
+                "main", None, governed=True, root=str(root),
+            ), et.EXIT_ALLOW)
+
+            self.assertEqual(self._run(
+                {"tool_name": "Edit", "tool_input": {"file_path": inside_via_alias},
+                 "cwd": str(root)},
+                "fix/issue-9-alias", ["README.md"], governed=True, root=str(root),
+            ), et.EXIT_ALLOW)
+            self.assertEqual(self._run(
+                {"tool_name": "Edit", "tool_input": {"file_path": dot_dot_name},
+                 "cwd": str(root)},
+                "fix/issue-9-alias", ["README.md"], governed=True, root=str(root),
+            ), et.EXIT_BLOCK)
+            self.assertEqual(self._run(
+                {"tool_name": "Edit", "tool_input": {"file_path": outside_via_alias},
+                 "cwd": str(root)},
+                "fix/issue-9-alias", ["README.md"], governed=True, root=str(root),
+            ), et.EXIT_ALLOW)
 
     def test_write_inside_declaration_is_allowed(self):
         rc = self._run(

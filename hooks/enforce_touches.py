@@ -17,7 +17,7 @@ Fail-open by design. This hook runs on every tool call, so a GitHub outage, an
 unparseable issue body, or work in an ungoverned repo must never halt the
 session. It blocks only when it can positively prove a violation:
 
-  * a file tool targets a governed repo while HEAD is protected, OR
+  * a detected file write targets a governed repo while HEAD is protected, OR
   * the branch names an issue, that issue declares touches, and the target
     path is outside the declaration.
 
@@ -36,6 +36,15 @@ import time
 PATH_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 
 PROTECTED_BRANCHES = {"main", "master"}
+
+# Canonical opt-in headings emitted by init_project.py and used by this
+# framework's own AGENTS.md. A prose mention or explicit rejection of the law
+# is not governance and must not make a globally installed hook block edits.
+GOVERNANCE_MARKER = re.compile(
+    r"^\s*#{1,6}\s+(?:🚨\s*)?Core Governance(?: Directive)?\s*:\s*"
+    r"The Issue-First Law\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Re-reading the issue from GitHub on every keystroke-level tool call would add
 # a network round trip to each edit. The declaration changes rarely, so a short
@@ -96,7 +105,7 @@ def governed_repo(root):
             text = fh.read()
     except (OSError, UnicodeError):
         return None
-    return bool(re.search(r"\bIssue-First Law\b", text, re.IGNORECASE))
+    return bool(GOVERNANCE_MARKER.search(text))
 
 
 def _git_common_dir(root):
@@ -197,12 +206,14 @@ def _norm(path, root):
     """
     if not path:
         return None
-    abs_path = os.path.abspath(os.path.join(root, os.path.expanduser(path)))
+    real_root = os.path.realpath(root)
+    abs_path = os.path.abspath(os.path.join(real_root, os.path.expanduser(path)))
+    real_path = os.path.realpath(abs_path)
     try:
-        rel = os.path.relpath(abs_path, root)
+        if os.path.commonpath([real_root, real_path]) != real_root:
+            return None
+        rel = os.path.relpath(real_path, real_root)
     except ValueError:
-        return None
-    if rel.startswith(".."):
         return None
     return rel.replace(os.sep, "/")
 
@@ -511,6 +522,14 @@ def deny(reason, detail):
     return EXIT_BLOCK
 
 
+def deny_protected_write(rel, branch):
+    return deny(
+        f"write to '{rel}' on protected branch '{branch}'.",
+        "Claim an issue, then create an isolated issue branch with "
+        "scripts/create_branch.py --worktree before editing.",
+    )
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -537,12 +556,18 @@ def main():
                 "Protected branches are merged through scripts/merge_pr.py, never "
                 "pushed to directly. Open a PR from your issue branch instead.",
             )
+        targets = _redirect_targets(command)
+        if targets and branch in PROTECTED_BRANCHES and governed_repo(root):
+            for target in targets:
+                rel = _norm(target, root)
+                if rel is not None:
+                    return deny_protected_write(rel, branch)
         if issue is None:
             return EXIT_ALLOW
         touches = touches_for(root, issue)
         if not touches:
             return EXIT_ALLOW
-        for target in _redirect_targets(command):
+        for target in targets:
             rel = _norm(target, root)
             if rel and not path_allowed(rel, touches):
                 return deny(
@@ -568,11 +593,7 @@ def main():
     if branch in PROTECTED_BRANCHES:
         governed = governed_repo(root)
         if governed:
-            return deny(
-                f"write to '{rel}' on protected branch '{branch}'.",
-                "Claim an issue, then create an isolated issue branch with "
-                "scripts/create_branch.py --worktree before editing.",
-            )
+            return deny_protected_write(rel, branch)
         # False is an ordinary ungoverned repository. None is a detection
         # failure. Both deliberately fail open for a globally installed hook.
         return EXIT_ALLOW
