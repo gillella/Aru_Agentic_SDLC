@@ -178,11 +178,13 @@ class ProjectBootstrapTests(unittest.TestCase):
             check_touches = Path(temp_dir) / ".github" / "scripts" / "check_touches.py"
             check_touches_wf = Path(temp_dir) / ".github" / "workflows" / "check_touches.yml"
             review_py = Path(temp_dir) / ".github" / "scripts" / "review.py"
+            review_wf = Path(temp_dir) / ".github" / "workflows" / "review.yml"
             reviewers_yml = Path(temp_dir) / ".github" / "reviewers.yml"
 
             self.assertTrue(check_touches.is_file())
             self.assertTrue(check_touches_wf.is_file())
             self.assertTrue(review_py.is_file())
+            self.assertTrue(review_wf.is_file())
             self.assertTrue(reviewers_yml.is_file())
 
             # Test review.py degrades to notice without API keys
@@ -195,6 +197,41 @@ class ProjectBootstrapTests(unittest.TestCase):
             )
             self.assertEqual(res.returncode, 0)
             self.assertIn("::notice::", res.stderr)
+
+    def test_check_touches_fails_closed_when_unlinked_or_unreadable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_project.scaffold_directory_structure(temp_dir)
+            init_project.write_governance_scripts(temp_dir)
+            check_touches = Path(temp_dir) / ".github" / "scripts" / "check_touches.py"
+
+            # No Closes link -> Fail closed (exit 1)
+            env = {"PR_BODY": "Just a PR body without closes", "PR_HEAD": "feature-branch"}
+            res = subprocess.run([sys.executable, str(check_touches)], capture_output=True, text=True, env=env)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("::error:: Fail-closed: No linked issue", res.stderr)
+
+    def test_check_touches_path_allowed_glob_vs_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_project.scaffold_directory_structure(temp_dir)
+            init_project.write_governance_scripts(temp_dir)
+            check_touches = Path(temp_dir) / ".github" / "scripts" / "check_touches.py"
+
+            # Load helper functions directly from check_touches script
+            spec = __import__("importlib.util").util.spec_from_file_location("check_touches", check_touches)
+            mod = __import__("importlib.util").util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            # Glob pattern 'src/*.py' MUST NOT match 'src/config.json'
+            touches_glob = ["src/*.py"]
+            self.assertTrue(mod.path_allowed("src/main.py", touches_glob))
+            self.assertFalse(mod.path_allowed("src/config.json", touches_glob))
+            self.assertFalse(mod.path_allowed("src/sub/nested.py", touches_glob))
+
+            # Bare directory pattern 'src/' MUST match subdirectories
+            touches_dir = ["src/"]
+            self.assertTrue(mod.path_allowed("src/main.py", touches_dir))
+            self.assertTrue(mod.path_allowed("src/sub/nested.py", touches_dir))
+            self.assertFalse(mod.path_allowed("docs/readme.md", touches_dir))
 
 
 class CiGateTests(unittest.TestCase):
