@@ -1,0 +1,41 @@
+[tool.ruff]
+# Matches the interpreter CI installs. Without it ruff infers a target from
+# the environment it happens to run in, so a local run and a CI run can
+# disagree about which syntax is modern.
+target-version = "py311"
+
+[tool.ruff.lint]
+# Selected explicitly rather than inherited. Ruff's default rule set widens
+# between releases - 0.16.2 reports 140 findings here on defaults, mostly
+# annotation modernisation - so a repository that relies on the default is
+# pinned to a tool version rather than to a policy. Naming the rules means an
+# upgrade changes findings only when we decide it should.
+#
+#   E4  import placement      E7  likely mistakes (ambiguous names, comparisons)
+#   E9  syntax and IO errors  F   pyflakes: undefined names, unused imports
+#
+# This is the correctness core, not a style opinion. Formatting rules are
+# deliberately absent: the repository has no formatter, and enabling E501
+# would add 305 findings that say nothing about whether the code works.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Every test module puts scripts/ or hooks/ on sys.path before importing the
+# module under test. The import cannot precede the path setup, so E402 is
+# wrong here by construction rather than by neglect.
+"tests/*" = ["E402"]
+
+# Pre-existing findings, frozen per file so the gate bites on new code from
+# today instead of waiting on a tree-wide cleanup. Two reasons they are not
+# fixed in this change: they sit outside this issue's touches: declaration,
+# and several pull requests are editing these same files right now, so a
+# tree-wide autofix would conflict with all of them.
+#
+# Burn-down is tracked in #66. The fleet_status.py entries are already covered
+# by #65 and should be deleted by that fix rather than carried forward.
+"scripts/claim_issue.py" = ["F541"]
+"scripts/common.py" = ["F541"]
+"scripts/create_branch.py" = ["F401"]
+"scripts/fleet_status.py" = ["E741", "F401", "F841"]
+"scripts/update_issue_status.py" = ["E741"]
+"tests/test_fleet_status.py" = ["E741", "F401"]

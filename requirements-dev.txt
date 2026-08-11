@@ -1,0 +1,12 @@
+# Development and CI toolchain.
+#
+# Pinned exactly, not floated. prompts/fleet-worker.md tells every agent to run
+# `ruff check .` before pushing, and agents run on different machines with
+# different resolvers. An unpinned linter means two agents can disagree about
+# the same diff and neither result reproduces in CI, which makes the check
+# unusable as a gate.
+#
+# Install:  python -m pip install -r requirements-dev.txt
+
+ruff==0.16.2
+pytest==9.1.1
