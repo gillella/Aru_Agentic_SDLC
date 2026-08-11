@@ -863,6 +863,45 @@ class WorktreeGovernanceTests(unittest.TestCase):
             self.bash(self.wt_a, f"echo x > {self.wt_a / 'app.py'}"), et.EXIT_ALLOW
         )
 
+    def test_redirect_into_another_worktree_outside_its_touches_is_blocked(self):
+        """Raised in review of PR #70.
+
+        The protected-branch half of the Bash path used the owning checkout
+        while the touches half still keyed off the session root, so a redirect
+        at an undeclared path in a sibling worktree was allowed even though
+        the identical Write was refused.
+        """
+        self.assertEqual(
+            self.bash(self.wt_a, f"echo x > {self.wt_b / 'other.py'}"), et.EXIT_BLOCK
+        )
+
+    def test_redirect_into_another_worktree_within_its_touches_is_allowed(self):
+        """Governed by the owner's declaration, not blocked reflexively."""
+        self.assertEqual(
+            self.bash(self.wt_a, f"echo x > {self.wt_b / 'app.py'}"), et.EXIT_ALLOW
+        )
+
+    def test_bash_and_write_agree_on_every_cross_checkout_target(self):
+        """Parity is the property that keeps a redirect from being a bypass.
+
+        Asserted as a loop rather than as separate cases so a future target
+        cannot be fixed on one path and forgotten on the other.
+        """
+        for target in (
+            self.wt_a / "app.py",
+            self.wt_a / "elsewhere.py",
+            self.wt_b / "app.py",
+            self.wt_b / "other.py",
+            self.main_root / "app.py",
+            self.outsider / "app.py",
+        ):
+            for cwd in (self.wt_a, self.main_root):
+                with self.subTest(target=str(target), cwd=str(cwd)):
+                    self.assertEqual(
+                        self.bash(cwd, f"echo x > {target}"),
+                        self.decide(cwd, target),
+                    )
+
     def test_new_file_in_a_directory_that_does_not_exist_yet_is_governed(self):
         """Write creates parents, so the target's directory need not exist.
 

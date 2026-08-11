@@ -645,30 +645,43 @@ def main():
         targets = _redirect_targets(command)
         # A shell redirect can name a path in any checkout, so each target is
         # judged by the one that owns it - the same rule the write path uses.
-        # Deciding these against the shell's branch let `echo x > ../../file`
-        # reach the main checkout unchecked from inside a worktree.
+        # Both checks have to key off the owner, not the shell: running them
+        # against the session's root and issue let `echo x > <other-wt>/f.py`
+        # slip through, because a sibling worktree is outside the session root
+        # and `_norm` returned None. The equivalent Write was refused, so the
+        # redirect became a way around the write path.
+        touches_by_owner = {}
         for target in targets:
             owned = owning_checkout(target, root, branch)
             if owned is None:
                 continue
             owner_root, owner_branch = owned
-            if owner_branch not in PROTECTED_BRANCHES:
-                continue
-            if not governed_repo(owner_root):
-                continue
             rel = _norm(target, owner_root)
-            if rel is not None:
-                return deny_protected_write(rel, owner_branch)
-        if issue is None:
-            return EXIT_ALLOW
-        touches = touches_for(root, issue)
-        if not touches:
-            return EXIT_ALLOW
-        for target in targets:
-            rel = _norm(target, root)
-            if rel and not path_allowed(rel, touches):
+            if rel is None:
+                continue
+
+            if owner_branch in PROTECTED_BRANCHES:
+                if governed_repo(owner_root):
+                    return deny_protected_write(rel, owner_branch)
+                continue
+
+            owner_issue = issue_from_branch(owner_branch)
+            if owner_issue is None:
+                continue  # Scratch worktree; usable without an issue.
+
+            # One lookup per owning checkout, not per redirect target: a
+            # command with several targets in one worktree must not pay a
+            # GitHub round trip each.
+            if owner_issue not in touches_by_owner:
+                touches_by_owner[owner_issue] = touches_for(owner_root, owner_issue)
+            touches = touches_by_owner[owner_issue]
+            if not touches:
+                continue
+
+            if not path_allowed(rel, touches):
                 return deny(
-                    f"shell write to '{rel}' is outside issue #{issue}'s declared touches.",
+                    f"shell write to '{rel}' is outside issue "
+                    f"#{owner_issue}'s declared touches.",
                     f"Declared: {', '.join(touches)}\n"
                     "Widen the declaration on the issue, or file a follow-up issue. "
                     "Do not expand your footprint silently.",
