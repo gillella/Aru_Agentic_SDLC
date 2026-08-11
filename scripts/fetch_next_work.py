@@ -10,11 +10,13 @@ agent claims off the board like anything else.
 Three work types, in strict priority order:
 
   1. feedback  - a PR I authored has requested changes or unresolved threads
-  2. review    - an eligible PR is waiting for someone to review it
-  3. issue     - nothing to finish, so start something new
+  2. merge     - a PR whose Definition-of-Done gates already pass
+  3. review    - an eligible PR is waiting for someone to review it
+  4. issue     - nothing to finish, so start something new
 
 Finishing beats starting. That ordering is the whole point: it is what stops
-the review queue growing faster than it drains.
+the review queue growing faster than it drains, and what carries independently
+reviewed work through gated merge without a human pressing the button.
 
   python3 fetch_next_work.py --agent agent-1 --json
   python3 fetch_next_work.py --agent agent-1 --family anthropic --claim
@@ -49,13 +51,17 @@ from typing import Any
 from claim_issue import (
     EXIT_CONFLICT,
     EXIT_OK,
+    claim_merge,
     claim_review,
+    merge_claimant,
+    reap_stale_merges,
     reap_stale_reviews,
     reviewed_by,
 )
 from common import list_open_issues, run_cmd
 from fetch_next_issue import build_candidates, reap_stale_claims
 from fetch_pr_feedback import fetch_active_review_feedback
+from merge_pr import closeout_incomplete, dod_status, is_merged
 
 # Retained as a backwards-compatible CLI default. Review count is audit data,
 # never an eligibility or human-intervention gate.
@@ -67,7 +73,7 @@ DEFAULT_ROUND_CAP = 3
 DEFAULT_CROSS_FAMILY_WAIT_MIN = 30
 
 PR_FIELDS = ("number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
-             "createdAt,headRefName,body,reviewDecision")
+             "createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt")
 
 
 def _label_value(labels: list[str], prefix: str) -> str | None:
@@ -90,6 +96,79 @@ def list_open_prs() -> list[dict[str, Any]] | None:
     except json.JSONDecodeError:
         print("[WARN] Could not parse the PR list.", file=sys.stderr)
         return None
+
+
+def list_merged_needing_closeout() -> list[dict[str, Any]] | None:
+    """Merged PRs whose close-out still needs ``merge_pr.py``.
+
+    Paginate until exhausted so an incomplete close-out older than the newest
+    fifty merges remains discoverable. Fail closed when any page cannot be
+    read: otherwise a crashed close-out becomes invisible.
+    """
+    from common import get_repo_slug
+
+    slug = get_repo_slug()
+    if not slug:
+        print("[WARN] Could not resolve repo slug for merged PR recovery.", file=sys.stderr)
+        return None
+    code, out, err = run_cmd(
+        [
+            "gh", "api", "--paginate",
+            f"repos/{slug}/pulls?state=closed&per_page=100&sort=updated&direction=desc",
+            "--jq", ".[]",
+        ],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not list closed PRs: {err.strip()}", file=sys.stderr)
+        return None
+    closed = []
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            closed.append(json.loads(line))
+        except json.JSONDecodeError:
+            print("[WARN] Could not parse closed PR list.", file=sys.stderr)
+            return None
+
+    recovery = []
+    for item in closed:
+        if not item.get("merged_at"):
+            continue
+        labels = [{"name": lab.get("name", "")} for lab in (item.get("labels") or [])]
+        pr = {
+            "number": item.get("number"),
+            "title": item.get("title") or "",
+            "isDraft": bool(item.get("draft")),
+            "labels": labels,
+            "reviews": [],
+            "statusCheckRollup": [],
+            "updatedAt": item.get("updated_at"),
+            "createdAt": item.get("created_at"),
+            "headRefName": ((item.get("head") or {}).get("ref")) or "",
+            "headRefOid": ((item.get("head") or {}).get("sha")) or "",
+            "body": item.get("body") or "",
+            "reviewDecision": "",
+            "state": "MERGED",
+            "mergedAt": item.get("merged_at"),
+            "_active_review_feedback": [],
+        }
+        if closeout_incomplete(pr):
+            recovery.append(pr)
+    return recovery
+
+
+def list_work_prs() -> list[dict[str, Any]] | None:
+    """Open PRs plus merged PRs that still need close-out recovery."""
+    open_prs = list_open_prs()
+    if open_prs is None:
+        return None
+    recovery = list_merged_needing_closeout()
+    if recovery is None:
+        return None
+    return open_prs + recovery
 
 
 def label_names(pr: dict[str, Any]) -> list[str]:
@@ -251,6 +330,68 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
               "for a cross-family reviewer")
 
 
+def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:
+    """Decides whether `agent` may claim mechanical merge of this PR.
+
+    Cheap label/CI/thread filters run first. Only survivors call the shared
+    ``merge_pr.dod_status`` evaluator so picker cost stays proportional to
+    near-ready PRs, not the whole open queue. Already-merged PRs are eligible
+    only when close-out is still incomplete.
+    """
+    labels = label_names(pr)
+    author = _label_value(labels, "author:")
+    holder = merge_claimant(labels)
+
+    def no(reason):
+        return {"eligible": False, "reason": reason}
+
+    if pr.get("isDraft"):
+        return no("draft")
+    if holder and holder != agent:
+        return no(f"already being merged by '{holder}'")
+
+    if is_merged(pr):
+        if not closeout_incomplete(pr):
+            return no("merged and close-out already complete")
+        ok, reason = dod_status(pr["number"])
+        if not ok:
+            return no(reason)
+        return {"eligible": True, "reason": reason}
+
+    review_holder = reviewed_by(labels)
+    if review_holder:
+        return no(f"review still in progress by '{review_holder}'")
+
+    threads = review_thread_count(pr)
+    if threads is None:
+        return no("review thread state is unavailable")
+    if threads:
+        return no(f"{threads} active review feedback item(s); waiting on author")
+
+    peers = [
+        name[len("reviewed-by:"):]
+        for name in labels
+        if name.startswith("reviewed-by:")
+        and name[len("reviewed-by:"):]
+        and name[len("reviewed-by:"):] != author
+    ]
+    if not peers and (pr.get("reviewDecision") or "").upper() != "APPROVED":
+        return no("no independent review attribution yet")
+
+    if author and author == agent and not peers:
+        return no("author cannot merge without a distinct peer reviewer")
+
+    state = ci_state(pr)
+    if state != "green":
+        if state != "none":
+            return no(f"CI is {state}")
+
+    ok, reason = dod_status(pr["number"])
+    if not ok:
+        return no(reason)
+    return {"eligible": True, "reason": reason}
+
+
 def mark(pr_number: int, label: str, colour: str, description: str) -> None:
     """Applies an advisory label. Never fatal - it is a signal, not a gate."""
     run_cmd(["gh", "label", "create", label, "--color", colour, "--description", description],
@@ -264,7 +405,7 @@ def mark(pr_number: int, label: str, colour: str, description: str) -> None:
 def select(agent: str, family: str | None, round_cap: int, cross_family_wait: int
            ) -> dict[str, Any]:
     """Builds the full picture, then picks by priority."""
-    prs = list_open_prs()
+    prs = list_work_prs()
     if prs is None:
         # Fail closed. Treating an unreadable queue as empty makes the selector
         # claim new implementation work as though no feedback or review were
@@ -272,6 +413,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         return {"agent": agent, "family": family,
                 "work": {"type": "error", "skill": None,
                          "reason": "the pull request queue could not be read"},
+                "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
                 "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
                 "escalated_prs": [], "claimable_issues": [],
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
@@ -285,6 +427,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         return {"agent": agent, "family": family,
                 "work": {"type": "error", "skill": None,
                          "reason": f"review thread state could not be read for {numbers}"},
+                "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
                 "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
                 "escalated_prs": [], "claimable_issues": [],
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
@@ -294,7 +437,27 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     mine = [p for p in prs if needs_my_attention(p, agent)]
     feedback = min(mine, key=lambda p: p["number"]) if mine else None
 
-    # 2. Review someone else's work.
+    # 2. Merge independently reviewed, gate-green work.
+    mergeable, merge_skipped = [], []
+    for pr in sorted(prs, key=lambda p: p["number"]):
+        verdict = merge_eligibility(pr, agent)
+        if verdict["eligible"]:
+            mergeable.append(pr)
+        else:
+            # Only surface skips that looked like merge candidates, otherwise
+            # every unreviewed PR pollutes the report with "no independent review".
+            labels = label_names(pr)
+            author = _label_value(labels, "author:")
+            has_peer = any(
+                name.startswith("reviewed-by:")
+                and name[len("reviewed-by:"):]
+                and name[len("reviewed-by:"):] != author
+                for name in labels
+            )
+            if has_peer or merge_claimant(labels) == agent:
+                merge_skipped.append({"number": pr["number"], "why": verdict["reason"]})
+
+    # 3. Review someone else's work.
     reviewable, skipped = [], []
     for pr in sorted(prs, key=lambda p: p["number"]):
         verdict = review_eligibility(pr, agent, family, round_cap, cross_family_wait)
@@ -306,13 +469,17 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     # Cross-family first, then degraded same-family, oldest PR first within each.
     reviewable.sort(key=lambda pair: (not pair[1]["cross_family"], -waiting_minutes(pair[0])))
 
-    # 3. Otherwise start something new - unchanged issue selection.
+    # 4. Otherwise start something new - unchanged issue selection.
     issues = list_open_issues()
     parts = build_candidates(issues, agent)
 
     if feedback is not None:
         work = {"type": "feedback", "pr": feedback["number"], "title": feedback["title"],
                 "skill": "address-pr-feedback"}
+    elif mergeable:
+        pr = mergeable[0]
+        work = {"type": "merge", "pr": pr["number"], "title": pr["title"],
+                "skill": "merge-pr", "head_sha": pr.get("headRefOid")}
     elif reviewable:
         pr, verdict = reviewable[0]
         work = {"type": "review", "pr": pr["number"], "title": pr["title"],
@@ -331,6 +498,13 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
 
     return {
         "agent": agent, "family": family, "work": work,
+        "mergeable_detail": [
+            {"pr": p["number"], "title": p["title"],
+             "head_sha": p.get("headRefOid")}
+            for p in mergeable
+        ],
+        "mergeable": [p["number"] for p in mergeable],
+        "merge_skipped": merge_skipped,
         # Ordered candidates, so a lost claim race costs one retry rather than
         # sending the agent back through the whole picker.
         "reviewable_detail": [
@@ -369,13 +543,31 @@ def main():
 
     if args.reap_after:
         reap_stale_reviews(args.reap_after)
+        reap_stale_merges(args.reap_after)
         reap_stale_claims(list_open_issues(), args.reap_after)
 
     res = select(args.agent, (args.family or "").lower() or None,
                  args.round_cap, args.cross_family_wait)
     work = res["work"]
 
-    if args.claim and work["type"] == "review":
+    if args.claim and work["type"] == "merge":
+        work["claimed"] = False
+        for candidate in res.get("mergeable_detail") or []:
+            rc = claim_merge(candidate["pr"], args.agent)
+            if rc == EXIT_OK:
+                work.update({"pr": candidate["pr"], "title": candidate["title"],
+                             "head_sha": candidate.get("head_sha"),
+                             "claimed": True})
+                break
+            if rc == EXIT_CONFLICT:
+                print(f"[INFO] PR #{candidate['pr']} merge was taken; trying the next one.",
+                      file=sys.stderr)
+                continue
+            work["claim_result"] = "error"
+            break
+        if not work["claimed"] and "claim_result" not in work:
+            work["claim_result"] = "all_taken"
+    elif args.claim and work["type"] == "review":
         # Walk the candidates: another agent claiming the top one first should
         # cost a retry, not a wasted cycle through the whole picker.
         work["claimed"] = False
@@ -425,6 +617,10 @@ def main():
     if work["type"] == "feedback":
         print(f"🔁 Your PR #{work['pr']} has requested changes — address it before taking new work.")
         print(f"   → {work['skill']}: {work['title']}")
+    elif work["type"] == "merge":
+        print(f"🔀 Merge PR #{work['pr']} (Definition of Done passed)")
+        print(f"   → merge_pr.py --pr {work['pr']}  (never gh pr merge)")
+        print(f"   → {work['skill']}: {work['title']}")
     elif work["type"] == "review":
         tag = "cross-family" if work["cross_family"] else "SAME FAMILY (degraded)"
         print(f"🔍 Review PR #{work['pr']} [{tag}]")
@@ -433,14 +629,20 @@ def main():
         verb = "Resume" if work.get("resuming") else "Implement"
         print(f"🛠️  {verb} issue #{work['issue']}")
         print(f"   → {work['skill']}: {work['title']}")
+    elif work["type"] == "error":
+        print(f"⛔ Picker error: {work.get('reason')}")
     else:
-        print("✨ Nothing to do: no reviewable PR and no claimable issue.")
+        print("✨ Nothing to do: no mergeable/reviewable PR and no claimable issue.")
 
+    if res.get("merge_skipped"):
+        print("\nMerge candidates not offered to you:")
+        for item in res["merge_skipped"]:
+            print(f"  #{item['number']}: {item['why']}")
     if res["skipped_prs"]:
         print("\nPRs not offered to you:")
         for item in res["skipped_prs"]:
             print(f"  #{item['number']}: {item['why']}")
-    if work["type"] != "issue" and res["claimable_issues"]:
+    if work["type"] not in {"issue", "merge"} and res["claimable_issues"]:
         print(f"\nIssues waiting: {res['claimable_issues']}")
 
 

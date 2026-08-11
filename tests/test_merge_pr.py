@@ -577,6 +577,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
             "reconcile_issue_done": (True, "done"),
             "clear_issue_claims": (True, "issue claim clear"),
             "clear_review_claims": (True, "review claim clear"),
+            "clear_merger_claims": (True, "merger claim clear"),
         }
         outcomes[failing] = (False, f"{failing} failed")
         patches = {
@@ -598,6 +599,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
         mocks["ensure_issue_closed"].assert_called_once_with(7)
         mocks["reconcile_issue_done"].assert_called_once_with(7)
         mocks["clear_review_claims"].assert_called_once_with(9)
+        mocks["clear_merger_claims"].assert_not_called()
 
     def test_worktree_failure_does_not_skip_branch_or_board_cleanup(self):
         ok, mocks = self._run("prune_worktree")
@@ -611,7 +613,9 @@ class CloseOutRecoveryTests(unittest.TestCase):
         self.assertFalse(ok)
         mocks["clear_issue_claims"].assert_called_once_with(7)
         mocks["clear_review_claims"].assert_called_once_with(9)
+        mocks["clear_merger_claims"].assert_not_called()
 
+    @patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear"))
     @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
     @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
     @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
@@ -621,7 +625,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree"))
     @patch.object(merge_pr.os, "chdir")
     def test_changes_to_surviving_root_before_pruning_caller_worktree(
-        self, chdir, prune, _local, _remote, _close, _done, _issue, _review
+        self, chdir, prune, _local, _remote, _close, _done, _issue, _review, _merger
     ):
         def after_chdir(*_args):
             chdir.assert_called_once_with("/repo")
@@ -1044,6 +1048,36 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
     def test_absent_claim_labels_are_already_done(self, _gh):
         self.assertTrue(merge_pr.clear_issue_claims(7)[0])
         self.assertTrue(merge_pr.clear_review_claims(9)[0])
+
+
+
+class ExpectedHeadGateTests(unittest.TestCase):
+    @patch.object(merge_pr, "fetch_pr")
+    def test_expected_head_mismatch_blocks_before_merge(self, fetch_pr):
+        pr = {
+            "number": 9, "title": "t", "body": "Closes #7", "state": "OPEN",
+            "headRefOid": "live-b", "labels": [], "reviews": [],
+            "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "additions": 1, "deletions": 1, "author": {"login": "gillella"},
+        }
+        fetch_pr.return_value = pr
+        with patch("sys.argv", ["merge_pr.py", "--pr", "9", "--expected-head", "reviewed-a"]):
+            rc = merge_pr.main()
+        self.assertEqual(rc, merge_pr.EXIT_BLOCKED)
+
+
+class CloseoutMarkerTests(unittest.TestCase):
+    def test_failed_board_reconcile_keeps_recovery_discoverable(self):
+        pr = {
+            "number": 9, "title": "t", "body": "Closes #7\n", "state": "MERGED",
+            "mergedAt": "t", "labels": [],
+        }
+        with patch.object(merge_pr, "_gh_json", return_value={
+            "state": "CLOSED",
+            "labels": [{"name": "status:in-review"}],
+        }):
+            self.assertTrue(merge_pr.closeout_incomplete(pr))
 
 
 if __name__ == "__main__":

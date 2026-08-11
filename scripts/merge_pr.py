@@ -41,6 +41,9 @@ REVIEWED_BY_LABEL = "reviewed-by:"
 # Treating it as attestation would let an author's own same-account review plus
 # any peer's claim satisfy the gate before that peer had looked at the diff.
 REVIEW_CLAIM_LABEL = "reviewer:"
+# Transient merge-execution claim from claim_merge. Cleared on close-out; never
+# treated as review attestation.
+MERGER_CLAIM_LABEL = "merger:"
 
 # Review apps can add useful findings, but their comments are not independent
 # approval. GitHub exposes some bot logins with a ``[bot]`` suffix and the
@@ -401,6 +404,37 @@ def is_merged(pr):
     return (pr.get("state") or "").upper() == "MERGED" or bool(pr.get("mergedAt"))
 
 
+def closeout_incomplete(pr):
+    """True when a merged PR still needs ``merge_pr.py`` close-out resumed.
+
+    Server-side merge removes the PR from ``gh pr list --state open``. Without
+    this check, a crash after merge but before Done/claim cleanup leaves the
+    board permanently stranded. Signals: a lingering ``merger:`` claim, any
+    linked ``Closes #N`` issue that is still open, or a closed issue that never
+    received ``status:done``.
+    """
+    if not is_merged(pr):
+        return False
+    labels = [lab.get("name", "") for lab in (pr.get("labels") or [])]
+    if any(name.startswith(MERGER_CLAIM_LABEL) for name in labels):
+        return True
+    for num in linked_issues(pr.get("body")):
+        issue = _gh_json(
+            ["gh", "issue", "view", str(num), "--json", "state,labels"]
+        )
+        if issue is None:
+            # Fail closed: an unreadable linked issue must be treated as unfinished.
+            return True
+        if (issue.get("state") or "").upper() == "OPEN":
+            return True
+        issue_labels = {
+            lab.get("name", "") for lab in (issue.get("labels") or [])
+        }
+        if "status:done" not in issue_labels:
+            return True
+    return False
+
+
 def merge_commit_oid(pr):
     value = pr.get("mergeCommit")
     if isinstance(value, dict):
@@ -726,6 +760,62 @@ def clear_review_claims(pr_num):
     return clear_labels("pr", pr_num, REVIEW_CLAIM_LABEL)
 
 
+def clear_merger_claims(pr_num):
+    return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL)
+
+
+def evaluate_dod(pr, issue_bodies, threads):
+    """Runs every Definition-of-Done check without merging.
+
+    Returns ``(ok, gates)`` where ``gates`` is a list of
+    ``(name, passed, message)`` in evaluation order. Shared by ``--dry-run``
+    and the merge work picker so eligibility cannot drift from the gate.
+    """
+    issue_nums = linked_issues(pr.get("body"))
+    gates = [
+        ("open", *check_open(pr)),
+        ("issue link", *check_issue_link(pr)),
+        ("ci", *check_ci(pr)),
+        ("review", *check_reviews(pr, threads)),
+        ("rebased", *check_rebased(pr)),
+        ("size", *check_size(pr)),
+    ]
+    for num in issue_nums:
+        gates.append((f"accept #{num}", *check_acceptance(num, issue_bodies.get(num, ""))))
+    ok = all(passed for _, passed, _ in gates)
+    return ok, gates
+
+
+def dod_status(pr_id):
+    """Fetch-and-evaluate helper for callers that only need pass/fail + reason.
+
+    Returns ``(ok, reason)``. ``ok`` is True only when every gate passes.
+    Fetch or thread-query failures fail closed with ``ok=False``.
+    """
+    pr = fetch_pr(pr_id)
+    if not pr:
+        return False, "could not fetch pull request"
+    if is_merged(pr):
+        if closeout_incomplete(pr):
+            return True, "merged; close-out incomplete — resume merge_pr.py"
+        return False, "merged and close-out already complete"
+    issue_nums = linked_issues(pr.get("body"))
+    if not issue_nums:
+        return False, "PR body has no Closes #<issue>"
+    issue_bodies = {}
+    for num in issue_nums:
+        issue = _gh_json(["gh", "issue", "view", str(num), "--json", "body"])
+        if issue is None:
+            return False, f"could not read issue #{num}"
+        issue_bodies[num] = issue.get("body") or ""
+    threads = unresolved_threads(pr_id)
+    ok, gates = evaluate_dod(pr, issue_bodies, threads)
+    if ok:
+        return True, "every Definition-of-Done gate passed"
+    blocked = [name for name, passed, _ in gates if not passed]
+    return False, f"unmet: {', '.join(blocked)}"
+
+
 def run_closeout(pr, issue_nums, repo_root):
     """Runs every idempotent close-out step, even after an earlier failure."""
     try:
@@ -760,7 +850,25 @@ def run_closeout(pr, issue_nums, repo_root):
             ok, message = False, f"Unexpected close-out error: {exc}"
         print(f"  {'✅' if ok else '❌'} {name:<18} {message}")
         all_ok = all_ok and ok
+
+    # Keep merger:<id> until every prior step succeeds so the picker can still
+    # rediscover incomplete close-out. Clearing it after a board/Done failure
+    # would make recovery invisible once the linked issue is CLOSED.
+    if all_ok:
+        try:
+            ok, message = clear_merger_claims(pr.get("number"))
+        except Exception as exc:
+            ok, message = False, f"Unexpected close-out error: {exc}"
+        print(f"  {'✅' if ok else '❌'} {'merger claim':<18} {message}")
+        all_ok = all_ok and ok
+    else:
+        print("  ⏳ merger claim      retained so recovery remains discoverable")
     return all_ok
+
+
+def heads_match(live_sha, expected_sha):
+    """True when the live head is exactly the picker-selected head."""
+    return bool(live_sha) and bool(expected_sha) and live_sha == expected_sha
 
 
 def main():
@@ -768,6 +876,12 @@ def main():
     parser.add_argument("--pr", type=int, required=True, help="Pull request number")
     parser.add_argument("--dry-run", action="store_true", help="Run every check, merge nothing")
     parser.add_argument("--merge-method", default="squash", choices=["squash", "merge", "rebase"])
+    parser.add_argument(
+        "--expected-head",
+        default=None,
+        metavar="SHA",
+        help="Head SHA selected by the picker; refuse if the live head differs",
+    )
     args = parser.parse_args()
 
     pr = fetch_pr(args.pr)
@@ -780,6 +894,16 @@ def main():
         return EXIT_ERROR
 
     gated_head = pr.get("headRefOid") or "unknown"
+    if args.expected_head and not is_merged(pr):
+        if not heads_match(gated_head, args.expected_head):
+            print(
+                f"[ERROR] Live head {gated_head} does not match picker-selected "
+                f"--expected-head {args.expected_head}. Refusing to merge a "
+                "different commit than the one that was claimed.",
+                file=sys.stderr,
+            )
+            return EXIT_BLOCKED
+
     if is_merged(pr):
         print(f"=== Merge execution — PR #{args.pr}: already merged; resuming close-out ===")
         final_pr = pr
@@ -795,22 +919,13 @@ def main():
             issue_bodies[num] = issue.get("body") or ""
 
         threads = unresolved_threads(args.pr)
-        gates = [
-            ("open", check_open(pr)),
-            ("issue link", check_issue_link(pr)),
-            ("ci", check_ci(pr)),
-            ("review", check_reviews(pr, threads)),
-            ("rebased", check_rebased(pr)),
-            ("size", check_size(pr)),
-        ]
-        for num in issue_nums:
-            gates.append((f"accept #{num}", check_acceptance(num, issue_bodies[num])))
+        ok, gates = evaluate_dod(pr, issue_bodies, threads)
 
         print(f"=== Definition of Done — PR #{args.pr}: {pr.get('title','')} ===")
         blocked = []
-        for name, (ok, message) in gates:
-            print(f"  {'✅' if ok else '❌'} {name:<11} {message}")
-            if not ok:
+        for name, passed, message in gates:
+            print(f"  {'✅' if passed else '❌'} {name:<11} {message}")
+            if not passed:
                 blocked.append(name)
         if blocked:
             print(f"\n🚫 Not merged. Unmet: {', '.join(blocked)}.")
@@ -818,6 +933,22 @@ def main():
         if args.dry_run:
             print("\n✅ Every gate passed. --dry-run, so nothing was merged.")
             return EXIT_OK
+
+        # Re-check head immediately before the merge command in case a push
+        # landed between DoD evaluation and execution.
+        fresh = fetch_pr(args.pr)
+        if not fresh:
+            return EXIT_ERROR
+        live = fresh.get("headRefOid") or "unknown"
+        if args.expected_head and not heads_match(live, args.expected_head):
+            print(
+                f"[ERROR] Head moved to {live} after DoD checks; expected "
+                f"{args.expected_head}. No merge command was run.",
+                file=sys.stderr,
+            )
+            return EXIT_BLOCKED
+        pr = fresh
+        gated_head = live
 
         print("\n=== Merge execution ===")
         final_pr, outcome = execute_merge(args.pr, pr, args.merge_method)

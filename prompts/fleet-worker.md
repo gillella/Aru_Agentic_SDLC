@@ -3,10 +3,11 @@
 One prompt, pasted once per agent session. Each agent asks the board what to do
 next, does it, and asks again — no orchestrator, no shared state beyond GitHub.
 
-Agents do three kinds of work: fix their own PR when a reviewer asks, review
-someone else's PR, or implement an issue. **Review is work an agent claims off
-the board**, done under that agent's own subscription. There is no CI reviewer
-and no provider API key anywhere in this design.
+Agents do four kinds of work: fix their own PR when a reviewer asks, merge a
+PR whose Definition-of-Done gates already pass, review someone else's PR, or
+implement an issue. **Review and merge are work an agent claims off the board**,
+done under that agent's own subscription. There is no CI reviewer and no
+provider API key anywhere in this design.
 
 ## How to launch
 
@@ -57,9 +58,10 @@ to them, do not touch their work.
 python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID> --family <FAMILY> --claim --json
 ```
 
-It returns one work item of type `feedback`, `review`, `issue`, or `idle`, and
-claims it. The priority order is deliberate — **finishing beats starting**. Do
-the branch below that matches, then loop.
+It returns one work item of type `feedback`, `merge`, `review`, `issue`, or
+`idle`, and claims it. The priority order is deliberate — **finishing beats
+starting** (feedback → merge → review → issue). Do the branch below that
+matches, then loop.
 
 ---
 
@@ -80,7 +82,38 @@ otherwise support the conclusion with code and test evidence.
 
 ---
 
-#### B. `review` — review someone else's PR
+#### B. `merge` — Definition of Done already passes
+
+The picker only offers `merge` when `merge_pr.py --dry-run` would pass every
+gate. Your claim is `merger:<AGENT_ID>` (already applied when `--claim` ran).
+
+1. Confirm the claim:
+   `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge`
+2. Execute the gated merge **only** through the helper, pinning the head SHA
+   the picker reported as `head_sha` / `work.head_sha`:
+   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>`
+   Never run `gh pr merge`, never push to `main`, never bypass the helper, and
+   never omit `--expected-head` when the picker supplied a SHA. If the live head
+   differs, the helper exits blocked without merging — re-ask the board.
+3. On success (exit 0): the helper closes linked issues, moves them to Done,
+   clears claims, and cleans worktrees. Immediately ask the board again.
+4. On exit 3 (DoD blocked / head mismatch): release the merge claim and loop —
+   do not invent a merge attempt. The PR returns to review/feedback/waiting
+   naturally.
+   `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release`
+5. On exit 1 (transient error / incomplete close-out): retry the **same**
+   `merge_pr.py --pr <N> --expected-head <HEAD_SHA>` command with bounded
+   backoff (5s, 15s, 45s; at most three attempts). If it still fails unsafely,
+   leave the `merger:` claim in place when close-out is incomplete so another
+   cycle can resume it; record the exact error on the linked issue and never
+   report success.
+
+The PR author may perform this mechanical merge once a distinct peer's
+`reviewed-by:<id>` is present. Self-review remains forbidden.
+
+---
+
+#### C. `review` — review someone else's PR
 
 Follow `$ARU_SDLC_HOME/skills/code-review/SKILL.md`.
 
@@ -132,7 +165,7 @@ say so in one sentence rather than inventing findings to look thorough.
 
 ---
 
-#### C. `issue` — implement
+#### D. `issue` — implement
 
 Follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`.
 
