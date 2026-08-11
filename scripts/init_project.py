@@ -437,8 +437,8 @@ def path_allowed(rel_path, touches):
             return True
         if "*" in pat_norm or "?" in pat_norm or "[" in pat_norm:
             pattern_regex = re.escape(pat_norm)
-            pattern_regex = pattern_regex.replace(r"\*", r"[^/]*")
-            pattern_regex = pattern_regex.replace(r"\?", r"[^/]")
+            pattern_regex = pattern_regex.replace(r"\\*", r"[^/]*")
+            pattern_regex = pattern_regex.replace(r"\\?", r"[^/]")
             if re.fullmatch(pattern_regex, rel):
                 return True
         else:

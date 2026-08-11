@@ -185,7 +185,10 @@ def _evaluate_current_repo() -> Dict[str, Any]:
                 }
                 board_status = board_options.get(gov_items[0].get("statusOptionId"))
             # Label vs Board alignment check
-            current_status_label = next((l.replace("status:", "") for l in labels if l.startswith("status:")), None)
+            current_status_label = next(
+                (name.replace("status:", "") for name in labels if name.startswith("status:")),
+                None,
+            )
             normalized_board_status = (board_status or "").lower().replace(" ", "-")
             if current_status_label and normalized_board_status and current_status_label != normalized_board_status:
                 drifted_issues.append(num)
@@ -207,7 +210,10 @@ def _evaluate_current_repo() -> Dict[str, Any]:
         decision = (pr.get("reviewDecision") or "").upper()
         merge_state = (pr.get("mergeStateStatus") or "").upper()
 
-        reviewer_label = next((l.replace("reviewer:", "") for l in labels if l.startswith("reviewer:")), None)
+        reviewer_label = next(
+            (name.replace("reviewer:", "") for name in labels if name.startswith("reviewer:")),
+            None,
+        )
         if reviewer_label:
             active_claims.append({"type": "review", "number": num, "agent": reviewer_label})
 
