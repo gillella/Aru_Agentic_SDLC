@@ -17,9 +17,9 @@ Fail-open by design. This hook runs on every tool call, so a GitHub outage, an
 unparseable issue body, or work in an ungoverned repo must never halt the
 session. It blocks only when it can positively prove a violation:
 
-  * the branch names an issue, AND
-  * that issue declares touches, AND
-  * the target path is outside the declaration.
+  * a file tool targets a governed repo while HEAD is protected, OR
+  * the branch names an issue, that issue declares touches, and the target
+    path is outside the declaration.
 
 Anything less and the call is allowed with a note on stderr.
 """
@@ -78,6 +78,25 @@ def issue_from_branch(branch):
     """
     match = re.search(r"issue-(\d+)", branch or "", re.IGNORECASE)
     return int(match.group(1)) if match else None
+
+
+def governed_repo(root):
+    """True when the repository opted into the Aru Issue-First Law.
+
+    ``False`` means the marker is positively absent. ``None`` means detection
+    failed, which the caller treats as unknown and therefore allows. This hook
+    is installed globally, so an ordinary repository with its own AGENTS.md
+    must never be mistaken for an Aru-governed one.
+    """
+    marker = os.path.join(root, "AGENTS.md")
+    if not os.path.isfile(marker):
+        return False
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeError):
+        return None
+    return bool(re.search(r"\bIssue-First Law\b", text, re.IGNORECASE))
 
 
 def _git_common_dir(root):
@@ -537,10 +556,29 @@ def main():
     if tool not in PATH_TOOLS:
         return EXIT_ALLOW
 
+    target = (
+        tool_input.get("file_path")
+        or tool_input.get("notebook_path")
+        or tool_input.get("path")
+    )
+    rel = _norm(target, root)
+    if rel is None:
+        return EXIT_ALLOW  # Outside the repo; not governed.
+
+    if branch in PROTECTED_BRANCHES:
+        governed = governed_repo(root)
+        if governed:
+            return deny(
+                f"write to '{rel}' on protected branch '{branch}'.",
+                "Claim an issue, then create an isolated issue branch with "
+                "scripts/create_branch.py --worktree before editing.",
+            )
+        # False is an ordinary ungoverned repository. None is a detection
+        # failure. Both deliberately fail open for a globally installed hook.
+        return EXIT_ALLOW
+
     if issue is None:
-        # Ungoverned branch. The Issue-First Law is a review concern, not
-        # something to enforce on every keystroke - blocking here would make
-        # scratch work and ungoverned repos unusable.
+        # A non-protected scratch branch remains usable without an issue.
         return EXIT_ALLOW
 
     touches = touches_for(root, issue)
@@ -556,15 +594,6 @@ def main():
             file=sys.stderr,
         )
         return EXIT_ALLOW
-
-    target = (
-        tool_input.get("file_path")
-        or tool_input.get("notebook_path")
-        or tool_input.get("path")
-    )
-    rel = _norm(target, root)
-    if rel is None:
-        return EXIT_ALLOW  # Outside the repo; not governed.
 
     if path_allowed(rel, touches):
         return EXIT_ALLOW

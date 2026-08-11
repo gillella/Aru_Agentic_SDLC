@@ -3,7 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "hooks"))
@@ -68,6 +68,29 @@ class BranchParsingTests(unittest.TestCase):
         # this way is invisible to the picker's resume logic too.
         self.assertIsNone(et.issue_from_branch("docs/30-current-state-gap-analysis"))
         self.assertIsNone(et.issue_from_branch("main"))
+
+
+class GovernedRepoTests(unittest.TestCase):
+    @patch.object(et.os.path, "isfile", return_value=True)
+    def test_issue_first_marker_enables_governance(self, _isfile):
+        with patch("builtins.open", mock_open(
+                read_data="# Core Governance: The Issue-First Law\n")):
+            self.assertTrue(et.governed_repo("/repo"))
+
+    @patch.object(et.os.path, "isfile", return_value=True)
+    def test_unrelated_agents_file_is_not_aru_governance(self, _isfile):
+        with patch("builtins.open", mock_open(
+                read_data="# Local development notes\n")):
+            self.assertFalse(et.governed_repo("/repo"))
+
+    @patch.object(et.os.path, "isfile", return_value=False)
+    def test_missing_agents_file_is_ungoverned(self, _isfile):
+        self.assertFalse(et.governed_repo("/repo"))
+
+    @patch.object(et.os.path, "isfile", return_value=True)
+    def test_unreadable_agents_file_is_unknown(self, _isfile):
+        with patch("builtins.open", side_effect=OSError("denied")):
+            self.assertIsNone(et.governed_repo("/repo"))
 
 
 class ProtectedBranchTests(unittest.TestCase):
@@ -343,12 +366,64 @@ class PostPr23ParserGapTests(unittest.TestCase):
 class HookDecisionTests(unittest.TestCase):
     """End-to-end main() behaviour with GitHub and git stubbed out."""
 
-    def _run(self, payload, branch, touches, tool="Edit"):
+    def _run(self, payload, branch, touches, governed=False):
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
              patch.object(et, "repo_root", return_value="/repo"), \
              patch.object(et, "current_branch", return_value=branch), \
+             patch.object(et, "governed_repo", return_value=governed), \
              patch.object(et, "touches_for", return_value=touches):
             return et.main()
+
+    def test_every_file_tool_is_blocked_on_governed_main(self):
+        payloads = {
+            "Edit": {"file_path": "/repo/app.py"},
+            "Write": {"file_path": "/repo/app.py"},
+            "MultiEdit": {"file_path": "/repo/app.py", "edits": []},
+            "NotebookEdit": {"notebook_path": "/repo/analysis.ipynb"},
+        }
+        for tool, tool_input in payloads.items():
+            with self.subTest(tool=tool):
+                stderr = io.StringIO()
+                with patch.object(et.sys, "stderr", stderr):
+                    rc = self._run(
+                        {"tool_name": tool, "tool_input": tool_input, "cwd": "/repo"},
+                        "main", None, governed=True,
+                    )
+                self.assertEqual(rc, et.EXIT_BLOCK)
+                self.assertIn("Claim an issue", stderr.getvalue())
+                self.assertIn("create_branch.py --worktree", stderr.getvalue())
+
+    def test_main_in_ungoverned_repo_is_allowed(self):
+        rc = self._run(
+            {"tool_name": "Edit", "tool_input": {"file_path": "/repo/app.py"},
+             "cwd": "/repo"},
+            "main", None, governed=False,
+        )
+        self.assertEqual(rc, et.EXIT_ALLOW)
+
+    def test_governance_detection_failure_on_main_fails_open(self):
+        rc = self._run(
+            {"tool_name": "Write", "tool_input": {"file_path": "/repo/app.py"},
+             "cwd": "/repo"},
+            "master", None, governed=None,
+        )
+        self.assertEqual(rc, et.EXIT_ALLOW)
+
+    def test_outside_repo_path_on_governed_main_is_allowed(self):
+        rc = self._run(
+            {"tool_name": "Edit", "tool_input": {"file_path": "/tmp/scratch.py"},
+             "cwd": "/repo"},
+            "main", None, governed=True,
+        )
+        self.assertEqual(rc, et.EXIT_ALLOW)
+
+    def test_scratch_branch_in_governed_repo_is_allowed(self):
+        rc = self._run(
+            {"tool_name": "Edit", "tool_input": {"file_path": "/repo/app.py"},
+             "cwd": "/repo"},
+            "scratch/experiment", None, governed=True,
+        )
+        self.assertEqual(rc, et.EXIT_ALLOW)
 
     def test_write_inside_declaration_is_allowed(self):
         rc = self._run(
