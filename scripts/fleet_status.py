@@ -7,7 +7,7 @@ Provides deterministic evaluation of factory state:
                        no board drift, no orphan worktrees.
   * waiting  (exit 2) - active work in flight, Ready/In Progress/In Review/Backlog issues,
                        pending CI, or pending reviews.
-  * blocked  (exit 3) - needs-human-review, needs-design, exhausted review rounds, or ambiguous board.
+  * blocked  (exit 3) - severe escalated merge conflict or ambiguous board.
   * error    (exit 1) - GitHub API / auth failures; fails closed.
 """
 
@@ -19,15 +19,12 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from common import (
-    AGENT_LABEL_PREFIX,
-    agent_labels,
     claimed_by,
-    get_issue_project_items,
     get_repo_projects,
     get_repo_slug,
     label_names,
-    list_open_issues,
-    parse_touches,
+    query_issue_project_items,
+    query_open_issues,
     run_cmd,
     run_gh_json,
     select_governed_project_items,
@@ -41,7 +38,7 @@ EXIT_BLOCKED = 3
 
 PR_FIELDS = (
     "number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
-    "createdAt,headRefName,body,reviewDecision,state"
+    "createdAt,headRefName,body,reviewDecision,mergeStateStatus,state"
 )
 
 
@@ -64,18 +61,58 @@ def list_worktree_branches() -> List[str]:
     return branches
 
 
+def _error(reason: str, summary: str) -> Dict[str, Any]:
+    return {
+        "state": "error",
+        "exit_code": EXIT_ERROR,
+        "reasons": [reason],
+        "summary": summary,
+    }
+
+
 def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
-    """Calculates authoritative factory state."""
+    """Calculates authoritative factory state for ``repo_dir``."""
+    try:
+        target = os.path.abspath(repo_dir)
+    except (OSError, TypeError, ValueError) as exc:
+        return _error(
+            f"Could not resolve repository directory '{repo_dir}': {exc}",
+            "ERROR: Invalid repository directory.",
+        )
+    if not os.path.isdir(target):
+        return _error(
+            f"Repository directory does not exist: {target}",
+            "ERROR: Invalid repository directory.",
+        )
+
+    original = os.getcwd()
+    try:
+        os.chdir(target)
+        return _evaluate_current_repo()
+    except OSError as exc:
+        return _error(
+            f"Could not evaluate repository directory '{target}': {exc}",
+            "ERROR: Could not access repository directory.",
+        )
+    finally:
+        os.chdir(original)
+
+
+def _evaluate_current_repo() -> Dict[str, Any]:
+    """Calculates state after the caller has selected the repository cwd."""
     slug = get_repo_slug()
     if not slug:
-        return {
-            "state": "error",
-            "exit_code": EXIT_ERROR,
-            "reasons": ["Could not determine GitHub repository slug."],
-            "summary": "ERROR: Unable to resolve repository slug.",
-        }
+        return _error(
+            "Could not determine GitHub repository slug.",
+            "ERROR: Unable to resolve repository slug.",
+        )
 
     projects = get_repo_projects(slug)
+    if projects is None:
+        return _error(
+            "Failed to list project boards from GitHub API.",
+            "ERROR: Could not query project boards.",
+        )
     governed_projects = select_governed_projects(projects, slug)
     if len(governed_projects) == 0:
         return {
@@ -96,27 +133,22 @@ def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
     governed_board = governed_projects[0]
     board_title = governed_board.get("title", "")
 
-    issues = list_open_issues()
+    issues = query_open_issues()
     if issues is None:
-        return {
-            "state": "error",
-            "exit_code": EXIT_ERROR,
-            "reasons": ["Failed to list open issues from GitHub API."],
-            "summary": "ERROR: Could not query open issues.",
-        }
+        return _error(
+            "Failed to list open issues from GitHub API.",
+            "ERROR: Could not query open issues.",
+        )
 
     prs = list_open_prs_details()
     if prs is None:
-        return {
-            "state": "error",
-            "exit_code": EXIT_ERROR,
-            "reasons": ["Failed to list open pull requests from GitHub API."],
-            "summary": "ERROR: Could not query open pull requests.",
-        }
+        return _error(
+            "Failed to list open pull requests from GitHub API.",
+            "ERROR: Could not query open pull requests.",
+        )
 
     worktree_branches = list_worktree_branches()
 
-    reasons: List[str] = []
     blocked_reasons: List[str] = []
     waiting_reasons: List[str] = []
     drifted_issues: List[int] = []
@@ -126,32 +158,36 @@ def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
     # Evaluate Issues
     for issue in issues:
         num = issue["number"]
-        body = issue.get("body") or ""
         labels = set(label_names(issue))
 
         holder = claimed_by(issue)
         if holder:
             active_claims.append({"type": "issue", "number": num, "agent": holder})
 
-        if "needs-human-review" in labels:
-            blocked_reasons.append(f"Issue #{num} carries 'needs-human-review'.")
-        if "needs-design" in labels:
-            blocked_reasons.append(f"Issue #{num} requires design review ('needs-design').")
-
         # Board drift check
-        items = get_issue_project_items(num)
+        items = query_issue_project_items(num)
+        if items is None:
+            return _error(
+                f"Failed to query project-board items for issue #{num}.",
+                "ERROR: Could not query issue project-board state.",
+            )
         gov_items = select_governed_project_items(items, slug)
         if not gov_items:
             orphan_issues.append(num)
             waiting_reasons.append(f"Issue #{num} is open but not on board '{board_title}'.")
         else:
-            board_status = None
-            p_field = (gov_items[0].get("project") or {}).get("field") or {}
-            board_options = {o["id"]: o["name"].lower() for o in p_field.get("options", [])}
-            board_status = board_options.get(gov_items[0].get("statusOptionId"))
+            status_value = gov_items[0].get("status") or {}
+            board_status = status_value.get("name")
+            if not board_status:
+                p_field = (gov_items[0].get("project") or {}).get("field") or {}
+                board_options = {
+                    o["id"]: o["name"] for o in p_field.get("options", [])
+                }
+                board_status = board_options.get(gov_items[0].get("statusOptionId"))
             # Label vs Board alignment check
             current_status_label = next((l.replace("status:", "") for l in labels if l.startswith("status:")), None)
-            if current_status_label and board_status and current_status_label != board_status.replace(" ", "-"):
+            normalized_board_status = (board_status or "").lower().replace(" ", "-")
+            if current_status_label and normalized_board_status and current_status_label != normalized_board_status:
                 drifted_issues.append(num)
                 waiting_reasons.append(f"Issue #{num} status label ('{current_status_label}') drifts from board status ('{board_status}').")
 
@@ -168,16 +204,17 @@ def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
     for pr in prs:
         num = pr["number"]
         labels = set(label_names(pr))
-        reviews = pr.get("reviews") or []
-        substantive = [r for r in reviews if (r.get("state") or "").upper() != "PENDING"]
         decision = (pr.get("reviewDecision") or "").upper()
+        merge_state = (pr.get("mergeStateStatus") or "").upper()
 
         reviewer_label = next((l.replace("reviewer:", "") for l in labels if l.startswith("reviewer:")), None)
         if reviewer_label:
             active_claims.append({"type": "review", "number": num, "agent": reviewer_label})
 
-        if "needs-human-review" in labels:
-            blocked_reasons.append(f"PR #{num} requires human review ('needs-human-review').")
+        if "needs-human-review" in labels and merge_state == "DIRTY":
+            blocked_reasons.append(
+                f"PR #{num} has an escalated severe merge conflict that agents could not resolve."
+            )
 
         if decision == "CHANGES_REQUESTED":
             waiting_reasons.append(f"PR #{num} has requested changes.")
