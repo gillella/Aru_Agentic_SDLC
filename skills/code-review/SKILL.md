@@ -42,7 +42,24 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Ensure no unnecessary performance bottlenecks, memory leaks, or high-complexity loops.
 
 ### Step 6: Submit Review & Cleanup Worktree
-- Submit structured review comments:
-  - **Approve**: If code meets all standards, approve PR and transition status to `In Review` / `Done`.
-  - **Request Changes**: Leave constructive, actionable feedback referencing specific line numbers.
+- Submit a substantive GitHub review. A chat summary is not review evidence.
+  - With a GitHub account distinct from the PR owner, use `gh pr review
+    --approve` when no blocking findings remain, or `--request-changes` with
+    constructive inline findings when changes are required.
+  - In the normal same-account fleet, GitHub rejects both verdicts as
+    self-review. Use `gh pr review --comment` and state the verdict in the body.
+    Put each blocking finding in an unresolved inline thread so the picker
+    routes the PR back to its author.
+- If the review has no blocking findings, complete its independent-agent
+  attribution and release the claim with
+  `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent
+  <AGENT_ID> --complete-review`. The resulting `reviewed-by:<id>` label plus the
+  substantive `COMMENTED` review is the same-account approval-equivalent read
+  by `merge_pr.py`.
+- If blocking findings remain, release the reviewer claim with `--release`
+  without adding `reviewed-by:`. The author/reviewer loop continues until every
+  thread is resolved; review-round count alone is never a human gate.
+- Do not move the issue directly to Done. Only the gated `merge_pr.py` close-out
+  performs the merge and Done transition after independent review, green CI,
+  resolved threads, and the remaining Definition-of-Done checks pass.
 - Remove temporary review worktree directory `.worktrees/review-pr-<PR_ID>`.
