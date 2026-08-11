@@ -4,6 +4,12 @@
 **Date:** 2026-08-10  
 **Companion:** [`PROCESS-AUDIT-2026-08.md`](PROCESS-AUDIT-2026-08.md) (baseline gaps); this doc is the *forward* roadmap after hardening landed.
 
+> Governance note: independent review is performed by a distinct agent and
+> merge execution is mechanical through `merge_pr.py`. Risk, diff size, and
+> review count strengthen evidence but do not create human gates. Human
+> intervention is reserved for a severe merge conflict or merge/close-out
+> failure agents cannot safely resolve.
+
 ---
 
 ## 1. What you have built
@@ -95,7 +101,7 @@ You already own a strong **middle factory** (claim → isolate → implement →
 |---|---|---|
 | **F1.1** | `idea-to-prd` skill (or thin wrapper over your existing write-to-prd / grill flows) | Factory starts at *intent*, not at already-shaped issues |
 | **F1.2** | `prd-to-issues` skill wired to board + phase + `depends-on` DAG | Epics become claimable work, not chat archaeology |
-| **F1.3** | Plan gate as mechanism: `needs-design` / `type:feat` → require plan comment URL before `create_branch.py` succeeds (optional `--require-plan-ack` for money/PII/schema) | Spec discipline is the binding constraint; today the gate lives only in `fleet-worker.md` |
+| **F1.3** | Plan gate as mechanism: `needs-design` / `type:feat` → require a durable post-and-proceed plan comment before `create_branch.py` succeeds; money/PII/schema increase required evidence | Spec discipline is the binding constraint; risk alone is not a human gate |
 | **F1.4** | Triage “Ready depth” SLO + auto-nag when Ready &lt; fleet size | Idle fleets are a triage failure, not an agent failure |
 | **F1.5** | Issue #20: create-github-issue always attaches to the project board | Orphan issues break the factory’s sole coordinator |
 
@@ -129,7 +135,7 @@ You already own a strong **middle factory** (claim → isolate → implement →
 | **F4.2** | Stack packs: Node/TS, Python, Go CI + test + deploy templates | Init stops being Python-shaped |
 | **F4.3** | Native skill discovery for Claude Code / Codex (symlinks from `$ARU_SDLC_HOME`) | Progressive disclosure without forking procedures |
 | **F4.4** | Golden-path demo repo (beyond `dummy_calculator_app`) that exercises full loop including deploy | Onboarding proof, not slides |
-| **F4.5** | Optional human merge queue UI / CLI dashboard wrapping `fleet_status` + `merge_pr --dry-run` | You stay the plant manager, not a script archaeologist |
+| **F4.5** | Merge-readiness UI / CLI dashboard wrapping `fleet_status` + `merge_pr --dry-run` | Gives the operator visibility without making routine merge execution human-only |
 
 ---
 

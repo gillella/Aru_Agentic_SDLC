@@ -28,7 +28,6 @@ Review eligibility:
   | family:<f> is not mine        | soft  |
   | CI green                      | hard  |
   | not a draft                   | hard  |
-  | review rounds < cap           | hard  |
 
 The family rule must be soft. An all-Claude fleet with a hard rule has zero
 eligible reviewers, nothing gets reviewed, and merge_pr.py blocks everything -
@@ -57,8 +56,8 @@ from claim_issue import (
 from common import list_open_issues, run_cmd
 from fetch_next_issue import build_candidates, reap_stale_claims
 
-# Beyond this many rounds, another agent pass is thrash rather than progress -
-# the audit found a docs PR that went six rounds. Escalate to a human instead.
+# Retained as a backwards-compatible CLI default. Review count is audit data,
+# never an eligibility or human-intervention gate.
 DEFAULT_ROUND_CAP = 3
 
 # How long a PR waits for a cross-family reviewer before any different agent
@@ -142,12 +141,6 @@ def ci_state(pr: dict[str, Any]) -> str:
     return "pending" if pending else "green"
 
 
-def review_rounds(pr: dict[str, Any]) -> int:
-    """Counts submitted reviews, which is how many rounds this PR has had."""
-    return len([r for r in (pr.get("reviews") or [])
-                if (r.get("state") or "").upper() != "PENDING"])
-
-
 def waiting_minutes(pr: dict[str, Any]) -> float:
     stamp = pr.get("updatedAt") or pr.get("createdAt")
     try:
@@ -199,14 +192,9 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
 
     decision = (pr.get("reviewDecision") or "").upper()
     if decision in {"APPROVED", "CHANGES_REQUESTED"}:
-        # A decided PR is waiting on a human merge or on its author, not on
-        # another reviewer. Re-offering it burns the round budget and
-        # eventually mislabels an approved PR as needing human review.
+        # A decided PR is waiting on gated mechanical merge or on its author,
+        # not on another reviewer. Re-offering it duplicates completed work.
         return no(f"already {decision.lower().replace('_', ' ')}")
-
-    rounds = review_rounds(pr)
-    if rounds >= round_cap:
-        return no(f"{rounds} review rounds already; needs a human")
 
     state = ci_state(pr)
     if state != "green":
@@ -259,15 +247,13 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     feedback = min(mine, key=lambda p: p["number"]) if mine else None
 
     # 2. Review someone else's work.
-    reviewable, skipped, escalated = [], [], []
+    reviewable, skipped = [], []
     for pr in sorted(prs, key=lambda p: p["number"]):
         verdict = review_eligibility(pr, agent, family, round_cap, cross_family_wait)
         if verdict["eligible"]:
             reviewable.append((pr, verdict))
         else:
             skipped.append({"number": pr["number"], "why": verdict["reason"]})
-            if "needs a human" in verdict["reason"]:
-                escalated.append(pr["number"])
 
     # Cross-family first, then degraded same-family, oldest PR first within each.
     reviewable.sort(key=lambda pair: (not pair[1]["cross_family"], -waiting_minutes(pair[0])))
@@ -306,7 +292,8 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         ],
         "reviewable": [p["number"] for p, _ in reviewable],
         "skipped_prs": skipped,
-        "escalated_prs": escalated,
+        # Backwards-compatible JSON field. Review rounds never populate it.
+        "escalated_prs": [],
         "claimable_issues": [i["number"] for i in parts["candidates"]],
         "blocked_by_dependencies": parts["blocked"],
         "blocked_by_file_conflict": parts["conflicted"],
@@ -322,7 +309,10 @@ def main():
                              "Omitting it means every PR looks cross-family.")
     parser.add_argument("--claim", action="store_true", help="Claim the selected work item")
     parser.add_argument("--json", action="store_true", dest="as_json")
-    parser.add_argument("--round-cap", type=int, default=DEFAULT_ROUND_CAP)
+    parser.add_argument(
+        "--round-cap", type=int, default=DEFAULT_ROUND_CAP,
+        help="Deprecated compatibility option; review count never blocks routing",
+    )
     parser.add_argument("--cross-family-wait", type=int, default=DEFAULT_CROSS_FAMILY_WAIT_MIN,
                         metavar="MINUTES")
     parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
@@ -336,17 +326,6 @@ def main():
     res = select(args.agent, (args.family or "").lower() or None,
                  args.round_cap, args.cross_family_wait)
     work = res["work"]
-
-    # A PR nobody may review any more must say so on the PR itself, or it sits
-    # in the queue invisibly waiting for a human who was never told.
-    #
-    # Only when actually working. Without --claim this command is an inspection
-    # - a probe, a status check, a dry run - and an inspection must not mutate
-    # the board.
-    if args.claim:
-        for number in res["escalated_prs"]:
-            mark(number, "needs-human-review", "b60205",
-                 "Review round cap reached; an agent pass is no longer useful")
 
     if args.claim and work["type"] == "review":
         # Walk the candidates: another agent claiming the top one first should
@@ -413,8 +392,6 @@ def main():
         print("\nPRs not offered to you:")
         for item in res["skipped_prs"]:
             print(f"  #{item['number']}: {item['why']}")
-    if res["escalated_prs"]:
-        print(f"\n🚨 Needs a human: {res['escalated_prs']}")
     if work["type"] != "issue" and res["claimable_issues"]:
         print(f"\nIssues waiting: {res['claimable_issues']}")
 

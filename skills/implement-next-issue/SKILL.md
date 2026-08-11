@@ -127,20 +127,16 @@ or other irreversible work from the plan gate.
    explicitly sanctioned for implementation-plan comments because the
    framework has no issue-comment helper; every GitHub mutation covered by a
    framework helper must still use that helper.
-2. Default behavior is **post-and-proceed**. Once the comment is visible on the
-   issue, continue without waiting for a human response.
-3. `--require-plan-ack` changes the gate to post-and-block. Use this mode for
-   money, PII, schema, migration, or other irreversible paths, and whenever the
-   issue or operator explicitly requires it. Keep the issue claimed but make no
-   edits until the repository owner or designated maintainer comments
-   `Plan approved` after the latest plan comment.
-4. If the approach materially changes before implementation, post an amended
-   plan. In acknowledgement mode, the amendment also requires a fresh
-   `Plan approved` comment.
-
-`--require-plan-ack` names a mode of this skill, not a standalone executable or
-helper-script flag. Selecting that governed workflow mode is not permission to
-bypass the issue claim, path budget, review, or merge gates.
+2. The plan is **post-and-proceed**. Once the comment is visible on the issue,
+   continue without waiting for a human response. Money, PII, security, schema,
+   migration, irreversible behavior, large diffs, and review-round count change
+   the plan, test, and review depth; none creates a human acknowledgement gate.
+3. If the approach materially changes before implementation, post an amended
+   plan before making the newly planned edits.
+4. If a required product decision is absent from the issue, document the
+   concrete options and leave the issue blocked for clarification. This is
+   requirement discovery, not a mandatory human review of an otherwise
+   complete implementation.
 
 ### Step 5: Implement Solution
 1. Confirm the plan gate is satisfied when it applies.
@@ -187,12 +183,14 @@ bypass the issue claim, path budget, review, or merge gates.
 
 1. The implementation author cannot satisfy the independent-review gate with a
    self-review. Wait for the peer review and resolve every review thread.
-2. Routine merges may be executed automatically by a factory agent, but only
-   with `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID>`. This is the
-   sole merge authority; do not use a direct push or ad-hoc `gh pr merge`.
-3. Money, PII, schema, other irreversible changes, and explicit escalations
-   require the human acknowledgement named by their governing gate before the
-   merge helper is invoked.
-4. The merge helper must prove green CI, independent review, resolved threads,
+2. After a distinct agent completes the independent review, any factory agent,
+   including the implementation author, may perform the mechanical merge with
+   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID>`. This is the sole
+   merge authority; do not use a direct push or ad-hoc `gh pr merge`.
+3. The merge helper must prove green CI, independent review, resolved threads,
    completed acceptance criteria, and an up-to-date branch, then close the
    issue, move it to Done, and clean up the issue branch/worktree.
+4. Human intervention is exceptional: request it only when a severe merge
+   conflict or merge/close-out failure remains unsafe or impossible for agents
+   to resolve through governed remediation. Risk category, diff size, and
+   review-round count alone never require it.

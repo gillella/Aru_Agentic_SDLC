@@ -185,7 +185,7 @@ def main():
         for issue, _ in qualified:
             print(f"  ✅ #{issue['number']:<4} {issue['title']}")
     if blocked:
-        print("\nBlocked — needs a human:")
+        print("\nBlocked — Ready contract incomplete:")
         for issue, gaps in blocked:
             print(f"  ❌ #{issue['number']:<4} {issue['title']}")
             for gap in gaps:

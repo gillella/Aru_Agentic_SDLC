@@ -80,10 +80,9 @@ class EligibilityTests(unittest.TestCase):
         self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", checks="pending"))["eligible"])
         self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", checks="none"))["eligible"])
 
-    def test_round_cap_escalates(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:anthropic", reviews=3))
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("needs a human", verdict["reason"])
+    def test_review_round_count_never_blocks_an_independent_agent(self):
+        verdict = eligible(pr(1, "author:agent-1", "family:anthropic", reviews=10))
+        self.assertTrue(verdict["eligible"])
 
     def test_same_family_waits_before_it_is_offered(self):
         verdict = eligible(pr(1, "author:agent-1", "family:openai", minutes_old=5))
@@ -176,9 +175,11 @@ class PriorityTests(unittest.TestCase):
         self.assertEqual(res["skipped_prs"][0]["number"], 3)
         self.assertIn("you wrote it", res["skipped_prs"][0]["why"])
 
-    def test_capped_prs_are_listed_for_escalation(self):
+    def test_many_review_rounds_remain_reviewable_without_escalation(self):
         res = self._select([pr(5, "author:agent-1", "family:anthropic", reviews=4)])
-        self.assertIn(5, res["escalated_prs"])
+        self.assertEqual(res["work"]["type"], "review")
+        self.assertEqual(res["work"]["pr"], 5)
+        self.assertEqual(res["escalated_prs"], [])
 
 
 if __name__ == "__main__":
@@ -186,7 +187,7 @@ if __name__ == "__main__":
 
 
 class ReviewDecisionTests(unittest.TestCase):
-    """A decided PR waits on a human or its author, not on another reviewer."""
+    """A decided PR waits on gated merge or its author, not another reviewer."""
 
     def test_approved_pr_is_not_offered_again(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic", decision="APPROVED"))

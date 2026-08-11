@@ -72,8 +72,11 @@ saying concretely why you disagree — never resolve a thread silently. Re-run
 the full local verification, push, and reply to each thread with the commit
 hash that addressed it.
 
-If you and the reviewer disagree twice on the same point, stop and escalate
-rather than going a third round. Add `needs-human-review` and say why.
+Keep the author/reviewer loop going until every concrete finding is resolved.
+Review-round count is audit data, not an escalation or eligibility gate. Do not
+add a human-review label. If the disagreement exposes a missing product
+decision, record the options on the issue and leave that requirement blocked;
+otherwise support the conclusion with code and test evidence.
 
 ---
 
@@ -108,6 +111,12 @@ review so the weaker check is on the record.
    tell a peer review from a self-review, because every agent authenticates as
    the same GitHub user. Skip it and the PR stays blocked with your claim on
    it, and the next agent sees work that looks taken but unreviewed.
+7. If the review is complete with no blocking findings, verify that every
+   thread is resolved, then run the Definition-of-Done gate:
+   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --dry-run`. If it
+   passes, any factory agent, including the author, may execute the mechanical
+   merge with the same command without `--dry-run`. Never self-review and never
+   bypass this helper.
 
 **Approving without verifying is a failure, not efficiency.** A rubber stamp is
 worse than no review at all, because it satisfies the merge gate while
@@ -122,11 +131,12 @@ Follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`.
 
 1. **Read the issue in full.** `gh issue view <N> --json title,body,labels`.
    Write down its `touches:` list — that is your **write budget**.
-2. **If it is `type:feat` or `needs-design`**, post an implementation plan as an
-   issue comment before any edit: approach, files, schema/API deltas, test
-   strategy, rejected alternatives. Post and proceed — do not block. **Except**
-   for money semantics, tenancy, PII, or a schema with data behind it: post the
-   plan and stop for a human.
+2. **If it is `type:feat` or `needs-design`, or it changes money, tenancy, PII,
+   security, schema, migration, or another irreversible contract**, post an
+   implementation plan as an issue comment before any edit: approach, files,
+   schema/API deltas, test strategy, rejected alternatives. Post and proceed —
+   do not block. Risk, large diffs, and review-round count require stronger
+   planning, tests, and review; none creates a human acknowledgement gate.
 3. **Branch from current main, in a worktree:**
    ```
    git fetch origin && git checkout main && git pull --ff-only
@@ -154,13 +164,17 @@ Follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`.
    The stamp is what lets another agent be routed to review it. Without it your
    PR looks authorless and may be handed back to you.
 8. **Drive CI green.** `check_ci.py --pr <PR> --wait`; on failure follow
-   `remediate-ci-failure`, at most **3 rounds**, then stop and report.
+   `remediate-ci-failure` and keep the issue in its governed state until the
+   failure is fixed or a concrete external blocker is recorded. There is no
+   arbitrary remediation-round limit.
 9. **Hand off:** `update_issue_status.py --issue <N> --status "In Review"`.
    This parks the issue and releases your active implementation slot so you can
    take new work while the PR stays conflict-protected. The `agent:<id>` label
    remains only as a legacy authorship backstop until Done; `author:<id>` is the
    PR's authoritative attribution.
-   **Do not merge your own PR.** Loop.
+   Do not self-review. After a distinct agent completes review and the merge
+   helper's gates pass, the author or another factory agent may perform the
+   mechanical merge through `merge_pr.py`. Loop.
 
 ---
 
@@ -179,8 +193,9 @@ corrupts someone else's work, not just yours.
    `reviewer:*`, or `author:*` label, never change another agent's issue status.
 4. **Never commit to `main`**, never force-push a branch that is not yours.
 5. **One work item at a time.** Finish or release before asking for more.
-6. **Never merge.** Your terminal state is `In Review`. A human merges through
-   `merge_pr.py`.
+6. **Never merge directly.** Only `merge_pr.py` has merge authority, and only
+   after a distinct agent's independent review and every enforced gate pass.
+   The author may execute that mechanical merge but may never self-review.
 7. **Report failures honestly.** If tests fail, say so with the output. Never
    claim a verification you did not run.
 
@@ -188,13 +203,16 @@ corrupts someone else's work, not just yours.
 
 Stop, write a final summary, and end the session when:
 
-- The picker returns `idle`. Report what is blocking so a human can unblock it.
-- CI stays red after 3 remediation rounds.
-- A review disagreement reaches a third round.
+- The picker returns `idle`. Report the board state and continue when work
+  becomes eligible; idle alone does not require human intervention.
 - You hit a decision that changes the product's shape — schema, external
   contract, money semantics, security posture — that the issue does not settle.
-  Comment the options and tradeoffs, then stop.
-- A helper script exits `1` (error, not conflict).
+  Comment the options and tradeoffs and leave the issue blocked for requirement
+  clarification.
+- A helper script exits `1` (error, not conflict). Diagnose and use the
+  governed remediation path. Human intervention is appropriate only if the
+  error is a severe merge conflict or merge/close-out failure that agents
+  cannot resolve safely.
 - Any hard rule would have to be broken to proceed.
 
 ### Final report
@@ -205,7 +223,7 @@ IMPLEMENTED:  #N -> PR #M (CI green, In Review)
 REVIEWED:     PR #M -> approved / changes requested (cross-family? yes/no)
 ADDRESSED:    PR #M -> N threads resolved
 IN FLIGHT:    <what and why it stopped>
-NEEDS HUMAN:  <the specific decision>
+HUMAN INTERVENTION: <only an unresolved severe merge/close-out failure; otherwise none>
 BOARD:        <what the picker last reported>
 ```
 

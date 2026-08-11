@@ -378,6 +378,7 @@ class SizeGateTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("soft limit", msg)
         self.assertIn("Independent review remains mandatory", msg)
+        self.assertNotIn("human", msg.lower())
 
     def test_small_diff_passes(self):
         self.assertTrue(merge_pr.check_size({"additions": 10, "deletions": 2})[0])
