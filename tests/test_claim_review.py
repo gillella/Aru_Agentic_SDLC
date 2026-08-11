@@ -106,6 +106,17 @@ class ActiveReviewFeedbackTests(unittest.TestCase):
 
     @patch.object(fetch_pr_feedback, "get_repo_slug", return_value="owner/repo")
     @patch.object(fetch_pr_feedback, "run_gh_json")
+    def test_head_change_between_pages_fails_closed(self, run_json, _slug):
+        run_json.side_effect = [
+            feedback_page([], True, "A", head="old-head"),
+            feedback_page([], head="new-head"),
+        ]
+
+        self.assertIsNone(fetch_pr_feedback.fetch_active_review_feedback(7))
+        self.assertEqual(run_json.call_count, 2)
+
+    @patch.object(fetch_pr_feedback, "get_repo_slug", return_value="owner/repo")
+    @patch.object(fetch_pr_feedback, "run_gh_json")
     def test_partial_graphql_errors_fail_closed(self, run_json, _slug):
         run_json.return_value = feedback_page([], errors=[{"message": "partial"}])
 

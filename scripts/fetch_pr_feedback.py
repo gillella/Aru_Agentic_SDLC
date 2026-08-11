@@ -50,6 +50,7 @@ def fetch_active_review_feedback(pr_id: int) -> list[dict] | None:
     }"""
     cursor = None
     seen_cursors = set()
+    expected_head_oid = None
     feedback = []
 
     while True:
@@ -77,6 +78,13 @@ def fetch_active_review_feedback(pr_id: int) -> list[dict] | None:
                 or not isinstance(nodes, list)
                 or not isinstance(page_info, dict)
                 or not isinstance(has_next, bool)):
+            return None
+        if expected_head_oid is None:
+            expected_head_oid = head_oid
+        elif head_oid != expected_head_oid:
+            # Pagination is not an atomic GitHub snapshot.  A push between
+            # pages makes both the thread set and isOutdated flags ambiguous,
+            # so the only safe result is unknown and a later retry.
             return None
 
         for thread in nodes:
@@ -112,7 +120,7 @@ def fetch_active_review_feedback(pr_id: int) -> list[dict] | None:
                 "url": comment.get("url"),
                 "user": {"login": (author or {}).get("login") or "reviewer"},
                 "commit_oid": (commit or {}).get("oid"),
-                "head_oid": head_oid,
+                "head_oid": expected_head_oid,
             })
 
         if not has_next:
