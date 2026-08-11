@@ -109,25 +109,48 @@ def unresolved_threads(pr_id):
         return None
     owner, name = slug.split("/", 1)
     query = """
-    query($owner:String!, $name:String!, $pr:Int!) {
+    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
         pullRequest(number:$pr) {
-          reviewThreads(first:100) { nodes { isResolved isOutdated } }
+          reviewThreads(first:100, after:$cursor) {
+            nodes { isResolved isOutdated }
+            pageInfo { hasNextPage endCursor }
+          }
         }
       }
     }"""
-    data = _gh_json([
-        "gh", "api", "graphql",
-        "-f", f"query={query}",
-        "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
-    ])
-    if not data:
-        return None
-    try:
-        nodes = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-    except (KeyError, TypeError):
-        return None
-    return sum(1 for n in nodes if not n.get("isResolved") and not n.get("isOutdated"))
+    cursor = None
+    unresolved = 0
+    while True:
+        args = [
+            "gh", "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
+        ]
+        if cursor:
+            args.extend(["-F", f"cursor={cursor}"])
+        data = _gh_json(args)
+        if not data:
+            return None
+        try:
+            connection = data["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            has_next = page_info["hasNextPage"]
+        except (KeyError, TypeError):
+            return None
+        if not isinstance(nodes, list) or not isinstance(has_next, bool):
+            return None
+        unresolved += sum(
+            1 for node in nodes
+            if not node.get("isResolved") and not node.get("isOutdated")
+        )
+        if not has_next:
+            return unresolved
+        next_cursor = page_info.get("endCursor")
+        if not next_cursor or next_cursor == cursor:
+            return None
+        cursor = next_cursor
 
 
 def unticked_criteria(issue_body):

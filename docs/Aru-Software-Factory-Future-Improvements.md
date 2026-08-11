@@ -77,7 +77,9 @@ You already own a strong **middle factory** (claim → isolate → implement →
 
 1. **Mechanisms over instructions.** Prefer hooks, CI jobs, and `merge_pr.py` checks over longer skill prose.  
 2. **One process owner.** Aru owns lifecycle in governed repos; disable competing workflow owners (GSD resume, ralph-loop, etc.) or map them explicitly into Aru stages.  
-3. **Human at high-leverage gates only:** triage judgment, money/PII/schema plans, oversized diffs, third-round review fights.  
+3. **Risk strengthens evidence, not merge authority:** money/PII/schema plans,
+   oversized diffs, and repeated review rounds stay inside the autonomous
+   planning, testing, independent-review, and remediation loop.
 4. **Do not rebuild the coordinator.** No supervisor agent, no MCP file-lock bus, no `tasks.md` migration.  
 5. **Finish the spine before adding stages.** Open PRs that close review-gate holes (#19, #24, #27, #25) beat new skills.
 
@@ -165,7 +167,7 @@ Later      Stack packs; versioned releases; metrics; golden-path demo
 1. Intake intent → PRD → phased issues  
 2. Triage to Ready (capacity ≥ fleet size)  
 3. `launch_fleet.sh -n N`  
-4. You merge via `merge_pr.py` (and ack design/money exceptions)  
+4. A factory agent runs `merge_pr.py` after a distinct review and all gates pass
 5. Deploy skill promotes; `fleet_status` shows what to fix in the factory itself  
 
 ---

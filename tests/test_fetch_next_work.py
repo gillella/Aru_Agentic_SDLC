@@ -300,3 +300,33 @@ class UnreadableQueueTests(unittest.TestCase):
             res = fnw.select("agent-2", "openai", 3, 30)
         self.assertEqual(res["work"]["type"], "error")
         self.assertIn("could not be read", res["work"]["reason"])
+
+    def test_unknown_threads_on_authored_pr_block_new_issue_selection(self):
+        authored = pr(57, "author:agent-2", "family:openai")
+        authored["_unresolved_threads"] = None
+        parts = {
+            "candidates": [{"number": 99, "title": "new work"}],
+            "my_in_flight": None, "blocked": [], "conflicted": [],
+            "missing_touches": [], "not_ready": [],
+        }
+        with patch.object(fnw, "list_open_prs", return_value=[authored]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts):
+            res = fnw.select("agent-2", "openai", 3, 30)
+        self.assertEqual(res["work"]["type"], "error")
+        self.assertEqual(res["claimable_issues"], [])
+
+    def test_unknown_threads_on_peer_pr_block_new_issue_selection(self):
+        peer_pr = pr(57, "author:agent-1", "family:anthropic")
+        peer_pr["_unresolved_threads"] = None
+        parts = {
+            "candidates": [{"number": 99, "title": "new work"}],
+            "my_in_flight": None, "blocked": [], "conflicted": [],
+            "missing_touches": [], "not_ready": [],
+        }
+        with patch.object(fnw, "list_open_prs", return_value=[peer_pr]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts):
+            res = fnw.select("agent-2", "openai", 3, 30)
+        self.assertEqual(res["work"]["type"], "error")
+        self.assertEqual(res["claimable_issues"], [])

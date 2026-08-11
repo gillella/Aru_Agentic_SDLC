@@ -275,6 +275,19 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
                 "missing_touches": []}
 
+    unreadable_threads = [
+        pr["number"] for pr in prs if review_thread_count(pr) is None
+    ]
+    if unreadable_threads:
+        numbers = ", ".join(f"#{number}" for number in unreadable_threads)
+        return {"agent": agent, "family": family,
+                "work": {"type": "error", "skill": None,
+                         "reason": f"review thread state could not be read for {numbers}"},
+                "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
+                "escalated_prs": [], "claimable_issues": [],
+                "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
+                "missing_touches": []}
+
     # 1. Finish what I started.
     mine = [p for p in prs if needs_my_attention(p, agent)]
     feedback = min(mine, key=lambda p: p["number"]) if mine else None

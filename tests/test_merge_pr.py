@@ -65,6 +65,38 @@ Do a thing.
         self.assertEqual(merge_pr.unticked_criteria("no headings here"), [])
 
 
+class UnresolvedThreadQueryTests(unittest.TestCase):
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_paginates_and_counts_unresolved_threads_on_later_pages(
+        self, gh_json, _slug
+    ):
+        gh_json.side_effect = [
+            {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [{"isResolved": True, "isOutdated": False}],
+                "pageInfo": {"hasNextPage": True, "endCursor": "next-page"},
+            }}}}},
+            {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [{"isResolved": False, "isOutdated": False}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}}},
+        ]
+
+        self.assertEqual(merge_pr.unresolved_threads(57), 1)
+        self.assertIn("cursor=next-page", gh_json.call_args_list[1].args[0])
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_missing_pagination_proof_returns_unknown(self, gh_json, _slug):
+        gh_json.return_value = {"data": {"repository": {"pullRequest": {
+            "reviewThreads": {
+                "nodes": [{"isResolved": True, "isOutdated": False}],
+            }
+        }}}}
+
+        self.assertIsNone(merge_pr.unresolved_threads(57))
+
+
 class CiGateTests(unittest.TestCase):
     def test_all_successful_passes(self):
         pr = {"statusCheckRollup": [

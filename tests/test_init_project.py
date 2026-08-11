@@ -51,6 +51,11 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertNotIn("--require-plan-ack", guidance)
         self.assertNotIn("a human merges", guidance)
         self.assertNotIn("fully autonomous merge of money", guidance)
+        self.assertNotIn("human at high-leverage gates", guidance)
+        self.assertNotIn("you merge via", guidance)
+        self.assertNotIn("ack design/money", guidance)
+        self.assertNotIn("stop for a human", guidance)
+        self.assertNotIn("human merges through", guidance)
 
     def test_ci_is_stack_aware_and_does_not_mask_failures(self):
         python_ci = render_ci_workflow("python", "pytest -q")
