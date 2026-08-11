@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -691,6 +692,187 @@ class HookDecisionTests(unittest.TestCase):
                 {"tool_name": "Edit", "tool_input": {"file_path": "x.py"}, "cwd": "/nope"}))), \
              patch.object(et, "repo_root", return_value=None):
             self.assertEqual(et.main(), et.EXIT_ALLOW)
+
+
+class WorktreeGovernanceTests(unittest.TestCase):
+    """Governance follows the file, not the shell.
+
+    Every agent in the fleet works inside `.worktrees/<branch>` while its
+    shell may sit anywhere, so the repository that owns the target file and
+    the repository the shell is standing in are routinely different. Deciding
+    from the shell's cwd got this wrong in both directions: it refused writes
+    inside a legitimate issue worktree, and - the dangerous half - it allowed
+    writes into the `main` checkout and into other agents' worktrees, where
+    neither the protected-branch guard nor `touches:` was ever consulted.
+
+    These use real git worktrees rather than patched helpers. The defect is in
+    how git state is resolved, so a fixture that stubs that resolution would
+    assert nothing.
+    """
+
+    AGENTS_MD = "# AGENTS\n\n## Core Governance Directive: The Issue-First Law\n\nBody.\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+        cls.main_root = base / "repo"
+        cls.main_root.mkdir()
+
+        def git(*args, cwd):
+            subprocess.run(
+                ["git", *args], cwd=str(cwd), check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+        git("init", "-b", "main", cwd=cls.main_root)
+        git("config", "user.email", "t@example.com", cwd=cls.main_root)
+        git("config", "user.name", "t", cwd=cls.main_root)
+        (cls.main_root / "AGENTS.md").write_text(cls.AGENTS_MD, encoding="utf-8")
+        (cls.main_root / "app.py").write_text("x = 1\n", encoding="utf-8")
+        git("add", "-A", cwd=cls.main_root)
+        git("commit", "-m", "init", cwd=cls.main_root)
+
+        # Two sibling worktrees, as the fleet actually runs: one per agent,
+        # each on its own governed issue branch.
+        cls.wt_a = cls.main_root / ".worktrees" / "fix-issue-11"
+        cls.wt_b = cls.main_root / ".worktrees" / "fix-issue-22"
+        git("worktree", "add", "-b", "fix/issue-11-a", str(cls.wt_a), cwd=cls.main_root)
+        git("worktree", "add", "-b", "fix/issue-22-b", str(cls.wt_b), cwd=cls.main_root)
+
+        # An unrelated repository that merely sits nearby. It must stay
+        # ungoverned no matter which shell reaches for it.
+        cls.outsider = base / "outsider"
+        cls.outsider.mkdir()
+        git("init", "-b", "main", cwd=cls.outsider)
+        (cls.outsider / "app.py").write_text("y = 2\n", encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def decide(self, cwd, target, touches=("app.py",)):
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target)},
+            "cwd": str(cwd),
+        }
+        # Only the GitHub lookup is stubbed; all git resolution is real.
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             patch.object(et, "touches_for", return_value=list(touches)):
+            return et.main()
+
+    # --- the false refusal ------------------------------------------------
+
+    def test_write_inside_own_worktree_is_allowed_from_the_worktree(self):
+        self.assertEqual(self.decide(self.wt_a, self.wt_a / "app.py"), et.EXIT_ALLOW)
+
+    def test_write_inside_own_worktree_is_allowed_from_the_repo_root(self):
+        """The shell sitting on main must not make a worktree edit a violation.
+
+        Working in a worktree while the shell stays at the repository root is
+        an ordinary pattern; refusing it teaches agents that the hook is noise.
+        """
+        self.assertEqual(
+            self.decide(self.main_root, self.wt_a / "app.py"), et.EXIT_ALLOW
+        )
+
+    # --- the false permissions -------------------------------------------
+
+    def test_write_into_main_checkout_is_blocked_from_a_worktree(self):
+        """The dangerous direction: this is the gap #29 closed, reopened.
+
+        An agent standing in any issue worktree could write straight into the
+        checkout that has `main` out, and the protected-branch guard never
+        fired because it was asked about the worktree's branch instead.
+        """
+        self.assertEqual(
+            self.decide(self.wt_a, self.main_root / "app.py"), et.EXIT_BLOCK
+        )
+
+    def test_write_into_main_checkout_is_blocked_from_the_repo_root(self):
+        self.assertEqual(
+            self.decide(self.main_root, self.main_root / "app.py"), et.EXIT_BLOCK
+        )
+
+    def test_write_into_another_agents_worktree_is_governed_by_that_worktree(self):
+        """Cross-agent isolation is the whole point of `touches:`.
+
+        #22's worktree is judged by #22's declaration, not #11's. `other.py`
+        is outside the declaration, so this is a violation rather than an
+        unchecked write.
+        """
+        self.assertEqual(
+            self.decide(self.wt_a, self.wt_b / "other.py"), et.EXIT_BLOCK
+        )
+
+    def test_declared_path_in_another_worktree_is_still_allowed(self):
+        """Governed by the other worktree's issue - not blocked reflexively."""
+        self.assertEqual(
+            self.decide(self.wt_a, self.wt_b / "app.py"), et.EXIT_ALLOW
+        )
+
+    # --- containment and fail-open ---------------------------------------
+
+    def test_path_outside_the_declaration_in_own_worktree_is_blocked(self):
+        self.assertEqual(
+            self.decide(self.wt_a, self.wt_a / "elsewhere.py"), et.EXIT_BLOCK
+        )
+
+    def test_unrelated_repository_is_never_governed(self):
+        """A sibling checkout that is not this repository stays the user's own.
+
+        The hook is installed globally, so mistaking a neighbouring project
+        for a governed worktree would make that project unusable.
+        """
+        self.assertEqual(
+            self.decide(self.wt_a, self.outsider / "app.py"), et.EXIT_ALLOW
+        )
+        self.assertEqual(
+            self.decide(self.main_root, self.outsider / "app.py"), et.EXIT_ALLOW
+        )
+
+    def test_path_in_no_repository_at_all_is_allowed(self):
+        self.assertEqual(
+            self.decide(self.wt_a, Path(self._tmp.name) / "loose.txt"), et.EXIT_ALLOW
+        )
+
+    def bash(self, cwd, command, touches=("app.py",)):
+        payload = {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": str(cwd),
+        }
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             patch.object(et, "touches_for", return_value=list(touches)):
+            return et.main()
+
+    def test_redirect_into_main_checkout_is_blocked_from_a_worktree(self):
+        """A shell redirect must not be the way around the write path.
+
+        Fixing only Edit/Write would leave `echo x > <main>/app.py` as an
+        unguarded equivalent, which is how this class of gap keeps reappearing.
+        """
+        self.assertEqual(
+            self.bash(self.wt_a, f"echo x > {self.main_root / 'app.py'}"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_redirect_inside_own_worktree_is_still_allowed(self):
+        self.assertEqual(
+            self.bash(self.wt_a, f"echo x > {self.wt_a / 'app.py'}"), et.EXIT_ALLOW
+        )
+
+    def test_new_file_in_a_directory_that_does_not_exist_yet_is_governed(self):
+        """Write creates parents, so the target's directory need not exist.
+
+        Resolution has to walk up to the nearest existing ancestor; otherwise
+        every new file in a new package silently escapes governance.
+        """
+        self.assertEqual(
+            self.decide(self.wt_a, self.main_root / "brand" / "new" / "f.py"),
+            et.EXIT_BLOCK,
+        )
 
 
 if __name__ == "__main__":

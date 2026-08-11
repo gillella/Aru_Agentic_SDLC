@@ -123,6 +123,80 @@ def _git_common_dir(root):
     return out if os.path.isabs(out) else os.path.join(root, out)
 
 
+def _nearest_existing_dir(path):
+    """Walks up to the first directory that exists.
+
+    A write may create its parent directories, so the target's own directory
+    need not exist yet. Resolving git state from a nonexistent path fails, and
+    treating that failure as "not a repository" would let every new file in a
+    new package escape governance entirely.
+    """
+    current = os.path.dirname(os.path.abspath(path)) or os.sep
+    while not os.path.isdir(current):
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+    return current
+
+
+def _resolve_checkout(path, session_root):
+    """Git-backed half of ``owning_checkout``; None when git cannot answer."""
+    anchor = _nearest_existing_dir(path)
+    if not anchor:
+        return None
+    root = repo_root(anchor)
+    if not root:
+        return None
+
+    # Sibling worktrees of one repository share a git common directory. That
+    # is what separates them from an unrelated checkout sitting nearby - this
+    # hook is installed globally and must not govern someone else's project.
+    session_common = _git_common_dir(session_root)
+    target_common = _git_common_dir(root)
+    if not session_common or not target_common:
+        return None
+    if os.path.realpath(session_common) != os.path.realpath(target_common):
+        return None
+
+    return root, current_branch(root)
+
+
+def owning_checkout(path, session_root, session_branch):
+    """The (root, branch) of the checkout that actually contains ``path``.
+
+    Governance follows the file, not the shell. Every agent works inside
+    ``.worktrees/<branch>`` while its shell may sit anywhere, so deciding from
+    the cwd asked the wrong repository in both directions: it refused
+    legitimate edits inside an issue worktree, and - the dangerous half - it
+    let writes into the ``main`` checkout and into other agents' worktrees past
+    both the protected-branch guard and ``touches:``, because those paths look
+    "outside the repo" when measured from a sibling worktree's root.
+
+    Returns None when the path is not part of this repository, which the
+    caller allows: a neighbouring project, or no repository at all. Sibling
+    worktrees of one repository share a git common directory, and that is what
+    separates them from an unrelated checkout that merely sits nearby - this
+    hook is installed globally and must not govern someone else's project.
+
+    When git cannot answer - no git on PATH, a path under no repository - fall
+    back to the session's own view for anything sitting inside the session
+    root. Without that fallback a resolution failure would silently ungovern
+    a path the shell can plainly see is its own, turning an unknown into a
+    permission. Anything genuinely elsewhere still returns None and is allowed.
+    """
+    if not path:
+        return None
+
+    resolved = _resolve_checkout(path, session_root)
+    if resolved is not None:
+        return resolved
+
+    if _norm(path, session_root) is not None:
+        return session_root, session_branch
+    return None
+
+
 def _cache_path(root, issue):
     common = _git_common_dir(root)
     if not common:
@@ -569,11 +643,22 @@ def main():
                 "pushed to directly. Open a PR from your issue branch instead.",
             )
         targets = _redirect_targets(command)
-        if targets and branch in PROTECTED_BRANCHES and governed_repo(root):
-            for target in targets:
-                rel = _norm(target, root)
-                if rel is not None:
-                    return deny_protected_write(rel, branch)
+        # A shell redirect can name a path in any checkout, so each target is
+        # judged by the one that owns it - the same rule the write path uses.
+        # Deciding these against the shell's branch let `echo x > ../../file`
+        # reach the main checkout unchecked from inside a worktree.
+        for target in targets:
+            owned = owning_checkout(target, root, branch)
+            if owned is None:
+                continue
+            owner_root, owner_branch = owned
+            if owner_branch not in PROTECTED_BRANCHES:
+                continue
+            if not governed_repo(owner_root):
+                continue
+            rel = _norm(target, owner_root)
+            if rel is not None:
+                return deny_protected_write(rel, owner_branch)
         if issue is None:
             return EXIT_ALLOW
         touches = touches_for(root, issue)
@@ -598,12 +683,19 @@ def main():
         or tool_input.get("notebook_path")
         or tool_input.get("path")
     )
-    rel = _norm(target, root)
+    # The checkout that owns the file decides, not the one the shell is in.
+    owned = owning_checkout(target, root, branch)
+    if owned is None:
+        return EXIT_ALLOW  # Not part of this repository; not governed.
+    owner_root, branch = owned
+    issue = issue_from_branch(branch)
+
+    rel = _norm(target, owner_root)
     if rel is None:
         return EXIT_ALLOW  # Outside the repo; not governed.
 
     if branch in PROTECTED_BRANCHES:
-        governed = governed_repo(root)
+        governed = governed_repo(owner_root)
         if governed:
             return deny_protected_write(rel, branch)
         # False is an ordinary ungoverned repository. None is a detection
@@ -614,7 +706,7 @@ def main():
         # A non-protected scratch branch remains usable without an issue.
         return EXIT_ALLOW
 
-    touches = touches_for(root, issue)
+    touches = touches_for(owner_root, issue)
     if touches is None:
         print(
             f"[aru] Could not read issue #{issue} to verify touches; allowing.",
