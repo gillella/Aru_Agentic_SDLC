@@ -33,12 +33,20 @@ the Definition-of-Done gate.
 - If lifecycle instructions conflict, follow Aru. Higher-priority explicit
   system, developer, or user instructions still take precedence.
 
-Routine merge execution is automated and may be performed by a factory agent
-only through `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`, after an
-independent review and every enforced gate pass. No agent or human may bypass
-that command with a direct push or an ad-hoc merge. Human acknowledgement is
-reserved for money, PII, schema, other irreversible changes, and explicit
-escalations identified by the governing workflow.
+Routine merge execution is mechanical and may be performed by any factory
+agent, including the implementation author, only through
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`, after a distinct agent
+has completed the independent review and every enforced gate passes. An author
+must never review their own PR. No agent or human may bypass the merge helper
+with a direct push or an ad-hoc merge.
+
+Money, PII, security, schema, migration, irreversible behavior, large diffs,
+and repeated review rounds increase the required planning, testing, and review
+depth; none of them alone creates a mandatory human gate. Human intervention
+is exceptional and is needed only when a severe merge conflict or merge/
+close-out failure remains unsafe or impossible for agents to resolve through
+the governed remediation path. Record the exact failure and attempted
+remediation when that exception occurs.
 
 ---
 
@@ -101,9 +109,10 @@ Inside this playbook repo itself, `$ARU_SDLC_HOME` may be `.` / the repo root.
 8. **Plan Before Editing**: For `type:feat`, `needs-design`, money, PII,
    schema, migration, or other irreversible work, post the implementation plan
    required by `implement-next-issue` before the first edit. High-risk scope
-   triggers the gate regardless of the issue's type labels. Select the
-   `--require-plan-ack` workflow mode when human acknowledgement is required;
-   it is a skill mode, not a standalone executable flag.
+   triggers the gate regardless of the issue's type labels. The plan is always
+   post-and-proceed unless the issue lacks a product decision required to
+   define its acceptance criteria; risk category alone does not require human
+   acknowledgement.
 
 ---
 

@@ -1,5 +1,12 @@
 # Aru_Agentic_SDLC — Process Audit, August 2026
 
+> **Historical baseline:** this audit records the factory before its August
+> hardening work. Human-only plan, review, diff-size, and merge proposals in the
+> original findings are superseded by issue #42. Current governance requires a
+> distinct agent review and gated mechanical merge; human intervention is only
+> for a severe merge conflict or merge/close-out failure agents cannot safely
+> resolve.
+
 Audit of the framework as implemented (`$ARU_SDLC_HOME`) and as actually practiced
 (`unum-catalog`), against current public practice in agentic SDLC.
 
@@ -126,9 +133,10 @@ state machines, money semantics. Those are exactly unum-catalog's Phase 1+ issue
 **Fix:** add a plan gate to `implement-next-issue`, triggered by a `needs-design` label
 (and default-on for `type:feat`): before any edit, the agent posts an implementation plan
 as an issue comment — approach, files, schema/API deltas, test strategy, rejected
-alternatives. For a solo operator, make it *post-and-proceed*, not *post-and-block*: you
-get an artifact and a review surface without becoming the bottleneck. Add
-`--require-plan-ack` for the money and schema paths where you do want to block.
+alternatives. Make it *post-and-proceed*, not *post-and-block*: the factory gets a
+durable artifact and review surface without inventing a human gate. Money,
+schema, and other high-risk paths increase the required plan, test, and review
+depth but do not require human acknowledgement.
 
 ### G3 — Review is unmodeled, and it is already your bottleneck
 
@@ -253,8 +261,10 @@ CI pass rate, Ready-column depth. Derive it from `gh` on demand; do not build a 
 CI has no secret scanning, no dependency audit. unum-catalog's domain — settlement,
 payouts, customer PII, supplier anonymity — makes this a Phase-1 blocker, not a nicety.
 
-**Fix:** `gitleaks` and `pip-audit` in CI now, while it is a three-line change. Add
-"touches money or PII paths" as a label that forces human review in `merge_pr.py`.
+**Fix:** `gitleaks` and `pip-audit` in CI now, while it is a three-line change.
+Money or PII paths require stronger threat-focused independent-agent review and
+tests, enforced through the ordinary fail-closed merge gate rather than a human
+review requirement.
 
 ---
 

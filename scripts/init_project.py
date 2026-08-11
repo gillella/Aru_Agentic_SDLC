@@ -119,11 +119,16 @@ branch, or merge around the Definition-of-Done gate.
 - Memory tools provide context only. PR bots are reviewers, not merge
   authorities.
 
-After independent review and every enforced gate pass, a factory agent may
-execute a routine merge only through
-`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Direct pushes and
-ad-hoc merge commands are forbidden. Money, PII, schema, other irreversible
-changes, and explicit escalations retain human-acknowledgement gates.
+After a distinct agent completes the independent review and every enforced
+gate passes, any factory agent, including the implementation author, may
+execute the mechanical merge only through
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Authors must never
+self-review. Direct pushes and ad-hoc merge commands are forbidden. Money,
+PII, security, schema, migration, irreversible behavior, large diffs, and
+review-round count increase planning, testing, and review depth but do not
+create a human gate. Human intervention is reserved for a severe merge
+conflict or merge/close-out failure that agents cannot safely resolve through
+governed remediation.
 
 ---
 
@@ -148,10 +153,9 @@ changes, and explicit escalations retain human-acknowledgement gates.
 6. **Plan Gate**: Before the first edit, `type:feat`, `needs-design`, money,
    PII, schema, migration, and other irreversible work posts the implementation
    plan required by `implement-next-issue`. High-risk scope triggers the gate
-   regardless of issue type labels. The default is post-and-proceed; select the
-   skill's `--require-plan-ack` workflow mode for money, PII, schema,
-   migrations, other irreversible paths, or explicit escalations. It is not a
-   standalone executable flag.
+   regardless of issue type labels. The plan is always post-and-proceed unless
+   the issue lacks a product decision needed to define acceptance; risk alone
+   does not require human acknowledgement.
 
 ---
 

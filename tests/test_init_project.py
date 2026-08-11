@@ -24,6 +24,39 @@ from init_project import (  # noqa: E402
 
 
 class ProjectBootstrapTests(unittest.TestCase):
+    def test_generated_governance_uses_agent_review_and_mechanical_merge(self):
+        rules = init_project.DEFAULT_AGENTS_TEMPLATE
+
+        self.assertIn("distinct agent", rules)
+        self.assertIn("including the implementation author", rules)
+        self.assertIn("merge_pr.py", rules)
+        self.assertIn("must never\nself-review", rules)
+        self.assertIn("severe merge", rules)
+        self.assertIn("merge/close-out failure", rules)
+        self.assertNotIn("--require-plan-ack", rules)
+        self.assertNotIn("human-acknowledgement", rules)
+
+    def test_active_factory_guidance_has_no_legacy_human_only_rule(self):
+        paths = [
+            ROOT / "AGENTS.md",
+            ROOT / "prompts" / "fleet-worker.md",
+            ROOT / "skills" / "implement-next-issue" / "SKILL.md",
+            ROOT / "docs" / "project_board_workflow.md",
+            ROOT / "docs" / "ARU-SOFTWARE-FACTORY.md",
+            ROOT / "docs" / "Aru-Software-Factory-Future-Improvements.md",
+        ]
+        guidance = "\n".join(path.read_text().lower() for path in paths)
+
+        self.assertNotIn("needs-human-review", guidance)
+        self.assertNotIn("--require-plan-ack", guidance)
+        self.assertNotIn("a human merges", guidance)
+        self.assertNotIn("fully autonomous merge of money", guidance)
+        self.assertNotIn("human at high-leverage gates", guidance)
+        self.assertNotIn("you merge via", guidance)
+        self.assertNotIn("ack design/money", guidance)
+        self.assertNotIn("stop for a human", guidance)
+        self.assertNotIn("human merges through", guidance)
+
     def test_ci_is_stack_aware_and_does_not_mask_failures(self):
         python_ci = render_ci_workflow("python", "pytest -q")
         node_ci = render_ci_workflow("node", "npm test")

@@ -1,6 +1,8 @@
 # Aru Software Factory — Build Plan
 
-**Goal:** idea → deployed software, mostly automated, with human steering at named gates.
+**Goal:** idea → deployed software through an autonomous governed loop, with
+operator visibility and exceptional human intervention only for an unresolved
+severe merge or close-out failure.
 
 **Status:** supersedes [`Aru-Software-Factory-Future-Improvements.md`](Aru-Software-Factory-Future-Improvements.md) as the working plan. That document's factory model, coordination insight, and non-goals hold and are carried forward. This one corrects its stale claims, adds what a full working session surfaced, and sequences the work.
 
@@ -156,20 +158,22 @@ There is no measure of tokens, wall time, or review rounds per issue. Without it
 
 ---
 
-## 4. The human steering interface
+## 4. The operator visibility and intervention interface
 
-The source document says "human at high-leverage gates only" but never defines the interface. Since the stated goal is *mostly automated with human steering*, this is the part that most needs specifying: automation without a defined steering surface becomes either a runaway or a babysitting job.
+The factory proceeds autonomously through planning, independent-agent review,
+and mechanical merge. Money, PII, security, schema, migration, diff size, and
+review-round count increase the evidence required but do not create human
+review or merge gates. Product intent still belongs in issue acceptance
+criteria; if a required decision is absent, agents record the options and keep
+the requirement blocked rather than inventing it.
 
-### 4.1 The four legitimate interrupts
+### 4.1 The one mandatory human intervention
 
-Everything else should proceed without you.
-
-| gate | why a human | current state |
-|---|---|---|
-| **Intent** — is this the right thing to build? | Irreducible. No mechanism substitutes. | manual, undefined |
-| **Design ack** — money, PII, schema, auth, irreversible migrations | Cost of being wrong is unbounded | prompt-level only |
-| **Oversized diff** | Review quality collapses past ~400 lines | mechanised in `merge_pr.py` ✅ |
-| **Escalation** — review round 3, or agents disagreeing | Loop-breaker | `needs-human-review` label exists, nothing routes it |
+Human intervention is required only when a severe merge conflict or merge/
+close-out failure remains unsafe or impossible for agents to resolve through
+governed remediation. The escalation must state the evidence, attempted fixes,
+preserved artifacts, and exact action needed. Everything else stays in the
+agent implementation/review/remediation loop.
 
 ### 4.2 What the operator must be able to see in one screen
 
@@ -182,11 +186,14 @@ Not built. This is `fleet_status.py` (source F3.4) and it is the difference betw
 - CI failure rate — *are gates working or noise?*
 - Cost and wall time per closed issue — *what is this costing?*
 
-### 4.3 The steering principle
+### 4.3 The operating principle
 
-> **The human sets direction and adjudicates irreversibility. The factory does everything else and reports what it did.**
+> **The issue defines direction. A distinct agent reviews. The gated helper
+> merges. Human intervention is the last resort for an unresolved severe merge
+> or close-out failure.**
 
-Every proposed automation should be tested against it. If a step needs a human for any reason other than *direction* or *irreversibility*, that is a missing mechanism, not a human gate.
+Every proposed automation should be tested against it. A risk label, large
+diff, repeated review, or tool preference is not a human gate.
 
 ---
 
@@ -236,7 +243,7 @@ The binding constraint, per §3.3.
 | **S2.1** | Evidence trail: verification commands and exit codes captured into the PR body automatically | "Tests pass" without evidence is an assertion |
 | **S2.2** | Acceptance-criteria runner: parse issue checkboxes → verification commands → merge input | Turns self-attested checkboxes into a real gate |
 | **S2.3** | Codify the narrower-than-reality heuristic in `code-review/SKILL.md` with today's five cases | Predictive of the defect class that actually occurs |
-| **S2.4** | Route `needs-human-review` somewhere you will see it | The escalation gate has no delivery mechanism |
+| **S2.4** | Surface narrowly scoped unresolved merge/close-out intervention with its evidence and requested action | Routine review rounds must stay in the agent loop |
 | **S2.5** | Split guidance in triage for oversized scopes | Prevents the review death spiral upstream |
 
 ### Phase 3 — Front of factory: intent → Ready work (1–2 weeks)
@@ -296,7 +303,8 @@ Carried forward, all still correct:
 - MCP coordination server with file locking — duplicates `touches:`
 - Replacing GitHub Issues with a local task file
 - More lifecycle skills for coverage's sake
-- Fully autonomous merge of money / PII / schema changes
+- Risk-category human review or merge gates; high-risk work strengthens
+  evidence without changing authority
 
 Added:
 

@@ -26,7 +26,7 @@ When a repository is bootstrapped via `skills/init-agent-project/SKILL.md`, it p
 | **Ready** | Triage complete, acceptance criteria defined, dependencies specified. | Ready for agent/human to claim. |
 | **In Progress** | Active development worktree created (`.worktrees/feat-issue-#-desc`). | Claimed via `claim_issue.py`. |
 | **In Review** | Pull Request opened (`Closes #X`), CI pipeline green. | PR submitted via `create_pr.py`. |
-| **Done** | PR merged into main, issue closed. | PR merged by reviewer or automated merge bot. |
+| **Done** | PR merged into main, issue closed. | A factory agent runs the gated `merge_pr.py` close-out. |
 
 ---
 
@@ -52,12 +52,12 @@ files, schema/API or money-semantics changes, verification strategy, and
 rejected alternatives. It must remain inside the issue so it survives agent
 handoffs and context compaction.
 
-The normal mode is post-and-proceed. For money, PII, schema, migrations, other
-irreversible paths, or an explicit operator escalation, select the
-`--require-plan-ack` mode of the `implement-next-issue` skill. This is a
-workflow mode, not a standalone executable flag. In that mode the claim
-remains held, but implementation pauses until a repository owner or designated
-maintainer comments `Plan approved` after the latest plan.
+The plan is always post-and-proceed once its durable issue comment is visible.
+Money, PII, security, schema, migration, irreversible behavior, large diffs,
+and repeated review rounds require proportionally stronger planning, tests,
+and independent review, but none creates a mandatory human acknowledgement
+gate. If the issue lacks a product decision needed to define acceptance, record
+the options and block for clarification rather than inventing requirements.
 
 ---
 
@@ -90,9 +90,12 @@ worktree, PR, review, merge, and cleanup. Other installed frameworks may help
 with a step, but their session-resume files, brainstorming flows, memory, or PR
 bots cannot replace board state or start a competing lifecycle.
 
-After an independent review and all Definition-of-Done checks pass, a factory
-agent may execute a routine merge only through
+After a distinct agent completes an independent review and all
+Definition-of-Done checks pass, any factory agent, including the implementation
+author, may execute the mechanical merge only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Direct pushes and
-ad-hoc merge commands have no merge authority. Human acknowledgement is
-required only for the high-risk and irreversible categories identified by the
-plan or merge gate, plus explicit escalations.
+ad-hoc merge commands have no merge authority, and authors may never
+self-review. Human intervention is exceptional and applies only when a severe
+merge conflict or merge/close-out failure remains unsafe or impossible for
+agents to resolve through governed remediation; risk category, diff size, and
+review-round count alone never require human participation.

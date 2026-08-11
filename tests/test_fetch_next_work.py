@@ -28,6 +28,7 @@ def pr(number, *labels, draft=False, checks="green", reviews=0, minutes_old=5,
         "statusCheckRollup": rollup,
         "updatedAt": ts(minutes_old), "createdAt": ts(minutes_old),
         "reviewDecision": decision, "body": "Closes #1", "headRefName": "x",
+        "_unresolved_threads": 0,
     }
 
 
@@ -80,10 +81,42 @@ class EligibilityTests(unittest.TestCase):
         self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", checks="pending"))["eligible"])
         self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", checks="none"))["eligible"])
 
-    def test_round_cap_escalates(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:anthropic", reviews=3))
+    def test_review_round_count_never_blocks_an_independent_agent(self):
+        verdict = eligible(pr(1, "author:agent-1", "family:anthropic", reviews=10))
+        self.assertTrue(verdict["eligible"])
+
+    def test_unresolved_commented_findings_wait_on_the_author(self):
+        candidate = pr(1, "author:agent-1", "family:anthropic", reviews=1)
+        candidate["_unresolved_threads"] = 2
+
+        verdict = eligible(candidate)
+
         self.assertFalse(verdict["eligible"])
-        self.assertIn("needs a human", verdict["reason"])
+        self.assertIn("waiting on author", verdict["reason"])
+
+    def test_completed_same_account_review_is_not_offered_again(self):
+        verdict = eligible(pr(
+            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-2",
+            reviews=1,
+        ))
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("waiting on gated merge", verdict["reason"])
+
+    def test_self_attribution_does_not_hide_pr_from_a_real_peer(self):
+        verdict = eligible(pr(
+            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-1",
+            reviews=1,
+        ))
+        self.assertTrue(verdict["eligible"])
+
+    def test_unknown_thread_state_fails_closed(self):
+        candidate = pr(1, "author:agent-1", "family:anthropic")
+        candidate["_unresolved_threads"] = None
+
+        verdict = eligible(candidate)
+
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("unavailable", verdict["reason"])
 
     def test_same_family_waits_before_it_is_offered(self):
         verdict = eligible(pr(1, "author:agent-1", "family:openai", minutes_old=5))
@@ -113,6 +146,11 @@ class FeedbackTests(unittest.TestCase):
         self.assertTrue(needs := fnw.needs_my_attention(
             pr(1, "author:agent-2", decision="CHANGES_REQUESTED"), "agent-2"))
         self.assertTrue(needs)
+
+    def test_my_commented_review_with_unresolved_threads_is_mine_to_fix(self):
+        candidate = pr(1, "author:agent-2", reviews=1)
+        candidate["_unresolved_threads"] = 3
+        self.assertTrue(fnw.needs_my_attention(candidate, "agent-2"))
 
     def test_someone_elses_pr_is_not(self):
         self.assertFalse(fnw.needs_my_attention(
@@ -176,9 +214,11 @@ class PriorityTests(unittest.TestCase):
         self.assertEqual(res["skipped_prs"][0]["number"], 3)
         self.assertIn("you wrote it", res["skipped_prs"][0]["why"])
 
-    def test_capped_prs_are_listed_for_escalation(self):
+    def test_many_review_rounds_remain_reviewable_without_escalation(self):
         res = self._select([pr(5, "author:agent-1", "family:anthropic", reviews=4)])
-        self.assertIn(5, res["escalated_prs"])
+        self.assertEqual(res["work"]["type"], "review")
+        self.assertEqual(res["work"]["pr"], 5)
+        self.assertEqual(res["escalated_prs"], [])
 
 
 if __name__ == "__main__":
@@ -186,7 +226,7 @@ if __name__ == "__main__":
 
 
 class ReviewDecisionTests(unittest.TestCase):
-    """A decided PR waits on a human or its author, not on another reviewer."""
+    """A decided PR waits on gated merge or its author, not another reviewer."""
 
     def test_approved_pr_is_not_offered_again(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic", decision="APPROVED"))
@@ -260,3 +300,33 @@ class UnreadableQueueTests(unittest.TestCase):
             res = fnw.select("agent-2", "openai", 3, 30)
         self.assertEqual(res["work"]["type"], "error")
         self.assertIn("could not be read", res["work"]["reason"])
+
+    def test_unknown_threads_on_authored_pr_block_new_issue_selection(self):
+        authored = pr(57, "author:agent-2", "family:openai")
+        authored["_unresolved_threads"] = None
+        parts = {
+            "candidates": [{"number": 99, "title": "new work"}],
+            "my_in_flight": None, "blocked": [], "conflicted": [],
+            "missing_touches": [], "not_ready": [],
+        }
+        with patch.object(fnw, "list_open_prs", return_value=[authored]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts):
+            res = fnw.select("agent-2", "openai", 3, 30)
+        self.assertEqual(res["work"]["type"], "error")
+        self.assertEqual(res["claimable_issues"], [])
+
+    def test_unknown_threads_on_peer_pr_block_new_issue_selection(self):
+        peer_pr = pr(57, "author:agent-1", "family:anthropic")
+        peer_pr["_unresolved_threads"] = None
+        parts = {
+            "candidates": [{"number": 99, "title": "new work"}],
+            "my_in_flight": None, "blocked": [], "conflicted": [],
+            "missing_touches": [], "not_ready": [],
+        }
+        with patch.object(fnw, "list_open_prs", return_value=[peer_pr]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts):
+            res = fnw.select("agent-2", "openai", 3, 30)
+        self.assertEqual(res["work"]["type"], "error")
+        self.assertEqual(res["claimable_issues"], [])
