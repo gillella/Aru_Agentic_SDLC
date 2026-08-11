@@ -545,8 +545,8 @@ def complete_review(pr_id: int, agent: str) -> int:
         # leaving the PR unable to merge. Attribution is idempotent, so a
         # nonzero result makes the same --complete-review command safely
         # retryable after a transient GitHub label-removal failure.
-        print(f"[ERROR] Review attributed, but the claim label could not be released. "
-              f"Retry --complete-review or release it with --release.", file=sys.stderr)
+        print("[ERROR] Review attributed, but the claim label could not be released. "
+              "Retry --complete-review or release it with --release.", file=sys.stderr)
         return EXIT_ERROR
     print(f"✅ Review of PR #{pr_id} completed by '{agent}'; claim released.")
     return EXIT_OK
