@@ -251,6 +251,28 @@ class ClaimProtocolTests(unittest.TestCase):
         run_cmd.assert_not_called()
         update_status.assert_not_called()
 
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_ambiguous_ready_and_in_review_status_fails_closed(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:ready", "status:in-review", "agent:agent-1"
+        )
+
+        result = claim_issue.claim_issue(39, "agent-0")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+        self.assertEqual(
+            claim_issue._status_name(get_issue.return_value),
+            "ambiguous(in-review,ready)",
+        )
+
 
 class InReviewHandoffStatusTests(unittest.TestCase):
     @patch("update_issue_status.run_cmd", return_value=(0, "", ""))

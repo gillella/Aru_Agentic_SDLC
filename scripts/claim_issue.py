@@ -84,20 +84,29 @@ def _remove_agent_label(issue_id: int, agent: str) -> bool:
     return code == 0
 
 
+def _status_labels(issue: dict) -> list[str]:
+    """Returns deterministic unique status labels for fail-closed decisions."""
+    return sorted({
+        name.lower() for name in label_names(issue) if name.lower().startswith("status:")
+    })
+
+
 def _has_in_progress(issue: dict) -> bool:
-    return "status:in-progress" in {name.lower() for name in label_names(issue)}
+    return _status_labels(issue) == ["status:in-progress"]
 
 
 def _status_name(issue: dict) -> str:
-    names = {name.lower() for name in label_names(issue)}
-    return next(
-        (name.removeprefix("status:") for name in names if name.startswith("status:")),
-        "unknown",
-    )
+    statuses = _status_labels(issue)
+    if not statuses:
+        return "unknown"
+    if len(statuses) > 1:
+        values = ",".join(name.removeprefix("status:") for name in statuses)
+        return f"ambiguous({values})"
+    return statuses[0].removeprefix("status:")
 
 
 def _has_ready(issue: dict) -> bool:
-    return _status_name(issue) == "ready"
+    return _status_labels(issue) == ["status:ready"]
 
 
 def _rollback_claim(issue_id: int, agent: str, assignee: str) -> None:
