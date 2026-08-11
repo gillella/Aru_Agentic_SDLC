@@ -946,15 +946,21 @@ class CacheRecheckTests(unittest.TestCase):
             "cwd": str(self.wt),
         }
         real_run = et._run
-        def mock_run(cmd, cwd=None):
+        gh_calls = []
+
+        def mock_run(cmd, cwd=None, timeout=15):
+            # Match _run's signature so a timeout kwarg cannot bypass the mock
+            # and hit a real `gh` (which fail-opens and leaves the cache stale).
             if cmd and cmd[0] == "gh":
+                gh_calls.append(cmd)
                 return 0, "touches: app.py, extra.py"
-            return real_run(cmd, cwd=cwd)
+            return real_run(cmd, cwd=cwd, timeout=timeout)
 
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
              patch.object(et, "_run", side_effect=mock_run):
             res = et.main()
         self.assertEqual(res, et.EXIT_ALLOW)
+        self.assertTrue(gh_calls, "expected a force-refresh gh issue view")
         # Verify cache was updated
         self.assertEqual(et._read_cache(self.wt, 73), ["app.py", "extra.py"])
 
@@ -967,10 +973,10 @@ class CacheRecheckTests(unittest.TestCase):
             "cwd": str(self.wt),
         }
         real_run = et._run
-        def mock_run(cmd, cwd=None):
+        def mock_run(cmd, cwd=None, timeout=15):
             if cmd and cmd[0] == "gh":
                 raise AssertionError("GitHub CLI should not be called on cached allow")
-            return real_run(cmd, cwd=cwd)
+            return real_run(cmd, cwd=cwd, timeout=timeout)
 
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
              patch.object(et, "_run", side_effect=mock_run):
@@ -986,10 +992,10 @@ class CacheRecheckTests(unittest.TestCase):
             "cwd": str(self.wt),
         }
         real_run = et._run
-        def mock_run(cmd, cwd=None):
+        def mock_run(cmd, cwd=None, timeout=15):
             if cmd and cmd[0] == "gh":
                 return 1, "API rate limit exceeded"
-            return real_run(cmd, cwd=cwd)
+            return real_run(cmd, cwd=cwd, timeout=timeout)
 
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
              patch.object(et, "_run", side_effect=mock_run):
