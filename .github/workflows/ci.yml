@@ -8,7 +8,7 @@ on:
 
 jobs:
   test-and-lint:
-    name: Run Verification & Tests
+    name: Lint, Verify & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -22,11 +22,24 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Verify Python Scripts Syntax
+      # Unpinned, this step would drift from what agents run locally. The
+      # version comes from requirements-dev.txt and the rules from
+      # pyproject.toml, so a local `ruff check .` and this job agree.
+      - name: Lint
         run: |
-          python -m py_compile scripts/*.py
+          ruff check .
+
+      # Covers hooks/ and tests/ as well as scripts/. hooks/enforce_touches.py
+      # is the write-time enforcement gate and was previously reached only
+      # because an unrelated test imports it - coverage by accident, not by a
+      # gate. The module signals refusal with EXIT_BLOCK = 2 and an unhandled
+      # crash exits 1, which is not that signal.
+      - name: Verify Python Syntax
+        run: |
+          python -m py_compile scripts/*.py hooks/*.py tests/*.py
 
       - name: Execute Tests
         run: |
