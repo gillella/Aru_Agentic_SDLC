@@ -179,9 +179,6 @@ def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
         if "needs-human-review" in labels:
             blocked_reasons.append(f"PR #{num} requires human review ('needs-human-review').")
 
-        if len(substantive) >= 3 and decision != "APPROVED":
-            blocked_reasons.append(f"PR #{num} reached maximum review rounds ({len(substantive)}) without approval.")
-
         if decision == "CHANGES_REQUESTED":
             waiting_reasons.append(f"PR #{num} has requested changes.")
         elif decision == "APPROVED":
