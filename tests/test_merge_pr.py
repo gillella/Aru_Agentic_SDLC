@@ -577,6 +577,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
             "reconcile_issue_done": (True, "done"),
             "clear_issue_claims": (True, "issue claim clear"),
             "clear_review_claims": (True, "review claim clear"),
+            "clear_merger_claims": (True, "merger claim clear"),
         }
         outcomes[failing] = (False, f"{failing} failed")
         patches = {
@@ -598,6 +599,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
         mocks["ensure_issue_closed"].assert_called_once_with(7)
         mocks["reconcile_issue_done"].assert_called_once_with(7)
         mocks["clear_review_claims"].assert_called_once_with(9)
+        mocks["clear_merger_claims"].assert_called_once_with(9)
 
     def test_worktree_failure_does_not_skip_branch_or_board_cleanup(self):
         ok, mocks = self._run("prune_worktree")
@@ -611,7 +613,9 @@ class CloseOutRecoveryTests(unittest.TestCase):
         self.assertFalse(ok)
         mocks["clear_issue_claims"].assert_called_once_with(7)
         mocks["clear_review_claims"].assert_called_once_with(9)
+        mocks["clear_merger_claims"].assert_called_once_with(9)
 
+    @patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear"))
     @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
     @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
     @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
@@ -621,7 +625,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree"))
     @patch.object(merge_pr.os, "chdir")
     def test_changes_to_surviving_root_before_pruning_caller_worktree(
-        self, chdir, prune, _local, _remote, _close, _done, _issue, _review
+        self, chdir, prune, _local, _remote, _close, _done, _issue, _review, _merger
     ):
         def after_chdir(*_args):
             chdir.assert_called_once_with("/repo")

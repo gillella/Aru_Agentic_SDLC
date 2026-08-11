@@ -568,6 +568,190 @@ def release_review(pr_id: int, agent: str) -> int:
     return EXIT_OK
 
 
+# --- Mechanical merge of a pull request ------------------------------------
+# Merge is board work once independent review is proven. Two agents racing the
+# same merge wastes retries and can confuse close-out, so it uses the same
+# optimistic label protocol as review claims. The label is coordination only:
+# merge_pr.py remains the sole merge authority and never treats merger:<id> as
+# review attestation.
+
+MERGER_LABEL_PREFIX = "merger:"
+
+
+def _merger_label_for(agent: str) -> str:
+    return f"{MERGER_LABEL_PREFIX}{agent}"
+
+
+def merger_labels(labels) -> list:
+    return sorted(name for name in (labels or []) if name.startswith(MERGER_LABEL_PREFIX))
+
+
+def merge_claimant(labels):
+    held = merger_labels(labels)
+    return held[0][len(MERGER_LABEL_PREFIX):] if held else None
+
+
+def _remove_merger_label(pr_id: int, agent: str) -> bool:
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--remove-label", _merger_label_for(agent)],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not remove merge claim for '{agent}': {err}", file=sys.stderr)
+    return code == 0
+
+
+def _has_peer_reviewer(labels, author: str | None) -> bool:
+    for name in labels or []:
+        if not name.startswith(REVIEWED_BY_LABEL_PREFIX):
+            continue
+        who = name[len(REVIEWED_BY_LABEL_PREFIX):]
+        if who and who != author:
+            return True
+    return False
+
+
+def claim_merge(pr_id: int, agent: str) -> int:
+    """Claims a pull request for mechanical merge. Same exit codes as claim_issue.
+
+    The PR author may hold this claim only when a distinct completed peer review
+    is already attributed. Self-review remains impossible because this path never
+    writes reviewed-by:<id>.
+    """
+    labels = _pr_labels(pr_id)
+    if labels is None:
+        print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
+        return EXIT_ERROR
+
+    author = pr_author(labels)
+    if author and author == agent and not _has_peer_reviewer(labels, author):
+        print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}' and has no "
+              f"distinct {REVIEWED_BY_LABEL_PREFIX}<peer> attribution yet. "
+              "Self-review cannot unlock mechanical merge.", file=sys.stderr)
+        return EXIT_CONFLICT
+
+    holder = merge_claimant(labels)
+    if holder and holder != agent:
+        print(f"[CONFLICT] PR #{pr_id} merge is already claimed by '{holder}'.",
+              file=sys.stderr)
+        return EXIT_CONFLICT
+    if holder == agent:
+        print(f"[INFO] PR #{pr_id} merge is already yours; resuming.")
+        return EXIT_OK
+
+    my_label = _merger_label_for(agent)
+    if not ensure_label(my_label, "5319e7", f"Merging by agent '{agent}'"):
+        print(f"[ERROR] Could not provision merge label '{my_label}'.", file=sys.stderr)
+        return EXIT_ERROR
+
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--add-label", my_label], check=False
+    )
+    if code != 0:
+        print(f"[ERROR] Could not apply merge claim: {err}", file=sys.stderr)
+        return EXIT_ERROR
+
+    time.sleep(READBACK_DELAY_S)
+    labels = _pr_labels(pr_id)
+    if labels is None:
+        print(f"[ERROR] Could not read back PR #{pr_id} after claiming merge.",
+              file=sys.stderr)
+        _remove_merger_label(pr_id, agent)
+        return EXIT_ERROR
+
+    holders = merger_labels(labels)
+    if my_label not in holders:
+        print(f"[ERROR] Merge label '{my_label}' was not present during read-back.",
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    if len(holders) > 1:
+        winner = holders[0]
+        contenders = ", ".join(h[len(MERGER_LABEL_PREFIX):] for h in holders)
+        if winner != my_label:
+            print(f"[CONFLICT] Race to merge #{pr_id} between [{contenders}]; "
+                  f"'{winner[len(MERGER_LABEL_PREFIX):]}' wins. Releasing.",
+                  file=sys.stderr)
+            _remove_merger_label(pr_id, agent)
+            return EXIT_CONFLICT
+        print(f"[INFO] Race to merge #{pr_id} between [{contenders}]; '{agent}' wins.")
+
+    time.sleep(CONFIRM_DELAY_S)
+    confirm = _pr_labels(pr_id)
+    if confirm is not None:
+        holders = merger_labels(confirm)
+        if len(holders) > 1 and holders[0] != my_label:
+            print(f"[CONFLICT] Late contender on merge of PR #{pr_id}; "
+                  f"'{holders[0][len(MERGER_LABEL_PREFIX):]}' wins. Releasing.",
+                  file=sys.stderr)
+            _remove_merger_label(pr_id, agent)
+            return EXIT_CONFLICT
+
+    print(f"✅ PR #{pr_id} claimed for merge by '{agent}'.")
+    return EXIT_OK
+
+
+def release_merge(pr_id: int, agent: str) -> int:
+    labels = _pr_labels(pr_id)
+    if labels is None:
+        print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
+        return EXIT_ERROR
+    holder = merge_claimant(labels)
+    if holder != agent:
+        print(f"[CONFLICT] PR #{pr_id} merge is held by '{holder}', not '{agent}'.",
+              file=sys.stderr)
+        return EXIT_CONFLICT
+    if not _remove_merger_label(pr_id, agent):
+        return EXIT_ERROR
+    print(f"♻️  Merge claim on PR #{pr_id} released by '{agent}'.")
+    return EXIT_OK
+
+
+def reap_stale_merges(hours: int = 4) -> list:
+    """Releases merge claims that went quiet without a successful merge.
+
+    Unlike review claims, a lingering merger:<id> does not block the merge gate
+    itself, but it does exclude the PR from the merge picker. Reap only when the
+    PR is still open and has been idle longer than ``hours``.
+    """
+    if hours <= 0:
+        return []
+
+    code, out, _ = run_cmd(
+        ["gh", "pr", "list", "--state", "open", "--limit", "200",
+         "--json", "number,labels,updatedAt"],
+        check=False,
+    )
+    if code != 0:
+        print("[WARN] Could not list PRs; no merge claims were reaped.", file=sys.stderr)
+        return []
+    try:
+        prs = json.loads(out) if out else []
+    except json.JSONDecodeError:
+        print("[WARN] Could not parse PR list; no merge claims were reaped.", file=sys.stderr)
+        return []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    released = []
+    for pr in prs:
+        names = [lab.get("name", "") for lab in pr.get("labels", [])]
+        holder = merge_claimant(names)
+        if not holder:
+            continue
+        try:
+            ts = datetime.fromisoformat((pr.get("updatedAt") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts > cutoff:
+            continue
+        if _remove_merger_label(pr["number"], holder):
+            released.append(pr["number"])
+            print(f"♻️  Released stale merge claim on PR #{pr['number']} "
+                  f"(held by '{holder}', idle > {hours}h).",
+                  file=sys.stderr)
+    return released
+
+
 def reap_stale_reviews(hours: int = 4) -> list:
     """Releases review claims that have gone quiet.
 
@@ -639,7 +823,7 @@ def main():
     parser = argparse.ArgumentParser(description="Claim or release a GitHub issue or PR review for one agent.")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--issue", type=int, help="GitHub Issue Number")
-    target.add_argument("--pr", type=int, help="Pull Request number to claim for review")
+    target.add_argument("--pr", type=int, help="Pull Request number to claim for review or merge")
     parser.add_argument("--agent", type=str, required=True,
                         help="Agent id, e.g. 'agent-1'. Becomes the agent:<id> label.")
     parser.add_argument("--assignee", type=str, default="@me", help="GitHub assignee (default: @me)")
@@ -649,18 +833,34 @@ def main():
     parser.add_argument("--complete-review", action="store_true", dest="complete",
                         help="Attribute a finished PR review (reviewed-by:<id>) and "
                              "release the claim. Run after submitting the GitHub review.")
+    parser.add_argument("--merge", action="store_true",
+                        help="With --pr: claim or release mechanical merge (merger:<id>), "
+                             "not review.")
     parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
-                        help="Release review claims idle longer than HOURS with no review submitted")
+                        help="Release review/merge claims idle longer than HOURS")
     args = parser.parse_args()
 
     if args.reap_after:
         reap_stale_reviews(args.reap_after)
+        reap_stale_merges(args.reap_after)
 
     if args.pr is not None:
+        if args.merge and args.complete:
+            print("[ERROR] --complete-review does not apply to merge claims.",
+                  file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+        if args.merge:
+            rc = (release_merge(args.pr, args.agent) if args.release
+                  else claim_merge(args.pr, args.agent))
+            sys.exit(rc)
         if args.complete:
             sys.exit(complete_review(args.pr, args.agent))
         rc = release_review(args.pr, args.agent) if args.release else claim_review(args.pr, args.agent)
         sys.exit(rc)
+
+    if args.merge:
+        print("[ERROR] --merge applies to a PR; use --pr <n> --merge.", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
 
     if args.complete:
         print("[ERROR] --complete-review applies to a PR review; use --pr <n>.",

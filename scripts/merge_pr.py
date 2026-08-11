@@ -41,6 +41,9 @@ REVIEWED_BY_LABEL = "reviewed-by:"
 # Treating it as attestation would let an author's own same-account review plus
 # any peer's claim satisfy the gate before that peer had looked at the diff.
 REVIEW_CLAIM_LABEL = "reviewer:"
+# Transient merge-execution claim from claim_merge. Cleared on close-out; never
+# treated as review attestation.
+MERGER_CLAIM_LABEL = "merger:"
 
 # Review apps can add useful findings, but their comments are not independent
 # approval. GitHub exposes some bot logins with a ``[bot]`` suffix and the
@@ -726,6 +729,60 @@ def clear_review_claims(pr_num):
     return clear_labels("pr", pr_num, REVIEW_CLAIM_LABEL)
 
 
+def clear_merger_claims(pr_num):
+    return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL)
+
+
+def evaluate_dod(pr, issue_bodies, threads):
+    """Runs every Definition-of-Done check without merging.
+
+    Returns ``(ok, gates)`` where ``gates`` is a list of
+    ``(name, passed, message)`` in evaluation order. Shared by ``--dry-run``
+    and the merge work picker so eligibility cannot drift from the gate.
+    """
+    issue_nums = linked_issues(pr.get("body"))
+    gates = [
+        ("open", *check_open(pr)),
+        ("issue link", *check_issue_link(pr)),
+        ("ci", *check_ci(pr)),
+        ("review", *check_reviews(pr, threads)),
+        ("rebased", *check_rebased(pr)),
+        ("size", *check_size(pr)),
+    ]
+    for num in issue_nums:
+        gates.append((f"accept #{num}", *check_acceptance(num, issue_bodies.get(num, ""))))
+    ok = all(passed for _, passed, _ in gates)
+    return ok, gates
+
+
+def dod_status(pr_id):
+    """Fetch-and-evaluate helper for callers that only need pass/fail + reason.
+
+    Returns ``(ok, reason)``. ``ok`` is True only when every gate passes.
+    Fetch or thread-query failures fail closed with ``ok=False``.
+    """
+    pr = fetch_pr(pr_id)
+    if not pr:
+        return False, "could not fetch pull request"
+    if is_merged(pr):
+        return True, "already merged; close-out may still be needed"
+    issue_nums = linked_issues(pr.get("body"))
+    if not issue_nums:
+        return False, "PR body has no Closes #<issue>"
+    issue_bodies = {}
+    for num in issue_nums:
+        issue = _gh_json(["gh", "issue", "view", str(num), "--json", "body"])
+        if issue is None:
+            return False, f"could not read issue #{num}"
+        issue_bodies[num] = issue.get("body") or ""
+    threads = unresolved_threads(pr_id)
+    ok, gates = evaluate_dod(pr, issue_bodies, threads)
+    if ok:
+        return True, "every Definition-of-Done gate passed"
+    blocked = [name for name, passed, _ in gates if not passed]
+    return False, f"unmet: {', '.join(blocked)}"
+
+
 def run_closeout(pr, issue_nums, repo_root):
     """Runs every idempotent close-out step, even after an earlier failure."""
     try:
@@ -750,6 +807,7 @@ def run_closeout(pr, issue_nums, repo_root):
             (f"issue claim #{num}", lambda num=num: clear_issue_claims(num)),
         ])
     steps.append(("review claim", lambda: clear_review_claims(pr.get("number"))))
+    steps.append(("merger claim", lambda: clear_merger_claims(pr.get("number"))))
 
     all_ok = True
     print("\n=== Post-merge close-out ===")
@@ -795,22 +853,13 @@ def main():
             issue_bodies[num] = issue.get("body") or ""
 
         threads = unresolved_threads(args.pr)
-        gates = [
-            ("open", check_open(pr)),
-            ("issue link", check_issue_link(pr)),
-            ("ci", check_ci(pr)),
-            ("review", check_reviews(pr, threads)),
-            ("rebased", check_rebased(pr)),
-            ("size", check_size(pr)),
-        ]
-        for num in issue_nums:
-            gates.append((f"accept #{num}", check_acceptance(num, issue_bodies[num])))
+        ok, gates = evaluate_dod(pr, issue_bodies, threads)
 
         print(f"=== Definition of Done — PR #{args.pr}: {pr.get('title','')} ===")
         blocked = []
-        for name, (ok, message) in gates:
-            print(f"  {'✅' if ok else '❌'} {name:<11} {message}")
-            if not ok:
+        for name, passed, message in gates:
+            print(f"  {'✅' if passed else '❌'} {name:<11} {message}")
+            if not passed:
                 blocked.append(name)
         if blocked:
             print(f"\n🚫 Not merged. Unmet: {', '.join(blocked)}.")

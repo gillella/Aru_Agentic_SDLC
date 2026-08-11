@@ -472,5 +472,60 @@ class ReapStaleReviewsTests(unittest.TestCase):
         self.assertEqual(claim_issue.reap_stale_reviews(0), [])
 
 
+class MergeClaimTests(unittest.TestCase):
+    """Issue #43: optimistic merger:<id> claims."""
+
+    def setUp(self):
+        self.labels = []
+
+    def _view(self, *_args, **_kwargs):
+        return 0, "\n".join(self.labels), ""
+
+    @patch.object(claim_issue, "CONFIRM_DELAY_S", 0)
+    @patch.object(claim_issue, "READBACK_DELAY_S", 0)
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "run_cmd")
+    def test_claim_merge_race_lowest_id_wins(self, run_cmd, _ensure):
+        # First read: unclaimed. After write: both labels present; agent-b loses.
+        sequence = [
+            (0, "author:agent-a\nreviewed-by:peer\n", ""),
+            (0, "", ""),  # add-label
+            (0, "author:agent-a\nmerger:agent-a\nmerger:agent-b\nreviewed-by:peer\n", ""),
+            (0, "", ""),  # remove loser
+        ]
+        run_cmd.side_effect = sequence
+        self.assertEqual(claim_issue.claim_merge(7, "agent-b"), claim_issue.EXIT_CONFLICT)
+
+    @patch.object(claim_issue, "CONFIRM_DELAY_S", 0)
+    @patch.object(claim_issue, "READBACK_DELAY_S", 0)
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "run_cmd")
+    def test_author_may_claim_merge_with_peer_review(self, run_cmd, _ensure):
+        run_cmd.side_effect = [
+            (0, "author:agent-a\nreviewed-by:peer\n", ""),
+            (0, "", ""),
+            (0, "author:agent-a\nmerger:agent-a\nreviewed-by:peer\n", ""),
+            (0, "author:agent-a\nmerger:agent-a\nreviewed-by:peer\n", ""),
+        ]
+        self.assertEqual(claim_issue.claim_merge(7, "agent-a"), claim_issue.EXIT_OK)
+
+    @patch.object(claim_issue, "run_cmd")
+    def test_author_cannot_claim_merge_without_peer_review(self, run_cmd):
+        run_cmd.return_value = (0, "author:agent-a\nreviewed-by:agent-a\n", "")
+        self.assertEqual(claim_issue.claim_merge(7, "agent-a"), claim_issue.EXIT_CONFLICT)
+
+    @patch.object(claim_issue, "run_cmd")
+    def test_stale_merge_claims_are_reaped(self, run_cmd):
+        run_cmd.side_effect = [
+            (0, '[{"number": 5, "labels": [{"name": "merger:stale"}], '
+                '"updatedAt": "2020-01-01T00:00:00Z"}]', ""),
+            (0, "", ""),
+        ]
+        self.assertEqual(claim_issue.reap_stale_merges(4), [5])
+
+    def test_reaping_merges_is_off_by_default(self):
+        self.assertEqual(claim_issue.reap_stale_merges(0), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -226,6 +226,75 @@ class PriorityTests(unittest.TestCase):
         self.assertEqual(res["escalated_prs"], [])
 
 
+class MergeWorkTests(unittest.TestCase):
+    """Issue #43: merge-ready PRs are claimable board work."""
+
+    def _select(self, prs, candidates=(), agent="agent-2", family="openai",
+                dod_ok=True, dod_reason="every Definition-of-Done gate passed"):
+        parts = {
+            "candidates": [{"number": n, "title": f"issue {n}"} for n in candidates],
+            "my_in_flight": None,
+            "blocked": [], "conflicted": [], "missing_touches": [], "not_ready": [],
+        }
+        with patch.object(fnw, "list_open_prs", return_value=list(prs)), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts), \
+             patch.object(fnw, "dod_status", return_value=(dod_ok, dod_reason)):
+            return fnw.select(agent, family, 3, 30)
+
+    def test_merge_outranks_review_and_new_work(self):
+        ready = pr(9, "author:agent-1", "family:anthropic", "reviewed-by:agent-9",
+                   reviews=1, title="ready to merge")
+        ready["headRefOid"] = "abc123"
+        res = self._select(
+            [ready, pr(2, "author:agent-1", "family:anthropic")],
+            candidates=[7],
+        )
+        self.assertEqual(res["work"]["type"], "merge")
+        self.assertEqual(res["work"]["pr"], 9)
+        self.assertEqual(res["work"]["skill"], "merge-pr")
+        self.assertEqual(res["work"]["head_sha"], "abc123")
+
+    def test_feedback_still_outranks_merge(self):
+        authored = pr(1, "author:agent-2")
+        authored["_active_review_feedback"] = [{"body": "fix"}]
+        ready = pr(9, "author:agent-1", "family:anthropic", "reviewed-by:agent-9",
+                   reviews=1)
+        res = self._select([authored, ready], candidates=[7])
+        self.assertEqual(res["work"]["type"], "feedback")
+
+    def test_author_may_merge_when_peer_review_exists(self):
+        ready = pr(9, "author:agent-2", "family:openai", "reviewed-by:agent-9",
+                   reviews=1)
+        res = self._select([ready], agent="agent-2", family="openai")
+        self.assertEqual(res["work"]["type"], "merge")
+        self.assertEqual(res["work"]["pr"], 9)
+
+    def test_author_cannot_merge_without_peer_reviewer(self):
+        # GitHub APPROVED alone is not enough for the author path without peers.
+        own = pr(9, "author:agent-2", "family:openai", decision="APPROVED", reviews=1)
+        verdict = fnw.merge_eligibility(own, "agent-2")
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("distinct peer", verdict["reason"])
+
+    def test_blocked_gates_do_not_offer_merge(self):
+        ready = pr(9, "author:agent-1", "family:anthropic", "reviewed-by:agent-9",
+                   reviews=1)
+        res = self._select([ready], candidates=[7], dod_ok=False,
+                           dod_reason="unmet: ci")
+        self.assertEqual(res["work"]["type"], "issue")
+        self.assertEqual(res["merge_skipped"][0]["number"], 9)
+        self.assertIn("unmet: ci", res["merge_skipped"][0]["why"])
+
+    def test_other_merger_claim_blocks_eligibility(self):
+        ready = pr(9, "author:agent-1", "family:anthropic", "reviewed-by:agent-9",
+                   "merger:agent-8", reviews=1)
+        with patch.object(fnw, "dod_status", return_value=(True, "ok")):
+            verdict = fnw.merge_eligibility(ready, "agent-2")
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("agent-8", verdict["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
