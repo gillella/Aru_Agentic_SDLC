@@ -23,6 +23,7 @@ and refuse to invent a second copy of these skills inside the target repo.
 
 | User intent | Skill to read and follow |
 |---|---|
+| Run the factory / work the board / no specific step named | `run-aru-factory` |
 | New governed repo / board / CI | `init-agent-project` |
 | Pick up / continue backlog work | `implement-next-issue` |
 | File a bug/feature/task | `create-github-issue` |

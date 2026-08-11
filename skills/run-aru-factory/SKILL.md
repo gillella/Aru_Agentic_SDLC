@@ -1,0 +1,199 @@
+---
+name: run-aru-factory
+description: Single entrypoint to the Aru_Agentic_SDLC factory for any local coding agent. Selects the right lifecycle skill and offers adopt, status, next, loop, and doctor modes. Use when the user says run the factory, work the project board, continue development, adopt this project, keep going on the backlog, what is the factory doing, or check the factory setup.
+triggers:
+  - "run the factory"
+  - "work the project board"
+  - "continue development"
+  - "adopt this project"
+  - "keep going on the backlog"
+  - "what is the factory doing"
+  - "check the factory setup"
+do_not_trigger_for:
+  - "a specific lifecycle step the user named directly (use that skill)"
+  - "filing an issue without doing the work (use create-github-issue)"
+---
+
+# Run Aru Factory
+
+One door into the factory. Every mode resolves to a lifecycle skill or a
+helper script that already exists — this file routes, it does not restate
+their procedures. When a step here disagrees with the skill it delegates to,
+the skill wins.
+
+Canonical home: `$ARU_SDLC_HOME` (default
+`/Users/aravindgillella/projects/Aru_Agentic_SDLC`).
+
+## Identity — required before any claim
+
+Every claim, review, and PR needs a **stable agent id** and a **model
+family**:
+
+```
+--agent <AGENT_ID> --family <FAMILY>
+```
+
+Pick an id once per concurrent session (`claude-1`, `codex-1`, …) and keep it
+for the whole session. Every agent authenticates as the same GitHub user, so
+these labels are the only identity the board has — they are what lets the
+picker route a PR to someone who did not write it, and what lets the merge
+gate tell a peer review from a self-review. **A picker or claim command
+without both flags is a bug**, not a shortcut.
+
+## Modes
+
+| mode | what it does | delegates to |
+|---|---|---|
+| `adopt` | make an ungoverned repo governed, then start work | `init-agent-project` |
+| `status` | report factory state without changing anything | `scripts/fleet_status.py` |
+| `next` | do exactly one unit of work, then stop | picker + the matching skill |
+| `loop` | repeat `next` until a stop condition fires | `prompts/fleet-worker.md` |
+| `doctor` | check the local setup, read-only | see **doctor** below |
+
+Default to `next` **only** when the user named no mode and clearly wants work
+done. An unrecognised mode is an error — say so and list the five. Never
+silently fall through to `next`: guessing wrong starts real work the user did
+not ask for.
+
+### adopt
+
+1. Does the repo have `AGENTS.md` carrying the Issue-First Law?
+2. **No** → follow `$ARU_SDLC_HOME/skills/init-agent-project/SKILL.md`. Do not
+   begin implementation in the same breath; bootstrapping is its own outcome.
+3. **Yes** → the repo is already governed. Continue as `next`.
+
+### status
+
+```
+python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" [--json]
+```
+
+Read-only. Exit codes distinguish complete, waiting, blocked, and error;
+report the state and its reasons rather than acting on them.
+
+### next
+
+**Recover before you claim.** Ask the picker with your id — it returns work
+you already hold, marked `resuming`, before offering anything new. Finishing
+beats starting, and an abandoned claim blocks the board for everyone else.
+
+```
+python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
+  --agent <AGENT_ID> --family <FAMILY> --claim --json
+```
+
+It returns one item and claims it. Follow the skill for its type:
+
+| type | skill |
+|---|---|
+| `feedback` | `address-pr-feedback` |
+| `review` | `code-review` |
+| `issue` | `implement-next-issue` |
+| `merge` | `merge_pr.py` only — see **merging** |
+| `idle` | stop; report what is blocking |
+
+The order is deliberate: unblocking work already in flight comes before
+starting anything new.
+
+**If the claim conflicts**, another agent won the race. That ends the
+iteration, not the session — ask the picker again. Treating a lost race as an
+error strands the agent while the board still has work.
+
+### loop
+
+`next`, repeated. The contract is
+`$ARU_SDLC_HOME/prompts/fleet-worker.md` — read it before the first
+iteration and follow it; the branch bodies and hard rules live there.
+
+Stop, write a final report, and end the session when:
+
+- the picker returns `idle`
+- the board's identity is ambiguous, or a dependency or `touches:` conflict
+  cannot be resolved from the issue
+- a decision is needed that the issue does not settle — schema, external
+  contract, money semantics, security posture
+- an automation step fails, or a helper script exits `1` (error, not conflict)
+- CI stays red after **3** remediation rounds
+- a review disagreement reaches a **third** round
+- a hard rule would have to be broken to continue
+
+Also stop when context is running short. A clean handoff report beats
+degrading halfway through an issue.
+
+### doctor
+
+Read-only. It must never claim, label, branch, commit, or open anything.
+
+```
+python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py"
+```
+
+**That script does not exist yet — it is #34.** Until it lands, check what can
+be checked from here and say plainly what you could not:
+
+- `$ARU_SDLC_HOME` resolves to the canonical repository
+- the target repo has `AGENTS.md` with the Issue-First Law
+- `git` and `gh` are present, and `gh auth status` succeeds — never print
+  credential values
+- the governed board resolves, via `fleet_status.py`
+- worktrees under `.worktrees/` and any in-flight claims for your agent id
+
+Report per-agent installation state as **not yet diagnosable**, rather than
+inferring it. A confident wrong answer about setup is worse than an admitted
+gap.
+
+## Rules that hold in every mode
+
+These are the framework's, restated here only because skipping one is how
+each has been broken before. The authority is `AGENTS.md`.
+
+1. **Issue-First.** No code change without a claimed, open, tracked issue.
+2. **Worktree isolation.** Feature work and reviews happen under
+   `.worktrees/`. Run helper scripts by absolute path so they act on the right
+   repo, and `cd` into the worktree before editing.
+3. **Stay inside `touches:`.** To write outside it, widen the declaration on
+   the issue *first* and say why. Never widen silently. Over-declaring is its
+   own harm: a glob like `tests/**` makes the picker serialise issues that
+   never really overlap.
+4. **Verify locally before pushing.** `ruff check .` and the test suite, both
+   clean. Report failures with their output; never claim a check you did not
+   run.
+5. **Every PR carries `Closes #<issue>`** and is opened through
+   `create_pr.py --agent <id> --model-family <family>`.
+6. **Never review your own PR.** The merge gate reads `author:` against
+   `reviewed-by:` and refuses a self-review — posting one does not unblock
+   anything.
+
+### Reviewing, in a same-account fleet
+
+GitHub rejects `--approve` and `--request-changes` from the PR's own account,
+and the whole fleet shares one account. Use `gh pr review --comment` and state
+the verdict in the body, with each blocking finding in its own **unresolved**
+inline thread so the picker routes the PR back to its author. Then:
+
+```
+python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --complete-review
+```
+
+Only on a review with no blocking findings. With findings outstanding, release
+the claim instead and leave the threads open. Full procedure:
+`skills/code-review/SKILL.md`.
+
+### Merging
+
+Merge only through the gated close-out, and never a PR you authored:
+
+```
+python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N>
+```
+
+Direct pushes and `gh pr merge` have no merge authority. A finding is closed
+by a commit or by an explicit `Withdrawn:` reply — resolving a thread proves
+nothing, and the gate checks.
+
+## References
+
+- Loop contract: `$ARU_SDLC_HOME/prompts/fleet-worker.md`
+- Router: `$ARU_SDLC_HOME/skills/aru-agentic-sdlc/SKILL.md`
+- Board lifecycle: `$ARU_SDLC_HOME/docs/project_board_workflow.md`
+- Commit and test standards: `$ARU_SDLC_HOME/docs/coding_standards.md`
