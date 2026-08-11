@@ -346,7 +346,10 @@ class ClaimReviewTests(unittest.TestCase):
                 {"name": "reviewed-by:agent-2"},
             ],
         }
-        ok, msg = merge_pr.check_reviews(pr, 0)
+        ok, msg = merge_pr.check_reviews(
+            pr,
+            {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+        )
         self.assertFalse(ok)
         self.assertIn("still in progress", msg)
 
