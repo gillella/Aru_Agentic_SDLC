@@ -80,8 +80,8 @@ def create_worktree(branch_name: str, path: str = None, attempts: int = 5) -> st
     return path
 
 
-def list_open_issues() -> List[Dict[str, Any]]:
-    """Fetches list of open issues via gh CLI.
+def query_open_issues() -> Optional[List[Dict[str, Any]]]:
+    """Fetches open issues, preserving a query failure as ``None``.
 
     --limit is explicit: gh defaults to 30, which silently truncates any board
     with more issues than that and makes the dependency graph wrong.
@@ -89,7 +89,16 @@ def list_open_issues() -> List[Dict[str, Any]]:
     cmd = ["gh", "issue", "list", "--state", "open", "--limit", "500",
            "--json", "number,title,labels,assignees,body,state,updatedAt"]
     res = run_gh_json(cmd)
-    return res if isinstance(res, list) else []
+    return res if isinstance(res, list) else None
+
+
+def list_open_issues() -> List[Dict[str, Any]]:
+    """Compatibility wrapper for issue pickers that historically consume a list.
+
+    Authoritative callers that must distinguish an empty repository from an
+    infrastructure failure use :func:`query_open_issues` directly.
+    """
+    return query_open_issues() or []
 
 
 # --- Concurrency primitives -----------------------------------------------
@@ -240,12 +249,13 @@ def get_repo_slug() -> Optional[str]:
     return stdout or None
 
 
-def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
-    """Returns every project item for an issue, with the project's Status field
-    and its available options resolved in one round trip."""
+def query_issue_project_items(
+    issue_number: int,
+) -> Optional[List[Dict[str, Any]]]:
+    """Returns project items while preserving GraphQL failures as ``None``."""
     slug = get_repo_slug()
     if not slug or "/" not in slug:
-        return []
+        return None
     owner, repo = slug.split("/", 1)
 
     query = """
@@ -257,6 +267,12 @@ def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
           projectItems(first:10) {
             nodes {
               id
+              status: fieldValueByName(name:"Status") {
+                ... on ProjectV2ItemFieldSingleSelectValue {
+                  optionId
+                  name
+                }
+              }
               project {
                 id
                 number
@@ -285,15 +301,20 @@ def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
         "-F", f"number={issue_number}",
     ]
     res = run_gh_json(cmd)
-    if not res:
-        return []
+    if not isinstance(res, dict) or res.get("errors"):
+        return None
     try:
         return res["data"]["repository"]["issue"]["projectItems"]["nodes"]
     except (KeyError, TypeError):
-        return []
+        return None
 
 
-def get_repo_projects(repo_slug: str) -> List[Dict[str, Any]]:
+def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
+    """Compatibility wrapper for board mutation helpers expecting a list."""
+    return query_issue_project_items(issue_number) or []
+
+
+def get_repo_projects(repo_slug: str) -> Optional[List[Dict[str, Any]]]:
     """Returns Project v2 boards linked to ``owner/repo``.
 
     Issue creation cannot discover its destination from project items because
@@ -301,7 +322,7 @@ def get_repo_projects(repo_slug: str) -> List[Dict[str, Any]]:
     projects instead, using the same title/linkage contract as status moves.
     """
     if not repo_slug or "/" not in repo_slug:
-        return []
+        return None
     owner, repo = repo_slug.split("/", 1)
     query = """
     query($owner:String!, $repo:String!) {
@@ -330,12 +351,12 @@ def get_repo_projects(repo_slug: str) -> List[Dict[str, Any]]:
         "-F", f"repo={repo}",
     ]
     res = run_gh_json(cmd)
-    if not res:
-        return []
+    if not isinstance(res, dict) or res.get("errors"):
+        return None
     try:
         return res["data"]["repository"]["projectsV2"]["nodes"]
     except (KeyError, TypeError):
-        return []
+        return None
 
 
 def select_governed_project_items(
@@ -385,7 +406,14 @@ def select_governed_projects(
 
 def resolve_governed_project(repo_slug: str) -> Optional[Dict[str, Any]]:
     """Resolves the exact ``<repo> Board`` or sole linked project."""
-    projects = select_governed_projects(get_repo_projects(repo_slug), repo_slug)
+    available = get_repo_projects(repo_slug)
+    if available is None:
+        print(
+            f"[WARN] Could not query project boards for '{repo_slug}'.",
+            file=sys.stderr,
+        )
+        return None
+    projects = select_governed_projects(available, repo_slug)
     if len(projects) == 1:
         return projects[0]
     print(
