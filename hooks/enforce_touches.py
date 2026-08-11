@@ -541,11 +541,12 @@ def _shell_tokens(command):
             flush()
             quoted = False
             index += 1
-    for t in raw_tokens:
-        if t in (">", ">>", ">&", "<", "|", "&&", ";"):
-            tokens.append(("op", t))
-        else:
-            tokens.append(("word", t))
+            continue
+
+        word.append(char)
+        index += 1
+
+    flush()
     return tokens
 
 
