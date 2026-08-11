@@ -170,6 +170,32 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertIn('name:"Jira-Style Backlog"', mutations)
         self.assertIn('name:"Sprint"', mutations)
 
+    def test_governance_scripts_written_and_valid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_project.scaffold_directory_structure(temp_dir)
+            init_project.write_governance_scripts(temp_dir)
+
+            check_touches = Path(temp_dir) / ".github" / "scripts" / "check_touches.py"
+            check_touches_wf = Path(temp_dir) / ".github" / "workflows" / "check_touches.yml"
+            review_py = Path(temp_dir) / ".github" / "scripts" / "review.py"
+            reviewers_yml = Path(temp_dir) / ".github" / "reviewers.yml"
+
+            self.assertTrue(check_touches.is_file())
+            self.assertTrue(check_touches_wf.is_file())
+            self.assertTrue(review_py.is_file())
+            self.assertTrue(reviewers_yml.is_file())
+
+            # Test review.py degrades to notice without API keys
+            env = {k: v for k, v in os.environ.items() if not k.endswith("_API_KEY")}
+            res = subprocess.run(
+                [sys.executable, str(review_py)],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(res.returncode, 0)
+            self.assertIn("::notice::", res.stderr)
+
 
 class CiGateTests(unittest.TestCase):
     """The generated CI must fail, not warn.

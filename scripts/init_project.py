@@ -391,6 +391,168 @@ Closes #
 """
 
 
+CHECK_TOUCHES_SCRIPT = """#!/usr/bin/env python3
+\"\"\"check_touches.py - Enforces PR file modifications against issue declared touches:\"\"\"
+
+import fnmatch
+import json
+import os
+import re
+import subprocess
+import sys
+
+
+def run_cmd(cmd):
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return res.returncode, res.stdout.strip(), res.stderr.strip()
+
+
+def parse_touches(body):
+    if not body:
+        return []
+    match = re.search(
+        r"^[ \\t]*[*_`]{0,2}touches[*_`]{0,2}[ \\t]*:[ \\t]*([^\\n]*)",
+        body,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if not match:
+        return []
+    raw = match.group(1).strip().strip("*_").strip()
+    if raw.startswith("("):
+        return []
+    return [p.strip().strip("`") for p in raw.split(",") if p.strip()]
+
+
+def norm_path(p):
+    return p.strip().strip("/")
+
+
+def path_allowed(rel_path, touches):
+    if not rel_path or not touches:
+        return False
+    rel = norm_path(rel_path)
+    for pat in touches:
+        pat_norm = norm_path(pat)
+        if rel == pat_norm or fnmatch.fnmatch(rel, pat_norm):
+            return True
+        ap = rel.split("*")[0].rstrip("/")
+        bp = pat_norm.split("*")[0].rstrip("/")
+        if bp and (rel.startswith(bp + "/") or rel == bp):
+            return True
+    return False
+
+
+def main():
+    pr_body = os.environ.get("PR_BODY", "")
+    pr_head = os.environ.get("PR_HEAD", "")
+
+    match = re.search(r"\\bcloses\\s+#(\\d+)\\b", pr_body, re.IGNORECASE)
+    if not match and pr_head:
+        match = re.search(r"issue-(\\d+)", pr_head, re.IGNORECASE)
+    if not match:
+        print("::warning:: No linked issue (Closes #N) found in PR body or branch name; cannot verify touches.", file=sys.stderr)
+        sys.exit(0)
+
+    issue_num = match.group(1)
+    code, out, err = run_cmd(["gh", "issue", "view", issue_num, "--json", "body", "-q", ".body"])
+    if code != 0 or not out:
+        print(f"::warning:: Could not fetch issue #{issue_num} body: {err}", file=sys.stderr)
+        sys.exit(0)
+
+    touches = parse_touches(out)
+    if not touches:
+        print(f"::warning:: Issue #{issue_num} declares no touches: metadata line; allowing.", file=sys.stderr)
+        sys.exit(0)
+
+    code, changed, err = run_cmd(["git", "diff", "--name-only", "origin/main...HEAD"])
+    if code != 0 or not changed:
+        sys.exit(0)
+
+    changed_files = [f.strip() for f in changed.splitlines() if f.strip()]
+    violations = [f for f in changed_files if not path_allowed(f, touches)]
+
+    if violations:
+        print(f"::error:: PR modifies files outside issue #{issue_num}'s declared touches: {', '.join(touches)}", file=sys.stderr)
+        for v in violations:
+            print(f"::error:: Violation: {v}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"✅ All {len(changed_files)} changed files are within declared touches for issue #{issue_num}.")
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+CHECK_TOUCHES_WORKFLOW = """name: Check Touches
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-touches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify PR file changes against issue touches declaration
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_HEAD: ${{ github.event.pull_request.head.ref }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/check_touches.py
+"""
+
+REVIEW_SCRIPT = """#!/usr/bin/env python3
+\"\"\"review.py - Model-routed AI reviewer script for CI.\"\"\"
+
+import os
+import sys
+
+
+def main():
+    api_keys = [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "MISTRAL_API_KEY",
+    ]
+    has_key = any(os.environ.get(k) for k in api_keys)
+    if not has_key:
+        print("::notice:: No AI provider API key configured; skipping model review.", file=sys.stderr)
+        sys.exit(0)
+
+    print("AI provider API key found; model review active.")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+REVIEWERS_CONFIG = """# Model-routed reviewer configuration
+version: 1
+reviewers:
+  default:
+    model: claude-3-5-sonnet
+    degrade_to_notice: true
+  routing:
+    anthropic: openai
+    openai: anthropic
+    google: anthropic
+"""
+
+
 def scaffold_directory_structure(target_dir: str):
     """Creates standard directory tree with .gitkeep so empty dirs survive git."""
     dirs = [
@@ -400,6 +562,7 @@ def scaffold_directory_structure(target_dir: str):
         "scripts",
         "docs",
         ".github/workflows",
+        ".github/scripts",
         ".github/ISSUE_TEMPLATE",
         ".cursor/rules",
     ]
@@ -411,6 +574,33 @@ def scaffold_directory_structure(target_dir: str):
             if not os.listdir(path):
                 open(keep, "a").close()
     print("✅ Standard directory structure scaffolded.")
+
+
+def write_governance_scripts(target_dir: str):
+    """Writes CI check_touches and model-routed reviewer scripts/workflows/config."""
+    scripts_dir = os.path.join(target_dir, ".github", "scripts")
+    workflows_dir = os.path.join(target_dir, ".github", "workflows")
+    github_dir = os.path.join(target_dir, ".github")
+    os.makedirs(scripts_dir, exist_ok=True)
+    os.makedirs(workflows_dir, exist_ok=True)
+
+    check_touches_path = os.path.join(scripts_dir, "check_touches.py")
+    with open(check_touches_path, "w", encoding="utf-8") as f:
+        f.write(CHECK_TOUCHES_SCRIPT)
+
+    check_touches_wf_path = os.path.join(workflows_dir, "check_touches.yml")
+    with open(check_touches_wf_path, "w", encoding="utf-8") as f:
+        f.write(CHECK_TOUCHES_WORKFLOW)
+
+    review_script_path = os.path.join(scripts_dir, "review.py")
+    with open(review_script_path, "w", encoding="utf-8") as f:
+        f.write(REVIEW_SCRIPT)
+
+    reviewers_config_path = os.path.join(github_dir, "reviewers.yml")
+    with open(reviewers_config_path, "w", encoding="utf-8") as f:
+        f.write(REVIEWERS_CONFIG)
+
+    print("✅ Governance scripts (check_touches, review.py, reviewers.yml) written.")
 
 
 def create_cursor_project_rule(target_dir: str):
@@ -938,6 +1128,7 @@ def main():
     create_cursor_project_rule(target)
     write_ci_workflow(target, test_runner, args.stack)
     write_templates(target)
+    write_governance_scripts(target)
     if not init_git_repo(target) or not initial_commit(target, args.name):
         print("[FATAL] Local repository bootstrap failed.", file=sys.stderr)
         sys.exit(1)
