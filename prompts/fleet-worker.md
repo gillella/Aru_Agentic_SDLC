@@ -21,6 +21,13 @@ provider API key anywhere in this design.
 3. Open one terminal session per agent, `cd` into that clone, paste the prompt.
 4. Preflight the board once (see **Board preflight** at the bottom).
 
+On an agent that discovers skills, `run-aru-factory` is the shorter path: say
+"run the factory as agent-2, family openai" and it routes into this same
+contract, in `loop` mode. This prompt stays the authority on what the loop
+does — the skill delegates here rather than restating it — so paste this when
+you want the loop pinned to an exact text, or when the agent has no skill
+discovery.
+
 **This loop needs a persistent shell with `gh`.** Claude Code, Cursor's CLI, and
 the local Codex CLI all qualify. **Codex Cloud does not** — it is task-triggered
 from ChatGPT, not a process that can poll a board. Use the local Codex CLI if
