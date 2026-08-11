@@ -212,7 +212,7 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
     if threads is None:
         return no("review thread state is unavailable")
     if threads:
-        return no(f"{threads} unresolved review thread(s); waiting on author")
+        return no(f"{threads} active review feedback item(s); waiting on author")
 
     peer_reviewers = [
         name[len("reviewed-by:"):]
@@ -225,10 +225,11 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
         return no("independent review complete; waiting on gated merge")
 
     decision = (pr.get("reviewDecision") or "").upper()
-    if decision in {"APPROVED", "CHANGES_REQUESTED"}:
-        # A decided PR is waiting on gated mechanical merge or on its author,
-        # not on another reviewer. Re-offering it duplicates completed work.
-        return no(f"already {decision.lower().replace('_', ' ')}")
+    if decision == "APPROVED":
+        # An approved PR is waiting on gated mechanical merge. A historical
+        # CHANGES_REQUESTED decision with no current feedback instead needs a
+        # fresh review so the latest verdict can unblock the merge gate.
+        return no("already approved")
 
     state = ci_state(pr)
     if state != "green":

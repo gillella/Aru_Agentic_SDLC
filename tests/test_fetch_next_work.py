@@ -231,17 +231,17 @@ if __name__ == "__main__":
 
 
 class ReviewDecisionTests(unittest.TestCase):
-    """A decided PR waits on gated merge or its author, not another reviewer."""
+    """Only a current approval suppresses a fresh review."""
 
     def test_approved_pr_is_not_offered_again(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic", decision="APPROVED"))
         self.assertFalse(verdict["eligible"])
         self.assertIn("already approved", verdict["reason"])
 
-    def test_changes_requested_pr_is_not_offered_to_a_reviewer(self):
+    def test_changes_requested_without_current_feedback_is_offered_for_rereview(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic",
                               decision="CHANGES_REQUESTED"))
-        self.assertFalse(verdict["eligible"])
+        self.assertTrue(verdict["eligible"])
 
     def test_undecided_pr_is_still_offered(self):
         self.assertTrue(eligible(pr(1, "author:agent-1", "family:anthropic"))["eligible"])
