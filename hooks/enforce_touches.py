@@ -17,9 +17,9 @@ Fail-open by design. This hook runs on every tool call, so a GitHub outage, an
 unparseable issue body, or work in an ungoverned repo must never halt the
 session. It blocks only when it can positively prove a violation:
 
-  * the branch names an issue, AND
-  * that issue declares touches, AND
-  * the target path is outside the declaration.
+  * a detected file write targets a governed repo while HEAD is protected, OR
+  * the branch names an issue, that issue declares touches, and the target
+    path is outside the declaration.
 
 Anything less and the call is allowed with a note on stderr.
 """
@@ -36,6 +36,15 @@ import time
 PATH_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 
 PROTECTED_BRANCHES = {"main", "master"}
+
+# Canonical opt-in headings emitted by init_project.py and used by this
+# framework's own AGENTS.md. A prose mention or explicit rejection of the law
+# is not governance and must not make a globally installed hook block edits.
+GOVERNANCE_MARKER = re.compile(
+    r"^\s*#{1,6}\s+(?:🚨\s*)?Core Governance(?: Directive)?\s*:\s*"
+    r"The Issue-First Law\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Re-reading the issue from GitHub on every keystroke-level tool call would add
 # a network round trip to each edit. The declaration changes rarely, so a short
@@ -78,6 +87,25 @@ def issue_from_branch(branch):
     """
     match = re.search(r"issue-(\d+)", branch or "", re.IGNORECASE)
     return int(match.group(1)) if match else None
+
+
+def governed_repo(root):
+    """True when the repository opted into the Aru Issue-First Law.
+
+    ``False`` means the marker is positively absent. ``None`` means detection
+    failed, which the caller treats as unknown and therefore allows. This hook
+    is installed globally, so an ordinary repository with its own AGENTS.md
+    must never be mistaken for an Aru-governed one.
+    """
+    marker = os.path.join(root, "AGENTS.md")
+    if not os.path.isfile(marker):
+        return False
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeError):
+        return None
+    return bool(GOVERNANCE_MARKER.search(text))
 
 
 def _git_common_dir(root):
@@ -174,18 +202,32 @@ def _norm(path, root):
     """Returns the repo-relative path, or None when the path is outside the repo.
 
     Paths outside the repository (a scratchpad, /tmp) are not the hook's
-    business, so they resolve to None and are always allowed.
+    business, so they resolve to None and are always allowed. Containment is
+    based on filesystem identity rather than string case: macOS commonly maps
+    ``Repo/File`` and ``repo/file`` to the same inode even though commonpath()
+    sees unrelated strings. Walking upward also preserves a nonexistent suffix
+    for a new file while resolving every existing symlink component.
     """
     if not path:
         return None
-    abs_path = os.path.abspath(os.path.join(root, os.path.expanduser(path)))
-    try:
-        rel = os.path.relpath(abs_path, root)
-    except ValueError:
-        return None
-    if rel.startswith(".."):
-        return None
-    return rel.replace(os.sep, "/")
+    real_root = os.path.realpath(root)
+    abs_path = os.path.abspath(os.path.join(real_root, os.path.expanduser(path)))
+    real_path = os.path.realpath(abs_path)
+    probe = real_path
+    suffix = []
+    while True:
+        try:
+            if os.path.samefile(probe, real_root):
+                return "/".join(reversed(suffix)) or "."
+        except (OSError, ValueError):
+            # Nonexistent new files and unreadable ancestors are expected.
+            # Keep walking; if identity can never be proven, fail open.
+            pass
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        suffix.append(os.path.basename(probe))
+        probe = parent
 
 
 def path_allowed(rel_path, touches):
@@ -492,6 +534,14 @@ def deny(reason, detail):
     return EXIT_BLOCK
 
 
+def deny_protected_write(rel, branch):
+    return deny(
+        f"write to '{rel}' on protected branch '{branch}'.",
+        "Claim an issue, then create an isolated issue branch with "
+        "scripts/create_branch.py --worktree before editing.",
+    )
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -518,12 +568,18 @@ def main():
                 "Protected branches are merged through scripts/merge_pr.py, never "
                 "pushed to directly. Open a PR from your issue branch instead.",
             )
+        targets = _redirect_targets(command)
+        if targets and branch in PROTECTED_BRANCHES and governed_repo(root):
+            for target in targets:
+                rel = _norm(target, root)
+                if rel is not None:
+                    return deny_protected_write(rel, branch)
         if issue is None:
             return EXIT_ALLOW
         touches = touches_for(root, issue)
         if not touches:
             return EXIT_ALLOW
-        for target in _redirect_targets(command):
+        for target in targets:
             rel = _norm(target, root)
             if rel and not path_allowed(rel, touches):
                 return deny(
@@ -537,10 +593,25 @@ def main():
     if tool not in PATH_TOOLS:
         return EXIT_ALLOW
 
+    target = (
+        tool_input.get("file_path")
+        or tool_input.get("notebook_path")
+        or tool_input.get("path")
+    )
+    rel = _norm(target, root)
+    if rel is None:
+        return EXIT_ALLOW  # Outside the repo; not governed.
+
+    if branch in PROTECTED_BRANCHES:
+        governed = governed_repo(root)
+        if governed:
+            return deny_protected_write(rel, branch)
+        # False is an ordinary ungoverned repository. None is a detection
+        # failure. Both deliberately fail open for a globally installed hook.
+        return EXIT_ALLOW
+
     if issue is None:
-        # Ungoverned branch. The Issue-First Law is a review concern, not
-        # something to enforce on every keystroke - blocking here would make
-        # scratch work and ungoverned repos unusable.
+        # A non-protected scratch branch remains usable without an issue.
         return EXIT_ALLOW
 
     touches = touches_for(root, issue)
@@ -556,15 +627,6 @@ def main():
             file=sys.stderr,
         )
         return EXIT_ALLOW
-
-    target = (
-        tool_input.get("file_path")
-        or tool_input.get("notebook_path")
-        or tool_input.get("path")
-    )
-    rel = _norm(target, root)
-    if rel is None:
-        return EXIT_ALLOW  # Outside the repo; not governed.
 
     if path_allowed(rel, touches):
         return EXIT_ALLOW
