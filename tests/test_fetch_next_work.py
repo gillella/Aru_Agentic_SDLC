@@ -28,7 +28,7 @@ def pr(number, *labels, draft=False, checks="green", reviews=0, minutes_old=5,
         "statusCheckRollup": rollup,
         "updatedAt": ts(minutes_old), "createdAt": ts(minutes_old),
         "reviewDecision": decision, "body": "Closes #1", "headRefName": "x",
-        "_unresolved_threads": 0,
+        "_active_review_feedback": [],
     }
 
 
@@ -87,7 +87,7 @@ class EligibilityTests(unittest.TestCase):
 
     def test_unresolved_commented_findings_wait_on_the_author(self):
         candidate = pr(1, "author:agent-1", "family:anthropic", reviews=1)
-        candidate["_unresolved_threads"] = 2
+        candidate["_active_review_feedback"] = [{"body": "fix"}, {"body": "also fix"}]
 
         verdict = eligible(candidate)
 
@@ -111,7 +111,7 @@ class EligibilityTests(unittest.TestCase):
 
     def test_unknown_thread_state_fails_closed(self):
         candidate = pr(1, "author:agent-1", "family:anthropic")
-        candidate["_unresolved_threads"] = None
+        candidate["_active_review_feedback"] = None
 
         verdict = eligible(candidate)
 
@@ -142,15 +142,19 @@ class EligibilityTests(unittest.TestCase):
 
 
 class FeedbackTests(unittest.TestCase):
-    def test_my_pr_with_changes_requested_is_mine_to_fix(self):
-        self.assertTrue(needs := fnw.needs_my_attention(
+    def test_stale_changes_requested_without_active_threads_does_not_reroute(self):
+        self.assertFalse(fnw.needs_my_attention(
             pr(1, "author:agent-2", decision="CHANGES_REQUESTED"), "agent-2"))
-        self.assertTrue(needs)
 
     def test_my_commented_review_with_unresolved_threads_is_mine_to_fix(self):
         candidate = pr(1, "author:agent-2", reviews=1)
-        candidate["_unresolved_threads"] = 3
+        candidate["_active_review_feedback"] = [{"body": "fix"}] * 3
         self.assertTrue(fnw.needs_my_attention(candidate, "agent-2"))
+
+    def test_plain_issue_comment_does_not_route_feedback(self):
+        candidate = pr(1, "author:agent-2", reviews=1)
+        candidate["comments"] = [{"body": "approval-style bot message"}]
+        self.assertFalse(fnw.needs_my_attention(candidate, "agent-2"))
 
     def test_someone_elses_pr_is_not(self):
         self.assertFalse(fnw.needs_my_attention(
@@ -176,9 +180,10 @@ class PriorityTests(unittest.TestCase):
             return fnw.select(agent, family, 3, 30)
 
     def test_feedback_outranks_review_and_new_work(self):
+        authored = pr(1, "author:agent-2")
+        authored["_active_review_feedback"] = [{"body": "fix this"}]
         res = self._select(
-            [pr(1, "author:agent-2", decision="CHANGES_REQUESTED"),
-             pr(2, "author:agent-1", "family:anthropic")],
+            [authored, pr(2, "author:agent-1", "family:anthropic")],
             candidates=[7])
         self.assertEqual(res["work"]["type"], "feedback")
         self.assertEqual(res["work"]["pr"], 1)
@@ -303,7 +308,7 @@ class UnreadableQueueTests(unittest.TestCase):
 
     def test_unknown_threads_on_authored_pr_block_new_issue_selection(self):
         authored = pr(57, "author:agent-2", "family:openai")
-        authored["_unresolved_threads"] = None
+        authored["_active_review_feedback"] = None
         parts = {
             "candidates": [{"number": 99, "title": "new work"}],
             "my_in_flight": None, "blocked": [], "conflicted": [],
@@ -318,7 +323,7 @@ class UnreadableQueueTests(unittest.TestCase):
 
     def test_unknown_threads_on_peer_pr_block_new_issue_selection(self):
         peer_pr = pr(57, "author:agent-1", "family:anthropic")
-        peer_pr["_unresolved_threads"] = None
+        peer_pr["_active_review_feedback"] = None
         parts = {
             "candidates": [{"number": 99, "title": "new work"}],
             "my_in_flight": None, "blocked": [], "conflicted": [],
