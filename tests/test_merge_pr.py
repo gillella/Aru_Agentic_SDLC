@@ -96,6 +96,35 @@ class UnresolvedThreadQueryTests(unittest.TestCase):
 
         self.assertIsNone(merge_pr.unresolved_threads(57))
 
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_multi_cursor_cycle_returns_unknown_without_another_request(
+        self, gh_json, _slug
+    ):
+        def page(next_cursor):
+            return {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": True, "endCursor": next_cursor},
+            }}}}}
+
+        gh_json.side_effect = [page("A"), page("B"), page("A")]
+
+        self.assertIsNone(merge_pr.unresolved_threads(57))
+        self.assertEqual(gh_json.call_count, 3)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_partial_data_with_graphql_errors_returns_unknown(self, gh_json, _slug):
+        gh_json.return_value = {
+            "errors": [{"message": "partial result"}],
+            "data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}},
+        }
+
+        self.assertIsNone(merge_pr.unresolved_threads(57))
+
 
 class CiGateTests(unittest.TestCase):
     def test_all_successful_passes(self):

@@ -120,6 +120,7 @@ def unresolved_threads(pr_id):
       }
     }"""
     cursor = None
+    seen_cursors = set()
     unresolved = 0
     while True:
         args = [
@@ -130,7 +131,7 @@ def unresolved_threads(pr_id):
         if cursor:
             args.extend(["-F", f"cursor={cursor}"])
         data = _gh_json(args)
-        if not data:
+        if not data or (isinstance(data, dict) and data.get("errors")):
             return None
         try:
             connection = data["data"]["repository"]["pullRequest"]["reviewThreads"]
@@ -148,8 +149,9 @@ def unresolved_threads(pr_id):
         if not has_next:
             return unresolved
         next_cursor = page_info.get("endCursor")
-        if not next_cursor or next_cursor == cursor:
+        if not next_cursor or next_cursor in seen_cursors:
             return None
+        seen_cursors.add(next_cursor)
         cursor = next_cursor
 
 
