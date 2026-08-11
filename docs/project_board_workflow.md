@@ -99,3 +99,24 @@ self-review. Human intervention is exceptional and applies only when a severe
 merge conflict or merge/close-out failure remains unsafe or impossible for
 agents to resolve through governed remediation; risk category, diff size, and
 review-round count alone never require human participation.
+
+---
+
+## 📊 Factory Fleet Status & Completion Evaluation
+
+The factory supervisor reads `scripts/fleet_status.py` for authoritative, deterministic evaluation of factory completion:
+
+```
+python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" [--json]
+```
+
+### Factory States & Exit Codes:
+
+| State | Exit Code | Description |
+|---|---|---|
+| **`complete`** | `0` | Every governed issue is Done/closed, zero open PRs, zero active claims (`agent:*`, `reviewer:*`), no board drift, no orphan worktrees. |
+| **`waiting`** | `2` | Active work in flight, Ready/In Progress/In Review/Backlog issues, pending CI, pending reviews, or worktree cleanup. |
+| **`blocked`** | `3` | Issues/PRs carrying human escalation labels, `needs-design`, unresolvable project board identity, or exhausted review/remediation rounds. |
+| **`error`** | `1` | GitHub API/auth failures; fails closed. |
+
+
