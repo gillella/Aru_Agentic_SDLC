@@ -207,6 +207,82 @@ class RedirectFalsePositiveTests(unittest.TestCase):
         )
 
 
+class ShellCommentTests(unittest.TestCase):
+    """An unquoted '#' ends the executable part of the line.
+
+    Reported on PR #37. The hand-written scanner replaced shlex, which had
+    handled comments for free, so this regressed against main: a trailing
+    comment mentioning a redirect blocked the command it annotated.
+    """
+
+    def test_redirect_inside_a_comment_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("echo hi # > out.txt"), [])
+
+    def test_whole_line_comment_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("# write it with > out.txt"), [])
+
+    def test_hash_inside_a_word_is_not_a_comment(self):
+        # bash reads `hi#not-comment` as one word, so the redirect is real.
+        # Getting this wrong is the dangerous direction: a genuine write
+        # would slip past the hook disguised as a comment.
+        self.assertIn("out.txt", et._redirect_targets("echo hi#not-comment > out.txt"))
+
+    def test_quoted_hash_is_not_a_comment(self):
+        self.assertIn("out.txt", et._redirect_targets('echo "# heading" > out.txt'))
+
+    def test_comment_ends_at_the_newline_and_later_lines_still_lex(self):
+        # Multi-line commands are routine for agents; a comment on line one
+        # must not blind the scanner to a real write on line two.
+        command = "echo hi # harmless > decoy.txt\nrm -f x && echo bye > real.txt"
+        targets = et._redirect_targets(command)
+        self.assertIn("real.txt", targets)
+        self.assertNotIn("decoy.txt", targets)
+
+
+class ProcessSubstitutionTests(unittest.TestCase):
+    """`>(cmd)` names a pipe, not a file.
+
+    Reported on PR #37: the scanner read the '>' as a redirect and reported
+    the command inside the parens as the file being written.
+    """
+
+    def test_process_substitution_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("echo >(cat)"), [])
+
+    def test_process_substitution_does_not_hide_a_real_redirect(self):
+        self.assertIn("out.txt", et._redirect_targets("echo >(cat) > out.txt"))
+
+    def test_redirect_nested_inside_process_substitution_still_counts(self):
+        # The body is ordinary shell, and this one genuinely writes.
+        self.assertIn("inside.txt", et._redirect_targets("echo >(cat > inside.txt)"))
+
+    def test_input_process_substitution_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("diff <(sort a) <(sort b)"), [])
+
+
+class DescriptorTargetTests(unittest.TestCase):
+    """`>&` writes a file only when its target is provably a filename.
+
+    Reported on PR #37. A descriptor move and an unresolved expansion were
+    both classified as paths, blocking commands that write nothing.
+    """
+
+    def test_descriptor_move_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("cmd 3>&4-"), [])
+        self.assertEqual(et._redirect_targets("cmd >&-"), [])
+
+    def test_expanded_descriptor_is_uncertain_and_not_reported(self):
+        self.assertEqual(et._redirect_targets("fd=2; echo hi >&$fd"), [])
+
+    def test_expansion_after_a_plain_redirect_is_still_a_write(self):
+        # Only `>&` is ambiguous. After a plain '>' an expansion is a file,
+        # and dropping it would trade a false positive for a false negative.
+        self.assertIn("$HOME/out.txt", et._redirect_targets("echo hi > $HOME/out.txt"))
+
+    def test_literal_filename_after_the_dup_operator_is_still_a_write(self):
+        self.assertIn("out.txt", et._redirect_targets("echo hi >&out.txt"))
+
+
 class PostPr23ParserGapTests(unittest.TestCase):
     """The gaps found on #23's merged head, each checked against real Bash.
 

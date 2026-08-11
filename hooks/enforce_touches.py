@@ -246,10 +246,19 @@ def _git_write_to_protected(command, branch):
 # `>&out.txt` creates or truncates a file exactly like `>`. Resolved in
 # _redirect_targets by inspecting what follows; see _IS_DESCRIPTOR.
 _AMBIGUOUS_DUP_OPS = frozenset({">&", ">>&"})
-# A descriptor target is a bare number (`2`) or `-` (close). Anything else is
-# a filename, and treating it as a descriptor is the dangerous direction: a
-# real write goes undetected.
-_IS_DESCRIPTOR = re.compile(r"\A(?:\d+|-)\Z")
+# A descriptor target is a bare number (`2`), `-` (close), or a descriptor
+# move such as `3-`, which duplicates the descriptor and closes the source.
+# Anything else is a filename, and treating it as a descriptor is the
+# dangerous direction: a real write goes undetected.
+_IS_DESCRIPTOR = re.compile(r"\A(?:\d+-?|-)\Z")
+# An unresolved expansion after `>&` cannot be classified either way:
+# `echo hi >&$fd` duplicates a descriptor when $fd holds a number and writes a
+# file when it holds a path, and this scanner resolves quoting but never
+# expansion. Reporting it as a filename blocks a governed branch without
+# positive proof of a write. Scoped to `>&` deliberately - after a plain `>`
+# an expansion is unambiguously a file, and `echo hi > $HOME/out.txt` must
+# still be caught.
+_HAS_EXPANSION = re.compile(r"[$`]")
 
 
 # A heredoc and its body: `<<EOF`, `<<'EOF'`, `<<-EOF`, terminated by a line
@@ -375,6 +384,31 @@ def _shell_tokens(command):
             index += 1
             continue
 
+        # `#` opens a comment only at the start of a word - bash reads
+        # `echo hi#not-comment` as a single word, `#` and all. Once a comment
+        # opens, the rest of the line is not executable, so continuing to lex
+        # it manufactured redirects out of prose: `echo hi # > out.txt` was
+        # reported as writing out.txt. A following line still lexes normally,
+        # which matters for the multi-line commands agents actually send.
+        if char == "#" and not word and not quoted:
+            newline = text.find("\n", index)
+            if newline == -1:
+                break
+            index = newline + 1
+            continue
+
+        # `>(cmd)` is process substitution: bash hands the command a pipe path
+        # such as /dev/fd/63 and creates no file named `cmd`. This has to be
+        # matched before the redirect operators below, which would otherwise
+        # read the `>` as a write and report the first word inside the parens
+        # as its target. The body is still scanned, so a genuine redirect
+        # nested inside it - `echo >(cat > inside.txt)` - is not lost.
+        if text.startswith(">(", index):
+            flush()
+            quoted = False
+            index += 2
+            continue
+
         operator = next((op for op in _REDIR_OPS if text.startswith(op, index)), None)
         if operator:
             flush()
@@ -422,7 +456,11 @@ def _redirect_targets(command):
                 # `>&` writes a file unless its target is a descriptor.
                 # Classifying it as duplication unconditionally hid real writes
                 # such as `echo hi >&out.txt`, the dangerous failure direction.
-                if target is not None and not _IS_DESCRIPTOR.match(target):
+                if (
+                    target is not None
+                    and not _IS_DESCRIPTOR.match(target)
+                    and not _HAS_EXPANSION.search(target)
+                ):
                     found.append(target)
             elif target is not None:
                 found.append(target)
