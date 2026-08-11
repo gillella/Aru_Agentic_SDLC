@@ -97,15 +97,15 @@ def label_names(pr: dict[str, Any]) -> list[str]:
 
 
 def _authored_via_branch(pr: dict[str, Any], agent: str) -> bool:
-    """Infers authorship from the linked issue's claim when the PR is unstamped.
+    """Infers authorship from the linked issue's retained agent label.
 
     `create_pr.py` now requires --agent and fails loudly on a bad stamp, so new
     PRs opened through it always carry author:<id>. This covers what that cannot
     reach: PRs predating stamping, and PRs a human opened by hand with `gh`.
     Those leave no author on the PR. The branch still encodes
-    the issue number, and that issue still carries the agent:<id> claim of
-    whoever implemented it - so authorship survives even when the stamp does
-    not. Without this, an agent could be handed its own unstamped PR to review.
+    the issue number, and an In Review issue retains the implementing agent's
+    label as a legacy authorship backstop even though it no longer consumes an
+    active implementation slot.
     """
     match = re.search(r"issue-(\d+)", pr.get("headRefName") or "", re.IGNORECASE)
     if not match:
@@ -116,7 +116,7 @@ def _authored_via_branch(pr: dict[str, Any], agent: str) -> bool:
         check=False,
     )
     if code != 0:
-        return False  # Unknown; the label check already said "not mine".
+        return False
     return f"agent:{agent}" in [line.strip() for line in out.splitlines()]
 
 

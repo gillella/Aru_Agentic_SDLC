@@ -156,6 +156,10 @@ Follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`.
 8. **Drive CI green.** `check_ci.py --pr <PR> --wait`; on failure follow
    `remediate-ci-failure`, at most **3 rounds**, then stop and report.
 9. **Hand off:** `update_issue_status.py --issue <N> --status "In Review"`.
+   This parks the issue and releases your active implementation slot so you can
+   take new work while the PR stays conflict-protected. The `agent:<id>` label
+   remains only as a legacy authorship backstop until Done; `author:<id>` is the
+   PR's authoritative attribution.
    **Do not merge your own PR.** Loop.
 
 ---

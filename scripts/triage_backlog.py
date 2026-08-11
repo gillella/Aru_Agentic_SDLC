@@ -96,7 +96,7 @@ def partition(issues: list[dict[str, Any]]) -> tuple[list, list, list]:
     backlog, ready, held = [], [], []
     for issue in issues:
         names = {n.lower() for n in label_names(issue)}
-        if claimed_by(issue):
+        if claimed_by(issue) or "status:in-review" in names:
             held.append(issue)
         elif "status:ready" in names:
             ready.append(issue)
@@ -142,7 +142,9 @@ def print_capacity(cap: dict[str, Any], held: list[dict[str, Any]]) -> None:
         for num, why in cap["deferred"]:
             print(f"    #{num}: {why}")
     if held:
-        holders = ", ".join(f"#{i['number']}({claimed_by(i)})" for i in held)
+        holders = ", ".join(
+            f"#{i['number']}({claimed_by(i) or 'parked'})" for i in held
+        )
         print(f"  In flight:               {holders}")
     if n == 0:
         print("\n  → Launch nothing. Triage first.")

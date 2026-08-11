@@ -23,7 +23,7 @@ class ClaimProtocolTests(unittest.TestCase):
     ):
         get_issue.side_effect = [
             issue_with_labels("status:ready"),
-            issue_with_labels("agent:agent-a", "agent:agent-b"),
+            issue_with_labels("status:ready", "agent:agent-a", "agent:agent-b"),
         ]
         run_cmd.return_value = (0, "", "")
 
@@ -47,11 +47,12 @@ class ClaimProtocolTests(unittest.TestCase):
     def test_successful_claim_requires_board_update(
         self, get_issue, _ensure_label, _run_cmd, update_status, _sleep
     ):
-        # pre-check + SETTLE_ROUNDS settle reads + post-status verify
+        # pre-check + settle reads + pre-finalize revalidation + post-status verify
         get_issue.side_effect = [
             issue_with_labels("status:ready"),
-            issue_with_labels("agent:agent-a"),
-            issue_with_labels("agent:agent-a"),
+            issue_with_labels("status:ready", "agent:agent-a"),
+            issue_with_labels("status:ready", "agent:agent-a"),
+            issue_with_labels("status:ready", "agent:agent-a"),
             issue_with_labels("agent:agent-a", "status:in-progress"),
         ]
 
@@ -75,8 +76,10 @@ class ClaimProtocolTests(unittest.TestCase):
         """Larger agent sees only itself first; smaller label arrives before confirm."""
         get_issue.side_effect = [
             issue_with_labels("status:ready"),
-            issue_with_labels("agent:agent-b"),  # first settle: sole holder
-            issue_with_labels("agent:agent-a", "agent:agent-b"),  # second: loses
+            issue_with_labels("status:ready", "agent:agent-b"),
+            issue_with_labels(
+                "status:ready", "agent:agent-a", "agent:agent-b"
+            ),
         ]
 
         result = claim_issue.claim_issue(7, "agent-b")
@@ -99,8 +102,9 @@ class ClaimProtocolTests(unittest.TestCase):
     ):
         get_issue.side_effect = [
             issue_with_labels("status:ready"),
-            issue_with_labels("agent:agent-b"),
-            issue_with_labels("agent:agent-b"),
+            issue_with_labels("status:ready", "agent:agent-b"),
+            issue_with_labels("status:ready", "agent:agent-b"),
+            issue_with_labels("status:ready", "agent:agent-b"),
             # post-status: smaller agent landed
             issue_with_labels("agent:agent-a", "agent:agent-b", "status:in-progress"),
         ]
@@ -127,6 +131,7 @@ class ClaimProtocolTests(unittest.TestCase):
     ):
         # Label present but status still Ready (crash between label and status).
         get_issue.side_effect = [
+            issue_with_labels("agent:agent-a", "status:ready"),
             issue_with_labels("agent:agent-a", "status:ready"),
             issue_with_labels("agent:agent-a", "status:in-progress"),
         ]
@@ -159,6 +164,138 @@ class ClaimProtocolTests(unittest.TestCase):
         self.assertEqual(result, claim_issue.EXIT_OK)
         update_status.assert_not_called()
         run_cmd.assert_not_called()
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_parked_in_review_issue_cannot_be_reclaimed(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:in-review", "agent:agent-1"
+        )
+
+        result = claim_issue.claim_issue(39, "agent-0")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_ready_issue_parked_during_settle_cannot_be_reopened(
+        self, get_issue, _ensure, run_cmd, update_status, _sleep
+    ):
+        get_issue.side_effect = [
+            issue_with_labels("status:ready"),
+            issue_with_labels(
+                "status:in-review", "agent:agent-0", "agent:agent-1"
+            ),
+        ]
+
+        result = claim_issue.claim_issue(39, "agent-0")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        update_status.assert_not_called()
+        self.assertEqual(
+            run_cmd.call_args_list[-1].args[0],
+            ["gh", "issue", "edit", "39", "--remove-label", "agent:agent-0"],
+        )
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_ready_issue_parked_before_finalize_cannot_be_reopened(
+        self, get_issue, _ensure, run_cmd, update_status, _sleep
+    ):
+        get_issue.side_effect = [
+            issue_with_labels("status:ready"),
+            issue_with_labels("status:ready", "agent:agent-0"),
+            issue_with_labels("status:ready", "agent:agent-0"),
+            issue_with_labels(
+                "status:in-review", "agent:agent-0", "agent:agent-1"
+            ),
+        ]
+
+        result = claim_issue.claim_issue(39, "agent-0")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        update_status.assert_not_called()
+        self.assertEqual(
+            run_cmd.call_args_list[-1].args[0],
+            ["gh", "issue", "edit", "39", "--remove-label", "agent:agent-0"],
+        )
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_stale_same_agent_label_on_backlog_cannot_resume(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:backlog", "agent:agent-0"
+        )
+
+        result = claim_issue.claim_issue(39, "agent-0")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_ambiguous_ready_and_in_review_status_fails_closed(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:ready", "status:in-review", "agent:agent-1"
+        )
+
+        result = claim_issue.claim_issue(39, "agent-0")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+        self.assertEqual(
+            claim_issue._status_name(get_issue.return_value),
+            "ambiguous(in-review,ready)",
+        )
+
+
+class InReviewHandoffStatusTests(unittest.TestCase):
+    @patch("update_issue_status.run_cmd", return_value=(0, "", ""))
+    @patch("update_issue_status.set_board_status", return_value=True)
+    @patch("update_issue_status.get_issue")
+    def test_update_status_retains_authorship_backstop_when_moving_to_in_review(
+        self, mock_get_issue, _mock_set_board, mock_run_cmd
+    ):
+        import update_issue_status
+
+        mock_get_issue.return_value = issue_with_labels(
+            "status:in-progress", "agent:agent-1"
+        )
+
+        res = update_issue_status.update_status(7, "In Review")
+
+        self.assertTrue(res)
+        cmd = mock_run_cmd.call_args[0][0]
+        self.assertIn("--add-label", cmd)
+        self.assertIn("status:in-review", cmd)
+        self.assertIn("--remove-label", cmd)
+        self.assertIn("status:in-progress", cmd)
+        self.assertNotIn("agent:agent-1", cmd)
 
 
 if __name__ == "__main__":

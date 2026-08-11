@@ -84,8 +84,29 @@ def _remove_agent_label(issue_id: int, agent: str) -> bool:
     return code == 0
 
 
+def _status_labels(issue: dict) -> list[str]:
+    """Returns deterministic unique status labels for fail-closed decisions."""
+    return sorted({
+        name.lower() for name in label_names(issue) if name.lower().startswith("status:")
+    })
+
+
 def _has_in_progress(issue: dict) -> bool:
-    return "status:in-progress" in {name.lower() for name in label_names(issue)}
+    return _status_labels(issue) == ["status:in-progress"]
+
+
+def _status_name(issue: dict) -> str:
+    statuses = _status_labels(issue)
+    if not statuses:
+        return "unknown"
+    if len(statuses) > 1:
+        values = ",".join(name.removeprefix("status:") for name in statuses)
+        return f"ambiguous({values})"
+    return statuses[0].removeprefix("status:")
+
+
+def _has_ready(issue: dict) -> bool:
+    return _status_labels(issue) == ["status:ready"]
 
 
 def _rollback_claim(issue_id: int, agent: str, assignee: str) -> None:
@@ -125,6 +146,23 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
             )
             return EXIT_ERROR
 
+        if not _has_ready(issue):
+            # Another worker may have parked or completed the issue after our
+            # initial Ready read. A concurrently completed claim by this same
+            # agent is safe to resume; every other transition invalidates this
+            # fresh attempt. Remove only our contender label when another
+            # identity is also present, preserving the parked author's marker.
+            if _has_in_progress(issue) and holders == [my_label]:
+                return EXIT_OK
+            if len(holders) > 1:
+                _remove_agent_label(issue_id, agent)
+            print(
+                f"[CONFLICT] Issue #{issue_id} became {_status_name(issue)} while "
+                "the claim was settling; refusing to reopen it.",
+                file=sys.stderr,
+            )
+            return EXIT_CONFLICT
+
         if holders[0] != my_label:
             contenders = ", ".join(h[len(AGENT_LABEL_PREFIX):] for h in holders)
             print(
@@ -148,6 +186,25 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
 def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
                     my_label: str) -> int:
     """Assign, move board status, and confirm no late lower-sorting contender."""
+    issue = get_issue(issue_id)
+    if not issue:
+        print(f"[ERROR] Could not revalidate Issue #{issue_id} before finalizing.",
+              file=sys.stderr)
+        return EXIT_ERROR
+    holders = agent_labels(issue)
+    if _has_in_progress(issue) and holders == [my_label]:
+        print(f"[INFO] Issue #{issue_id} is already yours; resuming.")
+        return EXIT_OK
+    if not _has_ready(issue):
+        if my_label in holders and len(holders) > 1:
+            _remove_agent_label(issue_id, agent)
+        print(
+            f"[CONFLICT] Issue #{issue_id} became {_status_name(issue)} before "
+            "claim finalization; refusing to reopen it.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFLICT
+
     code, _, err = run_cmd(
         ["gh", "issue", "edit", str(issue_id), "--add-assignee", assignee], check=False
     )
@@ -210,8 +267,27 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
         if _has_in_progress(issue):
             print(f"[INFO] Issue #{issue_id} is already yours; resuming.")
             return EXIT_OK
-        print(f"[INFO] Completing interrupted claim on #{issue_id}...")
-        return _finalize_claim(issue_id, agent, status, assignee, my_label)
+        if _has_ready(issue):
+            print(f"[INFO] Completing interrupted claim on #{issue_id}...")
+            return _finalize_claim(issue_id, agent, status, assignee, my_label)
+        print(
+            f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready or "
+            "In Progress; refusing stale same-agent recovery.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFLICT
+
+    # A fresh claim may start only from Ready. In Review deliberately makes
+    # claimed_by() return None so the author can take new work, but that must
+    # not make the parked issue claimable again. The same-agent interrupted
+    # In Progress/Ready paths above remain explicitly resumable.
+    if not _has_ready(issue):
+        print(
+            f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready; "
+            "refusing a new claim.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFLICT
 
     # --- Step 2: write our claim ------------------------------------------
     if not ensure_label(my_label, "1d76db", f"Claimed by agent '{agent}'"):

@@ -202,6 +202,56 @@ class ReviewDecisionTests(unittest.TestCase):
         self.assertTrue(eligible(pr(1, "author:agent-1", "family:anthropic"))["eligible"])
 
 
+class ParkedInReviewTests(unittest.TestCase):
+    """Proves Issue #39: handing off to In Review parks the issue and progresses to next work."""
+
+    @patch.object(fnw, "list_open_prs")
+    @patch.object(fnw, "list_open_issues")
+    def test_parked_in_review_issue_is_not_resumed_and_next_ready_issue_is_taken(
+        self, mock_issues, mock_prs
+    ):
+        # Reproduces #20 / #36: Issue #20 is In Review with PR #36 waiting.
+        # Worker agent-1 hands off #20 to In Review and runs fetch_next_work.
+        # Issue #20 must not be returned as resumable implementation; #21 must be selected.
+        mock_prs.return_value = [
+            pr(36, "author:agent-1", "family:openai", title="PR for #20")
+        ]
+        mock_issues.return_value = [
+            {
+                "number": 20,
+                "title": "fix issue 20",
+                "body": "touches: src/a.py\n",
+                "labels": [{"name": "status:in-review"}],
+            },
+            {
+                "number": 21,
+                "title": "feat issue 21",
+                "body": "touches: src/b.py\n",
+                "labels": [{"name": "status:ready"}],
+            },
+        ]
+        res = fnw.select("agent-1", "openai", round_cap=3, cross_family_wait=30)
+        self.assertEqual(res["work"]["type"], "issue")
+        self.assertEqual(res["work"]["issue"], 21)
+        self.assertFalse(res["work"]["resuming"])
+
+    @patch.object(fnw, "run_cmd")
+    def test_authored_via_branch_uses_retained_agent_label_on_unstamped_pr(
+        self, mock_run_cmd
+    ):
+        # GitHub assignees identify the shared account, not the implementing
+        # agent. The retained issue label is the legacy authorship backstop.
+        mock_run_cmd.return_value = (
+            0,
+            "status:in-review\nagent:agent-1\n",
+            "",
+        )
+        test_pr = pr(36, title="Unstamped PR")
+        test_pr["headRefName"] = "fix/issue-20-something"
+        self.assertTrue(fnw._authored_via_branch(test_pr, "agent-1"))
+        self.assertFalse(fnw._authored_via_branch(test_pr, "agent-2"))
+
+
 class UnreadableQueueTests(unittest.TestCase):
     def test_selector_fails_closed_when_prs_cannot_be_listed(self):
         # Treating an unreadable queue as empty would claim new implementation
