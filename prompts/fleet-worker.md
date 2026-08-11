@@ -101,16 +101,23 @@ review so the weaker check is on the record.
 4. **Check the verification claims.** The PR body claims something was
    verified. Is that plausible given the diff? Flag any claim the diff cannot
    support.
-5. **Submit a real GitHub review** — `gh pr review --approve` or
-   `--request-changes` with inline comments. A chat message is not a review;
-   `merge_pr.py` reads GitHub reviews and nothing else.
-6. Complete the review. One command attributes it and releases your claim:
+5. **Submit a real GitHub review.** With a distinct GitHub account, use
+   `gh pr review --approve` or `--request-changes` with inline comments. Agents
+   sharing the PR owner's account cannot use either verdict; submit
+   `gh pr review --comment` instead. Put every blocking finding in an unresolved
+   inline thread. A clean substantive `COMMENTED` review becomes the
+   approval-equivalent only after the distinct agent completes attribution in
+   the next step.
+6. If there are no blocking findings, complete the review. One command
+   attributes it and releases your claim:
    `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --complete-review`
 
    This is not optional bookkeeping. `merge_pr.py` reads `reviewed-by:<id>` to
    tell a peer review from a self-review, because every agent authenticates as
    the same GitHub user. Skip it and the PR stays blocked with your claim on
-   it, and the next agent sees work that looks taken but unreviewed.
+   it, and the next agent sees work that looks taken but unreviewed. If you
+   found blockers, release the claim with `--release` without adding
+   `reviewed-by:`; the unresolved threads route the PR back to its author.
 7. If the review is complete with no blocking findings, verify that every
    thread is resolved, then run the Definition-of-Done gate:
    `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --dry-run`. If it

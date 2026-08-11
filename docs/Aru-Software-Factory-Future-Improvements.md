@@ -145,7 +145,8 @@ You already own a strong **middle factory** (claim → isolate → implement →
 - **MCP coordination server with file locking** — duplicates `touches:`.  
 - **More lifecycle skills for the sake of coverage** — finish mechanisms first; seven (+ triage) is enough until deploy/ops.  
 - **Replacing GitHub Issues with a local task file** — worse durability and worse multi-agent safety.  
-- **Fully autonomous merge of money/PII/schema changes** — keep human ack.
+- **Risk-category human review or merge gates** — money/PII/schema work needs
+  stronger evidence, not a different merge authority.
 
 ---
 

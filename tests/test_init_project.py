@@ -36,6 +36,22 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertNotIn("--require-plan-ack", rules)
         self.assertNotIn("human-acknowledgement", rules)
 
+    def test_active_factory_guidance_has_no_legacy_human_only_rule(self):
+        paths = [
+            ROOT / "AGENTS.md",
+            ROOT / "prompts" / "fleet-worker.md",
+            ROOT / "skills" / "implement-next-issue" / "SKILL.md",
+            ROOT / "docs" / "project_board_workflow.md",
+            ROOT / "docs" / "ARU-SOFTWARE-FACTORY.md",
+            ROOT / "docs" / "Aru-Software-Factory-Future-Improvements.md",
+        ]
+        guidance = "\n".join(path.read_text().lower() for path in paths)
+
+        self.assertNotIn("needs-human-review", guidance)
+        self.assertNotIn("--require-plan-ack", guidance)
+        self.assertNotIn("a human merges", guidance)
+        self.assertNotIn("fully autonomous merge of money", guidance)
+
     def test_ci_is_stack_aware_and_does_not_mask_failures(self):
         python_ci = render_ci_workflow("python", "pytest -q")
         node_ci = render_ci_workflow("node", "npm test")

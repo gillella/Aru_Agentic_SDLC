@@ -28,6 +28,7 @@ def pr(number, *labels, draft=False, checks="green", reviews=0, minutes_old=5,
         "statusCheckRollup": rollup,
         "updatedAt": ts(minutes_old), "createdAt": ts(minutes_old),
         "reviewDecision": decision, "body": "Closes #1", "headRefName": "x",
+        "_unresolved_threads": 0,
     }
 
 
@@ -84,6 +85,39 @@ class EligibilityTests(unittest.TestCase):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic", reviews=10))
         self.assertTrue(verdict["eligible"])
 
+    def test_unresolved_commented_findings_wait_on_the_author(self):
+        candidate = pr(1, "author:agent-1", "family:anthropic", reviews=1)
+        candidate["_unresolved_threads"] = 2
+
+        verdict = eligible(candidate)
+
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("waiting on author", verdict["reason"])
+
+    def test_completed_same_account_review_is_not_offered_again(self):
+        verdict = eligible(pr(
+            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-2",
+            reviews=1,
+        ))
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("waiting on gated merge", verdict["reason"])
+
+    def test_self_attribution_does_not_hide_pr_from_a_real_peer(self):
+        verdict = eligible(pr(
+            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-1",
+            reviews=1,
+        ))
+        self.assertTrue(verdict["eligible"])
+
+    def test_unknown_thread_state_fails_closed(self):
+        candidate = pr(1, "author:agent-1", "family:anthropic")
+        candidate["_unresolved_threads"] = None
+
+        verdict = eligible(candidate)
+
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("unavailable", verdict["reason"])
+
     def test_same_family_waits_before_it_is_offered(self):
         verdict = eligible(pr(1, "author:agent-1", "family:openai", minutes_old=5))
         self.assertFalse(verdict["eligible"])
@@ -112,6 +146,11 @@ class FeedbackTests(unittest.TestCase):
         self.assertTrue(needs := fnw.needs_my_attention(
             pr(1, "author:agent-2", decision="CHANGES_REQUESTED"), "agent-2"))
         self.assertTrue(needs)
+
+    def test_my_commented_review_with_unresolved_threads_is_mine_to_fix(self):
+        candidate = pr(1, "author:agent-2", reviews=1)
+        candidate["_unresolved_threads"] = 3
+        self.assertTrue(fnw.needs_my_attention(candidate, "agent-2"))
 
     def test_someone_elses_pr_is_not(self):
         self.assertFalse(fnw.needs_my_attention(

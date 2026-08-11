@@ -303,7 +303,8 @@ Carried forward, all still correct:
 - MCP coordination server with file locking — duplicates `touches:`
 - Replacing GitHub Issues with a local task file
 - More lifecycle skills for coverage's sake
-- Fully autonomous merge of money / PII / schema changes
+- Risk-category human review or merge gates; high-risk work strengthens
+  evidence without changing authority
 
 Added:
 

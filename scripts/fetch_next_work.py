@@ -55,6 +55,7 @@ from claim_issue import (
 )
 from common import list_open_issues, run_cmd
 from fetch_next_issue import build_candidates, reap_stale_claims
+from merge_pr import unresolved_threads
 
 # Retained as a backwards-compatible CLI default. Review count is audit data,
 # never an eligibility or human-intervention gate.
@@ -93,6 +94,19 @@ def list_open_prs() -> list[dict[str, Any]] | None:
 
 def label_names(pr: dict[str, Any]) -> list[str]:
     return [lab.get("name", "") for lab in pr.get("labels", [])]
+
+
+def review_thread_count(pr: dict[str, Any]) -> int | None:
+    """Returns and caches the live unresolved-thread count for one selection.
+
+    A same-account blocking review is necessarily COMMENTED, so GitHub's
+    reviewDecision cannot route it. Unresolved threads are the fail-closed
+    author-feedback state, while zero threads plus reviewed-by attribution is
+    the approval-equivalent completion state.
+    """
+    if "_unresolved_threads" not in pr:
+        pr["_unresolved_threads"] = unresolved_threads(pr["number"])
+    return pr["_unresolved_threads"]
 
 
 def _authored_via_branch(pr: dict[str, Any], agent: str) -> bool:
@@ -158,7 +172,10 @@ def needs_my_attention(pr: dict[str, Any], agent: str) -> bool:
     """
     if _label_value(label_names(pr), "author:") != agent:
         return False
-    return (pr.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED"
+    if (pr.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED":
+        return True
+    threads = review_thread_count(pr)
+    return threads is not None and threads > 0
 
 
 def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
@@ -189,6 +206,22 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
         # recoverable without the label. Refusing outright would make every
         # legacy PR unreviewable; this refuses only the ones provably mine.
         return no("you wrote it (inferred from the linked issue's claim)")
+
+    threads = review_thread_count(pr)
+    if threads is None:
+        return no("review thread state is unavailable")
+    if threads:
+        return no(f"{threads} unresolved review thread(s); waiting on author")
+
+    peer_reviewers = [
+        name[len("reviewed-by:"):]
+        for name in labels
+        if name.startswith("reviewed-by:")
+        and name[len("reviewed-by:"):]
+        and name[len("reviewed-by:"):] != author
+    ]
+    if peer_reviewers:
+        return no("independent review complete; waiting on gated merge")
 
     decision = (pr.get("reviewDecision") or "").upper()
     if decision in {"APPROVED", "CHANGES_REQUESTED"}:
