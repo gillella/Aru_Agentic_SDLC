@@ -432,8 +432,8 @@ def attach_issue_to_governed_project(issue_number: int) -> bool:
             file=sys.stderr,
         )
         print(
-            f"[WARN] Manual remedy: gh project item-add <PROJECT_NUMBER> "
-            f"--owner <OWNER> --url <ISSUE_URL>",
+            "[WARN] Manual remedy: gh project item-add <PROJECT_NUMBER> "
+            "--owner <OWNER> --url <ISSUE_URL>",
             file=sys.stderr,
         )
         return False

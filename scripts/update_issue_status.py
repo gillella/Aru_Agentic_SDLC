@@ -43,7 +43,9 @@ def update_status(issue_id: int, status: str, require_board: bool = False) -> bo
         if _slug(s) != target_label and _slug(s) in current_labels
     ]
     if canonical == "Done":
-        stale_labels.extend([l for l in current_labels if l.startswith("agent:")])
+        stale_labels.extend(
+            [name for name in current_labels if name.startswith("agent:")]
+        )
     previous_status = next(
         (s for s in VALID_STATUSES if _slug(s) in current_labels),
         None,

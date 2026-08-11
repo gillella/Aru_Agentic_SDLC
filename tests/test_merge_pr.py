@@ -11,6 +11,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import merge_pr
 
 
+def _gate(pr, threads=0, **overrides):
+    """Runs the review gate with evidence defaulting to a clean pull request.
+
+    Most cases below exercise reviewer identity and label logic rather than
+    thread evidence, so they should not have to spell out every signal.
+    ``threads`` keeps its original positional meaning - the unresolved count,
+    or None when the query failed.
+    """
+    if threads is None:
+        return merge_pr.check_reviews(pr, None)
+    evidence = {
+        "unresolved": threads,
+        "unfixed": 0,
+        "withdrawn": 0,
+        "reviewed_head": True,
+    }
+    evidence.update(overrides)
+    return merge_pr.check_reviews(pr, evidence)
+
 class IssueLinkTests(unittest.TestCase):
     def test_extracts_closes_footer(self):
         self.assertEqual(merge_pr.linked_issue("Some body\n\nCloses #42\n"), 42)
@@ -175,12 +194,12 @@ class CiGateTests(unittest.TestCase):
 
 class ReviewGateTests(unittest.TestCase):
     def test_no_reviews_blocks(self):
-        ok, msg = merge_pr.check_reviews({"reviews": []}, 0)
+        ok, msg = _gate({"reviews": []}, 0)
         self.assertFalse(ok)
         self.assertIn("No review", msg)
 
     def test_changes_requested_blocks(self):
-        ok, _ = merge_pr.check_reviews({"reviews": [{"state": "CHANGES_REQUESTED"}]}, 0)
+        ok, _ = _gate({"reviews": [{"state": "CHANGES_REQUESTED"}]}, 0)
         self.assertFalse(ok)
 
     def test_advisory_bot_changes_requested_does_not_block_after_threads_resolve(self):
@@ -188,7 +207,7 @@ class ReviewGateTests(unittest.TestCase):
             "state": "CHANGES_REQUESTED",
             "author": {"login": "chatgpt-codex-connector"},
         }]
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewed-by:agent-2", reviews=reviews), 0)
         self.assertTrue(ok)
         self.assertIn("agent-2", msg)
@@ -205,7 +224,7 @@ class ReviewGateTests(unittest.TestCase):
             {"state": "APPROVED", "author": {"login": "bob"},
              "submittedAt": "2026-01-02T00:00:00Z"},
         ]}
-        ok, _ = merge_pr.check_reviews(pr, 0)
+        ok, _ = _gate(pr, 0)
         self.assertTrue(ok)
 
     def test_another_reviewer_still_blocking_is_respected(self):
@@ -215,7 +234,7 @@ class ReviewGateTests(unittest.TestCase):
             {"state": "CHANGES_REQUESTED", "author": {"login": "eve"},
              "submittedAt": "2026-01-03T00:00:00Z"},
         ]}
-        ok, msg = merge_pr.check_reviews(pr, 0)
+        ok, msg = _gate(pr, 0)
         self.assertFalse(ok)
         self.assertIn("eve", msg)
 
@@ -226,27 +245,27 @@ class ReviewGateTests(unittest.TestCase):
             {"state": "COMMENTED", "author": {"login": "bob"},
              "submittedAt": "2026-01-05T00:00:00Z"},
         ]}
-        self.assertFalse(merge_pr.check_reviews(pr, 0)[0])
+        self.assertFalse(_gate(pr, 0)[0])
 
     def test_unresolved_threads_block(self):
-        ok, msg = merge_pr.check_reviews({"reviews": [{"state": "COMMENTED"}]}, 3)
+        ok, msg = _gate({"reviews": [{"state": "COMMENTED"}]}, 3)
         self.assertFalse(ok)
         self.assertIn("3 unresolved", msg)
 
     def test_unknown_thread_state_blocks_rather_than_guesses(self):
-        ok, msg = merge_pr.check_reviews({"reviews": [{"state": "APPROVED"}]}, None)
+        ok, msg = _gate({"reviews": [{"state": "APPROVED"}]}, None)
         self.assertFalse(ok)
         self.assertIn("refusing", msg)
 
     def test_approved_and_resolved_passes(self):
-        ok, _ = merge_pr.check_reviews(
+        ok, _ = _gate(
             labelled("author:agent-1", review_login="some-colleague"), 0)
         self.assertTrue(ok)
 
     def test_commented_review_with_no_open_threads_passes(self):
         # Same-account agents cannot APPROVE through GitHub, so their governed
         # reviewed-by attribution remains the proof of completed peer review.
-        ok, _ = merge_pr.check_reviews(
+        ok, _ = _gate(
             labelled("author:agent-1", "reviewed-by:agent-2",
                      reviews=[{"state": "COMMENTED"}]), 0)
         self.assertTrue(ok)
@@ -272,32 +291,32 @@ class ExternalReviewerTests(unittest.TestCase):
     def test_a_bot_review_is_advisory_without_any_label(self):
         reviews = [{"state": "COMMENTED", "author": {
             "login": "chatgpt-codex-connector"}}]
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", reviews=reviews), 0)
         self.assertFalse(ok)
         self.assertIn("chatgpt-codex-connector", msg)
         self.assertIn("advisory", msg)
 
     def test_a_bot_approval_is_still_advisory(self):
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", review_login="chatgpt-codex-connector"), 0)
         self.assertFalse(ok)
         self.assertIn("advisory", msg)
 
     def test_an_external_approval_counts_without_any_label(self):
-        ok, _ = merge_pr.check_reviews(
+        ok, _ = _gate(
             labelled("author:agent-1", review_login="some-colleague"), 0)
         self.assertTrue(ok)
 
     def test_an_external_comment_does_not_count_without_approval(self):
         reviews = [{"state": "COMMENTED", "author": {"login": "some-colleague"}}]
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", reviews=reviews), 0)
         self.assertFalse(ok)
         self.assertIn("reviewed-by:", msg)
 
     def test_same_account_still_needs_the_labels(self):
-        ok, msg = merge_pr.check_reviews(labelled("author:agent-1"), 0)
+        ok, msg = _gate(labelled("author:agent-1"), 0)
         self.assertFalse(ok)
         # Names the attribution the gate reads and the command that writes it,
         # so the remedy is executable rather than a label to invent.
@@ -309,19 +328,19 @@ class SelfReviewTests(unittest.TestCase):
     """Every agent is the same GitHub user, so GitHub cannot catch this."""
 
     def test_self_review_is_refused(self):
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewed-by:agent-1"), 0)
         self.assertFalse(ok)
         self.assertIn("self-review", msg.lower())
 
     def test_peer_review_passes(self):
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewed-by:agent-2"), 0)
         self.assertTrue(ok)
         self.assertIn("agent-2", msg)
 
     def test_a_peer_alongside_a_self_review_passes(self):
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
         self.assertTrue(ok)
         self.assertIn("agent-3", msg)
@@ -329,32 +348,32 @@ class SelfReviewTests(unittest.TestCase):
     def test_review_without_attribution_is_refused(self):
         # Unattributable on a stamped PR: it cannot be told apart from a
         # self-review, so it must not pass.
-        ok, msg = merge_pr.check_reviews(labelled("author:agent-1"), 0)
+        ok, msg = _gate(labelled("author:agent-1"), 0)
         self.assertFalse(ok)
         self.assertIn("reviewed-by:", msg)
 
 
     def test_unstamped_pr_fails_closed(self):
-        ok, msg = merge_pr.check_reviews(labelled(), 0)
+        ok, msg = _gate(labelled(), 0)
         self.assertFalse(ok)
         self.assertIn("author:<id>", msg)
         self.assertIn("create_pr.py", msg)
 
     def test_unstamped_pr_with_external_approval_still_fails_closed(self):
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled(review_login="some-colleague"), 0)
         self.assertFalse(ok)
         self.assertIn("author:<id>", msg)
 
     def test_same_family_review_warns_but_does_not_refuse(self):
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewed-by:agent-2", "same-family-review"), 0)
         self.assertTrue(ok)
         self.assertIn("Same-family", msg)
 
     def test_self_review_refusal_outranks_nothing_else_being_wrong(self):
         # CI green, threads resolved, criteria ticked - still refused.
-        ok, _ = merge_pr.check_reviews(
+        ok, _ = _gate(
             labelled("author:solo", "reviewed-by:solo",
                      reviews=[{"state": "APPROVED"}, {"state": "COMMENTED"}]), 0)
         self.assertFalse(ok)
@@ -371,19 +390,19 @@ class ClaimIsNotAttestationTests(unittest.TestCase):
 
     def test_a_peer_claim_alone_does_not_satisfy_the_gate(self):
         # The exploit, verbatim: author's own review + a peer's bare claim.
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewer:agent-2"), 0)
         self.assertFalse(ok)
         self.assertIn("complete-review", msg)
 
     def test_the_refusal_names_the_claimant_and_the_command(self):
-        _, msg = merge_pr.check_reviews(
+        _, msg = _gate(
             labelled("author:agent-1", "reviewer:agent-2"), 0)
         self.assertIn("agent-2", msg)
         self.assertIn("--complete-review", msg)
 
     def test_completed_attribution_satisfies_the_gate(self):
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewed-by:agent-2"), 0)
         self.assertTrue(ok)
         self.assertIn("agent-2", msg)
@@ -391,7 +410,7 @@ class ClaimIsNotAttestationTests(unittest.TestCase):
     def test_a_claim_alongside_completed_attribution_still_blocks(self):
         # A held claim is live queue ownership and must be released even if an
         # earlier reviewer already completed a separate review.
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewer:agent-2", "reviewed-by:agent-2"), 0)
         self.assertFalse(ok)
         self.assertIn("still in progress", msg)
@@ -399,21 +418,21 @@ class ClaimIsNotAttestationTests(unittest.TestCase):
     def test_bot_comment_plus_peer_claim_blocks(self):
         reviews = [{"state": "COMMENTED", "author": {
             "login": "chatgpt-codex-connector"}}]
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewer:agent-2", reviews=reviews), 0)
         self.assertFalse(ok)
         self.assertIn("agent-2", msg)
         self.assertIn("still in progress", msg)
 
     def test_external_approval_plus_peer_claim_blocks(self):
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewer:agent-2",
                      review_login="some-colleague"), 0)
         self.assertFalse(ok)
         self.assertIn("agent-2", msg)
 
     def test_self_attribution_is_still_a_self_review(self):
-        ok, msg = merge_pr.check_reviews(
+        ok, msg = _gate(
             labelled("author:agent-1", "reviewed-by:agent-1"), 0)
         self.assertFalse(ok)
         self.assertIn("self-review", msg.lower())
@@ -531,7 +550,13 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr.os, "chdir")
     @patch.object(merge_pr, "repository_root", return_value="/repo")
     @patch.object(merge_pr, "execute_merge", return_value=(merged_pr(), "merged"))
-    @patch.object(merge_pr, "unresolved_threads", return_value=0)
+    @patch.object(
+        merge_pr,
+        "review_evidence",
+        return_value={
+            "unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True,
+        },
+    )
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
     def test_successful_merge_with_branch_delete_failure_is_resumable(
@@ -1082,3 +1107,121 @@ class CloseoutMarkerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResolutionIsNotProofTests(unittest.TestCase):
+    """Resolving a thread must not, by itself, certify that a finding was fixed.
+
+    PR #62 merged with five blocking findings intact. Nothing was bypassed:
+    the reviews were substantive, no latest verdict was CHANGES_REQUESTED
+    (the same-account path posts findings as COMMENTED with unresolved
+    threads), the threads were resolved, attribution was present, CI was
+    green. Zero-unresolved was doing work it cannot do - resolution is a UI
+    toggle with no relationship to the diff.
+    """
+
+    PASSING = ("author:agent-1", "reviewed-by:agent-2")
+
+    def test_a_resolved_finding_with_no_commit_after_it_blocks(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 1, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertFalse(ok)
+        self.assertIn("no commit after the finding", msg)
+
+    def test_the_refusal_names_both_remedies(self):
+        """A refusal an agent cannot act on becomes a workaround."""
+        _, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 2, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertIn("Push the fix", msg)
+        self.assertIn("Withdrawn:", msg)
+
+    def test_a_resolved_finding_followed_by_a_commit_passes(self):
+        ok, _ = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertTrue(ok)
+
+    def test_an_explicitly_withdrawn_finding_passes_without_a_commit(self):
+        """The escape hatch that keeps the commit rule from forcing no-op commits.
+
+        Without it a reviewer who withdraws a finding leaves the PR unmergeable,
+        and the rational response is to manufacture an empty commit - an audit
+        trail that lies, which is worse than the gap being closed.
+        """
+        ok, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "withdrawn": 1, "reviewed_head": True},
+        )
+        self.assertTrue(ok)
+        self.assertIn("withdrawn, not fixed", msg)
+
+    def test_the_audit_line_distinguishes_fixed_from_withdrawn(self):
+        """A later reader must be able to tell why the merge was allowed."""
+        _, fixed = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+        )
+        _, withdrawn = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "withdrawn": 2, "reviewed_head": True},
+        )
+        self.assertNotIn("withdrawn", fixed)
+        self.assertIn("2 finding(s) withdrawn", withdrawn)
+
+    def test_unresolved_still_blocks_before_the_new_checks(self):
+        """Ordering matters: the clearer refusal should win."""
+        _, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 1, "unfixed": 1, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertIn("unresolved review thread", msg)
+
+
+class ReviewMustCoverHeadTests(unittest.TestCase):
+    """A review attests to the commit it was submitted against.
+
+    Once head moves, the attestation covers code that is no longer proposed,
+    so a reviewed PR could be force-pushed and merged on the stale verdict.
+    """
+
+    PASSING = ("author:agent-1", "reviewed-by:agent-2")
+
+    def test_a_review_of_an_earlier_head_blocks(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": False},
+        )
+        self.assertFalse(ok)
+        self.assertIn("predates the current head", msg)
+
+    def test_a_review_at_head_passes(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertTrue(ok)
+        self.assertIn("reviewed at head", msg)
+
+
+class WithdrawnMarkerTests(unittest.TestCase):
+    """What counts as declaring a finding withdrawn."""
+
+    def test_marker_matches_at_the_start_of_a_reply(self):
+        self.assertTrue(merge_pr.WITHDRAWN_MARKER.search("Withdrawn: not a real issue"))
+        self.assertTrue(merge_pr.WITHDRAWN_MARKER.search("withdrawn - my mistake"))
+
+    def test_marker_matches_through_bold_formatting(self):
+        # Agents routinely write **Withdrawn:**; the convention should not
+        # hinge on markdown.
+        self.assertTrue(merge_pr.WITHDRAWN_MARKER.search("**Withdrawn:** superseded"))
+
+    def test_the_word_in_prose_does_not_count(self):
+        """Otherwise discussing withdrawal would silently satisfy the gate."""
+        self.assertIsNone(
+            merge_pr.WITHDRAWN_MARKER.search("I do not think this should be withdrawn.")
+        )

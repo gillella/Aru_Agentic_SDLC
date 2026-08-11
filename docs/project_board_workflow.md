@@ -100,6 +100,31 @@ merge conflict or merge/close-out failure remains unsafe or impossible for
 agents to resolve through governed remediation; risk category, diff size, and
 review-round count alone never require human participation.
 
+### Closing out a review finding
+
+The merge gate does not accept a resolved thread as evidence that its finding
+was addressed. Resolving a thread is a UI toggle with no relationship to the
+diff, and treating it as proof let PR #62 merge with five blocking findings
+intact. Every finding must be disposed of in one of two ways:
+
+- **Fixed** — push a commit after the thread was raised. The gate checks that
+  some commit followed the finding, not that a particular one addressed it;
+  ordering is the weaker claim it can actually verify, and it is only ever
+  used to refuse.
+- **Withdrawn** — reply to the thread starting with `Withdrawn:` and say why.
+  A finding can be legitimately retracted or argued down, and without this the
+  commit rule would push agents to manufacture no-op commits, producing an
+  audit trail that lies.
+
+Two consequences worth knowing before you hit them:
+
+- **Pushing after a review invalidates it.** A review attests to the commit it
+  was submitted against, so once head moves nobody has reviewed what would
+  merge. Re-review the current commit.
+- **The audit line records which signal let the PR through** — reviewed at
+  head, no unresolved threads, and how many findings were withdrawn rather
+  than fixed — so a later reader can reconstruct why.
+
 ---
 
 ## 📊 Factory Fleet Status & Completion Evaluation

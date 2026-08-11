@@ -5,7 +5,6 @@ Standard naming format: <type>/issue-<ID>-<short-description>
 """
 
 import argparse
-import os
 import re
 import sys
 from common import create_worktree, get_issue, run_cmd
