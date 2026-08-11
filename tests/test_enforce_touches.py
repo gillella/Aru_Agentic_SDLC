@@ -919,26 +919,42 @@ class CacheRecheckTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         et._run(["git", "init", "-b", "main"], cwd=self.root)
+        # Identity required by current_branch/worktree operations on some CI images.
+        et._run(["git", "config", "user.email", "t@example.com"], cwd=self.root)
+        et._run(["git", "config", "user.name", "t"], cwd=self.root)
         (self.root / "AGENTS.md").write_text("# Core Governance: The Issue-First Law\n", encoding="utf-8")
         et._run(["git", "add", "."], cwd=self.root)
         et._run(["git", "commit", "-m", "init"], cwd=self.root)
 
-        # Create worktree
+        # Create worktree. Parent dir must exist on older git; do not rely on
+        # `worktree add` creating intermediate directories.
+        self.issue = 73
         self.wt = self.root / ".worktrees" / "feat-issue-73-test"
-        et._run(["git", "worktree", "add", "-b", "feat/issue-73-test", str(self.wt)], cwd=self.root)
+        self.wt.parent.mkdir(parents=True, exist_ok=True)
+        rc, out = et._run(
+            ["git", "worktree", "add", "-b", "feat/issue-73-test", str(self.wt)],
+            cwd=self.root,
+        )
+        if rc != 0:
+            self.fail(f"git worktree add failed: {out!r}")
+        branch = et.current_branch(str(self.wt))
+        if et.issue_from_branch(branch) != self.issue:
+            self.fail(f"worktree branch {branch!r} does not carry issue #{self.issue}")
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def test_cache_resolves_to_common_git_dir_from_worktree(self):
-        cache_path = et._cache_path(self.wt, 73)
+        cache_path = et._cache_path(self.wt, self.issue)
         self.assertIsNotNone(cache_path)
-        self.assertTrue(cache_path.endswith("aru-touches-73.json"))
+        self.assertTrue(cache_path.endswith(f"aru-touches-{self.issue}.json"))
         # Must resolve to the main .git directory, not .worktrees/.../.git
         self.assertIn(os.path.realpath(str(self.root / ".git")), os.path.realpath(cache_path))
 
     def test_narrow_cache_rechecks_github_on_unallowed_path_and_allows_when_widened(self):
-        et._write_cache(self.wt, 73, ["app.py"])
+        et._write_cache(self.wt, self.issue, ["app.py"])
+        self.assertEqual(et._read_cache(self.wt, self.issue), ["app.py"])
+        self.assertFalse(et.path_allowed("extra.py", ["app.py"]))
 
         payload = {
             "tool_name": "Write",
@@ -947,6 +963,7 @@ class CacheRecheckTests(unittest.TestCase):
         }
         real_run = et._run
         gh_calls = []
+        decisions = []
 
         def mock_run(cmd, cwd=None, timeout=15):
             # Match _run's signature so a timeout kwarg cannot bypass the mock
@@ -956,16 +973,32 @@ class CacheRecheckTests(unittest.TestCase):
                 return 0, "touches: app.py, extra.py"
             return real_run(cmd, cwd=cwd, timeout=timeout)
 
+        real_touches_for = et.touches_for
+
+        def tracing_touches_for(root, issue, force_refresh=False):
+            result = real_touches_for(root, issue, force_refresh=force_refresh)
+            decisions.append((str(root), issue, force_refresh, list(result) if result is not None else None))
+            return result
+
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
-             patch.object(et, "_run", side_effect=mock_run):
+             patch.object(et, "_run", side_effect=mock_run), \
+             patch.object(et, "touches_for", side_effect=tracing_touches_for):
             res = et.main()
-        self.assertEqual(res, et.EXIT_ALLOW)
+        self.assertEqual(
+            res, et.EXIT_ALLOW,
+            f"decisions={decisions!r} gh_calls={gh_calls!r} "
+            f"branch={et.current_branch(str(self.wt))!r}",
+        )
+        self.assertTrue(
+            any(force for _root, _issue, force, _touches in decisions),
+            f"expected a force-refresh touches lookup; decisions={decisions!r}",
+        )
         self.assertTrue(gh_calls, "expected a force-refresh gh issue view")
         # Verify cache was updated
-        self.assertEqual(et._read_cache(self.wt, 73), ["app.py", "extra.py"])
+        self.assertEqual(et._read_cache(self.wt, self.issue), ["app.py", "extra.py"])
 
     def test_allowed_path_hits_cache_and_makes_no_github_call(self):
-        et._write_cache(self.wt, 73, ["app.py"])
+        et._write_cache(self.wt, self.issue, ["app.py"])
 
         payload = {
             "tool_name": "Write",
@@ -984,7 +1017,7 @@ class CacheRecheckTests(unittest.TestCase):
         self.assertEqual(res, et.EXIT_ALLOW)
 
     def test_github_failure_on_recheck_fails_open(self):
-        et._write_cache(self.wt, 73, ["app.py"])
+        et._write_cache(self.wt, self.issue, ["app.py"])
 
         payload = {
             "tool_name": "Write",
