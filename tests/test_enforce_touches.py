@@ -207,6 +207,139 @@ class RedirectFalsePositiveTests(unittest.TestCase):
         )
 
 
+class ShellCommentTests(unittest.TestCase):
+    """An unquoted '#' ends the executable part of the line.
+
+    Reported on PR #37. The hand-written scanner replaced shlex, which had
+    handled comments for free, so this regressed against main: a trailing
+    comment mentioning a redirect blocked the command it annotated.
+    """
+
+    def test_redirect_inside_a_comment_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("echo hi # > out.txt"), [])
+
+    def test_whole_line_comment_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("# write it with > out.txt"), [])
+
+    def test_hash_inside_a_word_is_not_a_comment(self):
+        # bash reads `hi#not-comment` as one word, so the redirect is real.
+        # Getting this wrong is the dangerous direction: a genuine write
+        # would slip past the hook disguised as a comment.
+        self.assertIn("out.txt", et._redirect_targets("echo hi#not-comment > out.txt"))
+
+    def test_quoted_hash_is_not_a_comment(self):
+        self.assertIn("out.txt", et._redirect_targets('echo "# heading" > out.txt'))
+
+    def test_comment_ends_at_the_newline_and_later_lines_still_lex(self):
+        # Multi-line commands are routine for agents; a comment on line one
+        # must not blind the scanner to a real write on line two.
+        command = "echo hi # harmless > decoy.txt\nrm -f x && echo bye > real.txt"
+        targets = et._redirect_targets(command)
+        self.assertIn("real.txt", targets)
+        self.assertNotIn("decoy.txt", targets)
+
+
+class ProcessSubstitutionTests(unittest.TestCase):
+    """`>(cmd)` names a pipe, not a file.
+
+    Reported on PR #37: the scanner read the '>' as a redirect and reported
+    the command inside the parens as the file being written.
+    """
+
+    def test_process_substitution_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("echo >(cat)"), [])
+
+    def test_process_substitution_does_not_hide_a_real_redirect(self):
+        self.assertIn("out.txt", et._redirect_targets("echo >(cat) > out.txt"))
+
+    def test_redirect_nested_inside_process_substitution_still_counts(self):
+        # The body is ordinary shell, and this one genuinely writes.
+        self.assertIn("inside.txt", et._redirect_targets("echo >(cat > inside.txt)"))
+
+    def test_input_process_substitution_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("diff <(sort a) <(sort b)"), [])
+
+
+class DescriptorTargetTests(unittest.TestCase):
+    """`>&` writes a file only when its target is provably a filename.
+
+    Reported on PR #37. A descriptor move and an unresolved expansion were
+    both classified as paths, blocking commands that write nothing.
+    """
+
+    def test_descriptor_move_is_not_a_write(self):
+        self.assertEqual(et._redirect_targets("cmd 3>&4-"), [])
+        self.assertEqual(et._redirect_targets("cmd >&-"), [])
+
+    def test_expanded_descriptor_is_uncertain_and_not_reported(self):
+        self.assertEqual(et._redirect_targets("fd=2; echo hi >&$fd"), [])
+
+    def test_expansion_after_a_plain_redirect_is_still_a_write(self):
+        # Only `>&` is ambiguous. After a plain '>' an expansion is a file,
+        # and dropping it would trade a false positive for a false negative.
+        self.assertIn("$HOME/out.txt", et._redirect_targets("echo hi > $HOME/out.txt"))
+
+    def test_literal_filename_after_the_dup_operator_is_still_a_write(self):
+        self.assertIn("out.txt", et._redirect_targets("echo hi >&out.txt"))
+
+
+class PostPr23ParserGapTests(unittest.TestCase):
+    """The gaps found on #23's merged head, each checked against real Bash.
+
+    Every expectation here was taken from running the command in a scratch
+    directory and listing what appeared, not from reading the parser. Two
+    directions of failure, and they are not equally bad: a false positive
+    blocks legitimate work and is visible immediately, while a false negative
+    lets a write escape the touches budget silently.
+    """
+
+    def test_quoted_operator_followed_by_an_argument_is_not_a_redirect(self):
+        # `echo ">" file.txt` prints two arguments and writes nothing.
+        self.assertEqual(et._redirect_targets('echo ">" file.txt'), [])
+        self.assertEqual(et._redirect_targets("echo '>' file.txt"), [])
+        self.assertEqual(et._redirect_targets('echo ">>" file.txt'), [])
+
+    def test_escaped_operator_followed_by_an_argument_is_not_a_redirect(self):
+        # Backslash escapes survive lexing only as trailing backslashes on the
+        # preceding token; the operator token itself looks entirely ordinary.
+        self.assertEqual(et._redirect_targets(r"echo \> file.txt"), [])
+        self.assertEqual(et._redirect_targets(r"echo \>\> file.txt"), [])
+        self.assertEqual(et._redirect_targets(r"echo a\>b"), [])
+
+    def test_an_even_run_of_backslashes_does_not_escape_the_operator(self):
+        # `echo \\ > f.txt` prints a literal backslash and really does redirect.
+        # Treating this as escaped would be a false negative.
+        self.assertEqual(et._redirect_targets(r"echo \\ > realbs.txt"), ["realbs.txt"])
+
+    def test_heredoc_delimiter_may_contain_shell_safe_punctuation(self):
+        # `\w+` did not match END-MSG, so the body was never stripped and the
+        # '>' closing the trailer address lexed as a redirect onto the
+        # terminator. This is the case that blocked committing this very fix.
+        command = (
+            'git commit -F - <<"END-MSG"\n'
+            "fix: something\n\n"
+            "Co-Authored-By: Claude <noreply@anthropic.com>\n"
+            "END-MSG\n"
+        )
+        self.assertEqual(et._redirect_targets(command), [])
+
+    def test_a_real_redirect_on_the_heredoc_opener_survives_body_stripping(self):
+        # Stripping the body must not cost the redirect beside it; that would
+        # trade a false positive for the worse failure.
+        command = "cat <<'END-MSG' > out.txt\nbody\nEND-MSG\n"
+        self.assertEqual(et._redirect_targets(command), ["out.txt"])
+
+    def test_dup_operator_writes_a_file_when_the_target_is_not_a_descriptor(self):
+        # The dangerous one. `echo hi >&out.txt` creates or truncates out.txt,
+        # and classifying >& as duplication unconditionally hid it entirely.
+        self.assertEqual(et._redirect_targets("echo hi >&out.txt"), ["out.txt"])
+
+    def test_dup_operator_with_a_descriptor_target_is_not_a_write(self):
+        for command in ("echo hi >&2", "echo hi 2>&1", "echo hi >&-"):
+            with self.subTest(command=command):
+                self.assertEqual(et._redirect_targets(command), [])
+
+
 class HookDecisionTests(unittest.TestCase):
     """End-to-end main() behaviour with GitHub and git stubbed out."""
 
@@ -266,6 +399,26 @@ class HookDecisionTests(unittest.TestCase):
             "feat/issue-9-api", ["src/api/*"],
         )
         self.assertEqual(rc, et.EXIT_BLOCK)
+
+    def test_dup_operator_write_outside_declaration_is_blocked(self):
+        # The bypass, end to end: `>&` reaches the filesystem exactly like `>`,
+        # so the hook must refuse it outside the budget. Before the fix this
+        # returned EXIT_ALLOW and the write landed unrecorded.
+        rc = self._run(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "echo x >&/repo/pyproject.toml"}, "cwd": "/repo"},
+            "feat/issue-9-api", ["src/api/*"],
+        )
+        self.assertEqual(rc, et.EXIT_BLOCK)
+
+    def test_quoted_operator_in_a_commit_message_is_not_blocked(self):
+        # The other direction: legitimate work must not be refused.
+        rc = self._run(
+            {"tool_name": "Bash",
+             "tool_input": {"command": 'git commit -m "use \\">\\" for redirects"'}, "cwd": "/repo"},
+            "feat/issue-9-api", ["src/api/*"],
+        )
+        self.assertEqual(rc, et.EXIT_ALLOW)
 
     def test_push_to_main_blocked_even_without_a_claim(self):
         rc = self._run(
