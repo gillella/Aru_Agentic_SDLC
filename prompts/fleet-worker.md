@@ -89,20 +89,24 @@ gate. Your claim is `merger:<AGENT_ID>` (already applied when `--claim` ran).
 
 1. Confirm the claim:
    `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge`
-2. Execute the gated merge **only** through the helper, targeting the head SHA
-   the picker reported:
-   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N>`
-   Never run `gh pr merge`, never push to `main`, never bypass the helper.
+2. Execute the gated merge **only** through the helper, pinning the head SHA
+   the picker reported as `head_sha` / `work.head_sha`:
+   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>`
+   Never run `gh pr merge`, never push to `main`, never bypass the helper, and
+   never omit `--expected-head` when the picker supplied a SHA. If the live head
+   differs, the helper exits blocked without merging — re-ask the board.
 3. On success (exit 0): the helper closes linked issues, moves them to Done,
    clears claims, and cleans worktrees. Immediately ask the board again.
-4. On exit 3 (DoD blocked): release the merge claim and loop — do not invent a
-   merge attempt. The PR returns to review/feedback/waiting naturally.
+4. On exit 3 (DoD blocked / head mismatch): release the merge claim and loop —
+   do not invent a merge attempt. The PR returns to review/feedback/waiting
+   naturally.
    `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release`
 5. On exit 1 (transient error / incomplete close-out): retry the **same**
-   `merge_pr.py --pr <N>` command with bounded backoff (5s, 15s, 45s; at most
-   three attempts). If it still fails unsafely, release the merge claim, record
-   the exact error on the linked issue, and leave the work visible as blocked —
-   never report success.
+   `merge_pr.py --pr <N> --expected-head <HEAD_SHA>` command with bounded
+   backoff (5s, 15s, 45s; at most three attempts). If it still fails unsafely,
+   leave the `merger:` claim in place when close-out is incomplete so another
+   cycle can resume it; record the exact error on the linked issue and never
+   report success.
 
 The PR author may perform this mechanical merge once a distinct peer's
 `reviewed-by:<id>` is present. Self-review remains forbidden.

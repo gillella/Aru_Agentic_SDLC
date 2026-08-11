@@ -99,27 +99,62 @@ def list_open_prs() -> list[dict[str, Any]] | None:
 
 
 def list_merged_needing_closeout() -> list[dict[str, Any]] | None:
-    """Recently merged PRs whose close-out still needs ``merge_pr.py``.
+    """Merged PRs whose close-out still needs ``merge_pr.py``.
 
-    Fail closed when the merged list cannot be read: otherwise a crashed
-    close-out becomes invisible and the board never reaches Done.
+    Paginate until exhausted so an incomplete close-out older than the newest
+    fifty merges remains discoverable. Fail closed when any page cannot be
+    read: otherwise a crashed close-out becomes invisible.
     """
+    from common import get_repo_slug
+
+    slug = get_repo_slug()
+    if not slug:
+        print("[WARN] Could not resolve repo slug for merged PR recovery.", file=sys.stderr)
+        return None
     code, out, err = run_cmd(
-        ["gh", "pr", "list", "--state", "merged", "--limit", "50", "--json", PR_FIELDS],
+        [
+            "gh", "api", "--paginate",
+            f"repos/{slug}/pulls?state=closed&per_page=100&sort=updated&direction=desc",
+            "--jq", ".[]",
+        ],
         check=False,
     )
     if code != 0:
-        print(f"[WARN] Could not list merged PRs: {err.strip()}", file=sys.stderr)
+        print(f"[WARN] Could not list closed PRs: {err.strip()}", file=sys.stderr)
         return None
-    try:
-        prs = json.loads(out) if out else []
-    except json.JSONDecodeError:
-        print("[WARN] Could not parse the merged PR list.", file=sys.stderr)
-        return None
+    closed = []
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            closed.append(json.loads(line))
+        except json.JSONDecodeError:
+            print("[WARN] Could not parse closed PR list.", file=sys.stderr)
+            return None
+
     recovery = []
-    for pr in prs:
-        # Avoid GraphQL thread lookups for merged recovery candidates.
-        pr["_active_review_feedback"] = []
+    for item in closed:
+        if not item.get("merged_at"):
+            continue
+        labels = [{"name": lab.get("name", "")} for lab in (item.get("labels") or [])]
+        pr = {
+            "number": item.get("number"),
+            "title": item.get("title") or "",
+            "isDraft": bool(item.get("draft")),
+            "labels": labels,
+            "reviews": [],
+            "statusCheckRollup": [],
+            "updatedAt": item.get("updated_at"),
+            "createdAt": item.get("created_at"),
+            "headRefName": ((item.get("head") or {}).get("ref")) or "",
+            "headRefOid": ((item.get("head") or {}).get("sha")) or "",
+            "body": item.get("body") or "",
+            "reviewDecision": "",
+            "state": "MERGED",
+            "mergedAt": item.get("merged_at"),
+            "_active_review_feedback": [],
+        }
         if closeout_incomplete(pr):
             recovery.append(pr)
     return recovery

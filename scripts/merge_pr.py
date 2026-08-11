@@ -409,8 +409,9 @@ def closeout_incomplete(pr):
 
     Server-side merge removes the PR from ``gh pr list --state open``. Without
     this check, a crash after merge but before Done/claim cleanup leaves the
-    board permanently stranded. Signals: a lingering ``merger:`` claim, or any
-    linked ``Closes #N`` issue that is still open.
+    board permanently stranded. Signals: a lingering ``merger:`` claim, any
+    linked ``Closes #N`` issue that is still open, or a closed issue that never
+    received ``status:done``.
     """
     if not is_merged(pr):
         return False
@@ -418,11 +419,18 @@ def closeout_incomplete(pr):
     if any(name.startswith(MERGER_CLAIM_LABEL) for name in labels):
         return True
     for num in linked_issues(pr.get("body")):
-        issue = _gh_json(["gh", "issue", "view", str(num), "--json", "state"])
+        issue = _gh_json(
+            ["gh", "issue", "view", str(num), "--json", "state,labels"]
+        )
         if issue is None:
             # Fail closed: an unreadable linked issue must be treated as unfinished.
             return True
         if (issue.get("state") or "").upper() == "OPEN":
+            return True
+        issue_labels = {
+            lab.get("name", "") for lab in (issue.get("labels") or [])
+        }
+        if "status:done" not in issue_labels:
             return True
     return False
 
@@ -832,7 +840,6 @@ def run_closeout(pr, issue_nums, repo_root):
             (f"issue claim #{num}", lambda num=num: clear_issue_claims(num)),
         ])
     steps.append(("review claim", lambda: clear_review_claims(pr.get("number"))))
-    steps.append(("merger claim", lambda: clear_merger_claims(pr.get("number"))))
 
     all_ok = True
     print("\n=== Post-merge close-out ===")
@@ -843,7 +850,25 @@ def run_closeout(pr, issue_nums, repo_root):
             ok, message = False, f"Unexpected close-out error: {exc}"
         print(f"  {'✅' if ok else '❌'} {name:<18} {message}")
         all_ok = all_ok and ok
+
+    # Keep merger:<id> until every prior step succeeds so the picker can still
+    # rediscover incomplete close-out. Clearing it after a board/Done failure
+    # would make recovery invisible once the linked issue is CLOSED.
+    if all_ok:
+        try:
+            ok, message = clear_merger_claims(pr.get("number"))
+        except Exception as exc:
+            ok, message = False, f"Unexpected close-out error: {exc}"
+        print(f"  {'✅' if ok else '❌'} {'merger claim':<18} {message}")
+        all_ok = all_ok and ok
+    else:
+        print("  ⏳ merger claim      retained so recovery remains discoverable")
     return all_ok
+
+
+def heads_match(live_sha, expected_sha):
+    """True when the live head is exactly the picker-selected head."""
+    return bool(live_sha) and bool(expected_sha) and live_sha == expected_sha
 
 
 def main():
@@ -851,6 +876,12 @@ def main():
     parser.add_argument("--pr", type=int, required=True, help="Pull request number")
     parser.add_argument("--dry-run", action="store_true", help="Run every check, merge nothing")
     parser.add_argument("--merge-method", default="squash", choices=["squash", "merge", "rebase"])
+    parser.add_argument(
+        "--expected-head",
+        default=None,
+        metavar="SHA",
+        help="Head SHA selected by the picker; refuse if the live head differs",
+    )
     args = parser.parse_args()
 
     pr = fetch_pr(args.pr)
@@ -863,6 +894,16 @@ def main():
         return EXIT_ERROR
 
     gated_head = pr.get("headRefOid") or "unknown"
+    if args.expected_head and not is_merged(pr):
+        if not heads_match(gated_head, args.expected_head):
+            print(
+                f"[ERROR] Live head {gated_head} does not match picker-selected "
+                f"--expected-head {args.expected_head}. Refusing to merge a "
+                "different commit than the one that was claimed.",
+                file=sys.stderr,
+            )
+            return EXIT_BLOCKED
+
     if is_merged(pr):
         print(f"=== Merge execution — PR #{args.pr}: already merged; resuming close-out ===")
         final_pr = pr
@@ -892,6 +933,22 @@ def main():
         if args.dry_run:
             print("\n✅ Every gate passed. --dry-run, so nothing was merged.")
             return EXIT_OK
+
+        # Re-check head immediately before the merge command in case a push
+        # landed between DoD evaluation and execution.
+        fresh = fetch_pr(args.pr)
+        if not fresh:
+            return EXIT_ERROR
+        live = fresh.get("headRefOid") or "unknown"
+        if args.expected_head and not heads_match(live, args.expected_head):
+            print(
+                f"[ERROR] Head moved to {live} after DoD checks; expected "
+                f"{args.expected_head}. No merge command was run.",
+                file=sys.stderr,
+            )
+            return EXIT_BLOCKED
+        pr = fresh
+        gated_head = live
 
         print("\n=== Merge execution ===")
         final_pr, outcome = execute_merge(args.pr, pr, args.merge_method)

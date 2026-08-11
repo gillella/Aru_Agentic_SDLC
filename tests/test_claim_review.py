@@ -519,12 +519,26 @@ class MergeClaimTests(unittest.TestCase):
         run_cmd.side_effect = [
             (0, '[{"number": 5, "labels": [{"name": "merger:stale"}], '
                 '"updatedAt": "2020-01-01T00:00:00Z"}]', ""),
+            (0, "[]", ""),  # merged list
             (0, "", ""),
         ]
         self.assertEqual(claim_issue.reap_stale_merges(4), [5])
 
     def test_reaping_merges_is_off_by_default(self):
         self.assertEqual(claim_issue.reap_stale_merges(0), [])
+
+    @patch.object(claim_issue, "run_cmd")
+    def test_stale_merge_claims_on_merged_prs_are_reaped(self, run_cmd):
+        run_cmd.side_effect = [
+            # open list empty
+            (0, "[]", ""),
+            # merged list with stale claimant
+            (0, '[{"number": 5, "labels": [{"name": "merger:dead"}], '
+                '"updatedAt": "2020-01-01T00:00:00Z", "state": "MERGED", '
+                '"mergedAt": "2020-01-01T00:00:00Z"}]', ""),
+            (0, "", ""),  # remove label
+        ]
+        self.assertEqual(claim_issue.reap_stale_merges(4), [5])
 
 
 if __name__ == "__main__":

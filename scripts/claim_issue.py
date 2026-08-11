@@ -708,32 +708,43 @@ def release_merge(pr_id: int, agent: str) -> int:
 
 
 def reap_stale_merges(hours: int = 4) -> list:
-    """Releases merge claims that went quiet without a successful merge.
+    """Releases merge claims that went quiet without finishing close-out.
 
-    Unlike review claims, a lingering merger:<id> does not block the merge gate
-    itself, but it does exclude the PR from the merge picker. Reap only when the
-    PR is still open and has been idle longer than ``hours``.
+    Open and merged PRs are both scanned. A crash right after server-side merge
+    leaves ``merger:dead`` on a MERGED PR; peers must be able to reclaim it, and
+    a reaper that only looks at ``--state open`` can never free that label.
+    Author and reviewed-by attribution are never touched.
     """
     if hours <= 0:
         return []
 
-    code, out, _ = run_cmd(
-        ["gh", "pr", "list", "--state", "open", "--limit", "200",
-         "--json", "number,labels,updatedAt"],
-        check=False,
-    )
-    if code != 0:
-        print("[WARN] Could not list PRs; no merge claims were reaped.", file=sys.stderr)
-        return []
-    try:
-        prs = json.loads(out) if out else []
-    except json.JSONDecodeError:
-        print("[WARN] Could not parse PR list; no merge claims were reaped.", file=sys.stderr)
-        return []
+    prs = []
+    for state in ("open", "merged"):
+        code, out, _ = run_cmd(
+            ["gh", "pr", "list", "--state", state, "--limit", "200",
+             "--json", "number,labels,updatedAt,state,mergedAt"],
+            check=False,
+        )
+        if code != 0:
+            print(f"[WARN] Could not list {state} PRs; merge reaping incomplete.",
+                  file=sys.stderr)
+            return []
+        try:
+            batch = json.loads(out) if out else []
+        except json.JSONDecodeError:
+            print(f"[WARN] Could not parse {state} PR list; merge reaping aborted.",
+                  file=sys.stderr)
+            return []
+        prs.extend(batch)
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     released = []
+    seen = set()
     for pr in prs:
+        number = pr.get("number")
+        if number in seen:
+            continue
+        seen.add(number)
         names = [lab.get("name", "") for lab in pr.get("labels", [])]
         holder = merge_claimant(names)
         if not holder:
@@ -744,9 +755,9 @@ def reap_stale_merges(hours: int = 4) -> list:
             continue
         if ts > cutoff:
             continue
-        if _remove_merger_label(pr["number"], holder):
-            released.append(pr["number"])
-            print(f"♻️  Released stale merge claim on PR #{pr['number']} "
+        if _remove_merger_label(number, holder):
+            released.append(number)
+            print(f"♻️  Released stale merge claim on PR #{number} "
                   f"(held by '{holder}', idle > {hours}h).",
                   file=sys.stderr)
     return released
