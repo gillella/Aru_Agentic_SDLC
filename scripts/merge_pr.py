@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime
 
 from common import get_repo_slug, run_cmd
 from update_issue_status import update_status
@@ -98,6 +99,164 @@ def linked_issue(body):
     """The first closed issue, or None. Kept for callers that want just one."""
     issues = linked_issues(body)
     return issues[0] if issues else None
+
+
+# A finding is disposed of in one of two ways: it is fixed, or it is
+# withdrawn. Only the first leaves evidence in the diff, so the second has to
+# say so out loud. A reply whose first word is "withdrawn" records that the
+# reviewer or author retracted the finding rather than addressing it, and the
+# merge audit line reports it. Without this, requiring a commit per finding
+# would force agents to manufacture no-op commits to clear a thread they had
+# legitimately argued down - an audit trail that actively lies is worse than
+# the gap this closes.
+WITHDRAWN_MARKER = re.compile(r"^\s*(?:\**\s*)?withdrawn\b", re.IGNORECASE | re.MULTILINE)
+
+
+def _parse_ts(value):
+    """ISO-8601 from the GitHub API to a comparable datetime, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def review_evidence(pr_id):
+    """Facts the review gate needs beyond a count of open threads.
+
+    Returns ``None`` on any query failure - an unknown review state must never
+    merge - otherwise a dict:
+
+      ``unresolved``  open, non-outdated threads.
+      ``unfixed``     threads resolved with no commit after the finding was
+                      raised and no explicit withdrawal. This is the shape that
+                      let PR #62 merge with five blocking findings intact:
+                      resolving a thread is a UI toggle and proves nothing
+                      about the code.
+      ``withdrawn``   threads whose resolution was declared a withdrawal.
+      ``reviewed_head``  True when at least one substantive, non-advisory
+                      review was submitted against the current head. A review
+                      of an earlier commit attests to code that is no longer
+                      proposed, so a push after review must invalidate it.
+
+    Commit ordering is not proof of causation - a commit landing after a
+    finding may be unrelated. It is the weaker claim the gate can actually
+    check, and it is only ever used to refuse, never to approve.
+    """
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    owner, name = slug.split("/", 1)
+    query = """
+    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
+      repository(owner:$owner, name:$name) {
+        pullRequest(number:$pr) {
+          headRefOid
+          reviews(first:100) {
+            nodes { state author { login } commit { oid } }
+          }
+          commits(last:100) {
+            nodes { commit { committedDate } }
+          }
+          reviewThreads(first:100, after:$cursor) {
+            nodes {
+              isResolved
+              isOutdated
+              comments(first:50) { nodes { createdAt body } }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }"""
+
+    cursor = None
+    seen_cursors = set()
+    unresolved = 0
+    unfixed = 0
+    withdrawn = 0
+    commit_times = None
+    reviewed_head = False
+
+    while True:
+        args = [
+            "gh", "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
+        ]
+        if cursor:
+            args.extend(["-F", f"cursor={cursor}"])
+        data = _gh_json(args)
+        if not data or (isinstance(data, dict) and data.get("errors")):
+            return None
+        try:
+            pull = data["data"]["repository"]["pullRequest"]
+            connection = pull["reviewThreads"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            has_next = page_info["hasNextPage"]
+        except (KeyError, TypeError):
+            return None
+        if not isinstance(nodes, list) or not isinstance(has_next, bool):
+            return None
+
+        # Commits and reviews do not change between thread pages; read once.
+        if commit_times is None:
+            head = pull.get("headRefOid")
+            try:
+                commit_times = sorted(
+                    ts for ts in (
+                        _parse_ts(((c or {}).get("commit") or {}).get("committedDate"))
+                        for c in (pull.get("commits") or {}).get("nodes") or []
+                    ) if ts is not None
+                )
+            except (AttributeError, TypeError):
+                return None
+            for review in (pull.get("reviews") or {}).get("nodes") or []:
+                if (review.get("state") or "").upper() == "PENDING":
+                    continue
+                who = ((review.get("author") or {}).get("login") or "")
+                if is_advisory_review_account(who):
+                    continue
+                if head and ((review.get("commit") or {}).get("oid")) == head:
+                    reviewed_head = True
+
+        for node in nodes:
+            outdated = bool(node.get("isOutdated"))
+            resolved = bool(node.get("isResolved"))
+            if not resolved and not outdated:
+                unresolved += 1
+                continue
+            if outdated:
+                # The lines it pointed at are gone, so the code did change.
+                continue
+            comments = (node.get("comments") or {}).get("nodes") or []
+            if not comments:
+                continue
+            if any(WITHDRAWN_MARKER.search(c.get("body") or "") for c in comments):
+                withdrawn += 1
+                continue
+            raised = _parse_ts(comments[0].get("createdAt"))
+            if raised is None:
+                # Cannot date the finding, so cannot prove a fix followed it.
+                unfixed += 1
+                continue
+            if not any(ts > raised for ts in commit_times):
+                unfixed += 1
+
+        if not has_next:
+            return {
+                "unresolved": unresolved,
+                "unfixed": unfixed,
+                "withdrawn": withdrawn,
+                "reviewed_head": reviewed_head,
+            }
+        next_cursor = page_info.get("endCursor")
+        if not next_cursor or next_cursor in seen_cursors:
+            return None
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
 
 
 def unresolved_threads(pr_id):
@@ -258,7 +417,19 @@ def is_advisory_review_account(login):
     return normalized.endswith("[bot]") or normalized in ADVISORY_REVIEW_ACCOUNTS
 
 
-def check_reviews(pr, threads):
+def _evidence_note(evidence):
+    """What actually satisfied the review gate, for the audit line.
+
+    A later reader needs to tell "every finding was fixed" from "the findings
+    were withdrawn", because those justify a merge very differently.
+    """
+    parts = ["reviewed at head", "no unresolved threads"]
+    if evidence.get("withdrawn"):
+        parts.append(f"{evidence['withdrawn']} finding(s) withdrawn, not fixed")
+    return ", ".join(parts) + "."
+
+
+def check_reviews(pr, evidence):
     reviews = pr.get("reviews") or []
     substantive = [r for r in reviews if (r.get("state") or "").upper() != "PENDING"]
     if not substantive:
@@ -271,10 +442,31 @@ def check_reviews(pr, threads):
     ]
     if blocking:
         return False, (f"{', '.join(blocking)} requested changes and has not re-approved.")
-    if threads is None:
+    if evidence is None:
         return False, "Could not determine review-thread state; refusing rather than guessing."
-    if threads > 0:
-        return False, f"{threads} unresolved review thread(s)."
+    if evidence["unresolved"] > 0:
+        return False, f"{evidence['unresolved']} unresolved review thread(s)."
+
+    # Resolving a thread is a UI toggle with no relationship to the diff, so
+    # zero-unresolved alone certified PR #62's five blocking findings as
+    # addressed while every one of them survived to main. A finding must have
+    # been fixed - some commit followed it - or explicitly withdrawn.
+    if evidence["unfixed"] > 0:
+        return False, (
+            f"{evidence['unfixed']} resolved thread(s) have no commit after the "
+            "finding was raised and were not withdrawn, so nothing shows the "
+            "finding was addressed. Push the fix, or reply to the thread "
+            "starting with 'Withdrawn:' and why."
+        )
+
+    # A review attests to the commit it was submitted against. Once head moves
+    # the attestation covers code that is no longer proposed, which otherwise
+    # lets a reviewed PR be force-pushed and merged on the stale verdict.
+    if not evidence["reviewed_head"]:
+        return False, (
+            "Every review predates the current head, so no reviewer has seen "
+            "what would merge. Re-review the current commit."
+        )
 
     # A claim means an independent agent is still reviewing. It must block
     # before any external-account or completed-attribution shortcut, otherwise
@@ -325,7 +517,7 @@ def check_reviews(pr, threads):
     if external_approvers:
         note = (
             f"Approved by external reviewer(s) {', '.join(external_approvers)}, "
-            "no unresolved threads."
+            f"{_evidence_note(evidence)}"
         )
         if any((lab.get("name") or "") == "same-family-review"
                for lab in (pr.get("labels") or [])):
@@ -354,7 +546,10 @@ def check_reviews(pr, threads):
                        f"'{author}'. The reviewing agent must finish with "
                        f"`claim_issue.py --pr <n> --agent <id> --complete-review`.")
 
-    note = f"{len(substantive)} review(s) from {', '.join(peers)}, no unresolved threads."
+    note = (
+        f"{len(substantive)} review(s) from {', '.join(peers)}, "
+        f"{_evidence_note(evidence)}"
+    )
     if any((lab.get("name") or "") == "same-family-review" for lab in (pr.get("labels") or [])):
         note += " ⚠️  Same-family review: no cross-family agent was available."
     return True, note
@@ -764,7 +959,7 @@ def clear_merger_claims(pr_num):
     return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL)
 
 
-def evaluate_dod(pr, issue_bodies, threads):
+def evaluate_dod(pr, issue_bodies, evidence):
     """Runs every Definition-of-Done check without merging.
 
     Returns ``(ok, gates)`` where ``gates`` is a list of
@@ -776,7 +971,7 @@ def evaluate_dod(pr, issue_bodies, threads):
         ("open", *check_open(pr)),
         ("issue link", *check_issue_link(pr)),
         ("ci", *check_ci(pr)),
-        ("review", *check_reviews(pr, threads)),
+        ("review", *check_reviews(pr, evidence)),
         ("rebased", *check_rebased(pr)),
         ("size", *check_size(pr)),
     ]
@@ -808,8 +1003,8 @@ def dod_status(pr_id):
         if issue is None:
             return False, f"could not read issue #{num}"
         issue_bodies[num] = issue.get("body") or ""
-    threads = unresolved_threads(pr_id)
-    ok, gates = evaluate_dod(pr, issue_bodies, threads)
+    evidence = review_evidence(pr_id)
+    ok, gates = evaluate_dod(pr, issue_bodies, evidence)
     if ok:
         return True, "every Definition-of-Done gate passed"
     blocked = [name for name, passed, _ in gates if not passed]
@@ -918,8 +1113,8 @@ def main():
                 return EXIT_ERROR
             issue_bodies[num] = issue.get("body") or ""
 
-        threads = unresolved_threads(args.pr)
-        ok, gates = evaluate_dod(pr, issue_bodies, threads)
+        evidence = review_evidence(args.pr)
+        ok, gates = evaluate_dod(pr, issue_bodies, evidence)
 
         print(f"=== Definition of Done — PR #{args.pr}: {pr.get('title','')} ===")
         blocked = []
