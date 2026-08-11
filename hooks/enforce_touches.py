@@ -204,7 +204,9 @@ def _cache_path(root, issue):
     return os.path.join(common, f"aru-touches-{issue}.json")
 
 
-def _read_cache(root, issue):
+def _read_cache(root, issue, force_refresh=False):
+    if force_refresh:
+        return None
     path = _cache_path(root, issue)
     if not path:
         return None
@@ -258,8 +260,8 @@ def parse_touches(body):
     return [e for e in entries if not e.startswith("(")]
 
 
-def touches_for(root, issue):
-    cached = _read_cache(root, issue)
+def touches_for(root, issue, force_refresh=False):
+    cached = _read_cache(root, issue, force_refresh=force_refresh)
     if cached is not None:
         return cached
     rc, out = _run(
@@ -539,12 +541,11 @@ def _shell_tokens(command):
             flush()
             quoted = False
             index += 1
-            continue
-
-        word.append(char)
-        index += 1
-
-    flush()
+    for t in raw_tokens:
+        if t in (">", ">>", ">&", "<", "|", "&&", ";"):
+            tokens.append(("op", t))
+        else:
+            tokens.append(("word", t))
     return tokens
 
 
@@ -679,10 +680,22 @@ def main():
                 continue
 
             if not path_allowed(rel, touches):
+                # Re-check GitHub to verify if touches: declaration was widened
+                fresh_touches = touches_for(owner_root, owner_issue, force_refresh=True)
+                if fresh_touches is None:
+                    print(
+                        f"[aru] Could not re-read issue #{owner_issue} to verify widened touches; allowing.",
+                        file=sys.stderr,
+                    )
+                    continue
+                if not fresh_touches or path_allowed(rel, fresh_touches):
+                    touches_by_owner[owner_issue] = fresh_touches
+                    continue
+
                 return deny(
                     f"shell write to '{rel}' is outside issue "
                     f"#{owner_issue}'s declared touches.",
-                    f"Declared: {', '.join(touches)}\n"
+                    f"Declared: {', '.join(fresh_touches)}\n"
                     "Widen the declaration on the issue, or file a follow-up issue. "
                     "Do not expand your footprint silently.",
                 )
@@ -736,9 +749,27 @@ def main():
     if path_allowed(rel, touches):
         return EXIT_ALLOW
 
+    # The cached declaration refused the path. Re-query GitHub to check if touches: was widened.
+    fresh_touches = touches_for(owner_root, issue, force_refresh=True)
+    if fresh_touches is None:
+        print(
+            f"[aru] Could not re-read issue #{issue} to verify widened touches; allowing.",
+            file=sys.stderr,
+        )
+        return EXIT_ALLOW
+    if not fresh_touches:
+        print(
+            f"[aru] Issue #{issue} declares no touches; nothing to enforce.",
+            file=sys.stderr,
+        )
+        return EXIT_ALLOW
+
+    if path_allowed(rel, fresh_touches):
+        return EXIT_ALLOW
+
     return deny(
         f"write to '{rel}' is outside issue #{issue}'s declared touches.",
-        f"Declared: {', '.join(touches)}\n"
+        f"Declared: {', '.join(fresh_touches)}\n"
         "This declaration is what let the picker run your issue in parallel with "
         "other agents. Widen it on the issue, or file a follow-up issue and release "
         "your claim. Do not expand your footprint silently.",

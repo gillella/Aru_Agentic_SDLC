@@ -914,5 +914,89 @@ class WorktreeGovernanceTests(unittest.TestCase):
         )
 
 
+class CacheRecheckTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        et._run(["git", "init", "-b", "main"], cwd=self.root)
+        (self.root / "AGENTS.md").write_text("# Core Governance: The Issue-First Law\n", encoding="utf-8")
+        et._run(["git", "add", "."], cwd=self.root)
+        et._run(["git", "commit", "-m", "init"], cwd=self.root)
+
+        # Create worktree
+        self.wt = self.root / ".worktrees" / "feat-issue-73-test"
+        et._run(["git", "worktree", "add", "-b", "feat/issue-73-test", str(self.wt)], cwd=self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_cache_resolves_to_common_git_dir_from_worktree(self):
+        cache_path = et._cache_path(self.wt, 73)
+        self.assertIsNotNone(cache_path)
+        self.assertTrue(cache_path.endswith("aru-touches-73.json"))
+        # Must resolve to the main .git directory, not .worktrees/.../.git
+        self.assertIn(os.path.realpath(str(self.root / ".git")), os.path.realpath(cache_path))
+
+    def test_narrow_cache_rechecks_github_on_unallowed_path_and_allows_when_widened(self):
+        et._write_cache(self.wt, 73, ["app.py"])
+
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(self.wt / "extra.py")},
+            "cwd": str(self.wt),
+        }
+        real_run = et._run
+        def mock_run(cmd, cwd=None):
+            if cmd and cmd[0] == "gh":
+                return 0, "touches: app.py, extra.py"
+            return real_run(cmd, cwd=cwd)
+
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             patch.object(et, "_run", side_effect=mock_run):
+            res = et.main()
+        self.assertEqual(res, et.EXIT_ALLOW)
+        # Verify cache was updated
+        self.assertEqual(et._read_cache(self.wt, 73), ["app.py", "extra.py"])
+
+    def test_allowed_path_hits_cache_and_makes_no_github_call(self):
+        et._write_cache(self.wt, 73, ["app.py"])
+
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(self.wt / "app.py")},
+            "cwd": str(self.wt),
+        }
+        real_run = et._run
+        def mock_run(cmd, cwd=None):
+            if cmd and cmd[0] == "gh":
+                raise AssertionError("GitHub CLI should not be called on cached allow")
+            return real_run(cmd, cwd=cwd)
+
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             patch.object(et, "_run", side_effect=mock_run):
+            res = et.main()
+        self.assertEqual(res, et.EXIT_ALLOW)
+
+    def test_github_failure_on_recheck_fails_open(self):
+        et._write_cache(self.wt, 73, ["app.py"])
+
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(self.wt / "unregistered.py")},
+            "cwd": str(self.wt),
+        }
+        real_run = et._run
+        def mock_run(cmd, cwd=None):
+            if cmd and cmd[0] == "gh":
+                return 1, "API rate limit exceeded"
+            return real_run(cmd, cwd=cwd)
+
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             patch.object(et, "_run", side_effect=mock_run):
+            res = et.main()
+        self.assertEqual(res, et.EXIT_ALLOW)
+
+
 if __name__ == "__main__":
     unittest.main()
+
