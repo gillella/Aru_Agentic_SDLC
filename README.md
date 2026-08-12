@@ -49,12 +49,18 @@ Aru_Agentic_SDLC/
 ├── templates/cursor/                # Cursor User Rules, project rules, slash commands
 └── docs/
     ├── ARU-SOFTWARE-FACTORY.md      # The working build plan — start here
+    ├── AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md  # Industry research → factory strategy
+    ├── PROJECT-BOARD-FOR-AGENTIC-FACTORY.md        # GitHub vs Linear vs Jira for agents
     ├── cursor-integration.md        # Cross-project Cursor setup
     ├── project_board_workflow.md    # Board, dependencies, worktrees
     └── coding_standards.md          # Commit hygiene & testing standards
 ```
 
 **Where the project is going:** [`docs/ARU-SOFTWARE-FACTORY.md`](docs/ARU-SOFTWARE-FACTORY.md) is the working plan — what is settled, what is being corrected, and the sequenced roadmap from here to idea-to-deployment. Read it before proposing structural changes.
+
+**Strategy & industry research:** [`docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md) maps a classical idea→research→requirements→sprint SDLC onto an agentic software factory (harness engineering, Spec Kit, board-as-orchestrator) and positions Aru against that landscape.
+
+**Which project board?** [`docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md) compares GitHub Issues, Linear, Jira, Azure Boards, and others for agentic coding factories — and recommends keeping GitHub as Aru’s coordinator.
 
 ---
 
