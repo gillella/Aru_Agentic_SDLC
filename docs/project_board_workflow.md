@@ -95,7 +95,10 @@ Definition-of-Done checks pass, any factory agent, including the implementation
 author, may execute the mechanical merge only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Direct pushes and
 ad-hoc merge commands have no merge authority, and authors may never
-self-review.
+self-review. Human intervention is exceptional and applies only when a severe
+merge conflict or merge/close-out failure remains unsafe or impossible for
+agents to resolve through governed remediation; risk category, diff size, and
+review-round count alone never require human participation.
 
 ### Server-side protection of `main`
 
@@ -109,18 +112,17 @@ blocks documentation-only pushes; this was a skipped or uninstalled client
 hook, not a path-parser gap. No separate hook-fix issue was filed.
 
 `scripts/enable_main_ruleset.py` creates ruleset `aru-protect-main`: pull
-requests required, status check `Lint, Verify & Test` required, force-push and
-deletion blocked. **Required approving review is off** — GitHub will not let
-the fleet account approve its own PRs, so that rule would deadlock every
-fleet-authored PR until #123. **Required linear history is off** — it would
-forbid merge commits and fight #89.
+requests required, and the CI job name from `.github/workflows/ci.yml` as
+the required status check. Default enforcement is `evaluate` so a mismatched
+check name cannot lock `main`. `--disable` and `--delete` are the inverse.
+**Required approving review is off** — GitHub will not let the fleet account
+approve its own PRs, so that rule would deadlock every fleet-authored PR
+until #123. **Required linear history is off** — it would forbid merge
+commits and fight #89.
 
 On this private repository the Rulesets API currently returns HTTP 403
 (GitHub Pro or public visibility required). `--apply` exits 3 in that case.
-Live enable and the scratch-clone push test are #133. Human intervention is exceptional and applies only when a severe
-merge conflict or merge/close-out failure remains unsafe or impossible for
-agents to resolve through governed remediation; risk category, diff size, and
-review-round count alone never require human participation.
+Live `enforcement: active` and the scratch-clone push test are #133.
 
 ### Closing out a review finding
 
