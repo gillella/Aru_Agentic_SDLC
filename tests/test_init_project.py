@@ -410,6 +410,15 @@ class DogfoodCiParityTests(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertIn(job, playbook_ci)
 
+    def test_gitleaks_workflow_declares_pull_request_read(self):
+        """The action lists PR commits; missing this permission is a 403, not a leak."""
+        playbook_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        python_ci = render_ci_workflow("python", "pytest -q")
+        for ci in (playbook_ci, python_ci):
+            with self.subTest(ci_len=len(ci)):
+                self.assertIn("pull-requests: read", ci)
+                self.assertIn("contents: read", ci)
+
     def test_pip_audit_fails_on_a_known_vulnerable_pin(self):
         """AC: pip-audit must fail the build on a known vulnerability."""
         with tempfile.TemporaryDirectory() as temp_dir:

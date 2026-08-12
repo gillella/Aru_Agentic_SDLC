@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ main ]
 
+# gitleaks-action lists PR commits via the API; without pull-requests:read
+# it fails with "Resource not accessible by integration" before scanning.
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   # Three gates this playbook already ships to new projects via
   # scripts/init_project.py. Running them here closes the dogfooding gap

@@ -222,6 +222,12 @@ on:
   pull_request:
     branches: [main]
 
+# gitleaks-action lists PR commits via the API; without pull-requests:read
+# it fails with "Resource not accessible by integration" before scanning.
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
