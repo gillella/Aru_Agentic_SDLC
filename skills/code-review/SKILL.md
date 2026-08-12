@@ -31,6 +31,8 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Check for subtle bugs, logic flaws, race conditions, or unhandled edge cases.
 - Ensure public API signatures, schema types, and data models remain consistent.
 - Verify zero unused imports, dead code, or debug statements.
+- Apply the **narrower-than-reality** heuristic below to every new or changed gate,
+  scanner, matcher, or permission check in the diff.
 
 ### Step 4: Test Coverage & Verification
 - Verify that new feature logic or bug fixes are accompanied by unit/integration tests.
@@ -63,3 +65,60 @@ This skill defines the declarative code review procedure for evaluating Pull Req
   performs the merge and Done transition after independent review, green CI,
   resolved threads, and the remaining Definition-of-Done checks pass.
 - Remove temporary review worktree directory `.worktrees/review-pr-<PR_ID>`.
+
+---
+
+## Review Checklist
+
+Apply every item before submitting the review. A chat summary that skips this
+list is not review evidence.
+
+- [ ] Linked issue (`Closes #N`) is open; every acceptance criterion is met or
+      explicitly deferred with a follow-up issue (do not close incomplete work).
+- [ ] Diff matches the claim in the PR body **and** the gate/script's actual
+      behaviour (state machine, not narrative — see below).
+- [ ] **Narrower-than-reality:** for every gate/scanner/matcher in the diff,
+      answer: *What does the thing I am gating actually accept, and am I
+      narrower than it?*
+- [ ] Tests cover the new behaviour; local suite is green in the review worktree.
+- [ ] CI is green (or failures are classified and already under remediation).
+- [ ] No secrets, unsafe shell interpolation, or trust-boundary holes introduced.
+- [ ] Blocking findings are each an unresolved inline thread; non-blocking notes
+      stay in the review body.
+
+---
+
+## Narrower-Than-Reality Heuristic
+
+**Question to ask of every gate:**
+
+> What does the thing I am gating actually accept, and am I narrower than it?
+
+The enforcement layer's design is usually sound. What keeps breaking is the gap
+between what a check *believes* and what the system *actually does*. When the
+check is narrower, it either false-passes (misses the real write / real test /
+real label) or false-fails (blocks legitimate layouts the runner accepts).
+
+### Worked examples
+
+| Check | Narrower than | Failure shape |
+|---|---|---|
+| Redirect / write scan | Shell quoting and expansion rules | Misses quoted/redirected writes, or treats `$TMP/out` as a repo path |
+| Test-discovery glob | pytest's `python_files` defaults (`test_*.py` **and** `*_test.py`) | Fails projects whose suite the runner would collect |
+| Jest test glob | Jest's `testMatch` (incl. `__tests__/`) | Same false-positive against a passing suite |
+| Merge-gate label read | The labels the framework actually writes (`author:` / `reviewed-by:`) | Accepts the wrong stamp, or requires a stamp nothing applies |
+| `_git_write_to_protected` | Git's real pre-subcommand options (`-C`, `--git-dir`, `--work-tree`, quoting) | `git -C <main> commit` escapes; legitimate worktree commits get refused |
+
+Recent issues in this family: #69 (hook governed the shell's cwd, not the
+file), #73 (widening `touches:` had no effect until a cache expired), #76
+(redirect target starting with a variable read as a repo path), #117
+(protected-branch guard keyed to the shell's branch).
+
+### State machine, not narrative
+
+Standing lesson from the #24 / #25 near-miss: review the diff against the
+**gate's actual behaviour**, not against the claim in the PR body. Both halves
+of a two-state protocol (e.g. `reviewer:` claim vs `reviewed-by:` completion)
+must be checked against the state machine the merge helper reads. A PR that
+*says* it stamps completion while the script still accepts the transient claim
+label is a security hole dressed as a fix.
