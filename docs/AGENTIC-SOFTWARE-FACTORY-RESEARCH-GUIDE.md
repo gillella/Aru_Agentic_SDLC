@@ -8,8 +8,13 @@
 **Companion artifacts:**
 - Working build plan: [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md)
 - Board choice deep-dive: [`PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](PROJECT-BOARD-FOR-AGENTIC-FACTORY.md)
-- Interactive Cursor canvas: `agentic-software-factory-briefing.canvas.tsx` (open beside chat in Cursor)
+- Landscape and citations: [`AGENTIC-SOFTWARE-FACTORY-GUIDE.md`](AGENTIC-SOFTWARE-FACTORY-GUIDE.md)
 - Process baseline: [`PROCESS-AUDIT-2026-08.md`](PROCESS-AUDIT-2026-08.md)
+
+> **Scope note.** An interactive Cursor canvas briefing was planned for this
+> issue and is **not** part of this change. It is tracked separately rather than
+> referenced here, because a document that advertises an artifact which does not
+> exist is a defect in its own right.
 
 ---
 

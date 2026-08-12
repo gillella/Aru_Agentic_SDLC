@@ -49,6 +49,7 @@ Aru_Agentic_SDLC/
 ├── templates/cursor/                # Cursor User Rules, project rules, slash commands
 └── docs/
     ├── ARU-SOFTWARE-FACTORY.md      # The working build plan — start here
+    ├── AGENTIC-SOFTWARE-FACTORY-GUIDE.md           # Landscape, research citations
     ├── AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md  # Industry research → factory strategy
     ├── PROJECT-BOARD-FOR-AGENTIC-FACTORY.md        # GitHub vs Linear vs Jira for agents
     ├── cursor-integration.md        # Cross-project Cursor setup
@@ -61,6 +62,11 @@ Aru_Agentic_SDLC/
 **Strategy & industry research:** [`docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md) maps a classical idea→research→requirements→sprint SDLC onto an agentic software factory (harness engineering, Spec Kit, board-as-orchestrator) and positions Aru against that landscape.
 
 **Which project board?** [`docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md) compares GitHub Issues, Linear, Jira, Azure Boards, and others for agentic coding factories — and recommends keeping GitHub as Aru’s coordinator.
+
+> **Note on the research documents.** There are currently two overlapping
+> research guides alongside the build plan. `ARU-SOFTWARE-FACTORY.md` remains
+> authoritative for sequencing and non-goals; the research guides are evidence,
+> not plan. Consolidating them into one canonical source is tracked in #113.
 
 ---
 
