@@ -1036,6 +1036,223 @@ class CacheRecheckTests(unittest.TestCase):
         self.assertEqual(res, et.EXIT_ALLOW)
 
 
+class LeadingExpansionTests(unittest.TestCase):
+    """A redirect target beginning with an expansion is not a repo path (#76).
+
+    `echo x > $TMP/out.txt` was reported as a write to `<repo>/$TMP/out.txt`
+    and refused against `touches:`, even when `$TMP` points elsewhere. The
+    refusal named `touches:`, so the readings available to an agent were
+    "widen the declaration" or "this path is forbidden" - and widening a
+    declaration to include `$TMP` is nonsense.
+
+    Only the *leading* segment decides the root, so an expansion later in the
+    path stays repository-relative and governed.
+    """
+
+    def test_unresolvable_leading_expansion_has_no_knowable_destination(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(et._resolve_target("$TMP/out.txt"))
+
+    def test_the_exact_command_that_failed_is_resolvable_to_nothing(self):
+        # From the #76 report: TMP is assigned inside the command, so the hook
+        # cannot see it. Regression test for the original failure.
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(et._resolve_target("$TMP/x"))
+
+    def test_leading_expansion_that_resolves_is_judged_by_its_real_destination(self):
+        with patch.dict(os.environ, {"HOME": "/Users/someone"}, clear=True):
+            self.assertEqual(et._resolve_target("$HOME/out.txt"), "/Users/someone/out.txt")
+
+    def test_braced_expansion_resolves_too(self):
+        with patch.dict(os.environ, {"HOME": "/Users/someone"}, clear=True):
+            self.assertEqual(et._resolve_target("${HOME}/out.txt"), "/Users/someone/out.txt")
+
+    def test_resolvable_expansion_keeps_its_coverage(self):
+        # Coverage must not be silently lost: a variable naming a real in-repo
+        # path still resolves and stays governed.
+        with patch.dict(os.environ, {"ARU_SDLC_HOME": "/repo"}, clear=True):
+            self.assertEqual(et._resolve_target("$ARU_SDLC_HOME/AGENTS.md"), "/repo/AGENTS.md")
+
+    def test_expansion_after_the_first_segment_stays_repository_relative(self):
+        # `dir/` roots this in the repository regardless of what $name holds.
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(et._resolve_target("dir/$name.txt"), "dir/$name.txt")
+
+    def test_ordinary_relative_target_is_unchanged(self):
+        self.assertEqual(et._resolve_target("out.txt"), "out.txt")
+
+    def test_absolute_target_is_unchanged(self):
+        self.assertEqual(et._resolve_target("/tmp/out.txt"), "/tmp/out.txt")
+
+    def test_command_substitution_in_the_leading_segment_is_unknowable(self):
+        self.assertIsNone(et._resolve_target("$(mktemp -d)/out.txt"))
+
+    def test_bare_variable_with_no_separator_is_unknowable(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(et._resolve_target("$OUTFILE"))
+
+
+class GitCommandCheckoutTests(unittest.TestCase):
+    """A git write is judged by the checkout it targets, not the shell (#117).
+
+    #70 moved *path* governance onto the owning checkout, but a git
+    subcommand has no path operand, so `_git_write_to_protected` kept reading
+    the session's branch. Two failures followed, and the dangerous one is the
+    permission: from any issue worktree, `git -C <main> commit` and
+    `cd <main> && git commit` reached `main` with the guard never consulted.
+
+    Compounding it, the old pattern allowed only lowercase `-c <config>`
+    between `git` and the subcommand, so `-C <path>`, `--git-dir=` and
+    `--work-tree=` stopped the command being recognised as a commit at all.
+
+    Real worktrees, not patched helpers: the defect is in how git state is
+    resolved, so stubbing that resolution would assert nothing.
+    """
+
+    AGENTS_MD = "# AGENTS\n\n## Core Governance Directive: The Issue-First Law\n\nBody.\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+        cls.main_root = base / "repo"
+        cls.main_root.mkdir()
+
+        def git(*args, cwd):
+            subprocess.run(
+                ["git", *args], cwd=str(cwd), check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+        git("init", "-b", "main", cwd=cls.main_root)
+        git("config", "user.email", "t@example.com", cwd=cls.main_root)
+        git("config", "user.name", "t", cwd=cls.main_root)
+        (cls.main_root / "AGENTS.md").write_text(cls.AGENTS_MD, encoding="utf-8")
+        (cls.main_root / "app.py").write_text("x = 1\n", encoding="utf-8")
+        git("add", "-A", cwd=cls.main_root)
+        git("commit", "-m", "init", cwd=cls.main_root)
+
+        cls.wt = cls.main_root / ".worktrees" / "fix-issue-11"
+        git("worktree", "add", "-b", "fix/issue-11-a", str(cls.wt), cwd=cls.main_root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def violation(self, command, cwd):
+        return et._git_write_violation(command, str(cwd))
+
+    # --- unchanged behaviour ---------------------------------------------
+
+    def test_plain_commit_on_main_is_still_blocked(self):
+        self.assertIsNotNone(self.violation("git commit -m x", self.main_root))
+
+    def test_plain_commit_in_a_worktree_is_still_allowed(self):
+        self.assertIsNone(self.violation("git commit -m x", self.wt))
+
+    def test_unrelated_command_is_still_allowed(self):
+        self.assertIsNone(self.violation("pytest -q", self.main_root))
+
+    def test_explicit_push_to_main_from_a_worktree_is_still_blocked(self):
+        self.assertIsNotNone(self.violation("git push origin main", self.wt))
+
+    # --- the false permissions (shell in a worktree, target is main) ------
+
+    def test_dash_capital_c_commit_into_main_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(f"git -C {self.main_root} commit -m x", self.wt)
+        )
+
+    def test_dash_capital_c_push_into_main_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(f"git -C {self.main_root} push origin main", self.wt)
+        )
+
+    def test_git_dir_and_work_tree_commit_into_main_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"git --git-dir={self.main_root}/.git "
+                f"--work-tree={self.main_root} commit -m x",
+                self.wt,
+            )
+        )
+
+    def test_config_flag_before_capital_c_still_resolves(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"git -C {self.main_root} -c user.name=x commit -m x", self.wt
+            )
+        )
+
+    def test_cd_into_main_then_commit_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(f"cd {self.main_root} && git commit -m x", self.wt)
+        )
+
+    def test_cd_into_main_then_bare_push_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(f"cd {self.main_root}; git push", self.wt)
+        )
+
+    def test_subshell_cd_into_main_then_commit_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(f"(cd {self.main_root} && git commit -m x)", self.wt)
+        )
+
+    # --- the false refusal (shell on main, target is a worktree) ----------
+
+    def test_cd_into_worktree_then_commit_is_allowed(self):
+        """How this was found: committing under claim from a shell on main."""
+        self.assertIsNone(
+            self.violation(f"cd {self.wt} && git commit -m x", self.main_root)
+        )
+
+    def test_dash_capital_c_commit_in_a_worktree_is_allowed(self):
+        self.assertIsNone(
+            self.violation(f"git -C {self.wt} commit -m x", self.main_root)
+        )
+
+    # --- ordering: a cd after the git command must not retarget it --------
+
+    def test_cd_after_the_commit_does_not_excuse_it(self):
+        self.assertIsNotNone(
+            self.violation(f"git commit -m x; cd {self.wt}", self.main_root)
+        )
+
+    # --- fail closed on what cannot be resolved ---------------------------
+
+    def test_unresolvable_cd_target_before_a_commit_is_refused(self):
+        """Cannot prove it is safe, so refuse.
+
+        Enumerating shell constructs reproduces this defect in a new place;
+        the invariant is that an unprovable git write is refused. A refusal
+        costs one explicit command, a false permission costs an ungoverned
+        commit on `main`.
+        """
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNotNone(
+                self.violation("cd $SOMEWHERE && git commit -m x", self.wt)
+            )
+
+    def test_unresolvable_dash_capital_c_target_is_refused(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNotNone(
+                self.violation("git -C $SOMEWHERE commit -m x", self.wt)
+            )
+
+    def test_resolvable_cd_target_is_not_refused_for_being_a_variable(self):
+        with patch.dict(os.environ, {"WT": str(self.wt)}, clear=False):
+            self.assertIsNone(
+                self.violation("cd $WT && git commit -m x", self.main_root)
+            )
+
+    def test_unresolvable_target_without_a_git_write_is_ignored(self):
+        # Fail-closed applies to git writes only; ordinary commands are not
+        # this function's business.
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(self.violation("cd $SOMEWHERE && ls", self.wt))
+
+
 if __name__ == "__main__":
     unittest.main()
 

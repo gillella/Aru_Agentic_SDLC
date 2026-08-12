@@ -335,6 +335,9 @@ def _git_write_to_protected(command, branch):
     Deliberately narrow. The git pre-push hook is the real backstop for pushes;
     this catches the common case early and gives the model a useful message
     instead of an opaque git failure.
+
+    Judges `branch` as given. Callers must pass the branch of the checkout the
+    command actually acts on - see `_git_write_violation`, which resolves it.
     """
     if not command:
         return None
@@ -359,6 +362,126 @@ def _git_write_to_protected(command, branch):
     return None
 
 
+# Subcommands that write to a branch. Anything else git does is a read as far
+# as this guard is concerned.
+_GIT_WRITE_SUBCOMMANDS = frozenset({"commit", "push"})
+# Options git accepts *before* the subcommand that move where it acts. The
+# previous pattern allowed only lowercase `-c <config>`, so `git -C <path>
+# commit` did not read as a commit at all and skipped the guard entirely -
+# the check was narrower than what git accepts.
+_GIT_DIR_OPTS = frozenset({"-C", "--git-dir", "--work-tree"})
+_GIT_VALUE_OPTS = _GIT_DIR_OPTS | {"-c", "--namespace", "--exec-path"}
+
+
+def _resolve_dir(raw, base):
+    """A `cd`/`-C` operand as an absolute path, or None if unknowable."""
+    resolved = _resolve_target(raw)
+    if resolved is None:
+        return None
+    return os.path.normpath(os.path.join(base, resolved))
+
+
+def _git_write_violation(command, cwd):
+    """Whether `command` writes to a protected branch, in whatever checkout it
+    actually acts on.
+
+    #70 moved path governance onto the checkout that owns the file, but a git
+    subcommand has no path operand, so the protected-branch guard kept reading
+    the shell's branch. That failed in both directions: `cd <worktree> && git
+    commit` from a shell on `main` was refused, while `git -C <main> commit`
+    from a worktree was allowed - the guard never consulted, which is the gap
+    #29 closed reopened through a different door.
+
+    Resolution order mirrors the shell: a `cd` earlier in the command moves the
+    base directory, and `-C`/`--work-tree`/`--git-dir` on the invocation itself
+    override it. A `cd` *after* the git command cannot retarget it, which is
+    why word order is walked rather than the command being scanned as a bag of
+    tokens.
+
+    Fails **closed**. Shell parsing is not winnable by enumeration - `cd`,
+    `pushd`, subshells and variables all retarget a write - so when a git write
+    is present and its checkout cannot be determined, this refuses. A refusal
+    costs one explicit command; a false permission costs an ungoverned commit
+    on a protected branch.
+    """
+    tokens = _shell_tokens(command)
+    if not tokens:
+        return None  # Unlexable; matches this module's fail-open contract.
+    words = [text for kind, text in tokens if kind == "word"]
+
+    base = cwd
+    base_unknown = False
+    index = 0
+    while index < len(words):
+        word = words[index]
+
+        # `cd` with no operand returns home, which is never a checkout we can
+        # reason about; treat it as unknown rather than guessing.
+        if word in ("cd", "pushd"):
+            operand = words[index + 1] if index + 1 < len(words) else None
+            if operand is None or operand.startswith("-"):
+                base_unknown = True
+            else:
+                moved = _resolve_dir(operand, base)
+                if moved is None:
+                    base_unknown = True
+                else:
+                    base, base_unknown = moved, False
+            index += 2
+            continue
+
+        if word != "git":
+            index += 1
+            continue
+
+        # Walk git's pre-subcommand options to find both the subcommand and
+        # any option that moves where it acts.
+        target, unknown = base, base_unknown
+        index += 1
+        subcommand = None
+        while index < len(words):
+            token = words[index]
+            if not token.startswith("-"):
+                subcommand = token
+                index += 1
+                break
+            name, _, inline = token.partition("=")
+            if inline:
+                value = inline
+                index += 1
+            elif name in _GIT_VALUE_OPTS:
+                value = words[index + 1] if index + 1 < len(words) else None
+                index += 2
+            else:
+                index += 1
+                continue
+            if name in _GIT_DIR_OPTS and value is not None:
+                # --git-dir names the .git directory; the checkout is its parent.
+                candidate = value[:-len("/.git")] if name == "--git-dir" and value.endswith("/.git") else value
+                moved = _resolve_dir(candidate, base)
+                target, unknown = (base, True) if moved is None else (moved, False)
+
+        if subcommand not in _GIT_WRITE_SUBCOMMANDS:
+            continue
+
+        if unknown:
+            return (
+                f"run 'git {subcommand}' in a directory this hook cannot "
+                "resolve, so it cannot prove the target branch is unprotected"
+            )
+        violation = _git_write_to_protected(f"git {subcommand}", current_branch(target))
+        if violation:
+            return violation
+        # `git push origin main` names its ref explicitly and is refused from
+        # any branch, so the ref scan still runs against the full command.
+        remainder = " ".join(words[index:])
+        explicit = _git_write_to_protected(f"git push {remainder}", "") if subcommand == "push" else None
+        if explicit:
+            return explicit
+
+    return None
+
+
 # `>&` is ambiguous and cannot be classified without looking at its target:
 # `2>&1` and `>&-` rebind or close a descriptor and write nothing, but
 # `>&out.txt` creates or truncates a file exactly like `>`. Resolved in
@@ -377,6 +500,46 @@ _IS_DESCRIPTOR = re.compile(r"\A(?:\d+-?|-)\Z")
 # an expansion is unambiguously a file, and `echo hi > $HOME/out.txt` must
 # still be caught.
 _HAS_EXPANSION = re.compile(r"[$`]")
+# A whole leading segment that is exactly one variable, braced or not.
+_LEADING_VAR = re.compile(r"\A\$\{?(\w+)\}?\Z")
+
+
+def _resolve_target(target):
+    """A redirect target's real destination, or None when it is unknowable.
+
+    Only the **leading** segment decides which root a path belongs to, so it is
+    the only place an expansion changes the answer. `dir/$name.txt` is
+    repository-relative whatever `$name` holds and stays governed; `$TMP/out.txt`
+    could be anywhere.
+
+    Previously a leading expansion was read as a repository-relative path, so
+    `echo x > $TMP/out.txt` was reported as a write to `<repo>/$TMP/out.txt` and
+    refused against `touches:`. The refusal blamed a declaration for a path the
+    hook could not locate, and widening that declaration to cover `$TMP` would
+    have been meaningless.
+
+    The hook runs inside the agent's process tree, so resolving from the
+    environment is not guesswork: `$HOME` and `$ARU_SDLC_HOME` keep their
+    current coverage and are judged against their real destination. Only a
+    variable this process genuinely cannot see - one assigned inside the
+    command, or a command substitution - is unknowable, and that falls back to
+    the module's existing rule of allowing what it cannot prove.
+    """
+    if not target:
+        return target
+    head, slash, rest = target.partition("/")
+    if not _HAS_EXPANSION.search(head):
+        return target  # Ordinary relative or absolute path; unchanged.
+
+    match = _LEADING_VAR.match(head)
+    if not match:
+        # Command substitution, arithmetic, or a partially expanded segment.
+        # Out of scope by design; unknowable is the honest answer.
+        return None
+    value = os.environ.get(match.group(1))
+    if not value:
+        return None
+    return os.path.join(value, rest) if slash else value
 
 
 # A heredoc and its body: `<<EOF`, `<<'EOF'`, `<<-EOF`, terminated by a line
@@ -637,12 +800,17 @@ def main():
 
     if tool == "Bash":
         command = tool_input.get("command", "")
-        violation = _git_write_to_protected(command, branch)
+        # Judged by the checkout the command acts on, not the shell's. A `cd`
+        # or `-C` moves the write somewhere the session's branch says nothing
+        # about, in both the permissive and the restrictive direction.
+        violation = _git_write_violation(command, cwd)
         if violation:
             return deny(
                 f"attempted to {violation}.",
                 "Protected branches are merged through scripts/merge_pr.py, never "
-                "pushed to directly. Open a PR from your issue branch instead.",
+                "pushed to directly. Open a PR from your issue branch instead.\n"
+                "If the target directory is correct, name it literally "
+                "(git -C <path>) so the checkout can be resolved.",
             )
         targets = _redirect_targets(command)
         # A shell redirect can name a path in any checkout, so each target is
@@ -653,7 +821,13 @@ def main():
         # and `_norm` returned None. The equivalent Write was refused, so the
         # redirect became a way around the write path.
         touches_by_owner = {}
-        for target in targets:
+        for raw_target in targets:
+            # A leading expansion means the destination is not knowable, and a
+            # path the hook cannot locate must never be reported as a
+            # `touches:` violation - the declaration is not what is wrong.
+            target = _resolve_target(raw_target)
+            if target is None:
+                continue
             owned = owning_checkout(target, root, branch)
             if owned is None:
                 continue
