@@ -15,7 +15,8 @@ Aru_Agentic_SDLC governance:
    `$ARU_SDLC_HOME/skills/` (or the symlinked Cursor skill of the same name)
    and follow it before improvising.
 4. Default skill routing:
-   - continue / next issue / backlog → `implement-next-issue`
+   - please continue / continue / keep going / work the board → `run-aru-factory` (loop)
+   - implement next issue / a named issue → `implement-next-issue`
    - new governed repo → `init-agent-project`
    - file bug/feature/task → `create-github-issue`
    - review a PR → `code-review`

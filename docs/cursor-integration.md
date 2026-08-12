@@ -12,7 +12,7 @@ Running `scripts/install_cursor_integration.sh` configures the local machine:
 |---|---|---|
 | `ARU_SDLC_HOME` | shell profile (`~/.zshrc` / `~/.bashrc`) | Canonical path to this playbook |
 | Agent skills | `~/.cursor/skills/<skill>/` and `~/.agents/skills/<skill>/` | Symlinks so Cursor discovers SDLC skills in every workspace |
-| Slash commands | `~/.cursor/commands/*.md` | `/implement-next-issue`, `/init-agent-project`, etc. |
+| Slash commands | `~/.cursor/commands/*.md` | `/continue`, `/run-aru-factory`, `/implement-next-issue`, … |
 | User-rules paste file | `~/.cursor/user-rules-aru-agentic-sdlc.md` | Text to paste into **Customize → Rules → User Rules** |
 | Optional global rule file | `~/.cursor/rules/aru-agentic-sdlc.mdc` | Best-effort file-backed rule (User Rules UI is authoritative) |
 
@@ -28,7 +28,7 @@ export ARU_SDLC_HOME=/Users/aravindgillella/projects/Aru_Agentic_SDLC
 ```
 
 Then open a new Agent chat so skill discovery refreshes. In a governed
-project, say `implement next issue` or run `/implement-next-issue`.
+project, say `please continue` or run `/continue`.
 
 ### Finding User Rules in the UI (Cursor 3.x)
 
@@ -62,12 +62,17 @@ Cursor auto-discovers personal skills from `~/.cursor/skills/` (and, on this
 machine, `~/.agents/skills/`). The installer symlinks:
 
 - `aru-agentic-sdlc` (router)
+- `run-aru-factory` (please continue / work the board)
 - `implement-next-issue`
 - `init-agent-project`
 - `create-github-issue`
 - `code-review`
 - `remediate-ci-failure`
 - `address-pr-feedback`
+
+In a new chat, **please continue** (or `/continue`) is loop mode: recover from
+the board, then pick feedback → merge → review → issue. Do not route bare
+"continue" to `implement-next-issue`; that skips review and merge.
 
 Agents must **read** the matching `SKILL.md` before acting. Scripts are
 invoked as:

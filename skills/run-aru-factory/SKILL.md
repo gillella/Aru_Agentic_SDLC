@@ -1,7 +1,10 @@
 ---
 name: run-aru-factory
-description: Single entrypoint to the Aru_Agentic_SDLC factory for any local coding agent. Selects the right lifecycle skill and offers adopt, status, next, loop, and doctor modes. Use when the user says run the factory, work the project board, continue development, adopt this project, keep going on the backlog, what is the factory doing, or check the factory setup.
+description: Single entrypoint to the Aru_Agentic_SDLC factory for any local coding agent. Selects the right lifecycle skill and offers adopt, status, next, loop, and doctor modes. Use when the user says please continue, continue, keep going, run the factory, work the project board, continue development, adopt this project, keep going on the backlog, what is the factory doing, or check the factory setup.
 triggers:
+  - "please continue"
+  - "continue"
+  - "keep going"
   - "run the factory"
   - "work the project board"
   - "continue development"
@@ -50,10 +53,14 @@ without both flags is a bug**, not a shortcut.
 | `loop` | repeat `next` until a stop condition fires | `prompts/fleet-worker.md` |
 | `doctor` | check the local setup, read-only | see **doctor** below |
 
-Default to `next` **only** when the user named no mode and clearly wants work
-done. An unrecognised mode is an error — say so and list the five. Never
-silently fall through to `next`: guessing wrong starts real work the user did
-not ask for.
+`please continue`, `continue`, and `keep going` are **`loop`**, not `next`
+and not `implement-next-issue`. The board is the session store; the picker
+recovers in-flight work before anything new.
+
+Default to `next` **only** when the user named no mode and clearly wants one
+unit of work, then stop. An unrecognised mode is an error — say so and list
+the five. Never silently fall through to `next`: guessing wrong starts real
+work the user did not ask for.
 
 ### adopt
 
@@ -104,6 +111,16 @@ error strands the agent while the board still has work.
 `next`, repeated. The contract is
 `$ARU_SDLC_HOME/prompts/fleet-worker.md` — read it before the first
 iteration and follow it; the branch bodies and hard rules live there.
+
+Pace dynamically. After a unit, ask the picker again immediately if it would
+return work. If the blocker is CI or a peer review you must not perform,
+wait on that event with a long fallback heartbeat — do not poll on a fixed
+interval. Cursor sessions use the Cursor `loop` skill's Dynamic Schedule;
+do not copy that skill into this file.
+
+Ask the operator only as last resort: a product decision the issue does not
+settle, or a severe merge/close-out agents cannot remediate. Idle, waiting
+on review, and red CI in remediation are not that.
 
 Stop, write a final report, and end the session when:
 
