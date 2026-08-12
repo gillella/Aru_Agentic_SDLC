@@ -12,9 +12,9 @@
 - Process baseline: [`PROCESS-AUDIT-2026-08.md`](PROCESS-AUDIT-2026-08.md)
 
 > **Scope note.** An interactive briefing over this material is **not** part of
-> this change and is tracked in [#122](../../issues/122). It is referenced by
-> issue rather than by filename, because a document that advertises an artifact
-> which does not exist is a defect in its own right.
+> this change and is tracked in #122. It is referenced by issue rather than by
+> filename, because a document that advertises an artifact which does not exist
+> is a defect in its own right.
 >
 > The original plan named a Cursor-specific canvas. #122 reframes it
 > tool-neutrally: this repository commits to being vendor-neutral and
