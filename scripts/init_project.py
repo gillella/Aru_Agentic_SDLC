@@ -173,6 +173,47 @@ Board statuses, in order: `Backlog` → `Ready` → `In Progress` → `In Review
 Each is mirrored by a `status:*` label so the CLI and the board stay in sync.
 """
 
+# Markers every dogfooded / rendered Python CI must carry. Tests pin both
+# this repo's `.github/workflows/ci.yml` and `render_ci_workflow("python", …)`
+# against this list so the factory cannot silently drop a gate it ships.
+CI_GATE_MARKERS = (
+    "gitleaks/gitleaks-action",
+    "fetch-depth: 0",
+    "pip-audit",
+    "requirements-dev.txt",
+    "import-linter",
+    "lint-imports",
+)
+
+# Shared shell body for pip-audit. Kept as one string so the template and the
+# playbook's own workflow cannot drift on which manifests they audit.
+PYTHON_PIP_AUDIT_SCRIPT = """pip install pip-audit
+          audited=0
+          if [ -f requirements-dev.txt ]; then
+            pip-audit -r requirements-dev.txt
+            audited=1
+          fi
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+            audited=1
+          fi
+          if [ "$audited" -eq 0 ] && [ -f pyproject.toml ]; then
+            pip-audit
+            audited=1
+          fi
+          if [ "$audited" -eq 0 ]; then
+            echo "No dependency manifest yet; nothing to audit."
+          fi"""
+
+# Shared shell body for import-linter. A missing contracts file skips; a
+# present contracts file that fails must fail the build.
+PYTHON_IMPORT_LINTER_SCRIPT = """if [ -f .importlinter ] || grep -q "importlinter" pyproject.toml 2>/dev/null; then
+            pip install import-linter
+            lint-imports
+          else
+            echo "No import-linter contracts configured yet; skipping."
+          fi"""
+
 CI_WORKFLOW_HEADER = """name: CI
 
 on:
@@ -218,12 +259,7 @@ PYTHON_CI_STEPS = """
 
       - name: Enforce module boundaries
         run: |
-          if [ -f .importlinter ] || grep -q "importlinter" pyproject.toml 2>/dev/null; then
-            pip install import-linter
-            lint-imports
-          else
-            echo "No import-linter contracts configured yet; skipping."
-          fi
+          """ + PYTHON_IMPORT_LINTER_SCRIPT + """
 
       - name: Tests
         run: |
@@ -248,14 +284,7 @@ PYTHON_CI_STEPS = """
 
       - name: Dependency audit
         run: |
-          pip install pip-audit
-          if [ -f requirements.txt ]; then
-            pip-audit -r requirements.txt
-          elif [ -f pyproject.toml ]; then
-            pip-audit
-          else
-            echo "No dependency manifest yet; nothing to audit."
-          fi
+          """ + PYTHON_PIP_AUDIT_SCRIPT + """
 """
 
 NODE_CI_STEPS = """

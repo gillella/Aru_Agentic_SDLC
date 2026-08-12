@@ -7,12 +7,92 @@ on:
     branches: [ main ]
 
 jobs:
+  # Three gates this playbook already ships to new projects via
+  # scripts/init_project.py. Running them here closes the dogfooding gap
+  # described in docs/ARU-SOFTWARE-FACTORY.md §2.2 / issue #86. Each job
+  # fails the build on its own — none of these steps soft-fail.
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, not just the tip. The default depth-1
+          # checkout would hide a secret that was committed and then removed
+          # in a later commit - the exact case worth catching.
+          fetch-depth: 0
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Dependency audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+          audited=0
+          if [ -f requirements-dev.txt ]; then
+            pip-audit -r requirements-dev.txt
+            audited=1
+          fi
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+            audited=1
+          fi
+          if [ "$audited" -eq 0 ] && [ -f pyproject.toml ]; then
+            pip-audit
+            audited=1
+          fi
+          if [ "$audited" -eq 0 ]; then
+            echo "No dependency manifest yet; nothing to audit."
+          fi
+
+  import-boundaries:
+    name: Import Boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Enforce module boundaries
+        run: |
+          if [ -f .importlinter ] || grep -q "importlinter" pyproject.toml 2>/dev/null; then
+            pip install import-linter
+            lint-imports
+          else
+            echo "No import-linter contracts configured yet; skipping."
+          fi
+
   test-and-lint:
     name: Lint, Verify & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          # Match the secret-scan checkout so a shallow tip cannot hide
+          # history-dependent checks if more are added to this job later.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
