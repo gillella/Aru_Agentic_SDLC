@@ -8,6 +8,8 @@ severe merge or close-out failure.
 
 **Companion:** [`PROCESS-AUDIT-2026-08.md`](PROCESS-AUDIT-2026-08.md) — the baseline gap analysis.
 
+**Strategy briefing:** [`AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md) — industry research (OpenAI harness, BCG factory, Spec Kit, Mastra, CodeRabbit) mapped onto this build plan. Board choice: [`PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](PROJECT-BOARD-FOR-AGENTIC-FACTORY.md).
+
 ---
 
 ## 1. What is settled and must not be re-litigated
