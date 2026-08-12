@@ -33,6 +33,11 @@ while read -r _local_ref _local_sha remote_ref _remote_sha; do
       python3 "\$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> --title "..." --body "..."
       python3 "\$ARU_SDLC_HOME/scripts/merge_pr.py"  --pr <PR>
 
+  This hook is local and skippable (--no-verify, or a clone that never ran
+  install_hooks.sh). Server-side protection is scripts/enable_main_ruleset.py;
+  until GitHub Pro (or a public repo) unlocks rulesets, the server will not
+  refuse the push. See #88 / #133.
+
   If you are the merge tooling, set ARU_ALLOW_MAIN_PUSH=1 for that one command.
 
 EOF

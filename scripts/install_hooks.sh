@@ -102,3 +102,7 @@ echo "Verify:  $0 --check"
 echo "Note:    .claude/settings.json is committed on purpose - it is project"
 echo "         governance, not a personal preference. Do not move it to"
 echo "         settings.local.json."
+echo
+echo "Server:  this hook is skippable. Enable the GitHub ruleset with"
+echo "         python3 \"\$ARU_SDLC_HOME/scripts/enable_main_ruleset.py\" --apply"
+echo "         (exits 3 until GitHub Pro or a public repo unlocks rulesets; #133)."
