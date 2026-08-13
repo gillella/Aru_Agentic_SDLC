@@ -16,6 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "run-aru-factory" / "SKILL.md"
 ROUTER = ROOT / "skills" / "aru-agentic-sdlc" / "SKILL.md"
 FLEET_PROMPT = ROOT / "prompts" / "fleet-worker.md"
+DESKTOP_ADAPTERS = (
+    ROOT / "templates" / "integrations" / "codex" / "instructions.md",
+    ROOT / "templates" / "integrations" / "claude" / "CLAUDE.md",
+    ROOT / "templates" / "integrations" / "antigravity" / "AGENTS.md",
+    ROOT / "templates" / "cursor" / "commands" / "run-aru-factory.md",
+)
 
 MODES = ("adopt", "status", "next", "loop", "doctor")
 
@@ -108,25 +114,30 @@ class ModeTests(unittest.TestCase):
         self.assertIn("not yet diagnosable", text)
 
 
-class StopConditionTests(unittest.TestCase):
-    """The stop list is the loop's safety contract; it must not quietly shrink."""
+class ContinuityContractTests(unittest.TestCase):
+    """Recoverable states must not quietly become desktop-task exits."""
 
-    def test_every_required_stop_condition_is_present(self):
+    def test_only_operator_stop_or_human_intervention_ends_loop(self):
         text = flat(skill_text())
-        for condition in (
-            "idle",
-            "ambiguous",
-            "conflict",
-            "money semantics",
-            "exits `1`",
-            "3",
-            "third",
-        ):
-            self.assertIn(condition, text, f"stop condition missing: {condition}")
+        self.assertIn("only when the operator explicitly stops", text)
+        self.assertIn("human intervention", text)
 
-    def test_the_loop_stops_on_low_context(self):
+    def test_recoverable_states_do_not_end_the_desktop_loop(self):
+        text = flat(skill_text())
+        for condition in ("idle", "complete", "review/ci/dependency", "exits `1`"):
+            self.assertIn(condition, text, f"recoverable condition missing: {condition}")
+        self.assertIn("do not emit a final response", text)
+
+    def test_low_context_is_recovered_not_a_stop_condition(self):
         text = flat(skill_text())
         self.assertIn("context is running short", text)
+        self.assertIn("context compaction", text)
+
+    def test_desktop_task_is_not_replaced_by_a_cli_agent(self):
+        text = flat(skill_text())
+        self.assertIn("task the operator started owns the loop", text)
+        self.assertIn("optional headless cli mode", text)
+        self.assertIn("never use ui scripting", text)
 
 
 class IdentityTests(unittest.TestCase):
@@ -246,6 +257,12 @@ class WiringTests(unittest.TestCase):
         """
         text = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
         self.assertIn("authority on what the loop does", text)
+
+    def test_every_desktop_adapter_preserves_the_current_project_task(self):
+        for adapter in DESKTOP_ADAPTERS:
+            text = flat(adapter.read_text(encoding="utf-8"))
+            self.assertIn("desktop app", text, str(adapter))
+            self.assertIn("do not replace", text, str(adapter))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durable foreground worker for one Aru factory agent identity.
+"""Optional headless worker for one Aru factory CLI agent identity.
 
 The GitHub Project Board remains the queue.  This process only decides when to
 start the next finite local-agent session and when to wait.  A child session
@@ -7,7 +7,8 @@ claims and executes exactly one governed lifecycle unit through the existing
 skills and helpers; when that session exits, this process re-reads GitHub and
 starts with fresh context.
 
-Loop mode is intentionally operator-owned: idle, complete, blocked, GitHub
+This does not control or resume a desktop-app conversation. Loop mode is
+intentionally operator-owned: idle, complete, blocked, GitHub
 errors, child failures, and credit/rate-limit exhaustion all wait and retry.
 Only an explicit stop request or termination signal ends a healthy loop.
 """
@@ -534,7 +535,9 @@ def validate_repo(repo: Path) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run one durable Aru factory worker.")
+    parser = argparse.ArgumentParser(
+        description="Run one optional headless Aru factory CLI worker.",
+    )
     parser.add_argument("mode", choices=("once", "loop", "status", "stop"))
     parser.add_argument("--repo", default=".", help="Trusted isolated repository checkout")
     parser.add_argument("--aru-home", default=os.environ.get("ARU_SDLC_HOME", ""))

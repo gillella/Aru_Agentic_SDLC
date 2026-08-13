@@ -50,13 +50,14 @@ without both flags is a bug**, not a shortcut.
 | `adopt` | make an ungoverned repo governed, then start work | `init-agent-project` |
 | `status` | report factory state without changing anything | `scripts/fleet_status.py` |
 | `next` | do exactly one unit of work, then stop | picker + the matching skill |
-| `loop` | durable worker; only the operator stops it | `scripts/run_fleet.py` + `prompts/fleet-worker.md` |
+| `loop` | keep this desktop task working until stop/intervention | `prompts/fleet-worker.md` |
 | `doctor` | check the local setup, read-only | see **doctor** below |
 
 `please continue`, `continue`, and `keep going` are **`loop`**, not `next`
-and not `implement-next-issue`. Loop mode starts the durable foreground runner;
-the board is the session store and each finite child session recovers in-flight
-work before anything new.
+and not `implement-next-issue`. In Codex, Claude, Cursor, or Antigravity desktop,
+the task the operator started owns the loop. Do not replace it with a separately
+launched CLI agent. The board is the session store; recover in-flight work
+before anything new.
 
 Default to `next` **only** when the user named no mode and clearly wants one
 unit of work, then stop. An unrecognised mode is an error — say so and list
@@ -98,7 +99,7 @@ It returns one item and claims it. Follow the skill for its type:
 | `review` | `code-review` |
 | `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
-| `idle` | return idle to the durable runner; `next` mode stops |
+| `idle` | `next` stops; `loop` waits and asks again |
 
 The order is deliberate: unblocking work already in flight comes before
 starting anything new.
@@ -109,30 +110,25 @@ error strands the agent while the board still has work.
 
 ### loop
 
-Run the outer process from the agent's trusted isolated clone:
+Read `prompts/fleet-worker.md`, then run its loop **inside the current desktop
+task**. Pace dynamically: after progress, ask the picker again immediately;
+for unchanged, idle, Complete, review/CI/dependency wait, rate limit, exhausted
+credits, helper failure, or GitHub/network error, use the app's supported wait
+or background primitive with a long fallback heartbeat, not a fixed interval.
+Do not emit a final response for a recoverable state.
 
-```
-python3 "$ARU_SDLC_HOME/scripts/run_fleet.py" loop \
-  --repo . --agent <AGENT_ID> --family <FAMILY> --adapter <codex|claude>
-```
+Loop mode ends intentionally only when the operator explicitly stops it or a
+specific decision/approval needs human intervention. Ambiguous board identity,
+an unresolved `touches:` conflict, money semantics, security posture, or a
+hard rule can require that intervention; explain the exact decision needed.
+Routine helper exits `1` and repeated CI or review rounds do not end the loop.
+When context is running short, recover through the desktop product's context
+compaction and durable GitHub/worktree state, then continue.
 
-`run_fleet.py` owns liveness, retry, and termination. It checks the picker
-without claiming, spends agent credit only when work is eligible, and launches
-one finite child session using the contract in `prompts/fleet-worker.md`.
-Pace dynamically: progress runs again immediately; unchanged, idle, complete,
-blocked, credit-limited, CLI-failed, or GitHub-error state uses bounded backoff
-with jitter, not a fixed interval. Loop mode stays alive until `run_fleet.py
-stop --agent <AGENT_ID>` or a termination signal requests a drain-first stop.
-
-The following are **child-session return conditions**, not reasons for the
-outer worker to exit: picker `idle`; ambiguous board state; an unresolved
-dependency or `touches:` conflict; an unsettled product decision including
-money semantics or security posture; an automation failure or helper that
-exits `1`; CI red after **3** remediation rounds; a **third** review
-disagreement; a hard-rule boundary; or context is running short. The child
-records or reports the condition and exits, and the runner parks and retries
-from durable GitHub state. Only severe merge/close-out work that cannot be
-remediated is surfaced for operator action; it still does not kill the runner.
+`scripts/run_fleet.py` is an **optional headless CLI mode** for an operator who
+explicitly requests it. It starts new CLI sessions; it cannot resume or control
+the desktop conversation the operator selected. Never use UI scripting to
+click or type into a desktop coding application.
 
 ### doctor
 
