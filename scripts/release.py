@@ -34,13 +34,13 @@ def run_cmd(cmd, cwd=None):
 
 
 def validate_semver(tag: str) -> bool:
-    """Validate that tag follows vX.Y.Z SemVer format."""
-    return bool(re.match(r"^v\d+\.\d+\.\d+$", tag))
+    """Validate that tag follows vX.Y.Z SemVer format without leading zeros."""
+    return bool(re.fullmatch(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$", tag))
 
 
 def get_checkpoint_tags():
-    """Retrieve all ckpt/* tags and their annotation/subject messages."""
-    code, stdout, _ = run_cmd(["git", "tag", "-l", "ckpt/*", "--format=%(refname:short)|%(contents:subject)"])
+    """Retrieve all ckpt/* tags sorted by descending creation date."""
+    code, stdout, _ = run_cmd(["git", "tag", "-l", "ckpt/*", "--sort=-creatordate", "--format=%(refname:short)|%(contents:subject)"])
     if code != 0 or not stdout:
         return []
 
@@ -77,7 +77,7 @@ def generate_changelog_content() -> str:
     if not checkpoints:
         lines.append("No `ckpt/*` tags found.")
     else:
-        for ckpt in reversed(checkpoints):
+        for ckpt in checkpoints:
             lines.append(f"- **{ckpt['tag']}**: {ckpt['subject']}")
 
     lines.append("")
@@ -92,10 +92,27 @@ def write_changelog(dry_run: bool = False) -> str:
     return content
 
 
-def create_release_tag(tag: str, dry_run: bool = False) -> int:
+def get_latest_release_tag() -> str | None:
+    code, stdout, _ = run_cmd(["git", "tag", "-l", "v*", "--sort=-v:refname"])
+    if code != 0 or not stdout:
+        return None
+    tags = [t for t in stdout.splitlines() if validate_semver(t)]
+    return tags[0] if tags else None
+
+
+def create_release_tag(tag: str, dry_run: bool = False, breaking: bool = False) -> int:
     if not validate_semver(tag):
         print(f"error: '{tag}' is not a valid SemVer tag (must match vX.Y.Z).", file=sys.stderr)
         return 1
+
+    if breaking:
+        latest = get_latest_release_tag()
+        if latest:
+            current_major = int(latest[1:].split(".")[0])
+            new_major = int(tag[1:].split(".")[0])
+            if new_major <= current_major:
+                print(f"error: breaking consumed-CLI change requires a MAJOR version bump (> v{current_major}.x.x), got '{tag}'.", file=sys.stderr)
+                return 1
 
     cmd = ["git", "tag", "-a", tag, "-m", f"Release {tag}"]
     if dry_run:
@@ -115,14 +132,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="SemVer release & CHANGELOG generator for Aru_Agentic_SDLC")
     parser.add_argument("--generate-changelog", action="store_true", help="Generate CHANGELOG.md from checkpoint tags")
     parser.add_argument("--tag", type=str, help="Create an annotated SemVer release tag (e.g. v0.1.0)")
+    parser.add_argument("--breaking", action="store_true", help="Assert breaking consumed-CLI change requiring MAJOR version bump")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without modifying disk or git tags")
     parser.add_argument("--check", action="store_true", help="Check current version and release status")
 
     args = parser.parse_args(argv)
 
     if args.check:
-        code, stdout, _ = run_cmd(["git", "tag", "-l", "v*", "--sort=-v:refname"])
-        tags = stdout.splitlines() if stdout else []
+        code, stdout, stderr = run_cmd(["git", "tag", "-l", "v*", "--sort=-v:refname"])
+        if code != 0:
+            print(f"error: listing release tags failed: {stderr}", file=sys.stderr)
+            return 1
+        tags = [t for t in stdout.splitlines() if validate_semver(t)]
         print(f"Latest release tags: {tags[:5] if tags else 'None'}")
         return 0
 
@@ -135,13 +156,15 @@ def main(argv=None):
             print("✅ Updated CHANGELOG.md")
 
     if args.tag:
-        return create_release_tag(args.tag, dry_run=args.dry_run)
+        return create_release_tag(args.tag, dry_run=args.dry_run, breaking=args.breaking)
 
     if not (args.generate_changelog or args.tag or args.check):
         parser.print_help()
+        return 1
 
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
