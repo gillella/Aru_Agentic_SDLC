@@ -5,9 +5,8 @@ Required approving review and required linear history are deliberately
 absent. The former deadlocks a same-account fleet (#123 / S0.7a). The
 latter forbids merge commits and fights #89 / S1.1.
 
-Default enforcement is ``evaluate`` so a misnamed status check cannot
-lock the factory out. ``--enforcement active`` is #133. ``--disable`` and
-``--delete`` are the inverse of ``--apply``.
+Default enforcement is ``active`` so direct pushes to main are refused
+by the server (#133). ``--disable`` and ``--delete`` are the inverse of ``--apply``.
 
 A 403 from GitHub because the plan does not include rulesets is exit 3,
 not a silent success.
@@ -73,6 +72,7 @@ def ruleset_payload(enforcement: str = "evaluate") -> Dict[str, Any]:
                 "type": "required_status_checks",
                 "parameters": {
                     "strict_required_status_checks_policy": True,
+                    "do_not_enforce_on_create": False,
                     "required_status_checks": [
                         {"context": ci_context_from_workflow()}
                     ],
@@ -258,8 +258,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--enforcement",
         choices=("evaluate", "active", "disabled"),
-        default="evaluate",
-        help="evaluate is the default so a bad check name cannot lock main.",
+        default="active",
+        help="active is the default live enforcement for protecting main.",
     )
     args = parser.parse_args(argv)
     payload = ruleset_payload(args.enforcement)

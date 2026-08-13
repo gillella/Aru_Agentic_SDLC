@@ -113,16 +113,15 @@ hook, not a path-parser gap. No separate hook-fix issue was filed.
 
 `scripts/enable_main_ruleset.py` creates ruleset `aru-protect-main`: pull
 requests required, and the CI job name from `.github/workflows/ci.yml` as
-the required status check. Default enforcement is `evaluate` so a mismatched
-check name cannot lock `main`. `--disable` and `--delete` are the inverse.
+the required status check. Default enforcement is `active` (#133) so direct
+pushes to `main` are refused by GitHub. `--disable` and `--delete` are the inverse.
 **Required approving review is off** — GitHub will not let the fleet account
 approve its own PRs, so that rule would deadlock every fleet-authored PR
 until #123. **Required linear history is off** — it would forbid merge
 commits and fight #89.
 
-On this private repository the Rulesets API currently returns HTTP 403
-(GitHub Pro or public visibility required). `--apply` exits 3 in that case.
-Live `enforcement: active` and the scratch-clone push test are #133.
+On public repositories or GitHub Pro organizations, `--apply` exits 0 and
+activates the `aru-protect-main` ruleset. `--apply` exits 3 if GitHub returns HTTP 403.
 
 ### Closing out a review finding
 
