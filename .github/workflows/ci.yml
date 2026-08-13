@@ -5,14 +5,107 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # gitleaks-action scans the event commit range on push/pull_request.
+  # Full-history `gitleaks detect` runs only on schedule / workflow_dispatch.
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+# gitleaks-action lists PR commits via the API; without pull-requests:read
+# it fails with "Resource not accessible by integration" before scanning.
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
+  # Three gates this playbook already ships to new projects via
+  # scripts/init_project.py. Running them here closes the dogfooding gap
+  # described in docs/ARU-SOFTWARE-FACTORY.md §2.2 / issue #86. Each job
+  # fails the build on its own — none of these steps soft-fail.
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 is required so a PR-range scan can resolve base^..head.
+          # push/pull_request: the action scans that event's commits, not the
+          # whole repo. schedule/workflow_dispatch: full-history detect.
+          fetch-depth: 0
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Dependency audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+          audited=0
+          for req in requirements-dev.txt requirements.txt; do
+            if [ -f "$req" ]; then
+              pip-audit -r "$req"
+              audited=1
+            fi
+          done
+          if [ -f pyproject.toml ]; then
+            if grep -q '^\[project\]' pyproject.toml; then
+              pip-audit -r pyproject.toml
+            else
+              echo "pyproject.toml has no [project] table; skipping project-file audit."
+            fi
+            audited=1
+          fi
+          if [ "$audited" -eq 0 ]; then
+            echo "No dependency manifest yet; nothing to audit."
+          fi
+
+  import-boundaries:
+    name: Import Boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Enforce module boundaries
+        run: |
+          if [ -f .importlinter ] || grep -q "importlinter" pyproject.toml 2>/dev/null; then
+            pip install import-linter
+            lint-imports
+          else
+            echo "No import-linter contracts configured yet; skipping."
+          fi
+
   test-and-lint:
     name: Lint, Verify & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          # Match the secret-scan checkout so a shallow tip cannot hide
+          # history-dependent checks if more are added to this job later.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5

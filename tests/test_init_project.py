@@ -17,6 +17,7 @@ except ImportError:
 
 import init_project  # noqa: E402
 from init_project import (  # noqa: E402
+    CI_GATE_MARKERS,
     render_ci_workflow,
     render_gitignore,
     write_templates,
@@ -281,8 +282,16 @@ class CiGateTests(unittest.TestCase):
             with self.subTest(stack=stack):
                 ci = render_ci_workflow(stack, runner)
                 self.assertIn("gitleaks/gitleaks-action", ci)
-                # depth-1 would hide a secret added then removed later.
                 self.assertIn("fetch-depth: 0", ci)
+                self.assertIn("schedule:", ci)
+                self.assertIn("workflow_dispatch:", ci)
+
+    def test_pip_audit_covers_pyproject_even_when_requirements_exist(self):
+        from init_project import PYTHON_PIP_AUDIT_SCRIPT
+        self.assertIn("pip-audit -r pyproject.toml", PYTHON_PIP_AUDIT_SCRIPT)
+        self.assertNotIn("audited\" -eq 0 ] && [ -f pyproject.toml ]", PYTHON_PIP_AUDIT_SCRIPT)
+        playbook = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn("pip-audit -r pyproject.toml", playbook)
 
     def test_every_stack_audits_dependencies(self):
         expected = {"python": "pip-audit", "node": "npm audit", "go": "govulncheck"}
@@ -372,6 +381,156 @@ class CursorProjectRuleTests(unittest.TestCase):
             rule = Path(target) / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
             self.assertTrue(rule.is_file())
             self.assertIn("Issue-First Law", rule.read_text())
+
+
+class DogfoodCiParityTests(unittest.TestCase):
+    """This playbook must run the gates it ships to new projects (#86).
+
+    A template that audits deps / scans secrets while the factory itself
+    skips them is the dogfooding gap named in ARU-SOFTWARE-FACTORY.md §2.2.
+    """
+
+    def test_python_template_carries_every_shared_gate_marker(self):
+        python_ci = render_ci_workflow("python", "pytest -q")
+        for marker in CI_GATE_MARKERS:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, python_ci)
+
+    def test_playbook_ci_is_a_superset_of_python_template_gates(self):
+        playbook_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        python_ci = render_ci_workflow("python", "pytest -q")
+        for marker in CI_GATE_MARKERS:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, python_ci)
+                self.assertIn(marker, playbook_ci)
+
+    def test_playbook_ci_gates_do_not_mask_failures(self):
+        playbook_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        # Softened forms that turn a red gate green. Match YAML keys / shell
+        # idioms, not the words appearing in a comment that forbids them.
+        self.assertNotRegex(playbook_ci, r"(?m)^\s*continue-on-error\s*:")
+        self.assertNotIn("|| true", playbook_ci)
+        self.assertNotIn("|| echo", playbook_ci)
+
+    def test_playbook_ci_names_the_three_dogfood_jobs(self):
+        playbook_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        for job in ("secret-scan:", "dependency-audit:", "import-boundaries:"):
+            with self.subTest(job=job):
+                self.assertIn(job, playbook_ci)
+
+    def test_gitleaks_workflow_declares_pull_request_read(self):
+        """The action lists PR commits; missing this permission is a 403, not a leak."""
+        playbook_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        python_ci = render_ci_workflow("python", "pytest -q")
+        for ci in (playbook_ci, python_ci):
+            with self.subTest(ci_len=len(ci)):
+                self.assertIn("pull-requests: read", ci)
+                self.assertIn("contents: read", ci)
+
+    def test_pip_audit_fails_on_a_known_vulnerable_pin(self):
+        """AC: pip-audit must fail the build on a known vulnerability."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            venv = root / "venv"
+            created = subprocess.run(
+                [sys.executable, "-m", "venv", str(venv)],
+                capture_output=True, text=True, check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest(f"could not create venv: {created.stderr}")
+            python = venv / ("Scripts/python" if sys.platform == "win32" else "bin/python")
+            install = subprocess.run(
+                [str(python), "-m", "pip", "install", "-q", "pip-audit"],
+                capture_output=True, text=True, check=False,
+            )
+            if install.returncode != 0:
+                self.skipTest(f"could not install pip-audit: {install.stderr}")
+            req = root / "requirements.txt"
+            req.write_text("jinja2==2.4.1\n")
+            audited = subprocess.run(
+                [str(python), "-m", "pip_audit", "-r", str(req)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(
+                audited.returncode, 0,
+                "pip-audit must fail on jinja2==2.4.1; "
+                f"stdout={audited.stdout!r} stderr={audited.stderr!r}",
+            )
+
+    def test_gitleaks_refuses_a_planted_dummy_secret(self):
+        """AC: a tree containing a planted dummy secret must fail the scan.
+
+        Downloads a pinned gitleaks release into a temp dir so the proof never
+        commits a secret into this repository's history and does not depend on
+        a host-installed binary or Docker.
+        """
+        import platform
+        import tarfile
+        import urllib.request
+
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+        if system == "linux" and machine in {"x86_64", "amd64"}:
+            asset = "gitleaks_8.21.2_linux_x64.tar.gz"
+        elif system == "linux" and machine in {"aarch64", "arm64"}:
+            asset = "gitleaks_8.21.2_linux_arm64.tar.gz"
+        elif system == "darwin" and machine == "arm64":
+            asset = "gitleaks_8.21.2_darwin_arm64.tar.gz"
+        elif system == "darwin" and machine == "x86_64":
+            asset = "gitleaks_8.21.2_darwin_x64.tar.gz"
+        else:
+            self.skipTest(f"no pinned gitleaks asset for {system}/{machine}")
+
+        url = (
+            "https://github.com/gitleaks/gitleaks/releases/download/"
+            f"v8.21.2/{asset}"
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tools = Path(temp_dir) / "tools"
+            tools.mkdir()
+            archive = tools / asset
+            try:
+                urllib.request.urlretrieve(url, archive)
+            except Exception as exc:  # noqa: BLE001 — network is optional in offline runs
+                self.skipTest(f"could not download gitleaks: {exc}")
+
+            with tarfile.open(archive, "r:gz") as tar:
+                tar.extractall(tools)
+            gitleaks = tools / "gitleaks"
+            self.assertTrue(gitleaks.is_file(), f"gitleaks missing from {asset}")
+            gitleaks.chmod(0o755)
+
+            repo = Path(temp_dir) / "repo"
+            repo.mkdir()
+            # Synthetic GitHub PAT shape. Official AWS *EXAMPLE* material is
+            # allowlisted by modern gitleaks and would false-pass this proof.
+            (repo / "leak.txt").write_text(
+                "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD\n"
+            )
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "add", "leak.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+                    "commit", "-m", "plant",
+                ],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            scanned = subprocess.run(
+                [str(gitleaks), "detect", f"--source={repo}", "--no-banner"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(
+                scanned.returncode,
+                0,
+                "gitleaks must fail on a planted AWS example key; "
+                f"stdout={scanned.stdout!r} stderr={scanned.stderr!r}",
+            )
 
 
 if __name__ == "__main__":
