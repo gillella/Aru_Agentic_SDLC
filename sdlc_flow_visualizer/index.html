@@ -247,8 +247,8 @@
 
   <!-- Detail Inspector Drawer / Modal -->
   <div class="drawer-overlay" id="drawer-overlay"></div>
-  <aside class="detail-drawer" id="detail-drawer" aria-label="Component Inspection Details" aria-hidden="true">
-    <button class="close-drawer" id="close-drawer-btn">&times;</button>
+  <aside class="detail-drawer" id="detail-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" aria-hidden="true">
+    <button class="close-drawer" id="close-drawer-btn" aria-label="Close component details">&times;</button>
     <div class="drawer-header">
       <div class="drawer-tag" id="drawer-tag">Mechanism</div>
       <h2 class="drawer-title" id="drawer-title">Component Name</h2>

@@ -29,8 +29,8 @@
   --amber-warning: hsl(38, 92%, 50%);
 
   /* Typography */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: -apple-system, blinkmacsystemfont, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, sfmono-regular, menlo, consolas, monospace;
 
   /* Shadows & Depth */
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
@@ -375,10 +375,10 @@ body {
 .flow-card.simulating-active {
   border-color: var(--green-success);
   box-shadow: 0 0 20px hsla(154, 75%, 48%, 0.3);
-  animation: pulseNode 1.5s infinite alternate;
+  animation: pulse-node 1.5s infinite alternate;
 }
 
-@keyframes pulseNode {
+@keyframes pulse-node {
   0% { transform: scale(1); }
   100% { transform: scale(1.02); }
 }

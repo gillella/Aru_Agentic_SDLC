@@ -278,6 +278,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const modeButtons = document.querySelectorAll('.mode-btn');
   const simBtn = document.getElementById('sim-toggle-btn');
   const simBtnText = document.getElementById('sim-btn-text');
+  const backgroundRegions = document.querySelectorAll('.app-header, .toolbar, .pipeline-container, .app-footer');
 
   let simRunning = false;
   let simInterval = null;
@@ -315,6 +316,7 @@ document.addEventListener('DOMContentLoaded', () => {
     drawer.classList.add('open');
     overlay.classList.add('open');
     drawer.setAttribute('aria-hidden', 'false');
+    backgroundRegions.forEach(region => { region.inert = true; });
     closeBtn.focus();
   }
 
@@ -322,6 +324,7 @@ document.addEventListener('DOMContentLoaded', () => {
     drawer.classList.remove('open');
     overlay.classList.remove('open');
     drawer.setAttribute('aria-hidden', 'true');
+    backgroundRegions.forEach(region => { region.inert = false; });
     cards.forEach(c => c.classList.remove('active-inspect'));
     if (lastActiveCard) lastActiveCard.focus();
   }
@@ -347,6 +350,20 @@ document.addEventListener('DOMContentLoaded', () => {
   overlay.addEventListener('click', closeDrawer);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && drawer.classList.contains('open')) closeDrawer();
+    if (event.key === 'Tab' && drawer.classList.contains('open')) {
+      const focusable = [...drawer.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+        .filter(element => !element.disabled);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
   });
 
   // 2. Search & Filter Logic
