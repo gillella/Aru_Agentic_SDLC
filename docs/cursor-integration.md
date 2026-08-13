@@ -30,6 +30,16 @@ export ARU_SDLC_HOME=/Users/aravindgillella/projects/Aru_Agentic_SDLC
 Then open a new Agent chat so skill discovery refreshes. In a governed
 project, say `implement next issue` or run `/implement-next-issue`.
 
+### GitHub access: `gh`, not MCP
+
+Authenticate GitHub with the `gh` CLI (`gh auth status`). Factory helpers
+under `$ARU_SDLC_HOME/scripts/` call that `gh`. **Do not use GitHub MCP** for
+claims, PRs, board status, reviews, or merges — it is a second credential
+store and bypasses author/reviewer stamps and the merge gate. MCP GitHub is
+optional and non-authoritative. Do not copy a PAT into MCP. Direct `gh` is
+allowed only when no helper exists (`gh issue comment` for implementation
+plans).
+
 ### Finding User Rules in the UI (Cursor 3.x)
 
 The label moves between builds. Try these in order:
