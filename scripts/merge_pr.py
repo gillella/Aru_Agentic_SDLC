@@ -34,6 +34,10 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_BLOCKED = 3
 
+# Namespace for merge checkpoints. The merge boundary is the meaningful
+# rollback target; per-commit tagging was rejected as noise (#80).
+CHECKPOINT_PREFIX = "ckpt/"
+
 # Completed-review attribution, written by claim_issue.py --complete-review.
 # This is the only label that satisfies the gate.
 REVIEWED_BY_LABEL = "reviewed-by:"
@@ -1066,6 +1070,111 @@ def heads_match(live_sha, expected_sha):
     return bool(live_sha) and bool(expected_sha) and live_sha == expected_sha
 
 
+def checkpoint_tag_name(pr_num, merged_sha):
+    """Names the checkpoint after the merge commit it marks.
+
+    Deriving the name from the merged SHA rather than a counter is what makes a
+    resumed close-out idempotent: the same merge always computes the same name,
+    so the existence check in ``write_checkpoint_tag`` recognises its own
+    earlier work instead of minting a second checkpoint for one merge.
+    """
+    if not merged_sha or merged_sha == "unknown":
+        return ""
+    return f"{CHECKPOINT_PREFIX}{pr_num}-{merged_sha[:7]}"
+
+
+def checkpoint_message(pr, issue_nums, gates, gated_head, merged_sha):
+    """Builds the annotated tag body: what landed, who touched it, what was checked."""
+    issues = ", ".join(f"#{n}" for n in issue_nums) or "none"
+    authors = ", ".join(label_values(pr, "author:")) or "unknown"
+    reviewers = ", ".join(label_values(pr, "reviewed-by:")) or "none recorded"
+    lines = [
+        f"checkpoint: PR #{pr.get('number')} — {pr.get('title') or ''}".rstrip(" —"),
+        "",
+        f"issues:      {issues}",
+        f"author:      {authors}",
+        f"reviewed-by: {reviewers}",
+        f"gated head:  {gated_head}",
+        f"merged as:   {merged_sha}",
+        "",
+        "gate verdicts:",
+    ]
+    if gates is None:
+        # The resume path never evaluates the gates, and re-deriving them now
+        # would be actively false: check_open fails on an already-closed PR, so
+        # a re-derived block would record failures that never happened. A
+        # checkpoint that admits the gap beats one that lies about it.
+        lines.append(
+            "  not reproducible — written by a resumed close-out; the gates "
+            "were evaluated by the original invocation."
+        )
+    else:
+        lines.extend(
+            f"  {'✅' if passed else '❌'} {name}: {detail}"
+            for name, passed, detail in gates
+        )
+    return "\n".join(lines) + "\n"
+
+
+def write_checkpoint_tag(repo_root, pr, issue_nums, gates, gated_head, merged_sha):
+    """Writes the annotated checkpoint tag. Returns ``(ok, message)``; never raises.
+
+    Call this only after close-out succeeds, so a checkpoint can never claim a
+    success that did not happen. Every failure is reported and swallowed: an
+    already-merged, already-closed-out PR must not be failed retroactively
+    because a tag write did not land, matching the close-out behaviour in #41.
+    """
+    name = checkpoint_tag_name(pr.get("number"), merged_sha)
+    if not name:
+        return False, "No merge commit SHA; no checkpoint written."
+    try:
+        code, _, _ = run_cmd(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{name}"],
+            check=False, cwd=repo_root,
+        )
+        if code == 0:
+            # Never -f. An existing checkpoint is history; moving it would
+            # destroy the very record this tag exists to preserve.
+            return True, f"Checkpoint {name} already recorded; left untouched."
+
+        # The merge commit is created server-side, so this clone may not hold it
+        # yet. Fetch first, and say so plainly if it still never arrives.
+        run_cmd(["git", "fetch", "--quiet", "origin"], check=False, cwd=repo_root)
+        code, _, _ = run_cmd(
+            ["git", "cat-file", "-e", f"{merged_sha}^{{commit}}"],
+            check=False, cwd=repo_root,
+        )
+        if code != 0:
+            return False, (
+                f"Merge commit {merged_sha} is not present locally; "
+                f"checkpoint {name} not written."
+            )
+
+        message = checkpoint_message(pr, issue_nums, gates, gated_head, merged_sha)
+        code, _, err = run_cmd(
+            ["git", "tag", "-a", name, merged_sha, "-m", message],
+            check=False, cwd=repo_root,
+        )
+        if code != 0:
+            return False, f"Could not write checkpoint {name}: {err or 'git tag failed'}"
+
+        # A checkpoint only reachable on the machine that ran the merge is not a
+        # rollback grid, so push it — but a merge already landed, so a failed
+        # push is reported rather than treated as an error.
+        code, _, err = run_cmd(
+            ["git", "push", "--quiet", "origin", f"refs/tags/{name}"],
+            check=False, cwd=repo_root,
+        )
+        if code != 0:
+            return True, (
+                f"Checkpoint {name} written locally; push failed "
+                f"({err or 'unknown'}). Push it to publish the rollback point."
+            )
+        return True, f"Checkpoint {name} written and pushed."
+    except Exception as exc:  # A tag must never take down a completed merge.
+        return False, f"Unexpected checkpoint error: {exc}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Merge a PR only if the Definition of Done is met.")
     parser.add_argument("--pr", type=int, required=True, help="Pull request number")
@@ -1089,6 +1198,9 @@ def main():
         return EXIT_ERROR
 
     gated_head = pr.get("headRefOid") or "unknown"
+    # Stays None on the resume path, where no gate is evaluated. The checkpoint
+    # records that gap rather than inventing a verdict set.
+    gates = None
     if args.expected_head and not is_merged(pr):
         if not heads_match(gated_head, args.expected_head):
             print(
@@ -1169,6 +1281,15 @@ def main():
     if not closeout_ok or not audit_ok:
         print("\n❌ Merge is complete, but close-out is incomplete. Re-run this command to resume.")
         return EXIT_ERROR
+
+    # Only here: after close-out succeeded, so no checkpoint can ever claim a
+    # success that did not happen. A failed write is a warning, not a failure —
+    # the merge is already complete and must not be reported as broken.
+    tag_ok, tag_message = write_checkpoint_tag(
+        root, final_pr, issue_nums, gates, gated_head, merged_sha
+    )
+    print(f"  {'✅' if tag_ok else '⚠️ '} {'checkpoint':<18} {tag_message}")
+
     print("\n✅ Merge and every close-out step completed.")
     return EXIT_OK
 
