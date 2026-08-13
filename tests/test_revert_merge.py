@@ -44,6 +44,17 @@ class TestRevertMerge(unittest.TestCase):
         sha = revert_merge.get_merge_commit_sha(pr_data)
         self.assertEqual(sha, "abc1234567890def")
 
+    @patch("revert_merge.run_cmd")
+    def test_get_merge_commit_sha_multiple_tags_ambiguous(self, mock_run_cmd):
+        pr_data = {"number": 10, "mergeCommit": None}
+        mock_run_cmd.return_value = (0, "ckpt/10-abc1234\nckpt/10-def5678\n", "")
+        sha = revert_merge.get_merge_commit_sha(pr_data)
+        self.assertIsNone(sha)
+
+    def test_revert_without_agent_fails(self):
+        res = revert_merge.revert_merge_pr(15, agent="")
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
     @patch("revert_merge.fetch_pr_details")
     def test_revert_unmerged_pr_fails(self, mock_fetch):
         mock_fetch.return_value = {
@@ -51,7 +62,7 @@ class TestRevertMerge(unittest.TestCase):
             "state": "OPEN",
             "mergedAt": None,
         }
-        res = revert_merge.revert_merge_pr(15)
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1")
         self.assertEqual(res, revert_merge.EXIT_ERROR)
 
     @patch("revert_merge.fetch_pr_details")
@@ -60,81 +71,99 @@ class TestRevertMerge(unittest.TestCase):
             "number": 15,
             "title": "fix something",
             "body": "Closes #12",
+            "baseRefName": "main",
             "state": "MERGED",
             "mergedAt": "2026-08-13T00:00:00Z",
             "mergeCommit": {"oid": "sha1234567"},
         }
-        res = revert_merge.revert_merge_pr(15, dry_run=True)
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", dry_run=True)
         self.assertEqual(res, revert_merge.EXIT_OK)
 
     @patch("revert_merge.update_status")
     @patch("revert_merge.enqueue_review")
-    @patch("revert_merge.apply_identity")
-    @patch("revert_merge.create_worktree")
+    @patch("revert_merge.apply_identity", return_value=True)
     @patch("revert_merge.is_merge_commit", return_value=True)
     @patch("revert_merge.run_cmd")
     @patch("revert_merge.fetch_pr_details")
     def test_revert_clean_success(
-        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_worktree, mock_identity, mock_enqueue, mock_update_status
+        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status
     ):
         mock_fetch.return_value = {
             "number": 20,
             "title": "feat: add feature",
             "body": "Closes #30",
+            "baseRefName": "main",
             "state": "MERGED",
             "mergedAt": "2026-08-13T00:00:00Z",
             "mergeCommit": {"oid": "mergecommitsha123"},
         }
-        mock_worktree.return_value = ".worktrees/revert-pr-20-feat-add-feature"
 
-        # Mock run_cmd results:
-        # 1. git revert -m 1 -> success
-        # 2. git push -> success
-        # 3. gh pr create -> success
-        # 4. gh issue comment -> success
+        # Mock run_cmd calls:
+        # 1. git fetch origin main -> ok
+        # 2. git worktree add -> ok
+        # 3. git revert -m 1 -> ok
+        # 4. git push -> ok
+        # 5. gh pr create -> ok (returns PR url)
+        # 6. gh issue reopen 30 -> ok
+        # 7. gh issue comment 30 -> ok
         mock_run_cmd.side_effect = [
+            (0, "", ""),  # git fetch
+            (0, "", ""),  # git worktree add
             (0, "", ""),  # git revert -m 1
             (0, "", ""),  # git push
             (0, "https://github.com/gillella/Aru_Agentic_SDLC/pull/99", ""),  # gh pr create
+            (0, "", ""),  # gh issue reopen
             (0, "", ""),  # gh issue comment
         ]
+        mock_update_status.return_value = True
 
         res = revert_merge.revert_merge_pr(20, agent="gemini-1", family="google")
         self.assertEqual(res, revert_merge.EXIT_OK)
-        mock_update_status.assert_called_once_with(30, "Ready")
+        mock_update_status.assert_called_once_with(30, "Ready", require_board=True)
         mock_identity.assert_called_once_with("99", agent="gemini-1", family="google")
 
-    @patch("revert_merge.create_worktree")
+    @patch("revert_merge.get_unmerged_files", return_value=["file1.py", "file2.py"])
     @patch("revert_merge.is_merge_commit", return_value=True)
     @patch("revert_merge.run_cmd")
     @patch("revert_merge.fetch_pr_details")
     def test_revert_conflict_failure(
-        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_worktree
+        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_unmerged
     ):
         mock_fetch.return_value = {
             "number": 25,
             "title": "breaking change",
             "body": "Closes #40",
+            "baseRefName": "develop",
             "state": "MERGED",
             "mergedAt": "2026-08-13T00:00:00Z",
             "mergeCommit": {"oid": "mergecommitsha456"},
         }
-        mock_worktree.return_value = ".worktrees/revert-pr-25-breaking-change"
 
-        # Mock run_cmd results:
-        # 1. git revert -m 1 -> fail (code 1)
-        # 2. git status --porcelain -> conflicts
-        # 3. git revert --abort -> success
-        # 4. git worktree remove -> success
+        # Mock run_cmd calls:
+        # 1. git fetch origin develop -> ok
+        # 2. git worktree add -> ok
+        # 3. git revert -m 1 -> fail (code 1)
+        # 4. git revert --abort -> ok
+        # 5. git worktree remove -> ok
         mock_run_cmd.side_effect = [
+            (0, "", ""),  # git fetch
+            (0, "", ""),  # git worktree add
             (1, "", "conflict error"),  # git revert
-            (0, "UU file1.py\nUU file2.py", ""),  # git status
             (0, "", ""),  # git revert --abort
             (0, "", ""),  # git worktree remove
         ]
 
-        res = revert_merge.revert_merge_pr(25)
+        res = revert_merge.revert_merge_pr(25, agent="gemini-1")
         self.assertEqual(res, revert_merge.EXIT_CONFLICT)
+
+    @patch("revert_merge.run_cmd")
+    def test_get_unmerged_files(self, mock_run_cmd):
+        mock_run_cmd.side_effect = [
+            (0, "file1.py\nfile2.py\n", ""),  # git diff --name-only --diff-filter=U
+            (0, "AA file2.py\nUD file3.py\n M file4.py", ""),  # git status --porcelain
+        ]
+        files = revert_merge.get_unmerged_files("/tmp")
+        self.assertEqual(files, ["file1.py", "file2.py", "file3.py", "file4.py"])
 
 
 if __name__ == "__main__":
