@@ -282,8 +282,16 @@ class CiGateTests(unittest.TestCase):
             with self.subTest(stack=stack):
                 ci = render_ci_workflow(stack, runner)
                 self.assertIn("gitleaks/gitleaks-action", ci)
-                # depth-1 would hide a secret added then removed later.
                 self.assertIn("fetch-depth: 0", ci)
+                self.assertIn("schedule:", ci)
+                self.assertIn("workflow_dispatch:", ci)
+
+    def test_pip_audit_covers_pyproject_even_when_requirements_exist(self):
+        from init_project import PYTHON_PIP_AUDIT_SCRIPT
+        self.assertIn("pip-audit -r pyproject.toml", PYTHON_PIP_AUDIT_SCRIPT)
+        self.assertNotIn("audited\" -eq 0 ] && [ -f pyproject.toml ]", PYTHON_PIP_AUDIT_SCRIPT)
+        playbook = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn("pip-audit -r pyproject.toml", playbook)
 
     def test_every_stack_audits_dependencies(self):
         expected = {"python": "pip-audit", "node": "npm audit", "go": "govulncheck"}
@@ -422,27 +430,29 @@ class DogfoodCiParityTests(unittest.TestCase):
     def test_pip_audit_fails_on_a_known_vulnerable_pin(self):
         """AC: pip-audit must fail the build on a known vulnerability."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            req = Path(temp_dir) / "requirements.txt"
-            # jinja2 2.4.1 has multiple published CVEs; pip-audit must refuse it.
-            req.write_text("jinja2==2.4.1\n")
-            result = subprocess.run(
-                [
-                    sys.executable, "-m", "pip", "install", "-q", "pip-audit",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
+            root = Path(temp_dir)
+            venv = root / "venv"
+            created = subprocess.run(
+                [sys.executable, "-m", "venv", str(venv)],
+                capture_output=True, text=True, check=False,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            if created.returncode != 0:
+                self.skipTest(f"could not create venv: {created.stderr}")
+            python = venv / ("Scripts/python" if sys.platform == "win32" else "bin/python")
+            install = subprocess.run(
+                [str(python), "-m", "pip", "install", "-q", "pip-audit"],
+                capture_output=True, text=True, check=False,
+            )
+            if install.returncode != 0:
+                self.skipTest(f"could not install pip-audit: {install.stderr}")
+            req = root / "requirements.txt"
+            req.write_text("jinja2==2.4.1\n")
             audited = subprocess.run(
-                [sys.executable, "-m", "pip_audit", "-r", str(req)],
-                capture_output=True,
-                text=True,
-                check=False,
+                [str(python), "-m", "pip_audit", "-r", str(req)],
+                capture_output=True, text=True, check=False,
             )
             self.assertNotEqual(
-                audited.returncode,
-                0,
+                audited.returncode, 0,
                 "pip-audit must fail on jinja2==2.4.1; "
                 f"stdout={audited.stdout!r} stderr={audited.stderr!r}",
             )

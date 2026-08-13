@@ -189,16 +189,18 @@ CI_GATE_MARKERS = (
 # playbook's own workflow cannot drift on which manifests they audit.
 PYTHON_PIP_AUDIT_SCRIPT = """pip install pip-audit
           audited=0
-          if [ -f requirements-dev.txt ]; then
-            pip-audit -r requirements-dev.txt
-            audited=1
-          fi
-          if [ -f requirements.txt ]; then
-            pip-audit -r requirements.txt
-            audited=1
-          fi
-          if [ "$audited" -eq 0 ] && [ -f pyproject.toml ]; then
-            pip-audit
+          for req in requirements-dev.txt requirements.txt; do
+            if [ -f "$req" ]; then
+              pip-audit -r "$req"
+              audited=1
+            fi
+          done
+          if [ -f pyproject.toml ]; then
+            if grep -q '^\\[project\\]' pyproject.toml; then
+              pip-audit -r pyproject.toml
+            else
+              echo "pyproject.toml has no [project] table; skipping project-file audit."
+            fi
             audited=1
           fi
           if [ "$audited" -eq 0 ]; then
@@ -221,6 +223,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # gitleaks-action scans the event commit range on push/pull_request.
+  # Full-history `gitleaks detect` runs only on schedule / workflow_dispatch.
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 # gitleaks-action lists PR commits via the API; without pull-requests:read
 # it fails with "Resource not accessible by integration" before scanning.
@@ -234,9 +241,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # gitleaks scans history, not just the tip. The default depth-1
-          # checkout would hide a secret that was committed and then removed
-          # in a later commit - the exact case worth catching.
+          # fetch-depth: 0 is required so a PR-range scan can resolve base^..head.
+          # push/pull_request: the action scans that event's commits, not the
+          # whole repo. schedule/workflow_dispatch: full-history detect.
           fetch-depth: 0
 
       - name: Secret scan
