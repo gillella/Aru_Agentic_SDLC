@@ -236,6 +236,13 @@ def fetch_pr_comments(pr_id: int) -> List[Dict[str, Any]]:
     return res if isinstance(res, list) else []
 
 
+def fetch_issue_comments(issue_id: int) -> List[Dict[str, Any]]:
+    """Fetches comments for an Issue."""
+    cmd = ["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{issue_id}/comments"]
+    res = run_gh_json(cmd)
+    return res if isinstance(res, list) else []
+
+
 # --- GitHub Project v2 board helpers --------------------------------------
 # The board is the monitoring surface; the status:* labels are what the CLI
 # reads. Both must move together or they drift. These helpers exist so

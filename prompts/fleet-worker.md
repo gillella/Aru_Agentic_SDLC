@@ -195,10 +195,12 @@ Follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`.
    Write down its `touches:` list — that is your **write budget**.
 2. **If it is `type:feat` or `needs-design`, or it changes money, tenancy, PII,
    security, schema, migration, or another irreversible contract**, post an
-   implementation plan as an issue comment before any edit: approach, files,
-   schema/API deltas, test strategy, rejected alternatives. Post and proceed —
-   do not block. Risk, large diffs, and review-round count require stronger
-   planning, tests, and review; none creates a human acknowledgement gate.
+   implementation plan as an issue comment before creating a branch or making edits:
+   approach, files, schema/API deltas, test strategy, rejected alternatives. Post
+   and proceed — do not block. `create_branch.py` mechanistically enforces this
+   plan gate by refusing branch/worktree creation until the plan comment exists.
+   Risk, large diffs, and review-round count require stronger planning, tests, and
+   review; none creates a human acknowledgement gate.
 3. **Branch from current main, in a worktree:**
    ```
    git fetch origin && git checkout main && git pull --ff-only

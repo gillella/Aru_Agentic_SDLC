@@ -7,19 +7,65 @@ Standard naming format: <type>/issue-<ID>-<short-description>
 import argparse
 import re
 import sys
-from common import create_worktree, get_issue, run_cmd
+from typing import Any, Dict, List, Optional
+
+from common import create_worktree, fetch_issue_comments, get_issue, run_cmd
+
+HIGH_RISK_TERMS = {"money", "pii", "schema", "migration", "migrations"}
 
 
-def sanitize_slug(text: str) -> str:
-    """Sanitizes text to safe git branch slug."""
-    text = text.lower().strip()
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"[\s_]+", "-", text)
-    return text[:30].strip("-")
+def requires_plan(issue: Optional[dict[str, Any]], branch_type: str = "feat") -> bool:
+    """Returns True if the issue or branch type requires an implementation plan before branch creation."""
+    if branch_type == "feat":
+        return True
+    if not issue:
+        return False
+
+    labels = {lbl.get("name", "").lower() for lbl in (issue.get("labels") or [])}
+    if "type:feat" in labels or "needs-design" in labels or "feature" in labels:
+        return True
+
+    body = (issue.get("body") or "").lower()
+    text_to_check = body + " " + " ".join(labels)
+    if any(term in text_to_check for term in HIGH_RISK_TERMS):
+        return True
+
+    return False
 
 
-def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool = False) -> str:
-    issue = get_issue(issue_id)
+def has_implementation_plan(issue_id: int, issue: Optional[dict[str, Any]] = None, comments: Optional[list[dict[str, Any]]] = None) -> bool:
+    """Checks if an implementation plan exists in the issue body or comments."""
+    plan_pattern = r"(?i)#+\s*implementation\s+plan|implementation\s+plan"
+
+    if issue and issue.get("body"):
+        if re.search(plan_pattern, issue["body"]):
+            return True
+
+    if comments is None:
+        comments = fetch_issue_comments(issue_id)
+
+    for comment in comments:
+        body = comment.get("body") or ""
+        if re.search(plan_pattern, body):
+            return True
+
+    return False
+
+
+def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool = False, fetch_remote: bool = True) -> str:
+    issue = get_issue(issue_id) if fetch_remote else None
+
+    if requires_plan(issue, branch_type):
+        if not has_implementation_plan(issue_id, issue=issue):
+            msg = (
+                f"[BLOCKED] Plan gate: Cannot create branch/worktree for issue #{issue_id} without a durable implementation plan.\n"
+                f"Missing: An implementation plan comment on issue #{issue_id} detailing approach, touched files, test strategy, and rejected alternatives.\n\n"
+                f"To fix, post an implementation plan comment to issue #{issue_id}:\n"
+                f'  gh issue comment {issue_id} --body "## Implementation Plan\\n\\n### Goal\\n...\\n\\n### Proposed Changes\\n...\\n\\n### Verification\\n..."'
+            )
+            print(msg, file=sys.stderr)
+            sys.exit(1)
+
     title_slug = "work"
     if issue and "title" in issue:
         clean_title = re.sub(r"^(feat|fix|chore|docs)\s*:\s*", "", issue["title"], flags=re.I)
