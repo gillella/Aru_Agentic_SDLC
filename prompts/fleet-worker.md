@@ -31,7 +31,8 @@ discovery.
 **This loop needs a persistent shell with `gh`.** Claude Code, Cursor's CLI, and
 the local Codex CLI all qualify. **Codex Cloud does not** — it is task-triggered
 from ChatGPT, not a process that can poll a board. Use the local Codex CLI if
-Codex is in the fleet.
+Codex is in the fleet. GitHub MCP is **not** a substitute for `gh`; do not use
+it for factory mutations.
 
 ---
 
@@ -245,6 +246,11 @@ corrupts someone else's work, not just yours.
    The author may execute that mechanical merge but may never self-review.
 7. **Report failures honestly.** If tests fail, say so with the output. Never
    claim a verification you did not run.
+8. **Never use GitHub MCP for lifecycle mutations.** Claims, labels, board
+   status, PRs, reviews, and merges go through `$ARU_SDLC_HOME/scripts/*.py`
+   (they call the configured `gh`). Direct `gh` only when no helper exists
+   (`gh issue comment` for implementation plans). MCP GitHub is optional and
+   non-authoritative — do not copy a PAT into it.
 
 ### Stop conditions
 

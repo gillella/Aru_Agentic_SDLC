@@ -134,7 +134,10 @@ be checked from here and say plainly what you could not:
 - `$ARU_SDLC_HOME` resolves to the canonical repository
 - the target repo has `AGENTS.md` with the Issue-First Law
 - `git` and `gh` are present, and `gh auth status` succeeds — never print
-  credential values
+  credential values. **That is the GitHub identity check.** Factory helpers
+  shell out to this `gh`. GitHub MCP (`user-github` or similar) is optional
+  and non-authoritative: do not require it, do not copy a PAT into it, and
+  do not use it for lifecycle mutations.
 - the governed board resolves, via `fleet_status.py`
 - worktrees under `.worktrees/` and any in-flight claims for your agent id
 
@@ -148,19 +151,22 @@ These are the framework's, restated here only because skipping one is how
 each has been broken before. The authority is `AGENTS.md`.
 
 1. **Issue-First.** No code change without a claimed, open, tracked issue.
-2. **Worktree isolation.** Feature work and reviews happen under
+2. **GitHub is `gh` plus helpers, not MCP.** Lifecycle mutations go through
+   `$ARU_SDLC_HOME/scripts/*.py`. `gh auth status` is the identity check.
+   Direct `gh` only when no helper exists (`gh issue comment` for plans).
+3. **Worktree isolation.** Feature work and reviews happen under
    `.worktrees/`. Run helper scripts by absolute path so they act on the right
    repo, and `cd` into the worktree before editing.
-3. **Stay inside `touches:`.** To write outside it, widen the declaration on
+4. **Stay inside `touches:`.** To write outside it, widen the declaration on
    the issue *first* and say why. Never widen silently. Over-declaring is its
    own harm: a glob like `tests/**` makes the picker serialise issues that
    never really overlap.
-4. **Verify locally before pushing.** `ruff check .` and the test suite, both
+5. **Verify locally before pushing.** `ruff check .` and the test suite, both
    clean. Report failures with their output; never claim a check you did not
    run.
-5. **Every PR carries `Closes #<issue>`** and is opened through
+6. **Every PR carries `Closes #<issue>`** and is opened through
    `create_pr.py --agent <id> --model-family <family>`.
-6. **Never review your own PR.** The merge gate reads `author:` against
+7. **Never review your own PR.** The merge gate reads `author:` against
    `reviewed-by:` and refuses a self-review — posting one does not unblock
    anything.
 

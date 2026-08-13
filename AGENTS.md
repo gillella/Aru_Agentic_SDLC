@@ -72,7 +72,19 @@ when working from another repository.
 
 ### 2. Offload Concrete Actions to Helper Scripts
 
-Skills are declarative. Git / worktree / GitHub actions MUST use:
+Skills are declarative. Git / worktree / GitHub actions MUST use
+`$ARU_SDLC_HOME/scripts/*.py` (they shell out to the configured `gh` CLI).
+**Do not use GitHub MCP** (`user-github` or any other MCP GitHub server) for
+lifecycle mutations — claims, labels, board status, PRs, reviews, or merges.
+MCP is a second credential store and a second API client; writes through it
+bypass `author:` / `reviewer:` stamps, board status, and the merge gate.
+`gh auth status` is the GitHub identity check. MCP GitHub is optional and
+non-authoritative. Never copy a PAT into MCP to "fix" it.
+
+Direct `gh` is allowed only when no helper exists. The sanctioned exception
+is implementation-plan comments via `gh issue comment`.
+
+Helper inventory:
 
 * `"$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"` — wire Cursor skills, commands, env
 * `python3 "$ARU_SDLC_HOME/scripts/init_project.py" --name <NAME> [--private] [--create-board]`
@@ -100,13 +112,18 @@ Inside this playbook repo itself, `$ARU_SDLC_HOME` may be `.` / the repo root.
 ## Repository Rules & Guardrails
 
 1. **Strict Issue-First Execution**: Never code without a claimed open issue on the project board.
-2. **No Direct Pushes to Default Branches**: Never push directly to `main` or `master`.
-3. **Mandatory Worktree Isolation**: Feature work and PR reviews run under `.worktrees/`.
-4. **Mandatory Issue Closure Linking**: Every PR body includes `Closes #<issue_number>`.
-5. **Local Test Verification First**: Never commit or push without a green local suite.
-6. **CI Green Gate**: If CI fails, invoke `remediate-ci-failure`.
-7. **Session State Memory**: Inspect git log, branches, open PRs, and board status before claiming new work.
-8. **Plan Before Editing**: For `type:feat`, `needs-design`, money, PII,
+2. **GitHub access is `gh` plus helpers, not MCP**: All GitHub lifecycle
+   mutations go through the configured `gh` CLI via
+   `python3 "$ARU_SDLC_HOME/scripts/<tool>.py"`. Do not use GitHub MCP for
+   those writes. Direct `gh` only when no helper exists (`gh issue comment`
+   for implementation plans). Do not make MCP GitHub a required setup step.
+3. **No Direct Pushes to Default Branches**: Never push directly to `main` or `master`.
+4. **Mandatory Worktree Isolation**: Feature work and PR reviews run under `.worktrees/`.
+5. **Mandatory Issue Closure Linking**: Every PR body includes `Closes #<issue_number>`.
+6. **Local Test Verification First**: Never commit or push without a green local suite.
+7. **CI Green Gate**: If CI fails, invoke `remediate-ci-failure`.
+8. **Session State Memory**: Inspect git log, branches, open PRs, and board status before claiming new work.
+9. **Plan Before Editing**: For `type:feat`, `needs-design`, money, PII,
    schema, migration, or other irreversible work, post the implementation plan
    required by `implement-next-issue` before the first edit. High-risk scope
    triggers the gate regardless of the issue's type labels. The plan is always

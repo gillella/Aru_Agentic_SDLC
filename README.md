@@ -75,7 +75,7 @@ Aru_Agentic_SDLC/
 1. **Bootstrap New Project**: Run `skills/init-agent-project/SKILL.md` or `python3 scripts/init_project.py --name <NAME> --create-board`.
 2. **Read `AGENTS.md`**: Understand repository guardrails, worktree isolation rules, and the Issue-First Law.
 3. **Execute Primary Skill**: Follow [`skills/implement-next-issue/SKILL.md`](skills/implement-next-issue/SKILL.md) to inspect session state, pick the next actionable issue, create a clean worktree, and execute the implementation lifecycle.
-4. **Use Helper Tools**: Execute GitHub operations via `python3 "$ARU_SDLC_HOME/scripts/<script_name>.py"`.
+4. **Use Helper Tools**: Execute GitHub operations via `python3 "$ARU_SDLC_HOME/scripts/<script_name>.py"` (they use the configured `gh` CLI). Do **not** use GitHub MCP for lifecycle mutations. `gh auth status` is the identity check; MCP GitHub is optional and non-authoritative — do not copy a PAT into it.
 
 ---
 
@@ -97,6 +97,9 @@ That installs:
 - Slash commands (`/implement-next-issue`, `/init-agent-project`, …)
 
 Details: [`docs/cursor-integration.md`](docs/cursor-integration.md).
+
+GitHub access for the factory is the configured **`gh` CLI** via
+`$ARU_SDLC_HOME/scripts/*.py`. GitHub MCP is not a required setup step.
 
 ---
 

@@ -16,7 +16,13 @@ and refuse to invent a second copy of these skills inside the target repo.
 1. Confirm `echo "$ARU_SDLC_HOME"` points at the playbook repo.
 2. Confirm the target project has `AGENTS.md` with the Issue-First Law.
    If not, run `init-agent-project` (or ask whether to bootstrap).
-3. Prefer helper scripts under `"$ARU_SDLC_HOME/scripts/"` for GitHub/git
+3. Confirm GitHub identity with `gh auth status` (never print credential
+   values). Factory helpers under `"$ARU_SDLC_HOME/scripts/"` shell out to
+   that `gh`. **GitHub MCP is optional and non-authoritative** — do not use
+   it for claims, labels, board status, PRs, reviews, or merges, and do not
+   copy a PAT into MCP. Direct `gh` only when no helper exists (`gh issue
+   comment` for implementation plans).
+4. Prefer helper scripts under `"$ARU_SDLC_HOME/scripts/"` for GitHub/git
    operations — do not reimplement them ad hoc.
 
 ## Route the request
@@ -39,6 +45,9 @@ execute it exactly. Do not skip worktree isolation, local tests, or
 ## Hard rules (always)
 
 - **Issue-First Law**: no code change without a tracked GitHub issue.
+- **GitHub via `gh` + helpers, not MCP**: lifecycle mutations use
+  `$ARU_SDLC_HOME/scripts/*.py`. `gh auth status` is the identity check.
+  MCP GitHub is optional and non-authoritative.
 - **No direct pushes** to `main` / `master`.
 - **Worktrees** under `.worktrees/` for feature work and PR reviews.
 - **Local tests green** before commit/push.
