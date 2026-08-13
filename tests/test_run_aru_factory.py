@@ -56,6 +56,7 @@ class SkillExistsTests(unittest.TestCase):
         """
         description = frontmatter(skill_text()).lower()
         for phrase in (
+            "please continue",
             "run the factory",
             "work the project board",
             "continue development",
@@ -207,6 +208,31 @@ class DelegationTests(unittest.TestCase):
 class WiringTests(unittest.TestCase):
     def test_the_router_offers_the_entrypoint(self):
         self.assertIn("run-aru-factory", ROUTER.read_text(encoding="utf-8"))
+
+    def test_please_continue_is_loop_not_implement_next_issue(self):
+        """Bare continue used to skip review and merge.
+
+        The picker order is feedback → merge → review → issue. Routing
+        'continue' to implement-next-issue drops the first three.
+        """
+        router = ROUTER.read_text(encoding="utf-8")
+        skill = flat(skill_text())
+        self.assertIn("please continue", frontmatter(skill_text()).lower())
+        self.assertIn("loop", skill)
+        # The continue row must name run-aru-factory, not implement-next-issue.
+        continue_lines = [
+            line for line in router.splitlines()
+            if "continue" in line.lower() and "|" in line
+        ]
+        self.assertTrue(continue_lines, "router has no continue row")
+        joined = " ".join(continue_lines).lower()
+        self.assertIn("run-aru-factory", joined)
+        self.assertNotIn("implement-next-issue", joined)
+
+    def test_loop_pacing_is_dynamic(self):
+        text = flat(skill_text())
+        self.assertIn("pace dynamically", text)
+        self.assertIn("fixed interval", text)
 
     def test_the_fleet_prompt_points_at_the_entrypoint(self):
         text = FLEET_PROMPT.read_text(encoding="utf-8")

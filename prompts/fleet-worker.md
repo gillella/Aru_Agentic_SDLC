@@ -22,11 +22,12 @@ provider API key anywhere in this design.
 4. Preflight the board once (see **Board preflight** at the bottom).
 
 On an agent that discovers skills, `run-aru-factory` is the shorter path: say
-"run the factory as agent-2, family openai" and it routes into this same
-contract, in `loop` mode. This prompt stays the authority on what the loop
-does — the skill delegates here rather than restating it — so paste this when
-you want the loop pinned to an exact text, or when the agent has no skill
-discovery.
+"please continue" or "run the factory as agent-2, family openai" and it routes
+into this same contract, in `loop` mode. The GitHub board is the session
+store — a new chat recovers by asking the picker, not by reading a local
+handoff file. This prompt stays the authority on what the loop does — the
+skill delegates here rather than restating it — so paste this when you want
+the loop pinned to an exact text, or when the agent has no skill discovery.
 
 **This loop needs a persistent shell with `gh`.** Claude Code, Cursor's CLI, and
 the local Codex CLI all qualify. **Codex Cloud does not** — it is task-triggered

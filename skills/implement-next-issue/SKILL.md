@@ -1,6 +1,6 @@
 ---
 name: implement-next-issue
-description: Claims the next actionable GitHub issue under Aru_Agentic_SDLC, recovers session state, implements in an isolated git worktree, runs tests, opens a PR with Closes #N, and monitors CI. Use when the user says implement next issue, pick up issue, work on backlog, start next task, or continue SDLC work.
+description: Claims the next actionable GitHub issue under Aru_Agentic_SDLC, recovers session state, implements in an isolated git worktree, runs tests, opens a PR with Closes #N, and monitors CI. Use when the user says implement next issue, pick up issue, work on backlog, start next task, or implement issue #N. Do not use for bare "please continue" — that is run-aru-factory loop.
 triggers:
   - "implement next issue"
   - "work on backlog"
@@ -8,6 +8,7 @@ triggers:
   - "implement issue #<ID>"
   - "start next task"
 do_not_trigger_for:
+  - "please continue / continue / keep going / run the factory (use run-aru-factory loop)"
   - "reviewing an existing PR (use code-review instead)"
   - "creating a new issue (use create-github-issue instead)"
   - "fixing CI failures on existing PRs (use remediate-ci-failure instead)"

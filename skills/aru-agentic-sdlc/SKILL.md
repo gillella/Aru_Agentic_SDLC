@@ -29,9 +29,9 @@ and refuse to invent a second copy of these skills inside the target repo.
 
 | User intent | Skill to read and follow |
 |---|---|
-| Run the factory / work the board / no specific step named | `run-aru-factory` |
+| Please continue / keep going / work the board / no specific step named | `run-aru-factory` (`loop`) |
 | New governed repo / board / CI | `init-agent-project` |
-| Pick up / continue backlog work | `implement-next-issue` |
+| Implement a named issue, or `implement next issue` | `implement-next-issue` |
 | File a bug/feature/task | `create-github-issue` |
 | Promote Backlog → Ready; board has no ready work | `triage-backlog` |
 | Review someone else's PR | `code-review` |
