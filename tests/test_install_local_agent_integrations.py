@@ -147,6 +147,51 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"Cursor installer failed: {res.stderr}")
         self.assertTrue((self.target_home / ".cursor" / "skills" / "run-aru-factory").is_symlink())
 
+    def test_malformed_managed_block_fails_closed(self):
+        claude_dir = self.target_home / ".claude"
+        claude_dir.mkdir(parents=True)
+        claude_md = claude_dir / "CLAUDE.md"
+        claude_md.write_text("<!-- BEGIN ARU_SDLC_GOVERNANCE -->\nKEEP_ME_AFTER_BROKEN_BLOCK\n")
+
+        res = self.run_installer("--claude-only")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("KEEP_ME_AFTER_BROKEN_BLOCK", claude_md.read_text())
+
+    def test_preserve_pre_existing_user_command(self):
+        cmd_dir = self.target_home / ".claude" / "commands"
+        cmd_dir.mkdir(parents=True)
+        user_cmd = cmd_dir / "continue.md"
+        user_cmd.write_text("# User Custom Command\nmy custom code\n")
+
+        res = self.run_installer("--claude-only")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("run-aru-factory", user_cmd.read_text())
+        backups = list(cmd_dir.glob("continue.md.pre-aru.*"))
+        self.assertTrue(len(backups) > 0, "Backup of pre-existing user command was not created")
+        self.assertIn("# User Custom Command", backups[0].read_text())
+
+    def test_check_mode_validates_cursor_rule(self):
+        (self.target_home / ".cursor").mkdir(parents=True)
+        self.run_installer("--cursor-only")
+        # Remove cursor rule
+        (self.target_home / ".cursor" / "rules" / "aru-agentic-sdlc.mdc").unlink()
+        res = self.run_installer("--cursor-only", "--check")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("[CHECK FAILED]", res.stdout)
+
+    def test_zero_agents_detected_without_all_flag(self):
+        cmd = [
+            str(INSTALLER),
+            "--aru-home", str(ROOT),
+            "--target-home", str(self.target_home),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "HOME": str(self.target_home)})
+        self.assertEqual(res.returncode, 0)
+        self.assertFalse((self.target_home / ".codex").exists())
+        self.assertFalse((self.target_home / ".claude").exists())
+        self.assertFalse((self.target_home / ".cursor").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
+

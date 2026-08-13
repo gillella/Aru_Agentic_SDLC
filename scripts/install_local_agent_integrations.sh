@@ -104,12 +104,14 @@ detect_agents() {
       TARGET_ANTIGRAVITY=true
     fi
 
-    # If no specific agent directory/binary detected at all, default all to true for setup readiness
+    # If no specific agent directory/binary detected at all, default all to true only when ALL_AGENTS is set
     if [[ "${TARGET_CODEX}" == false && "${TARGET_CLAUDE}" == false && "${TARGET_CURSOR}" == false && "${TARGET_ANTIGRAVITY}" == false ]]; then
-      TARGET_CODEX=true
-      TARGET_CLAUDE=true
-      TARGET_CURSOR=true
-      TARGET_ANTIGRAVITY=true
+      if [[ "${ALL_AGENTS}" == true ]]; then
+        TARGET_CODEX=true
+        TARGET_CLAUDE=true
+        TARGET_CURSOR=true
+        TARGET_ANTIGRAVITY=true
+      fi
     fi
   fi
 }
@@ -177,8 +179,8 @@ update_managed_block() {
   local end_tag="<!-- END ARU_SDLC_GOVERNANCE -->"
 
   if [[ "${CHECK_ONLY}" == true ]]; then
-    if [[ ! -f "${target_file}" ]] || ! grep -Fq "${begin_tag}" "${target_file}"; then
-      echo "[CHECK FAILED] Missing governance block in ${target_file}"
+    if [[ ! -f "${target_file}" ]] || ! grep -Fq "${begin_tag}" "${target_file}" || ! grep -Fq "${end_tag}" "${target_file}"; then
+      echo "[CHECK FAILED] Missing or malformed governance block in ${target_file}"
       return 1
     fi
     return 0
@@ -189,29 +191,28 @@ update_managed_block() {
     return 0
   fi
 
-  mkdir -p "$(dirname "${target_file}")"
-  touch "${target_file}"
-
-  local block
-  block="$(cat <<'EOF'
-<!-- BEGIN ARU_SDLC_GOVERNANCE -->
-# Aru_Agentic_SDLC Governance Directive
-This environment is governed by Aru_Agentic_SDLC.
+  local block="$(cat <<EOF
+${begin_tag}
+# Aru_Agentic_SDLC Governance & Workflows
 
 1. Confirm work originates from a tracked GitHub issue (Issue-First Law).
-2. Read and follow matching skills under `$ARU_SDLC_HOME/skills/`:
-   - `run-aru-factory` — "please continue", work the board, loop mode
-   - `implement-next-issue` — claim / worktree / implement / PR for an issue
-   - `create-github-issue` — file work
-   - `code-review` — review a PR in an isolated worktree
-   - `remediate-ci-failure` — fix red CI
-   - `address-pr-feedback` — resolve review comments
-3. Execute Git & GitHub actions via `python3 "$ARU_SDLC_HOME/scripts/<script>.py"`.
-<!-- END ARU_SDLC_GOVERNANCE -->
+2. Read and follow matching skills under \`\$ARU_SDLC_HOME/skills/\`:
+   - \`run-aru-factory\` — "please continue", work the board, loop mode
+   - \`implement-next-issue\` — claim / worktree / implement / PR for an issue
+   - \`create-github-issue\` — file work
+   - \`code-review\` — review a PR in an isolated worktree
+   - \`remediate-ci-failure\` — fix red CI
+   - \`address-pr-feedback\` — resolve review comments
+3. Execute Git & GitHub actions via \`python3 "\$ARU_SDLC_HOME/scripts/<script>.py"\`.
+${end_tag}
 EOF
 )"
 
   if grep -Fq "${begin_tag}" "${target_file}"; then
+    if ! grep -Fq "${end_tag}" "${target_file}"; then
+      echo "[ERROR] ${target_file} contains '${begin_tag}' without matching '${end_tag}'; refusing to modify to prevent data loss." >&2
+      return 1
+    fi
     local tmp
     tmp="$(mktemp)"
     local inside=0
@@ -250,46 +251,31 @@ ensure_env_export() {
   fi
 
   if [[ "${DRY_RUN}" == true ]]; then
-    echo "[DRY-RUN] Would set ARU_SDLC_HOME in ${profile}"
+    echo "[DRY-RUN] Would ensure ${line} in ${profile}"
     return 0
   fi
 
-  mkdir -p "$(dirname "${profile}")"
-  touch "${profile}"
-
-  if grep -Fq "ARU_SDLC_HOME=" "${profile}"; then
-    local tmp
-    tmp="$(mktemp)"
-    awk -v repl="${line}" '
-      BEGIN { done=0 }
-      /^export ARU_SDLC_HOME=/ {
-        if (!done) { print repl; done=1 }
-        next
-      }
-      { print }
-      END { if (!done) print repl }
-    ' "${profile}" > "${tmp}"
-    cat "${tmp}" > "${profile}"
-    rm -f "${tmp}"
-    echo "updated ARU_SDLC_HOME in ${profile}"
-  else
-    {
-      echo ""
-      echo "# Aru_Agentic_SDLC — Agent playbook home"
-      echo "${line}"
-    } >> "${profile}"
-    echo "appended ARU_SDLC_HOME to ${profile}"
+  if [[ -f "${profile}" ]]; then
+    if ! grep -Fq "ARU_SDLC_HOME=" "${profile}"; then
+      echo "" >> "${profile}"
+      echo "# Aru_Agentic_SDLC environment" >> "${profile}"
+      echo "${line}" >> "${profile}"
+      echo "added ARU_SDLC_HOME export to ${profile}"
+    fi
   fi
 }
 
 copy_commands() {
   local dest_dir="$1"
+
   if [[ "${CHECK_ONLY}" == true ]]; then
     for cmd in "${SDLC_HOME}/templates/cursor/commands/"*.md; do
-      local base="$(basename "${cmd}")"
-      if [[ ! -f "${dest_dir}/${base}" ]]; then
-        echo "[CHECK FAILED] Missing command file ${dest_dir}/${base}"
-        return 1
+      if [[ -f "${cmd}" ]]; then
+        local base="$(basename "${cmd}")"
+        if [[ ! -f "${dest_dir}/${base}" ]]; then
+          echo "[CHECK FAILED] Missing command file ${dest_dir}/${base}"
+          return 1
+        fi
       fi
     done
     return 0
@@ -304,7 +290,13 @@ copy_commands() {
   for cmd in "${SDLC_HOME}/templates/cursor/commands/"*.md; do
     if [[ -f "${cmd}" ]]; then
       local base="$(basename "${cmd}")"
-      cp "${cmd}" "${dest_dir}/${base}"
+      local dest_file="${dest_dir}/${base}"
+      if [[ -f "${dest_file}" ]] && ! grep -Fq "ARU_SDLC" "${dest_file}"; then
+        local backup="${dest_file}.pre-aru.$(date +%Y%m%d%H%M%S)"
+        mv "${dest_file}" "${backup}"
+        echo "note: preserved pre-existing user command ${dest_file} as ${backup}" >&2
+      fi
+      cp "${cmd}" "${dest_file}"
       echo "installed command /${base%.md} in ${dest_dir}"
     fi
   done
@@ -359,7 +351,12 @@ if [[ "${TARGET_CURSOR}" == true ]]; then
     link_skill "${skill}" "${CURSOR_SKILLS}" || ERRORS=$((ERRORS + 1))
   done
   copy_commands "${CURSOR_COMMANDS}" || ERRORS=$((ERRORS + 1))
-  if [[ "${CHECK_ONLY}" == false && "${DRY_RUN}" == false ]]; then
+  if [[ "${CHECK_ONLY}" == true ]]; then
+    if [[ ! -f "${CURSOR_RULES}/aru-agentic-sdlc.mdc" ]]; then
+      echo "[CHECK FAILED] Missing Cursor rule ${CURSOR_RULES}/aru-agentic-sdlc.mdc"
+      ERRORS=$((ERRORS + 1))
+    fi
+  elif [[ "${DRY_RUN}" == false ]]; then
     mkdir -p "${CURSOR_RULES}"
     cp "${SDLC_HOME}/templates/cursor/rules/aru-agentic-sdlc.mdc" "${CURSOR_RULES}/aru-agentic-sdlc.mdc"
   fi
