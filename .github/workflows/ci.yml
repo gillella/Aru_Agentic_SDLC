@@ -130,10 +130,28 @@ jobs:
       # because an unrelated test imports it - coverage by accident, not by a
       # gate. The module signals refusal with EXIT_BLOCK = 2 and an unhandled
       # crash exits 1, which is not that signal.
+      - name: Verify Source & Tests Hygiene
+        run: |
+          python -c "import os, sys, unittest
+          sources = ['scripts', 'hooks', 'sdlc_flow_visualizer', 'dummy_calculator_app']
+          present = [d for d in sources if os.path.isdir(d) and any(f.endswith('.py') for _, _, files in os.walk(d) for f in files)]
+          count = 0
+          if os.path.isdir('tests'):
+              suite = unittest.defaultTestLoader.discover('tests')
+              count = suite.countTestCases()
+          if present and count == 0:
+              print(f'error: source directories ({ \" \".join(present) }) exist, but tests/ is absent or contains zero importable test cases.', file=sys.stderr)
+              sys.exit(1)
+          "
+
       - name: Verify Python Syntax
         run: |
-          python -m py_compile scripts/*.py hooks/*.py tests/*.py
+          python -c "import glob, py_compile
+          files = [f for pattern in ['scripts/*.py', 'hooks/*.py', 'tests/*.py'] for f in glob.glob(pattern)]
+          for f in files:
+              py_compile.compile(f, doraise=True)
+          "
 
       - name: Execute Tests
         run: |
-          if [ -d tests ]; then python -m unittest discover tests; fi
+          python -m unittest discover tests
