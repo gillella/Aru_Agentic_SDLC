@@ -28,8 +28,13 @@ Review eligibility:
   | nobody else holds reviewer:*  | hard  |
   | author:<id> is not me         | hard  |
   | family:<f> is not mine        | soft  |
-  | CI green                      | hard  |
+  | CI red                        | hard  |
   | not a draft                   | hard  |
+
+CI pending or absent does not block a review claim. Pickup latency is the
+queue, and the reviewer already re-runs tests in a worktree. Merge still
+requires green CI. A red check still refuses review so the author fixes
+first.
 
 The family rule must be soft. An all-Claude fleet with a hard rule has zero
 eligible reviewers, nothing gets reviewed, and merge_pr.py blocks everything -
@@ -216,8 +221,9 @@ def _authored_via_branch(pr: dict[str, Any], agent: str) -> bool:
 def ci_state(pr: dict[str, Any]) -> str:
     """Returns 'green', 'red', 'pending', or 'none'.
 
-    A PR with no checks at all is 'none', not 'green'. Reviewing an unverified
-    diff wastes the review, and the merge gate refuses it anyway.
+    A PR with no checks at all is 'none', not 'green'. Merge still refuses
+    an unverified head. Review may proceed on pending/none so pickup does
+    not wait on CI; red still blocks.
     """
     rollup = pr.get("statusCheckRollup") or []
     if not rollup:
@@ -311,7 +317,7 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
         return no("already approved")
 
     state = ci_state(pr)
-    if state != "green":
+    if state == "red":
         return no(f"CI is {state}")
 
     cross = bool(family and pr_family and pr_family != family)
@@ -400,6 +406,32 @@ def mark(pr_number: int, label: str, colour: str, description: str) -> None:
                            check=False)
     if code != 0:
         print(f"[WARN] Could not label PR #{pr_number} '{label}': {err.strip()}", file=sys.stderr)
+
+
+def record_review_claim(pr_number: int, agent: str, created_at: str | None) -> None:
+    """Persist open-to-claim latency for the telemetry epic. Never a gate."""
+    claimed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    wait_line = "wait-minutes: unknown\n"
+    if created_at:
+        try:
+            opened = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            waited = (datetime.now(timezone.utc) - opened).total_seconds() / 60.0
+            wait_line = f"wait-minutes: {waited:.1f}\n"
+        except ValueError:
+            pass
+    body = (
+        "## Review claim\n"
+        f"review-claimed-at: {claimed_at}\n"
+        f"reviewer: {agent}\n"
+        f"{wait_line}"
+    )
+    code, _, err = run_cmd(
+        ["gh", "pr", "comment", str(pr_number), "--body", body],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not record review-claimed-at on #{pr_number}: "
+              f"{err.strip()}", file=sys.stderr)
 
 
 def select(agent: str, family: str | None, round_cap: int, cross_family_wait: int
@@ -509,7 +541,8 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         # sending the agent back through the whole picker.
         "reviewable_detail": [
             {"pr": p["number"], "title": p["title"],
-             "cross_family": v["cross_family"], "degraded": v["degraded"]}
+             "cross_family": v["cross_family"], "degraded": v["degraded"],
+             "created_at": p.get("createdAt")}
             for p, v in reviewable
         ],
         "reviewable": [p["number"] for p, _ in reviewable],
@@ -577,6 +610,9 @@ def main():
                 work.update({"pr": candidate["pr"], "title": candidate["title"],
                              "cross_family": candidate["cross_family"],
                              "degraded": candidate["degraded"], "claimed": True})
+                record_review_claim(
+                    candidate["pr"], args.agent, candidate.get("created_at"),
+                )
                 if candidate["degraded"]:
                     mark(candidate["pr"], "same-family-review", "fbca40",
                          "Reviewed by the author's own model family; no cross-family agent was free")

@@ -111,8 +111,32 @@ class IdentityStampTests(unittest.TestCase):
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
     def test_create_pr_propagates_a_failed_stamp(self, _branch, _issue):
         with patch.object(create_pr, "run_cmd", return_value=(0, "https://x/pull/7", "")), \
-                patch.object(create_pr, "apply_identity", return_value=False):
+                patch.object(create_pr, "apply_identity", return_value=False), \
+                patch.object(create_pr, "enqueue_review") as queued:
             self.assertFalse(create_pr.create_pr(7, "t", "b", "agent-1", "anthropic"))
+            queued.assert_not_called()
+
+    @patch.object(create_pr, "get_issue", return_value={"title": "t"})
+    @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
+    def test_successful_open_enqueues_review(self, _branch, _issue):
+        with patch.object(create_pr, "run_cmd", return_value=(0, "https://x/pull/7", "")), \
+                patch.object(create_pr, "apply_identity", return_value=True), \
+                patch.object(create_pr, "enqueue_review", return_value=True) as queued:
+            self.assertTrue(create_pr.create_pr(7, "t", "b", "agent-1", "anthropic"))
+            queued.assert_called_once_with("https://x/pull/7")
+
+    @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_enqueue_review_comments_queued_at_and_needs_review(self, _label, run):
+        self.assertTrue(create_pr.enqueue_review("https://x/pull/7"))
+        edited = run.call_args_list[0].args[0]
+        self.assertEqual(edited[:4], ["gh", "pr", "edit", "https://x/pull/7"])
+        self.assertIn("needs-review", edited)
+        commented = run.call_args_list[1].args[0]
+        self.assertEqual(commented[:3], ["gh", "pr", "comment"])
+        body = commented[commented.index("--body") + 1]
+        self.assertIn("review-queued-at:", body)
+        self.assertIn("No automated account should post a review", body)
 
 
 if __name__ == "__main__":

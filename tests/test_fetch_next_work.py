@@ -43,7 +43,6 @@ class CiStateTests(unittest.TestCase):
         self.assertEqual(fnw.ci_state(pr(1, checks="pending")), "pending")
 
     def test_no_checks_is_not_green(self):
-        # An unverified diff is not a verified one; reviewing it wastes the pass.
         self.assertEqual(fnw.ci_state(pr(1, checks="none")), "none")
 
 
@@ -76,10 +75,10 @@ class EligibilityTests(unittest.TestCase):
     def test_draft_is_skipped(self):
         self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", draft=True))["eligible"])
 
-    def test_red_and_pending_ci_are_skipped(self):
+    def test_red_ci_is_skipped_pending_and_none_are_claimable(self):
         self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", checks="red"))["eligible"])
-        self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", checks="pending"))["eligible"])
-        self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", checks="none"))["eligible"])
+        self.assertTrue(eligible(pr(1, "author:agent-1", "family:anthropic", checks="pending"))["eligible"])
+        self.assertTrue(eligible(pr(1, "author:agent-1", "family:anthropic", checks="none"))["eligible"])
 
     def test_review_round_count_never_blocks_an_independent_agent(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic", reviews=10))
@@ -205,6 +204,13 @@ class PriorityTests(unittest.TestCase):
 
     def test_idle_when_there_is_nothing_at_all(self):
         self.assertEqual(self._select([], candidates=[])["work"]["type"], "idle")
+
+    def test_pending_ci_cross_family_pr_is_offered_immediately(self):
+        candidate = pr(4, "author:agent-1", "family:anthropic", checks="pending")
+        res = self._select([candidate], candidates=[7])
+        self.assertEqual(res["work"]["type"], "review")
+        self.assertEqual(res["work"]["pr"], 4)
+        self.assertEqual(res["reviewable_detail"][0]["created_at"], candidate["createdAt"])
 
     def test_cross_family_pr_is_preferred_over_a_degraded_one(self):
         res = self._select([
@@ -400,6 +406,21 @@ class ParkedInReviewTests(unittest.TestCase):
         test_pr["headRefName"] = "fix/issue-20-something"
         self.assertTrue(fnw._authored_via_branch(test_pr, "agent-1"))
         self.assertFalse(fnw._authored_via_branch(test_pr, "agent-2"))
+
+
+class ReviewClaimTelemetryTests(unittest.TestCase):
+    def test_record_review_claim_writes_wait_minutes(self):
+        opened = (datetime.now(timezone.utc) - timedelta(minutes=12)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        with patch.object(fnw, "run_cmd", return_value=(0, "", "")) as run:
+            fnw.record_review_claim(9, "agent-2", opened)
+        self.assertEqual(run.call_args.args[0][0:4],
+                         ["gh", "pr", "comment", "9"])
+        body = run.call_args.args[0][run.call_args.args[0].index("--body") + 1]
+        self.assertIn("review-claimed-at:", body)
+        self.assertIn("reviewer: agent-2", body)
+        self.assertRegex(body, r"wait-minutes: 1[12]\.\d")
 
 
 class UnreadableQueueTests(unittest.TestCase):

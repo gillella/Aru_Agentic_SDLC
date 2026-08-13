@@ -16,8 +16,11 @@ running Sonnet, so "a different tool" is not necessarily a different reviewer.
 
 import argparse
 import sys
+from datetime import datetime, timezone
 
 from common import ensure_label, get_current_branch, get_issue, run_cmd
+
+NEEDS_REVIEW_LABEL = "needs-review"
 
 # Kept explicit rather than free-form: a typo like "anthropc" would silently
 # make every PR look cross-family to the picker, which is the one failure mode
@@ -65,6 +68,45 @@ def apply_identity(pr_ref: str, agent: str = "", family: str = "") -> bool:
     return True
 
 
+def enqueue_review(pr_ref: str) -> bool:
+    """Mark a newly opened PR as claimable review work immediately.
+
+    This is invocation, not a second review path: no bot posts a review.
+    The picker still requires a distinct agent. Failures here are warnings
+    because the PR already exists and identity is already stamped.
+    """
+    queued_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ensure_label(
+        NEEDS_REVIEW_LABEL,
+        "5319e7",
+        "Opened; claimable as review work (not a bot review)",
+    )
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", pr_ref, "--add-label", NEEDS_REVIEW_LABEL],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not apply {NEEDS_REVIEW_LABEL}: {err.strip()}",
+              file=sys.stderr)
+    body = (
+        "## Review queue\n"
+        f"review-queued-at: {queued_at}\n"
+        "\n"
+        "This PR is claimable review work for a distinct agent. "
+        "No automated account should post a review.\n"
+    )
+    code, _, err = run_cmd(
+        ["gh", "pr", "comment", pr_ref, "--body", body],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not record review-queued-at: {err.strip()}",
+              file=sys.stderr)
+        return False
+    print(f"🔍 Enqueued as review work (review-queued-at: {queued_at})")
+    return True
+
+
 def create_pr(issue_id: int, title: str = "", body: str = "",
               agent: str = "", family: str = "") -> bool:
     current_branch = get_current_branch()
@@ -94,7 +136,10 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
         # Reported as failure even though the PR opened: an unstamped PR is a
         # hole in the review gate, and a zero exit here would let a caller
         # move on believing the identity landed.
-        return apply_identity(pr_ref, agent, family)
+        if not apply_identity(pr_ref, agent, family):
+            return False
+        enqueue_review(pr_ref)
+        return True
 
     return True
 
