@@ -61,6 +61,29 @@ def run_installer(home, script=None, cwd=None):
     )
 
 
+def forensics(result, script, home):
+    """Everything needed to diagnose a failure from CI logs alone.
+
+    These tests passed on macOS/bash-3.2 and failed on Ubuntu/bash-5 with
+    assertion text that did not distinguish "wrong script ran" from "script
+    ran and did nothing". Re-running CI to add print statements costs a full
+    round trip per guess, so every failure message carries the evidence.
+    """
+    listing = []
+    for sub in (".cursor/skills", ".agents/skills"):
+        path = home / sub
+        names = sorted(p.name for p in path.iterdir()) if path.is_dir() else "<absent>"
+        listing.append(f"    {sub}: {names}")
+    return (
+        f"\n  script:  {script}"
+        f"\n  bash:    {subprocess.run(['bash','--version'],capture_output=True,text=True).stdout.splitlines()[0]}"
+        f"\n  rc:      {result.returncode}"
+        f"\n  stdout:  {result.stdout.strip()[-800:]!r}"
+        f"\n  stderr:  {result.stderr.strip()[-800:]!r}"
+        f"\n  HOME contents:\n" + "\n".join(listing)
+    )
+
+
 class InstallerParityTest(unittest.TestCase):
     def test_every_skill_on_disk_is_installed(self):
         """The regression that shipped: a skill exists but is unreachable."""
@@ -73,18 +96,18 @@ class InstallerParityTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
+            script = installer_path()
             result = run_installer(home)
-            self.assertEqual(
-                result.returncode, 0, f"installer failed:\n{result.stdout}\n{result.stderr}"
-            )
+            self.assertEqual(result.returncode, 0, forensics(result, script, home))
 
-            for dest in (home / ".cursor" / "skills", home / ".agents" / "skills"):
+            for sub in (".cursor/skills", ".agents/skills"):
+                dest = home / sub
                 installed = {d.name for d in dest.iterdir()} if dest.is_dir() else set()
                 self.assertEqual(
                     expected - installed,
                     set(),
-                    f"skills on disk but not installed into {dest.name}: "
-                    f"{sorted(expected - installed)}",
+                    f"skills on disk but not installed into {sub}: "
+                    f"{sorted(expected - installed)}" + forensics(result, script, home),
                 )
 
     def test_installed_skills_resolve_to_readable_procedures(self):
@@ -137,12 +160,16 @@ class InstallerRejectionTest(unittest.TestCase):
 
             home = Path(tmp) / "home"
             home.mkdir()
-            result = run_installer(home, script=fake / "scripts" / installer_path().name)
+            script = fake / "scripts" / installer_path().name
+            result = run_installer(home, script=script)
 
             self.assertNotEqual(
-                result.returncode, 0, "installer accepted a skill directory with no SKILL.md"
+                result.returncode,
+                0,
+                "installer accepted a skill directory with no SKILL.md"
+                + forensics(result, script, home),
             )
-            self.assertIn("SKILL.md", result.stderr)
+            self.assertIn("SKILL.md", result.stderr, forensics(result, script, home))
             self.assertFalse(
                 (home / ".agents" / "skills" / "good").exists(),
                 "installer linked skills before validating the whole set",
@@ -157,10 +184,15 @@ class InstallerRejectionTest(unittest.TestCase):
 
             home = Path(tmp) / "home"
             home.mkdir()
-            result = run_installer(home, script=fake / "scripts" / installer_path().name)
+            script = fake / "scripts" / installer_path().name
+            result = run_installer(home, script=script)
 
-            self.assertNotEqual(result.returncode, 0, "installer accepted an empty skills tree")
-            self.assertIn("no skills found", result.stderr)
+            self.assertNotEqual(
+                result.returncode,
+                0,
+                "installer accepted an empty skills tree" + forensics(result, script, home),
+            )
+            self.assertIn("no skills found", result.stderr, forensics(result, script, home))
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ DEFAULT_ARU_PATH="${SDLC_HOME}"
 # continue with a partial list, which is the failure this whole block exists
 # to prevent.
 SKILLS=()
+skill_count=0
 for skill_dir in "${SDLC_HOME}"/skills/*/; do
   [[ -d "${skill_dir}" ]] || continue
   if [[ ! -f "${skill_dir}SKILL.md" ]]; then
@@ -29,12 +30,19 @@ for skill_dir in "${SDLC_HOME}"/skills/*/; do
     exit 1
   fi
   SKILLS+=("$(basename "${skill_dir}")")
+  skill_count=$((skill_count + 1))
 done
 
-if [[ ${#SKILLS[@]} -eq 0 ]]; then
+# Counted separately rather than via ${#SKILLS[@]}: under `set -u`, bash 3.2
+# (still the /bin/bash on macOS) treats an empty array as unset and aborts
+# with "unbound variable" instead of reporting the real problem. A maintainer
+# on macOS would see a bash internals error where CI sees a clean message.
+if [[ ${skill_count} -eq 0 ]]; then
   echo "error: no skills found under ${SDLC_HOME}/skills" >&2
   exit 1
 fi
+
+echo "discovered ${skill_count} skills under ${SDLC_HOME}/skills"
 
 link_skill() {
   local name="$1"
