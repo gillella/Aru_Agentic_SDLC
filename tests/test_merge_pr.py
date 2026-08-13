@@ -585,11 +585,50 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
 
-        execute.assert_called_once()
+        execute.assert_called_once_with(9, fetch.return_value, "merge")
         _close.assert_called_once_with(7)
         _done.assert_called_once_with(7)
         _issue_claim.assert_called_once_with(7)
         _review_claim.assert_called_once_with(9)
+
+    @patch.object(merge_pr, "run_closeout", return_value=True)
+    @patch.object(merge_pr, "repository_root", return_value="/repo")
+    @patch.object(merge_pr, "execute_merge", return_value=(merged_pr(), "merged"))
+    @patch.object(
+        merge_pr,
+        "review_evidence",
+        return_value={
+            "unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True,
+        },
+    )
+    @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_default_merge_method_is_merge(
+        self, fetch, _json, _threads, execute, _root, closeout
+    ):
+        fetch.return_value = {
+            "number": 9,
+            "title": "open",
+            "body": "Closes #7",
+            "state": "OPEN",
+            "isDraft": False,
+            "headRefName": "fix/issue-7-example",
+            "headRefOid": "gated-sha",
+            "statusCheckRollup": [
+                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+            ],
+            "reviews": [{"state": "APPROVED", "author": {"login": "peer"}}],
+            "author": {"login": "author"},
+            "labels": [{"name": "author:agent-1"}],
+            "mergeStateStatus": "CLEAN",
+            "mergeable": "MERGEABLE",
+            "additions": 2,
+            "deletions": 1,
+        }
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+            self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
+
+        execute.assert_called_once_with(9, fetch.return_value, "merge")
 
 
 class CloseOutRecoveryTests(unittest.TestCase):

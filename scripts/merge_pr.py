@@ -1270,7 +1270,7 @@ def main():
     parser = argparse.ArgumentParser(description="Merge a PR only if the Definition of Done is met.")
     parser.add_argument("--pr", type=int, required=True, help="Pull request number")
     parser.add_argument("--dry-run", action="store_true", help="Run every check, merge nothing")
-    parser.add_argument("--merge-method", default="squash", choices=["squash", "merge", "rebase"])
+    parser.add_argument("--merge-method", default="merge", choices=["squash", "merge", "rebase"])
     parser.add_argument(
         "--expected-head",
         default=None,
