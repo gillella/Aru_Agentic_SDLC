@@ -7,11 +7,19 @@ Standard naming format: <type>/issue-<ID>-<short-description>
 import argparse
 import re
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from common import create_worktree, fetch_issue_comments, get_issue, run_cmd
 
 HIGH_RISK_TERMS = {"money", "pii", "schema", "migration", "migrations"}
+
+
+def sanitize_slug(text: str) -> str:
+    """Sanitizes text to safe git branch slug."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_]+", "-", text)
+    return text[:30].strip("-")
 
 
 def requires_plan(issue: Optional[dict[str, Any]], branch_type: str = "feat") -> bool:
