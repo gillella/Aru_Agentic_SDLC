@@ -3,7 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -275,6 +275,59 @@ class LifecycleTests(RunnerFixture):
 
         self.assertEqual(code, 1)
         self.assertEqual(runner.store.read()["terminal_reason"], "once_error")
+
+    def test_once_signal_drains_child_and_restores_handlers(self):
+        commands = FakeCommands([fleet()], [selection("issue", 45)])
+        runner = self.runner(commands)
+        installed = {}
+        restored = []
+
+        def set_handler(signum, handler):
+            if handler in {"old-int", "old-term"}:
+                restored.append((signum, handler))
+            else:
+                installed[signum] = handler
+
+        def child(_argv, _cwd):
+            installed[rf.signal.SIGTERM](rf.signal.SIGTERM, None)
+            self.assertTrue(runner.stop_signal)
+            return 0
+
+        runner.agent_runner = child
+        with (
+            patch.object(
+                rf.signal,
+                "getsignal",
+                side_effect=lambda signum: {
+                    rf.signal.SIGINT: "old-int",
+                    rf.signal.SIGTERM: "old-term",
+                }[signum],
+            ),
+            patch.object(rf.signal, "signal", side_effect=set_handler),
+        ):
+            code = runner.run_once()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.store.read()["terminal_reason"], "operator_stop")
+        self.assertEqual(
+            restored,
+            [(rf.signal.SIGINT, "old-int"), (rf.signal.SIGTERM, "old-term")],
+        )
+
+    def test_non_finite_timing_options_are_rejected(self):
+        for option in (
+            "--initial-wait", "--max-wait", "--jitter", "--helper-timeout",
+        ):
+            with self.subTest(option=option):
+                with (
+                    patch.object(rf, "validate_repo", return_value=self.repo),
+                    redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    rf.main([
+                        "once", "--repo", str(self.repo), "--agent", "codex-1",
+                        "--family", "openai", option, "inf",
+                    ])
 
     def test_complete_loop_exits_only_after_explicit_stop_file(self):
         commands = FakeCommands([fleet("complete", issues=0)])

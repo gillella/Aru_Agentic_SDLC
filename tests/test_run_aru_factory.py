@@ -21,6 +21,7 @@ DESKTOP_ADAPTERS = (
     ROOT / "templates" / "integrations" / "claude" / "CLAUDE.md",
     ROOT / "templates" / "integrations" / "antigravity" / "AGENTS.md",
     ROOT / "templates" / "cursor" / "commands" / "run-aru-factory.md",
+    ROOT / "templates" / "cursor" / "commands" / "continue.md",
 )
 
 MODES = ("adopt", "status", "next", "loop", "doctor")

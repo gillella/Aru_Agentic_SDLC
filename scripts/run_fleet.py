@@ -19,6 +19,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -564,18 +565,28 @@ class FleetRunner:
         if lock is None:
             self._log("runner_refused", reason="identity_already_running")
             return 2
+        previous_handlers: dict[int, Any] = {}
+        terminal = "once_error"
         try:
             self.store.clear_stop()
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, self._handle_signal)
             self._write_state("starting")
             self._log("runner_start", mode="once")
             result = self.run_iteration()
             recoverable_failure = result.phase in {"error_wait", "agent_unavailable_wait"}
             code = result.child_returncode or (1 if recoverable_failure else 0)
-            terminal = "once_complete" if code == 0 else "once_error"
-            self._write_state("stopped", terminal_reason=terminal)
-            self._log("runner_stop", terminal_reason=terminal)
+            if self._stop_requested():
+                terminal = "operator_stop"
+            else:
+                terminal = "once_complete" if code == 0 else "once_error"
             return code
         finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+            self._write_state("stopped", terminal_reason=terminal)
+            self._log("runner_stop", terminal_reason=terminal)
             self.store.release_lock(lock)
 
 
@@ -588,6 +599,12 @@ def validate_repo(repo: Path) -> Path:
     if top != resolved:
         raise ValueError(f"--repo must be the checkout root ({top})")
     return resolved
+
+
+def require_finite(value: float, option: str) -> float:
+    if not math.isfinite(value):
+        raise ValueError(f"{option} must be finite")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -623,6 +640,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         repo = validate_repo(Path(args.repo))
         agent = safe_identity(args.agent, "agent")
         family = safe_identity(args.family, "family") if args.mode in {"once", "loop"} else args.family
+        initial_wait = require_finite(args.initial_wait, "--initial-wait")
+        max_wait = require_finite(args.max_wait, "--max-wait")
+        jitter = require_finite(args.jitter, "--jitter")
+        helper_timeout = require_finite(args.helper_timeout, "--helper-timeout")
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -657,10 +678,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         family=family,
         adapter=args.adapter,
         adapter_command_json=args.adapter_command_json,
-        initial_wait=max(0.1, args.initial_wait),
-        max_wait=max(0.1, args.max_wait),
-        jitter=max(0.0, min(1.0, args.jitter)),
-        helper_timeout=max(1.0, args.helper_timeout),
+        initial_wait=max(0.1, initial_wait),
+        max_wait=max(0.1, max_wait),
+        jitter=max(0.0, min(1.0, jitter)),
+        helper_timeout=max(1.0, helper_timeout),
         state_dir=directory,
     )
     runner = FleetRunner(config)
