@@ -571,7 +571,7 @@ def parse_semver_major(version_str: Optional[str]) -> Optional[int]:
 
 def get_current_framework_version(repo_root: Optional[str] = None) -> str:
     """Returns the current framework version from git tags or fallback."""
-    cwd = repo_root or get_repo_root() or "."
+    cwd = repo_root or "."
     code, stdout, _ = run_cmd(["git", "describe", "--tags", "--abbrev=0", "--match", "v*"], check=False, cwd=cwd)
     if code == 0 and stdout:
         return stdout.strip()
