@@ -16,6 +16,7 @@ Only an explicit stop request or termination signal ends a healthy loop.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -98,15 +99,33 @@ def run_command(
     argv: Sequence[str], cwd: Path, timeout: float = 120.0,
 ) -> CommandResult:
     try:
-        result = subprocess.run(
-            list(argv), cwd=str(cwd), capture_output=True, text=True, check=False,
-            timeout=timeout,
+        process = subprocess.Popen(
+            list(argv),
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return CommandResult(124, "", "command timed out")
     except OSError as exc:
         return CommandResult(127, "", str(exc))
-    return CommandResult(result.returncode, result.stdout, result.stderr)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+        return CommandResult(124, "", "command timed out")
+    return CommandResult(process.returncode, stdout, stderr)
 
 
 def run_agent(
@@ -211,6 +230,25 @@ class StateStore:
         self.directory = directory
         self.path = directory / f"{agent}.json"
         self.stop_path = directory / f"{agent}.stop"
+        self.lock_path = directory / f"{agent}.lock"
+
+    def acquire_lock(self) -> Any | None:
+        """Hold one process per repository/agent identity until release."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        handle = self.lock_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return None
+        return handle
+
+    @staticmethod
+    def release_lock(handle: Any) -> None:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
     def write(self, payload: dict[str, Any]) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -481,14 +519,22 @@ class FleetRunner:
         self._log("stop_signal", signal=signum, drain="active child is allowed to finish")
 
     def run_loop(self) -> int:
-        self.store.clear_stop()
+        lock = self.store.acquire_lock()
+        if lock is None:
+            self._log("runner_refused", reason="identity_already_running")
+            print(
+                f"[run_fleet] {self.config.agent} already has a live runner",
+                file=sys.stderr,
+            )
+            return 2
         previous_handlers: dict[int, Any] = {}
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            previous_handlers[signum] = signal.getsignal(signum)
-            signal.signal(signum, self._handle_signal)
-        self._write_state("starting")
-        self._log("runner_start", mode="loop")
         try:
+            self.store.clear_stop()
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, self._handle_signal)
+            self._write_state("starting")
+            self._log("runner_start", mode="loop")
             while not self._stop_requested():
                 try:
                     result = self.run_iteration()
@@ -510,17 +556,27 @@ class FleetRunner:
                 signal.signal(signum, handler)
             self._write_state("stopped", terminal_reason="operator_stop")
             self._log("runner_stop", terminal_reason="operator_stop")
+            self.store.release_lock(lock)
         return 0
 
     def run_once(self) -> int:
-        self.store.clear_stop()
-        self._write_state("starting")
-        self._log("runner_start", mode="once")
-        result = self.run_iteration()
-        terminal = "once_complete" if result.child_returncode in (None, 0) else "once_child_error"
-        self._write_state("stopped", terminal_reason=terminal)
-        self._log("runner_stop", terminal_reason=terminal)
-        return result.child_returncode or 0
+        lock = self.store.acquire_lock()
+        if lock is None:
+            self._log("runner_refused", reason="identity_already_running")
+            return 2
+        try:
+            self.store.clear_stop()
+            self._write_state("starting")
+            self._log("runner_start", mode="once")
+            result = self.run_iteration()
+            recoverable_failure = result.phase in {"error_wait", "agent_unavailable_wait"}
+            code = result.child_returncode or (1 if recoverable_failure else 0)
+            terminal = "once_complete" if code == 0 else "once_error"
+            self._write_state("stopped", terminal_reason=terminal)
+            self._log("runner_stop", terminal_reason=terminal)
+            return code
+        finally:
+            self.store.release_lock(lock)
 
 
 def validate_repo(repo: Path) -> Path:

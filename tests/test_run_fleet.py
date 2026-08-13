@@ -86,13 +86,20 @@ class RunnerFixture(unittest.TestCase):
 
 class AdapterTests(RunnerFixture):
     def test_stuck_helper_becomes_a_retryable_timeout_result(self):
-        with patch.object(
-            rf.subprocess, "run", side_effect=rf.subprocess.TimeoutExpired(["gh"], 3),
+        process = unittest.mock.Mock(pid=9876, returncode=None)
+        process.communicate.side_effect = [
+            rf.subprocess.TimeoutExpired(["gh"], 3),
+            ("", ""),
+        ]
+        with (
+            patch.object(rf.subprocess, "Popen", return_value=process),
+            patch.object(rf.os, "killpg") as kill_group,
         ):
             result = rf.run_command(["gh", "api", "user"], self.repo, timeout=3)
 
         self.assertEqual(result.returncode, 124)
         self.assertEqual(result.stderr, "command timed out")
+        kill_group.assert_called_once_with(9876, rf.signal.SIGTERM)
 
     def test_child_is_signal_isolated_and_reports_its_pid(self):
         child = unittest.mock.Mock(pid=4321)
@@ -246,6 +253,29 @@ class IterationTests(RunnerFixture):
 
 
 class LifecycleTests(RunnerFixture):
+    def test_second_runner_for_same_identity_is_refused(self):
+        commands = FakeCommands([fleet("complete", issues=0)])
+        first = self.runner(commands)
+        second = self.runner(commands)
+        lock = first.store.acquire_lock()
+        self.assertIsNotNone(lock)
+        self.addCleanup(first.store.release_lock, lock)
+
+        code = second.run_loop()
+
+        self.assertEqual(code, 2)
+        self.assertEqual(second.cycle, 0)
+        self.assertEqual(commands.calls, [])
+
+    def test_once_returns_error_when_status_helper_fails(self):
+        commands = FakeCommands([rf.CommandResult(1, "", "network down")])
+        runner = self.runner(commands)
+
+        code = runner.run_once()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(runner.store.read()["terminal_reason"], "once_error")
+
     def test_complete_loop_exits_only_after_explicit_stop_file(self):
         commands = FakeCommands([fleet("complete", issues=0)])
         runner = self.runner(commands)
