@@ -160,7 +160,7 @@ class TestRevertMerge(unittest.TestCase):
     def test_get_unmerged_files(self, mock_run_cmd):
         mock_run_cmd.side_effect = [
             (0, "file1.py\nfile2.py\n", ""),  # git diff --name-only --diff-filter=U
-            (0, "AA file2.py\nUD file3.py\n M file4.py", ""),  # git status --porcelain
+            (0, "AA file2.py\nUD file3.py\nUU file4.py", ""),  # git status --porcelain
         ]
         files = revert_merge.get_unmerged_files("/tmp")
         self.assertEqual(files, ["file1.py", "file2.py", "file3.py", "file4.py"])

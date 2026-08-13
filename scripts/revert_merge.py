@@ -87,10 +87,12 @@ def get_unmerged_files(cwd: str) -> List[str]:
 
     code, status_out, _ = run_cmd(["git", "status", "--porcelain"], check=False, cwd=cwd)
     if code == 0 and status_out:
-        unmerged_prefixes = ("DD", "AU", "UD", "UA", "DU", "AA", "UU", "U ", " M")
+        unmerged_prefixes = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
         for line in status_out.splitlines():
-            if any(line.startswith(p) for p in unmerged_prefixes):
-                unmerged.add(line[3:].strip())
+            if len(line) >= 3 and line[:2] in unmerged_prefixes:
+                filepath = line[3:].strip().split(" -> ")[-1]
+                if filepath:
+                    unmerged.add(filepath)
 
     return sorted(list(unmerged))
 
@@ -198,6 +200,10 @@ def revert_merge_pr(
 
     # Create Revert PR
     pr_title = f"revert: PR #{pr_id} — {title}"
+    # Note: Revert PRs intentionally omit "Closes #<issue_number>" for the original
+    # reverted issue(s) because revert PRs reopen (rather than close) those associated issues.
+    # If --revert-issue is explicitly passed for a tracking issue of the revert itself,
+    # that tracking issue is closed via closure_links.
     closure_links = []
     if revert_issue:
         closure_links.append(f"Closes #{revert_issue}")
