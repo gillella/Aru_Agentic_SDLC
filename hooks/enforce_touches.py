@@ -341,24 +341,51 @@ def _git_write_to_protected(command, branch):
     """
     if not command:
         return None
-    # Strip quotes so `git push origin "main"` is seen the same as bare main.
-    normalized = re.sub(r"[\"']", "", command)
 
-    if re.search(r"\bgit\s+(-c\s+\S+\s+)*commit\b", normalized) and branch in PROTECTED_BRANCHES:
-        return f"commit directly on '{branch}'"
+    cmd_sans_heredoc = _strip_heredocs(command)
+    tokens = _shell_tokens(cmd_sans_heredoc)
+    if not tokens:
+        return None
 
-    push = re.search(r"\bgit\s+(-c\s+\S+\s+)*push\b(?P<args>[^&|;]*)", normalized)
-    if push:
-        args = push.group("args") or ""
-        targets = args.split()
-        for tok in targets:
-            # Handles `main`, `HEAD:main`, and `refs/heads/main`.
-            ref = tok.split(":")[-1].replace("refs/heads/", "")
-            if ref in PROTECTED_BRANCHES:
-                return f"push to '{ref}'"
-        # A bare `git push` on a protected branch pushes that branch.
-        if not [t for t in targets if not t.startswith("-")] and branch in PROTECTED_BRANCHES:
-            return f"push '{branch}'"
+    words = [text for kind, text in tokens if kind == "word"]
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word != "git":
+            index += 1
+            continue
+
+        index += 1
+        subcommand = None
+        while index < len(words):
+            token = words[index]
+            if not token.startswith("-"):
+                subcommand = token
+                index += 1
+                break
+            name, _, inline = token.partition("=")
+            if inline:
+                index += 1
+            elif name in _GIT_VALUE_OPTS:
+                index += 2
+            else:
+                index += 1
+
+        if not subcommand or subcommand not in _GIT_WRITE_SUBCOMMANDS:
+            continue
+
+        if subcommand == "commit" and branch in PROTECTED_BRANCHES:
+            return f"commit directly on '{branch}'"
+
+        if subcommand == "push":
+            targets = words[index:]
+            for tok in targets:
+                ref = tok.split(":")[-1].replace("refs/heads/", "")
+                if ref in PROTECTED_BRANCHES:
+                    return f"push to '{ref}'"
+            if not [t for t in targets if not t.startswith("-")] and branch in PROTECTED_BRANCHES:
+                return f"push '{branch}'"
+
     return None
 
 

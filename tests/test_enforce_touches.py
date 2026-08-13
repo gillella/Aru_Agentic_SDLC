@@ -193,6 +193,13 @@ class ProtectedBranchTests(unittest.TestCase):
     def test_unrelated_command_is_allowed(self):
         self.assertIsNone(et._git_write_to_protected("pytest -q", "main"))
 
+    def test_raw_prose_commands_are_safe_direct_to_matcher(self):
+        self.assertIsNone(et._git_write_to_protected('echo "remember to git commit later"', "main"))
+        self.assertIsNone(et._git_write_to_protected("echo 'run git commit when done'", "main"))
+        self.assertIsNone(et._git_write_to_protected("cat << 'EOF'\nremember to git commit later\nEOF", "main"))
+        self.assertIsNone(et._git_write_to_protected("ls # then git commit", "main"))
+        self.assertIsNone(et._git_write_to_protected('git status -m "git push origin main"', "main"))
+
 
 class RedirectDetectionTests(unittest.TestCase):
     def test_finds_redirect_and_tee_and_sed_targets(self):
@@ -536,6 +543,35 @@ class HookDecisionTests(unittest.TestCase):
             "main", None, governed=False,
         )
         self.assertEqual(rc, et.EXIT_ALLOW)
+
+    def test_prose_commands_via_main(self):
+        """Pins the prose false-positive fix for git commands in shell prose through main()."""
+        allowed_commands = [
+            'echo "remember to git commit later"',
+            "echo 'run git commit when done'",
+            "cat << 'EOF'\nremember to git commit later\nEOF",
+            "ls # then git commit",
+            'git status -m "git push origin main"',
+        ]
+        for command in allowed_commands:
+            with self.subTest(command=command, expected="ALLOW"):
+                rc = self._run(
+                    {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": "/repo"},
+                    "main", None, governed=True,
+                )
+                self.assertEqual(rc, et.EXIT_ALLOW)
+
+        blocked_commands = [
+            "git commit -m x",
+            "git push origin main",
+        ]
+        for command in blocked_commands:
+            with self.subTest(command=command, expected="BLOCK"):
+                rc = self._run(
+                    {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": "/repo"},
+                    "main", None, governed=True,
+                )
+                self.assertEqual(rc, et.EXIT_BLOCK)
 
     def test_real_path_aliases_are_correct_on_main_and_issue_branch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
