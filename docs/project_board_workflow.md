@@ -100,6 +100,30 @@ merge conflict or merge/close-out failure remains unsafe or impossible for
 agents to resolve through governed remediation; risk category, diff size, and
 review-round count alone never require human participation.
 
+### Server-side protection of `main`
+
+`hooks/pre-push` refuses a direct push in any clone that installed it. It is
+not a gate: `--no-verify`, a missing install, or a fresh clone bypasses it.
+
+Commit `46ca134` (`docs: add agentic software factory guide — deep research
+synthesis`) reached `origin/main` with no pull request and no review. It is a
+single-parent commit by `gillella@Aravinds-Mac-mini.local`. The hook already
+blocks documentation-only pushes; this was a skipped or uninstalled client
+hook, not a path-parser gap. No separate hook-fix issue was filed.
+
+`scripts/enable_main_ruleset.py` creates ruleset `aru-protect-main`: pull
+requests required, and the CI job name from `.github/workflows/ci.yml` as
+the required status check. Default enforcement is `evaluate` so a mismatched
+check name cannot lock `main`. `--disable` and `--delete` are the inverse.
+**Required approving review is off** — GitHub will not let the fleet account
+approve its own PRs, so that rule would deadlock every fleet-authored PR
+until #123. **Required linear history is off** — it would forbid merge
+commits and fight #89.
+
+On this private repository the Rulesets API currently returns HTTP 403
+(GitHub Pro or public visibility required). `--apply` exits 3 in that case.
+Live `enforcement: active` and the scratch-clone push test are #133.
+
 ### Closing out a review finding
 
 The merge gate does not accept a resolved thread as evidence that its finding
