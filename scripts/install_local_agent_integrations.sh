@@ -639,8 +639,16 @@ if [[ -n "${ARU_SDLC_REF:-}" ]]; then
   else
     echo "Pinning Aru_Agentic_SDLC at ${SDLC_HOME} to ref '${ARU_SDLC_REF}'..."
     if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" 2>/dev/null; then
-      git -C "${SDLC_HOME}" fetch --tags origin || true
-      git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" || echo "[WARN] Could not checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}; continuing." >&2
+      git -C "${SDLC_HOME}" fetch --tags origin 2>/dev/null || true
+      if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}"; then
+        echo "[ERROR] Could not checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}." >&2
+        exit 1
+      fi
+    fi
+    if [[ "${ARU_SDLC_REEXEC:-0}" != "1" ]]; then
+      export ARU_SDLC_REEXEC=1
+      echo "Re-executing installer from checked-out ref '${ARU_SDLC_REF}'..."
+      exec "${SDLC_HOME}/scripts/install_local_agent_integrations.sh" "$@"
     fi
   fi
 fi

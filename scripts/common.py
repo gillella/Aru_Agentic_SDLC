@@ -609,5 +609,9 @@ def check_version_compatibility(
     return True
 
 
+if os.environ.get("ARU_SDLC_REF"):
+    check_version_compatibility()
+
+
 if __name__ == "__main__":
     print("Aru_Agentic_SDLC Common Utilities Loaded Cleanly.")
