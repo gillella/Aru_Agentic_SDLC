@@ -31,8 +31,7 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Check for subtle bugs, logic flaws, race conditions, or unhandled edge cases.
 - Ensure public API signatures, schema types, and data models remain consistent.
 - Verify zero unused imports, dead code, or debug statements.
-- Apply the **narrower-than-reality** heuristic below to every new or changed gate,
-  scanner, matcher, or permission check in the diff.
+- Apply the **narrower-than-reality** heuristic below to every check, gate, scanner, matcher, cache TTL, or state evaluation whose effective scope can be narrower than the condition it is meant to cover.
 
 ### Step 4: Test Coverage & Verification
 - Verify that new feature logic or bug fixes are accompanied by unit/integration tests.
@@ -77,22 +76,25 @@ list is not review evidence.
       explicitly deferred with a follow-up issue (do not close incomplete work).
 - [ ] Diff matches the claim in the PR body **and** the gate/script's actual
       behaviour (state machine, not narrative — see below).
-- [ ] **Narrower-than-reality:** for every gate/scanner/matcher in the diff,
-      answer: *What does the thing I am gating actually accept, and am I
-      narrower than it?*
+- [ ] **Narrower-than-reality:** for every check, gate, scanner, matcher, cache TTL,
+      or state evaluation in the diff, answer: *What does the thing I am checking or
+      caching actually do or accept, and is my check or TTL narrower than it?*
 - [ ] Tests cover the new behaviour; local suite is green in the review worktree.
 - [ ] CI is green (or failures are classified and already under remediation).
 - [ ] No secrets, unsafe shell interpolation, or trust-boundary holes introduced.
 - [ ] Blocking findings are each an unresolved inline thread; non-blocking notes
       stay in the review body.
+- [ ] Review claim released via `claim_issue.py --pr <PR_ID> --agent <AGENT_ID> --complete-review`
+      (if no blocking findings remain) or `--release` (if changes requested).
+- [ ] Temporary review worktree (`.worktrees/review-pr-<PR_ID>`) is removed.
 
 ---
 
 ## Narrower-Than-Reality Heuristic
 
-**Question to ask of every gate:**
+**Question to ask of every check, gate, scanner, matcher, cache TTL, or state evaluation:**
 
-> What does the thing I am gating actually accept, and am I narrower than it?
+> What does the thing I am checking or caching actually do or accept, and is my check or TTL narrower than it?
 
 The enforcement layer's design is usually sound. What keeps breaking is the gap
 between what a check *believes* and what the system *actually does*. When the
@@ -107,12 +109,12 @@ real label) or false-fails (blocks legitimate layouts the runner accepts).
 | Test-discovery glob | pytest's `python_files` defaults (`test_*.py` **and** `*_test.py`) | Fails projects whose suite the runner would collect |
 | Jest test glob | Jest's `testMatch` (incl. `__tests__/`) | Same false-positive against a passing suite |
 | Merge-gate label read | The labels the framework actually writes (`author:` / `reviewed-by:`) | Accepts the wrong stamp, or requires a stamp nothing applies |
-| `_git_write_to_protected` | Git's real pre-subcommand options (`-C`, `--git-dir`, `--work-tree`, quoting) | `git -C <main> commit` escapes; legitimate worktree commits get refused |
+| `_git_write_to_protected` | Git's real pre-subcommand options (`-C`, `--git-dir`, `--work-tree`, quoting) | Historical defect (#117, fixed in PR #119 / commit `0d1b6d2`): `git -C <main> commit` escaped or legitimate worktree commits got refused |
 
 Recent issues in this family: #69 (hook governed the shell's cwd, not the
 file), #73 (widening `touches:` had no effect until a cache expired), #76
 (redirect target starting with a variable read as a repo path), #117
-(protected-branch guard keyed to the shell's branch).
+(protected-branch guard keyed to the shell's branch — fixed in PR #119 / commit `0d1b6d2`).
 
 ### State machine, not narrative
 
