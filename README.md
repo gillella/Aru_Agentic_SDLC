@@ -63,6 +63,8 @@ Aru_Agentic_SDLC/
 
 **Which project board?** [`docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md) compares GitHub Issues, Linear, Jira, Azure Boards, and others for agentic coding factories — and recommends keeping GitHub as Aru’s coordinator.
 
+**Explore the lifecycle:** open the no-build [interactive SDLC factory flow visualizer](sdlc_flow_visualizer/index.html) locally to inspect the current claim, worktree, review, merge, and remediation mechanics. Roadmap-only mechanisms are labelled as planned in the visualizer.
+
 > **Note on the research documents.** There are currently two overlapping
 > research guides alongside the build plan. `ARU-SOFTWARE-FACTORY.md` remains
 > authoritative for sequencing and non-goals; the research guides are evidence,
