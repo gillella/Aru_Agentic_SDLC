@@ -194,13 +194,13 @@ Follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`.
    Everything from here happens inside the worktree.
 4. **Implement.** Minimal and targeted. Match the surrounding idiom. Do not
    refactor what the issue did not ask you to touch.
-5. **Verify locally — not optional:** `ruff check .` and `pytest -q` both clean.
+5. **Verify locally — not optional:** `ruff check .` and `python3 -m unittest discover tests` both clean.
    New source with no test is not done. Docs-only? State in the PR body exactly
    what you checked.
 6. **Commit, rebase, re-verify, push:**
    ```
    git fetch origin && git rebase origin/main
-   ruff check . && pytest -q
+   ruff check . && python3 -m unittest discover tests
    git push -u origin <branch>
    ```
 7. **Open the PR, stamped with your identity:**

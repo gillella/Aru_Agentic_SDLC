@@ -136,4 +136,18 @@ jobs:
 
       - name: Execute Tests
         run: |
-          if [ -d tests ]; then python -m unittest discover tests; fi
+          has_source=0
+          missing_sources=""
+          for src in scripts hooks sdlc_flow_visualizer dummy_calculator_app; do
+            if [ -d "$src" ] && [ -n "$(find "$src" -maxdepth 2 -name '*.py' 2>/dev/null)" ]; then
+              has_source=1
+              missing_sources="$missing_sources $src"
+            fi
+          done
+          if [ "$has_source" -eq 1 ]; then
+            if [ ! -d tests ] || [ -z "$(find tests -maxdepth 2 -name 'test_*.py' 2>/dev/null)" ]; then
+              echo "error: source directories ($missing_sources) exist, but tests/ is absent or contains no test_*.py modules." >&2
+              exit 1
+            fi
+          fi
+          python -m unittest discover tests

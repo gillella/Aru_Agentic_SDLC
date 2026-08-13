@@ -51,7 +51,7 @@ as written:
 
 ```bash
 ruff check .
-pytest -q
+python3 -m unittest discover tests
 ```
 
 **The toolchain is pinned, and that is the point.** Versions live in
