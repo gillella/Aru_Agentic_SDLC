@@ -1225,3 +1225,353 @@ class WithdrawnMarkerTests(unittest.TestCase):
         self.assertIsNone(
             merge_pr.WITHDRAWN_MARKER.search("I do not think this should be withdrawn.")
         )
+
+
+def checkpoint_pr():
+    """A merged PR carrying the identity labels the checkpoint has to record."""
+    pr = merged_pr()
+    pr["title"] = "feat: the thing"
+    pr["labels"] = [
+        {"name": "author:cursor-1"},
+        {"name": "family:xai"},
+        {"name": "reviewed-by:claude-rev-9"},
+    ]
+    return pr
+
+
+CHECKPOINT_GATES = [
+    ("open", True, "PR is open."),
+    ("ci", True, "CI green (4 checks)."),
+    ("review", True, "1 review(s) from claude-rev-9."),
+    ("size", True, "Diff is 59 lines."),
+]
+
+
+class CheckpointTagNameTests(unittest.TestCase):
+    def test_name_pairs_the_pr_with_its_merge_commit(self):
+        self.assertEqual(
+            merge_pr.checkpoint_tag_name(120, "9ac804ae774509b47cbd1e735e4cfbb50edebc6b"),
+            "ckpt/120-9ac804a",
+        )
+
+    def test_the_same_merge_commit_always_yields_the_same_name(self):
+        """Idempotency rests on this: a resumed close-out must not mint a second tag."""
+        first = merge_pr.checkpoint_tag_name(9, "abcdef1234567890")
+        second = merge_pr.checkpoint_tag_name(9, "abcdef1234567890")
+        self.assertEqual(first, second)
+
+    def test_an_unknown_merge_sha_has_no_name(self):
+        self.assertEqual(merge_pr.checkpoint_tag_name(9, ""), "")
+        self.assertEqual(merge_pr.checkpoint_tag_name(9, "unknown"), "")
+
+
+class CheckpointMessageTests(unittest.TestCase):
+    def _message(self, gates=CHECKPOINT_GATES):
+        return merge_pr.checkpoint_message(
+            checkpoint_pr(), [7], gates, "gated-sha", "merge-sha"
+        )
+
+    def test_records_the_whole_verdict_set(self):
+        message = self._message()
+        for fragment in ("#9", "feat: the thing", "#7", "cursor-1",
+                         "claude-rev-9", "gated-sha", "merge-sha"):
+            self.assertIn(fragment, message)
+        for name, _, _ in CHECKPOINT_GATES:
+            self.assertIn(name, message)
+
+    def test_records_the_gated_head_not_only_the_merge_commit(self):
+        """The gated head is the commit the gate actually approved."""
+        self.assertIn("gated-sha", self._message())
+
+    def test_a_resumed_closeout_admits_the_gap_rather_than_inventing_verdicts(self):
+        """Re-deriving gates post-merge would record failures that never happened.
+
+        ``check_open`` fails on a closed PR, so a re-evaluated verdict block on
+        the resume path would be actively false. The checkpoint says so instead.
+        """
+        message = self._message(gates=None)
+        self.assertNotIn("✅", message)
+        self.assertIn("not reproducible", message.lower())
+
+    def test_a_failed_gate_is_recorded_as_failed(self):
+        message = self._message(gates=[("size", False, "Diff is 2000 lines.")])
+        self.assertIn("size", message)
+        self.assertIn("❌", message)
+
+
+class WriteCheckpointTagTests(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+
+    def _run_cmd(self, missing_tag=True, tag_rc=0, push_rc=0, object_present=True):
+        def fake(cmd, check=True, cwd=None):
+            self.calls.append(cmd)
+            if cmd[:2] == ["git", "fetch"]:
+                return 0, "", ""
+            if cmd[:3] == ["git", "rev-parse", "--verify"]:
+                return (1, "", "not found") if missing_tag else (0, "tagsha", "")
+            if cmd[:2] == ["git", "cat-file"]:
+                return (0, "", "") if object_present else (1, "", "missing object")
+            if cmd[:2] == ["git", "tag"]:
+                return tag_rc, "", ("tag failed" if tag_rc else "")
+            if cmd[:2] == ["git", "push"]:
+                return push_rc, "", ("push failed" if push_rc else "")
+            return 0, "", ""
+        return fake
+
+    def _write(self, **kwargs):
+        with patch.object(merge_pr, "run_cmd", side_effect=self._run_cmd(**kwargs)):
+            return merge_pr.write_checkpoint_tag(
+                "/repo", checkpoint_pr(), [7], CHECKPOINT_GATES, "gated-sha", "merge-sha"
+            )
+
+    def _tag_calls(self):
+        return [c for c in self.calls if c[:2] == ["git", "tag"]]
+
+    def test_writes_an_annotated_tag_at_the_merge_commit(self):
+        ok, message = self._write()
+        self.assertTrue(ok)
+        tag_calls = self._tag_calls()
+        self.assertEqual(len(tag_calls), 1)
+        self.assertIn("-a", tag_calls[0])
+        self.assertIn("ckpt/9-merge-s", tag_calls[0])
+        self.assertIn("merge-sha", tag_calls[0])
+        self.assertIn("ckpt/9-merge-s", message)
+
+    def test_an_existing_checkpoint_is_never_rewritten_or_moved(self):
+        """Re-running the helper must not duplicate, move, or force-update it."""
+        ok, message = self._write(missing_tag=False)
+        self.assertTrue(ok)
+        self.assertEqual(self._tag_calls(), [])
+        self.assertIn("already", message.lower())
+
+    def test_no_code_path_force_updates_a_tag(self):
+        self._write()
+        for cmd in self.calls:
+            self.assertNotIn("-f", cmd)
+            self.assertNotIn("--force", cmd)
+
+    def test_a_tag_write_failure_is_reported_not_raised(self):
+        ok, message = self._write(tag_rc=1)
+        self.assertFalse(ok)
+        self.assertIn("tag failed", message)
+
+    def test_a_push_failure_leaves_the_local_checkpoint_intact(self):
+        """The local tag satisfies the contract; the push is best effort."""
+        ok, message = self._write(push_rc=1)
+        self.assertTrue(ok)
+        self.assertIn("push", message.lower())
+
+    def test_a_merge_commit_absent_locally_is_reported(self):
+        ok, message = self._write(object_present=False)
+        self.assertFalse(ok)
+        self.assertIn("merge-sha", message)
+
+    def test_an_unknown_merge_sha_writes_nothing(self):
+        with patch.object(merge_pr, "run_cmd", side_effect=self._run_cmd()) as run:
+            ok, _ = merge_pr.write_checkpoint_tag(
+                "/repo", checkpoint_pr(), [7], CHECKPOINT_GATES, "gated-sha", "unknown"
+            )
+        self.assertFalse(ok)
+        run.assert_not_called()
+
+
+class CheckpointCallSiteTests(unittest.TestCase):
+    """The tag is written after close-out, never before, and never on a dry run."""
+
+    def _main(self, argv, closeout_ok=True):
+        with patch.object(sys, "argv", argv), \
+             patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "run_closeout", return_value=closeout_ok), \
+             patch.object(merge_pr, "write_checkpoint_tag",
+                          return_value=(True, "written")) as tag:
+            code = merge_pr.main()
+        return code, tag
+
+    def test_a_completed_closeout_writes_the_checkpoint(self):
+        code, tag = self._main(["merge_pr.py", "--pr", "9"])
+        self.assertEqual(code, merge_pr.EXIT_OK)
+        tag.assert_called_once()
+
+    def test_a_failed_closeout_writes_no_checkpoint(self):
+        """Otherwise the checkpoint would attest to a success that did not happen."""
+        code, tag = self._main(["merge_pr.py", "--pr", "9"], closeout_ok=False)
+        self.assertEqual(code, merge_pr.EXIT_ERROR)
+        tag.assert_not_called()
+
+    def test_dry_run_writes_no_checkpoint(self):
+        code, tag = self._main(["merge_pr.py", "--pr", "9", "--dry-run"])
+        self.assertEqual(code, merge_pr.EXIT_OK)
+        tag.assert_not_called()
+
+    def test_a_checkpoint_failure_does_not_fail_a_completed_merge(self):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "run_closeout", return_value=True), \
+             patch.object(merge_pr, "write_checkpoint_tag",
+                          return_value=(False, "git tag failed")):
+            self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
+
+    def test_the_resume_path_passes_no_fabricated_gates(self):
+        _, tag = self._main(["merge_pr.py", "--pr", "9"])
+        self.assertIsNone(tag.call_args.args[3])
+
+
+class CheckpointPublishRetryTests(unittest.TestCase):
+    """B1/B2: existence must not strand the push, and the fetch can create the tag."""
+
+    def setUp(self):
+        self.calls = []
+
+    def _run_cmd(self, missing_tag=True, tag_rc=0, push_rc=0, tag_after_fail=True):
+        def fake(cmd, check=True, cwd=None):
+            self.calls.append(cmd)
+            if cmd[:2] == ["git", "fetch"]:
+                return 0, "", ""
+            if cmd[:3] == ["git", "rev-parse", "--verify"]:
+                if not missing_tag:
+                    return 0, "tagsha", ""
+                # The re-check after a failed `git tag` sees the concurrent tag.
+                seen = [c for c in self.calls if c[:3] == ["git", "rev-parse", "--verify"]]
+                if len(seen) > 1 and tag_after_fail:
+                    return 0, "tagsha", ""
+                return 1, "", "not found"
+            if cmd[:2] == ["git", "cat-file"]:
+                return 0, "", ""
+            if cmd[:2] == ["git", "tag"]:
+                return tag_rc, "", ("already exists" if tag_rc else "")
+            if cmd[:2] == ["git", "push"]:
+                return push_rc, "", ("push failed" if push_rc else "")
+            return 0, "", ""
+        return fake
+
+    def _write(self, **kwargs):
+        with patch.object(merge_pr, "run_cmd", side_effect=self._run_cmd(**kwargs)):
+            return merge_pr.write_checkpoint_tag(
+                "/repo", checkpoint_pr(), [7], CHECKPOINT_GATES, "gated-sha", "merge-sha"
+            )
+
+    def _kinds(self):
+        return [" ".join(c[:2]) for c in self.calls]
+
+    def test_an_already_recorded_checkpoint_is_still_pushed(self):
+        """Otherwise one transient push failure un-publishes it permanently."""
+        ok, message = self._write(missing_tag=False)
+        self.assertTrue(ok)
+        self.assertIn("git push", self._kinds())
+        self.assertNotIn("git tag", self._kinds())
+        self.assertIn("already recorded", message)
+
+    def test_the_fetch_precedes_the_existence_check(self):
+        """A fetch auto-follows tags, so checking first false-fails a healthy merge."""
+        self._write()
+        kinds = self._kinds()
+        self.assertLess(kinds.index("git fetch"), kinds.index("git rev-parse"))
+
+    def test_a_tag_that_appeared_concurrently_is_not_reported_as_failure(self):
+        ok, message = self._write(tag_rc=1)
+        self.assertTrue(ok)
+        self.assertIn("already recorded", message)
+
+    def test_a_genuine_tag_failure_is_still_reported(self):
+        ok, message = self._write(tag_rc=1, tag_after_fail=False)
+        self.assertFalse(ok)
+        self.assertIn("already exists", message)
+
+    def test_a_push_failure_promises_a_later_retry(self):
+        ok, message = self._write(push_rc=1)
+        self.assertTrue(ok)
+        self.assertIn("retries", message.lower())
+
+
+class GateVerdictPersistenceTests(unittest.TestCase):
+    """B3: the resume path writes the real record instead of a permanent blank."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        patcher = patch.object(
+            merge_pr, "run_cmd", return_value=(0, self.dir, "")
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_verdicts_survive_a_round_trip(self):
+        self.assertTrue(merge_pr.save_gate_verdicts(self.dir, 9, CHECKPOINT_GATES))
+        self.assertEqual(merge_pr.load_gate_verdicts(self.dir, 9), CHECKPOINT_GATES)
+
+    def test_absent_verdicts_read_as_none_not_as_an_empty_pass(self):
+        """None makes the checkpoint admit the gap; [] would read as 'no gates ran'."""
+        self.assertIsNone(merge_pr.load_gate_verdicts(self.dir, 404))
+
+    def test_malformed_verdicts_read_as_none(self):
+        path = merge_pr.gate_verdict_path(self.dir, 9)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self.assertIsNone(merge_pr.load_gate_verdicts(self.dir, 9))
+
+    def test_discard_is_safe_when_nothing_was_parked(self):
+        merge_pr.discard_gate_verdicts(self.dir, 404)
+
+    def test_discard_removes_the_parked_verdicts(self):
+        merge_pr.save_gate_verdicts(self.dir, 9, CHECKPOINT_GATES)
+        merge_pr.discard_gate_verdicts(self.dir, 9)
+        self.assertIsNone(merge_pr.load_gate_verdicts(self.dir, 9))
+
+
+class CheckpointMergePathCallSiteTests(unittest.TestCase):
+    """B4: the resume branch is not the merge branch; both need the guarantees."""
+
+    def _main(self, argv, closeout_ok=True):
+        open_pr = checkpoint_pr()
+        open_pr["state"] = "OPEN"
+        open_pr.pop("mergedAt", None)
+        with patch.object(sys, "argv", argv), \
+             patch.object(merge_pr, "fetch_pr", return_value=open_pr), \
+             patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
+             patch.object(merge_pr, "review_evidence", return_value={}), \
+             patch.object(merge_pr, "evaluate_dod",
+                          return_value=(True, list(CHECKPOINT_GATES))), \
+             patch.object(merge_pr, "execute_merge",
+                          return_value=(merged_pr(), "merged")), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "save_gate_verdicts", return_value=True), \
+             patch.object(merge_pr, "load_gate_verdicts", return_value=None), \
+             patch.object(merge_pr, "discard_gate_verdicts"), \
+             patch.object(merge_pr, "run_closeout", return_value=closeout_ok), \
+             patch.object(merge_pr, "write_checkpoint_tag",
+                          return_value=(True, "written")) as tag:
+            code = merge_pr.main()
+        return code, tag
+
+    def test_the_merge_path_writes_the_checkpoint_with_real_verdicts(self):
+        code, tag = self._main(["merge_pr.py", "--pr", "9"])
+        self.assertEqual(code, merge_pr.EXIT_OK)
+        tag.assert_called_once()
+        self.assertEqual(tag.call_args.args[3], list(CHECKPOINT_GATES))
+
+    def test_dry_run_on_the_merge_path_writes_no_checkpoint(self):
+        """The resume branch returns earlier, so only this reaches the merge path."""
+        code, tag = self._main(["merge_pr.py", "--pr", "9", "--dry-run"])
+        self.assertEqual(code, merge_pr.EXIT_OK)
+        tag.assert_not_called()
+
+    def test_a_failed_closeout_on_the_merge_path_writes_no_checkpoint(self):
+        code, tag = self._main(["merge_pr.py", "--pr", "9"], closeout_ok=False)
+        self.assertEqual(code, merge_pr.EXIT_ERROR)
+        tag.assert_not_called()
+
+    def test_the_resume_path_loads_parked_verdicts_when_they_exist(self):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "load_gate_verdicts",
+                          return_value=list(CHECKPOINT_GATES)) as load, \
+             patch.object(merge_pr, "discard_gate_verdicts"), \
+             patch.object(merge_pr, "run_closeout", return_value=True), \
+             patch.object(merge_pr, "write_checkpoint_tag",
+                          return_value=(True, "written")) as tag:
+            merge_pr.main()
+        load.assert_called_once()
+        self.assertEqual(tag.call_args.args[3], list(CHECKPOINT_GATES))
