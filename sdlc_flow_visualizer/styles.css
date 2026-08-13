@@ -583,11 +583,33 @@ body {
     flex-direction: column;
     align-items: flex-start;
   }
+  .app-header {
+    padding: 1rem;
+  }
+  .header-actions {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .mode-selector {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .mode-btn {
+    flex: 1 1 30%;
+  }
+  .sim-btn {
+    width: 100%;
+    justify-content: center;
+  }
   .pipeline-container {
     grid-template-columns: 1fr;
     padding: 1.5rem 1rem;
   }
   .search-box {
+    width: 100%;
+  }
+  .detail-drawer {
     width: 100%;
   }
 }

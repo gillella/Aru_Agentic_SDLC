@@ -168,10 +168,10 @@ document.addEventListener('DOMContentLoaded', () => {
       title: 'Independent Peer Review',
       subtitle: 'SkillsMP Procedure: code-review',
       description: 'A distinct peer agent (preferring cross-family) claims the PR for review, checks out an isolated review worktree (.worktrees/review-pr-Y), and inspects the diff against the checklist.',
-      code: 'python3 scripts/claim_issue.py --pr 42 --agent agent-2 --complete-review',
+      code: 'python3 scripts/claim_issue.py --pr 42 --agent agent-2',
       rules: [
         'Authors can NEVER review their own PR (merge gate rejects self-reviews).',
-        'Peer agent leaves inline comments for findings; uses --complete-review only when clean.',
+        'Peer agent claims first, leaves inline comments for findings, and uses --complete-review only when clean.',
         'Stamps reviewed-by:agent-2 label upon completion.'
       ],
       remediation: 'If blocking findings exist, threads are left open and the claim is released.'
@@ -220,11 +220,11 @@ document.addEventListener('DOMContentLoaded', () => {
       title: 'Mechanical Merge & Tag',
       subtitle: 'Git Server Merge & Audit',
       description: 'The gated merge helper executes the server merge and writes an annotated checkpoint tag named ckpt/<PR>-<short-SHA> with the PR, issue, author, reviewer, and gate evidence.',
-      code: 'python3 scripts/merge_pr.py --pr 42 --expected-head <SHA>',
+      code: 'python3 scripts/merge_pr.py --pr 42 --expected-head <SHA> --merge-method squash',
       rules: [
-        'Preserves commit history and branch ancestry.',
+        'Current default is squash; issue #89 tracks changing the default to a merge commit.',
         'Creates immutable audit trail checkpoint tag.',
-        'Never drops branch commits via squash unless explicitly configured.'
+        'Use --merge-method merge explicitly when preserving branch commit ancestry is required.'
       ],
       remediation: 'If remote server merge fails, merge_pr.py reports error without corrupting local state.'
     },
@@ -281,11 +281,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let simRunning = false;
   let simInterval = null;
+  let activeView = 'macro';
+  let searchQuery = '';
+  let lastActiveCard = null;
 
   // 1. Drawer Inspection Logic
-  function openDrawer(nodeId) {
+  function openDrawer(nodeId, trigger) {
     const data = NODE_DETAILS[nodeId];
     if (!data) return;
+
+    lastActiveCard = trigger || null;
 
     document.getElementById('drawer-tag').textContent = data.tag;
     document.getElementById('drawer-title').textContent = data.title;
@@ -309,66 +314,79 @@ document.addEventListener('DOMContentLoaded', () => {
 
     drawer.classList.add('open');
     overlay.classList.add('open');
+    drawer.setAttribute('aria-hidden', 'false');
+    closeBtn.focus();
   }
 
   function closeDrawer() {
     drawer.classList.remove('open');
     overlay.classList.remove('open');
+    drawer.setAttribute('aria-hidden', 'true');
     cards.forEach(c => c.classList.remove('active-inspect'));
+    if (lastActiveCard) lastActiveCard.focus();
   }
 
   cards.forEach(card => {
+    const title = card.querySelector('h3').textContent;
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-label', `Inspect ${title}`);
     card.addEventListener('click', () => {
       const nodeId = card.getAttribute('data-id');
-      openDrawer(nodeId);
+      openDrawer(nodeId, card);
+    });
+    card.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openDrawer(card.getAttribute('data-id'), card);
+      }
     });
   });
 
   closeBtn.addEventListener('click', closeDrawer);
   overlay.addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && drawer.classList.contains('open')) closeDrawer();
+  });
 
   // 2. Search & Filter Logic
-  searchInput.addEventListener('input', (e) => {
-    const query = e.target.value.toLowerCase().trim();
+  const macroIds = new Set(['idea', 'triage', 'picker', 'pr', 'review', 'dodgate', 'deploy']);
+  const remediationIds = new Set(['triage', 'claim', 'plangate', 'implementation', 'ci', 'threads', 'freshhead', 'dodgate']);
+
+  function applyFilters() {
     cards.forEach(card => {
       const nodeId = card.getAttribute('data-id');
       const data = NODE_DETAILS[nodeId];
       if (!data) return;
 
       const searchableText = `${data.title} ${data.subtitle} ${data.description} ${data.code} ${data.tag} ${data.rules.join(' ')}`.toLowerCase();
-      if (!query || searchableText.includes(query)) {
-        card.style.display = 'block';
-        card.style.opacity = '1';
-      } else {
-        card.style.opacity = '0.2';
-      }
+      const matchesSearch = !searchQuery || searchableText.includes(searchQuery);
+      const matchesView = activeView === 'micro'
+        || (activeView === 'macro' && macroIds.has(nodeId))
+        || (activeView === 'remediation' && remediationIds.has(nodeId));
+      card.style.opacity = matchesSearch ? (matchesView ? '1' : '0.4') : '0.2';
     });
+  }
+
+  searchInput.addEventListener('input', (event) => {
+    searchQuery = event.target.value.toLowerCase().trim();
+    applyFilters();
   });
 
   // 3. View Mode Switcher
   modeButtons.forEach(btn => {
     btn.addEventListener('click', () => {
       modeButtons.forEach(b => b.classList.remove('active'));
+      modeButtons.forEach(b => b.setAttribute('aria-pressed', 'false'));
       btn.classList.add('active');
-      const view = btn.getAttribute('data-view');
-
-      cards.forEach(card => {
-        const id = card.getAttribute('data-id');
-        if (view === 'macro') {
-          // Highlight primary milestones
-          const isMacro = ['idea', 'triage', 'picker', 'pr', 'review', 'dodgate', 'deploy'].includes(id);
-          card.style.opacity = isMacro ? '1' : '0.4';
-        } else if (view === 'remediation') {
-          // Highlight failure & feedback handling
-          const isRem = ['triage', 'claim', 'plangate', 'implementation', 'ci', 'threads', 'freshhead', 'dodgate'].includes(id);
-          card.style.opacity = isRem ? '1' : '0.4';
-        } else {
-          // Micro (All visible)
-          card.style.opacity = '1';
-        }
-      });
+      btn.setAttribute('aria-pressed', 'true');
+      activeView = btn.getAttribute('data-view');
+      applyFilters();
     });
   });
+
+  modeButtons.forEach(btn => btn.setAttribute('aria-pressed', btn.classList.contains('active') ? 'true' : 'false'));
+  applyFilters();
 
   // 4. Animated Flow Simulation
   const SIM_SEQUENCE = ['idea', 'prd', 'dag', 'triage', 'picker', 'claim', 'worktree', 'plangate', 'implementation', 'localtest', 'pr', 'ci', 'review', 'threads', 'freshhead', 'dodgate', 'merge', 'closeout', 'deploy', 'telemetry'];
