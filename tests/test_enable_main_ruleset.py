@@ -35,7 +35,7 @@ class PayloadContractTests(unittest.TestCase):
         )
 
     def test_default_enforcement_is_active(self):
-        self.assertEqual(ruleset.ruleset_payload("active")["enforcement"], "active")
+        self.assertEqual(ruleset.ruleset_payload()["enforcement"], "active")
 
     def test_assert_safe_payload_rejects_linear_history(self):
         payload = ruleset.ruleset_payload()

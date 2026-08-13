@@ -45,7 +45,7 @@ def ci_context_from_workflow(path: Path = WORKFLOW) -> str:
     raise ValueError(f"{path} has no test-and-lint job name")
 
 
-def ruleset_payload(enforcement: str = "evaluate") -> Dict[str, Any]:
+def ruleset_payload(enforcement: str = "active") -> Dict[str, Any]:
     return {
         "name": RULESET_NAME,
         "target": "branch",
@@ -177,7 +177,7 @@ def _blocked_message(detail: str) -> int:
     return EXIT_BLOCKED
 
 
-def apply_ruleset(slug: str, enforcement: str = "evaluate") -> int:
+def apply_ruleset(slug: str, enforcement: str = "active") -> int:
     payload = ruleset_payload(enforcement)
     assert_safe_payload(payload)
     status, existing, detail = find_existing_id(slug)
