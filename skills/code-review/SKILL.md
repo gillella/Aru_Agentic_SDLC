@@ -69,9 +69,9 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 
 ## Review Checklist
 
-Apply every item before submitting the review. A chat summary that skips this
-list is not review evidence.
+Apply every pre-submission item before submitting the review, and complete the post-submission close-out after submission. A chat summary that skips this list is not review evidence.
 
+### Pre-Submission Checklist
 - [ ] Linked issue (`Closes #N`) is open; every acceptance criterion is met or
       explicitly deferred with a follow-up issue (do not close incomplete work).
 - [ ] Diff matches the claim in the PR body **and** the gate/script's actual
@@ -84,9 +84,11 @@ list is not review evidence.
 - [ ] No secrets, unsafe shell interpolation, or trust-boundary holes introduced.
 - [ ] Blocking findings are each an unresolved inline thread; non-blocking notes
       stay in the review body.
+
+### Post-Submission Close-Out
 - [ ] Review claim released via `claim_issue.py --pr <PR_ID> --agent <AGENT_ID> --complete-review`
       (if no blocking findings remain) or `--release` (if changes requested).
-- [ ] Temporary review worktree (`.worktrees/review-pr-<PR_ID>`) is removed.
+- [ ] Temporary review worktree (`.worktrees/review-pr-<PR_ID>`) removed and local review branch deleted.
 
 ---
 
