@@ -179,6 +179,7 @@ def review_evidence(pr_id):
     seen_cursors = set()
     unresolved = 0
     unfixed = 0
+    outdated_unfixed = 0
     withdrawn = 0
     commit_times = None
     reviewed_head = False
@@ -229,30 +230,38 @@ def review_evidence(pr_id):
         for node in nodes:
             outdated = bool(node.get("isOutdated"))
             resolved = bool(node.get("isResolved"))
+            comments = (node.get("comments") or {}).get("nodes") or []
+
             if not resolved and not outdated:
                 unresolved += 1
                 continue
-            if outdated:
-                # The lines it pointed at are gone, so the code did change.
-                continue
-            comments = (node.get("comments") or {}).get("nodes") or []
+
             if not comments:
+                if not resolved and outdated:
+                    outdated_unfixed += 1
                 continue
+
             if any(WITHDRAWN_MARKER.search(c.get("body") or "") for c in comments):
                 withdrawn += 1
                 continue
+
             raised = _parse_ts(comments[0].get("createdAt"))
-            if raised is None:
-                # Cannot date the finding, so cannot prove a fix followed it.
-                unfixed += 1
+            has_commit_after = (raised is not None) and any(ts > raised for ts in commit_times)
+
+            if not resolved and outdated:
+                if not has_commit_after:
+                    outdated_unfixed += 1
                 continue
-            if not any(ts > raised for ts in commit_times):
-                unfixed += 1
+
+            if resolved:
+                if not has_commit_after:
+                    unfixed += 1
 
         if not has_next:
             return {
                 "unresolved": unresolved,
                 "unfixed": unfixed,
+                "outdated_unfixed": outdated_unfixed,
                 "withdrawn": withdrawn,
                 "reviewed_head": reviewed_head,
             }
@@ -448,8 +457,16 @@ def check_reviews(pr, evidence):
         return False, (f"{', '.join(blocking)} requested changes and has not re-approved.")
     if evidence is None:
         return False, "Could not determine review-thread state; refusing rather than guessing."
-    if evidence["unresolved"] > 0:
-        return False, f"{evidence['unresolved']} unresolved review thread(s)."
+    unres = evidence.get("unresolved", 0)
+    out_unfixed = evidence.get("outdated_unfixed", 0)
+    if unres > 0 or out_unfixed > 0:
+        total = unres + out_unfixed
+        if unres > 0 and out_unfixed > 0:
+            return False, f"{total} unresolved review thread(s) ({out_unfixed} outdated without evidence)."
+        elif unres > 0:
+            return False, f"{unres} unresolved review thread(s)."
+        else:
+            return False, f"{out_unfixed} outdated review thread(s) without evidence."
 
     # Resolving a thread is a UI toggle with no relationship to the diff, so
     # zero-unresolved alone certified PR #62's five blocking findings as

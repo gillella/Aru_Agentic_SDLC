@@ -1266,6 +1266,94 @@ class WithdrawnMarkerTests(unittest.TestCase):
         )
 
 
+class OutdatedThreadEvidenceTests(unittest.TestCase):
+    """An outdated thread stops gating only when evidence shows it was addressed or withdrawn."""
+
+    PASSING = ("author:agent-1", "reviewed-by:agent-2")
+
+    def test_outdated_unresolved_thread_without_commit_blocks(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 1, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertFalse(ok)
+        self.assertIn("outdated review thread(s) without evidence", msg)
+
+    def test_pr_140_shape_four_findings_one_outdated_unfixed_accounted_for(self):
+        """Reproduces PR #140 shape: 4 findings, 1 anchor line deleted, 0 commits after finding."""
+        ok, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 3, "unfixed": 0, "outdated_unfixed": 1, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertFalse(ok)
+        self.assertIn("4 unresolved review thread(s) (1 outdated without evidence)", msg)
+
+    def test_outdated_unresolved_thread_with_commit_after_finding_passes(self):
+        ok, _ = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertTrue(ok)
+
+    @patch("merge_pr.get_repo_slug", return_value="owner/repo")
+    @patch("merge_pr._gh_json")
+    def test_review_evidence_parses_outdated_threads_with_and_without_evidence(self, mock_gh_json, _mock_slug):
+        gql_data = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": "head123",
+                        "reviews": {"nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}]},
+                        "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
+                        "reviewThreads": {
+                            "nodes": [
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3"}]}},
+                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)"}]}},
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                }
+            }
+        }
+        mock_gh_json.return_value = gql_data
+        evidence = merge_pr.review_evidence(140)
+        self.assertEqual(evidence["unresolved"], 3)
+        self.assertEqual(evidence["outdated_unfixed"], 1)
+
+        gql_data_with_commit = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": "head123",
+                        "reviews": {"nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}]},
+                        "commits": {
+                            "nodes": [
+                                {"commit": {"committedDate": "2026-08-10T10:00:00Z"}},
+                                {"commit": {"committedDate": "2026-08-10T12:00:00Z"}},
+                            ]
+                        },
+                        "reviewThreads": {
+                            "nodes": [
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3"}]}},
+                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)"}]}},
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                }
+            }
+        }
+        mock_gh_json.return_value = gql_data_with_commit
+        evidence_after_commit = merge_pr.review_evidence(140)
+        self.assertEqual(evidence_after_commit["unresolved"], 3)
+        self.assertEqual(evidence_after_commit["outdated_unfixed"], 0)
+
+
 def checkpoint_pr():
     """A merged PR carrying the identity labels the checkpoint has to record."""
     pr = merged_pr()
