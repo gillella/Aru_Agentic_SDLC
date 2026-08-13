@@ -17,6 +17,7 @@ TARGET_CLAUDE=false
 TARGET_CURSOR=false
 TARGET_ANTIGRAVITY=false
 EXPLICIT_AGENT=false
+ALL_AGENTS=false
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
@@ -31,6 +32,10 @@ parse_args() {
         ;;
       --repair)
         REPAIR=true
+        shift
+        ;;
+      --all)
+        ALL_AGENTS=true
         shift
         ;;
       --codex-only)

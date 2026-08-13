@@ -180,16 +180,24 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertIn("[CHECK FAILED]", res.stdout)
 
     def test_zero_agents_detected_without_all_flag(self):
+        clean_path = self.target_home / "clean_path"
+        clean_path.mkdir(parents=True)
+        for tool in ["bash", "sh", "grep", "cat", "mkdir", "ln", "rm", "mktemp", "basename", "dirname", "readlink", "touch", "which", "cut", "awk", "head", "echo"]:
+            tool_path = subprocess.run(["which", tool], capture_output=True, text=True).stdout.strip()
+            if tool_path and Path(tool_path).exists():
+                (clean_path / tool).symlink_to(tool_path)
+
         cmd = [
             str(INSTALLER),
             "--aru-home", str(ROOT),
-            "--target-home", str(self.target_home),
+            "--target-home", str(self.target_home / "user_home"),
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "HOME": str(self.target_home)})
-        self.assertEqual(res.returncode, 0)
-        self.assertFalse((self.target_home / ".codex").exists())
-        self.assertFalse((self.target_home / ".claude").exists())
-        self.assertFalse((self.target_home / ".cursor").exists())
+        res = subprocess.run(cmd, capture_output=True, text=True, env={"PATH": str(clean_path), "HOME": str(self.target_home / "user_home")})
+        self.assertEqual(res.returncode, 0, f"Installer failed: {res.stderr}\n{res.stdout}")
+        user_home = self.target_home / "user_home"
+        self.assertFalse((user_home / ".codex").exists())
+        self.assertFalse((user_home / ".claude").exists())
+        self.assertFalse((user_home / ".cursor").exists())
 
 
 if __name__ == "__main__":
