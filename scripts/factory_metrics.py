@@ -11,7 +11,6 @@ Outputs plain text or JSON. No database or external service required.
 import argparse
 import json
 import statistics
-import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
