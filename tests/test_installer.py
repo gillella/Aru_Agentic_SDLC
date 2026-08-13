@@ -1,0 +1,167 @@
+"""Parity tests for the agent-integration installer.
+
+The installer used to carry a hand-maintained array of skill names guarded only
+by a comment asking the next reader to keep it in step with `skills/` on disk.
+That invariant failed silently: `run-aru-factory` — the entrypoint every other
+skill is dispatched from — was never added, so no external agent could reach
+the door the README and AGENTS.md told people to use (#163).
+
+These tests assert the property that actually failed, rather than the shape of
+the fix: after an install, every skill on disk is reachable. They run the real
+script against a throwaway HOME so the assertion covers what the installer
+links, not what it appears to link on reading.
+
+The script is located by glob rather than by name because #164 renames it —
+a test that pins the old filename would fail the rename for the wrong reason.
+"""
+
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SKILLS_DIR = ROOT / "skills"
+
+
+def installer_path():
+    """The integration installer, whatever it is currently called."""
+    matches = sorted(ROOT.glob("scripts/install_*integration*.sh"))
+    if not matches:
+        raise AssertionError(
+            "no scripts/install_*integration*.sh found; if the installer was "
+            "renamed outside that pattern, update this glob"
+        )
+    # A deprecation shim may sit alongside the real script during the rename
+    # window. The longest name is the specific one; the shim keeps the old
+    # short name and merely forwards.
+    return max(matches, key=lambda p: len(p.name))
+
+
+def skills_on_disk():
+    return {d.name for d in SKILLS_DIR.iterdir() if d.is_dir() and (d / "SKILL.md").is_file()}
+
+
+def run_installer(home, script=None, cwd=None):
+    """Runs the installer with HOME redirected at a scratch directory.
+
+    Every path the script writes is HOME-relative (~/.cursor, ~/.agents,
+    ~/.zshrc, ~/.zprofile), so overriding HOME fully contains it. Without that
+    containment this test would rewrite the developer's own shell profile.
+    """
+    env = dict(os.environ, HOME=str(home))
+    return subprocess.run(
+        ["bash", str(script or installer_path())],
+        env=env,
+        cwd=str(cwd or ROOT),
+        capture_output=True,
+        text=True,
+    )
+
+
+class InstallerParityTest(unittest.TestCase):
+    def test_every_skill_on_disk_is_installed(self):
+        """The regression that shipped: a skill exists but is unreachable."""
+        expected = skills_on_disk()
+        self.assertIn(
+            "run-aru-factory",
+            expected,
+            "the entrypoint skill is missing from skills/ entirely",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            result = run_installer(home)
+            self.assertEqual(
+                result.returncode, 0, f"installer failed:\n{result.stdout}\n{result.stderr}"
+            )
+
+            for dest in (home / ".cursor" / "skills", home / ".agents" / "skills"):
+                installed = {d.name for d in dest.iterdir()} if dest.is_dir() else set()
+                self.assertEqual(
+                    expected - installed,
+                    set(),
+                    f"skills on disk but not installed into {dest.name}: "
+                    f"{sorted(expected - installed)}",
+                )
+
+    def test_installed_skills_resolve_to_readable_procedures(self):
+        """A dangling symlink installs a name, not a usable procedure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            result = run_installer(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            dest = home / ".agents" / "skills"
+            for name in skills_on_disk():
+                self.assertTrue(
+                    (dest / name / "SKILL.md").is_file(),
+                    f"{name} installed but its SKILL.md does not resolve",
+                )
+
+    def test_no_hardcoded_skill_name_list(self):
+        """Guards the fix itself: a reintroduced literal list rots the same way."""
+        text = installer_path().read_text(encoding="utf-8")
+        for name in skills_on_disk():
+            self.assertNotIn(
+                f"\n  {name}\n",
+                text,
+                f"{name} appears as a hardcoded array entry; the skill list "
+                f"must be derived from skills/ on disk",
+            )
+
+
+class InstallerRejectionTest(unittest.TestCase):
+    """A directory under skills/ that defines no procedure is an error.
+
+    Silently skipping it would recreate the original bug in a new form: the
+    skill looks installed to anyone reading skills/, but no agent can reach it.
+    Built against a synthetic tree because the real repo has no malformed skill
+    and should not grow one to satisfy a test.
+    """
+
+    def _fake_home(self, tmp):
+        fake = Path(tmp) / "sdlc"
+        (fake / "scripts").mkdir(parents=True)
+        shutil.copy(installer_path(), fake / "scripts" / installer_path().name)
+        (fake / "skills" / "good").mkdir(parents=True)
+        (fake / "skills" / "good" / "SKILL.md").write_text("# good\n", encoding="utf-8")
+        return fake
+
+    def test_skill_directory_without_skill_md_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = self._fake_home(tmp)
+            (fake / "skills" / "malformed").mkdir()
+
+            home = Path(tmp) / "home"
+            home.mkdir()
+            result = run_installer(home, script=fake / "scripts" / installer_path().name)
+
+            self.assertNotEqual(
+                result.returncode, 0, "installer accepted a skill directory with no SKILL.md"
+            )
+            self.assertIn("SKILL.md", result.stderr)
+            self.assertFalse(
+                (home / ".agents" / "skills" / "good").exists(),
+                "installer linked skills before validating the whole set",
+            )
+
+    def test_empty_skills_tree_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "sdlc"
+            (fake / "scripts").mkdir(parents=True)
+            shutil.copy(installer_path(), fake / "scripts" / installer_path().name)
+            (fake / "skills").mkdir()
+
+            home = Path(tmp) / "home"
+            home.mkdir()
+            result = run_installer(home, script=fake / "scripts" / installer_path().name)
+
+            self.assertNotEqual(result.returncode, 0, "installer accepted an empty skills tree")
+            self.assertIn("no skills found", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
