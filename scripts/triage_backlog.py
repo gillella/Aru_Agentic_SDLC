@@ -109,7 +109,7 @@ def has_non_goals(body: str) -> bool:
 
 def is_feat_or_fix(issue: dict[str, Any]) -> bool:
     """Checks if an issue represents a feature or bug fix."""
-    labels = {l.get("name", "").lower() for l in (issue.get("labels") or [])}
+    labels = {lbl.get("name", "").lower() for lbl in (issue.get("labels") or [])}
     title = (issue.get("title") or "").lower()
     return (
         any(lbl in labels for lbl in ("type:feat", "type:fix", "feature", "bug"))
