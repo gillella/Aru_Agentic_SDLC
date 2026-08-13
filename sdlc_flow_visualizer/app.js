@@ -1,0 +1,406 @@
+/**
+ * Aru Agentic SDLC — Interactive Graphical Visualizer Logic
+ * Provides component metadata, drawer inspection, search filtering,
+ * view mode switching, and animated idea flow simulation.
+ */
+
+document.addEventListener('DOMContentLoaded', () => {
+  // Component Knowledge Base
+  const NODE_DETAILS = {
+    idea: {
+      tag: 'Trigger',
+      title: 'Raw Idea & Feature Intent',
+      subtitle: 'Intake Trigger',
+      description: 'The SDLC originates from human operator intent, customer requirements, or bug reports. Direct code edits without an issue origin are strictly forbidden by the Issue-First Law.',
+      code: 'Follow skills/create-github-issue/SKILL.md',
+      rules: [
+        'No code edit or refactor may occur without a tracked issue.',
+        'Issue must define summary, background context, and clear acceptance criteria checkboxes.',
+        'Must specify declared touches: paths and depends-on: DAG tags.'
+      ],
+      remediation: 'If intent is underspecified, triage keeps it in Backlog; the planned #102 idea-to-prd skill will formalize this shaping step.'
+    },
+    prd: {
+      tag: 'Planned: #102 idea-to-prd',
+      title: 'PRD & Architecture Spec',
+      subtitle: 'Roadmap capability — not yet shipped',
+      description: 'Issue #102 will translate high-level intent into structured product requirements, architectural contracts, and verifiable acceptance criteria. Today this shaping is manual.',
+      code: 'Planned in GitHub issue #102',
+      rules: [
+        'Defines clear boundaries for what is in-scope and out-of-scope.',
+        'Identifies money, PII, schema, or migration risks early.',
+        'Requires clear, testable verification commands.'
+      ],
+      remediation: 'If PRD lacks technical decisions, issues remain blocked until clarified.'
+    },
+    dag: {
+      tag: 'Planned: #103 prd-to-issues',
+      title: 'Issue DAG Generator',
+      subtitle: 'Roadmap capability — not yet shipped',
+      description: 'Issue #103 will decompose PRDs into claimable GitHub issues with explicit depends-on: links and touches: file footprints. Today agents create and triage those issues directly.',
+      code: 'Planned in GitHub issue #103',
+      rules: [
+        'Declares touches: src/a/*, tests/b.py footprint so the picker detects path collisions.',
+        'Establishes dependency ordering so dependent tasks stay blocked until parent PRs merge.',
+        'Keeps each issue small enough for independent review.'
+      ],
+      remediation: 'If touches: is empty, the issue picker refuses to offer it to any agent until triaged.'
+    },
+    triage: {
+      tag: 'Script: triage_backlog.py',
+      title: 'Backlog Quality & Triage',
+      subtitle: 'Automation Script: triage_backlog.py',
+      description: 'Automated triager that evaluates open Backlog issues against the Ready contract: checks that acceptance criteria exist, touches: is declared and non-empty, and dependencies are resolved.',
+      code: 'python3 scripts/triage_backlog.py --capacity',
+      rules: [
+        'Promotes Backlog → Ready only when all metadata is complete.',
+        'Reports claimable capacity after dependency and path-conflict filtering.',
+        'Prevents un-triaged issues from reaching the picker.'
+      ],
+      remediation: 'If an issue lacks acceptance criteria, it remains in Backlog with a diagnostic warning.'
+    },
+    picker: {
+      tag: 'Script: fetch_next_work.py',
+      title: 'Multi-Task Priority Picker',
+      subtitle: 'Automation Script: fetch_next_work.py',
+      description: 'The single multi-task queue picker for fleet agents. Resolves work in strict priority order: 1. Feedback > 2. Merge > 3. Review > 4. Issue. Finishing beats starting!',
+      code: 'python3 scripts/fetch_next_work.py --agent agent-1 --family anthropic --claim',
+      rules: [
+        'Enforces finishing in-flight work before starting new issues.',
+        'Routes cross-family reviews to avoid model blind spots.',
+        'Evaluates dependency DAG and touches: path collisions across active claims.'
+      ],
+      remediation: 'If a claim race occurs (exit code 2), the picker automatically tries the next eligible candidate.'
+    },
+    claim: {
+      tag: 'Script: claim_issue.py',
+      title: 'Optimistic Claim & Tie-Break',
+      subtitle: 'Automation Script: claim_issue.py',
+      description: 'GitHub lacks compare-and-swap on issue assignment, so claiming writes the agent:<id> label, reads back the issue state, and resolves races deterministically using agent ID sorting.',
+      code: 'python3 scripts/claim_issue.py --issue 104 --agent agent-1',
+      rules: [
+        'Lowest-sorting agent ID wins claim races.',
+        'The loser automatically removes its label and backs off.',
+        'Updates board status to status:in-progress.'
+      ],
+      remediation: 'The designated janitor adds --reap-after 4 to picker cycles to release abandoned claims.'
+    },
+    worktree: {
+      tag: 'Script: create_branch.py',
+      title: 'Worktree Isolation',
+      subtitle: 'Automation Script: create_branch.py',
+      description: 'Creates a clean, isolated git worktree inside .worktrees/feat-issue-X to keep the main clone pristine. Retries on .git/index.lock contention.',
+      code: 'python3 scripts/create_branch.py --issue 104 --type feat --worktree',
+      rules: [
+        'All implementation and review edits happen under .worktrees/.',
+        'Direct edits on main are strictly forbidden.',
+        'Worktree names follow standard conventions: feat/issue-X-slug.'
+      ],
+      remediation: 'If git lock contention occurs during creation, the script uses exponential backoff to retry.'
+    },
+    plangate: {
+      tag: 'Gate: Plan Gate',
+      title: 'Post-and-Proceed Plan Gate',
+      subtitle: 'Mandatory Plan Gate',
+      description: 'Before making the first edit for a feature (or money, PII, schema, migration task), the agent posts a durable ## Implementation Plan comment on the issue.',
+      code: 'gh issue comment 104 --body-file .worktrees/plan.md',
+      rules: [
+        'Post-and-proceed: agent posts the comment and immediately proceeds without waiting for human approval.',
+        'Must outline files to edit, schema deltas, test strategy, and rejected alternatives.',
+        'If scope changes materially during execution, an amended plan comment is posted.'
+      ],
+      remediation: 'If product intent is missing, the issue is left blocked for operator clarification.'
+    },
+    implementation: {
+      tag: 'Hook: enforce_touches.py',
+      title: 'Source Edit & Path Guard',
+      subtitle: 'PreToolUse Guardrail Hook',
+      description: 'Deterministic PreToolUse hook that intercepts every file edit or shell write command, verifying the target file is inside the issue\'s declared touches: footprint.',
+      code: 'hooks/enforce_touches.py (PreToolUse Hook)',
+      rules: [
+        'Blocks writes outside declared touches: paths with exit code 2.',
+        'Blocks direct commits or pushes targeting protected default branches (main/master).',
+        'Forces widening touches: on the issue before writing to new files.'
+      ],
+      remediation: 'If an edit is blocked, the agent must widen touches: on the GitHub issue first.'
+    },
+    localtest: {
+      tag: 'Verification',
+      title: 'Local Verification',
+      subtitle: 'Test Discipline',
+      description: 'Executes pytest and ruff check . locally inside the worktree prior to committing or pushing code. Never claims success without empirical proof.',
+      code: 'ruff check . && pytest -q',
+      rules: [
+        'Never commit or push code with failing local unit tests or lint errors.',
+        'Preserves existing docstrings, public API contracts, and formatting.',
+        'Runs exact verification commands specified in the issue.'
+      ],
+      remediation: 'If local tests fail, the agent debugs and resolves failures inside the worktree.'
+    },
+    pr: {
+      tag: 'Script: create_pr.py',
+      title: 'Stamped Pull Request',
+      subtitle: 'Automation Script: create_pr.py',
+      description: 'Opens a Pull Request targeting main, stamping mandatory author:<id> and family:<family> labels, and populating Closes #ID in the body.',
+      code: 'python3 scripts/create_pr.py --issue 104 --agent agent-1 --model-family anthropic --title "..." --body "..."',
+      rules: [
+        'Requires --agent flag; omitting it exits non-zero.',
+        'Stamps author:<id> so the merge gate can distinguish peer reviews from self-reviews.',
+        'Includes mandatory Closes #X link for automatic issue closure.'
+      ],
+      remediation: 'If branch is behind main, rebase on main before opening PR.'
+    },
+    ci: {
+      tag: 'Script: check_ci.py',
+      title: 'CI Pipeline Gate',
+      subtitle: 'Automation Script: check_ci.py',
+      description: 'Polls automated GitHub Actions CI pipeline runs. If CI fails, triggers the remediate-ci-failure skill to parse un-truncated build logs and apply targeted fixes.',
+      code: 'python3 scripts/check_ci.py --pr 42 --wait',
+      rules: [
+        'CI checks must be completely green before review or merge.',
+        'Never gloss over build timeouts or permission errors.',
+        'Parses un-truncated logs for empirical failure tracebacks.'
+      ],
+      remediation: 'Invokes skills/remediate-ci-failure to analyze logs, apply targeted fixes, and push updates.'
+    },
+    review: {
+      tag: 'Skill: code-review',
+      title: 'Independent Peer Review',
+      subtitle: 'SkillsMP Procedure: code-review',
+      description: 'A distinct peer agent (preferring cross-family) claims the PR for review, checks out an isolated review worktree (.worktrees/review-pr-Y), and inspects the diff against the checklist.',
+      code: 'python3 scripts/claim_issue.py --pr 42 --agent agent-2 --complete-review',
+      rules: [
+        'Authors can NEVER review their own PR (merge gate rejects self-reviews).',
+        'Peer agent leaves inline comments for findings; uses --complete-review only when clean.',
+        'Stamps reviewed-by:agent-2 label upon completion.'
+      ],
+      remediation: 'If blocking findings exist, threads are left open and the claim is released.'
+    },
+    threads: {
+      tag: 'Script: fetch_pr_feedback.py',
+      title: 'Thread Verification',
+      subtitle: 'Automation Script: fetch_pr_feedback.py',
+      description: 'Parses active review comments and ensures every finding has a commit fix landing after the finding or an explicit Withdrawn: reply.',
+      code: 'python3 scripts/fetch_pr_feedback.py --pr 42',
+      rules: [
+        'Resolving a thread UI toggle alone is insufficient; a commit or explicit withdrawal is required.',
+        'Withdrawn replies must state why the finding was retracted.',
+        'Prevents unaddressed findings from reaching the merge gate.'
+      ],
+      remediation: 'Author agent invokes address-pr-feedback skill to push fixes or post withdrawal replies.'
+    },
+    freshhead: {
+      tag: 'Head Check',
+      title: 'Head Freshness Guard',
+      subtitle: 'Validation Guard',
+      description: 'Ensures the latest review attests to the exact current head SHA. If new commits were pushed after review, re-review is required before merge.',
+      code: 'merge_pr.py check_reviews() evidence["reviewed_head"]',
+      rules: [
+        'Reviews of previous commit SHAs cover code no longer proposed.',
+        'Prevents force-push bypasses after approval.',
+        'Requires peer re-review of updated head SHA.'
+      ],
+      remediation: 'Peer agent re-evaluates the updated head SHA and updates attestation.'
+    },
+    dodgate: {
+      tag: 'Script: merge_pr.py',
+      title: 'Definition-of-Done Gate',
+      subtitle: 'Automation Script: merge_pr.py',
+      description: 'The single sanctioned merge gate. Validates 7 strict checks: 1. Open/non-draft, 2. Green CI, 3. Independent reviewed-by stamp, 4. Zero unfixed threads, 5. Rebased on main, 6. Closes #X linked, 7. 100% checked acceptance criteria.',
+      code: 'python3 scripts/merge_pr.py --pr 42',
+      rules: [
+        'Fail-closed: any failed check aborts merge with non-zero exit code.',
+        'Direct pushes to main and gh pr merge bypasses are strictly forbidden.',
+        'Only script that has authority to merge code.'
+      ],
+      remediation: 'Prints exact unmet condition; agent resolves condition and re-runs script.'
+    },
+    merge: {
+      tag: 'Server Merge',
+      title: 'Mechanical Merge & Tag',
+      subtitle: 'Git Server Merge & Audit',
+      description: 'The gated merge helper executes the server merge and writes an annotated checkpoint tag named ckpt/<PR>-<short-SHA> with the PR, issue, author, reviewer, and gate evidence.',
+      code: 'python3 scripts/merge_pr.py --pr 42 --expected-head <SHA>',
+      rules: [
+        'Preserves commit history and branch ancestry.',
+        'Creates immutable audit trail checkpoint tag.',
+        'Never drops branch commits via squash unless explicitly configured.'
+      ],
+      remediation: 'If remote server merge fails, merge_pr.py reports error without corrupting local state.'
+    },
+    closeout: {
+      tag: 'Auto Close',
+      title: 'Board Sync & Worktree Pruning',
+      subtitle: 'Close-Out Engine',
+      description: 'Performs post-merge close-out: auto-closes linked GitHub issues, transitions board items to status:done, clears agent claims, and prunes local git worktree.',
+      code: 'python3 scripts/merge_pr.py --pr 42 --expected-head <SHA>',
+      rules: [
+        'Guarantees Done means clean workspace and sync\'d board.',
+        'Deregisters and prunes .worktrees/feat-issue-X.',
+        'Clears merger: and agent:<id> claims.'
+      ],
+      remediation: 'If close-out fails mid-way, running merge_pr.py again resumes close-out safely.'
+    },
+    deploy: {
+      tag: 'Planned: #109 deploy-preview',
+      title: 'Deploy Preview & Release',
+      subtitle: 'Roadmap capability — not yet shipped',
+      description: 'Issue #109 will add a deploy-preview skill gated on a merged commit. Staging and production promotion remain follow-on work in #110.',
+      code: 'Planned in GitHub issues #109 and #110',
+      rules: [
+        'Begins only from a governed merged commit.',
+        'Keeps deployment and promotion linked to issues and PRs.',
+        'Adds smoke and E2E stages through follow-on issue #111.'
+      ],
+      remediation: 'Until #109 lands, deployment is outside the implemented factory loop.'
+    },
+    telemetry: {
+      tag: 'Script: fleet_status.py',
+      title: 'Telemetry & Operator View',
+      subtitle: 'Monitoring Dashboard',
+      description: 'Currently evaluates complete, waiting, blocked, and error states from live issues, PRs, claims, board drift, and worktrees. Dwell time, cycle time, and spend metrics are planned in #106–#108.',
+      code: 'python3 scripts/fleet_status.py',
+      rules: [
+        'Fails closed when GitHub or board queries are ambiguous.',
+        'Reports open governed work, claims, drift, and orphan worktrees.',
+        'Does not yet report spend or full cycle-time telemetry.'
+      ],
+      remediation: 'Use triage_backlog.py --capacity beside fleet_status.py until the planned operator metrics land.'
+    }
+  };
+
+  // DOM Elements
+  const drawer = document.getElementById('detail-drawer');
+  const overlay = document.getElementById('drawer-overlay');
+  const closeBtn = document.getElementById('close-drawer-btn');
+  const cards = document.querySelectorAll('.flow-card');
+  const searchInput = document.getElementById('search-input');
+  const modeButtons = document.querySelectorAll('.mode-btn');
+  const simBtn = document.getElementById('sim-toggle-btn');
+  const simBtnText = document.getElementById('sim-btn-text');
+
+  let simRunning = false;
+  let simInterval = null;
+
+  // 1. Drawer Inspection Logic
+  function openDrawer(nodeId) {
+    const data = NODE_DETAILS[nodeId];
+    if (!data) return;
+
+    document.getElementById('drawer-tag').textContent = data.tag;
+    document.getElementById('drawer-title').textContent = data.title;
+    document.getElementById('drawer-subtitle').textContent = data.subtitle;
+    document.getElementById('drawer-description').textContent = data.description;
+    document.getElementById('drawer-code').textContent = data.code;
+
+    const rulesUl = document.getElementById('drawer-rules');
+    rulesUl.innerHTML = '';
+    data.rules.forEach(rule => {
+      const li = document.createElement('li');
+      li.textContent = rule;
+      rulesUl.appendChild(li);
+    });
+
+    document.getElementById('drawer-remediation').textContent = data.remediation;
+
+    cards.forEach(c => c.classList.remove('active-inspect'));
+    const activeCard = document.getElementById(`node-${nodeId}`);
+    if (activeCard) activeCard.classList.add('active-inspect');
+
+    drawer.classList.add('open');
+    overlay.classList.add('open');
+  }
+
+  function closeDrawer() {
+    drawer.classList.remove('open');
+    overlay.classList.remove('open');
+    cards.forEach(c => c.classList.remove('active-inspect'));
+  }
+
+  cards.forEach(card => {
+    card.addEventListener('click', () => {
+      const nodeId = card.getAttribute('data-id');
+      openDrawer(nodeId);
+    });
+  });
+
+  closeBtn.addEventListener('click', closeDrawer);
+  overlay.addEventListener('click', closeDrawer);
+
+  // 2. Search & Filter Logic
+  searchInput.addEventListener('input', (e) => {
+    const query = e.target.value.toLowerCase().trim();
+    cards.forEach(card => {
+      const nodeId = card.getAttribute('data-id');
+      const data = NODE_DETAILS[nodeId];
+      if (!data) return;
+
+      const searchableText = `${data.title} ${data.subtitle} ${data.description} ${data.code} ${data.tag} ${data.rules.join(' ')}`.toLowerCase();
+      if (!query || searchableText.includes(query)) {
+        card.style.display = 'block';
+        card.style.opacity = '1';
+      } else {
+        card.style.opacity = '0.2';
+      }
+    });
+  });
+
+  // 3. View Mode Switcher
+  modeButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      modeButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const view = btn.getAttribute('data-view');
+
+      cards.forEach(card => {
+        const id = card.getAttribute('data-id');
+        if (view === 'macro') {
+          // Highlight primary milestones
+          const isMacro = ['idea', 'triage', 'picker', 'pr', 'review', 'dodgate', 'deploy'].includes(id);
+          card.style.opacity = isMacro ? '1' : '0.4';
+        } else if (view === 'remediation') {
+          // Highlight failure & feedback handling
+          const isRem = ['triage', 'claim', 'plangate', 'implementation', 'ci', 'threads', 'freshhead', 'dodgate'].includes(id);
+          card.style.opacity = isRem ? '1' : '0.4';
+        } else {
+          // Micro (All visible)
+          card.style.opacity = '1';
+        }
+      });
+    });
+  });
+
+  // 4. Animated Flow Simulation
+  const SIM_SEQUENCE = ['idea', 'prd', 'dag', 'triage', 'picker', 'claim', 'worktree', 'plangate', 'implementation', 'localtest', 'pr', 'ci', 'review', 'threads', 'freshhead', 'dodgate', 'merge', 'closeout', 'deploy', 'telemetry'];
+  let simIndex = 0;
+
+  function runSimulationStep() {
+    cards.forEach(c => c.classList.remove('simulating-active'));
+    const currentId = SIM_SEQUENCE[simIndex];
+    const currentCard = document.getElementById(`node-${currentId}`);
+    if (currentCard) {
+      currentCard.classList.add('simulating-active');
+      currentCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    simIndex = (simIndex + 1) % SIM_SEQUENCE.length;
+  }
+
+  simBtn.addEventListener('click', () => {
+    if (simRunning) {
+      clearInterval(simInterval);
+      simRunning = false;
+      simBtn.classList.remove('running');
+      simBtnText.textContent = 'Simulate Idea Flow';
+      cards.forEach(c => c.classList.remove('simulating-active'));
+    } else {
+      simRunning = true;
+      simIndex = 0;
+      simBtn.classList.add('running');
+      simBtnText.textContent = 'Pause Simulation';
+      runSimulationStep();
+      simInterval = setInterval(runSimulationStep, 1600);
+    }
+  });
+
+  console.log('Aru Agentic SDLC Visualizer Loaded Cleanly.');
+});
