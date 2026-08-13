@@ -68,9 +68,60 @@ def has_verification(body: str) -> bool:
     return bool(tail.strip())
 
 
+LEGACY_ISSUE_CUTOFF_NUMBER = 158
+
+EXAMPLE_CONFORMING_ISSUE = """
+Example of a conforming issue with machine-checkable criteria:
+
+## Feature Description
+...
+
+## Acceptance Criteria
+- [ ] Predicate 1 (verify: `python3 -m unittest tests.test_foo`)
+- [ ] Predicate 2
+
+## Decision Boundaries
+- Default: value
+- Edge cases: handling
+- Error handling: raise/log
+
+## Non-Goals
+- Explicit out of scope item
+
+## Verification
+- Run test suite
+"""
+
+
+def has_decision_boundaries(body: str) -> bool:
+    """Checks for a Decision Boundaries section in the issue body."""
+    if not body:
+        return False
+    return bool(re.search(r"^\s*#{1,4}\s*decision\s+boundaries\b", body, flags=re.IGNORECASE | re.MULTILINE))
+
+
+def has_non_goals(body: str) -> bool:
+    """Checks for a Non-Goals section in the issue body."""
+    if not body:
+        return False
+    return bool(re.search(r"^\s*#{1,4}\s*non[- ]goals\b", body, flags=re.IGNORECASE | re.MULTILINE))
+
+
+def is_feat_or_fix(issue: dict[str, Any]) -> bool:
+    """Checks if an issue represents a feature or bug fix."""
+    labels = {l.get("name", "").lower() for l in (issue.get("labels") or [])}
+    title = (issue.get("title") or "").lower()
+    return (
+        any(lbl in labels for lbl in ("type:feat", "type:fix", "feature", "bug"))
+        or title.startswith("feat:")
+        or title.startswith("fix:")
+    )
+
+
 def ready_gaps(issue: dict[str, Any], open_numbers: set) -> list[str]:
     """Returns the list of unmet Ready-contract elements. Empty means ready."""
     body = issue.get("body") or ""
+    num = issue.get("number", 0)
     gaps = []
 
     if is_epic(issue.get("labels", [])):
@@ -83,6 +134,22 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set) -> list[str]:
         gaps.append("no verification section")
     if not parse_touches(body):
         gaps.append("no touches: declaration")
+
+    if is_feat_or_fix(issue):
+        missing_db = not has_decision_boundaries(body)
+        missing_ng = not has_non_goals(body)
+        if missing_db or missing_ng:
+            if num <= LEGACY_ISSUE_CUTOFF_NUMBER and num > 0:
+                print(
+                    f"  [WARN] Pre-existing legacy issue #{num} is missing machine-checkable criteria sections "
+                    f"({'Decision Boundaries' if missing_db else ''}{' and ' if missing_db and missing_ng else ''}{'Non-Goals' if missing_ng else ''}); warning only.",
+                    file=sys.stderr,
+                )
+            else:
+                if missing_db:
+                    gaps.append("missing section: ## Decision Boundaries")
+                if missing_ng:
+                    gaps.append("missing section: ## Non-Goals")
 
     unresolved = [d for d in parse_dependencies(body) if d in open_numbers]
     if unresolved:

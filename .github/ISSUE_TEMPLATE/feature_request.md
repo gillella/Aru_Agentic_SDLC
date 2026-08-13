@@ -10,11 +10,25 @@ assignees: ''
 <!-- Clear and concise description of what the feature is and why it is needed -->
 
 ## Acceptance Criteria
-- [ ] Requirement 1
-- [ ] Requirement 2
+- [ ] Predicate 1 (verify: `command to verify`)
+- [ ] Predicate 2
+
+## Decision Boundaries
+<!-- Explicit defaults, edge cases, error paths, and thresholds -->
+- Default:
+- Edge cases:
+- Error handling:
+
+## Non-Goals
+<!-- Explicit non-goals to bound agent improvisation -->
+- 
+
+## Verification
+<!-- Commands and steps to verify this feature -->
 
 ## Dependencies
 - **depends-on**: <!-- Issue numbers if any, e.g., #12, #14 -->
+- **touches**: <!-- Paths or globs touched by this issue -->
 - **parallel-eligible**: true <!-- Set to true if this issue can be implemented independently in parallel -->
 
 ## Technical Considerations

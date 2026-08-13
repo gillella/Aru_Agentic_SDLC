@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -53,9 +54,52 @@ class SectionParsingTests(unittest.TestCase):
         self.assertFalse(tb.has_verification("## Verification\n\n## Dependencies\n\nx\n"))
 
 
+CONFORMING_FEAT_BODY = """## Summary
+
+Do the feature.
+
+## Acceptance Criteria
+
+- [ ] Predicate 1 (verify: `pytest -q`)
+- [ ] Predicate 2
+
+## Decision Boundaries
+- Default: value
+- Edge cases: handling
+
+## Non-Goals
+- Out of scope
+
+## Verification
+
+`pytest -q` exits 0.
+
+## Dependencies
+
+depends-on:
+touches: src/thing.py, tests/test_thing.py
+parallel-eligible: true
+"""
+
+
 class ReadyContractTests(unittest.TestCase):
     def test_complete_issue_has_no_gaps(self):
         self.assertEqual(tb.ready_gaps(issue(10, "type:chore", body=READY_BODY), set()), [])
+
+    def test_conforming_feat_issue_has_no_gaps(self):
+        self.assertEqual(tb.ready_gaps(issue(200, "type:feat", body=CONFORMING_FEAT_BODY), set()), [])
+
+    def test_new_feat_issue_missing_decision_boundaries_and_non_goals_is_blocked(self):
+        gaps = tb.ready_gaps(issue(200, "type:feat", body=READY_BODY), set())
+        self.assertIn("missing section: ## Decision Boundaries", gaps)
+        self.assertIn("missing section: ## Non-Goals", gaps)
+
+    def test_legacy_issue_missing_machine_criteria_warns_and_passes(self):
+        with patch("sys.stderr.write") as mock_stderr:
+            gaps = tb.ready_gaps(issue(100, "type:feat", body=READY_BODY), set())
+            self.assertEqual(gaps, [])  # Passes for legacy issue <= 158
+            written = "".join(call.args[0] for call in mock_stderr.call_args_list)
+            self.assertIn("[WARN] Pre-existing legacy issue #100", written)
 
     def test_missing_touches_is_reported(self):
         body = READY_BODY.replace("touches: src/thing.py, tests/test_thing.py", "touches:")
