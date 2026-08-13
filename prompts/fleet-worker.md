@@ -198,7 +198,7 @@ Follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`.
    New source with no test is not done. Docs-only? State in the PR body exactly
    what you checked.
 6. **Commit, rebase, re-verify, push:**
-   ```
+   ```bash
    git fetch origin && git rebase origin/main
    ruff check . && python3 -m unittest discover tests
    git push -u origin <branch>
