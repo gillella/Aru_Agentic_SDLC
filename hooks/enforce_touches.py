@@ -342,12 +342,15 @@ def _git_write_to_protected(command, branch):
     if not command:
         return None
 
-    cmd_sans_heredoc = _strip_heredocs(command)
-    tokens = _shell_tokens(cmd_sans_heredoc)
-    if not tokens:
-        return None
+    if isinstance(command, (list, tuple)):
+        words = list(command)
+    else:
+        cmd_sans_heredoc = _strip_heredocs(command)
+        tokens = _shell_tokens(cmd_sans_heredoc)
+        if not tokens:
+            return None
+        words = [text for kind, text in tokens if kind == "word"]
 
-    words = [text for kind, text in tokens if kind == "word"]
     index = 0
     while index < len(words):
         word = words[index]
@@ -378,12 +381,27 @@ def _git_write_to_protected(command, branch):
             return f"commit directly on '{branch}'"
 
         if subcommand == "push":
-            targets = words[index:]
-            for tok in targets:
+            push_opts_with_val = {"-o", "--push-option", "-r", "--repo", "--receive-pack", "--exec"}
+            pos_args = []
+            i = index
+            while i < len(words):
+                tok = words[i]
+                if tok.startswith("-"):
+                    name, _, inline = tok.partition("=")
+                    if not inline and name in push_opts_with_val:
+                        i += 2
+                    else:
+                        i += 1
+                else:
+                    pos_args.append(tok)
+                    i += 1
+
+            for tok in pos_args:
                 ref = tok.split(":")[-1].replace("refs/heads/", "")
                 if ref in PROTECTED_BRANCHES:
                     return f"push to '{ref}'"
-            if not [t for t in targets if not t.startswith("-")] and branch in PROTECTED_BRANCHES:
+
+            if not pos_args and branch in PROTECTED_BRANCHES:
                 return f"push '{branch}'"
 
     return None
@@ -463,6 +481,7 @@ def _git_write_violation(command, cwd):
 
         # Walk git's pre-subcommand options to find both the subcommand and
         # any option that moves where it acts.
+        git_start_index = index
         target, unknown = base, base_unknown
         index += 1
         subcommand = None
@@ -496,15 +515,10 @@ def _git_write_violation(command, cwd):
                 f"run 'git {subcommand}' in a directory this hook cannot "
                 "resolve, so it cannot prove the target branch is unprotected"
             )
-        violation = _git_write_to_protected(f"git {subcommand}", current_branch(target))
+        cmd_words = words[git_start_index:]
+        violation = _git_write_to_protected(cmd_words, current_branch(target))
         if violation:
             return violation
-        # `git push origin main` names its ref explicitly and is refused from
-        # any branch, so the ref scan still runs against the full command.
-        remainder = " ".join(words[index:])
-        explicit = _git_write_to_protected(f"git push {remainder}", "") if subcommand == "push" else None
-        if explicit:
-            return explicit
 
     return None
 

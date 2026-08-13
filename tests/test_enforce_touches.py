@@ -184,6 +184,11 @@ class ProtectedBranchTests(unittest.TestCase):
     def test_quoted_ref_is_still_detected(self):
         self.assertIsNotNone(et._git_write_to_protected('git push origin "main"', "feat/issue-1-a"))
 
+    def test_push_with_option_containing_quotes_detects_violation(self):
+        self.assertIsNotNone(
+            et._git_write_to_protected('git push --no-verify -o "message=it\'s" origin HEAD:main', "feat/issue-1-a")
+        )
+
     def test_bare_push_while_on_main_is_blocked(self):
         self.assertIsNotNone(et._git_write_to_protected("git push", "main"))
 
