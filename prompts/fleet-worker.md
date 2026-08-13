@@ -1,7 +1,10 @@
-# Fleet Worker Prompt
+# Fleet Worker Child Contract
 
-One prompt, pasted once per agent session. Each agent asks the board what to do
-next, does it, and asks again — no orchestrator, no shared state beyond GitHub.
+This is the authority on what one finite worker session does. It is no longer
+the process-liveness boundary: `scripts/run_fleet.py` owns repeat, waiting,
+retry, and operator-controlled termination. Each child asks the board what to
+do next, completes or safely hands off exactly one unit, then returns to the
+runner. GitHub remains the only shared work queue.
 
 Agents do four kinds of work: fix their own PR when a reviewer asks, merge a
 PR whose Definition-of-Done gates already pass, review someone else's PR, or
@@ -9,7 +12,24 @@ implement an issue. **Review and merge are work an agent claims off the board**,
 done under that agent's own subscription. There is no CI reviewer and no
 provider API key anywhere in this design.
 
-## How to launch
+## Durable launch
+
+From each trusted isolated clone, start the foreground runner once:
+
+```
+python3 "$ARU_SDLC_HOME/scripts/run_fleet.py" loop \
+  --repo . --agent agent-1 --family openai --adapter codex
+```
+
+Use `--adapter claude --family anthropic` for Claude Code, or an explicit JSON
+argv adapter for another local CLI. The runner checks the picker before
+launching a child, so idle and complete boards consume GitHub polling but no
+agent credits. `run_fleet.py stop --repo . --agent agent-1` requests a
+drain-first stop. The dependent supervisor work in #46 is still required to
+restart this foreground process after terminal closure, process death, sleep,
+or reboot.
+
+## Fleet setup
 
 1. Give every agent a **distinct id** (`agent-1`, `agent-2`, …) and declare its
    **model family** (`anthropic`, `openai`, `google`, …). All agents
@@ -18,16 +38,14 @@ provider API key anywhere in this design.
    a reviewer with the same blind spots as its author.
 2. Give every agent its **own clone** (see `scripts/launch_fleet.sh`). Sharing
    one `.git` past ~3 agents means constant `index.lock` contention.
-3. Open one terminal session per agent, `cd` into that clone, paste the prompt.
+3. Open one persistent terminal per clone and start `run_fleet.py loop`.
 4. Preflight the board once (see **Board preflight** at the bottom).
 
-On an agent that discovers skills, `run-aru-factory` is the shorter path: say
-"please continue" or "run the factory as agent-2, family openai" and it routes
-into this same contract, in `loop` mode. The GitHub board is the session
-store — a new chat recovers by asking the picker, not by reading a local
-handoff file. This prompt stays the authority on what the loop does — the
-skill delegates here rather than restating it — so paste this when you want
-the loop pinned to an exact text, or when the agent has no skill discovery.
+On an agent that discovers skills, `run-aru-factory` routes loop mode to the
+same runner. The GitHub board is the session store — every new child recovers
+by asking the picker, not by reading a local handoff file. This prompt stays
+the authority on what the loop does inside one child; the skill and runner do
+not restate the lifecycle branches below.
 
 **This loop needs a persistent shell with `gh`.** Claude Code, Cursor's CLI, and
 the local Codex CLI all qualify. **Codex Cloud does not** — it is task-triggered
@@ -45,9 +63,9 @@ right now against the same GitHub board. You coordinate with them **only**
 through the board — never assume you are alone, and never assume you are the
 fastest.
 
-Your job: repeatedly ask the board what to do, do that one thing properly, and
-ask again. Work at your own pace. Do not wait for other agents, do not report
-to them, do not touch their work.
+Your job: ask the board what to do, do that one thing properly, report the
+outcome, and return to the outer runner. Do not start a second work unit. Work
+at your own pace. Do not touch another agent's work.
 
 ### Setup
 
@@ -70,7 +88,8 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID> --family 
 It returns one work item of type `feedback`, `merge`, `review`, `issue`, or
 `idle`, and claims it. The priority order is deliberate — **finishing beats
 starting** (feedback → merge → review → issue). Do the branch below that
-matches, then loop.
+matches, then return. The outer runner re-evaluates the board and decides when
+to launch the next child.
 
 ---
 
@@ -253,18 +272,19 @@ corrupts someone else's work, not just yours.
    (`gh issue comment` for implementation plans). MCP GitHub is optional and
    non-authoritative — do not copy a PAT into it.
 
-### Stop conditions
+### Child return conditions
 
-Stop, write a final summary, and end the session when:
+Write a final summary and return to the outer runner when:
 
-- The picker returns `idle`. Report the board state and continue when work
-  becomes eligible; idle alone does not require human intervention.
+- The picker returns `idle`. Report the board state; the runner remains alive
+  and wakes when work becomes eligible.
 - You hit a decision that changes the product's shape — schema, external
   contract, money semantics, security posture — that the issue does not settle.
   Comment the options and tradeoffs and leave the issue blocked for requirement
   clarification.
 - A helper script exits `1` (error, not conflict). Diagnose and use the
-  governed remediation path. Human intervention is appropriate only if the
+  governed remediation path. The runner treats the child exit as recoverable
+  and retries with backoff. Human intervention is appropriate only if the
   error is a severe merge conflict or merge/close-out failure that agents
   cannot resolve safely.
 - Any hard rule would have to be broken to proceed.

@@ -50,12 +50,13 @@ without both flags is a bug**, not a shortcut.
 | `adopt` | make an ungoverned repo governed, then start work | `init-agent-project` |
 | `status` | report factory state without changing anything | `scripts/fleet_status.py` |
 | `next` | do exactly one unit of work, then stop | picker + the matching skill |
-| `loop` | repeat `next` until a stop condition fires | `prompts/fleet-worker.md` |
+| `loop` | durable worker; only the operator stops it | `scripts/run_fleet.py` + `prompts/fleet-worker.md` |
 | `doctor` | check the local setup, read-only | see **doctor** below |
 
 `please continue`, `continue`, and `keep going` are **`loop`**, not `next`
-and not `implement-next-issue`. The board is the session store; the picker
-recovers in-flight work before anything new.
+and not `implement-next-issue`. Loop mode starts the durable foreground runner;
+the board is the session store and each finite child session recovers in-flight
+work before anything new.
 
 Default to `next` **only** when the user named no mode and clearly wants one
 unit of work, then stop. An unrecognised mode is an error — say so and list
@@ -97,7 +98,7 @@ It returns one item and claims it. Follow the skill for its type:
 | `review` | `code-review` |
 | `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
-| `idle` | stop; report what is blocking |
+| `idle` | return idle to the durable runner; `next` mode stops |
 
 The order is deliberate: unblocking work already in flight comes before
 starting anything new.
@@ -108,34 +109,30 @@ error strands the agent while the board still has work.
 
 ### loop
 
-`next`, repeated. The contract is
-`$ARU_SDLC_HOME/prompts/fleet-worker.md` — read it before the first
-iteration and follow it; the branch bodies and hard rules live there.
+Run the outer process from the agent's trusted isolated clone:
 
-Pace dynamically. After a unit, ask the picker again immediately if it would
-return work. If the blocker is CI or a peer review you must not perform,
-wait on that event with a long fallback heartbeat — do not poll on a fixed
-interval. Cursor sessions use the Cursor `loop` skill's Dynamic Schedule;
-do not copy that skill into this file.
+```
+python3 "$ARU_SDLC_HOME/scripts/run_fleet.py" loop \
+  --repo . --agent <AGENT_ID> --family <FAMILY> --adapter <codex|claude>
+```
 
-Ask the operator only as last resort: a product decision the issue does not
-settle, or a severe merge/close-out agents cannot remediate. Idle, waiting
-on review, and red CI in remediation are not that.
+`run_fleet.py` owns liveness, retry, and termination. It checks the picker
+without claiming, spends agent credit only when work is eligible, and launches
+one finite child session using the contract in `prompts/fleet-worker.md`.
+Pace dynamically: progress runs again immediately; unchanged, idle, complete,
+blocked, credit-limited, CLI-failed, or GitHub-error state uses bounded backoff
+with jitter, not a fixed interval. Loop mode stays alive until `run_fleet.py
+stop --agent <AGENT_ID>` or a termination signal requests a drain-first stop.
 
-Stop, write a final report, and end the session when:
-
-- the picker returns `idle`
-- the board's identity is ambiguous, or a dependency or `touches:` conflict
-  cannot be resolved from the issue
-- a decision is needed that the issue does not settle — schema, external
-  contract, money semantics, security posture
-- an automation step fails, or a helper script exits `1` (error, not conflict)
-- CI stays red after **3** remediation rounds
-- a review disagreement reaches a **third** round
-- a hard rule would have to be broken to continue
-
-Also stop when context is running short. A clean handoff report beats
-degrading halfway through an issue.
+The following are **child-session return conditions**, not reasons for the
+outer worker to exit: picker `idle`; ambiguous board state; an unresolved
+dependency or `touches:` conflict; an unsettled product decision including
+money semantics or security posture; an automation failure or helper that
+exits `1`; CI red after **3** remediation rounds; a **third** review
+disagreement; a hard-rule boundary; or context is running short. The child
+records or reports the condition and exits, and the runner parks and retries
+from durable GitHub state. Only severe merge/close-out work that cannot be
+remediated is surfaced for operator action; it still does not kill the runner.
 
 ### doctor
 
