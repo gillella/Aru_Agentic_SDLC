@@ -6,7 +6,7 @@ test_revert_merge.py - Unit tests for scripts/revert_merge.py.
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 # Add scripts directory to import path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))

@@ -17,12 +17,10 @@ import argparse
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from common import (
     create_worktree,
-    get_issue,
-    label_names,
     run_cmd,
     run_gh_json,
 )
