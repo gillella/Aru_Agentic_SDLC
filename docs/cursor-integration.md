@@ -20,15 +20,19 @@ Project bootstraps (`init_project.py`) also drop
 `.cursor/rules/aru-agentic-sdlc.mdc` into each new repo so project rules
 mirror the User Rule for teammates who do not have the global install.
 
-## One-time setup
+### Pinning a Version with `ARU_SDLC_REF`
+
+To prevent unannounced breaks on `main` from impacting consumer projects, pin a specific ref or release tag before installing:
 
 ```bash
 export ARU_SDLC_HOME=/Users/aravindgillella/projects/Aru_Agentic_SDLC
+export ARU_SDLC_REF=v0.1.0
 "$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"
 ```
 
-Then open a new Agent chat so skill discovery refreshes. In a governed
-project, say `please continue` or run `/continue`.
+- When `ARU_SDLC_REF` is set, the installer checks out that ref in `$ARU_SDLC_HOME` and exports `ARU_SDLC_REF` in your shell profile.
+- When `ARU_SDLC_REF` is unset, default behavior is unchanged (follows current branch / `main`).
+- Helper scripts check `ARU_SDLC_REF` against the checked out repository version and print a warning if MAJOR SemVer versions mismatch, but never hard-fail mid-session.
 
 ### GitHub access: `gh`, not MCP
 

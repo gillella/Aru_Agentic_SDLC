@@ -272,6 +272,7 @@ update_managed_block() {
 ensure_env_export() {
   local profile="$1"
   local line="export ARU_SDLC_HOME=\"${SDLC_HOME}\""
+  local ref_line="export ARU_SDLC_REF=\"${ARU_SDLC_REF:-}\""
 
   if [[ "${CHECK_ONLY}" == true ]]; then
     if [[ ! -f "${profile}" ]] || ! grep -Fq "ARU_SDLC_HOME=" "${profile}"; then
@@ -283,6 +284,9 @@ ensure_env_export() {
 
   if [[ "${DRY_RUN}" == true ]]; then
     echo "[DRY-RUN] Would ensure ${line} in ${profile}"
+    if [[ -n "${ARU_SDLC_REF:-}" ]]; then
+      echo "[DRY-RUN] Would ensure ${ref_line} in ${profile}"
+    fi
     return 0
   fi
 
@@ -292,6 +296,27 @@ ensure_env_export() {
       echo "# Aru_Agentic_SDLC environment" >> "${profile}"
       echo "${line}" >> "${profile}"
       echo "added ARU_SDLC_HOME export to ${profile}"
+    fi
+    if [[ -n "${ARU_SDLC_REF:-}" ]]; then
+      if grep -Fq "ARU_SDLC_REF=" "${profile}"; then
+        local tmp
+        tmp="$(mktemp)"
+        awk -v repl="${ref_line}" '
+          BEGIN { done=0 }
+          /^export ARU_SDLC_REF=/ {
+            if (!done) { print repl; done=1 }
+            next
+          }
+          { print }
+          END { if (!done) print repl }
+        ' "${profile}" > "${tmp}"
+        cat "${tmp}" > "${profile}"
+        rm -f "${tmp}"
+        echo "updated ARU_SDLC_REF in ${profile}"
+      else
+        echo "${ref_line}" >> "${profile}"
+        echo "added ARU_SDLC_REF export to ${profile}"
+      fi
     fi
   fi
 }
@@ -605,6 +630,20 @@ echo "=== Aru_Agentic_SDLC Multi-Agent Integration Installer ==="
 echo "SDLC Home:   ${SDLC_HOME}"
 echo "Target Home: ${TARGET_HOME}"
 echo "Mode:        $(if ${DRY_RUN}; then echo "Dry-Run"; elif ${CHECK_ONLY}; then echo "Check-Only"; else echo "Install"; fi)"
+
+if [[ -n "${ARU_SDLC_REF:-}" ]]; then
+  if [[ "${CHECK_ONLY}" == true ]]; then
+    echo "[INFO] ARU_SDLC_REF is set to '${ARU_SDLC_REF}'"
+  elif [[ "${DRY_RUN}" == true ]]; then
+    echo "[DRY-RUN] Would checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}"
+  else
+    echo "Pinning Aru_Agentic_SDLC at ${SDLC_HOME} to ref '${ARU_SDLC_REF}'..."
+    if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" 2>/dev/null; then
+      git -C "${SDLC_HOME}" fetch --tags origin || true
+      git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" || echo "[WARN] Could not checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}; continuing." >&2
+    fi
+  fi
+fi
 
 # Shared ~/.agents/skills
 AGENTS_SKILLS="${TARGET_HOME}/.agents/skills"
