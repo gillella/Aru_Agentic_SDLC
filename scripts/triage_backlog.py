@@ -64,9 +64,9 @@ def has_machine_checkable_predicates(criteria: list[str]) -> bool:
         r"\(verify:\s*[`'\"]?[^)`'\"]+[`'\"]?\)"
         r"|\bverify\s*:\s*[`'\"]?[^`'\"\n]+[`'\"]?"
         r"|\bverify_cmd\s*:"
-        r"|\bassert(?:s|ions?)?\b"
         r"|\bexits?\s+(?:with\s+code\s+)?(?:0|1|non-zero)\b"
-        r"|\breturns?\s+(?:code\s+)?(?:0|1|true|false)\b",
+        r"|\breturns?\s+(?:code\s+)?(?:0|1|true|false)\b"
+        r"|\bassert(?:s|ions?)?\s+(?:that\s+)?[`'\"]?[a-zA-Z0-9_.\s]+?\s*(?:==|!=|is|<=|>=|<|>|=|equals)\s*[`'\"]?(?:0|1|true|false|empty|non-empty|none|null|\d+)[`'\"]?",
         re.IGNORECASE,
     )
     return any(predicate_pattern.search(c) for c in criteria)

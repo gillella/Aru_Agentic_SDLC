@@ -55,6 +55,8 @@ class SectionParsingTests(unittest.TestCase):
 
     def test_has_machine_checkable_predicates(self):
         self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] it works", "- [ ] it is done"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Assert the UI looks good"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Document the `result` field"]))
         self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `pytest -q`)"]))
         self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] asserts returncode is 0"]))
         self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] check `python3 scripts/merge_pr.py` exits 0"]))
