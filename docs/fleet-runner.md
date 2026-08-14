@@ -112,3 +112,44 @@ Issue #46 installs and verifies the thinnest supported native continuity
 adapter for each desktop application. It must preserve the project the operator
 selected, persist explicit-stop intent, report capability gaps truthfully, and
 never substitute an OS daemon that drives the GUI.
+
+## Unattended-completion acceptance test
+
+The default end-to-end acceptance scenario is hermetic:
+
+```bash
+python3 -m unittest tests.e2e.test_unattended_board_completion
+```
+
+It injects fake local-agent adapters and an in-memory GitHub Project fixture
+through the real runner boundaries. It spends no model credits, uses no GitHub
+credentials, and does not read or modify Codex, Claude, Cursor, Antigravity, or
+developer configuration. The scenario covers two model families, concurrent
+non-overlapping claims, dependency and path serialization, author handoff,
+cross-family review feedback, CI remediation, crash recovery, guarded merge,
+durable high-risk blocking and acknowledgement, idle waiting, final board and
+workspace audit, and explicit runner shutdown.
+
+### Opt-in live disposable-repository smoke test
+
+The hermetic scenario is the CI gate. A live smoke test is a separate,
+operator-authorized exercise and must never target this repository or an
+existing project board:
+
+1. Create a new disposable GitHub repository and Project owned by a test
+   account or organization, then initialize it with the canonical Aru helper.
+2. Create two low-risk fixture issues whose `touches:` paths do not overlap and
+   one issue that depends on the first. Do not use secrets, production data,
+   billing paths, or a real application repository.
+3. In two isolated clones, start one explicitly chosen local-agent runner per
+   model family. Use distinct agent ids and normal governed helpers; do not
+   place tokens in command arguments or logs.
+4. Observe claim, worktree, PR, CI, independent review, merge, Done
+   reconciliation, and cleanup. Record only issue/PR URLs and gate outcomes.
+5. Request explicit runner stop, verify no open issues, PRs, or claims and no
+   dirty worktrees, then delete the disposable Project and repository.
+
+This live smoke test is intentionally not part of default CI because it uses
+paid local-agent sessions and mutates a real GitHub repository. Run it only
+when an operator deliberately supplies that disposable scope and accepts the
+cost.
