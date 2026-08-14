@@ -13,16 +13,20 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from slack_notify import (  # noqa: E402
     DedupeCache,
+    FileDedupeCache,
     RejectRedirectHandler,
     SlackConfig,
     config_for_project,
     config_from_env,
     dedupe_key,
     format_event,
+    format_github_alert_comment,
     load_slack_env,
+    notify_alert,
     post_event,
     redact,
     secrets_from_config,
+    validate_alert_event,
     main,
 )
 from slack_projects import ProjectRegistry  # noqa: E402
@@ -235,6 +239,174 @@ class SlackNotifyTests(unittest.TestCase):
                 req, None, 302, "Found", {}, "https://evil.example/steal"
             )
         self.assertIn("slack_redirect_rejected", str(ctx.exception))
+
+    def test_forbidden_event_types_are_rejected(self):
+        calls = []
+
+        def transport(config, text, thread_ts):
+            calls.append(text)
+            return {"ok": True, "ts": "1"}
+
+        result = post_event(
+            sample_config(),
+            {"type": "heartbeat", "agent": "cursor-1", "text": "tick"},
+            transport=transport,
+            cache=DedupeCache(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "forbidden_event_type")
+        self.assertEqual(calls, [])
+
+    def test_waiting_on_formats_peer_and_requires_fields(self):
+        with self.assertRaises(ValueError):
+            validate_alert_event({"type": "waiting-on", "agent": "cursor-1"})
+        text = format_event(
+            {
+                "type": "waiting-on",
+                "agent": "cursor-1",
+                "family": "other",
+                "issue": 181,
+                "waiting_on_agent": "claude-1",
+                "waiting_on_issue": 163,
+                "text": "path conflict",
+                "ts": "2026-08-14T12:00:00Z",
+            }
+        )
+        self.assertIn("waiting on agent=`claude-1`", text)
+        self.assertIn("issue #163", text)
+        self.assertIn("claim not stolen", text)
+
+    def test_hitl_mentions_operator(self):
+        text = format_event(
+            {
+                "type": "hitl",
+                "agent": "cursor-1",
+                "operator_user_id": "U01234567",
+                "text": "need schema decision",
+                "ts": "2026-08-14T12:00:00Z",
+            }
+        )
+        self.assertIn("<@U01234567>", text)
+        self.assertIn("need schema decision", text)
+
+    def test_notify_alert_comments_github_before_slack(self):
+        order = []
+
+        def transport(config, text, thread_ts):
+            order.append(("slack", text))
+            return {"ok": True, "ts": "9.9"}
+
+        def comment(kind, number, body, repo_dir):
+            order.append(("github", kind, number, body))
+            return True
+
+        secret = "arbitrary-signing-secret-value"
+        result = notify_alert(
+            sample_config(signing_secret=secret, operator_user_id="U01234567"),
+            {
+                "type": "hitl",
+                "agent": "cursor-1",
+                "family": "other",
+                "issue": 181,
+                "text": f"decision with {secret}",
+                "project_id": "proj_test",
+            },
+            transport=transport,
+            cache=DedupeCache(),
+            comment=comment,
+            repo_dir="/tmp/repo",
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["github_ok"])
+        self.assertEqual(order[0][0], "github")
+        self.assertEqual(order[1][0], "slack")
+        self.assertNotIn(secret, order[0][3])
+        self.assertNotIn(secret, order[1][1])
+        self.assertIn("<@U01234567>", order[1][1])
+
+    def test_notify_alert_waiting_on_does_not_claim(self):
+        claims = []
+
+        def transport(config, text, thread_ts):
+            return {"ok": True, "ts": "1"}
+
+        def comment(kind, number, body, repo_dir):
+            claims.append(("comment", kind, number))
+            return True
+
+        result = notify_alert(
+            sample_config(),
+            {
+                "type": "waiting-on",
+                "agent": "cursor-1",
+                "family": "other",
+                "issue": 181,
+                "waiting_on_agent": "claude-1",
+                "waiting_on_pr": 170,
+                "text": "review in flight",
+            },
+            transport=transport,
+            cache=DedupeCache(),
+            comment=comment,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(claims, [("comment", "issue", 181)])
+        self.assertIn("waiting on agent: `claude-1`", result["github_body"])
+        self.assertIn("do not steal the claim", result["github_body"])
+
+    def test_notify_alert_slack_down_still_returns(self):
+        def transport(config, text, thread_ts):
+            raise URLError("down")
+
+        result = notify_alert(
+            sample_config(),
+            {
+                "type": "blocked",
+                "agent": "cursor-1",
+                "issue": 1,
+                "text": "depends-on #2",
+            },
+            transport=transport,
+            cache=DedupeCache(),
+            comment=lambda *a: True,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["slack"]["error"], "slack_unavailable")
+
+    def test_file_dedupe_survives_reload(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "dedupe.json"
+            first = FileDedupeCache(path)
+            event = {
+                "type": "blocked",
+                "agent": "cursor-1",
+                "issue": 1,
+                "text": "x",
+                "project_id": "proj_a",
+            }
+            calls = []
+
+            def transport(config, text, thread_ts):
+                calls.append(text)
+                return {"ok": True, "ts": "1"}
+
+            post_event(sample_config(), event, transport=transport, cache=first)
+            second = FileDedupeCache(path)
+            again = post_event(sample_config(), event, transport=transport, cache=second)
+            self.assertTrue(again.get("deduped"))
+            self.assertEqual(len(calls), 1)
+
+    def test_github_alert_comment_has_no_slack_mention(self):
+        body = format_github_alert_comment(
+            {
+                "type": "hitl",
+                "agent": "cursor-1",
+                "operator_user_id": "U01234567",
+                "text": "need decision",
+            }
+        )
+        self.assertNotIn("<@U01234567>", body)
+        self.assertIn("HITL", body)
 
 
 if __name__ == "__main__":

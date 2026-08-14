@@ -128,7 +128,13 @@ specific decision/approval needs human intervention. If
 `$HOME/.aru/factory-loop.stop` applies to this project, stop immediately and
 do not arm native wakes. Ambiguous board identity, an unresolved `touches:`
 conflict, money semantics, security posture, or a hard rule can require that
-intervention; explain the exact decision needed.
+intervention; explain the exact decision needed on the linked GitHub issue/PR,
+then notify Slack with `--event hitl` (operator mention) via
+`scripts/slack_notify.py`. For dependency / claim waits use `--event waiting-on`
+(name the peer agent and their issue/PR; never steal the claim). For other
+blocks use `--event blocked`. Idle ticks and heartbeats must **not** notify.
+GitHub remains the work queue; Slack downtime must not halt the loop. Full
+command examples: `prompts/fleet-worker.md` and `docs/slack-control-room.md`.
 Routine helper exits `1` and repeated CI or review rounds do not end the loop.
 When context is running short, recover through the desktop product's context
 compaction and durable GitHub/worktree state, then continue.

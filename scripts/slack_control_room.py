@@ -46,9 +46,16 @@ COMMAND_RE = re.compile(
     r"(?P<verb>status|stop|resume|intervention)\b(?:\s+(?P<rest>.+))?",
     re.IGNORECASE,
 )
+QUEUE_VERB_RE = re.compile(
+    r"^(?P<verb>claim|merge|review)\b(?:\s+(?P<rest>.+))?",
+    re.IGNORECASE,
+)
 ISSUE_RE = re.compile(
     r"(?:(?P<kind>issue|pr)\s*[#:]?\s*(?P<numbered>\d+)|#(?P<hash>\d+))",
     re.IGNORECASE,
+)
+REFUSED_QUEUE_MESSAGE = (
+    "refused: Slack is not a work queue; use GitHub helpers for claim, merge, and review"
 )
 
 
@@ -68,6 +75,15 @@ def authorize(config: SlackConfig, project: ProjectRecord, user_id: str) -> bool
 
 def parse_command(text: str) -> Optional[Dict[str, str]]:
     cleaned = re.sub(r"<@[A-Z0-9]+>", "", redact(text or "")).strip()
+    refused = QUEUE_VERB_RE.match(cleaned)
+    if refused:
+        return {
+            "verb": "refused-queue",
+            "refused": refused.group("verb").lower(),
+            "target": "project",
+            "ref": "",
+            "decision": (refused.group("rest") or "").strip(),
+        }
     match = COMMAND_RE.match(cleaned)
     if not match:
         return None
@@ -307,6 +323,8 @@ def handle_command(
     runtime_health: Optional[str] = None,
 ) -> str:
     verb = parsed["verb"]
+    if verb == "refused-queue":
+        return REFUSED_QUEUE_MESSAGE
     health = runtime_health or ("healthy" if project.healthy else "degraded_unreachable")
     if verb == "status":
         return status_text(project, health)

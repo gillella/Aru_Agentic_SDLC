@@ -94,6 +94,41 @@ python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
 An unknown or closed project posts nothing. Slack downtime still returns a
 warning without halting factory work. Deduplication includes `project_id`, so
 identical events from different projects do not suppress one another.
+Alert events also persist dedupe under `~/.aru/slack-notify-dedupe.json` so
+loop heartbeats do not re-post the same blocker after a process restart.
+
+### Alert events (`blocked`, `waiting-on`, `hitl`)
+
+Factory agents use three alert kinds. Each alert posts a durable GitHub
+issue/PR comment with the same facts **before** the Slack message:
+
+| Event | When | Slack extras |
+|---|---|---|
+| `blocked` | unresolved `depends-on`, missing product decision, merge/close-out stuck | stamped identity + reason |
+| `waiting-on` | peer holds a claim, review, or overlapping `touches:` path | names `--waiting-on-agent` and the peer issue/PR; never steals the claim |
+| `hitl` | severe merge/close-out failure, exhausted credits, or an unresolvable decision | mentions `<@SLACK_OPERATOR_USER_ID>`; agents still stop per `AGENTS.md` |
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id proj_... \
+  --agent cursor-1 --family other \
+  --event waiting-on --issue 181 \
+  --waiting-on-agent claude-1 --waiting-on-issue 163 \
+  --repo-dir . \
+  --text "path conflict on scripts/merge_pr.py"
+
+python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id proj_... \
+  --agent cursor-1 --family other \
+  --event hitl --pr 170 \
+  --repo-dir . \
+  --decision "merge close-out failed after retries; need operator recovery"
+```
+
+Do **not** post heartbeats, diffs, prompts, tokens, or test logs. The helper
+rejects those event types. A Slack reply cannot claim, review, or merge —
+inbound `claim` / `merge` / `review` verbs are refused; only GitHub helpers
+mutate work state.
 
 ## Bridge process
 

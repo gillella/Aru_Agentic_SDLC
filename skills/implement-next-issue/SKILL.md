@@ -145,7 +145,15 @@ or other irreversible work from the plan gate.
 4. If a required product decision is absent from the issue, document the
    concrete options and leave the issue blocked for clarification. This is
    requirement discovery, not a mandatory human review of an otherwise
-   complete implementation.
+   complete implementation. After the GitHub comment, notify the Slack control
+   room once (`--event blocked` or `--event hitl` when a human decision is
+   required) via `scripts/slack_notify.py` — see `prompts/fleet-worker.md`.
+   Do not post heartbeats or steal another agent's claim.
+5. If work cannot start because of an unresolved `depends-on` or a peer holds
+   an overlapping `touches:` claim, comment on the issue naming the peer
+   `agent:` id and the issue/PR they hold, then
+   `slack_notify.py --event waiting-on --waiting-on-agent <id> ...`. Release
+   or wait; never steal the claim.
 
 ### Step 5: Implement Solution
 1. Confirm the plan gate is satisfied when it applies.
