@@ -17,7 +17,8 @@ import os
 import re
 import stat
 import sys
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional
 
 from common import (
     claimed_by,
@@ -36,6 +37,19 @@ EXIT_COMPLETE = 0
 EXIT_ERROR = 1
 EXIT_WAITING = 2
 EXIT_BLOCKED = 3
+
+STUCK_HOURS = 4.0
+REVIEW_AGE_WARN_HOURS = 2.0
+REVIEW_AGE_ATTN_HOURS = 8.0
+CI_FAIL_WARN = 0.2
+CI_FAIL_ATTN = 0.5
+REWORK_WARN = 2
+REWORK_ATTN = 3
+_SEV_RANK = {"ok": 0, "warn": 1, "attn": 2}
+_PASSING_CHECKS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+_PENDING_CHECKS = {
+    "", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED",
+}
 
 LINE_CEILING = 400
 SKIP_DIR_NAMES = {
@@ -172,6 +186,312 @@ def _error(reason: str, summary: str) -> Dict[str, Any]:
         "reasons": [reason],
         "summary": summary,
     }
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _hours_ago(value: Any, now: datetime) -> Optional[float]:
+    parsed = _parse_ts(value)
+    if parsed is None:
+        return None
+    hours = (now - parsed).total_seconds() / 3600.0
+    return round(hours, 2) if hours >= 0 else None
+
+
+def _worst_severity(levels: Iterable[str]) -> str:
+    worst = "ok"
+    for level in levels:
+        if _SEV_RANK.get(level, 0) > _SEV_RANK[worst]:
+            worst = level
+    return worst
+
+
+def _question(key: str, title: str, severity: str, summary: str, **payload: Any) -> Dict[str, Any]:
+    return {"key": key, "title": title, "severity": severity, "summary": summary, **payload}
+
+
+def _ready_question(issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+    from triage_backlog import capacity, partition
+
+    _, ready, held = partition(issues)
+    cap = capacity(ready, held)
+    ready_depth = cap["ready_total"]
+    fleet_size = len(held)
+    claimable = len(cap["concurrent"])
+    if ready_depth < fleet_size:
+        severity, note = "attn", " — factory is starved"
+    elif claimable < fleet_size:
+        severity, note = "warn", " — path conflicts starve extra agents"
+    else:
+        severity, note = "ok", ""
+    summary = (
+        f"{ready_depth} Ready, {fleet_size} in flight, {claimable} claimable{note}"
+    )
+    return _question(
+        "ready_depth", "Ready depth vs fleet size", severity, summary,
+        ready_depth=ready_depth, fleet_size=fleet_size, claimable=claimable,
+    )
+
+
+def _holder_rows(issues: List[Dict[str, Any]], prs: List[Dict[str, Any]], now: datetime) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for issue in issues:
+        agent = claimed_by(issue)
+        if not agent:
+            continue
+        age = _hours_ago(issue.get("updatedAt"), now)
+        rows.append({
+            "type": "issue", "number": issue["number"], "agent": agent,
+            "age_hours": age,
+            "age_availability": "measured" if age is not None else "unavailable",
+        })
+    for pr in prs:
+        reviewer = next(
+            (name[9:] for name in label_names(pr) if name.startswith("reviewer:")),
+            None,
+        )
+        if not reviewer:
+            continue
+        age = _hours_ago(pr.get("updatedAt"), now)
+        rows.append({
+            "type": "review", "number": pr["number"], "agent": reviewer,
+            "age_hours": age,
+            "age_availability": "measured" if age is not None else "unavailable",
+        })
+    return rows
+
+
+def _holders_question(issues: List[Dict[str, Any]], prs: List[Dict[str, Any]], now: datetime) -> Dict[str, Any]:
+    rows = _holder_rows(issues, prs, now)
+    stuck = [row for row in rows if row["age_hours"] is not None and row["age_hours"] >= STUCK_HOURS]
+    missing = [row for row in rows if row["age_hours"] is None]
+    if stuck:
+        severity = "attn"
+        summary = ", ".join(
+            f"{row['type']} #{row['number']} ({row['agent']}) idle {row['age_hours']:.1f}h"
+            for row in stuck
+        )
+    elif missing:
+        severity = "warn"
+        summary = f"{len(rows)} holder(s); {len(missing)} without a measured age"
+    elif rows:
+        severity = "ok"
+        summary = ", ".join(
+            f"{row['type']} #{row['number']} ({row['agent']}) {row['age_hours']:.1f}h"
+            for row in rows
+        )
+    else:
+        severity, summary = "ok", "no active claims"
+    return _question("holders", "Who holds what, and for how long", severity, summary, holders=rows)
+
+
+def _pending_review(pr: Dict[str, Any]) -> bool:
+    decision = (pr.get("reviewDecision") or "").upper()
+    return decision not in {"APPROVED", "CHANGES_REQUESTED"}
+
+
+def _review_age_question(prs: List[Dict[str, Any]], now: datetime) -> Dict[str, Any]:
+    pending = []
+    for pr in prs:
+        if not _pending_review(pr):
+            continue
+        age = _hours_ago(pr.get("createdAt"), now)
+        pending.append({
+            "number": pr["number"], "age_hours": age,
+            "age_availability": "measured" if age is not None else "unavailable",
+        })
+    measured = [row["age_hours"] for row in pending if row["age_hours"] is not None]
+    oldest = max(measured) if measured else None
+    if oldest is not None and oldest >= REVIEW_AGE_ATTN_HOURS:
+        severity = "attn"
+    elif oldest is not None and oldest >= REVIEW_AGE_WARN_HOURS:
+        severity = "warn"
+    elif pending and oldest is None:
+        severity = "warn"
+    else:
+        severity = "ok"
+    if not pending:
+        summary = "none awaiting review"
+    elif oldest is None:
+        summary = f"{len(pending)} awaiting review; age unavailable"
+    else:
+        summary = f"{len(pending)} awaiting review; oldest {oldest:.1f}h"
+    return _question(
+        "review_age", "PRs awaiting review, by age", severity, summary,
+        pending=pending, oldest_age_hours=oldest,
+    )
+
+
+def _review_rounds(pr: Dict[str, Any]) -> int:
+    return sum(
+        1 for review in (pr.get("reviews") or [])
+        if (review.get("state") or "").upper() == "CHANGES_REQUESTED"
+    )
+
+
+def _review_rounds_question(prs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    rows = [{"number": pr["number"], "review_rounds": _review_rounds(pr)} for pr in prs]
+    highest = max((row["review_rounds"] for row in rows), default=0)
+    if highest >= REWORK_ATTN:
+        severity = "attn"
+    elif highest >= REWORK_WARN:
+        severity = "warn"
+    else:
+        severity = "ok"
+    if not rows:
+        summary = "no open PRs"
+    else:
+        summary = f"max {highest} review round(s) across {len(rows)} open PR(s)"
+    return _question(
+        "review_rounds", "Review rounds per PR", severity, summary,
+        pull_requests=rows, max_review_rounds=highest,
+    )
+
+
+def _check_failed(check: Dict[str, Any]) -> Optional[bool]:
+    status = (check.get("status") or "").upper()
+    if status in _PENDING_CHECKS and not (check.get("conclusion") or check.get("state")):
+        return None
+    conclusion = (check.get("conclusion") or check.get("state") or "").upper()
+    if conclusion in _PENDING_CHECKS or status in _PENDING_CHECKS and conclusion == "":
+        return None
+    return conclusion not in _PASSING_CHECKS
+
+
+def _ci_question(prs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    completed = 0
+    failed = 0
+    for pr in prs:
+        for check in pr.get("statusCheckRollup") or []:
+            result = _check_failed(check)
+            if result is None:
+                continue
+            completed += 1
+            if result:
+                failed += 1
+    rate = round(failed / completed, 4) if completed else None
+    if rate is not None and rate >= CI_FAIL_ATTN:
+        severity = "attn"
+    elif rate is not None and rate >= CI_FAIL_WARN:
+        severity = "warn"
+    elif prs and completed == 0:
+        severity = "warn"
+    else:
+        severity = "ok"
+    if not prs:
+        summary = "no open PRs"
+    elif completed == 0:
+        summary = "no completed CI checks on open PRs"
+    else:
+        summary = f"{failed}/{completed} failed ({rate:.0%})"
+    return _question(
+        "ci_failure_rate", "CI failure rate", severity, summary,
+        failed=failed, completed=completed, failure_rate=rate,
+    )
+
+
+def _cost_question(closed: Optional[Dict[str, Any]], error: Optional[str]) -> Dict[str, Any]:
+    if error or not closed:
+        detail = f"unavailable ({error})" if error else "unavailable"
+        return _question(
+            "cost", "Cost and wall time per closed issue", "warn", detail,
+            availability="unavailable",
+        )
+    cost = closed.get("cost_per_closed_issue") or {}
+    cycles = [
+        row["cycle_time_hours"]
+        for row in closed.get("issues") or []
+        if row.get("cycle_time_hours") is not None
+    ]
+    avg_cycle = round(sum(cycles) / len(cycles), 2) if cycles else None
+    cycle_text = (
+        f", avg cycle {avg_cycle:.2f}h" if avg_cycle is not None else ", cycle time unavailable"
+    )
+    outliers = closed.get("outlier_issue_numbers") or []
+    count = closed.get("closed_issue_count", 0)
+    avg_cost = cost.get("average_usd_measured")
+    if outliers:
+        severity = "attn"
+        summary = f"{count} closed; {len(outliers)} outlier(s){cycle_text}"
+    elif cost.get("availability") != "measured":
+        severity = "warn"
+        summary = f"{count} closed; cost unavailable (no measured local CLI data){cycle_text}"
+    else:
+        severity = "ok"
+        summary = f"{count} closed; ${avg_cost:.6f} avg measured{cycle_text}"
+    return _question(
+        "cost", "Cost and wall time per closed issue", severity, summary,
+        availability=cost.get("availability") or "unavailable",
+        closed_issue_count=count,
+        average_usd_measured=avg_cost,
+        average_cycle_hours=avg_cycle,
+        outlier_issue_numbers=outliers,
+    )
+
+
+def build_operator_screen(
+    issues: List[Dict[str, Any]],
+    prs: List[Dict[str, Any]],
+    now: Optional[datetime] = None,
+    closed_issues: Optional[Dict[str, Any]] = None,
+    metrics_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Answer the six §4.2 questions from already-fetched board and PR facts."""
+    clock = now or datetime.now(timezone.utc)
+    questions = [
+        _ready_question(issues),
+        _holders_question(issues, prs, clock),
+        _review_age_question(prs, clock),
+        _review_rounds_question(prs),
+        _ci_question(prs),
+        _cost_question(closed_issues, metrics_error),
+    ]
+    return {"questions": questions, "severity": _worst_severity(q["severity"] for q in questions)}
+
+
+def apply_closed_issue_cost(
+    screen: Optional[Dict[str, Any]],
+    closed_issues: Optional[Dict[str, Any]],
+    metrics_error: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if not screen:
+        return screen
+    questions = [q for q in screen.get("questions") or [] if q.get("key") != "cost"]
+    questions.append(_cost_question(closed_issues, metrics_error))
+    screen["questions"] = questions
+    screen["severity"] = _worst_severity(q["severity"] for q in questions)
+    return screen
+
+
+def format_operator_screen(screen: Dict[str, Any]) -> str:
+    markers = {"ok": "[OK]  ", "warn": "[WARN]", "attn": "[ATTN]"}
+    lines = ["", "=== Operator screen ==="]
+    for question in screen.get("questions") or []:
+        marker = markers.get(question.get("severity"), "[WARN]")
+        lines.append(f"{marker} {question['title']}: {question['summary']}")
+    return "\n".join(lines)
+
+
+def _with_operator_screen(
+    status: Dict[str, Any],
+    issues: List[Dict[str, Any]],
+    prs: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    status["operator_screen"] = build_operator_screen(issues, prs)
+    return status
 
 
 def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
@@ -346,7 +666,7 @@ def _evaluate_current_repo() -> Dict[str, Any]:
 
     # Calculate overall state
     if blocked_reasons:
-        return {
+        return _with_operator_screen({
             "state": "blocked",
             "exit_code": EXIT_BLOCKED,
             "reasons": blocked_reasons,
@@ -357,10 +677,10 @@ def _evaluate_current_repo() -> Dict[str, Any]:
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
-        }
+        }, issues, prs)
 
     if waiting_reasons or issues or prs:
-        return {
+        return _with_operator_screen({
             "state": "waiting",
             "exit_code": EXIT_WAITING,
             "reasons": waiting_reasons,
@@ -371,9 +691,9 @@ def _evaluate_current_repo() -> Dict[str, Any]:
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
-        }
+        }, issues, prs)
 
-    return {
+    return _with_operator_screen({
         "state": "complete",
         "exit_code": EXIT_COMPLETE,
         "reasons": [],
@@ -384,7 +704,7 @@ def _evaluate_current_repo() -> Dict[str, Any]:
         "active_claims": [],
         "orphans": [],
         "drifted": [],
-    }
+    }, issues, prs)
 
 
 def main():
@@ -397,18 +717,26 @@ def main():
     args = parser.parse_args()
 
     status = evaluate_fleet_status(args.repo_dir)
-    if args.metrics:
+    closed = None
+    metrics_error = None
+    if status.get("state") != "error":
         try:
             if args.metrics_window_days <= 0:
                 raise RuntimeError("--metrics-window-days must be positive.")
             from factory_metrics import collect_factory_metrics
-            status["factory_metrics"] = collect_factory_metrics(
+            closed = collect_factory_metrics(
                 args.metrics_window_days,
                 args.metrics_usage_file,
                 repo_dir=args.repo_dir,
             )["closed_issues"]
         except (RuntimeError, TypeError, ValueError, KeyError) as exc:
-            reason = f"Closed-issue metrics unavailable: {exc}"
+            metrics_error = str(exc)
+    apply_closed_issue_cost(status.get("operator_screen"), closed, metrics_error)
+    if args.metrics:
+        if closed is not None:
+            status["factory_metrics"] = closed
+        else:
+            reason = f"Closed-issue metrics unavailable: {metrics_error}"
             status.setdefault("reasons", []).append(reason)
             status["factory_metrics_error"] = reason
 
@@ -419,6 +747,8 @@ def main():
     print("=== Aru_Agentic_SDLC: Factory Fleet Status ===")
     print(f"State: {status['state'].upper()}")
     print(f"Summary: {status['summary']}")
+    if status.get("operator_screen"):
+        print(format_operator_screen(status["operator_screen"]))
     if status.get("reasons"):
         print("\nDetails:")
         for r in status["reasons"]:

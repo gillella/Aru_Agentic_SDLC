@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,20 +17,23 @@ from fleet_status import (  # noqa: E402
     LINE_CEILING,
     collect_codebase_health,
     evaluate_fleet_status,
+    format_operator_screen,
 )
 
 
-def mock_issue(num, *labels, body="touches: src/a.py\n", title="Test Issue"):
-    return {
+def mock_issue(num, *labels, body="touches: src/a.py\n", title="Test Issue", **extra):
+    issue = {
         "number": num,
         "title": title,
         "body": body,
         "labels": [{"name": label} for label in labels],
     }
+    issue.update(extra)
+    return issue
 
 
-def mock_pr(num, *labels, decision="", merge_state="CLEAN"):
-    return {
+def mock_pr(num, *labels, decision="", merge_state="CLEAN", **extra):
+    pr = {
         "number": num,
         "title": f"PR {num}",
         "labels": [{"name": label} for label in labels],
@@ -38,6 +42,18 @@ def mock_pr(num, *labels, decision="", merge_state="CLEAN"):
         "mergeStateStatus": merge_state,
         "statusCheckRollup": [],
     }
+    pr.update(extra)
+    return pr
+
+
+def hours_ago(hours):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def questions(status):
+    return {item["key"]: item for item in status["operator_screen"]["questions"]}
 
 
 def mock_project(title="widgets Board", repo_slug="octocat/widgets"):
@@ -360,6 +376,109 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "complete")
         self.assertEqual(status["codebase_health"]["loc"], 1)
         self.assertEqual(status["codebase_health"]["file_count"], 1)
+
+    def test_complete_board_includes_six_operator_questions(self):
+        status = self.evaluate_fixture()
+        keys = [item["key"] for item in status["operator_screen"]["questions"]]
+        self.assertEqual(
+            keys,
+            [
+                "ready_depth",
+                "holders",
+                "review_age",
+                "review_rounds",
+                "ci_failure_rate",
+                "cost",
+            ],
+        )
+        self.assertEqual(questions(status)["ready_depth"]["severity"], "ok")
+        self.assertIn("[OK]", format_operator_screen(status["operator_screen"]))
+
+    def test_ready_depth_marks_starved_fleet(self):
+        status = self.evaluate_fixture(
+            [
+                mock_issue(
+                    21, "status:in-progress", "agent:codex-1",
+                    updatedAt=hours_ago(1),
+                )
+            ],
+            items={21: [mock_project_item("In Progress")]},
+        )
+        ready = questions(status)["ready_depth"]
+        self.assertEqual(ready["severity"], "attn")
+        self.assertEqual(ready["ready_depth"], 0)
+        self.assertEqual(ready["fleet_size"], 1)
+        self.assertIn("[ATTN]", format_operator_screen(status["operator_screen"]))
+
+    def test_holders_mark_stale_claims(self):
+        status = self.evaluate_fixture(
+            [
+                mock_issue(
+                    22, "status:in-progress", "agent:codex-1",
+                    updatedAt=hours_ago(6),
+                )
+            ],
+            items={22: [mock_project_item("In Progress")]},
+        )
+        holders = questions(status)["holders"]
+        self.assertEqual(holders["severity"], "attn")
+        self.assertIn("idle", holders["summary"])
+        self.assertEqual(holders["holders"][0]["age_availability"], "measured")
+
+    def test_review_age_and_rounds_and_ci_rate(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    30,
+                    createdAt=hours_ago(10),
+                    reviews=[{"state": "CHANGES_REQUESTED"}, {"state": "CHANGES_REQUESTED"}],
+                    statusCheckRollup=[
+                        {"name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"},
+                        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    ],
+                )
+            ]
+        )
+        self.assertEqual(status["state"], "waiting")
+        asked = questions(status)
+        self.assertEqual(asked["review_age"]["severity"], "attn")
+        self.assertGreaterEqual(asked["review_age"]["oldest_age_hours"], 8)
+        self.assertEqual(asked["review_rounds"]["severity"], "warn")
+        self.assertEqual(asked["review_rounds"]["max_review_rounds"], 2)
+        self.assertEqual(asked["ci_failure_rate"]["failed"], 1)
+        self.assertEqual(asked["ci_failure_rate"]["completed"], 2)
+        self.assertEqual(asked["ci_failure_rate"]["severity"], "attn")
+
+    def test_cost_question_uses_measured_closed_issue_metrics(self):
+        from fleet_status import apply_closed_issue_cost, build_operator_screen
+
+        screen = build_operator_screen([], [])
+        apply_closed_issue_cost(
+            screen,
+            {
+                "closed_issue_count": 2,
+                "cost_per_closed_issue": {
+                    "availability": "measured",
+                    "average_usd_measured": 1.5,
+                },
+                "outlier_issue_numbers": [9],
+                "issues": [
+                    {"cycle_time_hours": 2.0},
+                    {"cycle_time_hours": 4.0},
+                ],
+            },
+            None,
+        )
+        cost = {item["key"]: item for item in screen["questions"]}["cost"]
+        self.assertEqual(cost["severity"], "attn")
+        self.assertEqual(cost["average_cycle_hours"], 3.0)
+        self.assertIn("outlier", cost["summary"])
+
+    def test_api_failure_still_never_reports_complete(self):
+        status = evaluate_fleet_status("/definitely/not/a/repository")
+        self.assertEqual(status["state"], "error")
+        self.assertNotEqual(status["state"], "complete")
+        self.assertNotIn("operator_screen", status)
 
 
 if __name__ == "__main__":
