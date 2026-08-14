@@ -163,6 +163,18 @@ class SlackProjectRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(RegistryError, "private"):
             self.registry.list()
 
+    def test_owned_legacy_0755_registry_directory_is_secured(self):
+        self.root.chmod(0o755)
+        record = self.create_a()
+        self.assertEqual(record.project_id, "proj_project_a")
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
+
+    def test_world_writable_registry_directory_fails_closed(self):
+        self.root.chmod(0o777)
+        with self.assertRaisesRegex(RegistryError, "writable by another user"):
+            self.create_a()
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o777)
+
     def test_registry_symlink_fails_closed_without_replacing_target(self):
         target = self.root / "recoverable.json"
         target.write_text("recoverable", encoding="utf-8")
@@ -187,6 +199,12 @@ class SlackProjectRegistryTests(unittest.TestCase):
         persisted = self.registry_path.read_text(encoding="utf-8")
         self.assertNotIn(values["SLACK_BOT_TOKEN"], persisted)
         self.assertNotIn(values["SLACK_SIGNING_SECRET"], persisted)
+
+    def test_migration_rejects_duplicate_active_repository_identity(self):
+        self.create_a()
+        values = {"SLACK_TEAM_ID": "T01234567", "SLACK_CHANNEL_ID": "C11111111"}
+        with self.assertRaisesRegex(RegistryError, "already has an active binding"):
+            self.registry.migrate_legacy(values, self.checkout_a, "operator")
 
     def test_lock_protected_updates_do_not_lose_projects(self):
         def create(path: Path, channel: str, project_id: str):

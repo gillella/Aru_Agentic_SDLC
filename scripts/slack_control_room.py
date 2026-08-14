@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,7 @@ STOP_PATH = Path.home() / ".aru" / "factory-loop.stop"
 PID_PATH = Path.home() / ".aru" / "slack-control-room.pid"
 SEEN_PATH = Path.home() / ".aru" / "slack-control-room-seen.json"
 BRIDGE_IDENTITY = "aru-slack-control-room"
+_STATUS_LOCK = threading.Lock()
 COMMAND_RE = re.compile(
     r"(?P<verb>status|stop|resume|intervention)\b(?:\s+(?P<rest>.+))?",
     re.IGNORECASE,
@@ -240,13 +242,30 @@ def load_loop_heartbeats(project_path: str) -> List[str]:
     ]
 
 
-def status_text(project: ProjectRecord) -> str:
-    if not project.healthy:
+def verified_runtime_health(registry: ProjectRegistry, project: ProjectRecord) -> str:
+    checked = registry.verify(project.project_id)
+    runtime = str(checked.get("runtime_health") or "degraded_unreachable")
+    if runtime != "healthy":
+        return runtime
+    if checked.get("identity_verified"):
+        return "healthy"
+    return (
+        "degraded_identity_unverified"
+        if checked.get("verification_error")
+        else "degraded_identity_mismatch"
+    )
+
+
+def status_text(project: ProjectRecord, runtime_health: Optional[str] = None) -> str:
+    health = runtime_health or ("healthy" if project.healthy else "degraded_unreachable")
+    if health != "healthy":
         return (
-            f"project {project.project_id}: degraded_unreachable; checkout missing at "
-            f"{project.local_path}. Use registry verify, recover, or close locally."
+            f"project {project.project_id}: {health}; checkout unavailable or identity "
+            f"unverified at {project.local_path}. Use registry verify, recover, or close locally."
         )
-    status, capacity = evaluate_fleet_status(project.local_path), load_capacity(project.local_path)
+    with _STATUS_LOCK:
+        status = evaluate_fleet_status(project.local_path)
+        capacity = load_capacity(project.local_path)
     lines = [
         f"project {project.project_id}: healthy",
         f"factory state: {status.get('state')} ({status.get('summary', '')})",
@@ -263,8 +282,16 @@ def status_text(project: ProjectRecord) -> str:
     reviews = [item for item in (status.get("reasons") or []) if "review" in str(item).lower()]
     lines.append("open review work: " + ("; ".join(reviews[:8]) if reviews else "none"))
     stop = load_stop_file()
-    if stop.get("projects") or stop.get("agents"):
-        lines.append(f"operator stop: projects={stop.get('projects')} agents={stop.get('agents')}")
+    scoped_projects = [
+        item for item in stop.get("projects", [])
+        if item in {"*", project.local_path}
+    ]
+    scoped_agents = [
+        item for item in stop.get("agents", [])
+        if item.startswith(f"{project.local_path}::")
+    ]
+    if scoped_projects or scoped_agents:
+        lines.append(f"operator stop: projects={scoped_projects} agents={scoped_agents}")
     lines.append("loop heartbeats:")
     lines.extend(f"  {item}" for item in load_loop_heartbeats(project.local_path))
     return "\n".join(lines)
@@ -288,11 +315,13 @@ def github_comment(kind: str, number: int, decision: str, repo_dir: str) -> bool
 def handle_command(
     config: SlackConfig, parsed: Dict[str, str], project: ProjectRecord,
     comment: Callable[[str, int, str, str], bool] = github_comment,
+    runtime_health: Optional[str] = None,
 ) -> str:
     verb = parsed["verb"]
+    health = runtime_health or ("healthy" if project.healthy else "degraded_unreachable")
     if verb == "status":
-        return status_text(project)
-    if not project.healthy:
+        return status_text(project, health)
+    if health != "healthy":
         return "project checkout is degraded; use registry verify, recover, or close locally"
     if verb == "stop":
         return apply_stop(project.local_path, parsed.get("target") or "project")
@@ -318,14 +347,16 @@ def load_seen_ids(path: Optional[Path] = None) -> Dict[str, str]:
     return {key: str(value) for key, value in ids.items()}
 
 
-def record_seen_id(event_key: str, path: Optional[Path] = None) -> bool:
+def record_seen_id(
+    event_key: str, path: Optional[Path] = None, legacy_key: str = "",
+) -> bool:
     duplicate = {"value": False}
 
     def update(payload: Any) -> Dict[str, Any]:
         ids = payload.get("ids") if isinstance(payload, dict) else None
         if not isinstance(ids, dict):
             raise RegistryError("invalid Slack deduplication store")
-        if event_key in ids:
+        if event_key in ids or (legacy_key and legacy_key in ids):
             duplicate["value"] = True
             return payload
         ids[event_key] = _now()
@@ -358,16 +389,24 @@ def handle_slack_message(
         return None
     if not authorize(config, project, str(payload.get("user") or "")):
         return None
+    try:
+        runtime_health = verified_runtime_health(registry, project)
+    except RegistryError:
+        return None
     event_id = str(payload.get("client_msg_id") or payload.get("event_id") or payload.get("ts") or "")
     event_key = f"{project.project_id}:{team_id}:{channel_id}:{event_id}"
     if event_id:
-        if event_key in seen_ids or record_seen_id(event_key, seen_path):
+        if (
+            event_key in seen_ids
+            or event_id in seen_ids
+            or record_seen_id(event_key, seen_path, legacy_key=event_id)
+        ):
             return None
         seen_ids.add(event_key)
     parsed = parse_command(str(payload.get("text") or ""))
     if not parsed:
         return None
-    reply = handle_command(config, parsed, project, comment)
+    reply = handle_command(config, parsed, project, comment, runtime_health)
     notify(
         config_for_project(config, project),
         {
@@ -552,7 +591,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not args.project_id:
             parser.error("status requires --project-id")
         try:
-            print(status_text(registry.get(args.project_id)))
+            project = registry.get(args.project_id)
+            print(status_text(project, verified_runtime_health(registry, project)))
             return 0
         except RegistryError as exc:
             print(f"[ERROR] {exc}", file=sys.stderr)

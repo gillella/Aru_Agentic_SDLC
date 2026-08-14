@@ -2,7 +2,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -135,7 +138,10 @@ class SlackControlRoomTests(unittest.TestCase):
 
     def test_dedupe_survives_restart_and_is_scoped_by_project_route(self):
         replies = []
-        with patch.object(scr, "handle_command", side_effect=lambda _c, _p, project, _cb: project.project_id):
+        with patch.object(
+            scr, "handle_command",
+            side_effect=lambda _c, _p, project, _cb, _health: project.project_id,
+        ):
             first = scr.handle_slack_message(
                 sample_config(), self.registry, self.payload(), set(),
                 notify=lambda config, event: replies.append((config.channel_id, event["project_id"])) or {"ok": True},
@@ -212,6 +218,53 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertFalse(scr.agent_stop_applies(self.project_a.local_path, "codex-1", document))
         self.assertFalse(scr.agent_stop_applies(self.project_b.local_path, "cursor-1", document))
 
+    def test_status_filters_peer_project_stop_state(self):
+        scr.write_stop_file(
+            [self.project_b.local_path], "test", self.stop_path,
+            agents=[f"{self.project_b.local_path}::cursor-1"],
+        )
+        with patch.object(scr, "STOP_PATH", self.stop_path), \
+             patch.object(scr, "evaluate_fleet_status", return_value={
+                 "state": "waiting", "summary": "waiting", "reasons": [],
+             }), \
+             patch.object(scr, "load_capacity", return_value={
+                 "concurrent": [], "ready_total": 0,
+             }), \
+             patch.object(scr, "load_loop_heartbeats", return_value=[]):
+            text = scr.status_text(self.project_a)
+        self.assertNotIn(self.project_b.local_path, text)
+        self.assertNotIn("operator stop:", text)
+
+    def test_status_collection_is_serialized_across_project_channels(self):
+        active = 0
+        maximum = 0
+        guard = threading.Lock()
+
+        def evaluate(_path):
+            nonlocal active, maximum
+            with guard:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.02)
+            with guard:
+                active -= 1
+            return {"state": "waiting", "summary": "waiting", "reasons": []}
+
+        with patch.object(scr, "STOP_PATH", self.stop_path), \
+             patch.object(scr, "evaluate_fleet_status", side_effect=evaluate), \
+             patch.object(scr, "load_capacity", return_value={
+                 "concurrent": [], "ready_total": 0,
+             }), \
+             patch.object(scr, "load_loop_heartbeats", return_value=[]), \
+             ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(scr.status_text, self.project_a),
+                executor.submit(scr.status_text, self.project_b),
+            ]
+            for future in futures:
+                future.result()
+        self.assertEqual(maximum, 1)
+
     def test_degraded_project_allows_status_but_blocks_mutation(self):
         self.checkout_a.rmdir()
         degraded = self.registry.get(self.project_a.project_id)
@@ -228,6 +281,47 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertIn("degraded_unreachable", status)
         self.assertIn("degraded", message)
         self.assertEqual(callback, [])
+
+    def test_reused_checkout_with_wrong_identity_blocks_github_mutation(self):
+        self.registry.identity_provider = lambda path: {
+            "github_repo_id": "R_wrong",
+            "github_repo_database_id": 999,
+            "project_v2_id": "P_wrong",
+            "repo_slug": "owner/wrong",
+            "local_path": str(path.resolve()),
+        }
+        comments = []
+        replies = []
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry,
+            self.payload(text="intervention #187 do it", event_id="wrong-identity"),
+            set(),
+            comment=lambda *args: comments.append(args) or True,
+            notify=lambda _config, event: replies.append(event["text"]) or {"ok": True},
+            seen_path=self.seen_path,
+        )
+        self.assertIn("degraded", reply)
+        self.assertEqual(comments, [])
+        self.assertEqual(len(replies), 1)
+
+    def test_legacy_raw_event_id_prevents_replayed_command(self):
+        self.seen_path.write_text(
+            json.dumps({"ids": {"legacy-event": "2026-08-14T00:00:00Z"}}),
+            encoding="utf-8",
+        )
+        self.seen_path.chmod(0o600)
+        calls = []
+        with patch.object(scr, "STOP_PATH", self.stop_path):
+            reply = scr.handle_slack_message(
+                sample_config(), self.registry,
+                self.payload(text="stop", event_id="legacy-event"), set(),
+                comment=lambda *args: calls.append(args) or True,
+                notify=lambda *args: calls.append(args) or {"ok": True},
+                seen_path=self.seen_path,
+            )
+        self.assertIsNone(reply)
+        self.assertEqual(calls, [])
+        self.assertFalse(self.stop_path.exists())
 
     def test_intervention_targets_only_resolved_checkout(self):
         calls = []

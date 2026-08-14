@@ -44,8 +44,17 @@ def _private_directory(path: Path) -> None:
     if path.exists():
         if not path.is_dir():
             raise RegistryError(f"unsafe registry directory: {path}")
-        if stat.S_IMODE(path.stat().st_mode) & 0o077:
-            raise RegistryError(f"registry directory must be private (0700): {path}")
+        info = path.stat()
+        if info.st_uid != os.getuid():
+            raise RegistryError(f"registry directory is not owned by the current user: {path}")
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o022:
+            raise RegistryError(f"registry directory is writable by another user: {path}")
+        if mode != 0o700:
+            try:
+                os.chmod(path, 0o700, follow_symlinks=False)
+            except OSError as exc:
+                raise RegistryError(f"cannot secure registry directory {path}: {exc}") from exc
         return
     path.mkdir(parents=True, mode=0o700)
     os.chmod(path, 0o700)
@@ -497,6 +506,13 @@ class ProjectRegistry:
                 for item in document["projects"].values()
             ):
                 raise RegistryError("legacy channel is bound without migration evidence")
+            if any(
+                item.get("lifecycle") == "active"
+                and str(item.get("github_repo_id")) == str(identity["github_repo_id"])
+                and str(item.get("project_v2_id")) == str(identity["project_v2_id"])
+                for item in document["projects"].values()
+            ):
+                raise RegistryError("repository/project already has an active binding")
             timestamp = _now()
             project_id = f"proj_{uuid.uuid4().hex}"
             record = ProjectRecord(
