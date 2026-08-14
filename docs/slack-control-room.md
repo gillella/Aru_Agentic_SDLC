@@ -67,6 +67,8 @@ Revoke tokens in the Slack app dashboard, then delete `~/.aru/slack.env`.
 ## Threat model
 
 - Tokens never logged or posted. Outbound text is redacted for `xoxb-` / `xapp-`.
+- Notify does not follow HTTP redirects, so the bot token cannot leave Slack.
+- The runtime manifest requests only `app_mentions:read` and `chat:write`.
 - Slack cannot claim, review, or merge. Intervention is a GitHub comment.
 - Duplicate Slack deliveries are ignored (`client_msg_id` / `ts`).
 - If Slack is down, notify returns a warning and the GitHub loop continues.

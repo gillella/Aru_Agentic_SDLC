@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from slack_notify import (  # noqa: E402
     DedupeCache,
+    RejectRedirectHandler,
     SlackConfig,
     config_from_env,
     format_event,
@@ -100,6 +101,17 @@ class SlackNotifyTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "slack_unavailable")
+
+    def test_transport_rejects_redirects(self):
+        from urllib.request import Request
+
+        handler = RejectRedirectHandler()
+        req = Request("https://slack.com/api/chat.postMessage")
+        with self.assertRaises(URLError) as ctx:
+            handler.redirect_request(
+                req, None, 302, "Found", {}, "https://evil.example/steal"
+            )
+        self.assertIn("slack_redirect_rejected", str(ctx.exception))
 
 
 if __name__ == "__main__":

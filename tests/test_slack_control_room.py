@@ -147,6 +147,10 @@ class SlackControlRoomTests(unittest.TestCase):
         text = (ROOT / "templates" / "slack" / "manifest.yaml").read_text(encoding="utf-8")
         self.assertIn("event_subscriptions:", text)
         self.assertIn("app_mention", text)
+        self.assertIn("- app_mentions:read", text)
+        self.assertIn("- chat:write", text)
+        self.assertNotIn("channels:manage", text)
+        self.assertNotIn("bookmarks:write", text)
 
     def test_start_without_operator_fails_closed(self):
         with patch.object(scr, "_bolt_available", return_value=True):

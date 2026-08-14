@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ENV_PATH = Path.home() / ".aru" / "slack.env"
 SECRET_RE = re.compile(
@@ -140,6 +140,13 @@ def dedupe_key(event: Dict[str, Any]) -> str:
 Transport = Callable[[SlackConfig, str, Optional[str]], Dict[str, Any]]
 
 
+class RejectRedirectHandler(HTTPRedirectHandler):
+    """Do not follow redirects; the bot token must not leave Slack."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise URLError("slack_redirect_rejected")
+
+
 def slack_api_transport(config: SlackConfig, text: str, thread_ts: Optional[str]) -> Dict[str, Any]:
     payload = {"channel": config.channel_id, "text": text, "mrkdwn": True}
     if thread_ts:
@@ -154,7 +161,8 @@ def slack_api_transport(config: SlackConfig, text: str, thread_ts: Optional[str]
         },
         method="POST",
     )
-    with urlopen(req, timeout=20) as resp:
+    opener = build_opener(RejectRedirectHandler)
+    with opener.open(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
