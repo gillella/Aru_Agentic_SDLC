@@ -563,7 +563,7 @@ def parse_semver_major(version_str: Optional[str]) -> Optional[int]:
     """Extracts the MAJOR version number from a SemVer string (e.g., 'v1.2.3' -> 1, 'v0.1.0' -> 0)."""
     if not version_str:
         return None
-    match = re.search(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", str(version_str).strip())
+    match = re.fullmatch(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", str(version_str).strip())
     if match:
         return int(match.group(1))
     return None

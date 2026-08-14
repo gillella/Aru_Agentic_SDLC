@@ -24,6 +24,9 @@ class VersionPinningTests(unittest.TestCase):
         self.assertIsNone(common.parse_semver_major(""))
         self.assertIsNone(common.parse_semver_major("main"))
         self.assertIsNone(common.parse_semver_major(None))
+        # Refs containing a SemVer substring should not parse as valid SemVer
+        self.assertIsNone(common.parse_semver_major("feature-v2.0.0"))
+        self.assertIsNone(common.parse_semver_major("release-1.0.0-patch"))
 
     def test_check_version_compatibility_matching_major(self):
         with patch.dict(os.environ, {"ARU_SDLC_REF": "v1.2.0"}):
@@ -71,7 +74,23 @@ class VersionPinningTests(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
-    def test_clean_target_home_persists_exports(self):
+    def test_option_shaped_ref_rejected(self):
+        import subprocess
+        import tempfile
+        installer = str(ROOT / "scripts" / "install_local_agent_integrations.sh")
+        with tempfile.TemporaryDirectory() as temp_root, tempfile.TemporaryDirectory() as clean_home:
+            cmd = [
+                installer,
+                "--cursor-only",
+                "--aru-home", temp_root,
+                "--target-home", clean_home,
+            ]
+            env = dict(os.environ, ARU_SDLC_REF="-f", SHELL="/bin/zsh")
+            res = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("Invalid ARU_SDLC_REF", res.stderr)
+
+    def test_clean_target_home_persists_exports_and_switches_ref(self):
         import shutil
         import subprocess
         import tempfile
@@ -92,7 +111,14 @@ class VersionPinningTests(unittest.TestCase):
             shutil.copy(str(ROOT / "scripts" / "install_cursor_integration.sh"), os.path.join(temp_root, "scripts", "install_cursor_integration.sh"))
             common.run_cmd(["git", "add", "."], cwd=temp_root, check=True)
             common.run_cmd(["git", "commit", "-m", "init"], cwd=temp_root, check=True)
-            common.run_cmd(["git", "tag", "v1.0.0"], cwd=temp_root, check=True)
+            code, commit_sha, _ = common.run_cmd(["git", "rev-parse", "HEAD"], cwd=temp_root, check=True)
+            commit_sha = commit_sha.strip()
+
+            # Make a second commit so HEAD is on a different commit
+            with open(os.path.join(temp_root, "marker.txt"), "w") as f:
+                f.write("marker")
+            common.run_cmd(["git", "add", "."], cwd=temp_root, check=True)
+            common.run_cmd(["git", "commit", "-m", "second commit"], cwd=temp_root, check=True)
 
             cmd = [
                 os.path.join(temp_root, "scripts", "install_local_agent_integrations.sh"),
@@ -100,7 +126,7 @@ class VersionPinningTests(unittest.TestCase):
                 "--aru-home", temp_root,
                 "--target-home", clean_home,
             ]
-            env = dict(os.environ, ARU_SDLC_REF="v1.0.0", SHELL="/bin/zsh")
+            env = dict(os.environ, ARU_SDLC_REF=commit_sha, SHELL="/bin/zsh")
             res = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             self.assertEqual(res.returncode, 0, f"Installer failed: {res.stderr}")
 
@@ -109,7 +135,11 @@ class VersionPinningTests(unittest.TestCase):
             self.assertTrue(zshrc.exists())
             content = zshrc.read_text(encoding="utf-8")
             self.assertIn("export ARU_SDLC_HOME=", content)
-            self.assertIn('export ARU_SDLC_REF="v1.0.0"', content)
+            self.assertIn(f'export ARU_SDLC_REF="{commit_sha}"', content)
+
+            # Verify that temp_root repo was checked out to the pinned commit_sha
+            _, head_sha, _ = common.run_cmd(["git", "rev-parse", "HEAD"], cwd=temp_root, check=True)
+            self.assertEqual(head_sha.strip(), commit_sha)
 
 
 if __name__ == "__main__":

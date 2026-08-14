@@ -632,18 +632,26 @@ echo "Target Home: ${TARGET_HOME}"
 echo "Mode:        $(if ${DRY_RUN}; then echo "Dry-Run"; elif ${CHECK_ONLY}; then echo "Check-Only"; else echo "Install"; fi)"
 
 if [[ -n "${ARU_SDLC_REF:-}" ]]; then
+  if [[ "${ARU_SDLC_REF}" =~ ^- || "${ARU_SDLC_REF}" =~ [[:space:]] ]]; then
+    echo "[ERROR] Invalid ARU_SDLC_REF '${ARU_SDLC_REF}': ref cannot start with '-' or contain whitespace." >&2
+    exit 1
+  fi
   if [[ "${CHECK_ONLY}" == true ]]; then
     echo "[INFO] ARU_SDLC_REF is set to '${ARU_SDLC_REF}'"
   elif [[ "${DRY_RUN}" == true ]]; then
     echo "[DRY-RUN] Would checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}"
   else
     echo "Pinning Aru_Agentic_SDLC at ${SDLC_HOME} to ref '${ARU_SDLC_REF}'..."
-    if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" 2>/dev/null && ! git -C "${SDLC_HOME}" checkout --detach "${ARU_SDLC_REF}" 2>/dev/null; then
+    if ! git -C "${SDLC_HOME}" rev-parse --verify "${ARU_SDLC_REF}^{commit}" >/dev/null 2>&1; then
       git -C "${SDLC_HOME}" fetch --tags origin 2>/dev/null || true
-      if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" 2>/dev/null && ! git -C "${SDLC_HOME}" checkout --detach "${ARU_SDLC_REF}"; then
-        echo "[ERROR] Could not checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}." >&2
+      if ! git -C "${SDLC_HOME}" rev-parse --verify "${ARU_SDLC_REF}^{commit}" >/dev/null 2>&1; then
+        echo "[ERROR] Could not resolve ref '${ARU_SDLC_REF}' in ${SDLC_HOME}." >&2
         exit 1
       fi
+    fi
+    if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" 2>/dev/null && ! git -C "${SDLC_HOME}" checkout --detach "${ARU_SDLC_REF}" 2>/dev/null; then
+      echo "[ERROR] Could not checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}." >&2
+      exit 1
     fi
     if [[ "${ARU_SDLC_REEXEC:-0}" != "1" ]]; then
       export ARU_SDLC_REEXEC=1

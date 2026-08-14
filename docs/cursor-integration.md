@@ -22,18 +22,18 @@ mirror the User Rule for teammates who do not have the global install.
 
 ### Pinning a Version with `ARU_SDLC_REF`
 
-To prevent unannounced breaks on `main` from impacting consumer projects, pin a specific git ref, commit SHA, or release checkpoint before installing:
+To prevent unannounced breaks on `main` from impacting consumer projects, pin a specific immutable commit SHA, release tag, or checkpoint tag before installing:
 
 ```bash
 export ARU_SDLC_HOME=/Users/aravindgillella/projects/Aru_Agentic_SDLC
-# Pin to a specific release tag, checkpoint, or commit SHA:
-export ARU_SDLC_REF=main
+# Pin to an immutable commit SHA, release tag, or checkpoint:
+export ARU_SDLC_REF=d3a0588
 "$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"
 ```
 
-- When `ARU_SDLC_REF` is set, the installer checks out that ref in `$ARU_SDLC_HOME` and exports `ARU_SDLC_REF` in your shell profile.
+- When `ARU_SDLC_REF` is set to an immutable ref, the installer checks out that ref in `$ARU_SDLC_HOME` and exports `ARU_SDLC_REF` in your shell profile. Do not use moving branch names like `main` if you wish to prevent upstream changes from updating your environment.
 - When `ARU_SDLC_REF` is unset, default behavior is unchanged (follows current branch / `main`).
-- Helper scripts check `ARU_SDLC_REF` against the checked out repository version and print a warning if MAJOR SemVer versions mismatch, but never hard-fail mid-session.
+- Helper scripts check `ARU_SDLC_REF` against the checked-out repository version and print a warning if MAJOR SemVer versions mismatch, but never hard-fail mid-session.
 
 #### Discovering Current Ref and Available Versions
 
