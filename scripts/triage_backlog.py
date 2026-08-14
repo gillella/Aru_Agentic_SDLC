@@ -22,10 +22,11 @@ The Ready contract (all four required):
 import argparse
 import re
 import sys
-from typing import Any
+from typing import Any, Optional
 
 from common import (
     claimed_by,
+    get_repo_slug,
     label_names,
     list_open_issues,
     parse_touches,
@@ -68,6 +69,7 @@ def has_verification(body: str) -> bool:
     return bool(tail.strip())
 
 
+ARU_SDLC_REPO_SLUG = "gillella/Aru_Agentic_SDLC"
 LEGACY_ISSUE_CUTOFF_NUMBER = 158
 
 EXAMPLE_CONFORMING_ISSUE = """
@@ -93,18 +95,61 @@ Example of a conforming issue with machine-checkable criteria:
 """
 
 
-def has_decision_boundaries(body: str) -> bool:
-    """Checks for a Decision Boundaries section in the issue body."""
+def _extract_section(body: str, heading_pattern: str) -> str:
+    """Extracts markdown text under a given heading until the next heading, stripping HTML comments."""
     if not body:
+        return ""
+    parts = re.split(
+        rf"^\s*#{{1,4}}\s*{heading_pattern}\b.*$", body,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if len(parts) < 2:
+        return ""
+    tail = re.split(r"^\s*#{1,4}\s+", parts[1], flags=re.MULTILINE)[0]
+    tail = re.sub(r"<!--.*?-->", "", tail, flags=re.DOTALL)
+    return tail.strip()
+
+
+def has_decision_boundaries(body: str) -> bool:
+    """Checks for a substantive Decision Boundaries section in the issue body.
+
+    Rejects missing sections, empty sections, and untouched template placeholders
+    such as bare '- Default:', '- Edge cases:', '- Error handling:'.
+    """
+    content = _extract_section(body, r"decision\s+boundaries")
+    if not content:
         return False
-    return bool(re.search(r"^\s*#{1,4}\s*decision\s+boundaries\b", body, flags=re.IGNORECASE | re.MULTILINE))
+    placeholder_pattern = re.compile(
+        r"^[-*]?\s*(default|edge\s*cases?|error\s*handling|thresholds?)\s*:\s*$",
+        re.IGNORECASE,
+    )
+    substantive_lines = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line in ("-", "*", "+"):
+            continue
+        if placeholder_pattern.match(line):
+            continue
+        substantive_lines.append(line)
+    return len(substantive_lines) > 0
 
 
 def has_non_goals(body: str) -> bool:
-    """Checks for a Non-Goals section in the issue body."""
-    if not body:
+    """Checks for a substantive Non-Goals section in the issue body.
+
+    Rejects missing sections, empty sections, and untouched template placeholders
+    such as a bare '-' or '*'.
+    """
+    content = _extract_section(body, r"non[- ]goals")
+    if not content:
         return False
-    return bool(re.search(r"^\s*#{1,4}\s*non[- ]goals\b", body, flags=re.IGNORECASE | re.MULTILINE))
+    substantive_lines = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line in ("-", "*", "+"):
+            continue
+        substantive_lines.append(line)
+    return len(substantive_lines) > 0
 
 
 def is_feat_or_fix(issue: dict[str, Any]) -> bool:
@@ -118,7 +163,19 @@ def is_feat_or_fix(issue: dict[str, Any]) -> bool:
     )
 
 
-def ready_gaps(issue: dict[str, Any], open_numbers: set) -> list[str]:
+def is_legacy_issue(num: int, repo_slug: Optional[str] = None) -> bool:
+    """Grandfathering only applies to pre-existing issues in Aru_Agentic_SDLC itself.
+
+    Downstream repositories enforce machine-checkable criteria from issue #1 onwards.
+    """
+    if num <= 0 or num > LEGACY_ISSUE_CUTOFF_NUMBER:
+        return False
+    if repo_slug is None:
+        repo_slug = get_repo_slug()
+    return bool(repo_slug and repo_slug.strip().lower() == ARU_SDLC_REPO_SLUG.lower())
+
+
+def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str] = None) -> list[str]:
     """Returns the list of unmet Ready-contract elements. Empty means ready."""
     body = issue.get("body") or ""
     num = issue.get("number", 0)
@@ -139,7 +196,7 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set) -> list[str]:
         missing_db = not has_decision_boundaries(body)
         missing_ng = not has_non_goals(body)
         if missing_db or missing_ng:
-            if num <= LEGACY_ISSUE_CUTOFF_NUMBER and num > 0:
+            if is_legacy_issue(num, repo_slug):
                 print(
                     f"  [WARN] Pre-existing legacy issue #{num} is missing machine-checkable criteria sections "
                     f"({'Decision Boundaries' if missing_db else ''}{' and ' if missing_db and missing_ng else ''}{'Non-Goals' if missing_ng else ''}); warning only.",
@@ -241,9 +298,10 @@ def main():
     if args.issue:
         backlog = [i for i in backlog if i["number"] in args.issue]
 
+    slug = get_repo_slug()
     qualified, blocked = [], []
     for issue in sorted(backlog, key=lambda i: i["number"]):
-        gaps = ready_gaps(issue, open_numbers)
+        gaps = ready_gaps(issue, open_numbers, repo_slug=slug)
         (blocked if gaps else qualified).append((issue, gaps))
 
     print(f"=== Backlog triage — {len(backlog)} issue(s) examined ===\n")

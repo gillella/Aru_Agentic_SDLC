@@ -53,6 +53,16 @@ class SectionParsingTests(unittest.TestCase):
     def test_empty_verification_section_is_not_verification(self):
         self.assertFalse(tb.has_verification("## Verification\n\n## Dependencies\n\nx\n"))
 
+    def test_placeholder_decision_boundaries_rejected(self):
+        self.assertFalse(tb.has_decision_boundaries("## Decision Boundaries\n<!-- comment -->\n- Default:\n- Edge cases:\n- Error handling:\n\n## Next"))
+        self.assertFalse(tb.has_decision_boundaries("## Decision Boundaries\n\n## Next"))
+        self.assertTrue(tb.has_decision_boundaries("## Decision Boundaries\n- Default: fallback value\n- Edge cases: none\n\n## Next"))
+
+    def test_placeholder_non_goals_rejected(self):
+        self.assertFalse(tb.has_non_goals("## Non-Goals\n<!-- comment -->\n- \n\n## Next"))
+        self.assertFalse(tb.has_non_goals("## Non-Goals\n\n## Next"))
+        self.assertTrue(tb.has_non_goals("## Non-Goals\n- Do not rewrite auth engine\n\n## Next"))
+
 
 CONFORMING_FEAT_BODY = """## Summary
 
@@ -94,12 +104,23 @@ class ReadyContractTests(unittest.TestCase):
         self.assertIn("missing section: ## Decision Boundaries", gaps)
         self.assertIn("missing section: ## Non-Goals", gaps)
 
-    def test_legacy_issue_missing_machine_criteria_warns_and_passes(self):
-        with patch("sys.stderr.write") as mock_stderr:
-            gaps = tb.ready_gaps(issue(100, "type:feat", body=READY_BODY), set())
-            self.assertEqual(gaps, [])  # Passes for legacy issue <= 158
+    def test_new_feat_issue_with_untouched_placeholders_is_blocked(self):
+        body = READY_BODY + "\n## Decision Boundaries\n- Default:\n- Edge cases:\n\n## Non-Goals\n- \n"
+        gaps = tb.ready_gaps(issue(200, "type:feat", body=body), set())
+        self.assertIn("missing section: ## Decision Boundaries", gaps)
+        self.assertIn("missing section: ## Non-Goals", gaps)
+
+    def test_legacy_issue_in_aru_sdlc_repo_warns_and_passes(self):
+        with patch("triage_backlog.get_repo_slug", return_value="gillella/Aru_Agentic_SDLC"), patch("sys.stderr.write") as mock_stderr:
+            gaps = tb.ready_gaps(issue(100, "type:feat", body=READY_BODY), set(), repo_slug="gillella/Aru_Agentic_SDLC")
+            self.assertEqual(gaps, [])  # Passes for legacy issue <= 158 in Aru_Agentic_SDLC
             written = "".join(call.args[0] for call in mock_stderr.call_args_list)
             self.assertIn("[WARN] Pre-existing legacy issue #100", written)
+
+    def test_legacy_number_in_downstream_repo_is_not_exempt(self):
+        gaps = tb.ready_gaps(issue(10, "type:feat", body=READY_BODY), set(), repo_slug="acme/my-service")
+        self.assertIn("missing section: ## Decision Boundaries", gaps)
+        self.assertIn("missing section: ## Non-Goals", gaps)
 
     def test_missing_touches_is_reported(self):
         body = READY_BODY.replace("touches: src/thing.py, tests/test_thing.py", "touches:")

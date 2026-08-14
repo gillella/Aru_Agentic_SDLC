@@ -33,6 +33,6 @@ assignees: ''
 <!-- Commands and steps to verify this fix -->
 
 ## Dependencies
-- **depends-on**: <!-- e.g., none or #X -->
-- **touches**: <!-- Paths or globs touched by this issue -->
-- **parallel-eligible**: true
+depends-on: <!-- e.g., none or #X -->
+touches: <!-- Paths or globs touched by this issue -->
+parallel-eligible: true

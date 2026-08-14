@@ -27,9 +27,9 @@ assignees: ''
 <!-- Commands and steps to verify this feature -->
 
 ## Dependencies
-- **depends-on**: <!-- Issue numbers if any, e.g., #12, #14 -->
-- **touches**: <!-- Paths or globs touched by this issue -->
-- **parallel-eligible**: true <!-- Set to true if this issue can be implemented independently in parallel -->
+depends-on: <!-- Issue numbers if any, e.g., #12, #14 -->
+touches: <!-- Paths or globs touched by this issue -->
+parallel-eligible: true <!-- Set to true if this issue can be implemented independently in parallel -->
 
 ## Technical Considerations
 <!-- Any specific design preferences, architecture notes, or API contracts -->
