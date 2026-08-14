@@ -236,6 +236,32 @@ def fetch_pr_comments(pr_id: int) -> List[Dict[str, Any]]:
     return res if isinstance(res, list) else []
 
 
+def fetch_issue_comments(issue_id: int) -> List[Dict[str, Any]]:
+    """Fetches all comments for an Issue, retrieving all pages."""
+    cmd = ["gh", "api", "--paginate", f"repos/{{owner}}/{{repo}}/issues/{issue_id}/comments"]
+    code, stdout, _ = run_cmd(cmd, check=False)
+    if code != 0 or not stdout:
+        return []
+    comments: List[Dict[str, Any]] = []
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(stdout):
+        while pos < len(stdout) and stdout[pos].isspace():
+            pos += 1
+        if pos >= len(stdout):
+            break
+        try:
+            doc, end = decoder.raw_decode(stdout, idx=pos)
+            if isinstance(doc, list):
+                comments.extend(doc)
+            elif isinstance(doc, dict):
+                comments.append(doc)
+            pos = end
+        except json.JSONDecodeError:
+            break
+    return comments
+
+
 # --- GitHub Project v2 board helpers --------------------------------------
 # The board is the monitoring surface; the status:* labels are what the CLI
 # reads. Both must move together or they drift. These helpers exist so
