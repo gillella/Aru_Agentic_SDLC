@@ -1,94 +1,155 @@
 # Slack factory control room
 
-GitHub is the work queue. Slack is the discussion and alert plane for one
-project. Cursor, Claude, Codex, and Antigravity do **not** join as Slack
-users. They share **one** bot (Aru Code App / Aru Factory) in a single
-allowlisted channel. Messages stamp `agent`, `family`, repo, issue/PR, and
-time.
+GitHub remains the work queue. One local Slack bridge can route several Aru
+projects, with one private channel bound to each project. Cursor, Claude,
+Codex, and Antigravity do not join as separate Slack users; messages use one
+bot and stamp the agent, model family, project, issue or PR, and time.
 
-Live operator channel for this repo: private `#project-aru-code` on Anguliyam
-(`C0BPZMRR1RC`). Tokens stay in `~/.aru/slack.env`, never in git.
+Credentials stay in `~/.aru/slack.env`. Project routing lives separately in
+`~/.aru/projects.json`. The registry never stores bot tokens, app tokens,
+signing secrets, or other credentials.
 
-## What each desktop agent does
+## Registry model
 
-After a work unit, an agent may post (never instead of GitHub helpers):
+Every record has an immutable generated `project_id` and immutable GitHub
+repository and ProjectV2 identities. The repository slug and canonical local
+checkout path are recoverable pointers. The Slack team and channel form a
+reserved route. A record's lifecycle is `active` or `closed`; a missing local
+checkout is runtime health `degraded_unreachable`, not a lifecycle change.
+
+The registry is versioned and enforces:
+
+- exactly one active project for an inbound team and channel;
+- no reuse of a channel after its record is closed;
+- private `0700` parent directories and `0600` JSON and lock files;
+- lock-protected read-modify-write and same-directory atomic replacement;
+- fail-closed reads for corrupt, insecure, non-regular, or symlinked files.
+
+Create and inspect records with the local registry CLI:
+
+```bash
+python3 scripts/slack_projects.py create \
+  --local-path /absolute/path/to/repo \
+  --team-id T01234567 --channel-id C01234567 \
+  --operator aravind
+
+python3 scripts/slack_projects.py list
+python3 scripts/slack_projects.py resolve \
+  --team-id T01234567 --channel-id C01234567
+python3 scripts/slack_projects.py verify --project-id proj_...
+```
+
+`create` discovers and verifies the repository and governed ProjectV2 board
+through GitHub. Save the generated `project_id`; outbound notifications and
+local status checks require it explicitly.
+
+If a checkout moves or a repository is renamed, recover only the mutable
+pointers. Recovery refuses a checkout whose GitHub repository or ProjectV2
+identity differs from the immutable record:
+
+```bash
+python3 scripts/slack_projects.py recover \
+  --project-id proj_... --local-path /new/absolute/path \
+  --repo-slug owner/new-name --operator aravind
+```
+
+Close an obsolete record locally. Closing preserves its channel reservation
+and immediately disables inbound and outbound routing:
+
+```bash
+python3 scripts/slack_projects.py close \
+  --project-id proj_... --operator aravind
+```
+
+## Migrating the legacy singleton
+
+The explicit migration reads the old team and channel from
+`~/.aru/slack.env`, verifies the checkout identity, and imports the binding
+once. Re-running it returns the same project. It does not copy credentials.
+
+```bash
+python3 scripts/slack_projects.py migrate \
+  --local-path /absolute/path/to/repo --operator aravind
+```
+
+After migration, `SLACK_CHANNEL_ID` is no longer a routing fallback. It may be
+removed once all callers provide a project ID. `SLACK_TEAM_ID` still identifies
+the workspace authorized for the single credential set in this first version.
+
+## Outbound notifications
+
+Every notification must name a registry project. The destination channel comes
+only from its active record:
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id proj_... \
   --agent cursor-1 --family xai \
   --event blocked --issue 172 \
   --text "waiting on depends-on #110"
 ```
 
-Exit code is 0 even when Slack is down. The factory loop continues.
+An unknown or closed project posts nothing. Slack downtime still returns a
+warning without halting factory work. Deduplication includes `project_id`, so
+identical events from different projects do not suppress one another.
 
 ## Bridge process
 
 ```bash
-pip install -r requirements-slack.txt   # optional; live Socket Mode only
+pip install -r requirements-slack.txt   # live Socket Mode only
 python3 scripts/slack_control_room.py doctor
-python3 scripts/slack_control_room.py start --repo-dir /path/to/repo
-python3 scripts/slack_control_room.py status --repo-dir /path/to/repo
+python3 scripts/slack_control_room.py start
+python3 scripts/slack_control_room.py status --project-id proj_...
 python3 scripts/slack_control_room.py stop
 ```
 
-`start` uses Slack Socket Mode (no public HTTP URL). `stop` stops the **bridge**,
-not the factory. Factory stop/resume are Slack **commands**.
+`start` runs one Socket Mode bridge for every active registry record. `stop`
+stops only the bridge process, never a factory loop.
 
-## Operator commands (allowlisted user, allowlisted channel)
+For each inbound mention, the bridge resolves exactly one active project
+before authorization, deduplication, command parsing, filesystem mutation,
+GitHub access, or Slack acknowledgement. Unknown, ambiguous, and closed routes
+produce no Slack reply and no remote or project side effect. They create only
+a throttled local audit entry in `~/.aru/slack-audit.json`.
 
-Mention the bot, then put the verb first (`<@bot> status`, not a sentence
-that happens to contain `stop`):
+## Operator commands
 
-- `status` — read-only fleet state plus capacity, open review work, active
-  claims, and each configured desktop loop's last heartbeat (unknown when
-  the continuity doctor has no timestamp)
-- `stop` / `stop all` — write `~/.aru/factory-loop.stop` with `projects: ["*"]`
-- `stop <agent>` — record `agents: ["<project>::<agent>"]` so a peer agent in
-  the same project keeps running
-- `resume` / `resume all` — clear that operator stop only
-- `resume <agent>` — clear only that agent's token; refused while `*` or a
-  project-wide stop is in effect
-- `intervention #172 approved` — copy the decision onto the GitHub issue
-  in `--repo-dir` with `gh issue comment` / `gh pr comment` (no comment
-  helper exists; that is the governed direct-comment path)
+Mention the bot and put the verb first:
 
-A scoped `resume <target>` is rejected while a global `*` stop is in effect.
-Events from other workspaces, channels, users, or bots are ignored. The
-bridge refuses to start, and commands fail closed, unless
-`SLACK_OPERATOR_USER_ID` is set.
+- `status` reports only the resolved project. A missing checkout reports
+  `degraded_unreachable` without attempting repository or GitHub work.
+- `stop` records the resolved project's canonical checkout path in
+  `~/.aru/factory-loop.stop`.
+- `stop <agent>` records `<canonical-path>::<agent>` and leaves peer projects
+  and agents running.
+- `resume` removes only the resolved project's path and agent tokens.
+- `resume <agent>` removes only that project's agent token.
+- `intervention issue #172 <decision>` or `intervention PR #123 <decision>`
+  copies the decision to the resolved repository through the sanctioned GitHub
+  comment path.
 
-## Setup
+Slack does not expose a global factory command. `stop all` and `resume all`
+are rejected. The existing `projects: ["*"]` contract is preserved for local
+operator control, and Slack cannot clear it. A degraded project permits status
+only; use local `verify`, `recover`, or `close` for recovery.
 
-1. Create the app from `templates/slack/manifest.yaml` (or add the listed
-   bot scopes and reinstall).
-2. Enable Socket Mode. Create an app-level token with `connections:write`.
-3. Install to the workspace. `/invite` the bot into the private channel.
+## Setup and security
+
+1. Create the app from `templates/slack/manifest.yaml` and enable Socket Mode.
+2. Create an app-level token with `connections:write` and install the app.
+3. Invite the bot into each private project channel.
 4. Store `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_SIGNING_SECRET`,
-   `SLACK_TEAM_ID`, `SLACK_CHANNEL_ID`, and `SLACK_OPERATOR_USER_ID`
-   in `~/.aru/slack.env` (`chmod 600`). The operator id is required for
-   the bridge; notify-only posting can omit it.
+   `SLACK_TEAM_ID`, and `SLACK_OPERATOR_USER_ID` in `~/.aru/slack.env` with
+   mode `0600`.
+5. Create or migrate one registry record per project and run `doctor`.
 
-Revoke tokens in the Slack app dashboard, then delete `~/.aru/slack.env`.
+The bridge authorizes only the configured operator user in the record's Slack
+workspace and channel. Outbound text redacts credential-shaped data and the
+HTTP client refuses redirects. Duplicate inbound deliveries persist as
+`project_id:team:channel:event` identities in
+`~/.aru/slack-control-room-seen.json`, so restarts do not replay commands and
+the same Slack event ID cannot collide across projects.
 
-## Threat model
-
-- Tokens never logged or posted. Outbound text is redacted for `xoxb-` / `xapp-`.
-- Notify does not follow HTTP redirects, so the bot token cannot leave Slack.
-- The runtime manifest requests only `app_mentions:read` and `chat:write`.
-- Slack cannot claim, review, or merge. Intervention is a GitHub comment.
-- Duplicate Slack deliveries are ignored (`client_msg_id` / `ts`) and the
-  processed ids persist in `~/.aru/slack-control-room-seen.json` so a bridge
-  restart cannot replay `stop` / `resume` / `intervention`.
-- `stop` of the bridge process signals only a live PID whose command line
-  contains `slack_control_room`; a stale file pointing at another process is
-  refused.
-- If Slack is down, notify returns a warning and the GitHub loop continues.
-- On reconnect, the bridge does not replay stop/resume; it handles new events.
-
-## Recovery
-
-`doctor` reports missing env, missing bolt, and whether the bridge pid is live.
-If the bridge dies, factory work is unaffected. Restart `start`. A loop should
-stop when `factory-loop.stop` contains `*`, this project path, or
-`<project>::<agent-id>`.
+If Slack or the bridge is unavailable, GitHub-governed factory work continues.
+Revoke credentials in the Slack app dashboard before deleting
+`~/.aru/slack.env`.

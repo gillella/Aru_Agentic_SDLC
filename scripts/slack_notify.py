@@ -12,7 +12,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -62,7 +62,7 @@ def load_slack_env(path: Path = ENV_PATH) -> Dict[str, str]:
     return values
 
 
-def config_from_env(values: Dict[str, str]) -> SlackConfig:
+def config_from_env(values: Dict[str, str], require_channel: bool = True) -> SlackConfig:
     token = values.get("SLACK_BOT_TOKEN", "")
     team = values.get("SLACK_TEAM_ID", "")
     channel = values.get("SLACK_CHANNEL_ID", "")
@@ -70,7 +70,9 @@ def config_from_env(values: Dict[str, str]) -> SlackConfig:
         raise ValueError("SLACK_BOT_TOKEN is missing or not a bot token")
     if not team.startswith("T") or len(team) < 8:
         raise ValueError("SLACK_TEAM_ID is missing")
-    if not (channel.startswith("C") or channel.startswith("G")) or len(channel) < 8:
+    if require_channel and (
+        not (channel.startswith("C") or channel.startswith("G")) or len(channel) < 8
+    ):
         raise ValueError("SLACK_CHANNEL_ID is missing")
     return SlackConfig(
         bot_token=token,
@@ -95,6 +97,13 @@ def secrets_from_config(config: SlackConfig) -> list[str]:
     return [value for value in (config.bot_token, config.app_token, config.signing_secret) if value]
 
 
+def config_for_project(config: SlackConfig, project: Any) -> SlackConfig:
+    """Bind workspace credentials to one registry-controlled destination."""
+    if project.slack_team_id != config.team_id:
+        raise ValueError("project belongs to a different Slack workspace")
+    return replace(config, channel_id=project.slack_channel_id)
+
+
 def format_event(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> str:
     kind = event.get("type", "state")
     agent = event.get("agent", "unknown")
@@ -113,7 +122,7 @@ def format_event(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> 
     body = redact(str(event.get("text") or ""), extra=secrets).strip()
     lines = [
         f"[{kind}] agent=`{agent}` family=`{family}` {ref_s}",
-        f"repo={repo} state={state} ts={stamp}",
+        f"project={event.get('project_id', '') or 'unrouted'} repo={repo} state={state} ts={stamp}",
     ]
     if body:
         lines.append(body)
@@ -141,7 +150,7 @@ def dedupe_key(event: Dict[str, Any]) -> str:
         return str(event["dedupe_key"])
     return "|".join(
         str(event.get(name, ""))
-        for name in ("type", "agent", "issue", "pr", "text")
+        for name in ("project_id", "type", "agent", "issue", "pr", "text")
     )
 
 
@@ -206,11 +215,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--pr", type=int)
     parser.add_argument("--state", default="")
     parser.add_argument("--text", default="")
+    parser.add_argument("--project-id", required=True)
+    parser.add_argument("--registry-file", default="")
     parser.add_argument("--env-file", default=str(ENV_PATH))
     args = parser.parse_args(argv)
     try:
-        config = config_from_env(load_slack_env(Path(args.env_file)))
-    except ValueError as exc:
+        from slack_projects import DEFAULT_REGISTRY_PATH, ProjectRegistry, RegistryError
+
+        base = config_from_env(load_slack_env(Path(args.env_file)), require_channel=False)
+        project = ProjectRegistry(
+            Path(args.registry_file) if args.registry_file else DEFAULT_REGISTRY_PATH
+        ).get(args.project_id)
+        config = config_for_project(base, project)
+    except (ValueError, RegistryError) as exc:
         print(f"[WARN] Slack notify skipped: {exc}", file=sys.stderr)
         return 0
     event = {
@@ -222,6 +239,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "pr": args.pr,
         "state": args.state,
         "text": args.text,
+        "project_id": args.project_id,
     }
     result = post_event(config, event)
     if not result.get("ok"):
