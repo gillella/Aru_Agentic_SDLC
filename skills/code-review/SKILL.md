@@ -31,7 +31,7 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Check for subtle bugs, logic flaws, race conditions, or unhandled edge cases.
 - Ensure public API signatures, schema types, and data models remain consistent.
 - Verify zero unused imports, dead code, or debug statements.
-- Apply the **narrower-than-reality** heuristic below to every check, gate, scanner, matcher, cache TTL, or state evaluation whose effective scope can be narrower than the condition it is meant to cover.
+- Apply the **narrower-than-reality** heuristic below to every enforcement, comparison, decision, or state assumption whose effective scope can be narrower than the reality it governs.
 
 ### Step 4: Test Coverage & Verification
 - Verify that new feature logic or bug fixes are accompanied by unit/integration tests.
@@ -63,45 +63,51 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Do not move the issue directly to Done. Only the gated `merge_pr.py` close-out
   performs the merge and Done transition after independent review, green CI,
   resolved threads, and the remaining Definition-of-Done checks pass.
-- Remove temporary review worktree directory `.worktrees/review-pr-<PR_ID>`.
+- Remove temporary review worktree directory `.worktrees/review-pr-<PR_ID>`
+  (`git worktree remove --force .worktrees/review-pr-<PR_ID>`).
 
 ---
 
 ## Review Checklist
 
-Apply every pre-submission item before submitting the review, and complete the post-submission close-out after submission. A chat summary that skips this list is not review evidence.
+Apply every pre-submission item before submitting the review, submit the review with clear line comments and verdict, and complete the post-submission close-out after submission. A chat summary that skips this list is not review evidence.
 
 ### Pre-Submission Checklist
 - [ ] Linked issue (`Closes #N`) is open; every acceptance criterion is met or
       explicitly deferred with a follow-up issue (do not close incomplete work).
 - [ ] Diff matches the claim in the PR body **and** the gate/script's actual
       behaviour (state machine, not narrative — see below).
-- [ ] **Narrower-than-reality:** for every check, gate, scanner, matcher, cache TTL,
-      or state evaluation in the diff, answer: *What does the thing I am checking or
-      caching actually do or accept, and is my check or TTL narrower than it?*
+- [ ] **Narrower-than-reality:** for every enforcement, comparison, decision, or state
+      assumption in the diff, answer: *What does the underlying system or environment
+      actually do or accept, and is our enforcement, comparison, or assumption narrower than that reality?*
 - [ ] Tests cover the new behaviour; local suite is green in the review worktree.
 - [ ] CI is green (or failures are classified and already under remediation).
 - [ ] No secrets, unsafe shell interpolation, or trust-boundary holes introduced.
-- [ ] Blocking findings are each an unresolved inline thread; non-blocking notes
+- [ ] Blocking findings are each prepared as an unresolved inline thread; non-blocking notes
       stay in the review body.
+
+### Review Submission Checklist
+- [ ] Submit substantive GitHub review (`gh pr review --comment` for same-account fleet, or `--approve` / `--request-changes` across distinct accounts).
+- [ ] For changes requested, create unresolved inline review comment threads on specific diff lines for all blocking findings (so the picker routes the PR back to the author).
+- [ ] State overall review verdict and summary in the review body.
 
 ### Post-Submission Close-Out
 - [ ] Review claim released via `claim_issue.py --pr <PR_ID> --agent <AGENT_ID> --complete-review`
       (if no blocking findings remain) or `--release` (if changes requested).
-- [ ] Temporary review worktree (`.worktrees/review-pr-<PR_ID>`) removed and local review branch deleted.
+- [ ] Temporary review worktree (`.worktrees/review-pr-<PR_ID>`) removed (`git worktree remove --force .worktrees/review-pr-<PR_ID>`).
 
 ---
 
 ## Narrower-Than-Reality Heuristic
 
-**Question to ask of every check, gate, scanner, matcher, cache TTL, or state evaluation:**
+**Core principle:** Whenever code enforces rules, makes comparisons, resolves state, or relies on assumptions about the environment, ask:
 
-> What does the thing I am checking or caching actually do or accept, and is my check or TTL narrower than it?
+> *What does the underlying system or environment actually do, accept, or produce, and is our enforcement, comparison, or assumption narrower than that reality?*
 
 The enforcement layer's design is usually sound. What keeps breaking is the gap
-between what a check *believes* and what the system *actually does*. When the
-check is narrower, it either false-passes (misses the real write / real test /
-real label) or false-fails (blocks legitimate layouts the runner accepts).
+between what a check or assumption *believes* and what the system *actually does*. When the
+logic is narrower, it either false-passes (misses the real write / real test /
+real label) or false-fails (blocks legitimate layouts or formats the runner accepts).
 
 ### Worked examples
 
