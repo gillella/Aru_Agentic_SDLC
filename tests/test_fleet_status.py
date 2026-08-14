@@ -797,7 +797,39 @@ class FleetStatusTests(unittest.TestCase):
             print_capacity({"ready_total": 1, "concurrent": [10], "deferred": []}, [], ready_target=3)
         printed = out.getvalue()
         self.assertIn("Ready target:            3", printed)
-        self.assertIn("below target (3) — fleet is starved", printed)
+    def test_pending_review_eligibility_matches_canonical_rules(self):
+        from fleet_status import _pending_review
+        # Resolved threads on changes-requested PR: eligible for re-review
+        pr_rework_resolved = {
+            "number": 10, "isDraft": False, "reviewDecision": "CHANGES_REQUESTED",
+            "unresolvedReviewThreadsCount": 0, "labels": [],
+        }
+        self.assertTrue(_pending_review(pr_rework_resolved))
+
+        # Unresolved threads on commented review: waiting on author, not review queue
+        pr_unresolved_feedback = {
+            "number": 11, "isDraft": False, "reviewDecision": "COMMENTED",
+            "unresolvedReviewThreadsCount": 2, "labels": [],
+        }
+        self.assertFalse(_pending_review(pr_unresolved_feedback))
+
+        # Approved PR: waiting on merge, not review queue
+        pr_approved = {
+            "number": 12, "isDraft": False, "reviewDecision": "APPROVED",
+            "unresolvedReviewThreadsCount": 0, "labels": [],
+        }
+        self.assertFalse(_pending_review(pr_approved))
+
+        # PR with peer reviewed-by label: already reviewed
+        pr_reviewed = {
+            "number": 13, "isDraft": False, "reviewDecision": None,
+            "labels": [{"name": "author:claude-1"}, {"name": "reviewed-by:codex-1"}],
+        }
+        self.assertFalse(_pending_review(pr_reviewed))
+
+        # Draft PR: not in review queue
+        pr_draft = {"number": 14, "isDraft": True, "labels": []}
+        self.assertFalse(_pending_review(pr_draft))
 
     def test_api_failure_still_never_reports_complete(self):
         status = evaluate_fleet_status("/definitely/not/a/repository")

@@ -458,7 +458,24 @@ def _pending_review(pr: Dict[str, Any]) -> bool:
     if _has_reviewed_by(pr):
         return False
     decision = (pr.get("reviewDecision") or "").upper()
-    return decision not in {"APPROVED", "CHANGES_REQUESTED"}
+    if decision == "APPROVED":
+        return False
+    # If there are unresolved review threads, the PR is waiting on the author, not awaiting review
+    unresolved = pr.get("unresolvedReviewThreadsCount")
+    if unresolved is not None:
+        if unresolved > 0:
+            return False
+    else:
+        threads = pr.get("reviewThreads") or {}
+        if isinstance(threads, dict) and "nodes" in threads:
+            unresolved_nodes = sum(1 for t in threads["nodes"] if not t.get("isResolved"))
+            if unresolved_nodes > 0:
+                return False
+        elif isinstance(threads, list):
+            unresolved_list = sum(1 for t in threads if not t.get("isResolved"))
+            if unresolved_list > 0:
+                return False
+    return True
 
 
 def _review_age_question(prs: List[Dict[str, Any]], now: datetime) -> Dict[str, Any]:
