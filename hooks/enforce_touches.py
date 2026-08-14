@@ -391,6 +391,50 @@ def _short_option_value(token, value_options, words, index):
     return None, None, 1
 
 
+def _push_short_options(token, args, index):
+    """Returns (flags, consumed_words) for a possibly clustered push option."""
+    if not token.startswith("-") or token.startswith("--") or token == "-":
+        return set(), 1
+    flags = set()
+    cluster = token[1:]
+    for offset, char in enumerate(cluster):
+        option = f"-{char}"
+        flags.add(option)
+        if option in {"-o", "-r"}:
+            return flags, 1 if cluster[offset + 1:] else (2 if index + 1 < len(args) else 1)
+    return flags, 1
+
+
+def _push_state_option(name):
+    """Canonicalizes accepted long spellings that change protected-ref scope."""
+    candidates = {
+        "--delete": "--delete",
+        "--no-delete": "--no-delete",
+        "--tags": "--tags",
+        "--no-tags": "--no-tags",
+        "--all": "--all",
+        "--no-all": "--no-all",
+        "--branches": "--all",
+        "--no-branches": "--no-all",
+        "--mirror": "--mirror",
+        "--no-mirror": "--no-mirror",
+    }
+    if name in candidates:
+        return candidates[name]
+    accepted_prefixes = {
+        "--del": "--delete",
+        "--no-del": "--no-delete",
+        "--tag": "--tags",
+        "--no-tag": "--no-tags",
+        "--branch": "--all",
+        "--no-branch": "--no-all",
+        "--mir": "--mirror",
+        "--no-mir": "--no-mirror",
+    }
+    matches = {canonical for prefix, canonical in accepted_prefixes.items() if name.startswith(prefix)}
+    return matches.pop() if len(matches) == 1 else None
+
+
 def _unwrap_simple_command(words):
     """Strips leading environment variable assignments and command wrappers (env, sudo, etc.).
 
@@ -598,7 +642,8 @@ def _git_write_to_protected(command, branch):
         if subcommand == "push":
             push_opts_with_val = {"-o", "--push-option", "-r", "--repo", "--receive-pack", "--exec"}
             pos_args = []
-            pushes_all_refs = False
+            pushes_all_branches = False
+            mirrors_all_refs = False
             pushes_tags_only = False
             deletes_refs = False
             i = index
@@ -606,12 +651,27 @@ def _git_write_to_protected(command, branch):
                 tok = args[i]
                 if tok.startswith("-"):
                     name, _, inline = tok.partition("=")
-                    if name in {"--all", "--mirror"}:
-                        pushes_all_refs = True
-                    elif name == "--tags":
-                        pushes_tags_only = True
-                    elif name in {"-d", "--delete"}:
+                    short_flags, short_consumed = _push_short_options(tok, args, i)
+                    state_option = _push_state_option(name)
+                    if "-d" in short_flags or state_option == "--delete":
                         deletes_refs = True
+                    elif state_option == "--no-delete":
+                        deletes_refs = False
+                    if state_option == "--tags":
+                        pushes_tags_only = True
+                    elif state_option == "--no-tags":
+                        pushes_tags_only = False
+                    if state_option == "--all":
+                        pushes_all_branches = True
+                    elif state_option == "--no-all":
+                        pushes_all_branches = False
+                    elif state_option == "--mirror":
+                        mirrors_all_refs = True
+                    elif state_option == "--no-mirror":
+                        mirrors_all_refs = False
+                    if short_flags:
+                        i += short_consumed
+                        continue
                     if not inline and name in push_opts_with_val:
                         i += 2
                     else:
@@ -620,7 +680,7 @@ def _git_write_to_protected(command, branch):
                     pos_args.append(tok)
                     i += 1
 
-            if pushes_all_refs:
+            if pushes_all_branches or mirrors_all_refs:
                 return "push may update protected branches"
 
             raw_refspecs = pos_args[1:] if len(pos_args) > 1 else []

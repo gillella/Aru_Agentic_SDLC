@@ -302,9 +302,29 @@ class ProtectedBranchTests(unittest.TestCase):
             "git push --delete origin tag main",
             "git push origin --delete tag main",
             "git push -d origin tag main",
+            "git push -vd origin tag main",
+            "git push -dv origin tag main",
+            "git push --del origin tag main",
+            "git push --no-delete --delete origin tag main",
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(et._git_write_to_protected(command, "feat/issue-1-a"))
+
+    def test_push_negations_are_ordered_and_not_sticky(self):
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --tags --no-tags origin", "feat/issue-1-a")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --tags --no-tag origin", "feat/issue-1-a")
+        )
+        self.assertIsNone(
+            et._git_write_to_protected("git push --no-tags --tags origin", "feat/issue-1-a")
+        )
+        self.assertIsNone(
+            et._git_write_to_protected(
+                "git push --delete --no-delete origin tag main", "feat/issue-1-a"
+            )
+        )
 
     def test_positional_remote_overrides_repo_option_and_fails_closed(self):
         self.assertIsNotNone(
@@ -675,6 +695,8 @@ class HookDecisionTests(unittest.TestCase):
             "git push --repo=origin --tags",
             "git push origin tag main",
             "git push origin tag master",
+            "git push --no-tags --tags origin",
+            "git push --delete --no-delete origin tag main",
         ]
         for command in allowed_commands:
             with self.subTest(command=command, expected="ALLOW"):
@@ -712,6 +734,12 @@ class HookDecisionTests(unittest.TestCase):
             "git push --delete origin tag main",
             "git push origin --delete tag main",
             "git push -d origin tag main",
+            "git push -vd origin tag main",
+            "git push -dv origin tag main",
+            "git push --del origin tag main",
+            "git push --no-delete --delete origin tag main",
+            "git push --tags --no-tags origin",
+            "git push --tags --no-tag origin",
         ]
         for command in blocked_commands:
             with self.subTest(command=command, expected="BLOCK"):
