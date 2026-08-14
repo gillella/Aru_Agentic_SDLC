@@ -96,6 +96,8 @@ def replace_verification_evidence(body: str, evidence: Dict) -> Optional[str]:
     if (body.count(VERIFICATION_EVIDENCE_START) != 1
             or body.count(VERIFICATION_EVIDENCE_END) != 1):
         return None
+    if body.index(VERIFICATION_EVIDENCE_START) > body.index(VERIFICATION_EVIDENCE_END):
+        return None
     before, _marker, remainder = body.partition(VERIFICATION_EVIDENCE_START)
     _old_payload, _end_marker, after = remainder.partition(VERIFICATION_EVIDENCE_END)
     payload = json.dumps(evidence, indent=2, sort_keys=True)

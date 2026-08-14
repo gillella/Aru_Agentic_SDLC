@@ -272,6 +272,20 @@ class VerificationEvidenceTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("refresh", message)
 
+    def test_refresh_rejects_inverted_evidence_markers_without_truncating_body(self):
+        body = (
+            f"summary\n{common.VERIFICATION_EVIDENCE_END}\n"
+            f"stale\n{common.VERIFICATION_EVIDENCE_START}\nCloses #7"
+        )
+        evidence = {
+            "commands": [],
+            "head_sha": "head-7",
+            "schema": "aru.verification.v1",
+            "status": "not_run",
+        }
+        self.assertIsNone(create_pr.replace_verification_evidence(body, evidence))
+        self.assertIn("Closes #7", body)
+
     def test_cli_refuses_to_open_a_pr_without_verification_commands(self):
         argv = ["create_pr.py", "--issue", "7", "--agent", "agent-1"]
         with patch.object(sys, "argv", argv), \
