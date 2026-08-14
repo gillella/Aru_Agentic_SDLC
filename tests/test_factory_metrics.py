@@ -274,6 +274,7 @@ class FactoryMetricsUnitTests(unittest.TestCase):
             "agent": "codex-1", "family": "openai", "rework_rounds": 0,
         }]
         result = fm.build_closed_issue_metrics(closed, prs, [], [], 30)
+        self.assertEqual(result["issues"][0]["issue_number"], 1)
         self.assertEqual(result["issues"][0]["ci_runs"], 0)
 
     @patch("factory_metrics.collect_factory_metrics")

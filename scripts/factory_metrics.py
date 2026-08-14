@@ -470,8 +470,8 @@ def build_closed_issue_metrics(
         done = parse_iso(issue.get("done_at") or "")
         cycle = round((done - start).total_seconds() / 3600, 4) if start and done and done >= start else None
         valid_pr_numbers = [
-            number for pr in linked
-            if isinstance((number := pr.get("pr_number")), int) and not isinstance(number, bool)
+            pr_number for pr in linked
+            if isinstance((pr_number := pr.get("pr_number")), int) and not isinstance(pr_number, bool)
         ]
         records.append({
             "issue_number": number,
