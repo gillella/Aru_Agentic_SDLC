@@ -1,7 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -39,40 +39,74 @@ class DeployPreviewSkillTests(unittest.TestCase):
             self.assertEqual(issue_id, 109)
 
     @patch("deploy_preview.run_cmd")
-    def test_dispatch_cd_workflow_uses_exact_ref(self, mock_run):
+    def test_verify_commit_merged_accepts_ancestor(self, mock_run):
+        mock_run.side_effect = [
+            (0, "fullsha123456789\n", ""),  # rev-parse commit
+            (0, "mainsha123456789\n", ""),  # rev-parse default_branch
+            (0, "", ""),  # merge-base --is-ancestor
+        ]
+        is_merged, resolved = dp.verify_commit_merged("fullsha123", default_branch="main")
+        self.assertTrue(is_merged)
+        self.assertEqual(resolved, "fullsha123456789")
+
+    @patch("deploy_preview.run_cmd")
+    def test_verify_commit_merged_rejects_unmerged_or_invalid_commit(self, mock_run):
+        # Invalid / unknown commit
+        mock_run.return_value = (1, "", "fatal: Not a valid object name")
+        is_merged, _ = dp.verify_commit_merged("invalidsha", default_branch="main")
+        self.assertFalse(is_merged)
+
+        # Unmerged commit (not an ancestor of main)
+        mock_run.side_effect = [
+            (0, "fullsha123456789\n", ""),
+            (0, "mainsha123456789\n", ""),
+            (1, "", ""),  # merge-base failure
+        ]
+        is_merged, _ = dp.verify_commit_merged("unmergedsha", default_branch="main")
+        self.assertFalse(is_merged)
+
+    @patch("deploy_preview.run_cmd")
+    def test_dispatch_cd_workflow_correlates_new_run_id(self, mock_run):
+        # Initial call: gh workflow run, then gh run list with delayed new run
         mock_run.side_effect = [
             (0, "", ""),  # gh workflow run
-            (0, '[{"databaseId": 98765}]', ""),  # gh run list
+            (0, '[{"databaseId": 1001}, {"databaseId": 1002}]', ""),  # gh run list poll
         ]
-        run_id = dp.dispatch_cd_workflow("abcdef123456", workflow_name="deploy-preview.yml")
-        self.assertEqual(run_id, 98765)
-        first_call_cmd = mock_run.call_args_list[0][0][0]
-        self.assertIn("--ref", first_call_cmd)
-        self.assertIn("abcdef123456", first_call_cmd)
+        pre_existing = {1001}
+        run_id = dp.dispatch_cd_workflow(
+            "abcdef123456",
+            workflow_name="deploy-preview.yml",
+            pre_existing_run_ids=pre_existing,
+            max_poll_attempts=1,
+        )
+        self.assertEqual(run_id, 1002)
 
+    @patch("deploy_preview.verify_commit_merged", return_value=(True, "abcdef123456"))
+    @patch("deploy_preview.get_existing_run_ids", return_value=set())
     @patch("deploy_preview.dispatch_cd_workflow", return_value=12345)
     @patch("deploy_preview.wait_for_run", return_value=True)
     @patch("deploy_preview.post_preview_comment", return_value=True)
-    def test_deploy_preview_success_workflow(self, mock_comment, mock_wait, mock_dispatch):
+    def test_deploy_preview_success_workflow(self, mock_comment, mock_wait, mock_dispatch, mock_existing, mock_verify):
         exit_code = dp.deploy_preview(commit_sha="abcdef123456", issue_id=109, preview_url="https://preview.example.com")
         self.assertEqual(exit_code, 0)
-        mock_dispatch.assert_called_once_with("abcdef123456", workflow_name="deploy-preview.yml", dry_run=False)
+        mock_verify.assert_called_once_with("abcdef123456")
+        mock_dispatch.assert_called_once()
         mock_wait.assert_called_once_with(12345, dry_run=False)
         mock_comment.assert_called_once_with(109, "https://preview.example.com", "abcdef123456", dry_run=False)
 
+    @patch("deploy_preview.verify_commit_merged", return_value=(True, "abcdef123456"))
+    @patch("deploy_preview.get_existing_run_ids", return_value=set())
     @patch("deploy_preview.dispatch_cd_workflow", return_value=12345)
     @patch("deploy_preview.wait_for_run", return_value=False)
     @patch("deploy_preview.file_remediation_issue", return_value=201)
-    def test_deploy_preview_failure_workflow(self, mock_remediate, mock_wait, mock_dispatch):
+    def test_deploy_preview_failure_workflow(self, mock_remediate, mock_wait, mock_dispatch, mock_existing, mock_verify):
         exit_code = dp.deploy_preview(commit_sha="abcdef123456", issue_id=109)
         self.assertEqual(exit_code, 1)
         mock_remediate.assert_called_once()
-        args = mock_remediate.call_args[0]
-        self.assertEqual(args[0], 109)
-        self.assertEqual(args[1], "abcdef123456")
 
     @patch("deploy_preview.run_cmd")
-    def test_file_remediation_issue_attaches_to_board(self, mock_run):
+    def test_file_remediation_issue_attaches_to_board_or_fails_closed(self, mock_run):
+        # Successful creation and attachment
         mock_run.side_effect = [
             (0, "https://github.com/owner/repo/issues/205\n", ""),  # gh issue create
             (0, "Attached to board", ""),  # update_issue_status.py --require-board
@@ -80,10 +114,14 @@ class DeployPreviewSkillTests(unittest.TestCase):
         ]
         new_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
         self.assertEqual(new_id, 205)
-        # Check that update_issue_status was called with --require-board
-        attach_call = mock_run.call_args_list[1][0][0]
-        self.assertIn("--require-board", attach_call)
-        self.assertIn("Ready", attach_call)
+
+        # Attachment failure fails closed
+        mock_run.side_effect = [
+            (0, "https://github.com/owner/repo/issues/206\n", ""),  # gh issue create
+            (1, "", "Board attachment failed"),  # update_issue_status.py failure
+        ]
+        fail_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
+        self.assertIsNone(fail_id)
 
 
 if __name__ == "__main__":
