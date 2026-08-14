@@ -21,7 +21,9 @@ The registry is versioned and enforces:
 
 - exactly one active project for an inbound team and channel;
 - no reuse of a channel after its record is closed;
-- private `0700` parent directories and `0600` JSON and lock files;
+- private `0700` parent directories and `0600` JSON and lock files; an
+  owner-controlled legacy `0755` `~/.aru` directory is tightened automatically,
+  while foreign-owned or group/world-writable paths fail closed;
 - lock-protected read-modify-write and same-directory atomic replacement;
 - fail-closed reads for corrupt, insecure, non-regular, or symlinked files.
 
@@ -111,6 +113,11 @@ before authorization, deduplication, command parsing, filesystem mutation,
 GitHub access, or Slack acknowledgement. Unknown, ambiguous, and closed routes
 produce no Slack reply and no remote or project side effect. They create only
 a throttled local audit entry in `~/.aru/slack-audit.json`.
+
+Before a resolved command can inspect or mutate a checkout, the bridge also
+re-verifies its immutable GitHub repository and ProjectV2 identities. A path
+that has been reused for another checkout is treated as degraded until an
+operator recovers or closes the record.
 
 ## Operator commands
 
