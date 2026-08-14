@@ -310,13 +310,13 @@ def deploy_preview(
         dry_run=dry_run,
     )
     if run_id is None and not dry_run:
-        remedy_id = file_remediation_issue(issue_id, commit_sha, f"Could not dispatch workflow '{workflow_name}' for ref '{commit_sha}'.", dry_run=dry_run)
+        file_remediation_issue(issue_id, commit_sha, f"Could not dispatch workflow '{workflow_name}' for ref '{commit_sha}'.", dry_run=dry_run)
         return 1
 
     if wait and run_id:
         success = wait_for_run(run_id, dry_run=dry_run)
         if not success and not dry_run:
-            remedy_id = file_remediation_issue(issue_id, commit_sha, f"Workflow run {run_id} failed during execution.", dry_run=dry_run)
+            file_remediation_issue(issue_id, commit_sha, f"Workflow run {run_id} failed during execution.", dry_run=dry_run)
             return 1
 
     resolved_url = preview_url
