@@ -311,6 +311,25 @@ class SplitRecommendationTests(unittest.TestCase):
             ["9 acceptance criteria exceed the threshold of 8"],
         )
 
+    def test_wildcard_top_level_roots_are_inherently_wide(self):
+        repo_wide = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: **/*.py",
+        )
+        per_area = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: */config.yml",
+        )
+
+        self.assertEqual(
+            tb.split_reasons(issue(22, "type:chore", body=repo_wide)),
+            ["touches use wildcard top-level area patterns: **"],
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(23, "type:chore", body=per_area)),
+            ["touches use wildcard top-level area patterns: *"],
+        )
+
     def test_force_promotes_split_recommended_issue(self):
         wide = issue(12, "type:chore", "status:backlog", body=self.oversized_body())
         with patch("triage_backlog.list_open_issues", return_value=[wide]), \

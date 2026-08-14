@@ -326,10 +326,25 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
     """
     body = issue.get("body") or ""
     criteria_count = len(acceptance_criteria(body))
+    paths = [path.strip("/") for path in parse_touches(body) if path.strip("/")]
+    area_roots = [path.split("/", 1)[0] for path in paths]
+    raw_touches = re.search(
+        r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
+        body,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    raw_area_roots = []
+    if raw_touches:
+        raw_area_roots = [
+            path.strip().strip("`").strip("/").split("/", 1)[0]
+            for path in raw_touches.group(1).split(",")
+            if path.strip().strip("`").strip("/")
+        ]
+    wildcard_roots = sorted({
+        root for root in raw_area_roots if any(char in root for char in "*?[")
+    })
     areas = sorted({
-        path.strip("/").split("/", 1)[0]
-        for path in parse_touches(body)
-        if path.strip("/")
+        root for root in area_roots if not any(char in root for char in "*?[")
     })
     reasons = []
     if criteria_count > SPLIT_ACCEPTANCE_CRITERIA_THRESHOLD:
@@ -339,6 +354,11 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
         )
     if len(areas) > 1:
         reasons.append(f"touches span {len(areas)} top-level areas: {', '.join(areas)}")
+    if wildcard_roots:
+        reasons.append(
+            "touches use wildcard top-level area patterns: "
+            + ", ".join(wildcard_roots)
+        )
     return reasons
 
 

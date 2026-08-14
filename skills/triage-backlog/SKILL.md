@@ -48,9 +48,11 @@ missing — and this is judgment work, not formatting work:
 Issues that satisfy the Ready contract can still receive a `SPLIT`
 recommendation. The script flags either visible oversize signal: more than 8
 acceptance-criteria checkboxes **or** `touches:` paths spanning more than one
-top-level area. It prints the observed checkbox count and area names so the
-scope can be decomposed deliberately. Epics remain blocked by the Ready
-contract rather than entering this overrideable recommendation path.
+top-level area. A wildcard-bearing first component such as `**/*.py` or
+`*/config.yml` is inherently wide because it can match multiple top-level
+areas. The output prints the observed checkbox count, area names, or wildcard
+roots so the scope can be decomposed deliberately. Epics remain blocked by the
+Ready contract rather than entering this overrideable recommendation path.
 
 ## Step 3: Judge readiness beyond the contract
 
