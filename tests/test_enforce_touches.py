@@ -297,6 +297,15 @@ class ProtectedBranchTests(unittest.TestCase):
         self.assertIsNone(et._git_write_to_protected("git push origin tag main", "main"))
         self.assertIsNone(et._git_write_to_protected("git push origin tag master", "main"))
 
+    def test_delete_mode_treats_tag_name_as_a_deletion_destination(self):
+        for command in (
+            "git push --delete origin tag main",
+            "git push origin --delete tag main",
+            "git push -d origin tag main",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(et._git_write_to_protected(command, "feat/issue-1-a"))
+
     def test_positional_remote_overrides_repo_option_and_fails_closed(self):
         self.assertIsNotNone(
             et._git_write_to_protected("git push --repo=origin feature", "feat/issue-1-a")
@@ -700,6 +709,9 @@ class HookDecisionTests(unittest.TestCase):
             "exec -ca ignored /usr/bin/git push origin main",
             "exec -la ignored /usr/bin/git push origin main",
             "git push --repo=origin feature",
+            "git push --delete origin tag main",
+            "git push origin --delete tag main",
+            "git push -d origin tag main",
         ]
         for command in blocked_commands:
             with self.subTest(command=command, expected="BLOCK"):

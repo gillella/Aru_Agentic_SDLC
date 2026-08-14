@@ -600,6 +600,7 @@ def _git_write_to_protected(command, branch):
             pos_args = []
             pushes_all_refs = False
             pushes_tags_only = False
+            deletes_refs = False
             i = index
             while i < len(args):
                 tok = args[i]
@@ -609,6 +610,8 @@ def _git_write_to_protected(command, branch):
                         pushes_all_refs = True
                     elif name == "--tags":
                         pushes_tags_only = True
+                    elif name in {"-d", "--delete"}:
+                        deletes_refs = True
                     if not inline and name in push_opts_with_val:
                         i += 2
                     else:
@@ -625,7 +628,7 @@ def _git_write_to_protected(command, branch):
             has_tag_pseudo_refspec = False
             ref_index = 0
             while ref_index < len(raw_refspecs):
-                if raw_refspecs[ref_index] == "tag":
+                if raw_refspecs[ref_index] == "tag" and not deletes_refs:
                     if ref_index + 1 >= len(raw_refspecs):
                         return "push tag pseudo-refspec is incomplete"
                     has_tag_pseudo_refspec = True
