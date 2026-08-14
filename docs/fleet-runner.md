@@ -137,18 +137,89 @@ The hermetic scenario is the CI gate. A live smoke test is a separate,
 operator-authorized exercise and must never target this repository or an
 existing project board:
 
-1. Create a new disposable GitHub repository and Project owned by a test
-   account or organization, then initialize it with the canonical Aru helper.
-2. Create two low-risk fixture issues whose `touches:` paths do not overlap and
-   one issue that depends on the first. Do not use secrets, production data,
-   billing paths, or a real application repository.
-3. In two isolated clones, start one explicitly chosen local-agent runner per
-   model family. Use distinct agent ids and normal governed helpers; do not
-   place tokens in command arguments or logs.
-4. Observe claim, worktree, PR, CI, independent review, merge, Done
-   reconciliation, and cleanup. Record only issue/PR URLs and gate outcomes.
-5. Request explicit runner stop, verify no open issues, PRs, or claims and no
-   dirty worktrees, then delete the disposable Project and repository.
+1. Create the repository and Project only through the bootstrap helper, from a
+   directory that is not an existing checkout:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
+     --name <DISPOSABLE_REPO> --private --create-board \
+     --owner <TEST_OWNER> --target-dir <NEW_CHECKOUT>
+   ```
+
+   In the new checkout, enable the real required check when the test owner and
+   repository plan support rulesets:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/enable_main_ruleset.py" \
+     --apply --enforcement active
+   ```
+
+   If active rulesets are unavailable, stop rather than claiming that the live
+   guarded-merge case was exercised.
+2. Before any paid child starts, run `gh auth status` without redirecting its
+   output, verify the expected test-account login, and verify the exact target
+   with `gh repo view --json nameWithOwner -q .nameWithOwner`. Confirm the sole
+   disposable Project with `gh project list --owner <TEST_OWNER>` and run
+   `python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" --repo-dir . --json`.
+   Abort on any credential, repository, or Project mismatch. Never place a
+   token in an argument, environment dump, state file, or log.
+3. File two low-risk issues through the `create-github-issue` skill, then move
+   each one with the board helper:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" \
+     --issue <ID> --status Ready --require-board
+   ```
+
+   Their bodies must use exact machine-readable metadata:
+
+   ```text
+   depends-on: #12, #14
+   touches: src/a.py, tests/test_a.py
+   parallel-eligible: true
+   ```
+
+   Give the first two issues non-overlapping `touches:` values and make a third
+   issue depend on the first. Do not use secrets, production data, billing
+   paths, or a real application repository.
+4. Use distinct agent ids from at least two model families. Distinct ids are
+   required for `reviewed-by:<agent_id>` attribution even when both workers use
+   one GitHub account; a separate GitHub App or account may instead provide a
+   server-side approval. In two isolated clones, use only the governed
+   lifecycle commands:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
+     --agent <ID> --family <FAMILY> --claim --json
+   python3 "$ARU_SDLC_HOME/scripts/create_branch.py" \
+     --issue <ISSUE> --worktree
+   python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+     --issue <ISSUE> --agent <ID> --model-family <FAMILY> \
+     --title "<TITLE>" --body "Closes #<ISSUE>"
+   python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" \
+     --pr <PR> --agent <REVIEWER>
+   python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" \
+     --pr <PR> --agent <REVIEWER> --complete-review
+   python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
+     --pr <PR> --expected-head <SHA>
+   ```
+
+   Do not substitute direct `gh` or API lifecycle writes for a helper that
+   exists.
+5. Observe claim, worktree, PR, CI, independent review, guarded merge, Done
+   reconciliation, and helper-driven worktree/branch cleanup. Record only
+   issue/PR URLs and gate outcomes. Request explicit runner stop for each
+   worker, then run the authoritative final audit:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/run_fleet.py" stop \
+     --repo . --agent <ID>
+   python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" --repo-dir . --json
+   ```
+
+   Verify zero open issues, PRs, claims, or dirty worktrees. After that audit,
+   the operator may delete the disposable Project and repository in the GitHub
+   UI; no local agent performs that destructive account-level cleanup.
 
 This live smoke test is intentionally not part of default CI because it uses
 paid local-agent sessions and mutates a real GitHub repository. Run it only
