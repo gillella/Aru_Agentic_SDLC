@@ -121,6 +121,12 @@ or other irreversible work from the plan gate.
    - the exact files expected to change, consistent with `touches:`;
    - schema, migration, public API, state-machine, or money-semantics deltas
      (write `None` when there are none);
+   - an `### Existing Utility Reuse Audit` section that names the shared
+     functions, modules, scripts, or framework facilities evaluated; states
+     which will be reused; and, for every proposed new helper, explains why
+     each relevant existing utility is insufficient. When no existing utility
+     fits, record the concrete names and locations searched — a bare `None` is
+     not an audit;
    - the local test and verification strategy; and
    - rejected alternatives and why they were rejected.
    Post the durable comment with
@@ -141,8 +147,12 @@ or other irreversible work from the plan gate.
 
 ### Step 5: Implement Solution
 1. Confirm the plan gate is satisfied when it applies.
-2. Inspect files inside the isolated worktree directory.
-3. Perform source code modifications while preserving existing docstrings, formatting, and public API contracts.
+2. Before adding a helper, compare it with the utilities recorded in the
+   plan's reuse audit. If the helper was not disclosed there, or inspection
+   reveals another reusable utility, post an amended plan before the first
+   edit that follows the changed decision.
+3. Inspect files inside the isolated worktree directory.
+4. Perform source code modifications while preserving existing docstrings, formatting, and public API contracts.
 
 ### Step 6: Run Local Tests & Verification
 1. Execute the project's test runner, build system, and syntax/lint checks inside the worktree directory.
