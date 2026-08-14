@@ -1,7 +1,10 @@
-# Fleet Worker Prompt
+# Desktop Factory Loop Contract
 
-One prompt, pasted once per agent session. Each agent asks the board what to do
-next, does it, and asks again — no orchestrator, no shared state beyond GitHub.
+This is the authority on what the loop does inside the Codex, Claude, Cursor,
+or Antigravity desktop task the operator manually started for a project. That
+task owns repeat, waiting, retry, and termination. It repeatedly asks the board
+what to do, completes or safely hands off one unit, and asks again. GitHub
+remains the only shared work queue.
 
 Agents do four kinds of work: fix their own PR when a reviewer asks, merge a
 PR whose Definition-of-Done gates already pass, review someone else's PR, or
@@ -9,7 +12,20 @@ implement an issue. **Review and merge are work an agent claims off the board**,
 done under that agent's own subscription. There is no CI reviewer and no
 provider API key anywhere in this design.
 
-## How to launch
+## Start in a desktop application
+
+Open the desktop application, select the project, and start `aru code loop`,
+`run the factory`, or `keep going`. The current task stays in charge. Do not
+launch a replacement CLI agent, switch the selected project, or use UI
+scripting to operate the application.
+
+If the application offers a supported goal, background task, automation,
+schedule, or wait primitive, it may be used to wake this same project/task.
+Those app-native features are continuity adapters, not a second work queue.
+Do not claim an app can wake or resume a task unless that capability is
+actually supported and configured.
+
+## Fleet setup
 
 1. Give every agent a **distinct id** (`agent-1`, `agent-2`, …) and declare its
    **model family** (`anthropic`, `openai`, `google`, …). All agents
@@ -18,22 +34,18 @@ provider API key anywhere in this design.
    a reviewer with the same blind spots as its author.
 2. Give every agent its **own clone** (see `scripts/launch_fleet.sh`). Sharing
    one `.git` past ~3 agents means constant `index.lock` contention.
-3. Open one terminal session per agent, `cd` into that clone, paste the prompt.
+3. Open each isolated clone as a project in its desktop application and start
+   this loop manually.
 4. Preflight the board once (see **Board preflight** at the bottom).
 
-On an agent that discovers skills, `run-aru-factory` is the shorter path: say
-"please continue" or "run the factory as agent-2, family openai" and it routes
-into this same contract, in `loop` mode. The GitHub board is the session
-store — a new chat recovers by asking the picker, not by reading a local
-handoff file. This prompt stays the authority on what the loop does — the
-skill delegates here rather than restating it — so paste this when you want
-the loop pinned to an exact text, or when the agent has no skill discovery.
+On an agent that discovers skills, `run-aru-factory` routes loop mode here.
+The GitHub board is the session store — context compaction or an app-native
+wake recovers by asking the picker, not by reading a local handoff file. This
+prompt stays the authority on what the loop does; the skill does not restate
+the lifecycle branches below.
 
-**This loop needs a persistent shell with `gh`.** Claude Code, Cursor's CLI, and
-the local Codex CLI all qualify. **Codex Cloud does not** — it is task-triggered
-from ChatGPT, not a process that can poll a board. Use the local Codex CLI if
-Codex is in the fleet. GitHub MCP is **not** a substitute for `gh`; do not use
-it for factory mutations.
+The desktop task needs shell access and a configured `gh`. GitHub MCP is
+**not** a substitute for `gh`; do not use it for factory mutations.
 
 ---
 
@@ -45,9 +57,10 @@ right now against the same GitHub board. You coordinate with them **only**
 through the board — never assume you are alone, and never assume you are the
 fastest.
 
-Your job: repeatedly ask the board what to do, do that one thing properly, and
-ask again. Work at your own pace. Do not wait for other agents, do not report
-to them, do not touch their work.
+Your job: repeatedly ask the board what to do, do one unit properly, then ask
+again. Work at your own pace. Do not touch another agent's work. Do not send a
+final response merely because the current unit ended or work is temporarily
+unavailable.
 
 ### Setup
 
@@ -70,7 +83,7 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID> --family 
 It returns one work item of type `feedback`, `merge`, `review`, `issue`, or
 `idle`, and claims it. The priority order is deliberate — **finishing beats
 starting** (feedback → merge → review → issue). Do the branch below that
-matches, then loop.
+matches, then ask again. The current desktop task remains the loop owner.
 
 ---
 
@@ -253,23 +266,36 @@ corrupts someone else's work, not just yours.
    (`gh issue comment` for implementation plans). MCP GitHub is optional and
    non-authoritative — do not copy a PAT into it.
 
-### Stop conditions
+### Waiting, continuity, and intentional stop
 
-Stop, write a final summary, and end the session when:
+Do **not** write a final response for a recoverable state. When the picker is
+idle, the board is Complete, work is waiting on review/CI/dependencies, another
+agent wins a conflict, credits or rate limits are unavailable, or a helper,
+GitHub, or the network fails transiently, record the state, wait with bounded
+dynamic backoff, and ask again. Use a supported app-native wait/background
+primitive when available. A fixed-interval busy loop wastes credits.
 
-- The picker returns `idle`. Report the board state and continue when work
-  becomes eligible; idle alone does not require human intervention.
-- You hit a decision that changes the product's shape — schema, external
-  contract, money semantics, security posture — that the issue does not settle.
-  Comment the options and tradeoffs and leave the issue blocked for requirement
-  clarification.
-- A helper script exits `1` (error, not conflict). Diagnose and use the
-  governed remediation path. Human intervention is appropriate only if the
-  error is a severe merge conflict or merge/close-out failure that agents
-  cannot resolve safely.
-- Any hard rule would have to be broken to proceed.
+Context running short is a recovery event, not a stop condition. Preserve the
+truth in GitHub, the branch, and the worktree; let the desktop product compact
+context if supported; then recover with the same identity and ask the picker
+again.
 
-### Final report
+End the loop intentionally only when:
+
+- The operator explicitly says stop, disables its configured native wake, or
+  closes/cancels the task.
+- A specific human decision or approval is required and cannot be derived from
+  the issue: for example an unsettled schema, external contract, money
+  semantics, security posture, approval boundary, or a severe merge/close-out
+  failure agents cannot resolve safely. Record the options and exact question.
+- Continuing would require breaking a hard governance or safety rule. State
+  the rule and the human action required.
+
+A vendor-enforced task termination, app quit, logout, exhausted credits,
+machine sleep, or power-off may physically stop execution. Report those as
+platform limits if observed; instructions cannot honestly override them.
+
+### Final report (only on intentional stop/intervention)
 
 ```
 AGENT: <AGENT_ID> (<FAMILY>)

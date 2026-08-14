@@ -11,3 +11,6 @@ Resume the Aru factory from GitHub board state.
    that event with a long fallback heartbeat. Do not poll on a fixed interval.
 5. Ask the operator only as last resort — a product decision the issue does
    not settle, or a severe merge/close-out agents cannot remediate.
+6. Keep this Cursor desktop app task working after every unit and recoverable wait.
+   Stop only when the operator explicitly stops it or human intervention is
+   genuinely required; do not replace it with a CLI agent.

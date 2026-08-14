@@ -50,12 +50,14 @@ without both flags is a bug**, not a shortcut.
 | `adopt` | make an ungoverned repo governed, then start work | `init-agent-project` |
 | `status` | report factory state without changing anything | `scripts/fleet_status.py` |
 | `next` | do exactly one unit of work, then stop | picker + the matching skill |
-| `loop` | repeat `next` until a stop condition fires | `prompts/fleet-worker.md` |
+| `loop` | keep this desktop task working until stop/intervention | `prompts/fleet-worker.md` |
 | `doctor` | check the local setup, read-only | see **doctor** below |
 
 `please continue`, `continue`, and `keep going` are **`loop`**, not `next`
-and not `implement-next-issue`. The board is the session store; the picker
-recovers in-flight work before anything new.
+and not `implement-next-issue`. In Codex, Claude, Cursor, or Antigravity desktop,
+the task the operator started owns the loop. Do not replace it with a separately
+launched CLI agent. The board is the session store; recover in-flight work
+before anything new.
 
 Default to `next` **only** when the user named no mode and clearly wants one
 unit of work, then stop. An unrecognised mode is an error — say so and list
@@ -97,7 +99,7 @@ It returns one item and claims it. Follow the skill for its type:
 | `review` | `code-review` |
 | `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
-| `idle` | stop; report what is blocking |
+| `idle` | `next` stops; `loop` waits and asks again |
 
 The order is deliberate: unblocking work already in flight comes before
 starting anything new.
@@ -108,34 +110,25 @@ error strands the agent while the board still has work.
 
 ### loop
 
-`next`, repeated. The contract is
-`$ARU_SDLC_HOME/prompts/fleet-worker.md` — read it before the first
-iteration and follow it; the branch bodies and hard rules live there.
+Read `prompts/fleet-worker.md`, then run its loop **inside the current desktop
+task**. Pace dynamically: after progress, ask the picker again immediately;
+for unchanged, idle, Complete, review/CI/dependency wait, rate limit, exhausted
+credits, helper failure, or GitHub/network error, use the app's supported wait
+or background primitive with a long fallback heartbeat, not a fixed interval.
+Do not emit a final response for a recoverable state.
 
-Pace dynamically. After a unit, ask the picker again immediately if it would
-return work. If the blocker is CI or a peer review you must not perform,
-wait on that event with a long fallback heartbeat — do not poll on a fixed
-interval. Cursor sessions use the Cursor `loop` skill's Dynamic Schedule;
-do not copy that skill into this file.
+Loop mode ends intentionally only when the operator explicitly stops it or a
+specific decision/approval needs human intervention. Ambiguous board identity,
+an unresolved `touches:` conflict, money semantics, security posture, or a
+hard rule can require that intervention; explain the exact decision needed.
+Routine helper exits `1` and repeated CI or review rounds do not end the loop.
+When context is running short, recover through the desktop product's context
+compaction and durable GitHub/worktree state, then continue.
 
-Ask the operator only as last resort: a product decision the issue does not
-settle, or a severe merge/close-out agents cannot remediate. Idle, waiting
-on review, and red CI in remediation are not that.
-
-Stop, write a final report, and end the session when:
-
-- the picker returns `idle`
-- the board's identity is ambiguous, or a dependency or `touches:` conflict
-  cannot be resolved from the issue
-- a decision is needed that the issue does not settle — schema, external
-  contract, money semantics, security posture
-- an automation step fails, or a helper script exits `1` (error, not conflict)
-- CI stays red after **3** remediation rounds
-- a review disagreement reaches a **third** round
-- a hard rule would have to be broken to continue
-
-Also stop when context is running short. A clean handoff report beats
-degrading halfway through an issue.
+`scripts/run_fleet.py` is an **optional headless CLI mode** for an operator who
+explicitly requests it. It starts new CLI sessions; it cannot resume or control
+the desktop conversation the operator selected. Never use UI scripting to
+click or type into a desktop coding application.
 
 ### doctor
 
