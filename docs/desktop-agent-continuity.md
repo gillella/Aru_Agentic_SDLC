@@ -72,5 +72,10 @@ arm native wakes. If a managed Codex heartbeat (`id = "aru-code-loop"` or
 
 `doctor_local_agent_integrations.py` reports continuity adapters, macOS
 `.app` bundle versions (Info.plist only, no credentials), CLI/config evidence
-separately, stop state, and capability gaps. Full install-link diagnosis
-remains issue #34.
+separately, stop state, and capability gaps. Opt-in `--enable-native-wake`
+is **prepared/requested** only: it writes `native-wake.json` plus a Codex
+prompt. `native_wake_enabled` is true only when that app has verified
+configured/active vendor state (Codex `automation.toml` with
+`status = "ACTIVE"`). Prompt-only preparation, a paused heartbeat, or an
+Antigravity JSON flag without a bound `/goal` or `/schedule` is not
+enabled. Full install-link diagnosis remains issue #34.

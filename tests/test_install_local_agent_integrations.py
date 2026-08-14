@@ -256,6 +256,36 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertTrue(wake["projects"][project_b]["enabled"])
         self.assertNotEqual(wake["projects"][project_a]["automation_id"], wake["projects"][project_b]["automation_id"])
 
+    def test_enable_native_wake_is_prepared_not_doctor_enabled(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        project = "/tmp/aru-proj-a"
+        res = self.run_installer("--codex-only", "--enable-native-wake", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(
+            (self.target_home / ".codex" / "automations" / codex_auto_id(project) / "automation.toml").exists()
+        )
+        doctor = subprocess.run(
+            [
+                "python3",
+                str(ROOT / "scripts" / "doctor_local_agent_integrations.py"),
+                "--aru-home",
+                str(ROOT),
+                "--target-home",
+                str(self.target_home),
+                "--json",
+                "--project",
+                project,
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": "/usr/bin:/bin"},
+        )
+        payload = json.loads(doctor.stdout)
+        self.assertTrue(payload["agents"]["codex"]["native_wake_prepared"])
+        self.assertFalse(payload["agents"]["codex"]["native_wake_enabled"])
+        self.assertEqual(payload["agents"]["codex"]["native_wake_evidence"], "prompt_only")
+        self.assertFalse(payload["agents"]["antigravity"]["native_wake_enabled"])
+
     def test_stop_pauses_only_that_project_managed_heartbeat(self):
         project = "/tmp/aru-proj-a"
         managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)

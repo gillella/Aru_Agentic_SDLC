@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import plistlib
@@ -108,6 +109,58 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         text = self.run_doctor().stdout.lower()
         self.assertIn("not yet diagnosable", text)
         self.assertIn("#34", self.run_doctor().stdout)
+
+    def _write_prompt_only_codex_opt_in(self, project: str) -> str:
+        auto_id = "aru-code-loop-" + hashlib.sha256(project.encode()).hexdigest()[:12]
+        aru = self.target_home / ".aru"
+        aru.mkdir()
+        (aru / "native-wake.json").write_text(
+            json.dumps(
+                {
+                    "projects": {
+                        project: {
+                            "enabled": True,
+                            "automation_id": auto_id,
+                            "codex": "thread_heartbeat_template",
+                            "antigravity": "goal_or_schedule_operator",
+                        }
+                    }
+                }
+            )
+        )
+        prompt_dir = self.target_home / ".codex" / "automations" / auto_id
+        prompt_dir.mkdir(parents=True)
+        (prompt_dir / "PROMPT.md").write_text(f"wake {project}\n")
+        return auto_id
+
+    def test_prompt_only_opt_in_is_prepared_not_enabled(self):
+        project = "/tmp/aru-proj-a"
+        self._write_prompt_only_codex_opt_in(project)
+        payload = json.loads(self.run_doctor("--json", "--project", project).stdout)
+        codex = payload["agents"]["codex"]
+        self.assertTrue(codex["native_wake_prepared"])
+        self.assertFalse(codex["native_wake_configured"])
+        self.assertFalse(codex["native_wake_enabled"])
+        self.assertEqual(codex["native_wake_evidence"], "prompt_only")
+        gravity = payload["agents"]["antigravity"]
+        self.assertTrue(gravity["native_wake_prepared"])
+        self.assertFalse(gravity["native_wake_configured"])
+        self.assertFalse(gravity["native_wake_enabled"])
+        self.assertEqual(gravity["native_wake_evidence"], "requested")
+        for name in ("claude", "cursor"):
+            agent = payload["agents"][name]
+            self.assertFalse(agent["native_wake_prepared"])
+            self.assertFalse(agent["native_wake_enabled"])
+
+    def test_codex_active_toml_is_enabled_without_claiming_antigravity(self):
+        project = "/tmp/aru-proj-a"
+        auto_id = self._write_prompt_only_codex_opt_in(project)
+        toml = self.target_home / ".codex" / "automations" / auto_id / "automation.toml"
+        toml.write_text(f'version = 1\nid = "{auto_id}"\nstatus = "ACTIVE"\n')
+        payload = json.loads(self.run_doctor("--json", "--project", project).stdout)
+        self.assertTrue(payload["agents"]["codex"]["native_wake_enabled"])
+        self.assertEqual(payload["agents"]["codex"]["native_wake_evidence"], "automation_active")
+        self.assertFalse(payload["agents"]["antigravity"]["native_wake_enabled"])
 
 
 if __name__ == "__main__":

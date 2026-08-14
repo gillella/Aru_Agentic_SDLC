@@ -9,6 +9,7 @@ probes. It never prints credential values and never mutates configuration.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -20,6 +21,8 @@ from pathlib import Path
 
 SECRET_ENV = re.compile(r"(TOKEN|SECRET|KEY|PASSWORD|PAT|CREDENTIAL|AUTH)", re.I)
 VERSION_SAFE = re.compile(r"^[A-Za-z0-9._+ -]{1,80}$")
+MANAGED_CODEX_ID = re.compile(r'^id = "aru-code-loop(-[0-9a-f]+)?"\s*$', re.M)
+CODEX_STATUS = re.compile(r'^status = "([^"]+)"\s*$', re.M)
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -165,6 +168,59 @@ def load_json(path: Path) -> dict | None:
         return json.load(fh)
 
 
+def project_automation_id(project: str) -> str:
+    digest = hashlib.sha256(project.encode()).hexdigest()[:12]
+    return f"aru-code-loop-{digest}"
+
+
+def read_managed_codex_status(toml: Path) -> str | None:
+    if not toml.is_file():
+        return None
+    try:
+        text = toml.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not MANAGED_CODEX_ID.search(text):
+        return None
+    match = CODEX_STATUS.search(text)
+    return match.group(1) if match else "unknown"
+
+
+def native_wake_state(name: str, spec: dict, target_home: Path,
+                      project: str | None, wake_entry: dict) -> dict:
+    """Split operator opt-in from verified per-app configured/active wake."""
+    same = spec["same_task_native_wake"]
+    requested = bool(wake_entry.get("enabled")) if same.startswith("opt_in") else False
+    if name == "codex" and project:
+        auto_id = wake_entry.get("automation_id") or project_automation_id(project)
+        auto_dir = target_home / ".codex" / "automations" / auto_id
+        prompt = (auto_dir / "PROMPT.md").is_file()
+        status = read_managed_codex_status(auto_dir / "automation.toml")
+        prepared = requested or prompt
+        configured = status is not None
+        enabled = status == "ACTIVE"
+        if enabled:
+            evidence = "automation_active"
+        elif status == "PAUSED":
+            evidence = "automation_paused"
+        elif prepared:
+            evidence = "prompt_only"
+        else:
+            evidence = "none"
+    elif same.startswith("opt_in"):
+        prepared, configured, enabled = requested, False, False
+        evidence = "requested" if requested else "none"
+    else:
+        prepared, configured, enabled = False, False, False
+        evidence = "unsupported"
+    return {
+        "native_wake_prepared": prepared,
+        "native_wake_configured": configured,
+        "native_wake_enabled": enabled,
+        "native_wake_evidence": evidence,
+    }
+
+
 def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
     catalog = load_catalog(aru_home)
     stop_doc = load_json(target_home / ".aru" / "factory-loop.stop")
@@ -181,8 +237,8 @@ def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
         detected = bool(app or config or cli_present)
         version = (app or {}).get("version") or cli_version
         same = spec["same_task_native_wake"]
-        enabled = bool(wake_entry.get("enabled")) if same.startswith("opt_in") else False
         gap = same in {"session_loop_only", "unsupported"}
+        wake = native_wake_state(name, spec, target_home, project, wake_entry)
         agents[name] = {
             "detected": detected,
             "version": version,
@@ -195,8 +251,8 @@ def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
             "same_task_native_wake_notes": spec["same_task_native_wake_notes"],
             "app_restart_recovery": spec["app_restart_recovery"],
             "machine_restart_recovery": spec["machine_restart_recovery"],
-            "native_wake_enabled": enabled,
             "capability_gap": gap,
+            **wake,
         }
     stopped = stop_applies(stop_doc, project)
     return {
@@ -223,9 +279,14 @@ def render_human(payload: dict) -> str:
         mark = "detected" if agent["detected"] else "absent"
         gap = " gap" if agent["capability_gap"] else ""
         app = f" app={agent['app_path']}" if agent.get("app_path") else ""
+        wake = (
+            f" prepared={agent['native_wake_prepared']}"
+            f" enabled={agent['native_wake_enabled']}"
+            f" evidence={agent['native_wake_evidence']}"
+        )
         lines.append(
             f"  {name}: {mark} version={agent['version']}{app} "
-            f"same_task_wake={agent['same_task_native_wake']}{gap}"
+            f"same_task_wake={agent['same_task_native_wake']}{gap}{wake}"
         )
     lines.append("Never claims app-quit, sleep, power-off, or credit recovery.")
     return "\n".join(lines) + "\n"
