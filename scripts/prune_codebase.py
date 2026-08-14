@@ -53,7 +53,13 @@ def discover_python_targets(files: Sequence[Path], include_tests: bool = False) 
     for path in files:
         if path.suffix != ".py":
             continue
-        if not include_tests and path.parts and path.parts[0] in {"tests", "test"}:
+        is_test = (
+            any(part in {"tests", "test"} for part in path.parts[:-1])
+            or path.name in {"test.py", "tests.py"}
+            or path.name.startswith("test_")
+            or path.name.endswith("_test.py")
+        )
+        if not include_tests and is_test:
             continue
         selected.append(path.as_posix())
     return sorted(selected)

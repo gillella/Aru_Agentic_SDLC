@@ -15,12 +15,27 @@ import prune_codebase as pc
 
 class PruneCodebaseTests(unittest.TestCase):
     def test_discover_python_targets_excludes_tests_by_default(self):
-        files = [Path("scripts/live.py"), Path("hooks/guard.py"), Path("tests/test_live.py"), Path("README.md")]
+        files = [
+            Path("scripts/live.py"),
+            Path("hooks/guard.py"),
+            Path("tests/test_live.py"),
+            Path("test_widget.py"),
+            Path("widget_test.py"),
+            Path("src/pkg/tests/helpers.py"),
+            Path("README.md"),
+        ]
 
         self.assertEqual(pc.discover_python_targets(files), ["hooks/guard.py", "scripts/live.py"])
         self.assertEqual(
             pc.discover_python_targets(files, include_tests=True),
-            ["hooks/guard.py", "scripts/live.py", "tests/test_live.py"],
+            [
+                "hooks/guard.py",
+                "scripts/live.py",
+                "src/pkg/tests/helpers.py",
+                "test_widget.py",
+                "tests/test_live.py",
+                "widget_test.py",
+            ],
         )
 
     def test_parse_vulture_output_preserves_structured_and_unknown_lines(self):
