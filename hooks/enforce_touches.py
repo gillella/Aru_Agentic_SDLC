@@ -537,6 +537,10 @@ def _git_write_to_protected(command, branch):
             if refspecs:
                 for refspec in refspecs:
                     normalized_refspec = refspec.removeprefix("+")
+                    if normalized_refspec.startswith("^") or any(
+                        marker in normalized_refspec for marker in ("*", "?", "[")
+                    ):
+                        return "push refspec cannot be proven safe"
                     dest = normalized_refspec.split(":")[-1].replace("refs/heads/", "")
                     src = normalized_refspec.split(":")[0].replace("refs/heads/", "")
                     if dest in PROTECTED_BRANCHES:
