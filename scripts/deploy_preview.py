@@ -144,13 +144,17 @@ def dispatch_cd_workflow(
     commit_sha: str,
     workflow_name: str = "deploy-preview.yml",
     pre_existing_run_ids: Optional[Set[int]] = None,
+    default_branch: Optional[str] = None,
     max_poll_attempts: int = 5,
     poll_interval: float = 2.0,
     dry_run: bool = False,
 ) -> Optional[int]:
-    """Dispatches preview deployment workflow for commit SHA and correlates the new run ID."""
+    """Dispatches preview deployment workflow on default branch with commit_sha input and correlates the new run ID."""
+    if not default_branch:
+        default_branch = get_default_branch() or "main"
+
     if dry_run:
-        print(f"[DRY-RUN] Would dispatch workflow '{workflow_name}' at ref '{commit_sha}'")
+        print(f"[DRY-RUN] Would dispatch workflow '{workflow_name}' at ref '{default_branch}' for commit '{commit_sha}'")
         return 12345
 
     if pre_existing_run_ids is None:
@@ -162,17 +166,13 @@ def dispatch_cd_workflow(
 
     cmd = [
         "gh", "workflow", "run", workflow_name,
-        "--ref", commit_sha,
+        "--ref", default_branch,
         "-f", f"commit_sha={commit_sha}",
     ]
     code, out, err = run_cmd(cmd, check=False)
     if code != 0:
-        # Fallback without -f if workflow inputs are not declared
-        cmd = ["gh", "workflow", "run", workflow_name, "--ref", commit_sha]
-        code, out, err = run_cmd(cmd, check=False)
-        if code != 0:
-            print(f"[ERROR] Failed to dispatch workflow '{workflow_name}': {err}", file=sys.stderr)
-            return None
+        print(f"[ERROR] Failed to dispatch workflow '{workflow_name}': {err}", file=sys.stderr)
+        return None
 
     # Poll for the newly created run ID (must be strictly in new_runs)
     for attempt in range(max_poll_attempts):

@@ -108,15 +108,20 @@ class DeployPreviewSkillTests(unittest.TestCase):
             "abcdef123456",
             workflow_name="deploy-preview.yml",
             pre_existing_run_ids=pre_existing,
+            default_branch="main",
             max_poll_attempts=1,
         )
         self.assertEqual(run_id, 1002)
+        mock_run.assert_any_call(
+            ["gh", "workflow", "run", "deploy-preview.yml", "--ref", "main", "-f", "commit_sha=abcdef123456"],
+            check=False,
+        )
 
     @patch("deploy_preview.run_cmd")
     def test_dispatch_cd_workflow_fails_closed_when_run_query_fails_or_times_out(self, mock_run):
         # 1. gh run list fails during pre-existing run discovery
         mock_run.return_value = (1, "", "API rate limit")
-        run_id = dp.dispatch_cd_workflow("abcdef123456", workflow_name="deploy-preview.yml")
+        run_id = dp.dispatch_cd_workflow("abcdef123456", workflow_name="deploy-preview.yml", default_branch="main")
         self.assertIsNone(run_id)
 
         # 2. Polling only sees existing run 1001 without new run appearing -> must NOT return 1001
@@ -128,6 +133,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
             "abcdef123456",
             workflow_name="deploy-preview.yml",
             pre_existing_run_ids={1001},
+            default_branch="main",
             max_poll_attempts=1,
             poll_interval=0,
         )
