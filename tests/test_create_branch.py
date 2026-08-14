@@ -17,26 +17,44 @@ class CreateBranchPlanGateTests(unittest.TestCase):
         self.assertTrue(cb.requires_plan(issue, branch_type="chore"))
 
     def test_requires_plan_for_high_risk_terms(self):
-        issue = {"body": "This changes the database schema and user migration path.", "labels": []}
-        self.assertTrue(cb.requires_plan(issue, branch_type="chore"))
+        for term in ["money", "pii", "schema", "migration", "tenancy", "security", "irreversible"]:
+            with self.subTest(term=term):
+                issue = {"body": f"This operation involves {term} handling.", "labels": []}
+                self.assertTrue(cb.requires_plan(issue, branch_type="chore"))
 
     def test_does_not_require_plan_for_routine_chore_or_fix(self):
         issue = {"body": "Simple bug fix in parser.", "labels": [{"name": "type:fix"}]}
         self.assertFalse(cb.requires_plan(issue, branch_type="fix"))
 
     def test_has_implementation_plan_in_issue_body(self):
-        issue = {"body": "## Implementation Plan\n\n- Step 1\n- Step 2"}
+        issue = {"body": "## Implementation Plan\n\n### Proposed Changes\n- Update parser\n\n### Verification\n- Run tests"}
         self.assertTrue(cb.has_implementation_plan(104, issue=issue, comments=[]))
 
     def test_has_implementation_plan_in_issue_comments(self):
         issue = {"body": "Feature request."}
-        comments = [{"body": "### Implementation Plan\n\nApproach details..."}]
+        comments = [{"body": "### Implementation Plan\n\n### Proposed Changes\n- Update api\n\n### Verification\n- Run pytest"}]
         self.assertTrue(cb.has_implementation_plan(104, issue=issue, comments=comments))
+
+    def test_unsubstantive_or_placeholder_plan_is_rejected(self):
+        issue = {"body": "Feature request."}
+        # Mere mention of "implementation plan required" or "TBD"
+        comments = [{"body": "implementation plan required before starting"}]
+        self.assertFalse(cb.has_implementation_plan(104, issue=issue, comments=comments))
+        comments = [{"body": "## Implementation Plan: TBD"}]
+        self.assertFalse(cb.has_implementation_plan(104, issue=issue, comments=comments))
 
     def test_has_implementation_plan_returns_false_when_missing(self):
         issue = {"body": "Feature request without plan."}
         comments = [{"body": "General comment."}]
         self.assertFalse(cb.has_implementation_plan(104, issue=issue, comments=comments))
+
+    def test_fetch_issue_comments_handles_paginated_json_streams(self):
+        from common import fetch_issue_comments
+        with patch("common.run_cmd", return_value=(0, '[{"id": 1}][{"id": 2}]', "")):
+            comments = fetch_issue_comments(104)
+            self.assertEqual(len(comments), 2)
+            self.assertEqual(comments[0]["id"], 1)
+            self.assertEqual(comments[1]["id"], 2)
 
     @patch("create_branch.get_issue")
     @patch("create_branch.has_implementation_plan")

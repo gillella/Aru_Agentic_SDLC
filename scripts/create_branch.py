@@ -11,7 +11,18 @@ from typing import Any, Optional
 
 from common import create_worktree, fetch_issue_comments, get_issue, run_cmd
 
-HIGH_RISK_TERMS = {"money", "pii", "schema", "migration", "migrations"}
+HIGH_RISK_TERMS = {
+    "money",
+    "pii",
+    "schema",
+    "schemas",
+    "migration",
+    "migrations",
+    "tenancy",
+    "tenant",
+    "security",
+    "irreversible",
+}
 
 
 def sanitize_slug(text: str) -> str:
@@ -33,28 +44,66 @@ def requires_plan(issue: Optional[dict[str, Any]], branch_type: str = "feat") ->
     if "type:feat" in labels or "needs-design" in labels or "feature" in labels:
         return True
 
-    body = (issue.get("body") or "").lower()
-    text_to_check = body + " " + " ".join(labels)
-    if any(term in text_to_check for term in HIGH_RISK_TERMS):
+    title = (issue.get("title") or "").lower()
+    if title.startswith("feat:") or title.startswith("feat/"):
         return True
+
+    body = (issue.get("body") or "").lower()
+    text_to_check = f"{title} {body} {' '.join(labels)}"
+    for term in HIGH_RISK_TERMS:
+        if re.search(rf"\b{re.escape(term)}\b", text_to_check, re.IGNORECASE):
+            return True
 
     return False
 
 
-def has_implementation_plan(issue_id: int, issue: Optional[dict[str, Any]] = None, comments: Optional[list[dict[str, Any]]] = None) -> bool:
-    """Checks if an implementation plan exists in the issue body or comments."""
-    plan_pattern = r"(?i)#+\s*implementation\s+plan|implementation\s+plan"
+def is_substantive_plan(text: str) -> bool:
+    """Validates that text contains a substantive implementation plan artifact."""
+    if not text:
+        return False
+    # Must have an explicit Implementation Plan heading
+    if not re.search(r"^\s*#{1,4}\s*implementation\s+plan\b", text, re.IGNORECASE | re.MULTILINE):
+        return False
+    cleaned = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL).strip()
+    if len(cleaned) < 40:
+        return False
+    # Reject placeholder-only statements
+    if re.search(r"^\s*#{1,4}\s*implementation\s+plan\s*:\s*(?:tbd|todo|none|n/a|required|wip)\s*$", cleaned, re.IGNORECASE | re.MULTILINE):
+        lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+        if len(lines) < 4:
+            return False
 
-    if issue and issue.get("body"):
-        if re.search(plan_pattern, issue["body"]):
-            return True
+    has_approach_or_changes = bool(re.search(
+        r"(?:#{1,4}\s*(?:approach|proposed changes|design|architecture|files|scope|goal|plan)|\b(?:approach|proposed changes|files to change|architecture)\b)",
+        cleaned,
+        re.IGNORECASE,
+    ))
+    has_verification_or_tests = bool(re.search(
+        r"(?:#{1,4}\s*(?:verification|testing|test strategy|test plan)|\b(?:verification|test strategy|tests)\b)",
+        cleaned,
+        re.IGNORECASE,
+    ))
 
+    return has_approach_or_changes and has_verification_or_tests
+
+
+def has_implementation_plan(
+    issue_id: int,
+    issue: Optional[dict[str, Any]] = None,
+    comments: Optional[list[dict[str, Any]]] = None,
+) -> bool:
+    """Checks if a substantive implementation plan exists in the issue comments or body."""
     if comments is None:
         comments = fetch_issue_comments(issue_id)
 
+    # Prefer dedicated plan comments
     for comment in comments:
         body = comment.get("body") or ""
-        if re.search(plan_pattern, body):
+        if is_substantive_plan(body):
+            return True
+
+    if issue and issue.get("body"):
+        if is_substantive_plan(issue["body"]):
             return True
 
     return False
