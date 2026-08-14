@@ -63,8 +63,7 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Do not move the issue directly to Done. Only the gated `merge_pr.py` close-out
   performs the merge and Done transition after independent review, green CI,
   resolved threads, and the remaining Definition-of-Done checks pass.
-- Remove temporary review worktree directory `.worktrees/review-pr-<PR_ID>`
-  (`git worktree remove --force .worktrees/review-pr-<PR_ID>`).
+- Return to the primary repository root (`cd "$ARU_SDLC_HOME"` or `cd ../..`) and remove the temporary review worktree directory `.worktrees/review-pr-<PR_ID>` safely without `--force` (`git worktree remove .worktrees/review-pr-<PR_ID>`). If git refuses because untracked or modified files exist, inspect the worktree, remove only known generated build/test caches, or retain it for diagnostic recovery rather than discarding uninspected material.
 
 ---
 
@@ -94,7 +93,7 @@ Apply every pre-submission item before submitting the review, submit the review 
 ### Post-Submission Close-Out
 - [ ] Review claim released via `claim_issue.py --pr <PR_ID> --agent <AGENT_ID> --complete-review`
       (if no blocking findings remain) or `--release` (if changes requested).
-- [ ] Temporary review worktree (`.worktrees/review-pr-<PR_ID>`) removed (`git worktree remove --force .worktrees/review-pr-<PR_ID>`).
+- [ ] Return to repository root and clean up temporary review worktree safely without `--force` (`git worktree remove .worktrees/review-pr-<PR_ID>`), inspecting or retaining any uncertain files.
 
 ---
 
