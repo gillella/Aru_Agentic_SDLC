@@ -331,6 +331,14 @@ class ProtectedBranchTests(unittest.TestCase):
                 "git push --delete --no-delete origin tag main", "feat/issue-1-a"
             )
         )
+        self.assertIsNone(
+            et._git_write_to_protected(
+                "git push --branches --no-b --tags origin", "feat/issue-1-a"
+            )
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --no-branches --b origin", "feat/issue-1-a")
+        )
 
     def test_positional_remote_overrides_repo_option_and_fails_closed(self):
         self.assertIsNotNone(
@@ -704,6 +712,7 @@ class HookDecisionTests(unittest.TestCase):
             "git push --no-tags --tags origin",
             "git push --no-tags --ta origin",
             "git push --delete --no-delete origin tag main",
+            "git push --branches --no-b --tags origin",
         ]
         for command in allowed_commands:
             with self.subTest(command=command, expected="ALLOW"):
@@ -748,6 +757,7 @@ class HookDecisionTests(unittest.TestCase):
             "git push --tags --no-tags origin",
             "git push --tags --no-tag origin",
             "git push --tags --no-ta origin",
+            "git push --no-branches --b origin",
         ]
         for command in blocked_commands:
             with self.subTest(command=command, expected="BLOCK"):

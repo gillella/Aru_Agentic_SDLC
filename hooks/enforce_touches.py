@@ -428,8 +428,8 @@ def _push_state_option(name):
         "--no-tags": ("--no-tags", len("--no-ta")),
         "--all": ("--all", len("--al")),
         "--no-all": ("--no-all", len("--no-al")),
-        "--branches": ("--all", len("--br")),
-        "--no-branches": ("--no-all", len("--no-br")),
+        "--branches": ("--all", len("--b")),
+        "--no-branches": ("--no-all", len("--no-b")),
         "--mirror": ("--mirror", len("--m")),
         "--no-mirror": ("--no-mirror", len("--no-m")),
     }
