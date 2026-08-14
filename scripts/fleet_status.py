@@ -36,6 +36,21 @@ EXIT_ERROR = 1
 EXIT_WAITING = 2
 EXIT_BLOCKED = 3
 
+LINE_CEILING = 400
+SKIP_DIR_NAMES = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".worktrees",
+    ".mypy_cache",
+}
+
 PR_FIELDS = (
     "number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
     "createdAt,headRefName,body,reviewDecision,mergeStateStatus,state"
@@ -59,6 +74,48 @@ def list_worktree_branches() -> List[str]:
         if line.startswith("branch refs/heads/"):
             branches.append(line.replace("branch refs/heads/", "").strip())
     return branches
+
+
+def _count_lines(path: str) -> Optional[int]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return sum(1 for _ in fh)
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def collect_codebase_health(repo_dir: str) -> Dict[str, Any]:
+    """Summarize local bloat: LOC, average size, files at the 400-line ceiling."""
+    loc = 0
+    file_count = 0
+    total_bytes = 0
+    over_ceiling = []
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [name for name in dirs if name not in SKIP_DIR_NAMES]
+        for name in files:
+            path = os.path.join(root, name)
+            lines = _count_lines(path)
+            if lines is None:
+                continue
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            file_count += 1
+            loc += lines
+            total_bytes += size
+            if lines >= LINE_CEILING:
+                rel = os.path.relpath(path, repo_dir)
+                over_ceiling.append({"path": rel, "lines": lines})
+    over_ceiling.sort(key=lambda item: (-item["lines"], item["path"]))
+    average = int(total_bytes / file_count) if file_count else 0
+    return {
+        "loc": loc,
+        "file_count": file_count,
+        "average_file_bytes": average,
+        "line_ceiling": LINE_CEILING,
+        "files_at_or_over_ceiling": over_ceiling,
+    }
 
 
 def _error(reason: str, summary: str) -> Dict[str, Any]:
@@ -88,7 +145,7 @@ def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
     original = os.getcwd()
     try:
         os.chdir(target)
-        return _evaluate_current_repo()
+        status = _evaluate_current_repo()
     except OSError as exc:
         return _error(
             f"Could not evaluate repository directory '{target}': {exc}",
@@ -96,6 +153,9 @@ def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
         )
     finally:
         os.chdir(original)
+
+    status["codebase_health"] = collect_codebase_health(target)
+    return status
 
 
 def _evaluate_current_repo() -> Dict[str, Any]:
@@ -299,6 +359,16 @@ def main():
         print("\nDetails:")
         for r in status["reasons"]:
             print(f"  • {r}")
+    health = status.get("codebase_health")
+    if health:
+        print("\nCodebase health:")
+        print(f"  LOC: {health['loc']}")
+        print(f"  files: {health['file_count']}")
+        print(f"  average file size: {health['average_file_bytes']} bytes")
+        over = health["files_at_or_over_ceiling"]
+        print(f"  files at/over {health['line_ceiling']} lines: {len(over)}")
+        for item in over[:20]:
+            print(f"    • {item['path']} ({item['lines']})")
     sys.exit(status["exit_code"])
 
 

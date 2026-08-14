@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import tempfile
@@ -13,6 +14,8 @@ from fleet_status import (  # noqa: E402
     EXIT_COMPLETE,
     EXIT_ERROR,
     EXIT_WAITING,
+    LINE_CEILING,
+    collect_codebase_health,
     evaluate_fleet_status,
 )
 
@@ -281,6 +284,38 @@ class FleetStatusTests(unittest.TestCase):
 
         self.assertEqual(status["state"], "error")
         self.assertEqual(status["exit_code"], EXIT_ERROR)
+
+    def test_codebase_health_counts_loc_and_ceiling_warnings(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "small.py").write_text("a\nb\n", encoding="utf-8")
+            (root / ".venv").mkdir()
+            (root / ".venv" / "ignored.py").write_text("x\n" * 500, encoding="utf-8")
+            (root / "big.py").write_text("l\n" * LINE_CEILING, encoding="utf-8")
+            health = collect_codebase_health(str(root))
+        self.assertEqual(health["loc"], 2 + LINE_CEILING)
+        self.assertEqual(health["file_count"], 2)
+        self.assertEqual(health["line_ceiling"], 400)
+        self.assertEqual(
+            health["files_at_or_over_ceiling"],
+            [{"path": "big.py", "lines": LINE_CEILING}],
+        )
+        self.assertGreater(health["average_file_bytes"], 0)
+
+    def test_complete_status_includes_codebase_health(self):
+        with tempfile.TemporaryDirectory() as target:
+            Path(target, "app.py").write_text("print(1)\n", encoding="utf-8")
+            with (
+                patch("fleet_status.get_repo_slug", return_value="octocat/widgets"),
+                patch("fleet_status.get_repo_projects", return_value=[mock_project()]),
+                patch("fleet_status.query_open_issues", return_value=[]),
+                patch("fleet_status.list_open_prs_details", return_value=[]),
+                patch("fleet_status.list_worktree_branches", return_value=[]),
+            ):
+                status = evaluate_fleet_status(target)
+        self.assertEqual(status["state"], "complete")
+        self.assertEqual(status["codebase_health"]["loc"], 1)
+        self.assertEqual(status["codebase_health"]["file_count"], 1)
 
 
 if __name__ == "__main__":
