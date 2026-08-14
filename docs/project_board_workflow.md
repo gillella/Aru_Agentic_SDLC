@@ -120,8 +120,11 @@ approve its own PRs, so that rule would deadlock every fleet-authored PR
 until #123. **Required linear history is off** — it would forbid merge
 commits and fight #89.
 
-On public repositories or GitHub Pro organizations, `--apply` exits 0 and
-activates the `aru-protect-main` ruleset. `--apply` exits 3 if GitHub returns HTTP 403.
+On public repositories or private repositories owned by a GitHub Pro account,
+`--apply` exits 0 and activates the `aru-protect-main` ruleset with its default
+`active` enforcement. Explicit `--enforcement evaluate` or `--enforcement
+disabled` arguments override that default. `--apply` exits 3 if GitHub returns
+HTTP 403.
 
 ### Closing out a review finding
 
@@ -166,5 +169,4 @@ python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" [--json]
 | **`waiting`** | `2` | Active work in flight, Ready/In Progress/In Review/Backlog issues, pending CI, pending reviews, or worktree cleanup. |
 | **`blocked`** | `3` | Issues/PRs carrying human escalation labels, `needs-design`, unresolvable project board identity, or exhausted review/remediation rounds. |
 | **`error`** | `1` | GitHub API/auth failures; fails closed. |
-
 
