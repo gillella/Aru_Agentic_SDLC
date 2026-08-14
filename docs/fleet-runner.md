@@ -112,3 +112,116 @@ Issue #46 installs and verifies the thinnest supported native continuity
 adapter for each desktop application. It must preserve the project the operator
 selected, persist explicit-stop intent, report capability gaps truthfully, and
 never substitute an OS daemon that drives the GUI.
+
+## Unattended-completion acceptance test
+
+The default end-to-end acceptance scenario is hermetic:
+
+```bash
+python3 -m unittest tests.e2e.test_unattended_board_completion
+```
+
+It injects fake local-agent adapters and an in-memory GitHub transport while
+running the production picker, optimistic issue/review/merge claim helpers,
+merge Definition-of-Done evaluator, and runner. It spends no model credits,
+uses no GitHub credentials, and does not read or modify Codex, Claude, Cursor,
+Antigravity, or developer configuration. The scenario covers two model
+families, concurrent non-overlapping claims, dependency and path serialization,
+author handoff, cross-family review feedback, CI remediation, crash recovery,
+guarded merge, an unresolved high-risk product decision and acknowledgement,
+idle waiting, final board and workspace audit, and explicit runner shutdown.
+
+### Opt-in live disposable-repository smoke test
+
+The hermetic scenario is the CI gate. A live smoke test is a separate,
+operator-authorized exercise and must never target this repository or an
+existing project board:
+
+1. Create the repository and Project only through the bootstrap helper, from a
+   directory that is not an existing checkout:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
+     --name <DISPOSABLE_REPO> --private --create-board \
+     --owner <TEST_OWNER> --target-dir <NEW_CHECKOUT>
+   ```
+
+   In the new checkout, enable the real required check when the test owner and
+   repository plan support rulesets:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/enable_main_ruleset.py" \
+     --apply --enforcement active
+   ```
+
+   If active rulesets are unavailable, stop rather than claiming that the live
+   guarded-merge case was exercised.
+2. Before any paid child starts, run `gh auth status` without redirecting its
+   output, verify the expected test-account login, and verify the exact target
+   with `gh repo view --json nameWithOwner -q .nameWithOwner`. Confirm the sole
+   disposable Project with `gh project list --owner <TEST_OWNER>` and run
+   `python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" --repo-dir . --json`.
+   Abort on any credential, repository, or Project mismatch. Never place a
+   token in an argument, environment dump, state file, or log.
+3. File two low-risk issues through the `create-github-issue` skill, then move
+   each one with the board helper:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" \
+     --issue <ID> --status Ready --require-board
+   ```
+
+   Their bodies must use exact machine-readable metadata:
+
+   ```text
+   depends-on: #12, #14
+   touches: src/a.py, tests/test_a.py
+   parallel-eligible: true
+   ```
+
+   Give the first two issues non-overlapping `touches:` values and make a third
+   issue depend on the first. Do not use secrets, production data, billing
+   paths, or a real application repository.
+4. Use distinct agent ids from at least two model families. Distinct ids are
+   required for `reviewed-by:<agent_id>` attribution even when both workers use
+   one GitHub account; a separate GitHub App or account may instead provide a
+   server-side approval. In two isolated clones, use only the governed
+   lifecycle commands:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
+     --agent <ID> --family <FAMILY> --claim --json
+   python3 "$ARU_SDLC_HOME/scripts/create_branch.py" \
+     --issue <ISSUE> --worktree
+   python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+     --issue <ISSUE> --agent <ID> --model-family <FAMILY> \
+     --title "<TITLE>" --body "Closes #<ISSUE>"
+   python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" \
+     --pr <PR> --agent <REVIEWER>
+   python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" \
+     --pr <PR> --agent <REVIEWER> --complete-review
+   python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
+     --pr <PR> --expected-head <SHA>
+   ```
+
+   Do not substitute direct `gh` or API lifecycle writes for a helper that
+   exists.
+5. Observe claim, worktree, PR, CI, independent review, guarded merge, Done
+   reconciliation, and helper-driven worktree/branch cleanup. Record only
+   issue/PR URLs and gate outcomes. Request explicit runner stop for each
+   worker, then run the authoritative final audit:
+
+   ```bash
+   python3 "$ARU_SDLC_HOME/scripts/run_fleet.py" stop \
+     --repo . --agent <ID>
+   python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" --repo-dir . --json
+   ```
+
+   Verify zero open issues, PRs, claims, or dirty worktrees. After that audit,
+   the operator may delete the disposable Project and repository in the GitHub
+   UI; no local agent performs that destructive account-level cleanup.
+
+This live smoke test is intentionally not part of default CI because it uses
+paid local-agent sessions and mutates a real GitHub repository. Run it only
+when an operator deliberately supplies that disposable scope and accepts the
+cost.
