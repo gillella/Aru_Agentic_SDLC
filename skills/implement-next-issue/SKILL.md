@@ -109,7 +109,9 @@ when either condition is true:
 - the issue has the `type:feat` or `needs-design` label; or
 - its acceptance criteria, declared `touches:`, or intended implementation
   changes money semantics, PII handling, schemas, migrations, or another
-  irreversible contract.
+  irreversible contract; or
+- the intended implementation introduces a new helper function, module, or
+  script.
 
 High-risk scope is an independent trigger. A `type:fix` or `type:chore` label,
 or a missing `needs-design` label, never exempts money, PII, schema, migration,
