@@ -27,13 +27,48 @@ class CreateBranchPlanGateTests(unittest.TestCase):
         self.assertFalse(cb.requires_plan(issue, branch_type="fix"))
 
     def test_has_implementation_plan_in_issue_body(self):
-        issue = {"body": "## Implementation Plan\n\n### Proposed Changes\n- Update parser\n\n### Verification\n- Run tests"}
+        issue = {"body": "## Implementation Plan\n\n### Proposed Changes\n- Update parser\n\n### Files to Touch\n- scripts/foo.py\n\n### Verification\n- Run tests"}
         self.assertTrue(cb.has_implementation_plan(104, issue=issue, comments=[]))
 
     def test_has_implementation_plan_in_issue_comments(self):
         issue = {"body": "Feature request."}
-        comments = [{"body": "### Implementation Plan\n\n### Proposed Changes\n- Update api\n\n### Verification\n- Run pytest"}]
+        comments = [{"body": "### Implementation Plan\n\n### Proposed Changes\n- Update api\n\n### Files to Touch\n- scripts/api.py\n\n### Verification\n- Run pytest"}]
         self.assertTrue(cb.has_implementation_plan(104, issue=issue, comments=comments))
+
+    def test_minimal_low_risk_plan_rejected_for_high_risk_issue(self):
+        low_risk_plan = (
+            "## Implementation Plan\n\n"
+            "### Proposed Changes\n- Update security auth checks\n\n"
+            "### Files to Touch\n- auth.py\n\n"
+            "### Verification\n- Run auth tests"
+        )
+        high_risk_issue = {
+            "title": "feat: update token security and pii handling",
+            "body": "Ensure security and pii encryption.",
+            "labels": [{"name": "type:feat"}],
+        }
+        # Low risk plan passes for low risk
+        self.assertTrue(cb.is_substantive_plan(low_risk_plan, is_risk=False))
+        # But fails for high risk issue because schema/api and rejected alternatives are missing
+        self.assertFalse(cb.is_substantive_plan(low_risk_plan, is_risk=True))
+        self.assertFalse(cb.has_implementation_plan(104, issue=high_risk_issue, comments=[{"body": low_risk_plan}]))
+
+    def test_full_high_risk_plan_accepted_for_high_risk_issue(self):
+        high_risk_plan = (
+            "## Implementation Plan\n\n"
+            "### Proposed Changes\n- Update migration schema and pii encryption\n\n"
+            "### Files to Touch\n- db/schema.py, security/auth.py\n\n"
+            "### Schema / API Deltas\n- Adds encrypted_token column, preserves existing token API\n\n"
+            "### Verification & Test Strategy\n- Run pytest tests/test_security.py\n\n"
+            "### Rejected Alternatives\n- Considered storing raw tokens; rejected due to security risk"
+        )
+        high_risk_issue = {
+            "title": "feat: schema migration for pii encryption",
+            "body": "Migration and schema updates for pii.",
+            "labels": [{"name": "type:feat"}],
+        }
+        self.assertTrue(cb.is_substantive_plan(high_risk_plan, is_risk=True))
+        self.assertTrue(cb.has_implementation_plan(104, issue=high_risk_issue, comments=[{"body": high_risk_plan}]))
 
     def test_unsubstantive_or_placeholder_plan_is_rejected(self):
         issue = {"body": "Feature request."}
