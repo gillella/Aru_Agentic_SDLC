@@ -66,12 +66,20 @@ class SlackProjectRegistryTests(unittest.TestCase):
         self.assertNotIn("token", persisted.lower())
 
     def test_default_identity_discovers_exact_repo_and_governed_board(self):
-        repo = {"id": "R_node", "databaseId": 42, "nameWithOwner": "owner/repo"}
+        repo = {"id": "R_node", "nameWithOwner": "owner/repo"}
+        rest_repo = {"id": 42, "node_id": "R_node", "full_name": "owner/repo"}
         project = {"id": "PVT_board"}
-        with patch.object(slack_projects, "_bounded_json", return_value=repo), \
+        with patch.object(
+            slack_projects, "_bounded_json", side_effect=[repo, rest_repo]
+        ) as bounded, \
              patch.object(slack_projects, "_discover_governed_project", return_value=project) as resolve:
             found = slack_projects.discover_checkout_identity(self.checkout_a)
         resolve.assert_called_once_with("owner/repo")
+        self.assertNotIn("databaseId", bounded.call_args_list[0].args[0])
+        self.assertEqual(
+            bounded.call_args_list[1].args[0],
+            ["gh", "api", "repos/owner/repo"],
+        )
         self.assertEqual(found["github_repo_id"], "R_node")
         self.assertEqual(found["github_repo_database_id"], 42)
         self.assertEqual(found["project_v2_id"], "PVT_board")
@@ -278,10 +286,11 @@ class SlackProjectRegistryTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
     def test_checkout_discovery_resolves_board_from_repo_slug(self):
-        repo = {
-            "databaseId": 42, "id": "R_node", "nameWithOwner": "owner/repo",
-        }
-        with patch.object(slack_projects, "_bounded_json", return_value=repo), \
+        repo = {"id": "R_node", "nameWithOwner": "owner/repo"}
+        rest_repo = {"id": 42, "node_id": "R_node", "full_name": "owner/repo"}
+        with patch.object(
+            slack_projects, "_bounded_json", side_effect=[repo, rest_repo]
+        ), \
              patch.object(
                  slack_projects, "_discover_governed_project", return_value={"id": "PVT_board"}
              ) as resolve:
@@ -292,13 +301,61 @@ class SlackProjectRegistryTests(unittest.TestCase):
 
     def test_checkout_discovery_fails_when_board_is_ambiguous(self):
         repo = {"id": "R_node", "nameWithOwner": "owner/repo"}
-        with patch.object(slack_projects, "_bounded_json", return_value=repo), \
+        rest_repo = {"id": 42, "node_id": "R_node", "full_name": "owner/repo"}
+        with patch.object(
+            slack_projects, "_bounded_json", side_effect=[repo, rest_repo]
+        ), \
              patch.object(
                  slack_projects, "_discover_governed_project",
                  side_effect=RegistryError("cannot resolve one governed ProjectV2 board"),
              ):
             with self.assertRaisesRegex(RegistryError, "cannot resolve one governed"):
                 slack_projects.discover_checkout_identity(self.checkout_a)
+
+    def test_checkout_discovery_rejects_mismatched_repository_apis(self):
+        repo = {"id": "R_node", "nameWithOwner": "owner/repo"}
+        for rest_repo in (
+            {"id": 42, "node_id": "R_other", "full_name": "owner/repo"},
+            {"id": 42, "node_id": "R_node", "full_name": "owner/other"},
+        ):
+            with self.subTest(rest_repo=rest_repo), patch.object(
+                slack_projects, "_bounded_json", side_effect=[repo, rest_repo]
+            ), patch.object(slack_projects, "_discover_governed_project") as board:
+                with self.assertRaisesRegex(RegistryError, "mismatched data"):
+                    slack_projects.discover_checkout_identity(self.checkout_a)
+                board.assert_not_called()
+
+    def test_checkout_discovery_rejects_missing_or_invalid_database_id(self):
+        repo = {"id": "R_node", "nameWithOwner": "owner/repo"}
+        for database_id in (None, "42", True, 0, -1):
+            rest_repo = {
+                "id": database_id,
+                "node_id": "R_node",
+                "full_name": "owner/repo",
+            }
+            with self.subTest(database_id=database_id), patch.object(
+                slack_projects, "_bounded_json", side_effect=[repo, rest_repo]
+            ), patch.object(slack_projects, "_discover_governed_project") as board:
+                with self.assertRaisesRegex(RegistryError, "database id"):
+                    slack_projects.discover_checkout_identity(self.checkout_a)
+                board.assert_not_called()
+
+    def test_checkout_discovery_rejects_missing_or_mistyped_node_ids(self):
+        for repo_node_id, rest_node_id in ((7, 7), ("", ""), ("R_node", 7)):
+            repo = {"id": repo_node_id, "nameWithOwner": "owner/repo"}
+            rest_repo = {
+                "id": 42,
+                "node_id": rest_node_id,
+                "full_name": "owner/repo",
+            }
+            with self.subTest(
+                repo_node_id=repo_node_id, rest_node_id=rest_node_id
+            ), patch.object(
+                slack_projects, "_bounded_json", side_effect=[repo, rest_repo]
+            ), patch.object(slack_projects, "_discover_governed_project") as board:
+                with self.assertRaisesRegex(RegistryError, "identity"):
+                    slack_projects.discover_checkout_identity(self.checkout_a)
+                board.assert_not_called()
 
     def test_checkout_identity_commands_are_bounded(self):
         with patch.object(
@@ -310,7 +367,8 @@ class SlackProjectRegistryTests(unittest.TestCase):
         self.assertEqual(invoked.call_args.kwargs["timeout"], slack_projects.IDENTITY_TIMEOUT_SECONDS)
 
     def test_checkout_identity_bounds_repo_and_board_queries(self):
-        repo = {"databaseId": 42, "id": "R_node", "nameWithOwner": "owner/repo"}
+        repo = {"id": "R_node", "nameWithOwner": "owner/repo"}
+        rest_repo = {"id": 42, "node_id": "R_node", "full_name": "owner/repo"}
         board = {
             "data": {"repository": {"projectsV2": {"nodes": [{
                 "id": "PVT_board",
@@ -320,12 +378,13 @@ class SlackProjectRegistryTests(unittest.TestCase):
         }
         responses = [
             subprocess.CompletedProcess([], 0, json.dumps(repo), ""),
+            subprocess.CompletedProcess([], 0, json.dumps(rest_repo), ""),
             subprocess.CompletedProcess([], 0, json.dumps(board), ""),
         ]
         with patch.object(slack_projects.subprocess, "run", side_effect=responses) as invoked:
             found = slack_projects.discover_checkout_identity(self.checkout_a)
         self.assertEqual(found["project_v2_id"], "PVT_board")
-        self.assertEqual(invoked.call_count, 2)
+        self.assertEqual(invoked.call_count, 3)
         self.assertTrue(all(
             call.kwargs["timeout"] == slack_projects.IDENTITY_TIMEOUT_SECONDS
             for call in invoked.call_args_list
