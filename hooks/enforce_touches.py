@@ -413,6 +413,8 @@ def _unwrap_simple_command(words):
                             i += 1
                             s_arg = ""
                         inner_tokens = _shell_tokens(s_arg)
+                        if inner_tokens is None:
+                            return None, []
                         inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
                         if inner_words:
                             words = words[:i] + inner_words + words[i:]
@@ -439,6 +441,8 @@ def _unwrap_simple_command(words):
                         i += 2 if i + 1 < len(words) else 1
                     else:
                         i += 1
+                elif wrapper_name == "exec" and name == "-a" and not inline:
+                    i += 2 if i + 1 < len(words) else 1
                 else:
                     if inline:
                         i += 1

@@ -250,6 +250,17 @@ class ProtectedBranchTests(unittest.TestCase):
         self.assertIsNotNone(et._git_write_to_protected("time -f fmt git commit -m 'x'", "main"))
         self.assertIsNotNone(et._git_write_to_protected('env -S "git commit -m x"', "main"))
         self.assertIsNotNone(et._git_write_to_protected('env -S "/usr/bin/git commit -m x"', "main"))
+        self.assertIsNotNone(
+            et._git_write_to_protected("exec -a ignored /usr/bin/git commit -m x", "main")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected(
+                "exec -a ignored /usr/bin/git push origin HEAD", "main"
+            )
+        )
+
+    def test_malformed_env_split_string_does_not_crash(self):
+        self.assertIsNone(et._git_write_to_protected("env -S \"git commit -m '\"", "main"))
         self.assertIsNotNone(et._git_write_to_protected('/usr/bin/env -i FOO=bar /usr/bin/git commit -m x', "main"))
 
 
@@ -628,6 +639,8 @@ class HookDecisionTests(unittest.TestCase):
             "env --unset FOO git commit -m x",
             "time -f fmt git commit -m x",
             'env -S "git commit -m x"',
+            "exec -a ignored /usr/bin/git commit -m x",
+            "exec -a ignored /usr/bin/git push origin HEAD",
         ]
         for command in blocked_commands:
             with self.subTest(command=command, expected="BLOCK"):
