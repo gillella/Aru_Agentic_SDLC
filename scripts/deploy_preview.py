@@ -10,13 +10,12 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, List, Optional, Set
+from typing import Optional, Set
 
-from common import get_repo_slug, run_cmd
+from common import run_cmd
 
 
 def get_default_branch() -> str:
