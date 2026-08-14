@@ -22,17 +22,42 @@ mirror the User Rule for teammates who do not have the global install.
 
 ### Pinning a Version with `ARU_SDLC_REF`
 
-To prevent unannounced breaks on `main` from impacting consumer projects, pin a specific ref or release tag before installing:
+To prevent unannounced breaks on `main` from impacting consumer projects, pin a specific git ref, commit SHA, or release checkpoint before installing:
 
 ```bash
 export ARU_SDLC_HOME=/Users/aravindgillella/projects/Aru_Agentic_SDLC
-export ARU_SDLC_REF=v0.1.0
+# Pin to a specific release tag, checkpoint, or commit SHA:
+export ARU_SDLC_REF=main
 "$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"
 ```
 
 - When `ARU_SDLC_REF` is set, the installer checks out that ref in `$ARU_SDLC_HOME` and exports `ARU_SDLC_REF` in your shell profile.
 - When `ARU_SDLC_REF` is unset, default behavior is unchanged (follows current branch / `main`).
 - Helper scripts check `ARU_SDLC_REF` against the checked out repository version and print a warning if MAJOR SemVer versions mismatch, but never hard-fail mid-session.
+
+#### Discovering Current Ref and Available Versions
+
+To inspect what ref is currently installed or list available release tags:
+
+```bash
+# Discover current installed ref:
+git -C "$ARU_SDLC_HOME" rev-parse --short HEAD
+
+# Discover current tags and checkpoints:
+git -C "$ARU_SDLC_HOME" tag -l
+```
+
+#### Upgrading to a New Ref Deliberately
+
+To move forward to a newer ref or update to the latest `main`:
+
+```bash
+cd "$ARU_SDLC_HOME"
+git fetch origin
+git checkout <target-ref-or-main>
+export ARU_SDLC_REF=<target-ref-or-main>
+"$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"
+```
 
 ### GitHub access: `gh`, not MCP
 

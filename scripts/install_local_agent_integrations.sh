@@ -638,9 +638,9 @@ if [[ -n "${ARU_SDLC_REF:-}" ]]; then
     echo "[DRY-RUN] Would checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}"
   else
     echo "Pinning Aru_Agentic_SDLC at ${SDLC_HOME} to ref '${ARU_SDLC_REF}'..."
-    if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" 2>/dev/null; then
+    if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" 2>/dev/null && ! git -C "${SDLC_HOME}" checkout --detach "${ARU_SDLC_REF}" 2>/dev/null; then
       git -C "${SDLC_HOME}" fetch --tags origin 2>/dev/null || true
-      if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}"; then
+      if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" 2>/dev/null && ! git -C "${SDLC_HOME}" checkout --detach "${ARU_SDLC_REF}"; then
         echo "[ERROR] Could not checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}." >&2
         exit 1
       fi
@@ -735,6 +735,16 @@ else
 fi
 
 # Shell Environment
+if [[ "${CHECK_ONLY}" != true && "${DRY_RUN}" != true ]]; then
+  if [[ ! -f "${TARGET_HOME}/.zshrc" && ! -f "${TARGET_HOME}/.bashrc" && ! -f "${TARGET_HOME}/.zprofile" ]]; then
+    if [[ "${SHELL:-}" == *"bash"* ]]; then
+      touch "${TARGET_HOME}/.bashrc"
+    else
+      touch "${TARGET_HOME}/.zshrc"
+    fi
+  fi
+fi
+
 ensure_env_export "${TARGET_HOME}/.zshrc" || true
 ensure_env_export "${TARGET_HOME}/.bashrc" || true
 ensure_env_export "${TARGET_HOME}/.zprofile" || true

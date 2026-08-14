@@ -569,9 +569,18 @@ def parse_semver_major(version_str: Optional[str]) -> Optional[int]:
     return None
 
 
+def get_framework_root() -> str:
+    """Returns the absolute path to the Aru_Agentic_SDLC framework repository root."""
+    env_home = os.environ.get("ARU_SDLC_HOME")
+    if env_home and os.path.isdir(env_home):
+        return os.path.abspath(env_home)
+    # Fallback to the repository root containing this module (parent directory of scripts/)
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
 def get_current_framework_version(repo_root: Optional[str] = None) -> str:
     """Returns the current framework version from git tags or fallback."""
-    cwd = repo_root or "."
+    cwd = repo_root or get_framework_root()
     code, stdout, _ = run_cmd(["git", "describe", "--tags", "--abbrev=0", "--match", "v*"], check=False, cwd=cwd)
     if code == 0 and stdout:
         return stdout.strip()

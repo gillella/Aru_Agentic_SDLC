@@ -52,6 +52,65 @@ class VersionPinningTests(unittest.TestCase):
                 self.assertTrue(res)
                 mock_stderr.assert_not_called()
 
+    def test_foreign_cwd_resolves_framework_version_from_framework_root(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as foreign_dir:
+            # Initialize a foreign git repository with an unrelated tag
+            common.run_cmd(["git", "init"], cwd=foreign_dir, check=True)
+            common.run_cmd(["git", "config", "user.name", "Test"], cwd=foreign_dir, check=True)
+            common.run_cmd(["git", "config", "user.email", "test@example.com"], cwd=foreign_dir, check=True)
+            common.run_cmd(["git", "commit", "--allow-empty", "-m", "init"], cwd=foreign_dir, check=True)
+            common.run_cmd(["git", "tag", "v9.9.9"], cwd=foreign_dir, check=True)
+
+            # Ensure get_current_framework_version does not adopt v9.9.9 when cwd is foreign_dir
+            orig_cwd = os.getcwd()
+            try:
+                os.chdir(foreign_dir)
+                framework_ver = common.get_current_framework_version()
+                self.assertNotEqual(framework_ver, "v9.9.9")
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_clean_target_home_persists_exports(self):
+        import shutil
+        import subprocess
+        import tempfile
+        installer = str(ROOT / "scripts" / "install_local_agent_integrations.sh")
+        with tempfile.TemporaryDirectory() as temp_root, tempfile.TemporaryDirectory() as clean_home:
+            common.run_cmd(["git", "init", "-b", "main"], cwd=temp_root, check=True)
+            common.run_cmd(["git", "config", "user.name", "Test"], cwd=temp_root, check=True)
+            common.run_cmd(["git", "config", "user.email", "test@example.com"], cwd=temp_root, check=True)
+            os.makedirs(os.path.join(temp_root, "scripts"), exist_ok=True)
+            os.makedirs(os.path.join(temp_root, "skills", "code-review"), exist_ok=True)
+            with open(os.path.join(temp_root, "skills", "code-review", "SKILL.md"), "w") as f:
+                f.write("---\nname: code-review\n---\n")
+            if (ROOT / "templates").exists():
+                shutil.copytree(ROOT / "templates", Path(temp_root) / "templates")
+            if (ROOT / "commands").exists():
+                shutil.copytree(ROOT / "commands", Path(temp_root) / "commands")
+            shutil.copy(installer, os.path.join(temp_root, "scripts", "install_local_agent_integrations.sh"))
+            shutil.copy(str(ROOT / "scripts" / "install_cursor_integration.sh"), os.path.join(temp_root, "scripts", "install_cursor_integration.sh"))
+            common.run_cmd(["git", "add", "."], cwd=temp_root, check=True)
+            common.run_cmd(["git", "commit", "-m", "init"], cwd=temp_root, check=True)
+            common.run_cmd(["git", "tag", "v1.0.0"], cwd=temp_root, check=True)
+
+            cmd = [
+                os.path.join(temp_root, "scripts", "install_local_agent_integrations.sh"),
+                "--cursor-only",
+                "--aru-home", temp_root,
+                "--target-home", clean_home,
+            ]
+            env = dict(os.environ, ARU_SDLC_REF="v1.0.0", SHELL="/bin/zsh")
+            res = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.assertEqual(res.returncode, 0, f"Installer failed: {res.stderr}")
+
+            # Verify that .zshrc was created and exports persisted
+            zshrc = Path(clean_home) / ".zshrc"
+            self.assertTrue(zshrc.exists())
+            content = zshrc.read_text(encoding="utf-8")
+            self.assertIn("export ARU_SDLC_HOME=", content)
+            self.assertIn('export ARU_SDLC_REF="v1.0.0"', content)
+
 
 if __name__ == "__main__":
     unittest.main()
