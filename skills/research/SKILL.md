@@ -78,6 +78,10 @@ fix or remove them and re-run. Do not mark Done on belief alone.
 
 ### 4. Attach the artifact to the issue
 
+Direct `gh` is allowed here: there is no findings-attach helper yet, and this
+is the sanctioned exception for posting the findings artifact (parallel to
+implementation-plan comments).
+
 ```bash
 gh issue comment <N> --body-file <FINDINGS_OR_SUMMARY_FILE>
 ```

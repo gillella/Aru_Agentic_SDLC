@@ -1,4 +1,5 @@
 import json
+import socket
 import sys
 import tempfile
 import unittest
@@ -205,6 +206,73 @@ class ResearchSkillTests(unittest.TestCase):
             self.assertEqual(code, 0)
             payload = json.loads(buf.getvalue())
             self.assertTrue(payload["ok"])
+
+    def test_markdown_doi_keeps_balanced_parentheses(self):
+        text = "See [paper](https://doi.org/10.1000/example(part-a))"
+        cites = extract_citations(text)
+        self.assertEqual(cites[0]["kind"], "doi")
+        self.assertEqual(cites[0]["identifier"], "10.1000/example(part-a)")
+
+    def test_future_verification_date_fails(self):
+        text = SAMPLE.replace("2026-08-14", "2099-01-01")
+        http = FakeHttp(
+            {
+                "https://export.arxiv.org/api/query?id_list=2605.22534": {
+                    "status": 200,
+                    "body": "<feed><entry><id>http://arxiv.org/abs/2605.22534</id></entry></feed>",
+                },
+                "https://example.com/factory-note": {"status": 200, "body": "ok"},
+                "https://doi.org/10.1234/example.item": {"status": 200, "body": "ok"},
+            }
+        )
+        report = verify_findings(text, http_get=http)
+        self.assertFalse(report["repo_ok"])
+        self.assertTrue(any("invalid_verification_date" in err for err in report["errors"]))
+
+    def test_cgnat_and_documentation_addresses_rejected(self):
+        from verify_citations import is_public_ip
+
+        self.assertFalse(is_public_ip("100.64.0.1"))
+        self.assertFalse(is_public_ip("192.0.2.1"))
+        with self.assertRaises(ValueError):
+            assert_public_url("http://100.64.0.1/secret")
+
+    def test_dns_rebinding_connects_to_validated_address_only(self):
+        from verify_citations import default_http_get
+
+        infos = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80)),
+        ]
+        seen = []
+
+        class FakeResp:
+            status = 200
+
+            def getheader(self, name, default=None):
+                return default
+
+            def read(self, n=-1):
+                return b""
+
+        class FakeConn:
+            def __init__(self, host, *args, **kwargs):
+                seen.append(host)
+
+            def request(self, *args, **kwargs):
+                return None
+
+            def getresponse(self):
+                return FakeResp()
+
+            def close(self):
+                return None
+
+        with patch("verify_citations.socket.getaddrinfo", return_value=infos), patch(
+            "verify_citations.http.client.HTTPConnection", FakeConn
+        ):
+            payload = default_http_get("http://evil.example/path", read_body=False)
+        self.assertEqual(payload["status"], 200)
+        self.assertEqual(seen, ["8.8.8.8"])
 
 
 def default_rejecting_http(url: str, timeout: float = 20.0):

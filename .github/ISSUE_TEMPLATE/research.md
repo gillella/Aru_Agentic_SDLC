@@ -2,7 +2,7 @@
 name: Research
 about: Bounded research question that produces a cited findings artifact
 title: 'research: '
-labels: 'type:research'
+labels: 'type:research, status:backlog'
 assignees: ''
 ---
 

@@ -640,10 +640,14 @@ def main():
                 from claim_issue import claim_issue
                 from common import get_issue
                 for number in res["claimable_issues"]:
+                    issue_meta = get_issue(number)
+                    if not issue_meta:
+                        print(
+                            f"[WARN] Could not read issue #{number}; skipping claim.",
+                            file=sys.stderr,
+                        )
+                        continue
                     if claim_issue(number, args.agent) == EXIT_OK:
-                        issue_meta = get_issue(number) or {
-                            "number": number, "title": "", "labels": [],
-                        }
                         work = {
                             "type": "issue",
                             "issue": number,

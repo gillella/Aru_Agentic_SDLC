@@ -8,18 +8,20 @@ citations fail closed. Network failures are reported as unresolved.
 from __future__ import annotations
 
 import argparse
+import http.client
 import ipaddress
 import json
 import re
 import socket
+import ssl
 import sys
+import time
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import urljoin, urlparse
 
 ARXIV_RE = re.compile(
     r"(?:arxiv\.org/(?:abs|pdf)/|arxiv:)(?P<id>\d{4}\.\d{4,5})(?:v\d+)?",
@@ -30,13 +32,14 @@ DOI_RE = re.compile(
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"https?://[^\s\)\]\>\"']+", re.IGNORECASE)
-MD_LINK_RE = re.compile(r"\[[^\]]*\]\((?P<url>https?://[^)\s]+)\)", re.IGNORECASE)
+MD_LINK_START_RE = re.compile(r"\[[^\]]*\]\(", re.IGNORECASE)
 FINDING_LINE_RE = re.compile(r"^(?:\d+\.|[-*])\s+\S+")
 REPO_CLAIM_RE = re.compile(
     r"^[-*]\s*(?:path|file|code)\s*:\s*(?P<path>\S+)\s*[—\-–]\s*"
     r"verified\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})\b",
     re.IGNORECASE | re.MULTILINE,
 )
+MAX_ARXIV_BODY = 256 * 1024
 
 Resolver = Callable[[str], Dict[str, Any]]
 
@@ -56,6 +59,33 @@ def _clean_doi(raw: str) -> str:
     return doi
 
 
+def extract_markdown_link_urls(text: str) -> List[str]:
+    """Extract Markdown link destinations, allowing balanced parentheses in URLs."""
+    urls: List[str] = []
+    for match in MD_LINK_START_RE.finditer(text):
+        i = match.end()
+        depth = 1
+        while i < len(text) and depth:
+            ch = text[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch in "\n\r":
+                break
+            i += 1
+        if depth != 0:
+            continue
+        dest = text[match.end():i].strip()
+        if dest.startswith("<") and dest.endswith(">"):
+            dest = dest[1:-1].strip()
+        if dest.lower().startswith(("http://", "https://")):
+            urls.append(dest.rstrip(".,;"))
+    return urls
+
+
 def extract_citations(text: str) -> List[Dict[str, str]]:
     """Return unique citation dicts with kind + identifier (order preserved)."""
     found: List[Dict[str, str]] = []
@@ -68,7 +98,7 @@ def extract_citations(text: str) -> List[Dict[str, str]]:
         seen.add(key)
         found.append({"kind": kind, "identifier": identifier})
 
-    link_urls = [m.group("url").rstrip(".,;") for m in MD_LINK_RE.finditer(text)]
+    link_urls = extract_markdown_link_urls(text)
     for url in link_urls:
         arxiv = ARXIV_RE.search(url)
         doi = DOI_RE.search(url)
@@ -116,7 +146,7 @@ def extract_finding_lines(text: str) -> List[str]:
 
 def finding_has_citation(line: str) -> bool:
     return bool(
-        MD_LINK_RE.search(line)
+        extract_markdown_link_urls(line)
         or ARXIV_RE.search(line)
         or DOI_RE.search(line)
         or URL_RE.search(line)
@@ -139,7 +169,9 @@ def extract_repo_claims(text: str) -> Dict[str, Any]:
     invalid_dates = []
     for claim in dated:
         try:
-            date.fromisoformat(claim["verified"])
+            verified_date = date.fromisoformat(claim["verified"])
+            if verified_date > date.today():
+                invalid_dates.append(claim)
         except ValueError:
             invalid_dates.append(claim)
     return {
@@ -154,51 +186,152 @@ def is_public_ip(address: str) -> bool:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return False
-    return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
+    return bool(ip.is_global)
 
 
-def assert_public_url(url: str) -> None:
+def resolve_public_addresses(host: str, port: int) -> List[str]:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"dns:{exc}") from exc
+    if not infos:
+        raise ValueError("dns_empty")
+    addresses: List[str] = []
+    for info in infos:
+        sockaddr = info[4]
+        addr = sockaddr[0]
+        if not is_public_ip(addr):
+            raise ValueError(f"private_address:{addr}")
+        if addr not in addresses:
+            addresses.append(addr)
+    return addresses
+
+
+def assert_public_url(url: str) -> List[str]:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("unsupported_scheme")
     host = parsed.hostname
     if not host:
         raise ValueError("missing_host")
-    try:
-        infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise ValueError(f"dns:{exc}") from exc
-    if not infos:
-        raise ValueError("dns_empty")
-    for info in infos:
-        sockaddr = info[4]
-        if not is_public_ip(sockaddr[0]):
-            raise ValueError(f"private_address:{sockaddr[0]}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return resolve_public_addresses(host, port)
 
 
-class PublicOnlyRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        assert_public_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+def _request_path(parsed) -> str:
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    return path
 
 
-def default_http_get(url: str, timeout: float = 20.0) -> Dict[str, Any]:
-    assert_public_url(url)
-    req = Request(url, method="GET", headers={"User-Agent": "aru-verify-citations/1.0"})
-    opener = build_opener(PublicOnlyRedirectHandler)
-    with opener.open(req, timeout=timeout) as resp:
-        body = resp.read()
-        return {
-            "status": getattr(resp, "status", 200),
-            "body": body.decode("utf-8", errors="replace"),
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection to a validated IP with SNI for the original hostname."""
+
+    def __init__(self, ip_address: str, *, server_hostname: str, **kwargs):
+        self._server_hostname = server_hostname
+        super().__init__(ip_address, **kwargs)
+
+    def connect(self) -> None:
+        sock = socket.create_connection((self.host, self.port), self.timeout)
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+            target = self.sock
+        else:
+            target = sock
+        context = self._context or ssl.create_default_context()
+        self.sock = context.wrap_socket(target, server_hostname=self._server_hostname)
+
+
+def default_http_get(
+    url: str,
+    timeout: float = 20.0,
+    *,
+    read_body: bool = True,
+    max_body: int = MAX_ARXIV_BODY,
+    max_redirects: int = 5,
+) -> Dict[str, Any]:
+    """GET a public URL by connecting to a validated IP (DNS-rebinding safe)."""
+    deadline = time.monotonic() + timeout
+    current = url
+    for _ in range(max_redirects + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("request_deadline")
+        addresses = assert_public_url(current)
+        parsed = urlparse(current)
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        path = _request_path(parsed)
+        headers = {
+            "User-Agent": "aru-verify-citations/1.0",
+            "Host": host if parsed.port is None else f"{host}:{parsed.port}",
+            "Accept": "*/*",
         }
+        last_error: Optional[BaseException] = None
+        redirected = False
+        for address in addresses:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("request_deadline")
+            try:
+                if parsed.scheme == "https":
+                    conn: http.client.HTTPConnection = _PinnedHTTPSConnection(
+                        address,
+                        server_hostname=host,
+                        port=port,
+                        timeout=remaining,
+                        context=ssl.create_default_context(),
+                    )
+                else:
+                    conn = http.client.HTTPConnection(
+                        address, port=port, timeout=remaining
+                    )
+                try:
+                    conn.request("GET", path, headers=headers)
+                    resp = conn.getresponse()
+                    status = resp.status
+                    location = resp.getheader("Location")
+                    if status in {301, 302, 303, 307, 308} and location:
+                        resp.read()
+                        current = urljoin(current, location)
+                        redirected = True
+                        break
+                    if not read_body:
+                        # Drain nothing useful; status is enough for URL/DOI checks.
+                        while resp.read(8192):
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise TimeoutError("request_deadline")
+                            break
+                        return {"status": status, "body": ""}
+                    chunks: List[bytes] = []
+                    total = 0
+                    while total < max_body:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("request_deadline")
+                        chunk = resp.read(min(8192, max_body - total))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                    return {
+                        "status": status,
+                        "body": b"".join(chunks).decode("utf-8", errors="replace"),
+                    }
+                finally:
+                    conn.close()
+            except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError, ValueError) as exc:
+                last_error = exc
+                continue
+        if redirected:
+            continue
+        if last_error is not None:
+            raise last_error
+        raise URLError("no_public_address")
+    raise URLError("too_many_redirects")
 
 
 def resolve_arxiv(arxiv_id: str, http_get: Optional[Resolver] = None) -> CitationResult:
@@ -217,10 +350,12 @@ def resolve_arxiv(arxiv_id: str, http_get: Optional[Resolver] = None) -> Citatio
 
 
 def resolve_doi(doi: str, http_get: Optional[Resolver] = None) -> CitationResult:
-    getter = http_get or default_http_get
     url = f"https://doi.org/{doi}"
     try:
-        payload = getter(url)
+        if http_get is None:
+            payload = default_http_get(url, read_body=False)
+        else:
+            payload = http_get(url)
     except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
         if isinstance(exc, HTTPError) and exc.code == 404:
             return CitationResult(doi, "doi", False, "not_found")
@@ -234,9 +369,11 @@ def resolve_doi(doi: str, http_get: Optional[Resolver] = None) -> CitationResult
 
 
 def resolve_url(url: str, http_get: Optional[Resolver] = None) -> CitationResult:
-    getter = http_get or default_http_get
     try:
-        payload = getter(url)
+        if http_get is None:
+            payload = default_http_get(url, read_body=False)
+        else:
+            payload = http_get(url)
     except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
         if isinstance(exc, ValueError):
             return CitationResult(url, "url", False, str(exc))
