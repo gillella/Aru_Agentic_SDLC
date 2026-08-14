@@ -31,7 +31,11 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertEqual(stop["target"], "cursor-1")
         inter = scr.parse_command("intervention #172 ship it")
         self.assertEqual(inter["ref"], "172")
+        self.assertEqual(inter["kind"], "issue")
         self.assertEqual(inter["decision"], "ship it")
+        pr_cmd = scr.parse_command("intervention pr #88 ship it")
+        self.assertEqual(pr_cmd["kind"], "pr")
+        self.assertEqual(pr_cmd["ref"], "88")
         self.assertIsNone(scr.parse_command("hello there"))
         self.assertIsNone(scr.parse_command("<@U123> please do not stop all"))
 
@@ -111,6 +115,29 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertEqual(posted, [("issue", 88, "do this", "/abs/checkout")])
         self.assertIn("copied intervention", reply)
 
+        pr_posted = []
+
+        def comment_pr(kind, number, decision, repo_dir):
+            pr_posted.append((kind, number, decision, repo_dir))
+            return True
+
+        parsed_pr = scr.parse_command("intervention pr #99 do this")
+        secret = "arbitrary-signing-secret-value"
+        cfg = sample_config(signing_secret=secret)
+        parsed_secret = scr.parse_command(f"intervention #7 leak {secret} now")
+        leaked = []
+        scr.handle_command(
+            cfg,
+            parsed_secret,
+            "/repo",
+            "/abs/checkout",
+            lambda kind, number, decision, repo_dir: leaked.append(decision) or True,
+        )
+        self.assertEqual(leaked, ["leak [redacted] now"])
+        scr.handle_command(sample_config(), parsed_pr, "/repo", "/abs/checkout", comment_pr)
+        self.assertEqual(pr_posted[0][0], "pr")
+        self.assertEqual(pr_posted[0][1], 99)
+
     def test_status_uses_fleet_status(self):
         fake = {
             "state": "waiting",
@@ -155,6 +182,14 @@ class SlackControlRoomTests(unittest.TestCase):
     def test_start_without_operator_fails_closed(self):
         with patch.object(scr, "_bolt_available", return_value=True):
             code = scr.start_bridge(sample_config(operator_user_id=""), "/repo", ".")
+        self.assertEqual(code, 1)
+
+    def test_start_refuses_live_duplicate_pid(self):
+        with patch.object(scr, "_bolt_available", return_value=True), \
+             patch.object(scr, "_pid_alive", return_value=True):
+            code = scr.start_bridge(
+                sample_config(app_token="xapp-" + ("b" * 20)), "/repo", "."
+            )
         self.assertEqual(code, 1)
 
     def test_start_without_bolt_fails_closed(self):

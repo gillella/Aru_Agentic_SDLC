@@ -17,6 +17,7 @@ from slack_notify import (  # noqa: E402
     load_slack_env,
     post_event,
     redact,
+    secrets_from_config,
 )
 
 
@@ -31,6 +32,13 @@ def sample_config(**kwargs):
 
 
 class SlackNotifyTests(unittest.TestCase):
+    def test_redact_strips_configured_secrets(self):
+        secret = "arbitrary-signing-secret-value"
+        config = sample_config(signing_secret=secret)
+        text = format_event({"type": "hitl", "text": f"leak {secret}"}, secrets=secrets_from_config(config))
+        self.assertNotIn(secret, text)
+        self.assertIn("[redacted]", text)
+
     def test_redact_strips_bot_tokens(self):
         # Shape must not match Slack's live token grammar or push protection.
         text = "leak xoxb-PLACEHOLDERTOKENVALUE and Bearer secret"

@@ -83,11 +83,19 @@ def config_from_env(values: Dict[str, str]) -> SlackConfig:
     )
 
 
-def redact(text: str) -> str:
-    return SECRET_RE.sub("[redacted]", text or "")
+def redact(text: str, extra: Optional[list[str]] = None) -> str:
+    out = SECRET_RE.sub("[redacted]", text or "")
+    for secret in extra or []:
+        if secret:
+            out = out.replace(secret, "[redacted]")
+    return out
 
 
-def format_event(event: Dict[str, Any]) -> str:
+def secrets_from_config(config: SlackConfig) -> list[str]:
+    return [value for value in (config.bot_token, config.app_token, config.signing_secret) if value]
+
+
+def format_event(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> str:
     kind = event.get("type", "state")
     agent = event.get("agent", "unknown")
     family = event.get("family", "unknown")
@@ -102,7 +110,7 @@ def format_event(event: Dict[str, Any]) -> str:
     if pr:
         ref.append(f"PR #{pr}")
     ref_s = " ".join(ref) if ref else "no GitHub ref"
-    body = redact(str(event.get("text") or "")).strip()
+    body = redact(str(event.get("text") or ""), extra=secrets).strip()
     lines = [
         f"[{kind}] agent=`{agent}` family=`{family}` {ref_s}",
         f"repo={repo} state={state} ts={stamp}",
@@ -178,7 +186,7 @@ def post_event(
     key = dedupe_key(event)
     if cache.seen(key):
         return {"ok": True, "deduped": True}
-    text = format_event(event)
+    text = format_event(event, secrets=secrets_from_config(config))
     try:
         result = transport(config, text, thread_ts)
     except (OSError, URLError, HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:

@@ -21,6 +21,7 @@ from slack_notify import (
     load_slack_env,
     post_event,
     redact,
+    secrets_from_config,
 )
 
 STOP_PATH = Path.home() / ".aru" / "factory-loop.stop"
@@ -29,7 +30,10 @@ COMMAND_RE = re.compile(
     r"(?P<verb>status|stop|resume|intervention)\b(?:\s+(?P<rest>.+))?",
     re.IGNORECASE,
 )
-ISSUE_RE = re.compile(r"#(\d+)|(?:issue|pr)\s*[#:]?\s*(\d+)", re.IGNORECASE)
+ISSUE_RE = re.compile(
+    r"(?:(?P<kind>issue|pr)\s*[#:]?\s*(?P<numbered>\d+)|#(?P<hash>\d+))",
+    re.IGNORECASE,
+)
 
 
 def _now() -> str:
@@ -59,8 +63,11 @@ def parse_command(text: str) -> Optional[Dict[str, str]]:
         parsed["decision"] = ""
     elif verb == "intervention":
         found = ISSUE_RE.search(rest)
-        parsed["ref"] = next((g for g in found.groups() if g), "") if found else ""
+        parsed["kind"] = "issue"
+        parsed["ref"] = ""
         if found:
+            parsed["kind"] = (found.group("kind") or "issue").lower()
+            parsed["ref"] = found.group("numbered") or found.group("hash") or ""
             parsed["decision"] = rest[found.end():].strip()
     return parsed
 
@@ -134,9 +141,9 @@ def status_text(repo_dir: str = ".") -> str:
     return "\n".join(lines)
 
 
-def parse_ref(ref: str) -> Tuple[str, int]:
-    number = int(ref)
-    return ("issue", number)
+def parse_ref(ref: str, kind: str = "issue") -> Tuple[str, int]:
+    token = "pr" if kind.lower() == "pr" else "issue"
+    return (token, int(ref))
 
 
 def handle_command(
@@ -155,10 +162,11 @@ def handle_command(
         return apply_resume(project, parsed.get("target") or "all")
     if verb == "intervention":
         ref = parsed.get("ref") or ""
-        decision = redact(parsed.get("decision") or "")
-        if not ref or not decision:
+        raw = parsed.get("decision") or ""
+        if not ref or not raw:
             return "intervention needs `#<issue-or-pr> <decision>`"
-        kind, number = parse_ref(ref)
+        kind, number = parse_ref(ref, parsed.get("kind") or "issue")
+        decision = redact(raw, extra=secrets_from_config(config))
         ok = comment(kind, number, decision, repo_dir)
         if not ok:
             return f"could not copy intervention onto GitHub {kind} #{number}"
@@ -308,12 +316,16 @@ def start_bridge(config: SlackConfig, project: str, repo_dir: str) -> int:
             file=sys.stderr,
         )
         return 1
-    from slack_bolt import App
-    from slack_bolt.adapter.socket_mode import SocketModeHandler
-
     if not config.app_token.startswith("xapp-"):
         print("[ERROR] SLACK_APP_TOKEN (xapp-) is required for Socket Mode", file=sys.stderr)
         return 1
+    if _pid_alive(PID_PATH):
+        print("[ERROR] bridge already running", file=sys.stderr)
+        return 1
+    if PID_PATH.is_file():
+        clear_pid()
+    from slack_bolt import App
+    from slack_bolt.adapter.socket_mode import SocketModeHandler
     app = App(token=config.bot_token)
     seen: set[str] = set()
 
