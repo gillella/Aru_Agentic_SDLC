@@ -27,7 +27,13 @@ import subprocess
 import sys
 from datetime import datetime
 
-from common import get_repo_slug, run_cmd
+from common import (
+    VERIFICATION_EVIDENCE_END,
+    VERIFICATION_EVIDENCE_SCHEMA,
+    VERIFICATION_EVIDENCE_START,
+    get_repo_slug,
+    run_cmd,
+)
 from update_issue_status import update_status
 
 EXIT_OK = 0
@@ -606,6 +612,74 @@ def check_issue_link(pr):
     return True, "Linked to " + ", ".join(f"#{i}" for i in issues) + "."
 
 
+def parse_verification_evidence(body):
+    """Parses the marker-delimited verification JSON without scraping prose."""
+    body = body or ""
+    if body.count(VERIFICATION_EVIDENCE_START) > 1 or body.count(VERIFICATION_EVIDENCE_END) > 1:
+        return None, "multiple verification evidence blocks"
+    _before, marker, remainder = body.partition(VERIFICATION_EVIDENCE_START)
+    if not marker:
+        return None, "missing"
+    payload, end_marker, _after = remainder.partition(VERIFICATION_EVIDENCE_END)
+    if not end_marker:
+        return None, "missing closing verification marker"
+    payload = payload.strip()
+    if payload.startswith("```json"):
+        payload = payload[len("```json"):].lstrip()
+    if payload.endswith("```"):
+        payload = payload[:-3].rstrip()
+    try:
+        evidence = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        return None, f"invalid verification JSON: {exc.msg}"
+    if not isinstance(evidence, dict):
+        return None, "verification evidence must be a JSON object"
+    if evidence.get("schema") != VERIFICATION_EVIDENCE_SCHEMA:
+        return None, "unsupported verification evidence schema"
+    return evidence, None
+
+
+def check_verification(pr):
+    """Validates recorded commands while warning on legacy or not-run PRs."""
+    evidence, error = parse_verification_evidence(pr.get("body") or "")
+    if error == "missing":
+        return True, "⚠️  No verification evidence block; legacy warning only."
+    if error:
+        return False, f"Verification evidence is malformed: {error}."
+
+    status = evidence.get("status")
+    commands = evidence.get("commands")
+    if not isinstance(commands, list):
+        return False, "Verification evidence commands must be a JSON array."
+    if status == "not_run":
+        if commands:
+            return False, "Verification status is not_run but command records are present."
+        return True, "⚠️  Local verification was explicitly not run; warning-only rollout."
+    if status not in {"passed", "failed"}:
+        return False, f"Unknown verification status: {status!r}."
+    if not commands:
+        return False, f"Verification status is {status} but no commands were recorded."
+
+    for record in commands:
+        if not isinstance(record, dict):
+            return False, "Each verification command record must be a JSON object."
+        if not isinstance(record.get("command"), list) or not record["command"]:
+            return False, "A verification command is missing its argv array."
+        if not isinstance(record.get("exit_code"), int):
+            return False, "A verification command is missing an integer exit_code."
+        duration = record.get("duration_seconds")
+        if not isinstance(duration, (int, float)) or duration < 0:
+            return False, "A verification command has an invalid duration_seconds."
+        expected = "passed" if record["exit_code"] == 0 else "failed"
+        if record.get("status") != expected:
+            return False, "A verification command status disagrees with its exit_code."
+
+    failed = [record for record in commands if record["exit_code"] != 0]
+    if status == "failed" or failed:
+        return False, f"Local verification recorded {len(failed)} failing command(s)."
+    return True, f"Local verification passed {len(commands)} recorded command(s)."
+
+
 def check_acceptance(issue_num, issue_body):
     pending = unticked_criteria(issue_body)
     if pending:
@@ -1003,6 +1077,7 @@ def evaluate_dod(pr, issue_bodies, evidence):
     gates = [
         ("open", *check_open(pr)),
         ("issue link", *check_issue_link(pr)),
+        ("verification", *check_verification(pr)),
         ("ci", *check_ci(pr)),
         ("review", *check_reviews(pr, evidence)),
         ("rebased", *check_rebased(pr)),

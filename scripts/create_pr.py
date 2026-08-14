@@ -15,10 +15,21 @@ running Sonnet, so "a different tool" is not necessarily a different reviewer.
 """
 
 import argparse
+import json
+import shlex
 import sys
 from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
-from common import ensure_label, get_current_branch, get_issue, run_cmd
+from common import (
+    VERIFICATION_EVIDENCE_END,
+    VERIFICATION_EVIDENCE_SCHEMA,
+    VERIFICATION_EVIDENCE_START,
+    ensure_label,
+    get_current_branch,
+    get_issue,
+    run_cmd,
+)
 
 NEEDS_REVIEW_LABEL = "needs-review"
 
@@ -26,6 +37,53 @@ NEEDS_REVIEW_LABEL = "needs-review"
 # make every PR look cross-family to the picker, which is the one failure mode
 # this label exists to prevent.
 MODEL_FAMILIES = ("anthropic", "openai", "google", "meta", "mistral", "xai", "human")
+
+
+def collect_verification_evidence(commands: Optional[List[str]] = None) -> Dict:
+    """Runs configured verification commands and returns a versioned record."""
+    records = []
+    for command in commands or []:
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            argv = []
+        if not argv:
+            records.append({
+                "command": ["<invalid-command>"],
+                "duration_seconds": 0.0,
+                "exit_code": 2,
+                "status": "failed",
+            })
+            continue
+        code, _, _ = run_cmd(argv, check=False, evidence=records)
+        print(f"{'✅' if code == 0 else '❌'} Verification ({code}): {records[-1]['command']}")
+
+    if not records:
+        status = "not_run"
+    elif all(record["exit_code"] == 0 for record in records):
+        status = "passed"
+    else:
+        status = "failed"
+    return {
+        "commands": records,
+        "schema": VERIFICATION_EVIDENCE_SCHEMA,
+        "status": status,
+    }
+
+
+def render_verification_evidence(evidence: Dict) -> str:
+    """Renders stable marker-delimited JSON for machine parsing."""
+    payload = json.dumps(evidence, indent=2, sort_keys=True)
+    return (
+        "\n\n<details>\n"
+        "<summary>Local verification evidence</summary>\n\n"
+        f"{VERIFICATION_EVIDENCE_START}\n"
+        "```json\n"
+        f"{payload}\n"
+        "```\n"
+        f"{VERIFICATION_EVIDENCE_END}\n"
+        "</details>"
+    )
 
 
 def apply_identity(pr_ref: str, agent: str = "", family: str = "") -> bool:
@@ -108,7 +166,8 @@ def enqueue_review(pr_ref: str) -> bool:
 
 
 def create_pr(issue_id: int, title: str = "", body: str = "",
-              agent: str = "", family: str = "") -> bool:
+              agent: str = "", family: str = "",
+              verification_commands: Optional[List[str]] = None) -> bool:
     current_branch = get_current_branch()
     issue = get_issue(issue_id)
 
@@ -116,7 +175,15 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
         title = issue["title"] if issue else f"Fix issue #{issue_id}"
 
     closure_footer = f"\n\nCloses #{issue_id}"
-    full_body = (body.strip() + closure_footer) if body else f"Implementation for issue #{issue_id}.{closure_footer}"
+    base_body = body.strip() if body else f"Implementation for issue #{issue_id}."
+    if VERIFICATION_EVIDENCE_START in base_body or VERIFICATION_EVIDENCE_END in base_body:
+        print(
+            "[ERROR] PR body contains reserved verification evidence markers.",
+            file=sys.stderr,
+        )
+        return False
+    evidence = collect_verification_evidence(verification_commands)
+    full_body = base_body + render_verification_evidence(evidence) + closure_footer
 
     print(f"Opening Pull Request for branch '{current_branch}' linking 'Closes #{issue_id}'...")
     cmd = ["gh", "pr", "create", "--title", title, "--body", full_body, "--head", current_branch]
@@ -149,6 +216,15 @@ def main():
     parser.add_argument("--issue", type=int, required=True, help="GitHub Issue Number")
     parser.add_argument("--title", type=str, default="", help="Pull Request Title")
     parser.add_argument("--body", type=str, default="", help="Pull Request Description Body")
+    parser.add_argument(
+        "--verify-command",
+        action="append",
+        default=[],
+        help=(
+            "Verification command to execute and record; repeat for multiple commands. "
+            "Commands are tokenized without a shell."
+        ),
+    )
     # Required, matching claim_issue.py. It was optional and defaulted to "",
     # so a caller who simply forgot produced a PR with no author:<id>, and
     # merge_pr.py then accepted any review on it - including a self-review.
@@ -185,7 +261,14 @@ def main():
         print("[WARN] No --model-family given. Review routing cannot prefer a "
               "reviewer whose blind spots differ from this author's.", file=sys.stderr)
 
-    ok = create_pr(args.issue, args.title, args.body, args.agent, args.family.lower())
+    ok = create_pr(
+        args.issue,
+        args.title,
+        args.body,
+        args.agent,
+        args.family.lower(),
+        verification_commands=args.verify_command,
+    )
     sys.exit(0 if ok else 1)
 
 

@@ -12,20 +12,89 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-def run_cmd(cmd: List[str], check: bool = True, cwd: Optional[str] = None) -> Tuple[int, str, str]:
-    """Runs a system command and returns (returncode, stdout, stderr)."""
+VERIFICATION_EVIDENCE_SCHEMA = "aru.verification.v1"
+VERIFICATION_EVIDENCE_START = "<!-- aru-verification-evidence:v1 -->"
+VERIFICATION_EVIDENCE_END = "<!-- /aru-verification-evidence -->"
+
+_SENSITIVE_ARGUMENT_NAMES = {
+    "api-key", "apikey", "auth", "credential", "credentials", "key",
+    "password", "passwd", "secret", "token",
+}
+
+
+def _looks_sensitive(name: str) -> bool:
+    normalized = name.lstrip("-").replace("_", "-").lower()
+    return any(part in _SENSITIVE_ARGUMENT_NAMES for part in normalized.split("-"))
+
+
+def _redact_local_path(value: str) -> str:
+    """Removes absolute filesystem locations while keeping a useful basename."""
+    if not value or "://" in value:
+        return value
+    if Path(value).is_absolute():
+        return f"<local-path>/{Path(value).name}" if Path(value).name else "<local-path>"
+    for separator in ("=", ":"):
+        prefix, found, suffix = value.partition(separator)
+        if found and Path(suffix).is_absolute():
+            name = Path(suffix).name
+            replacement = f"<local-path>/{name}" if name else "<local-path>"
+            return f"{prefix}{separator}{replacement}"
+    if value.startswith("-I/"):
+        return f"-I<local-path>/{Path(value[2:]).name}"
+    return value
+
+
+def sanitize_command(cmd: List[str]) -> List[str]:
+    """Redacts common secret arguments and absolute local paths from evidence."""
+    sanitized = []
+    redact_next = False
+    for raw_arg in cmd:
+        arg = str(raw_arg)
+        if redact_next:
+            sanitized.append("<redacted>")
+            redact_next = False
+            continue
+        name, separator, _value = arg.partition("=")
+        if separator and _looks_sensitive(name):
+            sanitized.append(f"{name}=<redacted>")
+            continue
+        if arg.startswith("-") and _looks_sensitive(arg):
+            sanitized.append(arg)
+            redact_next = True
+            continue
+        sanitized.append(_redact_local_path(arg))
+    return sanitized
+
+
+def run_cmd(
+    cmd: List[str],
+    check: bool = True,
+    cwd: Optional[str] = None,
+    evidence: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[int, str, str]:
+    """Runs a command and optionally appends sanitized verification evidence."""
+    started = time.monotonic()
     try:
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
         if check and res.returncode != 0:
             print(f"[ERROR] Command failed ({' '.join(cmd)}):\n{res.stderr.strip()}", file=sys.stderr)
-        return res.returncode, res.stdout.strip(), res.stderr.strip()
+        code, stdout, stderr = res.returncode, res.stdout.strip(), res.stderr.strip()
     except Exception as e:
         if check:
             print(f"[EXCEPT] Exception running command ({' '.join(cmd)}): {e}", file=sys.stderr)
-        return 1, "", str(e)
+        code, stdout, stderr = 1, "", str(e)
+    if evidence is not None:
+        evidence.append({
+            "command": sanitize_command(cmd),
+            "duration_seconds": round(max(0.0, time.monotonic() - started), 3),
+            "exit_code": code,
+            "status": "passed" if code == 0 else "failed",
+        })
+    return code, stdout, stderr
 
 
 def run_gh_json(cmd: List[str]) -> Optional[Any]:
