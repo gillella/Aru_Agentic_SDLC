@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 import os
+import builtins
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -191,6 +192,21 @@ class SlackNotifyTests(unittest.TestCase):
                 ])
             self.assertEqual(code, 0)
             posted.assert_not_called()
+
+    def test_cli_skips_cleanly_when_registry_module_cannot_import(self):
+        original_import = builtins.__import__
+
+        def unavailable(name, *args, **kwargs):
+            if name == "slack_projects":
+                raise ImportError("registry module unavailable")
+            return original_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", side_effect=unavailable):
+            code = main([
+                "--agent", "codex-1", "--family", "openai", "--event", "state",
+                "--project-id", "proj_missing",
+            ])
+        self.assertEqual(code, 0)
 
     def test_post_event_slack_down_does_not_raise(self):
         def transport(config, text, thread_ts):

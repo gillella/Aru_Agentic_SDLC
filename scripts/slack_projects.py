@@ -372,8 +372,13 @@ class ProjectRegistry:
         return created
 
     def close(self, project_id: str, operator: str) -> ProjectRecord:
+        changed = {"value": False}
+
         def apply(document: Dict[str, Any]) -> ProjectRecord:
-            current = ProjectRecord.from_dict(document["projects"].get(project_id, {}))
+            existing = document["projects"].get(project_id)
+            if existing is None:
+                raise RegistryError(f"unknown project_id: {project_id}")
+            current = ProjectRecord.from_dict(existing)
             if current.lifecycle == "closed":
                 return current
             timestamp = _now()
@@ -382,10 +387,12 @@ class ProjectRegistry:
                 updated_at=timestamp, updated_by=operator,
             )
             document["projects"][project_id] = asdict(updated)
+            changed["value"] = True
             return updated
 
         closed = self._mutate(apply)
-        self.audit("close", operator, project_id)
+        if changed["value"]:
+            self.audit("close", operator, project_id)
         return closed
 
     def recover(

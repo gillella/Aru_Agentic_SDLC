@@ -105,8 +105,8 @@ python3 scripts/slack_control_room.py status --project-id proj_...
 python3 scripts/slack_control_room.py stop
 ```
 
-`start` runs one Socket Mode bridge for every active registry record. `stop`
-stops only the bridge process, never a factory loop.
+`start` runs a single Socket Mode bridge that serves every active registry
+record. `stop` stops only the bridge process, never a factory loop.
 
 For each inbound mention, the bridge resolves exactly one active project
 before authorization, deduplication, command parsing, filesystem mutation,
@@ -153,7 +153,7 @@ only; use local `verify`, `recover`, or `close` for recovery.
 The bridge authorizes only the configured operator user in the record's Slack
 workspace and channel. Outbound text redacts credential-shaped data and the
 HTTP client refuses redirects. Duplicate inbound deliveries persist as
-`project_id:team:channel:event` identities in
+`project_id|team|channel|event` identities in
 `~/.aru/slack-control-room-seen.json`, so restarts do not replay commands and
 the same Slack event ID cannot collide across projects.
 

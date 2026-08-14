@@ -221,7 +221,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     try:
         from slack_projects import DEFAULT_REGISTRY_PATH, ProjectRegistry, RegistryError
-
+    except ImportError as exc:
+        print(f"[WARN] Slack notify skipped: {exc}", file=sys.stderr)
+        return 0
+    try:
         base = config_from_env(load_slack_env(Path(args.env_file)), require_channel=False)
         project = ProjectRegistry(
             Path(args.registry_file) if args.registry_file else DEFAULT_REGISTRY_PATH

@@ -164,6 +164,8 @@ class SlackControlRoomTests(unittest.TestCase):
             ("C01234567", "proj_checkout_a"),
             ("C11111111", "proj_checkout_b"),
         ])
+        keys = json.loads(self.seen_path.read_text(encoding="utf-8"))["ids"]
+        self.assertIn("proj_checkout_a|T01234567|C01234567|evt-1", keys)
 
     def test_stop_and_resume_use_only_canonical_checkout_path(self):
         with patch.object(scr, "STOP_PATH", self.stop_path):
@@ -193,6 +195,16 @@ class SlackControlRoomTests(unittest.TestCase):
         document = scr.load_stop_file(self.stop_path)
         self.assertEqual(document["projects"], [self.project_a.local_path])
         self.assertEqual(document.get("agents", []), [])
+        self.assertEqual(self.stop_path.stat().st_mode & 0o777, 0o600)
+
+    def test_legacy_stop_file_adoption_uses_portable_fchmod(self):
+        self.stop_path.write_text('{"projects": []}\n', encoding="utf-8")
+        self.stop_path.chmod(0o644)
+        with patch.object(os, "chmod", side_effect=NotImplementedError) as chmod, \
+             patch.object(os, "fchmod", wraps=os.fchmod) as secured:
+            scr.load_stop_file(self.stop_path)
+        chmod.assert_not_called()
+        secured.assert_called()
         self.assertEqual(self.stop_path.stat().st_mode & 0o777, 0o600)
 
     def test_world_writable_legacy_stop_file_fails_closed(self):
@@ -323,6 +335,19 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertFalse(self.stop_path.exists())
 
+    def test_corrupt_seen_store_returns_operator_visible_failure(self):
+        self.seen_path.write_text("{broken", encoding="utf-8")
+        self.seen_path.chmod(0o600)
+        replies = []
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry, self.payload(event_id="corrupt-store"), set(),
+            notify=lambda _config, event: replies.append(event["text"]) or {"ok": True},
+            seen_path=self.seen_path,
+        )
+        self.assertIn("state is unusable", reply)
+        self.assertEqual(replies, [reply])
+        self.assertEqual(self.seen_path.read_text(encoding="utf-8"), "{broken")
+
     def test_intervention_targets_only_resolved_checkout(self):
         calls = []
         reply = scr.handle_command(
@@ -341,6 +366,27 @@ class SlackControlRoomTests(unittest.TestCase):
         with self.assertRaises(Exception):
             scr.record_seen_id("key", self.seen_path)
         self.assertEqual(self.seen_path.read_bytes(), before)
+
+    def test_stop_bridge_handles_process_exit_during_signal(self):
+        with patch.object(scr, "PID_PATH", self.root / "bridge.pid"), \
+             patch.object(scr, "_pid_record", return_value={"pid": 123}), \
+             patch.object(scr, "_pid_exists", return_value=True), \
+             patch.object(scr, "_is_our_bridge", return_value=True), \
+             patch.object(os, "kill", side_effect=ProcessLookupError), \
+             patch.object(scr, "clear_pid") as clear:
+            scr.PID_PATH.write_text("{}", encoding="utf-8")
+            self.assertEqual(scr.stop_bridge(), "bridge is not running")
+        clear.assert_called_once()
+
+    def test_stop_bridge_reports_signal_permission_failure(self):
+        with patch.object(scr, "PID_PATH", self.root / "bridge.pid"), \
+             patch.object(scr, "_pid_record", return_value={"pid": 123}), \
+             patch.object(scr, "_pid_exists", return_value=True), \
+             patch.object(scr, "_is_our_bridge", return_value=True), \
+             patch.object(os, "kill", side_effect=PermissionError("denied")):
+            scr.PID_PATH.write_text("{}", encoding="utf-8")
+            self.assertIn("could not signal pid 123", scr.stop_bridge())
+            self.assertTrue(scr.PID_PATH.exists())
 
     def test_start_refuses_missing_operator_before_opening_bridge(self):
         code = scr.start_bridge(sample_config(operator_user_id=""), self.registry)

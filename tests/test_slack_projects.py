@@ -96,6 +96,18 @@ class SlackProjectRegistryTests(unittest.TestCase):
                 "proj_project_b",
             )
 
+    def test_close_unknown_project_reports_accurate_error(self):
+        with self.assertRaisesRegex(RegistryError, "unknown project_id: proj_missing"):
+            self.registry.close("proj_missing", "operator")
+
+    def test_repeated_close_does_not_append_a_false_audit_transition(self):
+        record = self.create_a()
+        self.registry.close(record.project_id, "operator")
+        first_count = len(json.loads(self.audit_path.read_text(encoding="utf-8"))["events"])
+        self.registry.close(record.project_id, "operator")
+        second_count = len(json.loads(self.audit_path.read_text(encoding="utf-8"))["events"])
+        self.assertEqual(second_count, first_count)
+
     def test_duplicate_repository_project_is_rejected(self):
         self.create_a()
         with self.assertRaisesRegex(RegistryError, "already has an active binding"):

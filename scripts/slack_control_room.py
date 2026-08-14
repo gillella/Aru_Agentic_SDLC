@@ -114,10 +114,24 @@ def _adopt_legacy_stop_file(path: Path) -> None:
     if mode & 0o022:
         raise RegistryError(f"factory-loop.stop is writable by another user: {path}")
     if mode != 0o600:
+        descriptor = -1
         try:
-            os.chmod(path, 0o600, follow_symlinks=False)
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise RegistryError(f"factory-loop.stop changed while securing it: {path}")
+            if stat.S_IMODE(opened.st_mode) & 0o022:
+                raise RegistryError(f"factory-loop.stop is writable by another user: {path}")
+            os.fchmod(descriptor, 0o600)
         except OSError as exc:
             raise RegistryError(f"cannot secure factory-loop.stop: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def load_stop_file(path: Optional[Path] = None) -> Dict[str, Any]:
@@ -394,19 +408,27 @@ def handle_slack_message(
     except RegistryError:
         return None
     event_id = str(payload.get("client_msg_id") or payload.get("event_id") or payload.get("ts") or "")
-    event_key = f"{project.project_id}:{team_id}:{channel_id}:{event_id}"
-    if event_id:
-        if (
-            event_key in seen_ids
-            or event_id in seen_ids
-            or record_seen_id(event_key, seen_path, legacy_key=event_id)
-        ):
+    event_key = "|".join((project.project_id, team_id, channel_id, event_id))
+    try:
+        if event_id:
+            if (
+                event_key in seen_ids
+                or event_id in seen_ids
+                or record_seen_id(event_key, seen_path, legacy_key=event_id)
+            ):
+                return None
+            seen_ids.add(event_key)
+        parsed = parse_command(str(payload.get("text") or ""))
+        if not parsed:
             return None
-        seen_ids.add(event_key)
-    parsed = parse_command(str(payload.get("text") or ""))
-    if not parsed:
-        return None
-    reply = handle_command(config, parsed, project, comment, runtime_health)
+        reply = handle_command(config, parsed, project, comment, runtime_health)
+    except RegistryError as exc:
+        print(
+            f"[ERROR] control-room state is unusable: {redact(str(exc))}",
+            file=sys.stderr,
+        )
+        reply = "control-room state is unusable; inspect and repair the bridge host locally"
+        parsed = {"verb": "state-error"}
     notify(
         config_for_project(config, project),
         {
@@ -508,17 +530,23 @@ def stop_bridge() -> str:
     try:
         pid = int(_pid_record(PID_PATH).get("pid"))
     except (TypeError, ValueError):
-        clear_pid()
+        clear_pid(PID_PATH)
         return "bridge is not running"
     if _pid_exists(pid) and not _is_our_bridge(pid):
         return f"refusing to signal pid {pid}: not the control-room bridge"
     if not _pid_exists(pid):
-        clear_pid()
+        clear_pid(PID_PATH)
         return "bridge is not running"
-    os.kill(pid, 15)
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        clear_pid(PID_PATH)
+        return "bridge is not running"
+    except OSError as exc:
+        return f"could not signal pid {pid}: {exc}"
     for _ in range(20):
         if not _pid_exists(pid):
-            clear_pid()
+            clear_pid(PID_PATH)
             return "bridge stopped"
         time.sleep(0.1)
     return "bridge sent SIGTERM; pid file still present"
@@ -550,7 +578,7 @@ def start_bridge(config: SlackConfig, registry: ProjectRegistry) -> int:
         print("[ERROR] bridge already running", file=sys.stderr)
         return 1
     if PID_PATH.is_file():
-        clear_pid()
+        clear_pid(PID_PATH)
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
@@ -563,11 +591,11 @@ def start_bridge(config: SlackConfig, registry: ProjectRegistry) -> int:
         payload["team"] = body.get("team_id") or event.get("team")
         handle_slack_message(config, registry, payload, seen)
 
-    write_pid()
+    write_pid(PID_PATH)
     try:
         SocketModeHandler(app, config.app_token).start()
     finally:
-        clear_pid()
+        clear_pid(PID_PATH)
     return 0
 
 
