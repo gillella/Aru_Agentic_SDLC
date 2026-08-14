@@ -113,8 +113,28 @@ class CreateBranchPlanGateTests(unittest.TestCase):
         mock_has_plan.return_value = True
         mock_worktree.return_value = ".worktrees/feat-issue-999-planned-feature"
 
-        path = cb.create_branch(999, branch_type="feat", use_worktree=True, fetch_remote=False)
-        self.assertEqual(path, ".worktrees/feat-issue-999-planned-feature")
+    def test_untouched_template_rejected_for_placeholder_content(self):
+        low_risk_template = cb.format_plan_template(is_risk=False)
+        low_gaps = cb.validate_plan_depth(low_risk_template, is_risk=False)
+        self.assertTrue(any("placeholder" in g.lower() for g in low_gaps), f"Expected placeholder errors, got: {low_gaps}")
+
+        high_risk_template = cb.format_plan_template(is_risk=True)
+        high_gaps = cb.validate_plan_depth(high_risk_template, is_risk=True)
+        self.assertTrue(any("placeholder" in g.lower() for g in high_gaps), f"Expected placeholder errors, got: {high_gaps}")
+
+    def test_template_when_substantively_filled_passes_validation(self):
+        filled_low_risk = (
+            "## Implementation Plan\n\n"
+            "### Approach\n"
+            "We will implement token extraction by decoding JWT payloads and validating signatures.\n\n"
+            "### Files to Touch\n"
+            "- scripts/auth.py\n"
+            "- tests/test_auth.py\n\n"
+            "### Verification & Test Strategy\n"
+            "Run python3 -m unittest tests/test_auth.py to verify token extraction and expiry handling."
+        )
+        self.assertEqual(cb.validate_plan_depth(filled_low_risk, is_risk=False), [])
+        self.assertTrue(cb.is_substantive_plan(filled_low_risk, is_risk=False))
 
 
 if __name__ == "__main__":

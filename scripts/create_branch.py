@@ -65,8 +65,28 @@ def requires_plan(issue: Optional[dict[str, Any]], branch_type: str = "feat") ->
     return is_high_risk(issue)
 
 
+def _get_section_content(text: str, heading_pattern: str) -> Optional[str]:
+    """Extracts the body text under a specific markdown heading up to the next heading."""
+    pattern = rf"(?:^|\n)#{{1,4}}\s*(?:{heading_pattern})[^\n]*\n(.*?)(?=\n#{{1,4}}\s|\Z)"
+    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _is_placeholder_content(body: Optional[str]) -> bool:
+    """Returns True if the section body is missing, empty, or only contains placeholder tokens."""
+    if not body:
+        return True
+    cleaned = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    cleaned = re.sub(r"[`*_#>-]", "", cleaned)
+    cleaned = re.sub(r"\b(todo|tbd|none|na|n/a|placeholder|tba|\.{2,})\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", "", cleaned)
+    return len(cleaned) < 5
+
+
 def validate_plan_depth(text: str, is_risk: bool = False) -> list[str]:
-    """Validates plan text and returns a list of missing required sections/elements."""
+    """Validates plan text and returns a list of missing or placeholder-only required sections."""
     if not text:
         return ["no plan content provided"]
     if not re.search(r"^\s*#{1,4}\s*implementation\s+plan\b", text, re.IGNORECASE | re.MULTILINE):
@@ -77,46 +97,39 @@ def validate_plan_depth(text: str, is_risk: bool = False) -> list[str]:
         return ["plan is too brief (minimum substantive content required)"]
 
     missing = []
-    has_approach = bool(re.search(
-        r"(?:#{1,4}\s*(?:approach|proposed changes|design|architecture|solution)|\b(?:approach|proposed changes|architecture)\b)",
-        cleaned,
-        re.IGNORECASE,
-    ))
-    if not has_approach:
+
+    approach_body = _get_section_content(cleaned, r"approach|proposed changes|design|architecture|solution")
+    if approach_body is None:
         missing.append("missing section: Approach / Proposed Changes")
+    elif _is_placeholder_content(approach_body):
+        missing.append("section 'Approach / Proposed Changes' contains only placeholder content")
 
-    has_files = bool(re.search(
-        r"(?:#{1,4}\s*(?:files|files to touch|affected files|touched files|scope)|\b(?:touches|files to touch|affected files)\s*:\b)",
-        cleaned,
-        re.IGNORECASE,
-    ))
-    if not has_files:
-        missing.append("missing section: Files to Touch / Scope")
+    files_body = _get_section_content(cleaned, r"files|files to touch|affected files|touched files|scope")
+    if files_body is None:
+        # Fallback to inline touches: check
+        if not re.search(r"\b(?:touches|files to touch|affected files)\s*:\s*[^\n]+", cleaned, re.IGNORECASE):
+            missing.append("missing section: Files to Touch / Scope")
+    elif _is_placeholder_content(files_body):
+        missing.append("section 'Files to Touch / Scope' contains only placeholder content")
 
-    has_verification = bool(re.search(
-        r"(?:#{1,4}\s*(?:verification|testing|test strategy|test plan)|\b(?:verification|test strategy|tests)\b)",
-        cleaned,
-        re.IGNORECASE,
-    ))
-    if not has_verification:
+    verification_body = _get_section_content(cleaned, r"verification|testing|test strategy|test plan|verification & test strategy")
+    if verification_body is None:
         missing.append("missing section: Verification / Test Strategy")
+    elif _is_placeholder_content(verification_body):
+        missing.append("section 'Verification / Test Strategy' contains only placeholder content")
 
     if is_risk:
-        has_schema_or_api = bool(re.search(
-            r"(?:#{1,4}\s*(?:schema|api|data|migration|deltas?|invariants?|security impact)|\b(?:schema deltas?|api deltas?|data migration|security impact)\b)",
-            cleaned,
-            re.IGNORECASE,
-        ))
-        if not has_schema_or_api:
+        schema_body = _get_section_content(cleaned, r"schema|schema\s*/\s*api deltas?|api deltas?|data migration|security impact|invariants?")
+        if schema_body is None:
             missing.append("missing section (high-risk): Schema / API Deltas or Security Impact")
+        elif _is_placeholder_content(schema_body):
+            missing.append("section 'Schema / API Deltas' contains only placeholder content")
 
-        has_alternatives = bool(re.search(
-            r"(?:#{1,4}\s*(?:rejected alternatives|alternatives|trade-?offs?)|\b(?:rejected alternatives|alternatives considered)\b)",
-            cleaned,
-            re.IGNORECASE,
-        ))
-        if not has_alternatives:
+        alternatives_body = _get_section_content(cleaned, r"rejected alternatives|alternatives considered|alternatives|trade-?offs?")
+        if alternatives_body is None:
             missing.append("missing section (high-risk): Rejected Alternatives")
+        elif _is_placeholder_content(alternatives_body):
+            missing.append("section 'Rejected Alternatives' contains only placeholder content")
 
     return missing
 
@@ -130,18 +143,34 @@ def format_plan_template(is_risk: bool = False) -> str:
     """Returns the recommended template for an implementation plan comment."""
     if is_risk:
         return (
-            "## Implementation Plan\\n\\n"
-            "### Approach\\n...\\n\\n"
-            "### Files to Touch\\n...\\n\\n"
-            "### Schema / API Deltas\\n...\\n\\n"
-            "### Verification & Test Strategy\\n...\\n\\n"
-            "### Rejected Alternatives\\n..."
+            "## Implementation Plan\n\n"
+            "### Approach\n"
+            "<!-- Describe the design, architecture, and step-by-step changes -->\n"
+            "...\n\n"
+            "### Files to Touch\n"
+            "<!-- List exact paths to be created, modified, or deleted -->\n"
+            "...\n\n"
+            "### Schema / API Deltas\n"
+            "<!-- Describe database/API changes, schema migrations, and security boundaries -->\n"
+            "...\n\n"
+            "### Verification & Test Strategy\n"
+            "<!-- Executable test commands and verification plan -->\n"
+            "...\n\n"
+            "### Rejected Alternatives\n"
+            "<!-- Alternatives considered and rationale for choices -->\n"
+            "..."
         )
     return (
-        "## Implementation Plan\\n\\n"
-        "### Approach\\n...\\n\\n"
-        "### Files to Touch\\n...\\n\\n"
-        "### Verification & Test Strategy\\n..."
+        "## Implementation Plan\n\n"
+        "### Approach\n"
+        "<!-- Describe the design, architecture, and step-by-step changes -->\n"
+        "...\n\n"
+        "### Files to Touch\n"
+        "<!-- List exact paths to be created, modified, or deleted -->\n"
+        "...\n\n"
+        "### Verification & Test Strategy\n"
+        "<!-- Executable test commands and verification plan -->\n"
+        "..."
     )
 
 
@@ -195,7 +224,7 @@ def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool =
                 f"[BLOCKED] Plan gate: Cannot create branch/worktree for issue #{issue_id} without a durable implementation plan.\n"
                 f"{missing_detail}\n\n"
                 f"To fix, post an implementation plan comment to issue #{issue_id}:\n"
-                f'  gh issue comment {issue_id} --body "{template_body}"'
+                f"  gh issue comment {issue_id} --body \"$(cat <<'EOF'\n{template_body}\nEOF\n)\""
             )
             print(msg, file=sys.stderr)
             sys.exit(1)
