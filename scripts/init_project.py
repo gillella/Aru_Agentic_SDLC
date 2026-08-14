@@ -39,6 +39,7 @@ GOVERNANCE_LABELS = [
     ("type:fix", "d73a4a", "Defect repair"),
     ("type:chore", "cfd3d7", "Tooling, CI, or maintenance"),
     ("type:docs", "0075ca", "Specification or documentation"),
+    ("type:research", "bfd4f2", "Bounded research producing a cited artifact"),
     ("needs-design", "d4c5f9", "Requires an implementation plan before editing"),
     ("priority:p0", "b60205", "Blocking; drop everything"),
     ("priority:p1", "d93f0b", "Current phase critical path"),
@@ -863,6 +864,14 @@ def write_templates(target_dir: str, project_ref: Optional[str] = None):
             ["type:epic", "status:backlog"],
             [("phase", "Phase"), ("goal", "Goal"),
              ("gating", "Gating contract"), ("children", "Child issues")],
+            project_ref,
+        )),
+        ("research.yml", render_issue_form(
+            "Research", "Bounded research question with a cited findings artifact",
+            "research: ",
+            ["type:research", "status:backlog"],
+            [("question", "Research question"), ("scope", "Scope bounds"),
+             ("acceptance", "Acceptance criteria"), ("verification", "Verification")],
             project_ref,
         )),
     ]:

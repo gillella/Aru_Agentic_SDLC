@@ -461,3 +461,39 @@ class UnreadableQueueTests(unittest.TestCase):
             res = fnw.select("agent-2", "openai", 3, 30)
         self.assertEqual(res["work"]["type"], "error")
         self.assertEqual(res["claimable_issues"], [])
+
+
+class ResearchRoutingTests(unittest.TestCase):
+    def test_skill_for_issue_routes_research_label_and_title(self):
+        labeled = {
+            "number": 1,
+            "title": "look into X",
+            "labels": [{"name": "type:research"}],
+        }
+        titled = {"number": 2, "title": "research: bounded question", "labels": []}
+        feat = {
+            "number": 3,
+            "title": "feat: something",
+            "labels": [{"name": "type:feat"}],
+        }
+        self.assertEqual(fnw.skill_for_issue(labeled), "research")
+        self.assertEqual(fnw.skill_for_issue(titled), "research")
+        self.assertEqual(fnw.skill_for_issue(feat), "implement-next-issue")
+
+    def test_select_routes_research_candidate(self):
+        issue = {
+            "number": 101,
+            "title": "research: citations",
+            "labels": [{"name": "type:research"}, {"name": "status:ready"}],
+        }
+        parts = {
+            "candidates": [issue],
+            "my_in_flight": None, "blocked": [], "conflicted": [],
+            "missing_touches": [], "not_ready": [],
+        }
+        with patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "list_open_issues", return_value=[issue]), \
+             patch.object(fnw, "build_candidates", return_value=parts):
+            res = fnw.select("agent-2", "openai", 3, 30)
+        self.assertEqual(res["work"]["skill"], "research")
+        self.assertEqual(res["work"]["issue"], 101)

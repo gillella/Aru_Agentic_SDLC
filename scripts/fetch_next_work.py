@@ -63,10 +63,19 @@ from claim_issue import (
     reap_stale_reviews,
     reviewed_by,
 )
-from common import list_open_issues, run_cmd
+from common import list_open_issues, run_cmd, label_names as issue_label_names
 from fetch_next_issue import build_candidates, reap_stale_claims
 from fetch_pr_feedback import fetch_active_review_feedback
 from merge_pr import closeout_incomplete, dod_status, is_merged
+
+
+def skill_for_issue(issue: dict[str, Any]) -> str:
+    """Route type:research / research: titles to the research skill."""
+    labels = set(issue_label_names(issue))
+    title = str(issue.get("title") or "").strip().lower()
+    if "type:research" in labels or title.startswith("research:"):
+        return "research"
+    return "implement-next-issue"
 
 # Retained as a backwards-compatible CLI default. Review count is audit data,
 # never an eligibility or human-intervention gate.
@@ -520,11 +529,11 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     elif parts["my_in_flight"]:
         issue = parts["my_in_flight"]
         work = {"type": "issue", "issue": issue["number"], "title": issue["title"],
-                "skill": "implement-next-issue", "resuming": True}
+                "skill": skill_for_issue(issue), "resuming": True}
     elif parts["candidates"]:
         issue = parts["candidates"][0]
         work = {"type": "issue", "issue": issue["number"], "title": issue["title"],
-                "skill": "implement-next-issue", "resuming": False}
+                "skill": skill_for_issue(issue), "resuming": False}
     else:
         work = {"type": "idle", "skill": None}
 
@@ -629,11 +638,20 @@ def main():
             work["claim_result"] = "all_taken"
             if res["claimable_issues"]:
                 from claim_issue import claim_issue
+                from common import get_issue
                 for number in res["claimable_issues"]:
                     if claim_issue(number, args.agent) == EXIT_OK:
-                        work = {"type": "issue", "issue": number,
-                                "skill": "implement-next-issue", "title": "",
-                                "resuming": False, "claimed": True}
+                        issue_meta = get_issue(number) or {
+                            "number": number, "title": "", "labels": [],
+                        }
+                        work = {
+                            "type": "issue",
+                            "issue": number,
+                            "skill": skill_for_issue(issue_meta),
+                            "title": issue_meta.get("title") or "",
+                            "resuming": False,
+                            "claimed": True,
+                        }
                         # Rebind the result too. Rebinding only the local name
                         # left --json reporting the unclaimed review while the
                         # issue was claimed and In Progress, so the agent would
