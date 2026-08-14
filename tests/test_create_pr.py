@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -45,7 +46,8 @@ class AgentFlagTests(unittest.TestCase):
 
     def test_surrounding_whitespace_is_stripped_from_agent(self):
         argv = ["create_pr.py", "--issue", "7", "--title", "t", "--body", "b",
-                "--agent", "  agent-1  ", "--model-family", "anthropic"]
+                "--agent", "  agent-1  ", "--model-family", "anthropic",
+                "--verify-command", "python3 -m unittest"]
         with patch.object(sys, "argv", argv), \
                 patch.object(create_pr, "create_pr", return_value=True) as opened:
             with self.assertRaises(SystemExit) as caught:
@@ -56,7 +58,8 @@ class AgentFlagTests(unittest.TestCase):
 
     def test_agent_is_passed_through_to_the_pr(self):
         argv = ["create_pr.py", "--issue", "7", "--title", "t", "--body", "b",
-                "--agent", "agent-1", "--model-family", "anthropic"]
+                "--agent", "agent-1", "--model-family", "anthropic",
+                "--verify-command", "python3 -m unittest"]
         with patch.object(sys, "argv", argv), \
                 patch.object(create_pr, "create_pr", return_value=True) as opened:
             with self.assertRaises(SystemExit) as caught:
@@ -67,7 +70,7 @@ class AgentFlagTests(unittest.TestCase):
 
     def test_unknown_model_family_is_refused(self):
         argv = ["create_pr.py", "--issue", "7", "--agent", "a",
-                "--model-family", "anthropc"]
+                "--model-family", "anthropc", "--verify-command", "true"]
         with patch.object(sys, "argv", argv), \
                 patch.object(create_pr, "create_pr") as opened:
             with self.assertRaises(SystemExit) as caught:
@@ -77,7 +80,8 @@ class AgentFlagTests(unittest.TestCase):
 
     def test_missing_family_warns_but_proceeds(self):
         # Family only steers reviewer diversity; its absence must not block.
-        argv = ["create_pr.py", "--issue", "7", "--agent", "agent-1"]
+        argv = ["create_pr.py", "--issue", "7", "--agent", "agent-1",
+                "--verify-command", "true"]
         with patch.object(sys, "argv", argv), \
                 patch.object(create_pr, "create_pr", return_value=True) as opened:
             with self.assertRaises(SystemExit) as caught:
@@ -149,6 +153,7 @@ class VerificationEvidenceTests(unittest.TestCase):
         self.assertEqual(passing["status"], "passed")
         self.assertEqual(passing["commands"][0]["exit_code"], 0)
         self.assertGreaterEqual(passing["commands"][0]["duration_seconds"], 0)
+        self.assertTrue(passing["head_sha"])
 
         failing = create_pr.collect_verification_evidence([
             f'{sys.executable} -c "raise SystemExit(3)"',
@@ -161,6 +166,7 @@ class VerificationEvidenceTests(unittest.TestCase):
         evidence = create_pr.collect_verification_evidence([])
         self.assertEqual(evidence, {
             "commands": [],
+            "head_sha": evidence["head_sha"],
             "schema": "aru.verification.v1",
             "status": "not_run",
         })
@@ -179,6 +185,20 @@ class VerificationEvidenceTests(unittest.TestCase):
         self.assertIn("<redacted>", rendered)
         self.assertIn("<local-path>", rendered)
 
+    def test_command_evidence_redacts_url_credentials_and_sensitive_queries(self):
+        sanitized = common.sanitize_command([
+            "curl",
+            "https://oauth2:ghp_TOKEN@example.com/check?token=query-secret&ok=yes",
+            "--endpoint=https://user:password@example.net/path?api_key=hidden",
+            "file:///Users/example/private/config.json",
+        ])
+        rendered = " ".join(sanitized)
+        for secret in ("ghp_TOKEN", "query-secret", "password", "hidden", "/Users/example"):
+            self.assertNotIn(secret, rendered)
+        self.assertIn("https://<redacted>@example.com", rendered)
+        self.assertIn("token=%3Credacted%3E", rendered)
+        self.assertIn("file://<local-path>/config.json", rendered)
+
     def test_rendered_json_is_parseable_without_prose_scraping(self):
         evidence = {
             "commands": [{
@@ -187,6 +207,7 @@ class VerificationEvidenceTests(unittest.TestCase):
                 "exit_code": 0,
                 "status": "passed",
             }],
+            "head_sha": "head-7",
             "schema": "aru.verification.v1",
             "status": "passed",
         }
@@ -194,7 +215,9 @@ class VerificationEvidenceTests(unittest.TestCase):
         parsed, error = merge_pr.parse_verification_evidence(body)
         self.assertIsNone(error)
         self.assertEqual(parsed, evidence)
-        self.assertTrue(merge_pr.check_verification({"body": body})[0])
+        self.assertTrue(merge_pr.check_verification({
+            "body": body, "headRefOid": "head-7",
+        })[0])
 
     def test_gate_warns_on_missing_or_not_run_and_blocks_failed_or_malformed(self):
         missing_ok, missing_message = merge_pr.check_verification({"body": "legacy"})
@@ -203,10 +226,13 @@ class VerificationEvidenceTests(unittest.TestCase):
 
         not_run = create_pr.render_verification_evidence({
             "commands": [],
+            "head_sha": "head-7",
             "schema": "aru.verification.v1",
             "status": "not_run",
         })
-        self.assertTrue(merge_pr.check_verification({"body": not_run})[0])
+        self.assertTrue(merge_pr.check_verification({
+            "body": not_run, "headRefOid": "head-7",
+        })[0])
 
         failed = create_pr.render_verification_evidence({
             "commands": [{
@@ -215,15 +241,72 @@ class VerificationEvidenceTests(unittest.TestCase):
                 "exit_code": 1,
                 "status": "failed",
             }],
+            "head_sha": "head-7",
             "schema": "aru.verification.v1",
             "status": "failed",
         })
-        self.assertFalse(merge_pr.check_verification({"body": failed})[0])
+        self.assertFalse(merge_pr.check_verification({
+            "body": failed, "headRefOid": "head-7",
+        })[0])
         malformed = (
             f"{common.VERIFICATION_EVIDENCE_START}\n```json\n{{bad\n```\n"
             f"{common.VERIFICATION_EVIDENCE_END}"
         )
         self.assertFalse(merge_pr.check_verification({"body": malformed})[0])
+
+    def test_gate_rejects_evidence_for_a_different_pr_head(self):
+        body = create_pr.render_verification_evidence({
+            "commands": [{
+                "command": ["python3", "-m", "unittest"],
+                "duration_seconds": 0.1,
+                "exit_code": 0,
+                "status": "passed",
+            }],
+            "head_sha": "old-head",
+            "schema": "aru.verification.v1",
+            "status": "passed",
+        })
+        ok, message = merge_pr.check_verification({
+            "body": body, "headRefOid": "new-head",
+        })
+        self.assertFalse(ok)
+        self.assertIn("refresh", message)
+
+    def test_cli_refuses_to_open_a_pr_without_verification_commands(self):
+        argv = ["create_pr.py", "--issue", "7", "--agent", "agent-1"]
+        with patch.object(sys, "argv", argv), \
+                patch.object(create_pr, "create_pr") as opened:
+            with self.assertRaises(SystemExit) as caught:
+                create_pr.main()
+        self.assertNotEqual(caught.exception.code, 0)
+        opened.assert_not_called()
+
+    @patch.object(create_pr, "get_current_commit", return_value="head-7")
+    def test_refresh_replaces_evidence_only_for_the_live_head(self, _head):
+        original = "summary" + create_pr.render_verification_evidence({
+            "commands": [],
+            "head_sha": "head-7",
+            "schema": "aru.verification.v1",
+            "status": "not_run",
+        }) + "\n\nCloses #7"
+        responses = [
+            (0, '{"body": ' + json.dumps(original) + ', "headRefOid": "head-7"}', ""),
+            (0, '{"headRefOid": "head-7"}', ""),
+            (0, "", ""),
+        ]
+        with patch.object(create_pr, "run_cmd", side_effect=responses) as run, \
+                patch.object(create_pr, "collect_verification_evidence", return_value={
+                    "commands": [{"command": ["true"], "duration_seconds": 0.0,
+                                  "exit_code": 0, "status": "passed"}],
+                    "head_sha": "head-7",
+                    "schema": "aru.verification.v1",
+                    "status": "passed",
+                }):
+            self.assertTrue(create_pr.refresh_pr_evidence("7", ["true"]))
+        edit = run.call_args_list[-1].args[0]
+        refreshed, error = merge_pr.parse_verification_evidence(edit[-1])
+        self.assertIsNone(error)
+        self.assertEqual(refreshed["status"], "passed")
 
     @patch.object(create_pr, "get_issue", return_value={"title": "t"})
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
@@ -256,6 +339,7 @@ class VerificationEvidenceTests(unittest.TestCase):
     def test_merge_parser_rejects_multiple_evidence_blocks(self):
         evidence = create_pr.render_verification_evidence({
             "commands": [],
+            "head_sha": "head-7",
             "schema": "aru.verification.v1",
             "status": "not_run",
         })

@@ -14,6 +14,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 VERIFICATION_EVIDENCE_SCHEMA = "aru.verification.v1"
@@ -33,8 +34,17 @@ def _looks_sensitive(name: str) -> bool:
 
 def _redact_local_path(value: str) -> str:
     """Removes absolute filesystem locations while keeping a useful basename."""
-    if not value or "://" in value:
+    if not value:
         return value
+    sanitized_url = _sanitize_url(value)
+    if sanitized_url is not None:
+        return sanitized_url
+    for separator in ("=", ":"):
+        prefix, found, suffix = value.partition(separator)
+        if found:
+            sanitized_url = _sanitize_url(suffix)
+            if sanitized_url is not None:
+                return f"{prefix}{separator}{sanitized_url}"
     if Path(value).is_absolute():
         return f"<local-path>/{Path(value).name}" if Path(value).name else "<local-path>"
     for separator in ("=", ":"):
@@ -46,6 +56,38 @@ def _redact_local_path(value: str) -> str:
     if value.startswith("-I/"):
         return f"-I<local-path>/{Path(value[2:]).name}"
     return value
+
+
+def _sanitize_url(value: str) -> Optional[str]:
+    """Redacts URL credentials, sensitive query values, and local file paths."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if not parsed.scheme or (not parsed.netloc and parsed.scheme != "file"):
+        return None
+    if parsed.scheme == "file":
+        basename = Path(parsed.path).name
+        suffix = f"/{basename}" if basename else ""
+        return f"file://<local-path>{suffix}"
+
+    netloc = parsed.netloc
+    if parsed.username is not None or parsed.password is not None:
+        hostname = parsed.hostname or ""
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        host = f"{hostname}:{port}" if port is not None else hostname
+        netloc = f"<redacted>@{host}"
+
+    query = urlencode([
+        (name, "<redacted>" if _looks_sensitive(name) else val)
+        for name, val in parse_qsl(parsed.query, keep_blank_values=True)
+    ], doseq=True)
+    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
 
 
 def sanitize_command(cmd: List[str]) -> List[str]:
@@ -95,6 +137,12 @@ def run_cmd(
             "status": "passed" if code == 0 else "failed",
         })
     return code, stdout, stderr
+
+
+def get_current_commit() -> str:
+    """Returns the checked-out commit SHA, or an empty string on failure."""
+    code, stdout, _ = run_cmd(["git", "rev-parse", "HEAD"], check=False)
+    return stdout.strip() if code == 0 else ""
 
 
 def run_gh_json(cmd: List[str]) -> Optional[Any]:

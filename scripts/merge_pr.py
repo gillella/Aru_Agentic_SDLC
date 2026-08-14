@@ -649,6 +649,17 @@ def check_verification(pr):
 
     status = evidence.get("status")
     commands = evidence.get("commands")
+    evidence_head = evidence.get("head_sha")
+    pr_head = pr.get("headRefOid")
+    if not isinstance(evidence_head, str) or not evidence_head:
+        return False, "Verification evidence is missing the tested head SHA."
+    if not isinstance(pr_head, str) or not pr_head:
+        return False, "The live PR head SHA is unavailable; verification cannot be bound."
+    if evidence_head != pr_head:
+        return False, (
+            f"Verification was recorded for {evidence_head}, but the PR head is {pr_head}; "
+            "refresh evidence with create_pr.py --refresh-pr."
+        )
     if not isinstance(commands, list):
         return False, "Verification evidence commands must be a JSON array."
     if status == "not_run":

@@ -27,6 +27,7 @@ from common import (
     VERIFICATION_EVIDENCE_START,
     ensure_label,
     get_current_branch,
+    get_current_commit,
     get_issue,
     run_cmd,
 )
@@ -39,7 +40,10 @@ NEEDS_REVIEW_LABEL = "needs-review"
 MODEL_FAMILIES = ("anthropic", "openai", "google", "meta", "mistral", "xai", "human")
 
 
-def collect_verification_evidence(commands: Optional[List[str]] = None) -> Dict:
+def collect_verification_evidence(
+    commands: Optional[List[str]] = None,
+    head_sha: str = "",
+) -> Dict:
     """Runs configured verification commands and returns a versioned record."""
     records = []
     for command in commands or []:
@@ -66,6 +70,7 @@ def collect_verification_evidence(commands: Optional[List[str]] = None) -> Dict:
         status = "failed"
     return {
         "commands": records,
+        "head_sha": head_sha or get_current_commit(),
         "schema": VERIFICATION_EVIDENCE_SCHEMA,
         "status": status,
     }
@@ -84,6 +89,81 @@ def render_verification_evidence(evidence: Dict) -> str:
         f"{VERIFICATION_EVIDENCE_END}\n"
         "</details>"
     )
+
+
+def replace_verification_evidence(body: str, evidence: Dict) -> Optional[str]:
+    """Replaces exactly one evidence payload while preserving the PR prose."""
+    if (body.count(VERIFICATION_EVIDENCE_START) != 1
+            or body.count(VERIFICATION_EVIDENCE_END) != 1):
+        return None
+    before, _marker, remainder = body.partition(VERIFICATION_EVIDENCE_START)
+    _old_payload, _end_marker, after = remainder.partition(VERIFICATION_EVIDENCE_END)
+    payload = json.dumps(evidence, indent=2, sort_keys=True)
+    return (
+        f"{before}{VERIFICATION_EVIDENCE_START}\n"
+        f"```json\n{payload}\n```\n"
+        f"{VERIFICATION_EVIDENCE_END}{after}"
+    )
+
+
+def refresh_pr_evidence(pr_ref: str, verification_commands: List[str]) -> bool:
+    """Reruns verification and refreshes evidence for the exact live PR head."""
+    local_head = get_current_commit()
+    code, out, err = run_cmd(
+        ["gh", "pr", "view", str(pr_ref), "--json", "body,headRefOid"],
+        check=False,
+    )
+    if code != 0:
+        print(f"[ERROR] Could not read PR #{pr_ref}: {err}", file=sys.stderr)
+        return False
+    try:
+        pr = json.loads(out)
+    except json.JSONDecodeError:
+        print(f"[ERROR] Could not parse PR #{pr_ref} metadata.", file=sys.stderr)
+        return False
+    if not local_head or pr.get("headRefOid") != local_head:
+        print(
+            "[ERROR] Checked-out commit does not match the live PR head; "
+            "check out the PR worktree before refreshing evidence.",
+            file=sys.stderr,
+        )
+        return False
+
+    evidence = collect_verification_evidence(verification_commands, local_head)
+    if get_current_commit() != local_head:
+        print("[ERROR] HEAD changed while verification was running.", file=sys.stderr)
+        return False
+    code, fresh_out, err = run_cmd(
+        ["gh", "pr", "view", str(pr_ref), "--json", "headRefOid"],
+        check=False,
+    )
+    try:
+        fresh_head = json.loads(fresh_out).get("headRefOid") if code == 0 else ""
+    except json.JSONDecodeError:
+        fresh_head = ""
+    if fresh_head != local_head:
+        print(
+            "[ERROR] The remote PR head changed while verification was running; rerun refresh.",
+            file=sys.stderr,
+        )
+        return False
+
+    updated_body = replace_verification_evidence(pr.get("body") or "", evidence)
+    if updated_body is None:
+        print(
+            "[ERROR] PR body must contain exactly one complete verification evidence block.",
+            file=sys.stderr,
+        )
+        return False
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_ref), "--body", updated_body],
+        check=False,
+    )
+    if code != 0:
+        print(f"[ERROR] Could not refresh PR evidence: {err}", file=sys.stderr)
+        return False
+    print(f"✅ Refreshed verification evidence for PR #{pr_ref} at {local_head}.")
+    return True
 
 
 def apply_identity(pr_ref: str, agent: str = "", family: str = "") -> bool:
@@ -182,7 +262,14 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
             file=sys.stderr,
         )
         return False
-    evidence = collect_verification_evidence(verification_commands)
+    head_sha = get_current_commit()
+    if not head_sha:
+        print("[ERROR] Could not determine the commit being verified.", file=sys.stderr)
+        return False
+    evidence = collect_verification_evidence(verification_commands, head_sha)
+    if get_current_commit() != head_sha:
+        print("[ERROR] HEAD changed while verification was running.", file=sys.stderr)
+        return False
     full_body = base_body + render_verification_evidence(evidence) + closure_footer
 
     print(f"Opening Pull Request for branch '{current_branch}' linking 'Closes #{issue_id}'...")
@@ -216,6 +303,12 @@ def main():
     parser.add_argument("--issue", type=int, required=True, help="GitHub Issue Number")
     parser.add_argument("--title", type=str, default="", help="Pull Request Title")
     parser.add_argument("--body", type=str, default="", help="Pull Request Description Body")
+    parser.add_argument(
+        "--refresh-pr",
+        type=int,
+        default=0,
+        help="Refresh the evidence block on an existing PR for the checked-out head.",
+    )
     parser.add_argument(
         "--verify-command",
         action="append",
@@ -260,6 +353,18 @@ def main():
     if not args.family:
         print("[WARN] No --model-family given. Review routing cannot prefer a "
               "reviewer whose blind spots differ from this author's.", file=sys.stderr)
+
+    if not args.verify_command:
+        print(
+            "[ERROR] At least one --verify-command is required. Repeat the option "
+            "for every local test, lint, build, or validation command that the PR claims.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.refresh_pr:
+        ok = refresh_pr_evidence(args.refresh_pr, args.verify_command)
+        sys.exit(0 if ok else 1)
 
     ok = create_pr(
         args.issue,
