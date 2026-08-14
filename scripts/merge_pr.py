@@ -180,6 +180,7 @@ def review_evidence(pr_id):
     unresolved = 0
     unfixed = 0
     outdated_unfixed = 0
+    outdated_addressed = 0
     withdrawn = 0
     commit_times = None
     reviewed_head = False
@@ -251,6 +252,8 @@ def review_evidence(pr_id):
             if not resolved and outdated:
                 if not has_commit_after:
                     outdated_unfixed += 1
+                else:
+                    outdated_addressed += 1
                 continue
 
             if resolved:
@@ -262,6 +265,7 @@ def review_evidence(pr_id):
                 "unresolved": unresolved,
                 "unfixed": unfixed,
                 "outdated_unfixed": outdated_unfixed,
+                "outdated_addressed": outdated_addressed,
                 "withdrawn": withdrawn,
                 "reviewed_head": reviewed_head,
             }
@@ -436,8 +440,12 @@ def _evidence_note(evidence):
     A later reader needs to tell "every finding was fixed" from "the findings
     were withdrawn", because those justify a merge very differently.
     """
-    parts = ["reviewed at head", "no unresolved threads"]
-    if evidence.get("withdrawn"):
+    out_addressed = evidence.get("outdated_addressed", 0) if evidence else 0
+    if out_addressed > 0:
+        parts = ["reviewed at head", f"no unresolved threads ({out_addressed} outdated with commit evidence)"]
+    else:
+        parts = ["reviewed at head", "no unresolved threads"]
+    if evidence and evidence.get("withdrawn"):
         parts.append(f"{evidence['withdrawn']} finding(s) withdrawn, not fixed")
     return ", ".join(parts) + "."
 

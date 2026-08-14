@@ -1322,6 +1322,7 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
         evidence = merge_pr.review_evidence(140)
         self.assertEqual(evidence["unresolved"], 3)
         self.assertEqual(evidence["outdated_unfixed"], 1)
+        self.assertEqual(evidence["outdated_addressed"], 0)
 
         gql_data_with_commit = {
             "data": {
@@ -1352,6 +1353,14 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
         evidence_after_commit = merge_pr.review_evidence(140)
         self.assertEqual(evidence_after_commit["unresolved"], 3)
         self.assertEqual(evidence_after_commit["outdated_unfixed"], 0)
+        self.assertEqual(evidence_after_commit["outdated_addressed"], 1)
+
+    def test_evidence_note_formats_outdated_threads(self):
+        note = merge_pr._evidence_note({"outdated_addressed": 2, "withdrawn": 0})
+        self.assertEqual(note, "reviewed at head, no unresolved threads (2 outdated with commit evidence).")
+
+        note_clean = merge_pr._evidence_note({"outdated_addressed": 0, "withdrawn": 1})
+        self.assertEqual(note_clean, "reviewed at head, no unresolved threads, 1 finding(s) withdrawn, not fixed.")
 
 
 def checkpoint_pr():
