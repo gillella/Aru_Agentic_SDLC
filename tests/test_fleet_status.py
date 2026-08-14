@@ -1,4 +1,3 @@
-import io
 import os
 import sys
 import tempfile
@@ -291,6 +290,7 @@ class FleetStatusTests(unittest.TestCase):
             (root / "small.py").write_text("a\nb\n", encoding="utf-8")
             (root / ".venv").mkdir()
             (root / ".venv" / "ignored.py").write_text("x\n" * 500, encoding="utf-8")
+            (root / "notes.md").write_text("m\n" * 500, encoding="utf-8")
             (root / "big.py").write_text("l\n" * LINE_CEILING, encoding="utf-8")
             health = collect_codebase_health(str(root))
         self.assertEqual(health["loc"], 2 + LINE_CEILING)

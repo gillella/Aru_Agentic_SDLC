@@ -93,6 +93,8 @@ def collect_codebase_health(repo_dir: str) -> Dict[str, Any]:
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [name for name in dirs if name not in SKIP_DIR_NAMES]
         for name in files:
+            if not name.endswith(".py"):
+                continue
             path = os.path.join(root, name)
             lines = _count_lines(path)
             if lines is None:
