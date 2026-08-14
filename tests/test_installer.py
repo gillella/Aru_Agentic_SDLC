@@ -11,8 +11,9 @@ the fix: after an install, every skill on disk is reachable. They run the real
 script against a throwaway HOME so the assertion covers what the installer
 links, not what it appears to link on reading.
 
-The script is located by glob rather than by name because #164 renames it —
-a test that pins the old filename would fail the rename for the wrong reason.
+This issue changes the legacy Cursor installer specifically. The newer
+multi-agent installer has a separate contract and test suite, so selecting the
+longest matching filename would silently test the wrong program.
 """
 
 import os
@@ -27,17 +28,11 @@ SKILLS_DIR = ROOT / "skills"
 
 
 def installer_path():
-    """The integration installer, whatever it is currently called."""
-    matches = sorted(ROOT.glob("scripts/install_*integration*.sh"))
-    if not matches:
-        raise AssertionError(
-            "no scripts/install_*integration*.sh found; if the installer was "
-            "renamed outside that pattern, update this glob"
-        )
-    # A deprecation shim may sit alongside the real script during the rename
-    # window. The longest name is the specific one; the shim keeps the old
-    # short name and merely forwards.
-    return max(matches, key=lambda p: len(p.name))
+    """The legacy Cursor installer governed by issue #163."""
+    path = ROOT / "scripts" / "install_cursor_integration.sh"
+    if not path.is_file():
+        raise AssertionError("scripts/install_cursor_integration.sh is missing")
+    return path
 
 
 def skills_on_disk():
@@ -170,6 +165,34 @@ class InstallerRejectionTest(unittest.TestCase):
                 + forensics(result, script, home),
             )
             self.assertIn("SKILL.md", result.stderr, forensics(result, script, home))
+            self.assertFalse(
+                (home / ".agents" / "skills" / "good").exists(),
+                "installer linked skills before validating the whole set",
+            )
+
+    def test_unreadable_skill_md_aborts_before_linking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = self._fake_home(tmp)
+            manifest = fake / "skills" / "unreadable" / "SKILL.md"
+            manifest.parent.mkdir()
+            manifest.write_text("# unreadable\n", encoding="utf-8")
+            manifest.chmod(0)
+
+            home = Path(tmp) / "home"
+            home.mkdir()
+            script = fake / "scripts" / installer_path().name
+            try:
+                result = run_installer(home, script=script)
+            finally:
+                manifest.chmod(0o600)
+
+            self.assertNotEqual(
+                result.returncode,
+                0,
+                "installer accepted an unreadable SKILL.md"
+                + forensics(result, script, home),
+            )
+            self.assertIn("readable SKILL.md", result.stderr, forensics(result, script, home))
             self.assertFalse(
                 (home / ".agents" / "skills" / "good").exists(),
                 "installer linked skills before validating the whole set",

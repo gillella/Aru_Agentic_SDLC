@@ -24,8 +24,8 @@ SKILLS=()
 skill_count=0
 for skill_dir in "${SDLC_HOME}"/skills/*/; do
   [[ -d "${skill_dir}" ]] || continue
-  if [[ ! -f "${skill_dir}SKILL.md" ]]; then
-    echo "error: ${skill_dir} has no SKILL.md" >&2
+  if [[ ! -f "${skill_dir}SKILL.md" || ! -r "${skill_dir}SKILL.md" ]]; then
+    echo "error: ${skill_dir} has no readable SKILL.md" >&2
     echo "       every directory under skills/ must define one, or it is not a skill" >&2
     exit 1
   fi
@@ -112,4 +112,3 @@ ensure_env_export() {
 echo "Installing Cursor integration from ${SDLC_HOME}"
 
 exec "${SCRIPT_DIR}/install_local_agent_integrations.sh" --cursor-only --aru-home "${SDLC_HOME}" "$@"
-
