@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -8,6 +9,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install_local_agent_integrations.sh"
 CURSOR_INSTALLER = ROOT / "scripts" / "install_cursor_integration.sh"
+
+
+def codex_auto_id(project: str) -> str:
+    return "aru-code-loop-" + hashlib.sha256(project.encode()).hexdigest()[:12]
 
 
 class InstallLocalAgentIntegrationsTests(unittest.TestCase):
@@ -233,28 +238,69 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         project_b = "/tmp/aru-proj-b"
         res = self.run_installer("--codex-only", "--enable-native-wake", "--project", project_a)
         self.assertEqual(res.returncode, 0, res.stderr)
-        prompt = (self.target_home / ".codex" / "automations" / "aru-code-loop" / "PROMPT.md").read_text()
-        self.assertIn(project_a, prompt)
-        self.assertNotIn(project_b, prompt)
+        prompt_a = (
+            self.target_home / ".codex" / "automations" / codex_auto_id(project_a) / "PROMPT.md"
+        ).read_text()
+        self.assertIn(project_a, prompt_a)
+        self.assertNotIn(project_b, prompt_a)
+        res = self.run_installer("--enable-native-wake", "--project", project_b)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        prompt_b = (
+            self.target_home / ".codex" / "automations" / codex_auto_id(project_b) / "PROMPT.md"
+        ).read_text()
+        self.assertIn(project_b, prompt_b)
+        self.assertNotIn(project_a, prompt_b)
+        self.assertIn(project_a, prompt_a)
         wake = json.loads((self.target_home / ".aru" / "native-wake.json").read_text())
         self.assertTrue(wake["projects"][project_a]["enabled"])
-        self.assertNotIn(project_b, wake["projects"])
+        self.assertTrue(wake["projects"][project_b]["enabled"])
+        self.assertNotEqual(wake["projects"][project_a]["automation_id"], wake["projects"][project_b]["automation_id"])
 
-    def test_stop_pauses_only_managed_codex_heartbeat(self):
-        managed = self.target_home / ".codex" / "automations" / "aru-code-loop"
+    def test_stop_pauses_only_that_project_managed_heartbeat(self):
+        project = "/tmp/aru-proj-a"
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
         other = self.target_home / ".codex" / "automations" / "india-jobs"
-        managed.mkdir(parents=True)
-        other.mkdir(parents=True)
+        sibling = self.target_home / ".codex" / "automations" / codex_auto_id("/tmp/aru-proj-b")
+        for path in (managed, other, sibling):
+            path.mkdir(parents=True)
         managed.joinpath("automation.toml").write_text(
-            'version = 1\nid = "aru-code-loop"\nstatus = "ACTIVE"\n'
+            f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "ACTIVE"\n'
         )
         other.joinpath("automation.toml").write_text(
             'version = 1\nid = "india-jobs"\nstatus = "ACTIVE"\n'
         )
-        res = self.run_installer("--stop-loop", "--project", "/tmp/aru-proj-a")
+        sibling.joinpath("automation.toml").write_text(
+            f'version = 1\nid = "{codex_auto_id("/tmp/aru-proj-b")}"\nstatus = "ACTIVE"\n'
+        )
+        res = self.run_installer("--stop-loop", "--project", project)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
         self.assertIn('status = "ACTIVE"', other.joinpath("automation.toml").read_text())
+        self.assertIn('status = "ACTIVE"', sibling.joinpath("automation.toml").read_text())
+
+    def test_dry_run_stop_and_wake_do_not_write(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        res = self.run_installer("--dry-run", "--stop-loop", "--project", "/tmp/aru-proj-a")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("[DRY-RUN]", res.stdout)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+        res = self.run_installer("--dry-run", "--enable-native-wake", "--project", "/tmp/aru-proj-a")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((self.target_home / ".aru" / "native-wake.json").exists())
+
+    def test_disable_native_wake_pauses_matching_heartbeat(self):
+        project = "/tmp/aru-proj-a"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--enable-native-wake", "--project", project)
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.joinpath("automation.toml").write_text(
+            f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "ACTIVE"\n'
+        )
+        res = self.run_installer("--disable-native-wake", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+        wake = json.loads((self.target_home / ".aru" / "native-wake.json").read_text())
+        self.assertNotIn(project, wake.get("projects", {}))
 
     def test_antigravity_workflow_and_cursor_stop_command_install(self):
         (self.target_home / ".gemini" / "antigravity").mkdir(parents=True)

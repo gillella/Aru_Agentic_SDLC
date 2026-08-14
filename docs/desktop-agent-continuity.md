@@ -47,17 +47,21 @@ Codex standalone automations and Claude Desktop scheduled tasks may recover
 from GitHub in a new session. They must not be labelled same-task wake.
 
 `--enable-native-wake --project <abs-path>` records that opt-in for **that
-project only** and writes a Codex thread-automation prompt scoped to it. It
-does not invent a `target_thread_id`. Bind the heartbeat from the current
-Codex task. Sibling automations under `~/.codex/automations/` are never
-modified.
+project only** and writes a Codex thread-automation prompt under
+`~/.codex/automations/aru-code-loop-<sha256(project)[:12]>/`. It does not
+invent a `target_thread_id`. Bind the heartbeat from the current Codex
+task. Sibling automations under `~/.codex/automations/` are never modified.
+`--disable-native-wake` pauses that project's managed heartbeat before
+dropping the JSON entry. `--dry-run` prints the same actions and writes
+nothing.
 
 ## Explicit stop
 
 `$HOME/.aru/factory-loop.stop` is durable operator intent. `/stop-aru-loop`
 writes it; `/resume-aru-loop` clears it. While it applies to a project, loop
-mode must not continue and must not arm native wakes. If a managed Codex
-heartbeat (`id = "aru-code-loop"`) exists, stop pauses **that file only**.
+mode must not continue and must not arm native wakes. If a managed Codex heartbeat (`id = "aru-code-loop"` or
+`id = "aru-code-loop-<12 hex>"`) exists for that project, stop pauses
+**that file only**.
 
 ## Doctor
 

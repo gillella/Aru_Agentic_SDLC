@@ -354,9 +354,17 @@ install_antigravity_workflow() {
   echo "installed Antigravity workflow ${dest}"
 }
 
+codex_automation_id() {
+  python3 -c 'import hashlib, sys; print("aru-code-loop-" + hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])' "$1"
+}
+
 aru_python_json() {
+  if [[ "${DRY_RUN}" == true ]]; then
+    echo "[DRY-RUN] Would $1 under ${2}/.aru for ${3:-all-projects}"
+    return 0
+  fi
   python3 - "$@" <<'PY'
-import json, os, sys
+import hashlib, json, os, sys
 from datetime import datetime, timezone
 
 action, target_home, project = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -410,9 +418,11 @@ elif action in {"enable-wake", "disable-wake"}:
     data = load(wake_path, {"projects": {}})
     projects = data.setdefault("projects", {})
     if action == "enable-wake":
+        auto_id = "aru-code-loop-" + hashlib.sha256(project.encode()).hexdigest()[:12]
         projects[project] = {
             "enabled": True,
             "updated_at": now,
+            "automation_id": auto_id,
             "codex": "thread_heartbeat_template",
             "antigravity": "goal_or_schedule_operator",
             "claude": "session_loop_only",
@@ -431,11 +441,13 @@ PY
 
 write_codex_wake_prompt() {
   local project="$1"
-  local dest_dir="${TARGET_HOME}/.codex/automations/aru-code-loop"
+  local auto_id
+  auto_id="$(codex_automation_id "${project}")"
+  local dest_dir="${TARGET_HOME}/.codex/automations/${auto_id}"
   local dest="${dest_dir}/PROMPT.md"
   local src="${SDLC_HOME}/templates/integrations/codex/aru-code-loop.prompt.md"
   if [[ "${DRY_RUN}" == true ]]; then
-    echo "[DRY-RUN] Would write Codex wake prompt for ${project}"
+    echo "[DRY-RUN] Would write Codex wake prompt ${dest} for ${project}"
     return 0
   fi
   mkdir -p "${dest_dir}"
@@ -450,58 +462,65 @@ print(f"wrote {dest}")
 PY
 }
 
-pause_managed_codex_heartbeat() {
-  local toml="${TARGET_HOME}/.codex/automations/aru-code-loop/automation.toml"
+set_managed_codex_status() {
+  local toml="$1"
+  local status="$2"
   if [[ ! -f "${toml}" ]]; then
     return 0
   fi
-  if ! grep -Eq '^id = "aru-code-loop"' "${toml}"; then
+  if ! grep -Eq '^id = "aru-code-loop(-[0-9a-f]+)?"' "${toml}"; then
     echo "note: refusing to mutate unmanaged ${toml}" >&2
     return 0
   fi
   if [[ "${DRY_RUN}" == true ]]; then
-    echo "[DRY-RUN] Would pause managed Codex heartbeat ${toml}"
+    echo "[DRY-RUN] Would set ${toml} status=${status}"
     return 0
   fi
   local tmp
   tmp="$(mktemp)"
-  awk '
+  awk -v status="${status}" '
     BEGIN { done=0 }
     /^status = "/ {
-      if (!done) { print "status = \"PAUSED\""; done=1; next }
+      if (!done) { print "status = \"" status "\""; done=1; next }
     }
     { print }
-    END { if (!done) print "status = \"PAUSED\"" }
+    END { if (!done) print "status = \"" status "\"" }
   ' "${toml}" > "${tmp}"
   cat "${tmp}" > "${toml}"
   rm -f "${tmp}"
-  echo "paused managed Codex heartbeat ${toml}"
+  echo "set ${toml} status=${status}"
+}
+
+managed_codex_tomls_for_project() {
+  local project="$1"
+  local root="${TARGET_HOME}/.codex/automations"
+  if [[ ! -d "${root}" ]]; then
+    return 0
+  fi
+  if [[ -n "${project}" ]]; then
+    local auto_id
+    auto_id="$(codex_automation_id "${project}")"
+    printf '%s\n' "${root}/${auto_id}/automation.toml"
+    return 0
+  fi
+  local toml
+  for toml in "${root}"/aru-code-loop/automation.toml "${root}"/aru-code-loop-*/automation.toml; do
+    [[ -f "${toml}" ]] && printf '%s\n' "${toml}"
+  done
+}
+
+pause_managed_codex_heartbeat() {
+  local toml
+  while IFS= read -r toml; do
+    [[ -n "${toml}" ]] && set_managed_codex_status "${toml}" "PAUSED"
+  done < <(managed_codex_tomls_for_project "${1:-}")
 }
 
 resume_managed_codex_heartbeat() {
-  local toml="${TARGET_HOME}/.codex/automations/aru-code-loop/automation.toml"
-  if [[ ! -f "${toml}" ]]; then
-    return 0
-  fi
-  if ! grep -Eq '^id = "aru-code-loop"' "${toml}"; then
-    return 0
-  fi
-  if [[ "${DRY_RUN}" == true ]]; then
-    echo "[DRY-RUN] Would resume managed Codex heartbeat ${toml}"
-    return 0
-  fi
-  local tmp
-  tmp="$(mktemp)"
-  awk '
-    BEGIN { done=0 }
-    /^status = "/ {
-      if (!done) { print "status = \"ACTIVE\""; done=1; next }
-    }
-    { print }
-  ' "${toml}" > "${tmp}"
-  cat "${tmp}" > "${toml}"
-  rm -f "${tmp}"
-  echo "resumed managed Codex heartbeat ${toml}"
+  local toml
+  while IFS= read -r toml; do
+    [[ -n "${toml}" ]] && set_managed_codex_status "${toml}" "ACTIVE"
+  done < <(managed_codex_tomls_for_project "${1:-}")
 }
 
 apply_continuity_actions() {
@@ -523,15 +542,16 @@ apply_continuity_actions() {
     write_codex_wake_prompt "${PROJECT_PATH}" || return 1
   fi
   if [[ "${DISABLE_NATIVE_WAKE}" == true ]]; then
+    pause_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
     aru_python_json disable-wake "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
   fi
   if [[ "${STOP_LOOP}" == true ]]; then
     aru_python_json stop "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
-    pause_managed_codex_heartbeat || return 1
+    pause_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
   fi
   if [[ "${RESUME_LOOP}" == true ]]; then
     aru_python_json resume "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
-    resume_managed_codex_heartbeat || return 1
+    resume_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
   fi
 }
 
