@@ -6,6 +6,8 @@ test_revert_merge.py - Unit tests for scripts/revert_merge.py.
 import os
 import sys
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from unittest.mock import patch
 
 # Add scripts directory to import path
@@ -25,6 +27,10 @@ class TestRevertMerge(unittest.TestCase):
         """
         issues = revert_merge.parse_linked_issues(body)
         self.assertEqual(issues, [89, 90, 91])
+
+    def test_parse_all_github_closing_keyword_forms(self):
+        body = "Close #1 Closes #2 Closed #3 Fix #4 Fixes #5 Fixed #6 Resolve #7 Resolves #8 Resolved #9"
+        self.assertEqual(revert_merge.parse_linked_issues(body), list(range(1, 10)))
 
     def test_parse_linked_issues_empty(self):
         self.assertEqual(revert_merge.parse_linked_issues("No issues linked"), [])
@@ -85,13 +91,25 @@ class TestRevertMerge(unittest.TestCase):
         res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94)
         self.assertEqual(res, revert_merge.EXIT_ERROR)
 
-    def test_revert_target_status_invalid_typo_rejected(self):
-        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94, target_status="Redy")
+    @patch("revert_merge.claimed_by", return_value="gemini-1")
+    @patch("revert_merge.get_issue")
+    def test_revert_target_status_invalid_typo_rejected(self, mock_get_issue, mock_claimed):
+        mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94, target_status="Redy")
         self.assertEqual(res, revert_merge.EXIT_ERROR)
+        self.assertIn("'Redy' is not a valid target status", stderr.getvalue())
 
-    def test_revert_target_status_done_rejected(self):
-        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94, target_status="Done")
+    @patch("revert_merge.claimed_by", return_value="gemini-1")
+    @patch("revert_merge.get_issue")
+    def test_revert_target_status_done_rejected(self, mock_get_issue, mock_claimed):
+        mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94, target_status="Done")
         self.assertEqual(res, revert_merge.EXIT_ERROR)
+        self.assertIn("cannot set target issue status to 'Done'", stderr.getvalue())
 
     @patch("revert_merge.claimed_by", return_value="gemini-1")
     @patch("revert_merge.get_issue")
@@ -132,7 +150,7 @@ class TestRevertMerge(unittest.TestCase):
     @patch("revert_merge.is_merge_commit", return_value=True)
     @patch("revert_merge.run_cmd")
     @patch("revert_merge.fetch_pr_details")
-    def test_revert_clean_success(
+    def test_revert_runs_when_log_contains_unrelated_revert_text(
         self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status, mock_get_issue, mock_claimed, mock_find_pr
     ):
         mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
@@ -150,7 +168,7 @@ class TestRevertMerge(unittest.TestCase):
             (0, "", ""),  # git fetch
             (0, "origin/main\n", ""),  # git rev-parse --verify
             (0, "", ""),  # git worktree add
-            (1, "", ""),  # git log -1 (no revert commit yet)
+            (0, "Revert workflow documentation\n", ""),  # branch log has unrelated text
             (0, "", ""),  # git revert -m 1
             (0, "", ""),  # git push
             (0, "https://github.com/gillella/Aru_Agentic_SDLC/pull/99", ""),  # gh pr create
@@ -161,6 +179,12 @@ class TestRevertMerge(unittest.TestCase):
 
         res = revert_merge.revert_merge_pr(20, agent="gemini-1", family="google", revert_issue=94)
         self.assertEqual(res, revert_merge.EXIT_OK)
+        log_cmd = mock_run_cmd.call_args_list[3][0][0]
+        self.assertEqual(log_cmd, ["git", "log", "--format=%B", "origin/main..HEAD"])
+        self.assertTrue(
+            any(call.args[0][:2] == ["git", "revert"] for call in mock_run_cmd.call_args_list),
+            "an unrelated 'revert' in history must not skip git revert",
+        )
         mock_update_status.assert_called_once_with(30, "Ready", require_board=True)
         mock_identity.assert_called_once_with("99", agent="gemini-1", family="google")
 

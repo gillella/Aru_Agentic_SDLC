@@ -34,10 +34,10 @@ EXIT_CONFLICT = 2
 
 
 def parse_linked_issues(pr_body: str) -> List[int]:
-    """Parses linked issue numbers (Closes #X, Fixes #X, Resolves #X) from PR body."""
+    """Parses issue references using every GitHub-supported closing keyword."""
     if not pr_body:
         return []
-    pattern = r"(?:closes|fixes|resolves)\s+#(\d+)"
+    pattern = r"(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\s+#(\d+)"
     matches = re.findall(pattern, pr_body, re.IGNORECASE)
     return sorted(list(set(int(m) for m in matches)))
 
@@ -236,9 +236,14 @@ def revert_merge_pr(
                     return EXIT_ERROR
             actual_path = worktree_path
 
-        # Check if revert commit is already present
-        code_log, out_log, _ = run_cmd(["git", "log", "-1", "--format=%s"], check=False, cwd=actual_path)
-        has_revert_commit = code_log == 0 and bool(out_log) and ("revert" in out_log.lower())
+        # Check only commits added on the revert branch. The default message from
+        # `git revert --no-edit` records the exact reverted commit in its body.
+        code_log, out_log, _ = run_cmd(
+            ["git", "log", "--format=%B", f"origin/{base_ref}..HEAD"],
+            check=False,
+            cwd=actual_path,
+        )
+        has_revert_commit = code_log == 0 and f"This reverts commit {merge_sha}" in out_log
 
         if not has_revert_commit:
             is_merge = is_merge_commit(merge_sha, cwd=actual_path)
