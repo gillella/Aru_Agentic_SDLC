@@ -8,10 +8,15 @@ network calls, launches no paid agent, and writes no developer configuration.
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
+from unittest.mock import patch
 
+import claim_issue as claim_helpers
+import fetch_next_work
+import merge_pr
 import run_fleet
 
 
@@ -21,6 +26,7 @@ class Issue:
     touches: tuple[str, ...]
     depends_on: tuple[int, ...] = ()
     high_risk: bool = False
+    unresolved_decision: str = ""
     status: str = "Ready"
     claim: str | None = None
     implementations: int = 0
@@ -59,7 +65,8 @@ class HermeticFleet:
                 touches=tuple(item["touches"]),
                 depends_on=tuple(item.get("depends_on", ())),
                 high_risk=item.get("high_risk", False),
-                status="Blocked" if item.get("high_risk", False) else "Ready",
+                unresolved_decision=item.get("unresolved_decision", ""),
+                status="Blocked" if item.get("unresolved_decision") else "Ready",
             )
             for item in scenario["issues"]
         }
@@ -117,87 +124,189 @@ class HermeticFleet:
             "active_claims": self._active_claims(),
         }
 
-    def _paths_conflict(self, candidate: Issue) -> bool:
-        active_numbers = {
-            issue.number
-            for issue in self.issues.values()
-            if issue.number != candidate.number and issue.status in {"In Progress", "In Review"}
-        }
-        active_paths = {
-            path
-            for number in active_numbers
-            for path in self.issues[number].touches
-        }
-        return bool(active_paths.intersection(candidate.touches))
+    @staticmethod
+    def _status_label(status: str) -> str:
+        return {
+            "Ready": "status:ready",
+            "In Progress": "status:in-progress",
+            "In Review": "status:in-review",
+            "Blocked": "status:backlog",
+        }[status]
 
-    def _eligible_issue(self, agent: str) -> Issue | None:
-        resumed = sorted(
-            (issue for issue in self.issues.values() if issue.claim == agent),
-            key=lambda issue: issue.number,
-        )
-        if resumed:
-            return resumed[0]
-        for issue in sorted(self.issues.values(), key=lambda item: item.number):
-            if issue.status != "Ready" or issue.claim:
-                continue
-            if any(self.issues[number].status != "Done" for number in issue.depends_on):
-                continue
-            if self._paths_conflict(issue):
-                continue
-            return issue
-        return None
+    def _issue_record(self, issue: Issue) -> dict[str, Any]:
+        labels = [{"name": self._status_label(issue.status)}]
+        if issue.claim:
+            labels.append({"name": f"agent:{issue.claim}"})
+        dependencies = "\n".join(f"depends-on: #{number}" for number in issue.depends_on)
+        touches = ", ".join(issue.touches)
+        return {
+            "number": issue.number,
+            "title": f"fixture issue {issue.number}",
+            "body": f"{dependencies}\ntouches: {touches}\nparallel-eligible: true",
+            "labels": labels,
+            "assignees": [],
+            "state": "OPEN",
+            "updatedAt": "2026-08-14T09:00:00Z",
+        }
+
+    def _issue_records(self) -> list[dict[str, Any]]:
+        return [
+            self._issue_record(issue)
+            for issue in self.issues.values()
+            if issue.status != "Done"
+        ]
 
     @staticmethod
-    def _merge_ready(pr: PullRequest) -> bool:
-        return (
-            pr.ci == "green"
-            and pr.reviewed_by is not None
-            and pr.review_head == pr.head
-            and not pr.feedback_open
-        )
+    def _ci_rollup(state: str) -> list[dict[str, Any]]:
+        if state == "green":
+            return [{"name": "fixture-ci", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+        if state == "failure":
+            return [{"name": "fixture-ci", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        return [{"name": "fixture-ci", "status": "IN_PROGRESS", "conclusion": ""}]
 
-    def peek(self, agent: str, family: str) -> dict[str, Any]:
+    def _pr_labels(self, pr: PullRequest) -> list[str]:
+        labels = [f"author:{pr.author}", f"family:{pr.family}"]
+        if pr.reviewer_claim:
+            labels.append(f"reviewer:{pr.reviewer_claim}")
+        if pr.reviewed_by:
+            labels.append(f"reviewed-by:{pr.reviewed_by}")
+        if pr.merger_claim:
+            labels.append(f"merger:{pr.merger_claim}")
+        return labels
+
+    def _pr_record(self, pr: PullRequest) -> dict[str, Any]:
+        reviews = []
+        if pr.reviewed_by:
+            reviews.append({
+                "state": "COMMENTED",
+                "id": pr.reviewed_by,
+                "author": {"login": "fixture-account"},
+                "submittedAt": "2026-08-14T09:00:00Z",
+            })
+        return {
+            "number": pr.number,
+            "title": f"fixture PR {pr.number}",
+            "isDraft": False,
+            "labels": [{"name": label} for label in self._pr_labels(pr)],
+            "reviews": reviews,
+            "statusCheckRollup": self._ci_rollup(pr.ci),
+            "updatedAt": "2026-08-14T09:00:00Z",
+            "createdAt": "2026-08-14T09:00:00Z",
+            "headRefName": f"fixture/issue-{pr.issue}",
+            "headRefOid": f"head-{pr.head}",
+            "body": f"Closes #{pr.issue}",
+            "reviewDecision": "",
+            "state": "OPEN" if not pr.merged else "MERGED",
+            "mergedAt": "2026-08-14T09:30:00Z" if pr.merged else None,
+            "mergeStateStatus": "CLEAN",
+            "mergeable": "MERGEABLE",
+            "additions": 20,
+            "deletions": 5,
+            "author": {"login": "fixture-account"},
+            "_active_review_feedback": [object()] if pr.feedback_open else [],
+        }
+
+    def _pr_records(self) -> list[dict[str, Any]]:
+        return [self._pr_record(pr) for pr in self._open_prs()]
+
+    def dod_status(self, pr_number: int) -> tuple[bool, str]:
+        pr = self.pull_requests[pr_number]
+        evidence = {
+            "unresolved": 0,
+            "unfixed": 0,
+            "reviewed_head": bool(pr.reviewed_by and pr.review_head == pr.head),
+            "withdrawn": 0,
+        }
+        issue_body = "## Acceptance Criteria\n- [x] fixture acceptance"
+        ok, gates = merge_pr.evaluate_dod(
+            self._pr_record(pr), {pr.issue: issue_body}, evidence,
+        )
+        blocked = [name for name, passed, _message in gates if not passed]
+        return ok, "every Definition-of-Done gate passed" if ok else f"unmet: {', '.join(blocked)}"
+
+    def select(self, agent: str, family: str) -> dict[str, Any]:
         if self.workers[agent] != family:
             raise AssertionError(f"family drift for {agent}")
-        authored = sorted(
-            (
-                pr for pr in self._open_prs()
-                if pr.author == agent and (pr.feedback_open or pr.ci == "failure")
-            ),
-            key=lambda pr: pr.number,
-        )
-        if authored:
-            return {"type": "feedback", "pr": authored[0].number}
-        mergeable = sorted(
-            (pr for pr in self._open_prs() if self._merge_ready(pr) and not pr.merger_claim),
-            key=lambda pr: pr.number,
-        )
-        if mergeable:
-            return {"type": "merge", "pr": mergeable[0].number}
-        reviewable = sorted(
-            (
-                pr for pr in self._open_prs()
-                if pr.author != agent
-                and pr.ci == "green"
-                and not pr.feedback_open
-                and pr.review_head != pr.head
-                and not pr.reviewer_claim
-            ),
-            key=lambda pr: (self.workers[pr.author] == family, pr.number),
-        )
-        if reviewable:
-            return {"type": "review", "pr": reviewable[0].number}
-        issue = self._eligible_issue(agent)
-        if issue:
-            return {"type": "issue", "issue": issue.number}
-        return {"type": "idle"}
+        with (
+            patch.object(fetch_next_work, "list_work_prs", side_effect=self._pr_records),
+            patch.object(fetch_next_work, "list_open_issues", side_effect=self._issue_records),
+            patch.object(fetch_next_work, "dod_status", side_effect=self.dod_status),
+        ):
+            return fetch_next_work.select(agent, family, round_cap=3, cross_family_wait=30)
+
+    def _set_issue_status(self, issue_number: int, status: str, **_kwargs: Any) -> bool:
+        self.issues[issue_number].status = status
+        return True
+
+    def _transport_command(self, argv: Sequence[str], **_kwargs: Any) -> tuple[int, str, str]:
+        command = list(argv)
+        if len(command) < 4 or command[0] != "gh":
+            raise AssertionError(f"unexpected claim transport command: {command}")
+        kind, action, number = command[1], command[2], int(command[3])
+        if action != "edit":
+            raise AssertionError(f"unexpected claim transport action: {command}")
+        if kind == "issue":
+            issue = self.issues[number]
+            if "--add-label" in command:
+                issue.claim = command[command.index("--add-label") + 1].removeprefix("agent:")
+            elif "--remove-label" in command:
+                issue.claim = None
+            return 0, "", ""
+        pr = self.pull_requests[number]
+        if "--add-label" in command:
+            label = command[command.index("--add-label") + 1]
+            if label.startswith("reviewer:"):
+                pr.reviewer_claim = label.removeprefix("reviewer:")
+            elif label.startswith("reviewed-by:"):
+                pr.reviewed_by = label.removeprefix("reviewed-by:")
+            elif label.startswith("merger:"):
+                pr.merger_claim = label.removeprefix("merger:")
+        elif "--remove-label" in command:
+            label = command[command.index("--remove-label") + 1]
+            if label.startswith("reviewer:"):
+                pr.reviewer_claim = None
+            elif label.startswith("merger:"):
+                pr.merger_claim = None
+        return 0, "", ""
+
+    @contextmanager
+    def _claim_transport(self):
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(
+                claim_helpers, "get_issue",
+                side_effect=lambda number: self._issue_record(self.issues[number]),
+            ))
+            stack.enter_context(patch.object(claim_helpers, "update_status", self._set_issue_status))
+            stack.enter_context(patch.object(claim_helpers, "ensure_label", return_value=True))
+            stack.enter_context(patch.object(claim_helpers, "run_cmd", self._transport_command))
+            stack.enter_context(patch.object(claim_helpers.time, "sleep", return_value=None))
+            stack.enter_context(patch.object(
+                claim_helpers, "_pr_labels",
+                side_effect=lambda number: self._pr_labels(self.pull_requests[number]),
+            ))
+            yield
+
+    def _claim_with_helpers(self, work: dict[str, Any], agent: str) -> None:
+        with self._claim_transport():
+            if work["type"] == "issue":
+                result = claim_helpers.claim_issue(work["issue"], agent)
+            elif work["type"] == "review":
+                result = claim_helpers.claim_review(work["pr"], agent)
+            elif work["type"] == "merge":
+                result = claim_helpers.claim_merge(work["pr"], agent)
+            else:
+                return
+        if result != claim_helpers.EXIT_OK:
+            raise AssertionError(f"real claim helper rejected {work}")
 
     def _claim_issue(self, issue: Issue, agent: str) -> None:
-        if issue.claim not in {None, agent}:
-            raise AssertionError(f"duplicate claim on issue #{issue.number}")
-        if issue.claim is None:
-            issue.claim = agent
-            issue.status = "In Progress"
+        if issue.claim != agent or issue.status != "In Progress":
+            raise AssertionError(f"real claim helper did not claim issue #{issue.number}")
+        already_recorded = any(
+            event["event"] == "issue_claimed" and event["issue"] == issue.number
+            for event in self.events
+        )
+        if not already_recorded:
             issue.workspace_clean = False
             self.record("issue_claimed", issue=issue.number, agent=agent)
 
@@ -236,6 +345,9 @@ class HermeticFleet:
             pr.reviewed_by = None
             pr.verifications += 1
             self.record("feedback_fixed", pr=pr.number, issue=pr.issue, agent=agent)
+            if pr.ci == "failure":
+                pr.ci = "green"
+                self.record("ci_remediated", pr=pr.number, issue=pr.issue, agent=agent)
         elif pr.ci == "failure":
             pr.ci = "green"
             pr.verifications += 1
@@ -247,27 +359,33 @@ class HermeticFleet:
     def _review(self, pr: PullRequest, agent: str) -> int:
         if pr.author == agent or self.workers[pr.author] == self.workers[agent]:
             raise AssertionError("review was not independent and cross-family")
-        if pr.reviewer_claim not in {None, agent}:
-            raise AssertionError(f"duplicate review claim on PR #{pr.number}")
-        pr.reviewer_claim = agent
+        if pr.reviewer_claim != agent:
+            raise AssertionError(f"real claim helper did not claim review of PR #{pr.number}")
         self.record("review_claimed", pr=pr.number, issue=pr.issue, agent=agent)
         if pr.issue in self.feedback_once and pr.feedback_rounds == 0:
             pr.feedback_rounds += 1
             pr.feedback_open = True
-            pr.reviewer_claim = None
+            with self._claim_transport():
+                result = claim_helpers.release_review(pr.number, agent)
+            if result != claim_helpers.EXIT_OK:
+                raise AssertionError(f"real claim helper could not release review #{pr.number}")
             self.record("feedback_requested", pr=pr.number, issue=pr.issue, agent=agent)
             return 0
         pr.review_head = pr.head
-        pr.reviewed_by = agent
-        pr.reviewer_claim = None
+        with self._claim_transport():
+            result = claim_helpers.complete_review(pr.number, agent)
+        if result != claim_helpers.EXIT_OK:
+            raise AssertionError(f"real claim helper could not complete review #{pr.number}")
         self.record("review_completed", pr=pr.number, issue=pr.issue, agent=agent)
         return 0
 
     def _merge(self, pr: PullRequest, agent: str) -> int:
-        pr.merger_claim = agent
+        if pr.merger_claim != agent:
+            raise AssertionError(f"real claim helper did not claim merge of PR #{pr.number}")
         self.record("merge_claimed", pr=pr.number, issue=pr.issue, agent=agent)
-        if not self._merge_ready(pr):
-            raise AssertionError(f"merge gates did not pass for PR #{pr.number}")
+        ready, reason = self.dod_status(pr.number)
+        if not ready:
+            raise AssertionError(f"real merge gate rejected PR #{pr.number}: {reason}")
         pr.merged = True
         pr.merger_claim = None
         issue = self.issues[pr.issue]
@@ -279,8 +397,9 @@ class HermeticFleet:
 
     def execute_one(self, agent: str, family: str) -> int:
         self.fake_adapter_launches += 1
-        work = self.peek(agent, family)
+        work = self.select(agent, family)["work"]
         work_type = work["type"]
+        self._claim_with_helpers(work, agent)
         if work_type == "issue":
             issue = self.issues[work["issue"]]
             self._claim_issue(issue, agent)
@@ -302,8 +421,8 @@ class HermeticFleet:
 
     def acknowledge_human_gate(self, issue_number: int) -> None:
         issue = self.issues[issue_number]
-        if not issue.high_risk or issue.status != "Blocked":
-            raise AssertionError("no durable high-risk gate to acknowledge")
+        if not issue.unresolved_decision or issue.status != "Blocked":
+            raise AssertionError("no durable unresolved decision to acknowledge")
         self.human_acknowledged = True
         issue.status = "Ready"
         self.record("human_gate_acknowledged", issue=issue_number)
@@ -336,7 +455,7 @@ class HelperRouter:
         elif script == "fetch_next_work.py":
             agent = command[command.index("--agent") + 1]
             family = command[command.index("--family") + 1]
-            payload = {"work": self.fleet.peek(agent, family)}
+            payload = self.fleet.select(agent, family)
         else:
             raise AssertionError(f"unexpected helper command: {command}")
         return run_fleet.CommandResult(0, json.dumps(payload), "")

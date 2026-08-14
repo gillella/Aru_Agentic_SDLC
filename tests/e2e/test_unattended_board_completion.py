@@ -79,6 +79,22 @@ class UnattendedBoardCompletionTests(unittest.TestCase):
         self.runners["codex-1"] = self.make_runner(
             "codex-1", "openai", state_suffix="restarted"
         )
+        pending_review = self.cycle("codex-1")
+        self.assertEqual((pending_review.work_type, pending_review.work_number), ("review", 101))
+        self.fleet.advance_ci(2, "failure")
+        remediation = self.cycle("claude-1")
+        self.assertEqual((remediation.work_type, remediation.work_number), ("feedback", 101))
+        self.assertIn(
+            {"event": "ci_remediated", "pr": 101, "issue": 2, "agent": "claude-1"},
+            self.fleet.events,
+        )
+        pending_review_wait = self.cycle("codex-1")
+        self.assertEqual(pending_review_wait.phase, "waiting")
+        reviewed_beta = self.cycle("codex-1")
+        merged_beta = self.cycle("claude-1")
+        self.assertEqual((reviewed_beta.work_type, reviewed_beta.work_number), ("review", 101))
+        self.assertEqual((merged_beta.work_type, merged_beta.work_number), ("merge", 101))
+
         recovered = self.cycle("codex-1")
         self.assertEqual((recovered.work_type, recovered.work_number), ("issue", 1))
         self.assertEqual(self.fleet.issues[1].implementations, 1)
@@ -90,12 +106,25 @@ class UnattendedBoardCompletionTests(unittest.TestCase):
         self.assertEqual(temporary_idle.phase, "waiting")
         self.assertEqual(self.runners["codex-1"].store.read()["phase"], "waiting")
 
+        reviewed_followup = self.cycle("claude-1")
+        merged_followup = self.cycle("codex-1")
         requested = self.cycle("claude-1")
+        no_work_for_reviewer = self.cycle("claude-1")
         fixed = self.cycle("codex-1")
         review_retry_wait = self.cycle("claude-1")
         reviewed = self.cycle("claude-1")
         merged = self.cycle("codex-1")
+        self.assertEqual(
+            (reviewed_followup.work_type, reviewed_followup.work_number),
+            ("review", 103),
+        )
+        self.assertEqual(
+            (merged_followup.work_type, merged_followup.work_number),
+            ("merge", 103),
+        )
         self.assertEqual(requested.work_type, "review")
+        self.assertEqual(requested.work_number, 102)
+        self.assertEqual(no_work_for_reviewer.phase, "waiting")
         self.assertEqual(fixed.work_type, "feedback")
         self.assertEqual(review_retry_wait.phase, "waiting")
         self.assertEqual(reviewed.work_type, "review")
@@ -115,19 +144,8 @@ class UnattendedBoardCompletionTests(unittest.TestCase):
 
         dependency_work = self.cycle("codex-1")
         self.assertEqual((dependency_work.work_type, dependency_work.work_number), ("issue", 3))
-        self.fleet.advance_ci(2, "failure")
-        remediation = self.cycle("claude-1")
-        self.assertEqual(remediation.work_type, "feedback")
-        self.assertIn(
-            {"event": "ci_remediated", "pr": 101, "issue": 2, "agent": "claude-1"},
-            self.fleet.events,
-        )
 
         expected_work = [
-            ("codex-1", "review", 101),
-            ("claude-1", "merge", 101),
-            ("claude-1", "review", 103),
-            ("codex-1", "merge", 103),
             ("claude-1", "review", 104),
             ("codex-1", "merge", 104),
             ("codex-1", "issue", 4),

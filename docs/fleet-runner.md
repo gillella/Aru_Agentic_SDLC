@@ -121,14 +121,15 @@ The default end-to-end acceptance scenario is hermetic:
 python3 -m unittest tests.e2e.test_unattended_board_completion
 ```
 
-It injects fake local-agent adapters and an in-memory GitHub Project fixture
-through the real runner boundaries. It spends no model credits, uses no GitHub
-credentials, and does not read or modify Codex, Claude, Cursor, Antigravity, or
-developer configuration. The scenario covers two model families, concurrent
-non-overlapping claims, dependency and path serialization, author handoff,
-cross-family review feedback, CI remediation, crash recovery, guarded merge,
-durable high-risk blocking and acknowledgement, idle waiting, final board and
-workspace audit, and explicit runner shutdown.
+It injects fake local-agent adapters and an in-memory GitHub transport while
+running the production picker, optimistic issue/review/merge claim helpers,
+merge Definition-of-Done evaluator, and runner. It spends no model credits,
+uses no GitHub credentials, and does not read or modify Codex, Claude, Cursor,
+Antigravity, or developer configuration. The scenario covers two model
+families, concurrent non-overlapping claims, dependency and path serialization,
+author handoff, cross-family review feedback, CI remediation, crash recovery,
+guarded merge, an unresolved high-risk product decision and acknowledgement,
+idle waiting, final board and workspace audit, and explicit runner shutdown.
 
 ### Opt-in live disposable-repository smoke test
 

@@ -8,10 +8,15 @@
     {"number": 2, "touches": ["src/beta.py"]},
     {"number": 3, "touches": ["src/dependent.py"], "depends_on": [1]},
     {"number": 4, "touches": ["src/alpha.py"]},
-    {"number": 5, "touches": ["schema/high-risk.sql"], "high_risk": true},
+    {
+      "number": 5,
+      "touches": ["schema/high-risk.sql"],
+      "high_risk": true,
+      "unresolved_decision": "retention contract is unspecified"
+    },
     {"number": 6, "touches": ["src/follow-up.py"]}
   ],
   "crash_once": [1],
-  "feedback_once": [1],
+  "feedback_once": [1, 2],
   "initial_ci": {"2": "pending"}
 }
