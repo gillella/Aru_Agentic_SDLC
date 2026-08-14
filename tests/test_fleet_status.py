@@ -335,6 +335,17 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(health["file_count"], 1)
         self.assertEqual(health["loc"], 1)
 
+    def test_codebase_health_counts_non_utf8_sources(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "latin1.py").write_bytes(
+                b"# -*- coding: latin-1 -*-\nx = '\xe9'\n"
+            )
+            (root / "app.js").write_text("a\nb\n", encoding="utf-8")
+            health = collect_codebase_health(str(root))
+        self.assertEqual(health["file_count"], 2)
+        self.assertEqual(health["loc"], 4)
+
     def test_complete_status_includes_codebase_health(self):
         with tempfile.TemporaryDirectory() as target:
             Path(target, "app.py").write_text("print(1)\n", encoding="utf-8")

@@ -114,9 +114,9 @@ def _is_regular_file(path: str) -> bool:
 
 def _count_lines(path: str) -> Optional[int]:
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, "rb") as fh:
             return sum(1 for _ in fh)
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         return None
 
 
