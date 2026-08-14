@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import time
 from datetime import datetime, timezone
@@ -95,19 +96,45 @@ def _stop_document(value: Any) -> Dict[str, Any]:
     return value
 
 
+def _adopt_legacy_stop_file(path: Path) -> None:
+    """Secure a regular legacy stop file without rejecting its old 0644 mode."""
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise RegistryError(f"cannot inspect factory-loop.stop: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise RegistryError(f"unsafe factory-loop.stop file: {path}")
+    if info.st_uid != os.getuid():
+        raise RegistryError(f"factory-loop.stop is not owned by the current user: {path}")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        raise RegistryError(f"factory-loop.stop is writable by another user: {path}")
+    if mode != 0o600:
+        try:
+            os.chmod(path, 0o600, follow_symlinks=False)
+        except OSError as exc:
+            raise RegistryError(f"cannot secure factory-loop.stop: {exc}") from exc
+
+
 def load_stop_file(path: Optional[Path] = None) -> Dict[str, Any]:
-    return _stop_document(read_secure_json(path or STOP_PATH, {}))
+    destination = path or STOP_PATH
+    _adopt_legacy_stop_file(destination)
+    return _stop_document(read_secure_json(destination, {}))
 
 
 def write_stop_file(
     projects: List[str], source: str, path: Optional[Path] = None,
     agents: Optional[List[str]] = None,
 ) -> None:
+    destination = path or STOP_PATH
+    _adopt_legacy_stop_file(destination)
     payload = {
         "projects": projects, "agents": list(agents or []),
         "stopped_at": _now(), "source": source,
     }
-    mutate_secure_json(path or STOP_PATH, {}, lambda _current: payload)
+    mutate_secure_json(destination, {}, lambda _current: payload)
 
 
 def agent_stop_token(project_path: str, agent: str) -> str:
@@ -144,13 +171,16 @@ def apply_stop(project_path: str, target: str, path: Optional[Path] = None) -> s
             "stopped_at": _now(), "source": "slack_control_room",
         }
 
-    mutate_secure_json(path or STOP_PATH, {}, update)
+    destination = path or STOP_PATH
+    _adopt_legacy_stop_file(destination)
+    mutate_secure_json(destination, {}, update)
     subject = "project" if target == "project" else target
     return f"stop recorded for {subject} (drain-first; loops check between units)"
 
 
 def apply_resume(project_path: str, target: str, path: Optional[Path] = None) -> str:
     destination = path or STOP_PATH
+    _adopt_legacy_stop_file(destination)
     if not destination.is_file():
         return "no operator stop is in effect"
     result = {"message": ""}

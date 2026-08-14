@@ -174,6 +174,28 @@ class SlackControlRoomTests(unittest.TestCase):
             self.assertIn("cleared", resumed)
             self.assertNotIn(str(self.checkout_a.resolve()), json.loads(self.stop_path.read_text())["projects"])
 
+    def test_legacy_0644_stop_file_is_adopted_without_schema_breakage(self):
+        self.stop_path.write_text(
+            json.dumps({
+                "projects": [self.project_a.local_path],
+                "stopped_at": "2026-08-14T00:00:00Z",
+                "source": "install_local_agent_integrations.sh",
+            }),
+            encoding="utf-8",
+        )
+        self.stop_path.chmod(0o644)
+        document = scr.load_stop_file(self.stop_path)
+        self.assertEqual(document["projects"], [self.project_a.local_path])
+        self.assertEqual(document.get("agents", []), [])
+        self.assertEqual(self.stop_path.stat().st_mode & 0o777, 0o600)
+
+    def test_world_writable_legacy_stop_file_fails_closed(self):
+        self.stop_path.write_text('{"projects": ["*"]}\n', encoding="utf-8")
+        self.stop_path.chmod(0o666)
+        with self.assertRaisesRegex(Exception, "writable by another user"):
+            scr.load_stop_file(self.stop_path)
+        self.assertEqual(self.stop_path.stat().st_mode & 0o777, 0o666)
+
     def test_global_stop_and_resume_are_rejected_from_slack(self):
         with patch.object(scr, "STOP_PATH", self.stop_path):
             self.assertIn("not supported", scr.apply_stop(self.project_a.local_path, "all"))
