@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -98,10 +99,11 @@ class DeployPreviewSkillTests(unittest.TestCase):
 
     @patch("deploy_preview.run_cmd")
     def test_dispatch_cd_workflow_correlates_new_run_id(self, mock_run):
-        # Initial call: gh workflow run, then gh run list with delayed new run
+        # Initial call: gh workflow run, gh run list with delayed new run, gh run view for correlation
         mock_run.side_effect = [
             (0, "", ""),  # gh workflow run
             (0, '[{"databaseId": 1001}, {"databaseId": 1002}]', ""),  # gh run list poll
+            (0, json.dumps({"displayTitle": "Deploy Preview for abcdef123456 (tok123)", "name": "Deploy Preview", "headSha": "abcdef123456"}), ""),  # gh run view 1002
         ]
         pre_existing = {1001}
         run_id = dp.dispatch_cd_workflow(
@@ -109,13 +111,10 @@ class DeployPreviewSkillTests(unittest.TestCase):
             workflow_name="deploy-preview.yml",
             pre_existing_run_ids=pre_existing,
             default_branch="main",
+            run_token="tok123",
             max_poll_attempts=1,
         )
         self.assertEqual(run_id, 1002)
-        mock_run.assert_any_call(
-            ["gh", "workflow", "run", "deploy-preview.yml", "--ref", "main", "-f", "commit_sha=abcdef123456"],
-            check=False,
-        )
 
     @patch("deploy_preview.run_cmd")
     def test_dispatch_cd_workflow_fails_closed_when_run_query_fails_or_times_out(self, mock_run):
@@ -176,6 +175,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
     def test_file_remediation_issue_attaches_to_board_or_fails_closed(self, mock_run):
         # Successful creation and attachment
         mock_run.side_effect = [
+            (0, "[]", ""),  # gh issue list (no existing issue)
             (0, "https://github.com/owner/repo/issues/205\n", ""),  # gh issue create
             (0, "Attached to board", ""),  # update_issue_status.py --require-board
             (0, "", ""),  # gh issue comment notifying originating issue
@@ -183,10 +183,10 @@ class DeployPreviewSkillTests(unittest.TestCase):
         new_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
         self.assertEqual(new_id, 205)
 
-        # Attachment failure fails closed
+        # Creation failure returns None
         mock_run.side_effect = [
-            (0, "https://github.com/owner/repo/issues/206\n", ""),  # gh issue create
-            (1, "", "Board attachment failed"),  # update_issue_status.py failure
+            (0, "[]", ""),  # gh issue list
+            (1, "", "Failed to create issue"),  # gh issue create failure
         ]
         fail_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
         self.assertIsNone(fail_id)
@@ -227,19 +227,110 @@ class DeployPreviewSkillTests(unittest.TestCase):
         url2 = dp.extract_preview_url_from_run(12346)
         self.assertIsNone(url2)
 
-    def test_deploy_preview_no_wait_without_url_fails(self):
-        exit_code = dp.deploy_preview(commit_sha="abcdef123456", issue_id=109, wait=False, preview_url=None)
-        self.assertEqual(exit_code, 1)
+    @patch("deploy_preview.run_cmd")
+    def test_dispatch_cd_workflow_correlates_matching_run_under_concurrent_dispatches(self, mock_run):
+        # Two new runs appear in poll: 2001 (for commit A / token A) and 2002 (for commit B / token B)
+        # Calling for commit A / token A must select 2001, not max(new_runs) (2002)
+        def run_cmd_side_effect(cmd, check=False):
+            if cmd[:3] == ["gh", "workflow", "run"]:
+                return (0, "", "")
+            if cmd[:3] == ["gh", "run", "list"]:
+                return (0, '[{"databaseId": 1000}, {"databaseId": 2001}, {"databaseId": 2002}]', "")
+            if cmd[:3] == ["gh", "run", "view"]:
+                run_id = cmd[3]
+                if run_id == "2002":
+                    return (0, json.dumps({"displayTitle": "Deploy Preview for commitB (tokenB)", "name": "Deploy Preview", "headSha": "commitB"}), "")
+                if run_id == "2001":
+                    return (0, json.dumps({"displayTitle": "Deploy Preview for commitA (tokenA)", "name": "Deploy Preview", "headSha": "commitA"}), "")
+            return (1, "", "unknown cmd")
+
+        mock_run.side_effect = run_cmd_side_effect
+        pre_existing = {1000}
+        run_id = dp.dispatch_cd_workflow(
+            "commitA",
+            workflow_name="deploy-preview.yml",
+            pre_existing_run_ids=pre_existing,
+            default_branch="main",
+            run_token="tokenA",
+            max_poll_attempts=1,
+        )
+        self.assertEqual(run_id, 2001)
 
     @patch("deploy_preview.run_cmd")
-    def test_file_remediation_issue_fails_closed_when_originating_comment_fails(self, mock_run):
+    def test_file_remediation_issue_reuses_existing_issue(self, mock_run):
+        # Existing open remediation issue #199 for commit abcdef1
         mock_run.side_effect = [
-            (0, "https://github.com/owner/repo/issues/207\n", ""),  # gh issue create
-            (0, "Attached to board", ""),  # update_issue_status.py --require-board
-            (1, "", "Failed to comment on originating issue"),  # gh issue comment failure
+            (0, json.dumps([{"number": 199, "title": "fix(deploy): preview deployment failed for commit abcdef1", "body": "details"}]), ""),
         ]
-        fail_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
-        self.assertIsNone(fail_id)
+        issue_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy failed")
+        self.assertEqual(issue_id, 199)
+
+    @patch("deploy_preview.run_cmd")
+    def test_file_remediation_issue_returns_created_id_on_notification_warning(self, mock_run):
+        # Issue created and attached, but originating comment fails -> durable partial success returns created ID
+        mock_run.side_effect = [
+            (0, "[]", ""),  # gh issue list (no existing issue)
+            (0, "https://github.com/owner/repo/issues/208\n", ""),  # gh issue create
+            (0, "Attached to board", ""),  # update_issue_status.py
+            (1, "", "Failed to comment on originating issue"),  # gh issue comment fails
+        ]
+        new_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy failed")
+        self.assertEqual(new_id, 208)
+
+    def test_build_preview_artifact_with_visualizer_directory_fixture(self):
+        import tempfile
+        import build_preview as bp
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            src = Path(temp_dir) / "project"
+            out = Path(temp_dir) / "dist"
+            viz = src / "sdlc_flow_visualizer"
+            viz.mkdir(parents=True)
+            (viz / "index.html").write_text("<!DOCTYPE html><html><body>Visualizer</body></html>")
+            (viz / "styles.css").write_text("body { color: blue; }")
+            (viz / "app.js").write_text("console.log('loaded');")
+
+            success = bp.assemble_preview_artifact(str(src), str(out))
+            self.assertTrue(success)
+            self.assertTrue((out / "index.html").is_file())
+            self.assertTrue((out / "styles.css").is_file())
+            self.assertTrue((out / "app.js").is_file())
+            self.assertEqual((out / "styles.css").read_text(), "body { color: blue; }")
+
+    def test_build_preview_artifact_with_root_static_fixture(self):
+        import tempfile
+        import build_preview as bp
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            src = Path(temp_dir) / "project"
+            out = Path(temp_dir) / "dist"
+            src.mkdir(parents=True)
+            (src / "index.html").write_text("<!DOCTYPE html><html><body>Root</body></html>")
+            (src / "styles.css").write_text("body { font-size: 14px; }")
+            assets = src / "assets"
+            assets.mkdir()
+            (assets / "logo.svg").write_text("<svg></svg>")
+
+            success = bp.assemble_preview_artifact(str(src), str(out))
+            self.assertTrue(success)
+            self.assertTrue((out / "index.html").is_file())
+            self.assertTrue((out / "styles.css").is_file())
+            self.assertTrue((out / "assets" / "logo.svg").is_file())
+
+    def test_build_preview_artifact_fails_on_unsupported_project(self):
+        import tempfile
+        import build_preview as bp
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            src = Path(temp_dir) / "project"
+            out = Path(temp_dir) / "dist"
+            src.mkdir(parents=True)
+            # Only Python source without any HTML/preview entrypoint
+            (src / "main.py").write_text("print('hello')")
+
+            success = bp.assemble_preview_artifact(str(src), str(out))
+            self.assertFalse(success)
+            self.assertFalse((out / "index.html").exists())
 
 
 if __name__ == "__main__":

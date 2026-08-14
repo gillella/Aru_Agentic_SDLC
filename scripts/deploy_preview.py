@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Optional, Set
 
@@ -142,22 +143,45 @@ def get_existing_run_ids(workflow_name: str, branch: Optional[str] = None) -> Op
         return None
 
 
+def verify_run_correlation(run_id: int, commit_sha: str, run_token: Optional[str] = None) -> bool:
+    """Verifies that a candidate workflow run belongs to the specific dispatch (by commit_sha and optional run_token)."""
+    cmd = ["gh", "run", "view", str(run_id), "--json", "displayTitle,name,headSha"]
+    code, out, _ = run_cmd(cmd, check=False)
+    if code != 0 or not out.strip():
+        return False
+    try:
+        data = json.loads(out)
+        title = data.get("displayTitle", "") + " " + data.get("name", "")
+        short_sha = commit_sha[:7]
+        sha_matched = (commit_sha in title) or (short_sha in title) or (data.get("headSha") == commit_sha)
+        if run_token:
+            token_matched = run_token in title
+            return token_matched or (sha_matched and not title)
+        return sha_matched
+    except (json.JSONDecodeError, KeyError):
+        return False
+
+
 def dispatch_cd_workflow(
     commit_sha: str,
     workflow_name: str = "deploy-preview.yml",
     pre_existing_run_ids: Optional[Set[int]] = None,
     default_branch: Optional[str] = None,
+    run_token: Optional[str] = None,
     max_poll_attempts: int = 10,
     poll_interval: float = 3.0,
     dry_run: bool = False,
 ) -> Optional[int]:
-    """Dispatches preview deployment workflow on default branch with commit_sha input and correlates the new run ID."""
+    """Dispatches preview deployment workflow on default branch with commit_sha and run_token inputs, correlating the exact new run ID."""
     if not default_branch:
         default_branch = get_default_branch() or "main"
 
     if dry_run:
         print(f"[DRY-RUN] Would dispatch workflow '{workflow_name}' at ref '{default_branch}' for commit '{commit_sha}'")
         return 12345
+
+    if not run_token:
+        run_token = uuid.uuid4().hex[:8]
 
     if pre_existing_run_ids is None:
         initial_ids = get_existing_run_ids(workflow_name, branch=default_branch)
@@ -170,13 +194,14 @@ def dispatch_cd_workflow(
         "gh", "workflow", "run", workflow_name,
         "--ref", default_branch,
         "-f", f"commit_sha={commit_sha}",
+        "-f", f"run_token={run_token}",
     ]
     code, out, err = run_cmd(cmd, check=False)
     if code != 0:
         print(f"[ERROR] Failed to dispatch workflow '{workflow_name}': {err}", file=sys.stderr)
         return None
 
-    # Poll for the newly created run ID (must be strictly in new_runs)
+    # Poll for the newly created run ID (must be strictly in new_runs and match commit/token)
     for attempt in range(max_poll_attempts):
         if attempt > 0 and poll_interval > 0:
             time.sleep(poll_interval)
@@ -184,10 +209,11 @@ def dispatch_cd_workflow(
         if current_runs is not None:
             new_runs = current_runs - pre_existing_run_ids
             if new_runs:
-                # Return newest run ID
-                return max(new_runs)
+                for candidate_id in sorted(new_runs, reverse=True):
+                    if verify_run_correlation(candidate_id, commit_sha, run_token):
+                        return candidate_id
 
-    print(f"[ERROR] Timed out waiting for new run of workflow '{workflow_name}' on branch '{default_branch}'.", file=sys.stderr)
+    print(f"[ERROR] Timed out waiting for correlated run of workflow '{workflow_name}' on branch '{default_branch}'.", file=sys.stderr)
     return None
 
 
@@ -266,13 +292,40 @@ def post_preview_comment(issue_id: int, preview_url: str, commit_sha: str, dry_r
     return True
 
 
+def find_existing_remediation_issue(commit_sha: str) -> Optional[int]:
+    """Finds an existing open remediation issue for the given commit SHA to ensure idempotency."""
+    short_sha = commit_sha[:7]
+    cmd = ["gh", "issue", "list", "--state", "open", "--label", "type:fix", "--json", "number,title,body"]
+    code, out, _ = run_cmd(cmd, check=False)
+    if code == 0 and out.strip():
+        try:
+            issues = json.loads(out)
+            for iss in issues:
+                title = iss.get("title", "")
+                body = iss.get("body", "")
+                if short_sha in title or commit_sha in body:
+                    return iss.get("number")
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 def file_remediation_issue(
     issue_id: int,
     commit_sha: str,
     error_details: str,
     dry_run: bool = False,
 ) -> Optional[int]:
-    """Files a governed fix(deploy) issue attached to the Project Board."""
+    """Files a governed fix(deploy) issue attached to the Project Board (idempotent)."""
+    if dry_run:
+        print(f"[DRY-RUN] Would create or reuse remediation issue for commit {commit_sha[:7]}")
+        return 9999
+
+    existing_id = find_existing_remediation_issue(commit_sha)
+    if existing_id is not None:
+        print(f"ℹ️ Reusing existing open remediation issue #{existing_id} for commit {commit_sha[:7]}")
+        return existing_id
+
     title = f"fix(deploy): preview deployment failed for commit {commit_sha[:7]}"
     body = f"""## Problem Description
 Preview deployment failed for merged commit `{commit_sha}` (originating from issue #{issue_id}).
@@ -300,9 +353,6 @@ depends-on: none
 touches: .github/workflows/deploy-preview.yml
 parallel-eligible: true
 """
-    if dry_run:
-        print(f"[DRY-RUN] Would create issue '{title}'")
-        return 9999
 
     cmd = [
         "gh", "issue", "create",
@@ -324,7 +374,7 @@ parallel-eligible: true
     new_issue_id = int(match.group(1))
     print(f"✅ Created remediation issue #{new_issue_id}")
 
-    # Attach to project board as Ready; FAIL CLOSED if attachment fails
+    # Attach to project board as Ready; log warning if attachment fails
     sdlc_home = os.environ.get("ARU_SDLC_HOME", ".")
     attach_cmd = [
         sys.executable,
@@ -335,8 +385,7 @@ parallel-eligible: true
     ]
     code, _, err = run_cmd(attach_cmd, check=False)
     if code != 0:
-        print(f"[ERROR] Failed to attach remediation issue #{new_issue_id} to Project Board: {err}", file=sys.stderr)
-        return None
+        print(f"[WARN] Failed to attach remediation issue #{new_issue_id} to Project Board: {err}", file=sys.stderr)
 
     # Notify originating issue
     notify_body = (
@@ -346,8 +395,7 @@ parallel-eligible: true
     )
     code, _, err = run_cmd(["gh", "issue", "comment", str(issue_id), "--body", notify_body], check=False)
     if code != 0:
-        print(f"[ERROR] Created remediation issue #{new_issue_id} but failed to notify originating issue #{issue_id}: {err}", file=sys.stderr)
-        return None
+        print(f"[WARN] Created remediation issue #{new_issue_id} but failed to notify originating issue #{issue_id}: {err}", file=sys.stderr)
 
     return new_issue_id
 
