@@ -270,10 +270,21 @@ def discover_fleet_size(repo_dir: str) -> Optional[int]:
     return launched or None
 
 
-def fetch_ci_history(window_days: int) -> List[Dict[str, Any]]:
-    """Windowed Actions runs, including failed attempts later rerun green."""
+def fetch_ci_history(window_days: int, repo_dir: str = ".") -> List[Dict[str, Any]]:
+    """Windowed Actions runs for ``repo_dir``, including failed-then-green reruns."""
     from factory_metrics import fetch_ci_runs
-    return fetch_ci_runs(window_days)
+
+    original = os.getcwd()
+    target = os.path.abspath(repo_dir)
+    try:
+        os.chdir(target)
+        return fetch_ci_runs(window_days)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not collect CI history from repository '{target}': {exc}"
+        ) from exc
+    finally:
+        os.chdir(original)
 
 
 def _comment_bodies(pr: Dict[str, Any]) -> List[str]:
@@ -645,7 +656,11 @@ def evaluate_fleet_status(
     original = os.getcwd()
     try:
         os.chdir(target)
-        size = fleet_size if fleet_size is not None else discover_fleet_size(target)
+        size = (
+            resolve_fleet_size(fleet_size)
+            if fleet_size is not None
+            else discover_fleet_size(target)
+        )
         status = _evaluate_current_repo(size)
     except OSError as exc:
         return _error(
@@ -863,7 +878,7 @@ def main():
         try:
             if args.metrics_window_days <= 0:
                 raise RuntimeError("--metrics-window-days must be positive.")
-            ci_runs = fetch_ci_history(args.metrics_window_days)
+            ci_runs = fetch_ci_history(args.metrics_window_days, args.repo_dir)
         except (RuntimeError, TypeError, ValueError, KeyError) as exc:
             ci_error = str(exc)
         apply_ci_failure_rate(status.get("operator_screen"), ci_runs, ci_error)

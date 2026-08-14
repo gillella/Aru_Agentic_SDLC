@@ -418,14 +418,43 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(ready["in_flight"], 1)
         self.assertIn("[ATTN]", format_operator_screen(status["operator_screen"]))
 
-    def test_idle_configured_fleet_is_starved_when_ready_is_empty(self):
-        status = self.evaluate_fixture(fleet_size=4)
+    def test_negative_fleet_size_is_unavailable_not_healthy(self):
+        status = self.evaluate_fixture(fleet_size=-1)
         ready = questions(status)["ready_depth"]
-        self.assertEqual(ready["severity"], "attn")
-        self.assertEqual(ready["ready_depth"], 0)
-        self.assertEqual(ready["in_flight"], 0)
-        self.assertEqual(ready["fleet_size"], 4)
-        self.assertIn("starved", ready["summary"])
+        self.assertIsNone(ready["fleet_size"])
+        self.assertEqual(ready["severity"], "warn")
+        self.assertIn("unavailable", ready["summary"])
+
+    def test_main_fetches_ci_history_from_repo_dir(self):
+        from fleet_status import main
+
+        original = os.getcwd()
+        observed = []
+        status = {
+            "state": "waiting",
+            "exit_code": EXIT_WAITING,
+            "summary": "waiting",
+            "operator_screen": {"questions": [], "severity": "ok"},
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "widgets"
+            repo.mkdir()
+
+            def fake_fetch(_window):
+                observed.append(os.getcwd())
+                return []
+
+            with (
+                patch("fleet_status.evaluate_fleet_status", return_value=status),
+                patch("factory_metrics.fetch_ci_runs", side_effect=fake_fetch),
+                patch("sys.argv", ["fleet_status.py", "--json", "--repo-dir", str(repo)]),
+                patch("builtins.print"),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main()
+        self.assertEqual(raised.exception.code, EXIT_WAITING)
+        self.assertEqual(observed, [str(repo.resolve())])
+        self.assertEqual(os.getcwd(), original)
 
     def test_holders_mark_stale_claims(self):
         status = self.evaluate_fixture(
