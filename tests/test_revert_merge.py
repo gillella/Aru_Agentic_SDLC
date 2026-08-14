@@ -156,6 +156,95 @@ class TestRevertMerge(unittest.TestCase):
         res = revert_merge.revert_merge_pr(25, agent="gemini-1")
         self.assertEqual(res, revert_merge.EXIT_CONFLICT)
 
+    def test_revert_target_status_done_rejected(self):
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", target_status="Done")
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
+    @patch("revert_merge.update_status")
+    @patch("revert_merge.enqueue_review")
+    @patch("revert_merge.apply_identity", return_value=False)
+    @patch("revert_merge.is_merge_commit", return_value=True)
+    @patch("revert_merge.run_cmd")
+    @patch("revert_merge.fetch_pr_details")
+    def test_revert_apply_identity_failure(
+        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status
+    ):
+        mock_fetch.return_value = {
+            "number": 20,
+            "title": "feat: add feature",
+            "body": "Closes #30",
+            "baseRefName": "main",
+            "state": "MERGED",
+            "mergedAt": "2026-08-13T00:00:00Z",
+            "mergeCommit": {"oid": "mergecommitsha123"},
+        }
+        mock_run_cmd.side_effect = [
+            (0, "", ""),  # git fetch
+            (0, "", ""),  # git worktree add
+            (0, "", ""),  # git revert -m 1
+            (0, "", ""),  # git push
+            (0, "https://github.com/gillella/Aru_Agentic_SDLC/pull/99", ""),  # gh pr create
+        ]
+        res = revert_merge.revert_merge_pr(20, agent="gemini-1")
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+        mock_enqueue.assert_not_called()
+        mock_update_status.assert_not_called()
+
+    @patch("revert_merge.get_unmerged_files", return_value=[])
+    @patch("revert_merge.is_merge_commit", return_value=True)
+    @patch("revert_merge.run_cmd")
+    @patch("revert_merge.fetch_pr_details")
+    def test_revert_git_non_conflict_failure(
+        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_unmerged
+    ):
+        mock_fetch.return_value = {
+            "number": 25,
+            "title": "breaking change",
+            "body": "Closes #40",
+            "baseRefName": "develop",
+            "state": "MERGED",
+            "mergedAt": "2026-08-13T00:00:00Z",
+            "mergeCommit": {"oid": "mergecommitsha456"},
+        }
+        mock_run_cmd.side_effect = [
+            (0, "", ""),  # git fetch
+            (0, "", ""),  # git worktree add
+            (1, "", "fatal: bad object"),  # git revert
+            (0, "", ""),  # git revert --abort
+            (0, "", ""),  # git worktree remove
+        ]
+        res = revert_merge.revert_merge_pr(25, agent="gemini-1")
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
+    @patch("revert_merge.update_status", return_value=False)
+    @patch("revert_merge.enqueue_review")
+    @patch("revert_merge.apply_identity", return_value=True)
+    @patch("revert_merge.is_merge_commit", return_value=True)
+    @patch("revert_merge.run_cmd")
+    @patch("revert_merge.fetch_pr_details")
+    def test_revert_issue_restoration_failure(
+        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status
+    ):
+        mock_fetch.return_value = {
+            "number": 20,
+            "title": "feat: add feature",
+            "body": "Closes #30",
+            "baseRefName": "main",
+            "state": "MERGED",
+            "mergedAt": "2026-08-13T00:00:00Z",
+            "mergeCommit": {"oid": "mergecommitsha123"},
+        }
+        mock_run_cmd.side_effect = [
+            (0, "", ""),  # git fetch
+            (0, "", ""),  # git worktree add
+            (0, "", ""),  # git revert -m 1
+            (0, "", ""),  # git push
+            (0, "https://github.com/gillella/Aru_Agentic_SDLC/pull/99", ""),  # gh pr create
+            (0, "", ""),  # gh issue reopen 30
+        ]
+        res = revert_merge.revert_merge_pr(20, agent="gemini-1")
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
     @patch("revert_merge.run_cmd")
     def test_get_unmerged_files(self, mock_run_cmd):
         mock_run_cmd.side_effect = [

@@ -110,6 +110,10 @@ def revert_merge_pr(
         print("[ERROR] --agent is required. Revert PRs must be stamped with author identity.", file=sys.stderr)
         return EXIT_ERROR
 
+    if target_status.strip().lower() == "done":
+        print("[ERROR] Revert cannot set target issue status to 'Done'. Issues must be restored to an active/unresolved state.", file=sys.stderr)
+        return EXIT_ERROR
+
     pr_data = fetch_pr_details(pr_id)
     if not pr_data:
         print(f"[ERROR] Could not fetch details for PR #{pr_id}.", file=sys.stderr)
@@ -173,22 +177,27 @@ def revert_merge_pr(
 
     code, out, err = run_cmd(revert_cmd, check=False, cwd=actual_path)
     if code != 0:
-        # Conflict encountered
+        # Conflict or git failure encountered
         conflicts = get_unmerged_files(actual_path)
 
         # Abort revert
         run_cmd(["git", "revert", "--abort"], check=False, cwd=actual_path)
         run_cmd(["git", "worktree", "remove", "--force", actual_path], check=False)
 
-        print(f"\n[ERROR] Revert of PR #{pr_id} failed due to merge conflicts.", file=sys.stderr)
-        print("Conflicting files:", file=sys.stderr)
-        for cf in conflicts:
-            print(f"  - {cf}", file=sys.stderr)
-        print("\nManual Remediation Required:", file=sys.stderr)
-        print(f"  1. Create branch '{revert_branch}' from origin/{base_ref} manually.", file=sys.stderr)
-        print(f"  2. Execute '{revert_cmd_str}' and resolve conflicts manually.", file=sys.stderr)
-        print(f"  3. Commit resolved revert, push '{revert_branch}', and open a PR linking 'Reverts #{pr_id}'.", file=sys.stderr)
-        return EXIT_CONFLICT
+        if conflicts:
+            print(f"\n[ERROR] Revert of PR #{pr_id} failed due to merge conflicts.", file=sys.stderr)
+            print("Conflicting files:", file=sys.stderr)
+            for cf in conflicts:
+                print(f"  - {cf}", file=sys.stderr)
+            print("\nManual Remediation Required:", file=sys.stderr)
+            print(f"  1. Create branch '{revert_branch}' from origin/{base_ref} manually.", file=sys.stderr)
+            print(f"  2. Execute '{revert_cmd_str}' and resolve conflicts manually.", file=sys.stderr)
+            print(f"  3. Commit resolved revert, push '{revert_branch}', and open a PR linking 'Reverts #{pr_id}'.", file=sys.stderr)
+            return EXIT_CONFLICT
+        else:
+            print(f"\n[ERROR] Revert of PR #{pr_id} failed: {err or out}", file=sys.stderr)
+            print(f"Command attempted: {revert_cmd_str}", file=sys.stderr)
+            return EXIT_ERROR
 
     print(f"✅ Clean revert achieved in worktree '{actual_path}'.")
 
@@ -239,18 +248,21 @@ def revert_merge_pr(
     enqueue_review(revert_pr_num)
 
     # Reopen affected issues & update board state (failing closed on any failure)
+    failed_issues = []
     for issue_id in linked_issues:
         # 1. Reopen GitHub issue
         code_reopen, _, err_reopen = run_cmd(["gh", "issue", "reopen", str(issue_id)], check=False)
         if code_reopen != 0:
             print(f"[ERROR] Failed to reopen Issue #{issue_id} on GitHub: {err_reopen}", file=sys.stderr)
-            return EXIT_ERROR
+            failed_issues.append((issue_id, "reopen"))
+            continue
 
         # 2. Update board status and labels
         board_ok = update_status(issue_id, target_status, require_board=True)
         if not board_ok:
             print(f"[ERROR] Failed to update board status for Issue #{issue_id} to '{target_status}'.", file=sys.stderr)
-            return EXIT_ERROR
+            failed_issues.append((issue_id, "board_status"))
+            continue
 
         # 3. Post explanatory comment
         comment_body = (
@@ -260,9 +272,15 @@ def revert_merge_pr(
         code_comm, _, err_comm = run_cmd(["gh", "issue", "comment", str(issue_id), "--body", comment_body], check=False)
         if code_comm != 0:
             print(f"[ERROR] Failed to post comment on Issue #{issue_id}: {err_comm}", file=sys.stderr)
-            return EXIT_ERROR
+            failed_issues.append((issue_id, "comment"))
+            continue
 
         print(f"✅ Issue #{issue_id} reopened on GitHub, moved to '{target_status}', and commented.")
+
+    if failed_issues:
+        print(f"\n[ERROR] Revert PR #{revert_pr_num} created, but issue restoration failed for: {failed_issues}", file=sys.stderr)
+        print("Manual remediation required for the failed issues listed above.", file=sys.stderr)
+        return EXIT_ERROR
 
     print(f"\n🎉 Governed revert of PR #{pr_id} complete. Revert PR #{revert_pr_num} is now in queue for review.")
     return EXIT_OK
