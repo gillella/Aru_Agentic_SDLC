@@ -14,4 +14,10 @@ This environment is governed by Aru_Agentic_SDLC.
 4. In the desktop app, `aru code loop`, `continue`, and `keep going` keep the
    current project task working the board. Do not replace it with a CLI agent;
    stop only for an explicit operator stop or required human intervention.
+5. Before continuing a loop, check `$HOME/.aru/factory-loop.stop`. If it applies
+   to this project, stop and do not arm native wakes.
+6. `/goal` may finish the current task. `/schedule` launches a **project-scoped**
+   background agent that must recover from GitHub; it is not this conversation.
+   Enable either only in the project the operator selected. See
+   `$ARU_SDLC_HOME/docs/desktop-agent-continuity.md`.
 <!-- END ARU_SDLC_GOVERNANCE -->

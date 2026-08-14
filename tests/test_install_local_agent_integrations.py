@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -7,6 +9,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install_local_agent_integrations.sh"
 CURSOR_INSTALLER = ROOT / "scripts" / "install_cursor_integration.sh"
+
+
+def codex_auto_id(project: str) -> str:
+    return "aru-code-loop-" + hashlib.sha256(project.encode()).hexdigest()[:12]
 
 
 class InstallLocalAgentIntegrationsTests(unittest.TestCase):
@@ -198,6 +204,175 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertFalse((user_home / ".codex").exists())
         self.assertFalse((user_home / ".claude").exists())
         self.assertFalse((user_home / ".cursor").exists())
+
+    def test_governance_block_includes_stop_file_contract(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        res = self.run_installer("--codex-only")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        text = (self.target_home / ".codex" / "instructions.md").read_text()
+        self.assertIn("factory-loop.stop", text)
+        self.assertIn("thread", text.lower())
+
+    def test_stop_loop_persists_and_survives_reinstall(self):
+        project = "/tmp/aru-proj-a"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--codex-only")
+        res = self.run_installer("--stop-loop", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn(project, stop["projects"])
+        self.run_installer("--codex-only")
+        stop2 = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn(project, stop2["projects"])
+        res = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+
+    def test_enable_native_wake_requires_absolute_project_and_scopes_prompt(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        res = self.run_installer("--enable-native-wake")
+        self.assertNotEqual(res.returncode, 0)
+        res = self.run_installer("--enable-native-wake", "--project", "relative/path")
+        self.assertNotEqual(res.returncode, 0)
+        project_a = "/tmp/aru-proj-a"
+        project_b = "/tmp/aru-proj-b"
+        res = self.run_installer("--codex-only", "--enable-native-wake", "--project", project_a)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        prompt_a = (
+            self.target_home / ".codex" / "automations" / codex_auto_id(project_a) / "PROMPT.md"
+        ).read_text()
+        self.assertIn(project_a, prompt_a)
+        self.assertNotIn(project_b, prompt_a)
+        res = self.run_installer("--enable-native-wake", "--project", project_b)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        prompt_b = (
+            self.target_home / ".codex" / "automations" / codex_auto_id(project_b) / "PROMPT.md"
+        ).read_text()
+        self.assertIn(project_b, prompt_b)
+        self.assertNotIn(project_a, prompt_b)
+        self.assertIn(project_a, prompt_a)
+        wake = json.loads((self.target_home / ".aru" / "native-wake.json").read_text())
+        self.assertTrue(wake["projects"][project_a]["enabled"])
+        self.assertTrue(wake["projects"][project_b]["enabled"])
+        self.assertNotEqual(wake["projects"][project_a]["automation_id"], wake["projects"][project_b]["automation_id"])
+
+    def test_enable_native_wake_is_prepared_not_doctor_enabled(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        project = "/tmp/aru-proj-a"
+        res = self.run_installer("--codex-only", "--enable-native-wake", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(
+            (self.target_home / ".codex" / "automations" / codex_auto_id(project) / "automation.toml").exists()
+        )
+        doctor = subprocess.run(
+            [
+                "python3",
+                str(ROOT / "scripts" / "doctor_local_agent_integrations.py"),
+                "--aru-home",
+                str(ROOT),
+                "--target-home",
+                str(self.target_home),
+                "--json",
+                "--project",
+                project,
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": "/usr/bin:/bin"},
+        )
+        payload = json.loads(doctor.stdout)
+        self.assertTrue(payload["agents"]["codex"]["native_wake_prepared"])
+        self.assertFalse(payload["agents"]["codex"]["native_wake_enabled"])
+        self.assertEqual(payload["agents"]["codex"]["native_wake_evidence"], "prompt_only")
+        self.assertFalse(payload["agents"]["antigravity"]["native_wake_enabled"])
+
+    def test_stop_pauses_only_that_project_managed_heartbeat(self):
+        project = "/tmp/aru-proj-a"
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        other = self.target_home / ".codex" / "automations" / "india-jobs"
+        sibling = self.target_home / ".codex" / "automations" / codex_auto_id("/tmp/aru-proj-b")
+        for path in (managed, other, sibling):
+            path.mkdir(parents=True)
+        managed.joinpath("automation.toml").write_text(
+            f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "ACTIVE"\n'
+        )
+        other.joinpath("automation.toml").write_text(
+            'version = 1\nid = "india-jobs"\nstatus = "ACTIVE"\n'
+        )
+        sibling.joinpath("automation.toml").write_text(
+            f'version = 1\nid = "{codex_auto_id("/tmp/aru-proj-b")}"\nstatus = "ACTIVE"\n'
+        )
+        res = self.run_installer("--stop-loop", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+        self.assertIn('status = "ACTIVE"', other.joinpath("automation.toml").read_text())
+        self.assertIn('status = "ACTIVE"', sibling.joinpath("automation.toml").read_text())
+
+    def test_dry_run_stop_and_wake_do_not_write(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        res = self.run_installer("--dry-run", "--stop-loop", "--project", "/tmp/aru-proj-a")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("[DRY-RUN]", res.stdout)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+        res = self.run_installer("--dry-run", "--enable-native-wake", "--project", "/tmp/aru-proj-a")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((self.target_home / ".aru" / "native-wake.json").exists())
+
+    def test_disable_native_wake_pauses_matching_heartbeat(self):
+        project = "/tmp/aru-proj-a"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--enable-native-wake", "--project", project)
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.joinpath("automation.toml").write_text(
+            f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "ACTIVE"\n'
+        )
+        res = self.run_installer("--disable-native-wake", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+        wake = json.loads((self.target_home / ".aru" / "native-wake.json").read_text())
+        self.assertNotIn(project, wake.get("projects", {}))
+
+    def test_project_resume_does_not_clear_global_stop(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        res = self.run_installer("--stop-loop")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn("*", stop["projects"])
+        res = self.run_installer("--resume-loop", "--project", "/tmp/aru-proj-a")
+        self.assertNotEqual(res.returncode, 0, res.stdout)
+        self.assertIn("global stop", res.stderr)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn("*", stop["projects"])
+
+    def test_resume_does_not_reactivate_disabled_wake(self):
+        project = "/tmp/aru-proj-a"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--enable-native-wake", "--project", project)
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.joinpath("automation.toml").write_text(
+            f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "ACTIVE"\n'
+        )
+        self.run_installer("--disable-native-wake", "--project", project)
+        res = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+        wake = json.loads((self.target_home / ".aru" / "native-wake.json").read_text())
+        self.assertNotIn(project, wake.get("projects", {}))
+
+    def test_antigravity_workflow_and_cursor_stop_command_install(self):
+        (self.target_home / ".gemini" / "antigravity").mkdir(parents=True)
+        (self.target_home / ".cursor").mkdir(parents=True)
+        res = self.run_installer()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(
+            (self.target_home / ".gemini" / "antigravity" / "workflows" / "aru-code-loop.md").is_file()
+        )
+        self.assertTrue((self.target_home / ".cursor" / "commands" / "stop-aru-loop.md").is_file())
+        self.assertTrue((self.target_home / ".cursor" / "commands" / "resume-aru-loop.md").is_file())
+        self.assertIn(
+            "factory-loop.stop",
+            (self.target_home / ".cursor" / "commands" / "continue.md").read_text(),
+        )
 
 
 if __name__ == "__main__":

@@ -18,6 +18,11 @@ TARGET_CURSOR=false
 TARGET_ANTIGRAVITY=false
 EXPLICIT_AGENT=false
 ALL_AGENTS=false
+STOP_LOOP=false
+RESUME_LOOP=false
+ENABLE_NATIVE_WAKE=false
+DISABLE_NATIVE_WAKE=false
+PROJECT_PATH=""
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
@@ -58,6 +63,26 @@ parse_args() {
         EXPLICIT_AGENT=true
         shift
         ;;
+      --stop-loop)
+        STOP_LOOP=true
+        shift
+        ;;
+      --resume-loop)
+        RESUME_LOOP=true
+        shift
+        ;;
+      --enable-native-wake)
+        ENABLE_NATIVE_WAKE=true
+        shift
+        ;;
+      --disable-native-wake)
+        DISABLE_NATIVE_WAKE=true
+        shift
+        ;;
+      --project)
+        PROJECT_PATH="$2"
+        shift 2
+        ;;
       --aru-home)
         SDLC_HOME="$2"
         shift 2
@@ -78,6 +103,11 @@ Options:
   --claude-only      Target Claude Code integration only
   --cursor-only      Target Cursor integration only
   --antigravity-only Target Antigravity integration only
+  --stop-loop        Persist explicit operator stop (optionally --project)
+  --resume-loop      Clear explicit operator stop (optionally --project)
+  --enable-native-wake  Opt-in vendor wake for --project (absolute path)
+  --disable-native-wake Remove opt-in wake for --project
+  --project <path>   Absolute project path for stop/wake scoping
   --aru-home <path>  Specify Aru_Agentic_SDLC repository root
   --target-home <path> Specify target home directory (overrides \$HOME)
 EOF
@@ -180,12 +210,17 @@ link_skill() {
 
 update_managed_block() {
   local target_file="$1"
+  local template_file="${2:-}"
   local begin_tag="<!-- BEGIN ARU_SDLC_GOVERNANCE -->"
   local end_tag="<!-- END ARU_SDLC_GOVERNANCE -->"
 
   if [[ "${CHECK_ONLY}" == true ]]; then
     if [[ ! -f "${target_file}" ]] || ! grep -Fq "${begin_tag}" "${target_file}" || ! grep -Fq "${end_tag}" "${target_file}"; then
       echo "[CHECK FAILED] Missing or malformed governance block in ${target_file}"
+      return 1
+    fi
+    if ! grep -Fq "factory-loop.stop" "${target_file}"; then
+      echo "[CHECK FAILED] Governance block missing stop-file contract in ${target_file}"
       return 1
     fi
     return 0
@@ -196,22 +231,13 @@ update_managed_block() {
     return 0
   fi
 
-  local block="$(cat <<EOF
-${begin_tag}
-# Aru_Agentic_SDLC Governance & Workflows
-
-1. Confirm work originates from a tracked GitHub issue (Issue-First Law).
-2. Read and follow matching skills under \`\$ARU_SDLC_HOME/skills/\`:
-   - \`run-aru-factory\` — "please continue", work the board, loop mode
-   - \`implement-next-issue\` — claim / worktree / implement / PR for an issue
-   - \`create-github-issue\` — file work
-   - \`code-review\` — review a PR in an isolated worktree
-   - \`remediate-ci-failure\` — fix red CI
-   - \`address-pr-feedback\` — resolve review comments
-3. Execute Git & GitHub actions via \`python3 "\$ARU_SDLC_HOME/scripts/<script>.py"\`.
-${end_tag}
-EOF
-)"
+  local block
+  if [[ -n "${template_file}" && -f "${template_file}" ]]; then
+    block="$(cat "${template_file}")"
+  else
+    echo "error: missing governance template ${template_file}" >&2
+    return 1
+  fi
 
   if grep -Fq "${begin_tag}" "${target_file}"; then
     if ! grep -Fq "${end_tag}" "${target_file}"; then
@@ -307,6 +333,272 @@ copy_commands() {
   done
 }
 
+install_antigravity_workflow() {
+  local dest_dir="$1"
+  local src="${SDLC_HOME}/templates/integrations/antigravity/workflows/aru-code-loop.md"
+  local dest="${dest_dir}/aru-code-loop.md"
+
+  if [[ "${CHECK_ONLY}" == true ]]; then
+    if [[ ! -f "${dest}" ]]; then
+      echo "[CHECK FAILED] Missing Antigravity workflow ${dest}"
+      return 1
+    fi
+    return 0
+  fi
+  if [[ "${DRY_RUN}" == true ]]; then
+    echo "[DRY-RUN] Would install Antigravity workflow ${dest}"
+    return 0
+  fi
+  mkdir -p "${dest_dir}"
+  cp "${src}" "${dest}"
+  echo "installed Antigravity workflow ${dest}"
+}
+
+codex_automation_id() {
+  python3 -c 'import hashlib, sys; print("aru-code-loop-" + hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])' "$1"
+}
+
+aru_python_json() {
+  if [[ "${DRY_RUN}" == true ]]; then
+    echo "[DRY-RUN] Would $1 under ${2}/.aru for ${3:-all-projects}"
+    return 0
+  fi
+  python3 - "$@" <<'PY'
+import hashlib, json, os, sys
+from datetime import datetime, timezone
+
+action, target_home, project = sys.argv[1], sys.argv[2], sys.argv[3]
+aru_dir = os.path.join(target_home, ".aru")
+os.makedirs(aru_dir, exist_ok=True)
+stop_path = os.path.join(aru_dir, "factory-loop.stop")
+wake_path = os.path.join(aru_dir, "native-wake.json")
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def load(path, default):
+    if not os.path.isfile(path):
+        return default
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+def dump(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+if action == "stop":
+    data = load(stop_path, {"projects": [], "stopped_at": now})
+    projects = list(data.get("projects") or [])
+    token = project or "*"
+    if token not in projects:
+        projects.append(token)
+    dump(stop_path, {"projects": projects, "stopped_at": now, "source": "install_local_agent_integrations.sh"})
+    print(f"wrote stop marker {stop_path} for {token}")
+elif action == "resume":
+    if not os.path.isfile(stop_path):
+        print(f"no stop marker at {stop_path}")
+        raise SystemExit(0)
+    if not project:
+        os.remove(stop_path)
+        print(f"removed stop marker {stop_path}")
+        raise SystemExit(0)
+    data = load(stop_path, {"projects": []})
+    projects = list(data.get("projects") or [])
+    if "*" in projects:
+        print(
+            "error: global stop (*) is in effect; resume without --project to clear it",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    projects = [p for p in projects if p != project]
+    if projects:
+        data["projects"] = projects
+        dump(stop_path, data)
+        print(f"cleared stop for {project} in {stop_path}")
+    else:
+        os.remove(stop_path)
+        print(f"removed stop marker {stop_path}")
+elif action in {"enable-wake", "disable-wake"}:
+    if not project:
+        raise SystemExit("enable/disable wake requires an absolute --project")
+    data = load(wake_path, {"projects": {}})
+    projects = data.setdefault("projects", {})
+    if action == "enable-wake":
+        auto_id = "aru-code-loop-" + hashlib.sha256(project.encode()).hexdigest()[:12]
+        projects[project] = {
+            "enabled": True,
+            "updated_at": now,
+            "automation_id": auto_id,
+            "codex": "thread_heartbeat_template",
+            "antigravity": "goal_or_schedule_operator",
+            "claude": "session_loop_only",
+            "cursor": "session_loop_only",
+        }
+        dump(wake_path, data)
+        print(f"enabled native wake for {project}")
+    else:
+        projects.pop(project, None)
+        dump(wake_path, data)
+        print(f"disabled native wake for {project}")
+else:
+    raise SystemExit(f"unknown json action {action}")
+PY
+}
+
+write_codex_wake_prompt() {
+  local project="$1"
+  local auto_id
+  auto_id="$(codex_automation_id "${project}")"
+  local dest_dir="${TARGET_HOME}/.codex/automations/${auto_id}"
+  local dest="${dest_dir}/PROMPT.md"
+  local src="${SDLC_HOME}/templates/integrations/codex/aru-code-loop.prompt.md"
+  if [[ "${DRY_RUN}" == true ]]; then
+    echo "[DRY-RUN] Would write Codex wake prompt ${dest} for ${project}"
+    return 0
+  fi
+  mkdir -p "${dest_dir}"
+  python3 - "$src" "$dest" "$project" <<'PY'
+import sys
+src, dest, project = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src, encoding="utf-8").read().replace("{{PROJECT}}", project)
+if project not in text:
+    raise SystemExit("codex wake prompt lost its project scope")
+open(dest, "w", encoding="utf-8").write(text)
+print(f"wrote {dest}")
+PY
+}
+
+set_managed_codex_status() {
+  local toml="$1"
+  local status="$2"
+  if [[ ! -f "${toml}" ]]; then
+    return 0
+  fi
+  if ! grep -Eq '^id = "aru-code-loop(-[0-9a-f]+)?"' "${toml}"; then
+    echo "note: refusing to mutate unmanaged ${toml}" >&2
+    return 0
+  fi
+  if [[ "${DRY_RUN}" == true ]]; then
+    echo "[DRY-RUN] Would set ${toml} status=${status}"
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  awk -v status="${status}" '
+    BEGIN { done=0 }
+    /^status = "/ {
+      if (!done) { print "status = \"" status "\""; done=1; next }
+    }
+    { print }
+    END { if (!done) print "status = \"" status "\"" }
+  ' "${toml}" > "${tmp}"
+  cat "${tmp}" > "${toml}"
+  rm -f "${tmp}"
+  echo "set ${toml} status=${status}"
+}
+
+managed_codex_tomls_for_project() {
+  local project="$1"
+  local root="${TARGET_HOME}/.codex/automations"
+  if [[ ! -d "${root}" ]]; then
+    return 0
+  fi
+  if [[ -n "${project}" ]]; then
+    local auto_id
+    auto_id="$(codex_automation_id "${project}")"
+    printf '%s\n' "${root}/${auto_id}/automation.toml"
+    return 0
+  fi
+  local toml
+  for toml in "${root}"/aru-code-loop/automation.toml "${root}"/aru-code-loop-*/automation.toml; do
+    [[ -f "${toml}" ]] && printf '%s\n' "${toml}"
+  done
+}
+
+pause_managed_codex_heartbeat() {
+  local toml
+  while IFS= read -r toml; do
+    [[ -n "${toml}" ]] && set_managed_codex_status "${toml}" "PAUSED"
+  done < <(managed_codex_tomls_for_project "${1:-}")
+}
+
+codex_wake_enabled() {
+  python3 - "$TARGET_HOME" "$1" <<'PY'
+import json, os, sys
+home, project = sys.argv[1], sys.argv[2]
+path = os.path.join(home, ".aru", "native-wake.json")
+if not os.path.isfile(path):
+    raise SystemExit(1)
+data = json.load(open(path, encoding="utf-8"))
+entry = (data.get("projects") or {}).get(project) or {}
+raise SystemExit(0 if entry.get("enabled") else 1)
+PY
+}
+
+enabled_wake_projects() {
+  python3 - "$TARGET_HOME" <<'PY'
+import json, os, sys
+path = os.path.join(sys.argv[1], ".aru", "native-wake.json")
+if not os.path.isfile(path):
+    raise SystemExit(0)
+data = json.load(open(path, encoding="utf-8"))
+for project, entry in (data.get("projects") or {}).items():
+    if entry.get("enabled"):
+        print(project)
+PY
+}
+
+resume_managed_codex_heartbeat() {
+  local project="${1:-}"
+  local toml proj
+  if [[ -z "${project}" ]]; then
+    while IFS= read -r proj; do
+      [[ -n "${proj}" ]] && resume_managed_codex_heartbeat "${proj}"
+    done < <(enabled_wake_projects)
+    return 0
+  fi
+  if ! codex_wake_enabled "${project}"; then
+    echo "note: leaving Codex heartbeat paused for ${project}; native wake is not enabled"
+    return 0
+  fi
+  while IFS= read -r toml; do
+    [[ -n "${toml}" ]] && set_managed_codex_status "${toml}" "ACTIVE"
+  done < <(managed_codex_tomls_for_project "${project}")
+}
+
+apply_continuity_actions() {
+  if [[ "${ENABLE_NATIVE_WAKE}" == true || "${DISABLE_NATIVE_WAKE}" == true ]]; then
+    if [[ -z "${PROJECT_PATH}" || "${PROJECT_PATH}" != /* ]]; then
+      echo "error: --enable-native-wake/--disable-native-wake requires --project <absolute-path>" >&2
+      return 1
+    fi
+  fi
+  if [[ -n "${PROJECT_PATH}" && "${PROJECT_PATH}" != /* ]]; then
+    echo "error: --project must be an absolute path" >&2
+    return 1
+  fi
+  if [[ "${CHECK_ONLY}" == true ]]; then
+    return 0
+  fi
+  if [[ "${ENABLE_NATIVE_WAKE}" == true ]]; then
+    aru_python_json enable-wake "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
+    write_codex_wake_prompt "${PROJECT_PATH}" || return 1
+  fi
+  if [[ "${DISABLE_NATIVE_WAKE}" == true ]]; then
+    pause_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
+    aru_python_json disable-wake "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
+  fi
+  if [[ "${STOP_LOOP}" == true ]]; then
+    aru_python_json stop "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
+    pause_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
+  fi
+  if [[ "${RESUME_LOOP}" == true ]]; then
+    aru_python_json resume "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
+    resume_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
+  fi
+}
+
 ERRORS=0
 
 echo "=== Aru_Agentic_SDLC Multi-Agent Integration Installer ==="
@@ -327,7 +619,8 @@ if [[ "${TARGET_CODEX}" == true ]]; then
   for skill in "${SKILLS[@]}"; do
     link_skill "${skill}" "${CODEX_SKILLS}" || ERRORS=$((ERRORS + 1))
   done
-  update_managed_block "${TARGET_HOME}/.codex/instructions.md" || ERRORS=$((ERRORS + 1))
+  update_managed_block "${TARGET_HOME}/.codex/instructions.md" \
+    "${SDLC_HOME}/templates/integrations/codex/instructions.md" || ERRORS=$((ERRORS + 1))
 else
   echo "Skipping Codex (not requested/detected)"
 fi
@@ -341,7 +634,8 @@ if [[ "${TARGET_CLAUDE}" == true ]]; then
     link_skill "${skill}" "${CLAUDE_SKILLS}" || ERRORS=$((ERRORS + 1))
   done
   copy_commands "${CLAUDE_COMMANDS}" || ERRORS=$((ERRORS + 1))
-  update_managed_block "${TARGET_HOME}/.claude/CLAUDE.md" || ERRORS=$((ERRORS + 1))
+  update_managed_block "${TARGET_HOME}/.claude/CLAUDE.md" \
+    "${SDLC_HOME}/templates/integrations/claude/CLAUDE.md" || ERRORS=$((ERRORS + 1))
 else
   echo "Skipping Claude Code (not requested/detected)"
 fi
@@ -365,7 +659,8 @@ if [[ "${TARGET_CURSOR}" == true ]]; then
     mkdir -p "${CURSOR_RULES}"
     cp "${SDLC_HOME}/templates/cursor/rules/aru-agentic-sdlc.mdc" "${CURSOR_RULES}/aru-agentic-sdlc.mdc"
   fi
-  update_managed_block "${TARGET_HOME}/.cursor/user-rules-aru-agentic-sdlc.md" || ERRORS=$((ERRORS + 1))
+  update_managed_block "${TARGET_HOME}/.cursor/user-rules-aru-agentic-sdlc.md" \
+    "${SDLC_HOME}/templates/integrations/cursor/governance.md" || ERRORS=$((ERRORS + 1))
 else
   echo "Skipping Cursor (not requested/detected)"
 fi
@@ -377,12 +672,16 @@ if [[ "${TARGET_ANTIGRAVITY}" == true ]]; then
   for skill in "${SKILLS[@]}"; do
     link_skill "${skill}" "${ANTIGRAVITY_SKILLS}" || ERRORS=$((ERRORS + 1))
   done
-  update_managed_block "${TARGET_HOME}/.gemini/antigravity/AGENTS.md" || ERRORS=$((ERRORS + 1))
+  update_managed_block "${TARGET_HOME}/.gemini/antigravity/AGENTS.md" \
+    "${SDLC_HOME}/templates/integrations/antigravity/AGENTS.md" || ERRORS=$((ERRORS + 1))
+  install_antigravity_workflow "${TARGET_HOME}/.gemini/antigravity/workflows" || ERRORS=$((ERRORS + 1))
   if [[ -d "${TARGET_HOME}/.antigravity" ]]; then
     for skill in "${SKILLS[@]}"; do
       link_skill "${skill}" "${TARGET_HOME}/.antigravity/skills" || ERRORS=$((ERRORS + 1))
     done
-    update_managed_block "${TARGET_HOME}/.antigravity/AGENTS.md" || ERRORS=$((ERRORS + 1))
+    update_managed_block "${TARGET_HOME}/.antigravity/AGENTS.md" \
+      "${SDLC_HOME}/templates/integrations/antigravity/AGENTS.md" || ERRORS=$((ERRORS + 1))
+    install_antigravity_workflow "${TARGET_HOME}/.antigravity/workflows" || ERRORS=$((ERRORS + 1))
   fi
 else
   echo "Skipping Antigravity (not requested/detected)"
@@ -392,6 +691,8 @@ fi
 ensure_env_export "${TARGET_HOME}/.zshrc" || true
 ensure_env_export "${TARGET_HOME}/.bashrc" || true
 ensure_env_export "${TARGET_HOME}/.zprofile" || true
+
+apply_continuity_actions || ERRORS=$((ERRORS + 1))
 
 if [[ ${ERRORS} -gt 0 ]]; then
   echo "Finished with ${ERRORS} issue(s)."

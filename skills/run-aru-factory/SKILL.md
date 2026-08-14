@@ -118,9 +118,11 @@ or background primitive with a long fallback heartbeat, not a fixed interval.
 Do not emit a final response for a recoverable state.
 
 Loop mode ends intentionally only when the operator explicitly stops it or a
-specific decision/approval needs human intervention. Ambiguous board identity,
-an unresolved `touches:` conflict, money semantics, security posture, or a
-hard rule can require that intervention; explain the exact decision needed.
+specific decision/approval needs human intervention. If
+`$HOME/.aru/factory-loop.stop` applies to this project, stop immediately and
+do not arm native wakes. Ambiguous board identity, an unresolved `touches:`
+conflict, money semantics, security posture, or a hard rule can require that
+intervention; explain the exact decision needed.
 Routine helper exits `1` and repeated CI or review rounds do not end the loop.
 When context is running short, recover through the desktop product's context
 compaction and durable GitHub/worktree state, then continue.
@@ -128,7 +130,8 @@ compaction and durable GitHub/worktree state, then continue.
 `scripts/run_fleet.py` is an **optional headless CLI mode** for an operator who
 explicitly requests it. It starts new CLI sessions; it cannot resume or control
 the desktop conversation the operator selected. Never use UI scripting to
-click or type into a desktop coding application.
+click or type into a desktop coding application. Per-app wake limits:
+`$ARU_SDLC_HOME/docs/desktop-agent-continuity.md`.
 
 ### doctor
 
@@ -138,7 +141,9 @@ Read-only. It must never claim, label, branch, commit, or open anything.
 python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py"
 ```
 
-**That script does not exist yet — it is #34.** Until it lands, check what can
+When present, that script reports **continuity** adapters (#46): detected apps,
+capability levels, stop-file state, and opt-in wake. **Full install-link
+diagnosis does not exist yet — it is #34.** Until it lands, check what can
 be checked from here and say plainly what you could not:
 
 - `$ARU_SDLC_HOME` resolves to the canonical repository
