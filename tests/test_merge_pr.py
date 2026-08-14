@@ -1252,7 +1252,16 @@ class WithdrawnMarkerTests(unittest.TestCase):
 
     def test_marker_matches_at_the_start_of_a_reply(self):
         self.assertTrue(merge_pr.WITHDRAWN_MARKER.search("Withdrawn: not a real issue"))
-        self.assertTrue(merge_pr.WITHDRAWN_MARKER.search("withdrawn - my mistake"))
+
+    def test_bare_or_later_marker_does_not_count(self):
+        self.assertIsNone(merge_pr.WITHDRAWN_MARKER.search("withdrawn"))
+        self.assertIsNone(merge_pr.WITHDRAWN_MARKER.search("withdrawn - my mistake"))
+        self.assertIsNone(
+            merge_pr.WITHDRAWN_MARKER.search("Finding details\nWithdrawn: reason")
+        )
+        self.assertIsNone(
+            merge_pr.WITHDRAWN_MARKER.search("Finding details\n> Withdrawn: reason")
+        )
 
     def test_marker_matches_through_bold_formatting(self):
         # Agents routinely write **Withdrawn:**; the convention should not
@@ -1264,6 +1273,107 @@ class WithdrawnMarkerTests(unittest.TestCase):
         self.assertIsNone(
             merge_pr.WITHDRAWN_MARKER.search("I do not think this should be withdrawn.")
         )
+
+
+class OutdatedThreadEvidenceTests(unittest.TestCase):
+    """An outdated thread stops gating only when evidence shows it was addressed or withdrawn."""
+
+    PASSING = ("author:agent-1", "reviewed-by:agent-2")
+
+    def test_outdated_unresolved_thread_without_commit_blocks(self):
+        ok, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 1, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertFalse(ok)
+        self.assertIn("outdated review thread(s) without evidence", msg)
+
+    def test_pr_140_shape_four_findings_one_outdated_unfixed_accounted_for(self):
+        """Reproduces PR #140 shape: 4 findings, 1 anchor line deleted, 0 commits after finding."""
+        ok, msg = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 3, "unfixed": 0, "outdated_unfixed": 1, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertFalse(ok)
+        self.assertIn("4 unresolved review thread(s) (1 outdated without evidence)", msg)
+
+    def test_outdated_unresolved_thread_with_commit_after_finding_passes(self):
+        ok, _ = merge_pr.check_reviews(
+            labelled(*self.PASSING),
+            {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+        )
+        self.assertTrue(ok)
+
+    @patch("merge_pr.get_repo_slug", return_value="owner/repo")
+    @patch("merge_pr._gh_json")
+    def test_review_evidence_parses_outdated_threads_with_and_without_evidence(self, mock_gh_json, _mock_slug):
+        gql_data = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": "head123",
+                        "reviews": {"nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}]},
+                        "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
+                        "reviewThreads": {
+                            "nodes": [
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3"}]}},
+                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)"}]}},
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                }
+            }
+        }
+        mock_gh_json.return_value = gql_data
+        evidence = merge_pr.review_evidence(140)
+        self.assertEqual(evidence["unresolved"], 3)
+        self.assertEqual(evidence["outdated_unfixed"], 1)
+        self.assertEqual(evidence["outdated_addressed"], 0)
+
+        gql_data_with_commit = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": "head123",
+                        "reviews": {"nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}]},
+                        "commits": {
+                            "nodes": [
+                                {"commit": {"committedDate": "2026-08-10T10:00:00Z"}},
+                                {"commit": {"committedDate": "2026-08-10T12:00:00Z"}},
+                            ]
+                        },
+                        "reviewThreads": {
+                            "nodes": [
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3"}]}},
+                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)"}]}},
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                }
+            }
+        }
+        mock_gh_json.return_value = gql_data_with_commit
+        evidence_after_commit = merge_pr.review_evidence(140)
+        self.assertEqual(evidence_after_commit["unresolved"], 3)
+        self.assertEqual(evidence_after_commit["outdated_unfixed"], 0)
+        self.assertEqual(evidence_after_commit["outdated_addressed"], 1)
+
+    def test_evidence_note_formats_outdated_threads(self):
+        note = merge_pr._evidence_note({"outdated_addressed": 2, "withdrawn": 0})
+        self.assertEqual(
+            note,
+            "reviewed at head, no blocking unresolved threads "
+            "(2 outdated with commit evidence).",
+        )
+
+        note_clean = merge_pr._evidence_note({"outdated_addressed": 0, "withdrawn": 1})
+        self.assertEqual(note_clean, "reviewed at head, no unresolved threads, 1 finding(s) withdrawn, not fixed.")
 
 
 def checkpoint_pr():
