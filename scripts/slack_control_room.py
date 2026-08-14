@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -26,6 +27,8 @@ from slack_notify import (
 
 STOP_PATH = Path.home() / ".aru" / "factory-loop.stop"
 PID_PATH = Path.home() / ".aru" / "slack-control-room.pid"
+SEEN_PATH = Path.home() / ".aru" / "slack-control-room-seen.json"
+BRIDGE_IDENTITY = "aru-slack-control-room"
 COMMAND_RE = re.compile(
     r"(?P<verb>status|stop|resume|intervention)\b(?:\s+(?P<rest>.+))?",
     re.IGNORECASE,
@@ -82,24 +85,53 @@ def load_stop_file(path: Optional[Path] = None) -> Dict[str, Any]:
         return {}
 
 
-def write_stop_file(projects: List[str], source: str, path: Optional[Path] = None) -> None:
+def write_stop_file(
+    projects: List[str],
+    source: str,
+    path: Optional[Path] = None,
+    agents: Optional[List[str]] = None,
+) -> None:
     dest = path or STOP_PATH
     dest.parent.mkdir(mode=0o700, exist_ok=True)
-    payload = {"projects": projects, "stopped_at": _now(), "source": source}
+    payload = {
+        "projects": projects,
+        "agents": list(agents or []),
+        "stopped_at": _now(),
+        "source": source,
+    }
     tmp = dest.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, dest)
     dest.chmod(0o600)
 
 
+def agent_stop_token(project: str, agent: str) -> str:
+    return f"{project}::{agent}"
+
+
+def agent_stop_applies(project: str, agent: str, data: Optional[Dict[str, Any]] = None) -> bool:
+    doc = data if data is not None else load_stop_file()
+    projects = list(doc.get("projects") or [])
+    agents = list(doc.get("agents") or [])
+    if "*" in projects or project in projects:
+        return True
+    return agent_stop_token(project, agent) in agents
+
+
 def apply_stop(project: str, target: str) -> str:
     data = load_stop_file()
     projects = list(data.get("projects") or [])
-    token = "*" if target == "all" else (project or "*")
-    if token not in projects:
-        projects.append(token)
-    write_stop_file(projects, "slack_control_room")
-    return f"stop recorded for {token} (drain-first; loops check between units)"
+    agents = list(data.get("agents") or [])
+    if target == "all":
+        if "*" not in projects:
+            projects.append("*")
+        write_stop_file(projects, "slack_control_room", agents=agents)
+        return "stop recorded for * (drain-first; loops check between units)"
+    token = agent_stop_token(project, target)
+    if token not in agents:
+        agents.append(token)
+    write_stop_file(projects, "slack_control_room", agents=agents)
+    return f"stop recorded for {target} (drain-first; loops check between units)"
 
 
 def apply_resume(project: str, target: str) -> str:
@@ -107,27 +139,79 @@ def apply_resume(project: str, target: str) -> str:
         return "no operator stop is in effect"
     data = load_stop_file()
     projects = list(data.get("projects") or [])
+    agents = list(data.get("agents") or [])
     scoped = target not in {"", "all"}
-    if scoped and "*" in projects:
-        return "global stop (*) is in effect; resume all to clear it"
     if not scoped:
         STOP_PATH.unlink()
         return "cleared operator stop for all projects"
-    projects = [item for item in projects if item != project]
-    if not projects:
+    if "*" in projects:
+        return "global stop (*) is in effect; resume all to clear it"
+    if project in projects:
+        return f"project stop for {project} is in effect; resume all to clear it"
+    token = agent_stop_token(project, target)
+    agents = [item for item in agents if item != token]
+    if not projects and not agents:
         STOP_PATH.unlink()
-        return f"cleared operator stop for {project}"
-    write_stop_file(projects, "slack_control_room")
-    return f"cleared operator stop for {project}"
+        return f"cleared operator stop for {target}"
+    write_stop_file(projects, "slack_control_room", agents=agents)
+    return f"cleared operator stop for {target}"
 
 
-def status_text(repo_dir: str = ".") -> str:
+def load_capacity(repo_dir: str) -> Dict[str, Any]:
+    from common import list_open_issues
+    from triage_backlog import capacity, partition
+
+    original = os.getcwd()
+    try:
+        os.chdir(os.path.abspath(repo_dir))
+        issues = list_open_issues() or []
+        _backlog, ready, held = partition(issues)
+        return capacity(ready, held)
+    except (OSError, TypeError, ValueError) as exc:
+        return {"error": str(exc), "concurrent": [], "deferred": [], "ready_total": 0}
+    finally:
+        os.chdir(original)
+
+
+def load_loop_heartbeats(project: str) -> List[str]:
+    from doctor_local_agent_integrations import report
+
+    aru_home = Path(os.environ.get("ARU_SDLC_HOME") or Path(__file__).resolve().parents[1])
+    abs_project = project if str(project).startswith("/") else str(Path(project or ".").resolve())
+    payload = report(aru_home, Path.home(), abs_project)
+    lines = []
+    for name, agent in (payload.get("agents") or {}).items():
+        last = agent.get("last_heartbeat") or "unknown"
+        evidence = agent.get("native_wake_evidence") or "none"
+        lines.append(f"{name}: last_heartbeat={last} wake_evidence={evidence}")
+    return lines
+
+
+def _review_work_lines(status: Dict[str, Any]) -> List[str]:
+    markers = ("In Review", "pending review", "requested changes")
+    return [item for item in (status.get("reasons") or []) if any(mark in str(item) for mark in markers)]
+
+
+def status_text(repo_dir: str = ".", project: str = "") -> str:
     status = evaluate_fleet_status(repo_dir)
     health = status.get("codebase_health") or {}
+    cap = load_capacity(repo_dir)
+    target = project or str(Path(repo_dir).resolve())
+    beats = load_loop_heartbeats(target)
     lines = [
         f"factory state: {status.get('state')} ({status.get('summary', '')})",
         f"open issues: {status.get('open_issues_count', '?')} open PRs: {status.get('open_prs_count', '?')}",
     ]
+    if cap.get("error"):
+        lines.append(f"capacity: unavailable ({cap['error']})")
+    else:
+        concurrent = cap.get("concurrent") or []
+        lines.append(
+            f"capacity: claimable={len(concurrent)} ready={cap.get('ready_total', '?')} "
+            f"concurrent={concurrent}"
+        )
+    reviews = _review_work_lines(status)
+    lines.append("open review work: " + ("; ".join(reviews[:8]) if reviews else "none"))
     claims = status.get("active_claims") or []
     if claims:
         lines.append("claims: " + ", ".join(str(item) for item in claims[:8]))
@@ -136,8 +220,13 @@ def status_text(repo_dir: str = ".") -> str:
             f"codebase loc={health.get('loc')} files={health.get('file_count')}"
         )
     stop = load_stop_file()
-    if stop.get("projects"):
-        lines.append(f"operator stop: {stop.get('projects')} at {stop.get('stopped_at')}")
+    if stop.get("projects") or stop.get("agents"):
+        lines.append(
+            f"operator stop: projects={stop.get('projects')} agents={stop.get('agents')} "
+            f"at {stop.get('stopped_at')}"
+        )
+    lines.append("loop heartbeats:")
+    lines.extend(f"  {item}" for item in beats)
     return "\n".join(lines)
 
 
@@ -155,7 +244,7 @@ def handle_command(
 ) -> str:
     verb = parsed["verb"]
     if verb == "status":
-        return status_text(repo_dir)
+        return status_text(repo_dir, project)
     if verb == "stop":
         return apply_stop(project, parsed.get("target") or "all")
     if verb == "resume":
@@ -190,6 +279,51 @@ def github_comment(kind: str, number: int, decision: str, repo_dir: str = ".") -
     return code == 0
 
 
+def load_seen_ids(path: Optional[Path] = None) -> Dict[str, str]:
+    dest = path or SEEN_PATH
+    if not dest.is_file():
+        return {}
+    try:
+        payload = json.loads(dest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    ids = payload.get("ids") if isinstance(payload, dict) else payload
+    if isinstance(ids, dict):
+        return {str(key): str(value) for key, value in ids.items()}
+    if isinstance(ids, list):
+        return {str(item): "" for item in ids}
+    return {}
+
+
+def record_seen_id(event_id: str, path: Optional[Path] = None) -> bool:
+    """Persist event_id. Return True if it was already recorded."""
+    dest = path or SEEN_PATH
+    dest.parent.mkdir(mode=0o700, exist_ok=True)
+    if not dest.exists():
+        dest.write_text("{}\n", encoding="utf-8")
+        dest.chmod(0o600)
+    with dest.open("r+", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            payload = json.loads(handle.read() or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        ids = payload.get("ids") if isinstance(payload, dict) else {}
+        if not isinstance(ids, dict):
+            ids = {}
+        if event_id in ids:
+            return True
+        ids[event_id] = _now()
+        if len(ids) > 2000:
+            ids = dict(list(ids.items())[-1500:])
+        handle.seek(0)
+        handle.truncate()
+        json.dump({"ids": ids}, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    dest.chmod(0o600)
+    return False
+
+
 def handle_slack_message(
     config: SlackConfig,
     payload: Dict[str, Any],
@@ -200,10 +334,11 @@ def handle_slack_message(
     notify: Callable[..., Dict[str, Any]] = post_event,
 ) -> Optional[str]:
     event_id = str(payload.get("client_msg_id") or payload.get("ts") or "")
-    if event_id and event_id in seen_ids:
-        return None
     if event_id:
+        already = event_id in seen_ids or record_seen_id(event_id)
         seen_ids.add(event_id)
+        if already:
+            return None
     if not authorize(
         config,
         str(payload.get("team") or payload.get("team_id") or ""),
@@ -235,7 +370,7 @@ def doctor(env_path: Path = ENV_PATH) -> Dict[str, Any]:
         "env_file_present": env_path.is_file(),
         "bolt_installed": _bolt_available(),
         "pid_file": str(PID_PATH),
-        "bridge_running": _pid_alive(PID_PATH),
+        "bridge_running": _bridge_running(PID_PATH),
         "ok": False,
     }
     try:
@@ -263,20 +398,62 @@ def _bolt_available() -> bool:
         return False
 
 
-def _pid_alive(path: Path) -> bool:
-    if not path.is_file():
-        return False
+def _pid_exists(pid: int) -> bool:
     try:
-        pid = int(path.read_text(encoding="utf-8").strip())
         os.kill(pid, 0)
         return True
-    except (OSError, ValueError):
+    except OSError:
         return False
+
+
+def _process_command(pid: int) -> str:
+    from common import run_cmd
+
+    code, stdout, _ = run_cmd(["ps", "-p", str(pid), "-o", "command="], check=False)
+    return stdout if code == 0 else ""
+
+
+def _pid_record(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        return {}
+    text = path.read_text(encoding="utf-8").strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("pid") is not None:
+            return data
+    except json.JSONDecodeError:
+        pass
+    try:
+        return {"pid": int(text), "identity": ""}
+    except ValueError:
+        return {}
+
+
+def _is_our_bridge(pid: int) -> bool:
+    command = _process_command(pid)
+    return "slack_control_room" in command
+
+
+def _bridge_running(path: Path) -> bool:
+    record = _pid_record(path)
+    try:
+        pid = int(record.get("pid"))
+    except (TypeError, ValueError):
+        return False
+    return _pid_exists(pid) and _is_our_bridge(pid)
 
 
 def write_pid(path: Path = PID_PATH) -> None:
     path.parent.mkdir(mode=0o700, exist_ok=True)
-    path.write_text(str(os.getpid()), encoding="utf-8")
+    payload = {
+        "pid": os.getpid(),
+        "identity": BRIDGE_IDENTITY,
+        "started_at": _now(),
+        "argv": Path(sys.argv[0]).name if sys.argv else "slack_control_room.py",
+    }
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
     path.chmod(0o600)
 
 
@@ -288,14 +465,24 @@ def clear_pid(path: Path = PID_PATH) -> None:
 def stop_bridge() -> str:
     if not PID_PATH.is_file():
         return "bridge is not running"
+    record = _pid_record(PID_PATH)
     try:
-        pid = int(PID_PATH.read_text(encoding="utf-8").strip())
+        pid = int(record.get("pid"))
+    except (TypeError, ValueError):
+        clear_pid()
+        return "bridge is not running"
+    if _pid_exists(pid) and not _is_our_bridge(pid):
+        return f"refusing to signal pid {pid}: not the control-room bridge"
+    if not _pid_exists(pid):
+        clear_pid()
+        return "bridge is not running"
+    try:
         os.kill(pid, 15)
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
         clear_pid()
         return f"bridge stop failed: {exc}"
     for _ in range(20):
-        if not _pid_alive(PID_PATH):
+        if not _pid_exists(pid):
             clear_pid()
             return "bridge stopped"
         time.sleep(0.1)
@@ -319,7 +506,7 @@ def start_bridge(config: SlackConfig, project: str, repo_dir: str) -> int:
     if not config.app_token.startswith("xapp-"):
         print("[ERROR] SLACK_APP_TOKEN (xapp-) is required for Socket Mode", file=sys.stderr)
         return 1
-    if _pid_alive(PID_PATH):
+    if _bridge_running(PID_PATH):
         print("[ERROR] bridge already running", file=sys.stderr)
         return 1
     if PID_PATH.is_file():
@@ -327,7 +514,7 @@ def start_bridge(config: SlackConfig, project: str, repo_dir: str) -> int:
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
     app = App(token=config.bot_token)
-    seen: set[str] = set()
+    seen: set[str] = set(load_seen_ids())
 
     @app.event("app_mention")
     def _mention(body, event):  # pragma: no cover - live Slack path
@@ -355,7 +542,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(report, indent=2))
         return 0 if report.get("ok") else 1
     if args.command == "status":
-        print(status_text(args.repo_dir))
+        print(status_text(args.repo_dir, args.project))
         return 0
     if args.command == "stop":
         print(stop_bridge())

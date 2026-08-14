@@ -40,11 +40,18 @@ not the factory. Factory stop/resume are Slack **commands**.
 Mention the bot, then put the verb first (`<@bot> status`, not a sentence
 that happens to contain `stop`):
 
-- `status` — read-only `fleet_status.py`
-- `stop` / `stop all` — write `~/.aru/factory-loop.stop` (drain-first)
+- `status` — read-only fleet state plus capacity, open review work, active
+  claims, and each configured desktop loop's last heartbeat (unknown when
+  the continuity doctor has no timestamp)
+- `stop` / `stop all` — write `~/.aru/factory-loop.stop` with `projects: ["*"]`
+- `stop <agent>` — record `agents: ["<project>::<agent>"]` so a peer agent in
+  the same project keeps running
 - `resume` / `resume all` — clear that operator stop only
+- `resume <agent>` — clear only that agent's token; refused while `*` or a
+  project-wide stop is in effect
 - `intervention #172 approved` — copy the decision onto the GitHub issue
-  in `--repo-dir`
+  in `--repo-dir` with `gh issue comment` / `gh pr comment` (no comment
+  helper exists; that is the governed direct-comment path)
 
 A scoped `resume <target>` is rejected while a global `*` stop is in effect.
 Events from other workspaces, channels, users, or bots are ignored. The
@@ -70,11 +77,18 @@ Revoke tokens in the Slack app dashboard, then delete `~/.aru/slack.env`.
 - Notify does not follow HTTP redirects, so the bot token cannot leave Slack.
 - The runtime manifest requests only `app_mentions:read` and `chat:write`.
 - Slack cannot claim, review, or merge. Intervention is a GitHub comment.
-- Duplicate Slack deliveries are ignored (`client_msg_id` / `ts`).
+- Duplicate Slack deliveries are ignored (`client_msg_id` / `ts`) and the
+  processed ids persist in `~/.aru/slack-control-room-seen.json` so a bridge
+  restart cannot replay `stop` / `resume` / `intervention`.
+- `stop` of the bridge process signals only a live PID whose command line
+  contains `slack_control_room`; a stale file pointing at another process is
+  refused.
 - If Slack is down, notify returns a warning and the GitHub loop continues.
 - On reconnect, the bridge does not replay stop/resume; it handles new events.
 
 ## Recovery
 
 `doctor` reports missing env, missing bolt, and whether the bridge pid is live.
-If the bridge dies, factory work is unaffected. Restart `start`.
+If the bridge dies, factory work is unaffected. Restart `start`. A loop should
+stop when `factory-loop.stop` contains `*`, this project path, or
+`<project>::<agent-id>`.
