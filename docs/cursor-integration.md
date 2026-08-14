@@ -20,15 +20,44 @@ Project bootstraps (`init_project.py`) also drop
 `.cursor/rules/aru-agentic-sdlc.mdc` into each new repo so project rules
 mirror the User Rule for teammates who do not have the global install.
 
-## One-time setup
+### Pinning a Version with `ARU_SDLC_REF`
+
+To prevent unannounced breaks on `main` from impacting consumer projects, pin a specific immutable commit SHA, release tag, or checkpoint tag before installing:
 
 ```bash
 export ARU_SDLC_HOME=/Users/aravindgillella/projects/Aru_Agentic_SDLC
+# Pin to an immutable commit SHA, release tag, or checkpoint:
+export ARU_SDLC_REF=d3a0588
 "$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"
 ```
 
-Then open a new Agent chat so skill discovery refreshes. In a governed
-project, say `please continue` or run `/continue`.
+- When `ARU_SDLC_REF` is set to an immutable ref, the installer checks out that ref in `$ARU_SDLC_HOME` and exports `ARU_SDLC_REF` in your shell profile. Do not use moving branch names like `main` if you wish to prevent upstream changes from updating your environment.
+- When `ARU_SDLC_REF` is unset, default behavior is unchanged (follows current branch / `main`).
+- Helper scripts check `ARU_SDLC_REF` against the checked-out repository version and print a warning if MAJOR SemVer versions mismatch, but never hard-fail mid-session.
+
+#### Discovering Current Ref and Available Versions
+
+To inspect what ref is currently installed or list available release tags:
+
+```bash
+# Discover current installed ref:
+git -C "$ARU_SDLC_HOME" rev-parse --short HEAD
+
+# Discover current tags and checkpoints:
+git -C "$ARU_SDLC_HOME" tag -l
+```
+
+#### Upgrading to a New Ref Deliberately
+
+To move forward to a newer ref or update to the latest `main`:
+
+```bash
+cd "$ARU_SDLC_HOME"
+git fetch origin
+git checkout <target-ref-or-main>
+export ARU_SDLC_REF=<target-ref-or-main>
+"$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"
+```
 
 ### GitHub access: `gh`, not MCP
 

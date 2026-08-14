@@ -272,6 +272,7 @@ update_managed_block() {
 ensure_env_export() {
   local profile="$1"
   local line="export ARU_SDLC_HOME=\"${SDLC_HOME}\""
+  local ref_line="export ARU_SDLC_REF=\"${ARU_SDLC_REF:-}\""
 
   if [[ "${CHECK_ONLY}" == true ]]; then
     if [[ ! -f "${profile}" ]] || ! grep -Fq "ARU_SDLC_HOME=" "${profile}"; then
@@ -283,6 +284,9 @@ ensure_env_export() {
 
   if [[ "${DRY_RUN}" == true ]]; then
     echo "[DRY-RUN] Would ensure ${line} in ${profile}"
+    if [[ -n "${ARU_SDLC_REF:-}" ]]; then
+      echo "[DRY-RUN] Would ensure ${ref_line} in ${profile}"
+    fi
     return 0
   fi
 
@@ -292,6 +296,27 @@ ensure_env_export() {
       echo "# Aru_Agentic_SDLC environment" >> "${profile}"
       echo "${line}" >> "${profile}"
       echo "added ARU_SDLC_HOME export to ${profile}"
+    fi
+    if [[ -n "${ARU_SDLC_REF:-}" ]]; then
+      if grep -Fq "ARU_SDLC_REF=" "${profile}"; then
+        local tmp
+        tmp="$(mktemp)"
+        awk -v repl="${ref_line}" '
+          BEGIN { done=0 }
+          /^export ARU_SDLC_REF=/ {
+            if (!done) { print repl; done=1 }
+            next
+          }
+          { print }
+          END { if (!done) print repl }
+        ' "${profile}" > "${tmp}"
+        cat "${tmp}" > "${profile}"
+        rm -f "${tmp}"
+        echo "updated ARU_SDLC_REF in ${profile}"
+      else
+        echo "${ref_line}" >> "${profile}"
+        echo "added ARU_SDLC_REF export to ${profile}"
+      fi
     fi
   fi
 }
@@ -606,6 +631,36 @@ echo "SDLC Home:   ${SDLC_HOME}"
 echo "Target Home: ${TARGET_HOME}"
 echo "Mode:        $(if ${DRY_RUN}; then echo "Dry-Run"; elif ${CHECK_ONLY}; then echo "Check-Only"; else echo "Install"; fi)"
 
+if [[ -n "${ARU_SDLC_REF:-}" ]]; then
+  if [[ "${ARU_SDLC_REF}" =~ ^- || "${ARU_SDLC_REF}" =~ [[:space:]] ]]; then
+    echo "[ERROR] Invalid ARU_SDLC_REF '${ARU_SDLC_REF}': ref cannot start with '-' or contain whitespace." >&2
+    exit 1
+  fi
+  if [[ "${CHECK_ONLY}" == true ]]; then
+    echo "[INFO] ARU_SDLC_REF is set to '${ARU_SDLC_REF}'"
+  elif [[ "${DRY_RUN}" == true ]]; then
+    echo "[DRY-RUN] Would checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}"
+  else
+    echo "Pinning Aru_Agentic_SDLC at ${SDLC_HOME} to ref '${ARU_SDLC_REF}'..."
+    if ! git -C "${SDLC_HOME}" rev-parse --verify "${ARU_SDLC_REF}^{commit}" >/dev/null 2>&1; then
+      git -C "${SDLC_HOME}" fetch --tags origin 2>/dev/null || true
+      if ! git -C "${SDLC_HOME}" rev-parse --verify "${ARU_SDLC_REF}^{commit}" >/dev/null 2>&1; then
+        echo "[ERROR] Could not resolve ref '${ARU_SDLC_REF}' in ${SDLC_HOME}." >&2
+        exit 1
+      fi
+    fi
+    if ! git -C "${SDLC_HOME}" checkout "${ARU_SDLC_REF}" 2>/dev/null && ! git -C "${SDLC_HOME}" checkout --detach "${ARU_SDLC_REF}" 2>/dev/null; then
+      echo "[ERROR] Could not checkout ref '${ARU_SDLC_REF}' in ${SDLC_HOME}." >&2
+      exit 1
+    fi
+    if [[ "${ARU_SDLC_REEXEC:-0}" != "1" ]]; then
+      export ARU_SDLC_REEXEC=1
+      echo "Re-executing installer from checked-out ref '${ARU_SDLC_REF}'..."
+      exec "${SDLC_HOME}/scripts/install_local_agent_integrations.sh" "$@"
+    fi
+  fi
+fi
+
 # Shared ~/.agents/skills
 AGENTS_SKILLS="${TARGET_HOME}/.agents/skills"
 for skill in "${SKILLS[@]}"; do
@@ -688,6 +743,16 @@ else
 fi
 
 # Shell Environment
+if [[ "${CHECK_ONLY}" != true && "${DRY_RUN}" != true ]]; then
+  if [[ ! -f "${TARGET_HOME}/.zshrc" && ! -f "${TARGET_HOME}/.bashrc" && ! -f "${TARGET_HOME}/.zprofile" ]]; then
+    if [[ "${SHELL:-}" == *"bash"* ]]; then
+      touch "${TARGET_HOME}/.bashrc"
+    else
+      touch "${TARGET_HOME}/.zshrc"
+    fi
+  fi
+fi
+
 ensure_env_export "${TARGET_HOME}/.zshrc" || true
 ensure_env_export "${TARGET_HOME}/.bashrc" || true
 ensure_env_export "${TARGET_HOME}/.zprofile" || true

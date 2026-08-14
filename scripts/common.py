@@ -559,5 +559,68 @@ def add_issue_to_project(issue_number: int, project_number: int, owner: str = "@
     return True
 
 
+def parse_semver_major(version_str: Optional[str]) -> Optional[int]:
+    """Extracts the MAJOR version number from a SemVer string (e.g., 'v1.2.3' -> 1, 'v0.1.0' -> 0)."""
+    if not version_str:
+        return None
+    match = re.fullmatch(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", str(version_str).strip())
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def get_framework_root() -> str:
+    """Returns the absolute path to the Aru_Agentic_SDLC framework repository root."""
+    env_home = os.environ.get("ARU_SDLC_HOME")
+    if env_home and os.path.isdir(env_home):
+        return os.path.abspath(env_home)
+    # Fallback to the repository root containing this module (parent directory of scripts/)
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def get_current_framework_version(repo_root: Optional[str] = None) -> str:
+    """Returns the current framework version from git tags or fallback."""
+    cwd = repo_root or get_framework_root()
+    code, stdout, _ = run_cmd(["git", "describe", "--tags", "--abbrev=0", "--match", "v*"], check=False, cwd=cwd)
+    if code == 0 and stdout:
+        return stdout.strip()
+    return "v0.1.0"
+
+
+def check_version_compatibility(
+    expected_ref: Optional[str] = None,
+    current_version: Optional[str] = None,
+) -> bool:
+    """Warns (never hard-fails) on MAJOR SemVer mismatch between expected ref and current version.
+
+    Always returns True (never raises or exits non-zero).
+    """
+    ref = expected_ref or os.environ.get("ARU_SDLC_REF")
+    if not ref:
+        return True
+
+    expected_major = parse_semver_major(ref)
+    if expected_major is None:
+        return True
+
+    curr_ver = current_version or get_current_framework_version()
+    current_major = parse_semver_major(curr_ver)
+    if current_major is None:
+        return True
+
+    if expected_major != current_major:
+        print(
+            f"[WARN] Framework version mismatch: ARU_SDLC_REF specifies '{ref}' "
+            f"(MAJOR {expected_major}), but current repository ref is '{curr_ver}' "
+            f"(MAJOR {current_major}). Continuing execution.",
+            file=sys.stderr,
+        )
+    return True
+
+
+if os.environ.get("ARU_SDLC_REF"):
+    check_version_compatibility()
+
+
 if __name__ == "__main__":
     print("Aru_Agentic_SDLC Common Utilities Loaded Cleanly.")
