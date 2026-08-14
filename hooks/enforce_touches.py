@@ -421,17 +421,23 @@ def _push_state_option(name):
     }
     if name in candidates:
         return candidates[name]
-    accepted_prefixes = {
-        "--del": "--delete",
-        "--no-del": "--no-delete",
-        "--tag": "--tags",
-        "--no-tag": "--no-tags",
-        "--branch": "--all",
-        "--no-branch": "--no-all",
-        "--mir": "--mirror",
-        "--no-mir": "--no-mirror",
+    unique_abbreviations = {
+        "--delete": ("--delete", len("--de")),
+        "--no-delete": ("--no-delete", len("--no-de")),
+        "--tags": ("--tags", len("--ta")),
+        "--no-tags": ("--no-tags", len("--no-ta")),
+        "--all": ("--all", len("--al")),
+        "--no-all": ("--no-all", len("--no-al")),
+        "--branches": ("--all", len("--br")),
+        "--no-branches": ("--no-all", len("--no-br")),
+        "--mirror": ("--mirror", len("--m")),
+        "--no-mirror": ("--no-mirror", len("--no-m")),
     }
-    matches = {canonical for prefix, canonical in accepted_prefixes.items() if name.startswith(prefix)}
+    matches = {
+        state
+        for canonical, (state, minimum) in unique_abbreviations.items()
+        if len(name) >= minimum and canonical.startswith(name)
+    }
     return matches.pop() if len(matches) == 1 else None
 
 

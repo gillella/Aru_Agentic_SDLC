@@ -317,8 +317,14 @@ class ProtectedBranchTests(unittest.TestCase):
         self.assertIsNotNone(
             et._git_write_to_protected("git push --tags --no-tag origin", "feat/issue-1-a")
         )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --tags --no-ta origin", "feat/issue-1-a")
+        )
         self.assertIsNone(
             et._git_write_to_protected("git push --no-tags --tags origin", "feat/issue-1-a")
+        )
+        self.assertIsNone(
+            et._git_write_to_protected("git push --no-tags --ta origin", "feat/issue-1-a")
         )
         self.assertIsNone(
             et._git_write_to_protected(
@@ -696,6 +702,7 @@ class HookDecisionTests(unittest.TestCase):
             "git push origin tag main",
             "git push origin tag master",
             "git push --no-tags --tags origin",
+            "git push --no-tags --ta origin",
             "git push --delete --no-delete origin tag main",
         ]
         for command in allowed_commands:
@@ -740,6 +747,7 @@ class HookDecisionTests(unittest.TestCase):
             "git push --no-delete --delete origin tag main",
             "git push --tags --no-tags origin",
             "git push --tags --no-tag origin",
+            "git push --tags --no-ta origin",
         ]
         for command in blocked_commands:
             with self.subTest(command=command, expected="BLOCK"):
