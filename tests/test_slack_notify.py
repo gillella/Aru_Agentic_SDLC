@@ -1,7 +1,10 @@
 import sys
 import tempfile
 import unittest
+import os
+import builtins
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import URLError
 
@@ -12,13 +15,17 @@ from slack_notify import (  # noqa: E402
     DedupeCache,
     RejectRedirectHandler,
     SlackConfig,
+    config_for_project,
     config_from_env,
+    dedupe_key,
     format_event,
     load_slack_env,
     post_event,
     redact,
     secrets_from_config,
+    main,
 )
+from slack_projects import ProjectRegistry  # noqa: E402
 
 
 def sample_config(**kwargs):
@@ -64,6 +71,28 @@ class SlackNotifyTests(unittest.TestCase):
                 }
             )
 
+    def test_workspace_config_does_not_require_legacy_channel(self):
+        config = config_from_env(
+            {
+                "SLACK_BOT_TOKEN": "xoxb-" + ("a" * 40),
+                "SLACK_TEAM_ID": "T01234567",
+            },
+            require_channel=False,
+        )
+        self.assertEqual(config.channel_id, "")
+
+    def test_project_record_is_the_only_outbound_destination(self):
+        project = SimpleNamespace(
+            slack_team_id="T01234567", slack_channel_id="C99999999"
+        )
+        routed = config_for_project(sample_config(channel_id="CLEGACY1"), project)
+        self.assertEqual(routed.channel_id, "C99999999")
+        with self.assertRaises(ValueError):
+            config_for_project(
+                sample_config(),
+                SimpleNamespace(slack_team_id="T99999999", slack_channel_id="C99999999"),
+            )
+
     def test_format_event_stamps_identity(self):
         text = format_event(
             {
@@ -96,6 +125,92 @@ class SlackNotifyTests(unittest.TestCase):
         self.assertTrue(first["ok"])
         self.assertTrue(second.get("deduped"))
         self.assertEqual(len(calls), 1)
+
+    def test_dedupe_key_is_project_scoped(self):
+        base = {"type": "state", "agent": "codex-1", "text": "same"}
+        self.assertNotEqual(
+            dedupe_key({**base, "project_id": "proj_a"}),
+            dedupe_key({**base, "project_id": "proj_b"}),
+        )
+        self.assertNotEqual(
+            dedupe_key({**base, "project_id": "proj_a", "dedupe_key": "event-1"}),
+            dedupe_key({**base, "project_id": "proj_b", "dedupe_key": "event-1"}),
+        )
+
+    def test_cli_requires_explicit_project_id(self):
+        with self.assertRaises(SystemExit):
+            main(["--agent", "codex-1", "--family", "openai", "--event", "state"])
+
+    def test_cli_routes_by_registry_and_ignores_legacy_channel(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            os.chmod(root, 0o700)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            registry_path = root / "projects.json"
+            audit_path = root / "audit.json"
+
+            def identity(path):
+                return {
+                    "github_repo_id": "R_repo",
+                    "github_repo_database_id": 1,
+                    "project_v2_id": "P_project",
+                    "repo_slug": "owner/repo",
+                    "local_path": str(path.resolve()),
+                }
+
+            record = ProjectRegistry(registry_path, audit_path, identity).create(
+                checkout, "T01234567", "C99999999", "operator", "proj_outbound"
+            )
+            env_file = root / "slack.env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+                + "\nSLACK_TEAM_ID=T01234567\nSLACK_CHANNEL_ID=C11111111\n",
+                encoding="utf-8",
+            )
+            with patch("slack_notify.post_event", return_value={"ok": True}) as posted:
+                code = main([
+                    "--agent", "codex-1", "--family", "openai", "--event", "state",
+                    "--project-id", record.project_id,
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(posted.call_args.args[0].channel_id, "C99999999")
+
+    def test_unknown_outbound_project_fails_closed_without_posting(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            os.chmod(root, 0o700)
+            registry_path = root / "projects.json"
+            env_file = root / "slack.env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+                + "\nSLACK_TEAM_ID=T01234567\nSLACK_CHANNEL_ID=C11111111\n",
+                encoding="utf-8",
+            )
+            with patch("slack_notify.post_event") as posted:
+                code = main([
+                    "--agent", "codex-1", "--family", "openai", "--event", "state",
+                    "--project-id", "proj_missing", "--registry-file", str(registry_path),
+                    "--env-file", str(env_file),
+                ])
+            self.assertEqual(code, 0)
+            posted.assert_not_called()
+
+    def test_cli_skips_cleanly_when_registry_module_cannot_import(self):
+        original_import = builtins.__import__
+
+        def unavailable(name, *args, **kwargs):
+            if name == "slack_projects":
+                raise ImportError("registry module unavailable")
+            return original_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", side_effect=unavailable):
+            code = main([
+                "--agent", "codex-1", "--family", "openai", "--event", "state",
+                "--project-id", "proj_missing",
+            ])
+        self.assertEqual(code, 0)
 
     def test_post_event_slack_down_does_not_raise(self):
         def transport(config, text, thread_ts):

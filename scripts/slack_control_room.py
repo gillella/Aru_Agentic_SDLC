@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Aru Slack control-room bridge: operator commands, not a second work queue."""
+"""Aru Slack control-room bridge: routed operator commands, not a work queue."""
 
 from __future__ import annotations
 
 import argparse
-import fcntl
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,17 +20,28 @@ from fleet_status import evaluate_fleet_status
 from slack_notify import (
     ENV_PATH,
     SlackConfig,
+    config_for_project,
     config_from_env,
     load_slack_env,
     post_event,
     redact,
     secrets_from_config,
 )
+from slack_projects import (
+    DEFAULT_AUDIT_PATH,
+    DEFAULT_REGISTRY_PATH,
+    ProjectRecord,
+    ProjectRegistry,
+    RegistryError,
+    mutate_secure_json,
+    read_secure_json,
+)
 
 STOP_PATH = Path.home() / ".aru" / "factory-loop.stop"
 PID_PATH = Path.home() / ".aru" / "slack-control-room.pid"
 SEEN_PATH = Path.home() / ".aru" / "slack-control-room-seen.json"
 BRIDGE_IDENTITY = "aru-slack-control-room"
+_STATUS_LOCK = threading.Lock()
 COMMAND_RE = re.compile(
     r"(?P<verb>status|stop|resume|intervention)\b(?:\s+(?P<rest>.+))?",
     re.IGNORECASE,
@@ -43,31 +56,30 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def authorize(config: SlackConfig, team_id: str, channel_id: str, user_id: str) -> bool:
+def authorize(config: SlackConfig, project: ProjectRecord, user_id: str) -> bool:
     operator = config.operator_user_id
-    if not (operator.startswith("U") and len(operator) >= 8):
-        return False
-    if team_id != config.team_id or channel_id != config.channel_id:
-        return False
-    return user_id == operator
+    return bool(
+        operator.startswith("U")
+        and len(operator) >= 8
+        and user_id == operator
+        and config.team_id == project.slack_team_id
+    )
 
 
 def parse_command(text: str) -> Optional[Dict[str, str]]:
-    cleaned = redact(text or "")
-    cleaned = re.sub(r"<@[A-Z0-9]+>", "", cleaned).strip()
+    cleaned = re.sub(r"<@[A-Z0-9]+>", "", redact(text or "")).strip()
     match = COMMAND_RE.match(cleaned)
     if not match:
         return None
     verb = match.group("verb").lower()
     rest = (match.group("rest") or "").strip()
-    parsed = {"verb": verb, "target": "all", "ref": "", "decision": rest}
+    parsed = {"verb": verb, "target": "project", "ref": "", "decision": rest}
     if verb in {"stop", "resume"}:
-        parsed["target"] = rest.split()[0].lower() if rest else "all"
+        parsed["target"] = rest.split()[0].lower() if rest else "project"
         parsed["decision"] = ""
     elif verb == "intervention":
         found = ISSUE_RE.search(rest)
         parsed["kind"] = "issue"
-        parsed["ref"] = ""
         if found:
             parsed["kind"] = (found.group("kind") or "issue").lower()
             parsed["ref"] = found.group("numbered") or found.group("hash") or ""
@@ -75,86 +87,121 @@ def parse_command(text: str) -> Optional[Dict[str, str]]:
     return parsed
 
 
-def load_stop_file(path: Optional[Path] = None) -> Dict[str, Any]:
-    dest = path or STOP_PATH
-    if not dest.is_file():
-        return {}
+def _stop_document(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RegistryError("invalid factory-loop.stop document")
+    projects, agents = value.get("projects", []), value.get("agents", [])
+    if not isinstance(projects, list) or not all(isinstance(item, str) for item in projects):
+        raise RegistryError("invalid factory-loop.stop projects")
+    if not isinstance(agents, list) or not all(isinstance(item, str) for item in agents):
+        raise RegistryError("invalid factory-loop.stop agents")
+    return value
+
+
+def _adopt_legacy_stop_file(path: Path) -> None:
+    """Secure a regular legacy stop file without rejecting its old 0644 mode."""
+    if not path.exists() and not path.is_symlink():
+        return
     try:
-        return json.loads(dest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+        info = path.lstat()
+    except OSError as exc:
+        raise RegistryError(f"cannot inspect factory-loop.stop: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise RegistryError(f"unsafe factory-loop.stop file: {path}")
+    if info.st_uid != os.getuid():
+        raise RegistryError(f"factory-loop.stop is not owned by the current user: {path}")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        raise RegistryError(f"factory-loop.stop is writable by another user: {path}")
+    if mode != 0o600:
+        descriptor = -1
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise RegistryError(f"factory-loop.stop changed while securing it: {path}")
+            if stat.S_IMODE(opened.st_mode) & 0o022:
+                raise RegistryError(f"factory-loop.stop is writable by another user: {path}")
+            os.fchmod(descriptor, 0o600)
+        except OSError as exc:
+            raise RegistryError(f"cannot secure factory-loop.stop: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def load_stop_file(path: Optional[Path] = None) -> Dict[str, Any]:
+    destination = path or STOP_PATH
+    _adopt_legacy_stop_file(destination)
+    return _stop_document(read_secure_json(destination, {}))
 
 
 def write_stop_file(
-    projects: List[str],
-    source: str,
-    path: Optional[Path] = None,
+    projects: List[str], source: str, path: Optional[Path] = None,
     agents: Optional[List[str]] = None,
 ) -> None:
-    dest = path or STOP_PATH
-    dest.parent.mkdir(mode=0o700, exist_ok=True)
+    destination = path or STOP_PATH
+    _adopt_legacy_stop_file(destination)
     payload = {
-        "projects": projects,
-        "agents": list(agents or []),
-        "stopped_at": _now(),
-        "source": source,
+        "projects": projects, "agents": list(agents or []),
+        "stopped_at": _now(), "source": source,
     }
-    tmp = dest.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, dest)
-    dest.chmod(0o600)
+    mutate_secure_json(destination, {}, lambda _current: payload)
 
 
-def agent_stop_token(project: str, agent: str) -> str:
-    return f"{project}::{agent}"
-
-
-def agent_stop_applies(project: str, agent: str, data: Optional[Dict[str, Any]] = None) -> bool:
-    doc = data if data is not None else load_stop_file()
-    projects = list(doc.get("projects") or [])
-    agents = list(doc.get("agents") or [])
-    if "*" in projects or project in projects:
-        return True
-    return agent_stop_token(project, agent) in agents
-
-
-def apply_stop(project: str, target: str) -> str:
-    data = load_stop_file()
-    projects = list(data.get("projects") or [])
-    agents = list(data.get("agents") or [])
+def apply_stop(project_path: str, target: str, path: Optional[Path] = None) -> str:
     if target == "all":
-        if "*" not in projects:
-            projects.append("*")
-        write_stop_file(projects, "slack_control_room", agents=agents)
-        return "stop recorded for * (drain-first; loops check between units)"
-    token = agent_stop_token(project, target)
-    if token not in agents:
-        agents.append(token)
-    write_stop_file(projects, "slack_control_room", agents=agents)
-    return f"stop recorded for {target} (drain-first; loops check between units)"
+        return "global Slack stop is not supported; use the local operator control"
+    if target != "project":
+        return "agent-scoped Slack stop is not supported in V1; stop the project or use local control"
+
+    def update(value: Any) -> Dict[str, Any]:
+        document = _stop_document(value)
+        projects, agents = list(document.get("projects", [])), list(document.get("agents", []))
+        if project_path not in projects:
+            projects.append(project_path)
+        return {
+            **document, "projects": projects, "agents": agents,
+            "stopped_at": _now(), "source": "slack_control_room",
+        }
+
+    destination = path or STOP_PATH
+    _adopt_legacy_stop_file(destination)
+    mutate_secure_json(destination, {}, update)
+    return "stop recorded for project (drain-first; loops check between units)"
 
 
-def apply_resume(project: str, target: str) -> str:
-    if not STOP_PATH.is_file():
+def apply_resume(project_path: str, target: str, path: Optional[Path] = None) -> str:
+    if target == "all":
+        return "global Slack resume is not supported; use the local operator control"
+    if target != "project":
+        return "agent-scoped Slack resume is not supported in V1; resume the project or use local control"
+    destination = path or STOP_PATH
+    _adopt_legacy_stop_file(destination)
+    if not destination.is_file():
         return "no operator stop is in effect"
-    data = load_stop_file()
-    projects = list(data.get("projects") or [])
-    agents = list(data.get("agents") or [])
-    scoped = target not in {"", "all"}
-    if not scoped:
-        STOP_PATH.unlink()
-        return "cleared operator stop for all projects"
-    if "*" in projects:
-        return "global stop (*) is in effect; resume all to clear it"
-    if project in projects:
-        return f"project stop for {project} is in effect; resume all to clear it"
-    token = agent_stop_token(project, target)
-    agents = [item for item in agents if item != token]
-    if not projects and not agents:
-        STOP_PATH.unlink()
-        return f"cleared operator stop for {target}"
-    write_stop_file(projects, "slack_control_room", agents=agents)
-    return f"cleared operator stop for {target}"
+    result = {"message": ""}
+
+    def update(value: Any) -> Dict[str, Any]:
+        document = _stop_document(value)
+        projects, agents = list(document.get("projects", [])), list(document.get("agents", []))
+        if "*" in projects:
+            result["message"] = "global stop (*) is local-operator-only and cannot be cleared from Slack"
+            return document
+        projects = [item for item in projects if item != project_path]
+        agents = [item for item in agents if not item.startswith(f"{project_path}::")]
+        result["message"] = "cleared operator stop for project"
+        return {
+            **document, "projects": projects, "agents": agents,
+            "stopped_at": _now(), "source": "slack_control_room",
+        }
+
+    mutate_secure_json(destination, {}, update)
+    return result["message"]
 
 
 def load_capacity(repo_dir: str) -> Dict[str, Any]:
@@ -164,8 +211,7 @@ def load_capacity(repo_dir: str) -> Dict[str, Any]:
     original = os.getcwd()
     try:
         os.chdir(os.path.abspath(repo_dir))
-        issues = list_open_issues() or []
-        _backlog, ready, held = partition(issues)
+        _backlog, ready, held = partition(list_open_issues() or [])
         return capacity(ready, held)
     except (OSError, TypeError, ValueError) as exc:
         return {"error": str(exc), "concurrent": [], "deferred": [], "ready_total": 0}
@@ -173,220 +219,235 @@ def load_capacity(repo_dir: str) -> Dict[str, Any]:
         os.chdir(original)
 
 
-def load_loop_heartbeats(project: str) -> List[str]:
+def load_loop_heartbeats(project_path: str) -> List[str]:
     from doctor_local_agent_integrations import report
 
     aru_home = Path(os.environ.get("ARU_SDLC_HOME") or Path(__file__).resolve().parents[1])
-    abs_project = project if str(project).startswith("/") else str(Path(project or ".").resolve())
-    payload = report(aru_home, Path.home(), abs_project)
-    lines = []
-    for name, agent in (payload.get("agents") or {}).items():
-        last = agent.get("last_heartbeat") or "unknown"
-        evidence = agent.get("native_wake_evidence") or "none"
-        lines.append(f"{name}: last_heartbeat={last} wake_evidence={evidence}")
-    return lines
+    payload = report(aru_home, Path.home(), project_path)
+    return [
+        f"{name}: last_heartbeat={agent.get('last_heartbeat') or 'unknown'} "
+        f"wake_evidence={agent.get('native_wake_evidence') or 'none'}"
+        for name, agent in (payload.get("agents") or {}).items()
+    ]
 
 
-def _review_work_lines(status: Dict[str, Any]) -> List[str]:
-    markers = ("In Review", "pending review", "requested changes")
-    return [item for item in (status.get("reasons") or []) if any(mark in str(item) for mark in markers)]
+def verified_runtime_health(registry: ProjectRegistry, project: ProjectRecord) -> str:
+    checked = registry.verify(project.project_id)
+    runtime = str(checked.get("runtime_health") or "degraded_unreachable")
+    if runtime != "healthy":
+        return runtime
+    if checked.get("identity_verified"):
+        return "healthy"
+    return (
+        "degraded_identity_unverified"
+        if checked.get("verification_error")
+        else "degraded_identity_mismatch"
+    )
 
 
-def status_text(repo_dir: str = ".", project: str = "") -> str:
-    status = evaluate_fleet_status(repo_dir)
-    health = status.get("codebase_health") or {}
-    cap = load_capacity(repo_dir)
-    target = project or str(Path(repo_dir).resolve())
-    beats = load_loop_heartbeats(target)
+def status_text(project: ProjectRecord, runtime_health: Optional[str] = None) -> str:
+    health = runtime_health or ("healthy" if project.healthy else "degraded_unreachable")
+    if health != "healthy":
+        return (
+            f"project {project.project_id}: {health}; checkout unavailable or identity "
+            f"unverified at {project.local_path}. Use registry verify, recover, or close locally."
+        )
+    with _STATUS_LOCK:
+        status = evaluate_fleet_status(project.local_path)
+        capacity = load_capacity(project.local_path)
     lines = [
+        f"project {project.project_id}: healthy",
         f"factory state: {status.get('state')} ({status.get('summary', '')})",
         f"open issues: {status.get('open_issues_count', '?')} open PRs: {status.get('open_prs_count', '?')}",
     ]
-    if cap.get("error"):
-        lines.append(f"capacity: unavailable ({cap['error']})")
+    if capacity.get("error"):
+        lines.append(f"capacity: unavailable ({capacity['error']})")
     else:
-        concurrent = cap.get("concurrent") or []
+        concurrent = capacity.get("concurrent") or []
         lines.append(
-            f"capacity: claimable={len(concurrent)} ready={cap.get('ready_total', '?')} "
+            f"capacity: claimable={len(concurrent)} ready={capacity.get('ready_total', '?')} "
             f"concurrent={concurrent}"
         )
-    reviews = _review_work_lines(status)
+    reviews = [item for item in (status.get("reasons") or []) if "review" in str(item).lower()]
     lines.append("open review work: " + ("; ".join(reviews[:8]) if reviews else "none"))
-    claims = status.get("active_claims") or []
-    if claims:
-        lines.append("claims: " + ", ".join(str(item) for item in claims[:8]))
-    if health:
-        lines.append(
-            f"codebase loc={health.get('loc')} files={health.get('file_count')}"
-        )
     stop = load_stop_file()
-    if stop.get("projects") or stop.get("agents"):
-        lines.append(
-            f"operator stop: projects={stop.get('projects')} agents={stop.get('agents')} "
-            f"at {stop.get('stopped_at')}"
-        )
+    scoped_projects = [
+        item for item in stop.get("projects", [])
+        if item in {"*", project.local_path}
+    ]
+    scoped_agents = [
+        item for item in stop.get("agents", [])
+        if item.startswith(f"{project.local_path}::")
+    ]
+    if scoped_projects or scoped_agents:
+        lines.append(f"operator stop: projects={scoped_projects} agents={scoped_agents}")
     lines.append("loop heartbeats:")
-    lines.extend(f"  {item}" for item in beats)
+    lines.extend(f"  {item}" for item in load_loop_heartbeats(project.local_path))
     return "\n".join(lines)
 
 
 def parse_ref(ref: str, kind: str = "issue") -> Tuple[str, int]:
-    token = "pr" if kind.lower() == "pr" else "issue"
-    return (token, int(ref))
+    return ("pr" if kind.lower() == "pr" else "issue", int(ref))
+
+
+def github_comment(kind: str, number: int, decision: str, repo_dir: str) -> bool:
+    from common import run_cmd
+
+    body = f"Operator intervention via Slack control room ({_now()}):\n\n{decision}\n"
+    code, _, _ = run_cmd(
+        ["gh", "issue" if kind == "issue" else "pr", "comment", str(number), "--body", body],
+        check=False, cwd=repo_dir,
+    )
+    return code == 0
 
 
 def handle_command(
-    config: SlackConfig,
-    parsed: Dict[str, str],
-    project: str,
-    repo_dir: str,
-    comment: Callable[[str, int, str, str], bool],
+    config: SlackConfig, parsed: Dict[str, str], project: ProjectRecord,
+    comment: Callable[[str, int, str, str], bool] = github_comment,
+    runtime_health: Optional[str] = None,
 ) -> str:
     verb = parsed["verb"]
+    health = runtime_health or ("healthy" if project.healthy else "degraded_unreachable")
     if verb == "status":
-        return status_text(repo_dir, project)
+        return status_text(project, health)
+    if health != "healthy":
+        return "project checkout is degraded; use registry verify, recover, or close locally"
     if verb == "stop":
-        return apply_stop(project, parsed.get("target") or "all")
+        return apply_stop(project.local_path, parsed.get("target") or "project")
     if verb == "resume":
-        return apply_resume(project, parsed.get("target") or "all")
+        return apply_resume(project.local_path, parsed.get("target") or "project")
     if verb == "intervention":
-        ref = parsed.get("ref") or ""
-        raw = parsed.get("decision") or ""
-        if not ref or not raw:
+        ref, decision = parsed.get("ref") or "", parsed.get("decision") or ""
+        if not ref or not decision:
             return "intervention needs `#<issue-or-pr> <decision>`"
         kind, number = parse_ref(ref, parsed.get("kind") or "issue")
-        decision = redact(raw, extra=secrets_from_config(config))
-        ok = comment(kind, number, decision, repo_dir)
-        if not ok:
+        safe_decision = redact(decision, extra=secrets_from_config(config))
+        if not comment(kind, number, safe_decision, project.local_path):
             return f"could not copy intervention onto GitHub {kind} #{number}"
         return f"copied intervention to GitHub {kind} #{number}"
     return "unknown command"
 
 
-def github_comment(kind: str, number: int, decision: str, repo_dir: str = ".") -> bool:
-    from common import run_cmd
-
-    body = (
-        "Operator intervention via Slack control room "
-        f"({_now()}):\n\n{decision}\n"
-    )
-    resource = "issue" if kind == "issue" else "pr"
-    code, _, _ = run_cmd(
-        ["gh", resource, "comment", str(number), "--body", body],
-        check=False,
-        cwd=repo_dir,
-    )
-    return code == 0
-
-
 def load_seen_ids(path: Optional[Path] = None) -> Dict[str, str]:
-    dest = path or SEEN_PATH
-    if not dest.is_file():
-        return {}
-    try:
-        payload = json.loads(dest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    ids = payload.get("ids") if isinstance(payload, dict) else payload
-    if isinstance(ids, dict):
-        return {str(key): str(value) for key, value in ids.items()}
-    if isinstance(ids, list):
-        return {str(item): "" for item in ids}
-    return {}
+    payload = read_secure_json(path or SEEN_PATH, {"ids": {}})
+    ids = payload.get("ids") if isinstance(payload, dict) else None
+    if not isinstance(ids, dict) or not all(isinstance(key, str) for key in ids):
+        raise RegistryError("invalid Slack deduplication store")
+    return {key: str(value) for key, value in ids.items()}
 
 
-def record_seen_id(event_id: str, path: Optional[Path] = None) -> bool:
-    """Persist event_id. Return True if it was already recorded."""
-    dest = path or SEEN_PATH
-    dest.parent.mkdir(mode=0o700, exist_ok=True)
-    if not dest.exists():
-        dest.write_text("{}\n", encoding="utf-8")
-        dest.chmod(0o600)
-    with dest.open("r+", encoding="utf-8") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            payload = json.loads(handle.read() or "{}")
-        except json.JSONDecodeError:
-            payload = {}
-        ids = payload.get("ids") if isinstance(payload, dict) else {}
+def record_seen_id(
+    event_key: str, path: Optional[Path] = None, legacy_key: str = "",
+) -> bool:
+    duplicate = {"value": False}
+
+    def update(payload: Any) -> Dict[str, Any]:
+        ids = payload.get("ids") if isinstance(payload, dict) else None
         if not isinstance(ids, dict):
-            ids = {}
-        if event_id in ids:
-            return True
-        ids[event_id] = _now()
-        if len(ids) > 2000:
-            ids = dict(list(ids.items())[-1500:])
-        handle.seek(0)
-        handle.truncate()
-        json.dump({"ids": ids}, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    dest.chmod(0o600)
-    return False
+            raise RegistryError("invalid Slack deduplication store")
+        if event_key in ids or (legacy_key and legacy_key in ids):
+            duplicate["value"] = True
+            return payload
+        ids[event_key] = _now()
+        return {"ids": dict(list(ids.items())[-1500:])}
+
+    mutate_secure_json(path or SEEN_PATH, {"ids": {}}, update)
+    return duplicate["value"]
 
 
 def handle_slack_message(
-    config: SlackConfig,
-    payload: Dict[str, Any],
-    seen_ids: set[str],
-    project: str,
-    repo_dir: str,
+    config: SlackConfig, registry: ProjectRegistry, payload: Dict[str, Any], seen_ids: set[str],
     comment: Callable[[str, int, str, str], bool] = github_comment,
     notify: Callable[..., Dict[str, Any]] = post_event,
+    seen_path: Optional[Path] = None,
 ) -> Optional[str]:
-    event_id = str(payload.get("client_msg_id") or payload.get("ts") or "")
-    if event_id:
-        already = event_id in seen_ids or record_seen_id(event_id)
-        seen_ids.add(event_id)
-        if already:
+    team_id = str(payload.get("team") or payload.get("team_id") or "")
+    channel_id = str(payload.get("channel") or "")
+    try:
+        project = registry.resolve(team_id, channel_id)
+    except RegistryError:
+        route_hash = hashlib.sha256(f"{team_id}\0{channel_id}".encode()).hexdigest()[:16]
+        registry.audit(
+            "invalid_inbound_route", "slack_bridge",
+            detail=(
+                f"team={redact(team_id) or 'missing'} "
+                f"channel={redact(channel_id) or 'missing'}"
+            ),
+            throttle_key=f"invalid-route:{route_hash}",
+        )
+        return None
+    if not authorize(config, project, str(payload.get("user") or "")):
+        user_hash = hashlib.sha256(str(payload.get("user") or "missing").encode()).hexdigest()[:16]
+        try:
+            registry.audit(
+                "unauthorized_inbound", "slack_bridge",
+                detail=f"project_id={project.project_id} user_hash={user_hash}",
+                throttle_key=f"unauthorized:{project.project_id}:{user_hash}",
+            )
+        except RegistryError as exc:
+            print(f"[ERROR] cannot audit denied Slack command: {redact(str(exc))}", file=sys.stderr)
+        return None
+    try:
+        runtime_health = verified_runtime_health(registry, project)
+    except RegistryError:
+        return None
+    event_id = str(payload.get("client_msg_id") or payload.get("event_id") or payload.get("ts") or "")
+    event_key = "|".join((project.project_id, team_id, channel_id, event_id))
+    try:
+        if event_id:
+            if (
+                event_key in seen_ids
+                or event_id in seen_ids
+                or record_seen_id(event_key, seen_path, legacy_key=event_id)
+            ):
+                return None
+            seen_ids.add(event_key)
+        parsed = parse_command(str(payload.get("text") or ""))
+        if not parsed:
             return None
-    if not authorize(
-        config,
-        str(payload.get("team") or payload.get("team_id") or ""),
-        str(payload.get("channel") or ""),
-        str(payload.get("user") or ""),
-    ):
-        return None
-    parsed = parse_command(str(payload.get("text") or ""))
-    if not parsed:
-        return None
-    reply = handle_command(config, parsed, project, repo_dir, comment)
+        reply = handle_command(config, parsed, project, comment, runtime_health)
+    except RegistryError as exc:
+        print(
+            f"[ERROR] control-room state is unusable: {redact(str(exc))}",
+            file=sys.stderr,
+        )
+        reply = "control-room state is unusable; inspect and repair the bridge host locally"
+        parsed = {"verb": "state-error"}
     notify(
-        config,
+        config_for_project(config, project),
         {
-            "type": "command-ack",
-            "agent": "slack-bridge",
-            "family": "human",
-            "text": reply,
-            "dedupe_key": f"ack:{event_id}:{parsed['verb']}",
+            "project_id": project.project_id, "type": "command-ack",
+            "agent": "slack-bridge", "family": "human", "text": reply,
+            "dedupe_key": f"{project.project_id}:{team_id}:{channel_id}:ack:{event_id}:{parsed['verb']}",
         },
     )
     return reply
 
 
-def doctor(env_path: Path = ENV_PATH) -> Dict[str, Any]:
-    values = load_slack_env(env_path)
+def doctor(
+    env_path: Path = ENV_PATH, registry_path: Path = DEFAULT_REGISTRY_PATH,
+    audit_path: Path = DEFAULT_AUDIT_PATH,
+) -> Dict[str, Any]:
     report: Dict[str, Any] = {
-        "env_file": str(env_path),
-        "env_file_present": env_path.is_file(),
-        "bolt_installed": _bolt_available(),
-        "pid_file": str(PID_PATH),
-        "bridge_running": _bridge_running(PID_PATH),
-        "ok": False,
+        "env_file": str(env_path), "env_file_present": env_path.is_file(),
+        "registry_file": str(registry_path), "bolt_installed": _bolt_available(),
+        "bridge_running": _bridge_running(PID_PATH), "ok": False,
     }
     try:
-        config = config_from_env(values)
-    except ValueError as exc:
+        config = config_from_env(load_slack_env(env_path), require_channel=False)
+        projects = ProjectRegistry(registry_path, audit_path).list(include_closed=False)
+        mismatched = [item.project_id for item in projects if item.slack_team_id != config.team_id]
+        if mismatched:
+            raise RegistryError(f"projects belong to another Slack workspace: {mismatched}")
+    except (ValueError, RegistryError) as exc:
         report["error"] = str(exc)
         return report
-    report.update(
-        {
-            "ok": True,
-            "team_id": config.team_id,
-            "channel_id": config.channel_id,
-            "operator_configured": bool(config.operator_user_id),
-            "socket_token_present": config.app_token.startswith("xapp-"),
-        }
-    )
+    report.update({
+        "ok": True, "team_id": config.team_id, "active_projects": len(projects),
+        "degraded_projects": [item.project_id for item in projects if not item.healthy],
+        "operator_configured": bool(config.operator_user_id),
+        "socket_token_present": config.app_token.startswith("xapp-"),
+    })
     return report
 
 
@@ -408,7 +469,6 @@ def _pid_exists(pid: int) -> bool:
 
 def _process_command(pid: int) -> str:
     from common import run_cmd
-
     code, stdout, _ = run_cmd(["ps", "-p", str(pid), "-o", "command="], check=False)
     return stdout if code == 0 else ""
 
@@ -416,45 +476,31 @@ def _process_command(pid: int) -> str:
 def _pid_record(path: Path) -> Dict[str, Any]:
     if not path.is_file():
         return {}
-    text = path.read_text(encoding="utf-8").strip()
     try:
-        data = json.loads(text)
-        if isinstance(data, dict) and data.get("pid") is not None:
-            return data
-    except json.JSONDecodeError:
-        pass
-    try:
-        return {"pid": int(text), "identity": ""}
-    except ValueError:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _is_our_bridge(pid: int) -> bool:
-    command = _process_command(pid)
-    return "slack_control_room" in command
+    return "slack_control_room" in _process_command(pid)
 
 
 def _bridge_running(path: Path) -> bool:
-    record = _pid_record(path)
     try:
-        pid = int(record.get("pid"))
+        pid = int(_pid_record(path).get("pid"))
     except (TypeError, ValueError):
         return False
     return _pid_exists(pid) and _is_our_bridge(pid)
 
 
 def write_pid(path: Path = PID_PATH) -> None:
-    path.parent.mkdir(mode=0o700, exist_ok=True)
     payload = {
-        "pid": os.getpid(),
-        "identity": BRIDGE_IDENTITY,
-        "started_at": _now(),
+        "pid": os.getpid(), "identity": BRIDGE_IDENTITY, "started_at": _now(),
         "argv": Path(sys.argv[0]).name if sys.argv else "slack_control_room.py",
     }
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    path.chmod(0o600)
+    mutate_secure_json(path, {}, lambda _current: payload)
 
 
 def clear_pid(path: Path = PID_PATH) -> None:
@@ -465,43 +511,49 @@ def clear_pid(path: Path = PID_PATH) -> None:
 def stop_bridge() -> str:
     if not PID_PATH.is_file():
         return "bridge is not running"
-    record = _pid_record(PID_PATH)
     try:
-        pid = int(record.get("pid"))
+        pid = int(_pid_record(PID_PATH).get("pid"))
     except (TypeError, ValueError):
-        clear_pid()
+        clear_pid(PID_PATH)
         return "bridge is not running"
     if _pid_exists(pid) and not _is_our_bridge(pid):
         return f"refusing to signal pid {pid}: not the control-room bridge"
     if not _pid_exists(pid):
-        clear_pid()
+        clear_pid(PID_PATH)
         return "bridge is not running"
     try:
         os.kill(pid, 15)
+    except ProcessLookupError:
+        clear_pid(PID_PATH)
+        return "bridge is not running"
     except OSError as exc:
-        clear_pid()
-        return f"bridge stop failed: {exc}"
+        return f"could not signal pid {pid}: {exc}"
     for _ in range(20):
         if not _pid_exists(pid):
-            clear_pid()
+            clear_pid(PID_PATH)
             return "bridge stopped"
         time.sleep(0.1)
     return "bridge sent SIGTERM; pid file still present"
 
 
-def start_bridge(config: SlackConfig, project: str, repo_dir: str) -> int:
+def start_bridge(config: SlackConfig, registry: ProjectRegistry) -> int:
     if not (config.operator_user_id.startswith("U") and len(config.operator_user_id) >= 8):
-        print(
-            "[ERROR] SLACK_OPERATOR_USER_ID is required; commands fail closed.",
-            file=sys.stderr,
-        )
+        print("[ERROR] SLACK_OPERATOR_USER_ID is required; commands fail closed.", file=sys.stderr)
+        return 1
+    try:
+        mismatched = [
+            item.project_id
+            for item in registry.list(include_closed=False)
+            if item.slack_team_id != config.team_id
+        ]
+    except RegistryError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    if mismatched:
+        print(f"[ERROR] projects belong to another Slack workspace: {mismatched}", file=sys.stderr)
         return 1
     if not _bolt_available():
-        print(
-            "[ERROR] slack-bolt is not installed. "
-            "pip install -r requirements-slack.txt",
-            file=sys.stderr,
-        )
+        print("[ERROR] slack-bolt is not installed. pip install -r requirements-slack.txt", file=sys.stderr)
         return 1
     if not config.app_token.startswith("xapp-"):
         print("[ERROR] SLACK_APP_TOKEN (xapp-) is required for Socket Mode", file=sys.stderr)
@@ -510,50 +562,60 @@ def start_bridge(config: SlackConfig, project: str, repo_dir: str) -> int:
         print("[ERROR] bridge already running", file=sys.stderr)
         return 1
     if PID_PATH.is_file():
-        clear_pid()
+        clear_pid(PID_PATH)
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
+
     app = App(token=config.bot_token)
-    seen: set[str] = set(load_seen_ids())
+    seen = set(load_seen_ids())
 
     @app.event("app_mention")
     def _mention(body, event):  # pragma: no cover - live Slack path
         payload = dict(event)
         payload["team"] = body.get("team_id") or event.get("team")
-        handle_slack_message(config, payload, seen, project, repo_dir)
+        handle_slack_message(config, registry, payload, seen)
 
-    write_pid()
+    write_pid(PID_PATH)
     try:
         SocketModeHandler(app, config.app_token).start()
     finally:
-        clear_pid()
+        clear_pid(PID_PATH)
     return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Aru Slack control-room bridge")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["start", "status", "doctor", "stop"])
-    parser.add_argument("--repo-dir", default=".")
-    parser.add_argument("--project", default="")
-    parser.add_argument("--env-file", default=str(ENV_PATH))
+    parser.add_argument("--project-id")
+    parser.add_argument("--registry-file", type=Path, default=DEFAULT_REGISTRY_PATH)
+    parser.add_argument("--audit-file", type=Path, default=DEFAULT_AUDIT_PATH)
+    parser.add_argument("--env-file", type=Path, default=ENV_PATH)
     args = parser.parse_args(argv)
+    registry = ProjectRegistry(args.registry_file, args.audit_file)
     if args.command == "doctor":
-        report = doctor(Path(args.env_file))
+        report = doctor(args.env_file, args.registry_file, args.audit_file)
         print(json.dumps(report, indent=2))
         return 0 if report.get("ok") else 1
-    if args.command == "status":
-        print(status_text(args.repo_dir, args.project))
-        return 0
     if args.command == "stop":
         print(stop_bridge())
         return 0
+    if args.command == "status":
+        if not args.project_id:
+            parser.error("status requires --project-id")
+        try:
+            project = registry.get(args.project_id)
+            print(status_text(project, verified_runtime_health(registry, project)))
+            return 0
+        except RegistryError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            return 1
     try:
-        config = config_from_env(load_slack_env(Path(args.env_file)))
-    except ValueError as exc:
+        config = config_from_env(load_slack_env(args.env_file), require_channel=False)
+        registry.list(include_closed=False)
+    except (ValueError, RegistryError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
-    project = args.project or str(Path(args.repo_dir).resolve())
-    return start_bridge(config, project, args.repo_dir)
+    return start_bridge(config, registry)
 
 
 if __name__ == "__main__":
