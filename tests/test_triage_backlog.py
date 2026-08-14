@@ -189,6 +189,27 @@ parallel-eligible: true
         gaps = tb.ready_gaps(issue(200, "type:fix", body=bug_body), set())
         self.assertEqual(gaps, [])
 
+    def test_machine_checkable_predicates_rejects_bare_inline_code(self):
+        bare_code_criteria = [
+            "- [ ] Document the `result` field in the response",
+            "- [ ] Update `my_var` variable in `README.md`",
+        ]
+        self.assertFalse(tb.has_machine_checkable_predicates(bare_code_criteria))
+
+    def test_machine_checkable_predicates_accepts_verify_and_assertions(self):
+        verify_criteria = ["- [ ] Verify output (verify: `python3 test.py`)"]
+        self.assertTrue(tb.has_machine_checkable_predicates(verify_criteria))
+
+        assert_criteria = ["- [ ] Asserts that return code is 0"]
+        self.assertTrue(tb.has_machine_checkable_predicates(assert_criteria))
+
+        exit_criteria = ["- [ ] Exits with code 0 on valid input"]
+        self.assertTrue(tb.has_machine_checkable_predicates(exit_criteria))
+
+    def test_example_conforming_issue_body_passes_ready_contract(self):
+        gaps = tb.ready_gaps(issue(200, "type:feat", body=tb.EXAMPLE_CONFORMING_ISSUE_BODY), set())
+        self.assertEqual(gaps, [])
+
     def test_epic_is_never_ready(self):
         gaps = tb.ready_gaps(issue(2, "type:epic", body=READY_BODY), set())
         self.assertEqual(len(gaps), 1)
@@ -205,6 +226,7 @@ parallel-eligible: true
             self.assertIn("Example of a conforming issue with machine-checkable criteria:", output)
             self.assertIn("## Decision Boundaries", output)
             self.assertIn("## Non-Goals", output)
+            self.assertIn("## Dependencies", output)
 
 
 class PartitionTests(unittest.TestCase):

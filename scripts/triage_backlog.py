@@ -57,11 +57,16 @@ def acceptance_criteria(body: str) -> list[str]:
 
 
 def has_machine_checkable_predicates(criteria: list[str]) -> bool:
-    """Returns True if at least one acceptance criterion contains an executable verify command or checkable predicate."""
+    """Returns True if at least one acceptance criterion contains an executable verify command or checkable assertion."""
     if not criteria:
         return False
     predicate_pattern = re.compile(
-        r"\(verify:\s*[`'\"]?[^)`'\"]+[`'\"]?\)|`[^`]+`|\bverify\s*:|\bassert(?:s|ions?)?\b|\bexits?\s+0\b",
+        r"\(verify:\s*[`'\"]?[^)`'\"]+[`'\"]?\)"
+        r"|\bverify\s*:\s*[`'\"]?[^`'\"\n]+[`'\"]?"
+        r"|\bverify_cmd\s*:"
+        r"|\bassert(?:s|ions?)?\b"
+        r"|\bexits?\s+(?:with\s+code\s+)?(?:0|1|non-zero)\b"
+        r"|\breturns?\s+(?:code\s+)?(?:0|1|true|false)\b",
         re.IGNORECASE,
     )
     return any(predicate_pattern.search(c) for c in criteria)
@@ -84,26 +89,34 @@ def has_verification(body: str) -> bool:
 ARU_SDLC_REPO_SLUG = "gillella/Aru_Agentic_SDLC"
 LEGACY_ISSUE_CUTOFF_NUMBER = 158
 
-EXAMPLE_CONFORMING_ISSUE = """
-Example of a conforming issue with machine-checkable criteria:
-
-## Feature Description
-...
+EXAMPLE_CONFORMING_ISSUE_BODY = """## Feature Description
+Describe the problem and intended change.
 
 ## Acceptance Criteria
 - [ ] Predicate 1 (verify: `python3 -m unittest tests.test_foo`)
-- [ ] Predicate 2
+- [ ] Predicate 2 (verify: `python3 scripts/foo.py --check`)
 
 ## Decision Boundaries
-- Default: value
-- Edge cases: handling
-- Error handling: raise/log
+- Default: return 0 on success
+- Error handling: exit 1 on failure
+- Edge cases: handle empty inputs safely
 
 ## Non-Goals
-- Explicit out of scope item
+- Modifying third-party dependencies
 
 ## Verification
-- Run test suite
+`python3 -m unittest discover tests` exits 0.
+
+## Dependencies
+depends-on: none
+touches: scripts/foo.py, tests/test_foo.py
+parallel-eligible: true
+"""
+
+EXAMPLE_CONFORMING_ISSUE = f"""
+Example of a conforming issue with machine-checkable criteria:
+
+{EXAMPLE_CONFORMING_ISSUE_BODY}
 """
 
 
