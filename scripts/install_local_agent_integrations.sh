@@ -404,7 +404,14 @@ elif action == "resume":
         print(f"removed stop marker {stop_path}")
         raise SystemExit(0)
     data = load(stop_path, {"projects": []})
-    projects = [p for p in (data.get("projects") or []) if p not in {project, "*"}]
+    projects = list(data.get("projects") or [])
+    if "*" in projects:
+        print(
+            "error: global stop (*) is in effect; resume without --project to clear it",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    projects = [p for p in projects if p != project]
     if projects:
         data["projects"] = projects
         dump(stop_path, data)
@@ -516,11 +523,48 @@ pause_managed_codex_heartbeat() {
   done < <(managed_codex_tomls_for_project "${1:-}")
 }
 
+codex_wake_enabled() {
+  python3 - "$TARGET_HOME" "$1" <<'PY'
+import json, os, sys
+home, project = sys.argv[1], sys.argv[2]
+path = os.path.join(home, ".aru", "native-wake.json")
+if not os.path.isfile(path):
+    raise SystemExit(1)
+data = json.load(open(path, encoding="utf-8"))
+entry = (data.get("projects") or {}).get(project) or {}
+raise SystemExit(0 if entry.get("enabled") else 1)
+PY
+}
+
+enabled_wake_projects() {
+  python3 - "$TARGET_HOME" <<'PY'
+import json, os, sys
+path = os.path.join(sys.argv[1], ".aru", "native-wake.json")
+if not os.path.isfile(path):
+    raise SystemExit(0)
+data = json.load(open(path, encoding="utf-8"))
+for project, entry in (data.get("projects") or {}).items():
+    if entry.get("enabled"):
+        print(project)
+PY
+}
+
 resume_managed_codex_heartbeat() {
-  local toml
+  local project="${1:-}"
+  local toml proj
+  if [[ -z "${project}" ]]; then
+    while IFS= read -r proj; do
+      [[ -n "${proj}" ]] && resume_managed_codex_heartbeat "${proj}"
+    done < <(enabled_wake_projects)
+    return 0
+  fi
+  if ! codex_wake_enabled "${project}"; then
+    echo "note: leaving Codex heartbeat paused for ${project}; native wake is not enabled"
+    return 0
+  fi
   while IFS= read -r toml; do
     [[ -n "${toml}" ]] && set_managed_codex_status "${toml}" "ACTIVE"
-  done < <(managed_codex_tomls_for_project "${1:-}")
+  done < <(managed_codex_tomls_for_project "${project}")
 }
 
 apply_continuity_actions() {

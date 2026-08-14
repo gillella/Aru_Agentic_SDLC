@@ -58,13 +58,19 @@ nothing.
 ## Explicit stop
 
 `$HOME/.aru/factory-loop.stop` is durable operator intent. `/stop-aru-loop`
-writes it; `/resume-aru-loop` clears it. While it applies to a project, loop
-mode must not continue and must not arm native wakes. If a managed Codex heartbeat (`id = "aru-code-loop"` or
+writes it; `/resume-aru-loop` clears it. A stop without `--project` stores
+`*`. Project-scoped `--resume-loop --project` refuses while `*` applies —
+clear the global stop without `--project`. `--resume-loop` reactivates a
+managed Codex heartbeat only when that project's `native-wake.json` entry is
+still `enabled`; `--disable-native-wake` therefore survives a later resume.
+While a stop applies to a project, loop mode must not continue and must not
+arm native wakes. If a managed Codex heartbeat (`id = "aru-code-loop"` or
 `id = "aru-code-loop-<12 hex>"`) exists for that project, stop pauses
 **that file only**.
 
 ## Doctor
 
-`doctor_local_agent_integrations.py` reports continuity adapters, versions
-(without credentials), stop state, and capability gaps. Full install-link
-diagnosis remains issue #34.
+`doctor_local_agent_integrations.py` reports continuity adapters, macOS
+`.app` bundle versions (Info.plist only, no credentials), CLI/config evidence
+separately, stop state, and capability gaps. Full install-link diagnosis
+remains issue #34.

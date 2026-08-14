@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -62,14 +63,88 @@ def probe_version(binary: str) -> str | None:
     return first
 
 
-def agent_detected(target_home: Path, spec: dict) -> bool:
+def config_detected(target_home: Path, spec: dict) -> bool:
     for token in spec.get("detect", []):
-        if token.startswith("."):
-            if (target_home / token).exists():
-                return True
-        elif shutil.which(token):
+        if token.startswith(".") and (target_home / token).exists():
             return True
     return False
+
+
+def cli_name(spec: dict) -> str | None:
+    for token in spec.get("detect", []):
+        if not token.startswith("."):
+            return token
+    return None
+
+
+def application_roots(target_home: Path) -> list[Path]:
+    roots = [target_home / "Applications"]
+    if target_home.resolve() == Path.home().resolve():
+        roots.extend([Path("/Applications"), Path.home() / "Applications"])
+    unique = []
+    seen = set()
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def sanitize_version(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if SECRET_ENV.search(text):
+        return "redacted"
+    if not VERSION_SAFE.search(text):
+        return "unparsed"
+    return text
+
+
+def read_bundle_meta(app_path: Path) -> dict | None:
+    plist = app_path / "Contents" / "Info.plist"
+    if not plist.is_file():
+        return None
+    try:
+        data = plistlib.loads(plist.read_bytes())
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    ident = data.get("CFBundleIdentifier")
+    version = sanitize_version(
+        data.get("CFBundleShortVersionString") or data.get("CFBundleVersion")
+    )
+    return {
+        "path": str(app_path),
+        "bundle_id": ident if isinstance(ident, str) else None,
+        "version": version,
+    }
+
+
+def find_macos_app(spec: dict, roots: list[Path]) -> dict | None:
+    names = spec.get("macos_app_names") or []
+    bundle_ids = set(spec.get("macos_bundle_ids") or [])
+    for name in names:
+        for root in roots:
+            meta = read_bundle_meta(root / name)
+            if meta:
+                return meta
+    if not bundle_ids:
+        return None
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            if child.suffix != ".app":
+                continue
+            meta = read_bundle_meta(child)
+            if meta and meta.get("bundle_id") in bundle_ids:
+                return meta
+    return None
 
 
 def stop_applies(stop_doc: dict | None, project: str | None) -> bool:
@@ -95,16 +170,26 @@ def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
     stop_doc = load_json(target_home / ".aru" / "factory-loop.stop")
     wake_doc = load_json(target_home / ".aru" / "native-wake.json") or {"projects": {}}
     wake_entry = (wake_doc.get("projects") or {}).get(project or "", {})
+    roots = application_roots(target_home)
     agents = {}
     for name, spec in catalog["agents"].items():
-        detected = agent_detected(target_home, spec)
-        version = probe_version(name) if detected else None
+        app = find_macos_app(spec, roots)
+        config = config_detected(target_home, spec)
+        binary = cli_name(spec)
+        cli_version = probe_version(binary) if binary else None
+        cli_present = bool(binary and shutil.which(binary))
+        detected = bool(app or config or cli_present)
+        version = (app or {}).get("version") or cli_version
         same = spec["same_task_native_wake"]
         enabled = bool(wake_entry.get("enabled")) if same.startswith("opt_in") else False
         gap = same in {"session_loop_only", "unsupported"}
         agents[name] = {
             "detected": detected,
             "version": version,
+            "app_path": (app or {}).get("path"),
+            "app_version": (app or {}).get("version"),
+            "cli_version": cli_version,
+            "config_detected": config,
             "active_task_loop": spec["active_task_loop"],
             "same_task_native_wake": same,
             "same_task_native_wake_notes": spec["same_task_native_wake_notes"],
@@ -137,8 +222,9 @@ def render_human(payload: dict) -> str:
     for name, agent in payload["agents"].items():
         mark = "detected" if agent["detected"] else "absent"
         gap = " gap" if agent["capability_gap"] else ""
+        app = f" app={agent['app_path']}" if agent.get("app_path") else ""
         lines.append(
-            f"  {name}: {mark} version={agent['version']} "
+            f"  {name}: {mark} version={agent['version']}{app} "
             f"same_task_wake={agent['same_task_native_wake']}{gap}"
         )
     lines.append("Never claims app-quit, sleep, power-off, or credit recovery.")

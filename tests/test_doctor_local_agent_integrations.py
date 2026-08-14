@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import stat
 import subprocess
 import tempfile
@@ -80,6 +81,28 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertEqual(payload["agents"]["codex"]["version"], "redacted")
         self.assertNotIn("gho_secretvalue", json.dumps(payload))
         self.assertNotIn("gho_secretvalue", self.run_doctor(env={"PATH": path}).stdout)
+
+    def test_app_only_install_is_detected_with_bundle_version(self):
+        app = self.target_home / "Applications" / "Antigravity.app" / "Contents"
+        app.mkdir(parents=True)
+        with (app / "Info.plist").open("wb") as fh:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": "com.google.antigravity",
+                    "CFBundleShortVersionString": "2.8.1",
+                },
+                fh,
+            )
+        payload = json.loads(
+            self.run_doctor("--json", env={"PATH": "/usr/bin:/bin"}).stdout
+        )
+        agent = payload["agents"]["antigravity"]
+        self.assertTrue(agent["detected"])
+        self.assertEqual(agent["version"], "2.8.1")
+        self.assertEqual(agent["app_version"], "2.8.1")
+        self.assertTrue(agent["app_path"].endswith("Antigravity.app"))
+        self.assertFalse(agent["config_detected"])
+        self.assertIsNone(agent["cli_version"])
 
     def test_default_output_does_not_claim_full_install_diagnosis(self):
         text = self.run_doctor().stdout.lower()

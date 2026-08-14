@@ -302,6 +302,33 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         wake = json.loads((self.target_home / ".aru" / "native-wake.json").read_text())
         self.assertNotIn(project, wake.get("projects", {}))
 
+    def test_project_resume_does_not_clear_global_stop(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        res = self.run_installer("--stop-loop")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn("*", stop["projects"])
+        res = self.run_installer("--resume-loop", "--project", "/tmp/aru-proj-a")
+        self.assertNotEqual(res.returncode, 0, res.stdout)
+        self.assertIn("global stop", res.stderr)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn("*", stop["projects"])
+
+    def test_resume_does_not_reactivate_disabled_wake(self):
+        project = "/tmp/aru-proj-a"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--enable-native-wake", "--project", project)
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.joinpath("automation.toml").write_text(
+            f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "ACTIVE"\n'
+        )
+        self.run_installer("--disable-native-wake", "--project", project)
+        res = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+        wake = json.loads((self.target_home / ".aru" / "native-wake.json").read_text())
+        self.assertNotIn(project, wake.get("projects", {}))
+
     def test_antigravity_workflow_and_cursor_stop_command_install(self):
         (self.target_home / ".gemini" / "antigravity").mkdir(parents=True)
         (self.target_home / ".cursor").mkdir(parents=True)
