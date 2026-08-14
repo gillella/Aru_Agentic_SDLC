@@ -56,20 +56,66 @@ def acceptance_criteria(body: str) -> list[str]:
     return [ln.strip() for ln in tail.splitlines() if re.match(r"^\s*[-*]\s*\[[ xX]\]", ln)]
 
 
+VERIFY_PLACEHOLDERS = frozenset({
+    "command to verify",
+    "command",
+    "cmd",
+    "commands",
+    "<command>",
+    "<command to verify>",
+    "<command_to_verify>",
+    "todo",
+    "tbd",
+    "none",
+    "null",
+    "n/a",
+    "na",
+    "...",
+    "test",
+    "test command",
+    "your command here",
+    "placeholder",
+})
+
+
+def _is_valid_verify_command(cmd: str) -> bool:
+    cleaned = cmd.strip("`'\" \t\r\n").strip()
+    if not cleaned:
+        return False
+    lower = cleaned.lower()
+    if lower in VERIFY_PLACEHOLDERS:
+        return False
+    if re.match(r"^(?:<.*>|\.{3,}|todo|tbd|none|n/a)$", lower):
+        return False
+    return True
+
+
 def has_machine_checkable_predicates(criteria: list[str]) -> bool:
     """Returns True if at least one acceptance criterion contains an executable verify command or checkable assertion."""
     if not criteria:
         return False
-    predicate_pattern = re.compile(
-        r"\(verify:\s*[`'\"]?[^)`'\"]+[`'\"]?\)"
-        r"|\bverify\s*:\s*[`'\"]?[^`'\"\n]+[`'\"]?"
-        r"|\bverify_cmd\s*:"
-        r"|\bexits?\s+(?:with\s+code\s+)?(?:0|1|non-zero)\b"
+
+    verify_pattern = re.compile(
+        r"\(verify:\s*([^)]+)\)"
+        r"|\bverify(?:_cmd)?\s*:\s*([^\n,)]+)",
+        re.IGNORECASE,
+    )
+    assertion_pattern = re.compile(
+        r"\bexits?\s+(?:with\s+code\s+)?(?:0|1|non-zero)\b"
         r"|\breturns?\s+(?:code\s+)?(?:0|1|true|false)\b"
         r"|\bassert(?:s|ions?)?\s+(?:that\s+)?[`'\"]?[a-zA-Z0-9_.\s]+?\s*(?:==|!=|is|<=|>=|<|>|=|equals)\s*[`'\"]?(?:0|1|true|false|empty|non-empty|none|null|\d+)[`'\"]?",
         re.IGNORECASE,
     )
-    return any(predicate_pattern.search(c) for c in criteria)
+
+    for c in criteria:
+        for m in verify_pattern.finditer(c):
+            cmd_match = m.group(1) or m.group(2)
+            if cmd_match and _is_valid_verify_command(cmd_match):
+                return True
+        if assertion_pattern.search(c):
+            return True
+
+    return False
 
 
 def has_verification(body: str) -> bool:

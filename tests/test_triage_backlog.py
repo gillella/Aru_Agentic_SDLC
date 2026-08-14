@@ -57,6 +57,12 @@ class SectionParsingTests(unittest.TestCase):
         self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] it works", "- [ ] it is done"]))
         self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Assert the UI looks good"]))
         self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Document the `result` field"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `command to verify`)"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: command to verify)"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `TODO`)"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `<command>`)"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `...`)"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: none)"]))
         self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `pytest -q`)"]))
         self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] asserts returncode is 0"]))
         self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] check `python3 scripts/merge_pr.py` exits 0"]))
@@ -207,6 +213,18 @@ parallel-eligible: true
 
         exit_criteria = ["- [ ] Exits with code 0 on valid input"]
         self.assertTrue(tb.has_machine_checkable_predicates(exit_criteria))
+
+    def test_feature_request_template_with_untouched_criteria_placeholder_is_blocked(self):
+        tmpl = (Path(__file__).resolve().parents[1] / ".github" / "ISSUE_TEMPLATE" / "feature_request.md").read_text()
+        body = tmpl + "\n## Decision Boundaries\n- Default: 0\n\n## Non-Goals\n- None\n\n## Verification\n`pytest` exits 0\n\n## Dependencies\ntouches: scripts/foo.py\n"
+        gaps = tb.ready_gaps(issue(200, "type:feat", body=body), set())
+        self.assertIn("acceptance criteria lack machine-checkable predicate (e.g., '(verify: `cmd`)' or test assertion)", gaps)
+
+    def test_bug_report_template_with_untouched_criteria_placeholder_is_blocked(self):
+        tmpl = (Path(__file__).resolve().parents[1] / ".github" / "ISSUE_TEMPLATE" / "bug_report.md").read_text()
+        body = tmpl + "\n## Decision Boundaries\n- Default: 0\n\n## Non-Goals\n- None\n\n## Verification\n`pytest` exits 0\n\n## Dependencies\ntouches: scripts/foo.py\n"
+        gaps = tb.ready_gaps(issue(200, "type:fix", body=body), set())
+        self.assertIn("acceptance criteria lack machine-checkable predicate (e.g., '(verify: `cmd`)' or test assertion)", gaps)
 
     def test_example_conforming_issue_body_passes_ready_contract(self):
         gaps = tb.ready_gaps(issue(200, "type:feat", body=tb.EXAMPLE_CONFORMING_ISSUE_BODY), set())
