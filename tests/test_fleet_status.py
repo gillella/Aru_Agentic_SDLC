@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,22 +15,30 @@ from fleet_status import (  # noqa: E402
     EXIT_ERROR,
     EXIT_WAITING,
     LINE_CEILING,
+    apply_ci_failure_rate,
+    apply_closed_issue_cost,
+    build_operator_screen,
     collect_codebase_health,
+    discover_fleet_size,
     evaluate_fleet_status,
+    format_operator_screen,
+    resolve_fleet_size,
 )
 
 
-def mock_issue(num, *labels, body="touches: src/a.py\n", title="Test Issue"):
-    return {
+def mock_issue(num, *labels, body="touches: src/a.py\n", title="Test Issue", **extra):
+    issue = {
         "number": num,
         "title": title,
         "body": body,
         "labels": [{"name": label} for label in labels],
     }
+    issue.update(extra)
+    return issue
 
 
-def mock_pr(num, *labels, decision="", merge_state="CLEAN"):
-    return {
+def mock_pr(num, *labels, decision="", merge_state="CLEAN", **extra):
+    pr = {
         "number": num,
         "title": f"PR {num}",
         "labels": [{"name": label} for label in labels],
@@ -38,6 +47,18 @@ def mock_pr(num, *labels, decision="", merge_state="CLEAN"):
         "mergeStateStatus": merge_state,
         "statusCheckRollup": [],
     }
+    pr.update(extra)
+    return pr
+
+
+def hours_ago(hours):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def questions(status):
+    return {item["key"]: item for item in status["operator_screen"]["questions"]}
 
 
 def mock_project(title="widgets Board", repo_slug="octocat/widgets"):
@@ -66,7 +87,7 @@ def mock_project_item(status="Ready", repo_slug="octocat/widgets"):
 
 
 class FleetStatusTests(unittest.TestCase):
-    def evaluate_fixture(self, issues=None, prs=None, items=None):
+    def evaluate_fixture(self, issues=None, prs=None, items=None, fleet_size=None):
         issues = [] if issues is None else issues
         prs = [] if prs is None else prs
         item_map = {} if items is None else items
@@ -81,7 +102,7 @@ class FleetStatusTests(unittest.TestCase):
                 side_effect=lambda number: item_map.get(number, [mock_project_item()]),
             ),
         ):
-            return evaluate_fleet_status(".")
+            return evaluate_fleet_status(".", fleet_size=fleet_size)
 
     def test_complete_state_when_board_and_repo_are_empty(self):
         status = self.evaluate_fixture()
@@ -360,6 +381,328 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "complete")
         self.assertEqual(status["codebase_health"]["loc"], 1)
         self.assertEqual(status["codebase_health"]["file_count"], 1)
+
+    def test_complete_board_includes_six_operator_questions(self):
+        status = self.evaluate_fixture()
+        keys = [item["key"] for item in status["operator_screen"]["questions"]]
+        self.assertEqual(
+            keys,
+            [
+                "ready_depth",
+                "holders",
+                "review_age",
+                "review_rounds",
+                "ci_failure_rate",
+                "cost",
+            ],
+        )
+        self.assertEqual(questions(status)["ready_depth"]["severity"], "warn")
+        self.assertIn("fleet size unavailable", questions(status)["ready_depth"]["summary"])
+        self.assertIn("[WARN]", format_operator_screen(status["operator_screen"]))
+
+    def test_ready_depth_marks_starved_fleet(self):
+        status = self.evaluate_fixture(
+            [
+                mock_issue(
+                    21, "status:in-progress", "agent:codex-1",
+                    updatedAt=hours_ago(1),
+                )
+            ],
+            items={21: [mock_project_item("In Progress")]},
+            fleet_size=1,
+        )
+        ready = questions(status)["ready_depth"]
+        self.assertEqual(ready["severity"], "attn")
+        self.assertEqual(ready["ready_depth"], 0)
+        self.assertEqual(ready["fleet_size"], 1)
+        self.assertEqual(ready["in_flight"], 1)
+        self.assertIn("[ATTN]", format_operator_screen(status["operator_screen"]))
+
+    def test_negative_fleet_size_is_unavailable_not_healthy(self):
+        status = self.evaluate_fixture(fleet_size=-1)
+        ready = questions(status)["ready_depth"]
+        self.assertIsNone(ready["fleet_size"])
+        self.assertEqual(ready["severity"], "warn")
+        self.assertIn("unavailable", ready["summary"])
+
+    def test_main_fetches_ci_history_from_repo_dir(self):
+        from fleet_status import main
+
+        original = os.getcwd()
+        observed = []
+        status = {
+            "state": "waiting",
+            "exit_code": EXIT_WAITING,
+            "summary": "waiting",
+            "operator_screen": {"questions": [], "severity": "ok"},
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "widgets"
+            repo.mkdir()
+
+            def fake_fetch(_window):
+                observed.append(os.getcwd())
+                return []
+
+            with (
+                patch("fleet_status.evaluate_fleet_status", return_value=status),
+                patch("factory_metrics.fetch_ci_runs", side_effect=fake_fetch),
+                patch("sys.argv", ["fleet_status.py", "--json", "--repo-dir", str(repo)]),
+                patch("builtins.print"),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main()
+        self.assertEqual(raised.exception.code, EXIT_WAITING)
+        self.assertEqual(observed, [str(repo.resolve())])
+        self.assertEqual(os.getcwd(), original)
+
+    def test_holders_mark_stale_claims(self):
+        status = self.evaluate_fixture(
+            [
+                mock_issue(
+                    22, "status:in-progress", "agent:codex-1",
+                    updatedAt=hours_ago(6),
+                )
+            ],
+            items={22: [mock_project_item("In Progress")]},
+        )
+        holders = questions(status)["holders"]
+        self.assertEqual(holders["severity"], "attn")
+        self.assertIn("idle", holders["summary"])
+        self.assertEqual(holders["holders"][0]["age_availability"], "measured")
+
+    def test_review_age_and_rounds_and_ci_rate(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    30,
+                    createdAt=hours_ago(10),
+                    comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
+                    reviews=[{"state": "CHANGES_REQUESTED"}, {"state": "CHANGES_REQUESTED"}],
+                )
+            ]
+        )
+        self.assertEqual(status["state"], "waiting")
+        asked = questions(status)
+        self.assertEqual(asked["review_age"]["severity"], "attn")
+        self.assertGreaterEqual(asked["review_age"]["oldest_age_hours"], 8)
+        self.assertEqual(asked["review_rounds"]["severity"], "warn")
+        self.assertEqual(asked["review_rounds"]["max_review_rounds"], 2)
+        self.assertEqual(asked["ci_failure_rate"]["availability"], "unavailable")
+
+    def test_review_age_ignores_drafts_and_completed_reviews(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    32, isDraft=True,
+                    comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
+                ),
+                mock_pr(
+                    33, "reviewed-by:codex-1",
+                    comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
+                ),
+            ]
+        )
+        asked = questions(status)["review_age"]
+        self.assertEqual(asked["pending"], [])
+        self.assertEqual(asked["severity"], "ok")
+
+    def test_review_age_uses_queued_at_not_created_at(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    34,
+                    createdAt=hours_ago(48),
+                    comments=[{"body": f"review-queued-at: {hours_ago(1)}"}],
+                )
+            ]
+        )
+        asked = questions(status)["review_age"]
+        self.assertEqual(asked["pending"][0]["age_availability"], "measured")
+        self.assertLess(asked["oldest_age_hours"], 2)
+        self.assertEqual(asked["severity"], "ok")
+
+    def test_review_age_without_queue_stamp_is_unavailable(self):
+        status = self.evaluate_fixture(
+            prs=[mock_pr(35, createdAt=hours_ago(48))]
+        )
+        asked = questions(status)["review_age"]
+        self.assertEqual(asked["pending"][0]["age_availability"], "unavailable")
+        self.assertIsNone(asked["oldest_age_hours"])
+        self.assertEqual(asked["severity"], "warn")
+
+    def test_review_rounds_count_same_account_commented_reviews(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    31,
+                    reviews=[
+                        {"state": "COMMENTED"},
+                        {"state": "COMMENTED"},
+                        {"state": "COMMENTED"},
+                        {"state": "APPROVED"},
+                    ],
+                )
+            ]
+        )
+        asked = questions(status)["review_rounds"]
+        self.assertEqual(asked["max_review_rounds"], 0)
+        self.assertEqual(asked["severity"], "ok")
+
+    def test_review_rounds_count_blocking_commented_reviews_only(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    36,
+                    reviews=[
+                        {
+                            "state": "COMMENTED",
+                            "body": "Verdict: **CHANGES REQUESTED**. Blocking finding below.",
+                        },
+                        {
+                            "state": "COMMENTED",
+                            "body": "Verdict: no blocking findings. LGTM.",
+                        },
+                    ],
+                )
+            ]
+        )
+        asked = questions(status)["review_rounds"]
+        self.assertEqual(asked["max_review_rounds"], 1)
+        self.assertEqual(asked["severity"], "ok")
+
+    def test_review_rounds_prefer_changes_requested_over_clean_phrasing(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    37,
+                    reviews=[
+                        {
+                            "state": "COMMENTED",
+                            "body": (
+                                "No blocking compatibility issues; however "
+                                "verdict: CHANGES REQUESTED for correctness"
+                            ),
+                        },
+                        {
+                            "state": "COMMENTED",
+                            "body": "No findings from lint. Blocking finding: runtime failure.",
+                        },
+                    ],
+                )
+            ]
+        )
+        asked = questions(status)["review_rounds"]
+        self.assertEqual(asked["max_review_rounds"], 2)
+
+    def test_default_evaluation_discovers_launch_fleet_clones(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            repo = home / "widgets"
+            repo.mkdir()
+            for name in ("agent-1", "agent-2", "agent-3", "agent-4"):
+                (home / ".aru-fleet" / "widgets" / name / ".git").mkdir(parents=True)
+            with (
+                patch("fleet_status.Path.home", return_value=home),
+                patch("fleet_status.get_repo_slug", return_value="octocat/widgets"),
+                patch("fleet_status.get_repo_projects", return_value=[mock_project()]),
+                patch("fleet_status.query_open_issues", return_value=[]),
+                patch("fleet_status.list_open_prs_details", return_value=[]),
+                patch("fleet_status.list_worktree_branches", return_value=[]),
+            ):
+                status = evaluate_fleet_status(str(repo))
+        ready = questions(status)["ready_depth"]
+        self.assertEqual(ready["fleet_size"], 4)
+        self.assertEqual(ready["in_flight"], 0)
+        self.assertEqual(ready["severity"], "attn")
+        self.assertIn("starved", ready["summary"])
+
+    def test_discover_fleet_size_reads_run_fleet_state(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "widgets"
+            repo.mkdir()
+            state = Path(raw) / "state" / "aru-factory"
+            digest = __import__("hashlib").sha256(str(repo.resolve()).encode("utf-8")).hexdigest()[:16]
+            folder = state / digest
+            folder.mkdir(parents=True)
+            (folder / "cursor-1.json").write_text("{}", encoding="utf-8")
+            (folder / "codex-1.json").write_text("{}", encoding="utf-8")
+            with patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(raw) / "state")}, clear=False):
+                self.assertEqual(discover_fleet_size(str(repo)), 2)
+
+    def test_ci_failure_rate_counts_failed_then_green_reruns(self):
+        screen = build_operator_screen([], [])
+        apply_ci_failure_rate(
+            screen,
+            [
+                {"status": "completed", "conclusion": "failure", "pull_requests": [{"number": 1}]},
+                {"status": "completed", "conclusion": "success", "pull_requests": [{"number": 1}]},
+            ],
+            None,
+        )
+        ci = {item["key"]: item for item in screen["questions"]}["ci_failure_rate"]
+        self.assertEqual(ci["failed"], 1)
+        self.assertEqual(ci["completed"], 2)
+        self.assertEqual(ci["failure_rate"], 0.5)
+        self.assertEqual(ci["severity"], "attn")
+        self.assertEqual(ci["availability"], "measured")
+
+    def test_resolve_fleet_size_reads_env_and_rejects_invalid(self):
+        with patch.dict(os.environ, {"ARU_FLEET_SIZE": "4"}, clear=False):
+            self.assertEqual(resolve_fleet_size(None), 4)
+        with patch.dict(os.environ, {"ARU_FLEET_SIZE": "nope"}, clear=False):
+            self.assertIsNone(resolve_fleet_size(None))
+        self.assertEqual(resolve_fleet_size(3), 3)
+        self.assertIsNone(resolve_fleet_size(-1))
+
+    def test_default_main_skips_closed_issue_collection(self):
+        status = {
+            "state": "waiting",
+            "exit_code": EXIT_WAITING,
+            "summary": "waiting",
+            "operator_screen": {"questions": [], "severity": "ok"},
+        }
+        with (
+            patch("fleet_status.evaluate_fleet_status", return_value=status),
+            patch("fleet_status.fetch_ci_history", return_value=[]),
+            patch("factory_metrics.collect_factory_metrics") as collect,
+            patch("sys.argv", ["fleet_status.py", "--json"]),
+            patch("builtins.print"),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            from fleet_status import main
+            main()
+        self.assertEqual(raised.exception.code, EXIT_WAITING)
+        collect.assert_not_called()
+
+    def test_cost_question_uses_measured_closed_issue_metrics(self):
+        screen = build_operator_screen([], [])
+        apply_closed_issue_cost(
+            screen,
+            {
+                "closed_issue_count": 2,
+                "cost_per_closed_issue": {
+                    "availability": "measured",
+                    "average_usd_measured": 1.5,
+                },
+                "outlier_issue_numbers": [9],
+                "issues": [
+                    {"cycle_time_hours": 2.0},
+                    {"cycle_time_hours": 4.0},
+                ],
+            },
+            None,
+        )
+        cost = {item["key"]: item for item in screen["questions"]}["cost"]
+        self.assertEqual(cost["severity"], "attn")
+        self.assertEqual(cost["average_cycle_hours"], 3.0)
+        self.assertIn("outlier", cost["summary"])
+
+    def test_api_failure_still_never_reports_complete(self):
+        status = evaluate_fleet_status("/definitely/not/a/repository")
+        self.assertEqual(status["state"], "error")
+        self.assertNotEqual(status["state"], "complete")
+        self.assertNotIn("operator_screen", status)
 
 
 if __name__ == "__main__":
