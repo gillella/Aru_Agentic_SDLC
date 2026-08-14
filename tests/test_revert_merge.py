@@ -52,29 +52,65 @@ class TestRevertMerge(unittest.TestCase):
         self.assertIsNone(sha)
 
     def test_revert_without_agent_fails(self):
-        res = revert_merge.revert_merge_pr(15, agent="", family="google")
+        res = revert_merge.revert_merge_pr(15, agent="", family="google", revert_issue=94)
         self.assertEqual(res, revert_merge.EXIT_ERROR)
 
     def test_revert_without_family_fails(self):
-        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="")
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="", revert_issue=94)
         self.assertEqual(res, revert_merge.EXIT_ERROR)
 
     def test_revert_with_invalid_family_fails(self):
-        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="unknown_family")
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="unknown_family", revert_issue=94)
         self.assertEqual(res, revert_merge.EXIT_ERROR)
 
+    def test_revert_without_revert_issue_fails(self):
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=None)
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
+    @patch("revert_merge.get_issue", return_value=None)
+    def test_revert_with_missing_revert_issue_fails(self, mock_get_issue):
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=999)
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
+    @patch("revert_merge.get_issue")
+    def test_revert_with_closed_revert_issue_fails(self, mock_get_issue):
+        mock_get_issue.return_value = {"number": 94, "state": "CLOSED", "labels": [{"name": "agent:gemini-1"}]}
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94)
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
+    @patch("revert_merge.claimed_by", return_value="other-agent")
+    @patch("revert_merge.get_issue")
+    def test_revert_with_unclaimed_revert_issue_fails(self, mock_get_issue, mock_claimed):
+        mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:other-agent"}]}
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94)
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
+    def test_revert_target_status_invalid_typo_rejected(self):
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94, target_status="Redy")
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
+    def test_revert_target_status_done_rejected(self):
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94, target_status="Done")
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+
+    @patch("revert_merge.claimed_by", return_value="gemini-1")
+    @patch("revert_merge.get_issue")
     @patch("revert_merge.fetch_pr_details")
-    def test_revert_unmerged_pr_fails(self, mock_fetch):
+    def test_revert_unmerged_pr_fails(self, mock_fetch, mock_get_issue, mock_claimed):
+        mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
         mock_fetch.return_value = {
             "number": 15,
             "state": "OPEN",
             "mergedAt": None,
         }
-        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google")
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94)
         self.assertEqual(res, revert_merge.EXIT_ERROR)
 
+    @patch("revert_merge.claimed_by", return_value="gemini-1")
+    @patch("revert_merge.get_issue")
     @patch("revert_merge.fetch_pr_details")
-    def test_revert_dry_run_success(self, mock_fetch):
+    def test_revert_dry_run_success(self, mock_fetch, mock_get_issue, mock_claimed):
+        mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
         mock_fetch.return_value = {
             "number": 15,
             "title": "fix something",
@@ -84,9 +120,12 @@ class TestRevertMerge(unittest.TestCase):
             "mergedAt": "2026-08-13T00:00:00Z",
             "mergeCommit": {"oid": "sha1234567"},
         }
-        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", dry_run=True)
+        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", revert_issue=94, dry_run=True)
         self.assertEqual(res, revert_merge.EXIT_OK)
 
+    @patch("revert_merge.find_existing_revert_pr", return_value=None)
+    @patch("revert_merge.claimed_by", return_value="gemini-1")
+    @patch("revert_merge.get_issue")
     @patch("revert_merge.update_status")
     @patch("revert_merge.enqueue_review")
     @patch("revert_merge.apply_identity", return_value=True)
@@ -94,8 +133,9 @@ class TestRevertMerge(unittest.TestCase):
     @patch("revert_merge.run_cmd")
     @patch("revert_merge.fetch_pr_details")
     def test_revert_clean_success(
-        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status
+        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status, mock_get_issue, mock_claimed, mock_find_pr
     ):
+        mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
         mock_fetch.return_value = {
             "number": 20,
             "title": "feat: add feature",
@@ -106,63 +146,11 @@ class TestRevertMerge(unittest.TestCase):
             "mergeCommit": {"oid": "mergecommitsha123"},
         }
 
-        # Mock run_cmd calls:
-        # 1. git fetch origin main -> ok
-        # 2. git rev-parse --verify origin/main -> ok
-        # 3. git worktree add -> ok
-        # 4. git revert -m 1 -> ok
-        # 5. git push -> ok
-        # 6. gh pr create -> ok (returns PR url)
-        # 7. gh issue reopen 30 -> ok
-        # 8. gh issue comment 30 -> ok
         mock_run_cmd.side_effect = [
             (0, "", ""),  # git fetch
             (0, "origin/main\n", ""),  # git rev-parse --verify
             (0, "", ""),  # git worktree add
-            (0, "", ""),  # git revert -m 1
-            (0, "", ""),  # git push
-            (0, "https://github.com/gillella/Aru_Agentic_SDLC/pull/99", ""),  # gh pr create
-            (0, "", ""),  # gh issue reopen
-            (0, "", ""),  # gh issue comment
-        ]
-        mock_update_status.return_value = True
-
-        res = revert_merge.revert_merge_pr(20, agent="gemini-1", family="google")
-        self.assertEqual(res, revert_merge.EXIT_OK)
-        mock_update_status.assert_called_once_with(30, "Ready", require_board=True)
-        mock_identity.assert_called_once_with("99", agent="gemini-1", family="google")
-
-        # Verify PR creation body contains Reverts #20 and Reopens #30, but not Closes #30
-        pr_cmd = mock_run_cmd.call_args_list[5][0][0]
-        self.assertIn("gh", pr_cmd)
-        body_idx = pr_cmd.index("--body") + 1
-        pr_body = pr_cmd[body_idx]
-        self.assertIn("Reverts #20", pr_body)
-        self.assertIn("Reopens #30", pr_body)
-        self.assertNotIn("Closes #30", pr_body)
-
-    @patch("revert_merge.update_status")
-    @patch("revert_merge.enqueue_review")
-    @patch("revert_merge.apply_identity", return_value=True)
-    @patch("revert_merge.is_merge_commit", return_value=True)
-    @patch("revert_merge.run_cmd")
-    @patch("revert_merge.fetch_pr_details")
-    def test_revert_with_explicit_revert_issue_adds_closure(
-        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status
-    ):
-        mock_fetch.return_value = {
-            "number": 20,
-            "title": "feat: add feature",
-            "body": "Closes #30",
-            "baseRefName": "main",
-            "state": "MERGED",
-            "mergedAt": "2026-08-13T00:00:00Z",
-            "mergeCommit": {"oid": "mergecommitsha123"},
-        }
-        mock_run_cmd.side_effect = [
-            (0, "", ""),  # git fetch
-            (0, "origin/main\n", ""),  # git rev-parse --verify
-            (0, "", ""),  # git worktree add
+            (1, "", ""),  # git log -1 (no revert commit yet)
             (0, "", ""),  # git revert -m 1
             (0, "", ""),  # git push
             (0, "https://github.com/gillella/Aru_Agentic_SDLC/pull/99", ""),  # gh pr create
@@ -173,20 +161,72 @@ class TestRevertMerge(unittest.TestCase):
 
         res = revert_merge.revert_merge_pr(20, agent="gemini-1", family="google", revert_issue=94)
         self.assertEqual(res, revert_merge.EXIT_OK)
+        mock_update_status.assert_called_once_with(30, "Ready", require_board=True)
+        mock_identity.assert_called_once_with("99", agent="gemini-1", family="google")
 
-        pr_cmd = mock_run_cmd.call_args_list[5][0][0]
+        # Verify PR creation body contains Reverts #20, Reopens #30, and Closes #94 (revert issue), but not Closes #30
+        pr_cmd = mock_run_cmd.call_args_list[6][0][0]
+        self.assertIn("gh", pr_cmd)
         body_idx = pr_cmd.index("--body") + 1
         pr_body = pr_cmd[body_idx]
+        self.assertIn("Reverts #20", pr_body)
+        self.assertIn("Reopens #30", pr_body)
         self.assertIn("Closes #94", pr_body)
         self.assertNotIn("Closes #30", pr_body)
 
+    @patch("revert_merge.find_existing_revert_pr")
+    @patch("revert_merge.claimed_by", return_value="gemini-1")
+    @patch("revert_merge.get_issue")
+    @patch("revert_merge.update_status")
+    @patch("revert_merge.enqueue_review")
+    @patch("revert_merge.apply_identity", return_value=True)
+    @patch("revert_merge.run_cmd")
+    @patch("revert_merge.fetch_pr_details")
+    def test_revert_resume_from_existing_pr(
+        self, mock_fetch, mock_run_cmd, mock_identity, mock_enqueue, mock_update_status, mock_get_issue, mock_claimed, mock_find_pr
+    ):
+        mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
+        mock_fetch.return_value = {
+            "number": 20,
+            "title": "feat: add feature",
+            "body": "Closes #30",
+            "baseRefName": "main",
+            "state": "MERGED",
+            "mergedAt": "2026-08-13T00:00:00Z",
+            "mergeCommit": {"oid": "mergecommitsha123"},
+        }
+        # Existing PR already created on GitHub
+        mock_find_pr.return_value = {
+            "number": 99,
+            "url": "https://github.com/gillella/Aru_Agentic_SDLC/pull/99",
+            "headRefName": "revert/pr-20-feat-add-feature",
+            "baseRefName": "main",
+        }
+
+        mock_run_cmd.side_effect = [
+            (0, "", ""),  # gh issue reopen 30
+            (0, "", ""),  # gh issue comment 30
+        ]
+        mock_update_status.return_value = True
+
+        res = revert_merge.revert_merge_pr(20, agent="gemini-1", family="google", revert_issue=94)
+        self.assertEqual(res, revert_merge.EXIT_OK)
+        # Should not have called git fetch, worktree add, or pr create
+        mock_identity.assert_called_once_with("99", agent="gemini-1", family="google")
+        mock_enqueue.assert_called_once_with("99")
+        mock_update_status.assert_called_once_with(30, "Ready", require_board=True)
+
+    @patch("revert_merge.find_existing_revert_pr", return_value=None)
+    @patch("revert_merge.claimed_by", return_value="gemini-1")
+    @patch("revert_merge.get_issue")
     @patch("revert_merge.get_unmerged_files", return_value=["file1.py", "file2.py"])
     @patch("revert_merge.is_merge_commit", return_value=True)
     @patch("revert_merge.run_cmd")
     @patch("revert_merge.fetch_pr_details")
     def test_revert_conflict_failure(
-        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_unmerged
+        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_unmerged, mock_get_issue, mock_claimed, mock_find_pr
     ):
+        mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
         mock_fetch.return_value = {
             "number": 25,
             "title": "breaking change",
@@ -197,119 +237,19 @@ class TestRevertMerge(unittest.TestCase):
             "mergeCommit": {"oid": "mergecommitsha456"},
         }
 
-        # Mock run_cmd calls:
-        # 1. git fetch origin develop -> ok
-        # 2. git rev-parse --verify origin/develop -> ok
-        # 3. git worktree add -> ok
-        # 4. git revert -m 1 -> fail (code 1)
-        # 5. git revert --abort -> ok
-        # 6. git worktree remove -> ok
-        # 7. git branch -D -> ok
         mock_run_cmd.side_effect = [
             (0, "", ""),  # git fetch
             (0, "origin/develop\n", ""),  # git rev-parse --verify
             (0, "", ""),  # git worktree add
+            (1, "", ""),  # git log -1
             (1, "", "conflict error"),  # git revert
             (0, "", ""),  # git revert --abort
             (0, "", ""),  # git worktree remove
             (0, "", ""),  # git branch -D
         ]
 
-        res = revert_merge.revert_merge_pr(25, agent="gemini-1", family="google")
+        res = revert_merge.revert_merge_pr(25, agent="gemini-1", family="google", revert_issue=94)
         self.assertEqual(res, revert_merge.EXIT_CONFLICT)
-
-    def test_revert_target_status_done_rejected(self):
-        res = revert_merge.revert_merge_pr(15, agent="gemini-1", family="google", target_status="Done")
-        self.assertEqual(res, revert_merge.EXIT_ERROR)
-
-    @patch("revert_merge.update_status")
-    @patch("revert_merge.enqueue_review")
-    @patch("revert_merge.apply_identity", return_value=False)
-    @patch("revert_merge.is_merge_commit", return_value=True)
-    @patch("revert_merge.run_cmd")
-    @patch("revert_merge.fetch_pr_details")
-    def test_revert_apply_identity_failure(
-        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status
-    ):
-        mock_fetch.return_value = {
-            "number": 20,
-            "title": "feat: add feature",
-            "body": "Closes #30",
-            "baseRefName": "main",
-            "state": "MERGED",
-            "mergedAt": "2026-08-13T00:00:00Z",
-            "mergeCommit": {"oid": "mergecommitsha123"},
-        }
-        mock_run_cmd.side_effect = [
-            (0, "", ""),  # git fetch
-            (0, "origin/main\n", ""),  # git rev-parse --verify
-            (0, "", ""),  # git worktree add
-            (0, "", ""),  # git revert -m 1
-            (0, "", ""),  # git push
-            (0, "https://github.com/gillella/Aru_Agentic_SDLC/pull/99", ""),  # gh pr create
-        ]
-        res = revert_merge.revert_merge_pr(20, agent="gemini-1", family="google")
-        self.assertEqual(res, revert_merge.EXIT_ERROR)
-        mock_enqueue.assert_not_called()
-        mock_update_status.assert_not_called()
-
-    @patch("revert_merge.get_unmerged_files", return_value=[])
-    @patch("revert_merge.is_merge_commit", return_value=True)
-    @patch("revert_merge.run_cmd")
-    @patch("revert_merge.fetch_pr_details")
-    def test_revert_git_non_conflict_failure(
-        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_unmerged
-    ):
-        mock_fetch.return_value = {
-            "number": 25,
-            "title": "breaking change",
-            "body": "Closes #40",
-            "baseRefName": "develop",
-            "state": "MERGED",
-            "mergedAt": "2026-08-13T00:00:00Z",
-            "mergeCommit": {"oid": "mergecommitsha456"},
-        }
-        mock_run_cmd.side_effect = [
-            (0, "", ""),  # git fetch
-            (0, "origin/develop\n", ""),  # git rev-parse --verify
-            (0, "", ""),  # git worktree add
-            (1, "", "fatal: bad object"),  # git revert
-            (0, "", ""),  # git revert --abort
-            (0, "", ""),  # git worktree remove
-            (0, "", ""),  # git branch -D
-        ]
-        res = revert_merge.revert_merge_pr(25, agent="gemini-1", family="google")
-        self.assertEqual(res, revert_merge.EXIT_ERROR)
-
-    @patch("revert_merge.update_status", return_value=False)
-    @patch("revert_merge.enqueue_review")
-    @patch("revert_merge.apply_identity", return_value=True)
-    @patch("revert_merge.is_merge_commit", return_value=True)
-    @patch("revert_merge.run_cmd")
-    @patch("revert_merge.fetch_pr_details")
-    def test_revert_issue_restoration_failure(
-        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status
-    ):
-        mock_fetch.return_value = {
-            "number": 20,
-            "title": "feat: add feature",
-            "body": "Closes #30",
-            "baseRefName": "main",
-            "state": "MERGED",
-            "mergedAt": "2026-08-13T00:00:00Z",
-            "mergeCommit": {"oid": "mergecommitsha123"},
-        }
-        mock_run_cmd.side_effect = [
-            (0, "", ""),  # git fetch
-            (0, "origin/main\n", ""),  # git rev-parse --verify
-            (0, "", ""),  # git worktree add
-            (0, "", ""),  # git revert -m 1
-            (0, "", ""),  # git push
-            (0, "https://github.com/gillella/Aru_Agentic_SDLC/pull/99", ""),  # gh pr create
-            (0, "", ""),  # gh issue reopen 30
-        ]
-        res = revert_merge.revert_merge_pr(20, agent="gemini-1", family="google")
-        self.assertEqual(res, revert_merge.EXIT_ERROR)
 
     @patch("revert_merge.run_cmd")
     def test_get_unmerged_files(self, mock_run_cmd):

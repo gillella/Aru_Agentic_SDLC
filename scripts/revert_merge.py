@@ -6,7 +6,7 @@ Reverts a merged PR safely:
 1. Locates the merge commit via the PR metadata or checkpoint tag.
 2. Creates an isolated worktree branch 'revert/pr-<id>-<slug>' off origin/<baseRefName>.
 3. Executes git revert. If clean, opens a revert PR linking 'Reverts #<id>'
-   (and 'Closes #N' only if an explicit --revert-issue tracking issue is given).
+   and 'Closes #<revert_issue>' for the claimed tracking issue.
 4. Reopens affected issues on GitHub and moves them from 'Done' back to 'Ready'
    (or specified target status) with an explanatory comment.
 5. If the revert encounters git conflicts, refuses with the exact conflict files
@@ -20,11 +20,13 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from common import (
+    claimed_by,
+    get_issue,
     run_cmd,
     run_gh_json,
 )
 from create_pr import MODEL_FAMILIES, apply_identity, enqueue_review
-from update_issue_status import update_status
+from update_issue_status import VALID_STATUSES, update_status
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -45,6 +47,15 @@ def fetch_pr_details(pr_id: int) -> Optional[Dict[str, Any]]:
     fields = "number,title,body,state,mergedAt,mergeCommit,headRefName,baseRefName"
     cmd = ["gh", "pr", "view", str(pr_id), "--json", fields]
     return run_gh_json(cmd)
+
+
+def find_existing_revert_pr(revert_branch: str) -> Optional[Dict[str, Any]]:
+    """Finds an existing open PR for the revert branch if one was already created."""
+    cmd = ["gh", "pr", "list", "--head", revert_branch, "--state", "open", "--json", "number,url,headRefName,baseRefName"]
+    prs = run_gh_json(cmd)
+    if isinstance(prs, list) and prs:
+        return prs[0]
+    return None
 
 
 def get_merge_commit_sha(pr_data: Dict[str, Any]) -> Optional[str]:
@@ -101,9 +112,9 @@ def revert_merge_pr(
     pr_id: int,
     agent: str,
     family: str = "",
+    revert_issue: Optional[int] = None,
     dry_run: bool = False,
     target_status: str = "Ready",
-    revert_issue: Optional[int] = None,
 ) -> int:
     """Main workflow function for reverting a PR."""
     agent = (agent or "").strip()
@@ -120,9 +131,36 @@ def revert_merge_pr(
         print(f"[ERROR] Unknown model family '{family}'. Allowed: {', '.join(MODEL_FAMILIES)}", file=sys.stderr)
         return EXIT_ERROR
 
-    if target_status.strip().lower() == "done":
+    if not revert_issue or revert_issue <= 0:
+        print("[ERROR] --revert-issue <ID> is required. Revert PRs must link a tracked issue with 'Closes #<ID>' to pass the merge gate.", file=sys.stderr)
+        return EXIT_ERROR
+
+    # Preflight validation of tracking issue
+    tracking_issue = get_issue(revert_issue)
+    if not tracking_issue:
+        print(f"[ERROR] Revert tracking issue #{revert_issue} not found.", file=sys.stderr)
+        return EXIT_ERROR
+
+    if tracking_issue.get("state", "").upper() != "OPEN":
+        print(f"[ERROR] Revert tracking issue #{revert_issue} is not OPEN.", file=sys.stderr)
+        return EXIT_ERROR
+
+    holder = claimed_by(tracking_issue)
+    if holder != agent:
+        print(f"[ERROR] Revert tracking issue #{revert_issue} is not claimed by agent '{agent}' (current holder: '{holder}'). Claim it first.", file=sys.stderr)
+        return EXIT_ERROR
+
+    # Preflight validation of target status
+    canonical_status = next((s for s in VALID_STATUSES if s.lower() == target_status.strip().lower()), None)
+    if not canonical_status:
+        print(f"[ERROR] '{target_status}' is not a valid target status. Expected one of: {', '.join(VALID_STATUSES)}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if canonical_status == "Done":
         print("[ERROR] Revert cannot set target issue status to 'Done'. Issues must be restored to an active/unresolved state.", file=sys.stderr)
         return EXIT_ERROR
+
+    target_status = canonical_status
 
     pr_data = fetch_pr_details(pr_id)
     if not pr_data:
@@ -147,7 +185,8 @@ def revert_merge_pr(
     print(f"=== Revert Plan — PR #{pr_id}: {title} ===")
     print(f"  Merge Commit: {merge_sha}")
     print(f"  Base Branch: {base_ref}")
-    print(f"  Linked Issues: {linked_issues if linked_issues else 'None'}")
+    print(f"  Revert Tracking Issue: #{revert_issue}")
+    print(f"  Linked Issues to Reopen: {linked_issues if linked_issues else 'None'}")
     print(f"  Target Issue Status: {target_status}")
 
     title_slug = re.sub(r"[^a-zA-Z0-9]+", "-", title.lower()).strip("-")[:30]
@@ -158,102 +197,110 @@ def revert_merge_pr(
         print("\n[DRY RUN] Would create worktree from remote base, execute git revert, open revert PR, reopen issues, and update board.")
         return EXIT_OK
 
-    # Ensure remote base is fresh
-    code_fetch, _, err_fetch = run_cmd(["git", "fetch", "origin", base_ref], check=False)
-    if code_fetch != 0:
-        print(f"[ERROR] Failed to fetch origin/{base_ref}: {err_fetch}", file=sys.stderr)
-        return EXIT_ERROR
-
-    code_verify, _, err_verify = run_cmd(["git", "rev-parse", "--verify", f"origin/{base_ref}"], check=False)
-    if code_verify != 0:
-        print(f"[ERROR] Remote base branch 'origin/{base_ref}' does not exist or cannot be resolved: {err_verify}", file=sys.stderr)
-        return EXIT_ERROR
-
-    # Create worktree off origin/<baseRefName>
-    os.makedirs(os.path.dirname(worktree_path), exist_ok=True)
-    code_wt, _, err_wt = run_cmd(
-        ["git", "worktree", "add", "-b", revert_branch, worktree_path, f"origin/{base_ref}"],
-        check=False,
-    )
-    if code_wt != 0:
-        print(f"[ERROR] Could not create worktree for branch '{revert_branch}' at '{worktree_path}': {err_wt}", file=sys.stderr)
-        return EXIT_ERROR
-
-    actual_path = worktree_path
-
-    # Determine if merge commit or single commit revert
-    is_merge = is_merge_commit(merge_sha, cwd=actual_path)
-    if is_merge:
-        revert_cmd = ["git", "revert", "-m", "1", "--no-edit", merge_sha]
-        revert_cmd_str = f"git revert -m 1 {merge_sha}"
+    # Check if a revert PR was already created in a previous attempt (resumption support)
+    existing_pr = find_existing_revert_pr(revert_branch)
+    if existing_pr:
+        revert_pr_num = str(existing_pr["number"])
+        revert_pr_url = existing_pr.get("url", f"#{revert_pr_num}")
+        print(f"ℹ️ Revert PR #{revert_pr_num} already exists ({revert_pr_url}). Resuming post-creation steps...")
     else:
-        revert_cmd = ["git", "revert", "--no-edit", merge_sha]
-        revert_cmd_str = f"git revert {merge_sha}"
-
-    code, out, err = run_cmd(revert_cmd, check=False, cwd=actual_path)
-    if code != 0:
-        # Conflict or git failure encountered
-        conflicts = get_unmerged_files(actual_path)
-
-        # Abort revert and remove worktree + branch so retries are clean
-        run_cmd(["git", "revert", "--abort"], check=False, cwd=actual_path)
-        run_cmd(["git", "worktree", "remove", "--force", actual_path], check=False)
-        run_cmd(["git", "branch", "-D", revert_branch], check=False)
-
-        if conflicts:
-            print(f"\n[ERROR] Revert of PR #{pr_id} failed due to merge conflicts.", file=sys.stderr)
-            print("Conflicting files:", file=sys.stderr)
-            for cf in conflicts:
-                print(f"  - {cf}", file=sys.stderr)
-            print("\nManual Remediation Required:", file=sys.stderr)
-            print(f"  1. Create branch '{revert_branch}' from origin/{base_ref} manually.", file=sys.stderr)
-            print(f"  2. Execute '{revert_cmd_str}' and resolve conflicts manually.", file=sys.stderr)
-            print(f"  3. Commit resolved revert, push '{revert_branch}', and open a PR linking 'Reverts #{pr_id}'.", file=sys.stderr)
-            return EXIT_CONFLICT
-        else:
-            print(f"\n[ERROR] Revert of PR #{pr_id} failed: {err or out}", file=sys.stderr)
-            print(f"Command attempted: {revert_cmd_str}", file=sys.stderr)
+        # Ensure remote base is fresh
+        code_fetch, _, err_fetch = run_cmd(["git", "fetch", "origin", base_ref], check=False)
+        if code_fetch != 0:
+            print(f"[ERROR] Failed to fetch origin/{base_ref}: {err_fetch}", file=sys.stderr)
             return EXIT_ERROR
 
-    print(f"✅ Clean revert achieved in worktree '{actual_path}'.")
+        code_verify, _, err_verify = run_cmd(["git", "rev-parse", "--verify", f"origin/{base_ref}"], check=False)
+        if code_verify != 0:
+            print(f"[ERROR] Remote base branch 'origin/{base_ref}' does not exist or cannot be resolved: {err_verify}", file=sys.stderr)
+            return EXIT_ERROR
 
-    # Push revert branch
-    code_push, _, err_push = run_cmd(["git", "push", "-u", "origin", revert_branch], check=False, cwd=actual_path)
-    if code_push != 0:
-        print(f"[ERROR] Failed to push revert branch '{revert_branch}': {err_push}", file=sys.stderr)
-        return EXIT_ERROR
+        # Create or reuse worktree off origin/<baseRefName>
+        if os.path.exists(worktree_path):
+            actual_path = worktree_path
+            print(f"ℹ️ Reusing existing worktree at '{actual_path}'.")
+        else:
+            os.makedirs(os.path.dirname(worktree_path), exist_ok=True)
+            code_wt, _, err_wt = run_cmd(
+                ["git", "worktree", "add", "-b", revert_branch, worktree_path, f"origin/{base_ref}"],
+                check=False,
+            )
+            if code_wt != 0:
+                # Branch might already exist from a prior attempt; attach worktree to existing branch
+                code_wt2, _, err_wt2 = run_cmd(
+                    ["git", "worktree", "add", worktree_path, revert_branch],
+                    check=False,
+                )
+                if code_wt2 != 0:
+                    print(f"[ERROR] Could not create or attach worktree for branch '{revert_branch}' at '{worktree_path}': {err_wt} / {err_wt2}", file=sys.stderr)
+                    return EXIT_ERROR
+            actual_path = worktree_path
 
-    # Create Revert PR
-    pr_title = f"revert: PR #{pr_id} — {title}"
-    # Note: Revert PRs intentionally omit "Closes #<issue_number>" for the original
-    # reverted issue(s) because revert PRs reopen (rather than close) those associated issues.
-    # If --revert-issue is explicitly passed for a tracking issue of the revert itself,
-    # that tracking issue is closed via closure_links.
-    closure_links = []
-    if revert_issue:
-        closure_links.append(f"Closes #{revert_issue}")
+        # Check if revert commit is already present
+        code_log, out_log, _ = run_cmd(["git", "log", "-1", "--format=%s"], check=False, cwd=actual_path)
+        has_revert_commit = code_log == 0 and bool(out_log) and ("revert" in out_log.lower())
 
-    closure_text = "\n".join(closure_links) if closure_links else ""
-    reopen_text = "\n".join([f"- Reopens #{issue_id}" for issue_id in linked_issues]) if linked_issues else "None"
-    pr_body = (
-        f"## Revert Summary\n"
-        f"This PR reverts PR #{pr_id} (\"{title}\"), reverting merge commit `{merge_sha[:7]}`.\n\n"
-        f"## Reopened Issues\n"
-        f"{reopen_text}\n\n"
-        f"Reverts #{pr_id}\n"
-    )
-    if closure_text:
-        pr_body += f"{closure_text}\n"
+        if not has_revert_commit:
+            is_merge = is_merge_commit(merge_sha, cwd=actual_path)
+            if is_merge:
+                revert_cmd = ["git", "revert", "-m", "1", "--no-edit", merge_sha]
+                revert_cmd_str = f"git revert -m 1 {merge_sha}"
+            else:
+                revert_cmd = ["git", "revert", "--no-edit", merge_sha]
+                revert_cmd_str = f"git revert {merge_sha}"
 
-    pr_cmd = ["gh", "pr", "create", "--title", pr_title, "--body", pr_body, "--head", revert_branch, "--base", base_ref]
-    code_pr, pr_out, err_pr = run_cmd(pr_cmd, check=False, cwd=actual_path)
-    if code_pr != 0:
-        print(f"[ERROR] Failed to open revert PR: {err_pr}", file=sys.stderr)
-        return EXIT_ERROR
+            code, out, err = run_cmd(revert_cmd, check=False, cwd=actual_path)
+            if code != 0:
+                conflicts = get_unmerged_files(actual_path)
+                run_cmd(["git", "revert", "--abort"], check=False, cwd=actual_path)
+                run_cmd(["git", "worktree", "remove", "--force", actual_path], check=False)
+                run_cmd(["git", "branch", "-D", revert_branch], check=False)
 
-    revert_pr_url = pr_out.strip()
-    revert_pr_num = revert_pr_url.split("/")[-1] if "/" in revert_pr_url else revert_pr_url
-    print(f"✅ Revert PR #{revert_pr_num} created: {revert_pr_url}")
+                if conflicts:
+                    print(f"\n[ERROR] Revert of PR #{pr_id} failed due to merge conflicts.", file=sys.stderr)
+                    print("Conflicting files:", file=sys.stderr)
+                    for cf in conflicts:
+                        print(f"  - {cf}", file=sys.stderr)
+                    print("\nManual Remediation Required:", file=sys.stderr)
+                    print(f"  1. Create branch '{revert_branch}' from origin/{base_ref} manually.", file=sys.stderr)
+                    print(f"  2. Execute '{revert_cmd_str}' and resolve conflicts manually.", file=sys.stderr)
+                    print(f"  3. Commit resolved revert, push '{revert_branch}', and open a PR linking 'Reverts #{pr_id}'.", file=sys.stderr)
+                    return EXIT_CONFLICT
+                else:
+                    print(f"\n[ERROR] Revert of PR #{pr_id} failed: {err or out}", file=sys.stderr)
+                    print(f"Command attempted: {revert_cmd_str}", file=sys.stderr)
+                    return EXIT_ERROR
+
+            print(f"✅ Clean revert achieved in worktree '{actual_path}'.")
+
+        # Push revert branch
+        code_push, _, err_push = run_cmd(["git", "push", "-u", "origin", revert_branch], check=False, cwd=actual_path)
+        if code_push != 0:
+            print(f"[ERROR] Failed to push revert branch '{revert_branch}': {err_push}", file=sys.stderr)
+            return EXIT_ERROR
+
+        # Create Revert PR
+        pr_title = f"revert: PR #{pr_id} — {title}"
+        closure_text = f"Closes #{revert_issue}"
+        reopen_text = "\n".join([f"- Reopens #{issue_id}" for issue_id in linked_issues]) if linked_issues else "None"
+        pr_body = (
+            f"## Revert Summary\n"
+            f"This PR reverts PR #{pr_id} (\"{title}\"), reverting merge commit `{merge_sha[:7]}`.\n\n"
+            f"## Reopened Issues\n"
+            f"{reopen_text}\n\n"
+            f"Reverts #{pr_id}\n"
+            f"{closure_text}\n"
+        )
+
+        pr_cmd = ["gh", "pr", "create", "--title", pr_title, "--body", pr_body, "--head", revert_branch, "--base", base_ref]
+        code_pr, pr_out, err_pr = run_cmd(pr_cmd, check=False, cwd=actual_path)
+        if code_pr != 0:
+            print(f"[ERROR] Failed to open revert PR: {err_pr}", file=sys.stderr)
+            return EXIT_ERROR
+
+        revert_pr_url = pr_out.strip()
+        revert_pr_num = revert_pr_url.split("/")[-1] if "/" in revert_pr_url else revert_pr_url
+        print(f"✅ Revert PR #{revert_pr_num} created: {revert_pr_url}")
 
     # Stamp identity and enqueue for review (failing closed if identity stamp fails)
     if not apply_identity(revert_pr_num, agent=agent, family=family):
@@ -292,8 +339,8 @@ def revert_merge_pr(
         print(f"✅ Issue #{issue_id} reopened on GitHub, moved to '{target_status}', and commented.")
 
     if failed_issues:
-        print(f"\n[ERROR] Revert PR #{revert_pr_num} created, but issue restoration failed for: {failed_issues}", file=sys.stderr)
-        print("Manual remediation required for the failed issues listed above.", file=sys.stderr)
+        print(f"\n[ERROR] Revert PR #{revert_pr_num} processed, but issue restoration failed for: {failed_issues}", file=sys.stderr)
+        print("Manual remediation or re-running revert_merge.py is required.", file=sys.stderr)
         return EXIT_ERROR
 
     print(f"\n🎉 Governed revert of PR #{pr_id} complete. Revert PR #{revert_pr_num} is now in queue for review.")
@@ -305,18 +352,18 @@ def main():
     parser.add_argument("--pr", type=int, required=True, help="Merged PR number to revert")
     parser.add_argument("--agent", type=str, required=True, help="Agent ID executing the revert")
     parser.add_argument("--model-family", "--family", dest="family", type=str, required=True, choices=MODEL_FAMILIES, help="Model family (e.g. google, anthropic)")
+    parser.add_argument("--revert-issue", type=int, required=True, help="Tracking issue number to link with Closes #N (must be claimed by agent)")
     parser.add_argument("--dry-run", action="store_true", help="Preview revert actions without mutating git/GitHub")
     parser.add_argument("--target-status", type=str, default="Ready", help="Status to move affected issues to (default: Ready)")
-    parser.add_argument("--revert-issue", type=int, default=None, help="Optional tracking issue number to link with Closes #N")
 
     args = parser.parse_args()
     sys.exit(revert_merge_pr(
         args.pr,
         agent=args.agent,
         family=args.family,
+        revert_issue=args.revert_issue,
         dry_run=args.dry_run,
         target_status=args.target_status,
-        revert_issue=args.revert_issue,
     ))
 
 
