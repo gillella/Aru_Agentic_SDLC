@@ -214,6 +214,8 @@ class ProtectedBranchTests(unittest.TestCase):
         self.assertIsNotNone(
             et._git_write_to_protected("git push origin refs/heads/*", "feat/issue-1-a")
         )
+        self.assertIsNotNone(et._git_write_to_protected("git push origin :", "feat/issue-1-a"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin +:", "feat/issue-1-a"))
 
     def test_unrelated_command_is_allowed(self):
         self.assertIsNone(et._git_write_to_protected("pytest -q", "main"))
