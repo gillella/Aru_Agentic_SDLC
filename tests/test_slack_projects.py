@@ -327,7 +327,7 @@ class SlackProjectRegistryTests(unittest.TestCase):
 
     def test_checkout_discovery_rejects_missing_or_invalid_database_id(self):
         repo = {"id": "R_node", "nameWithOwner": "owner/repo"}
-        for database_id in (None, "42", True):
+        for database_id in (None, "42", True, 0, -1):
             rest_repo = {
                 "id": database_id,
                 "node_id": "R_node",
@@ -337,6 +337,23 @@ class SlackProjectRegistryTests(unittest.TestCase):
                 slack_projects, "_bounded_json", side_effect=[repo, rest_repo]
             ), patch.object(slack_projects, "_discover_governed_project") as board:
                 with self.assertRaisesRegex(RegistryError, "database id"):
+                    slack_projects.discover_checkout_identity(self.checkout_a)
+                board.assert_not_called()
+
+    def test_checkout_discovery_rejects_missing_or_mistyped_node_ids(self):
+        for repo_node_id, rest_node_id in ((7, 7), ("", ""), ("R_node", 7)):
+            repo = {"id": repo_node_id, "nameWithOwner": "owner/repo"}
+            rest_repo = {
+                "id": 42,
+                "node_id": rest_node_id,
+                "full_name": "owner/repo",
+            }
+            with self.subTest(
+                repo_node_id=repo_node_id, rest_node_id=rest_node_id
+            ), patch.object(
+                slack_projects, "_bounded_json", side_effect=[repo, rest_repo]
+            ), patch.object(slack_projects, "_discover_governed_project") as board:
+                with self.assertRaisesRegex(RegistryError, "identity"):
                     slack_projects.discover_checkout_identity(self.checkout_a)
                 board.assert_not_called()
 

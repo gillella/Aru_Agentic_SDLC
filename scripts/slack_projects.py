@@ -314,24 +314,33 @@ def discover_checkout_identity(local_path: Path) -> Dict[str, Any]:
             ["gh", "repo", "view", "--json", "id,nameWithOwner"],
             cwd=str(local_path),
         )
-        repo_slug = str(repo["nameWithOwner"])
+        repo_node_id = repo["id"]
+        repo_slug = repo["nameWithOwner"]
+        if (not isinstance(repo_node_id, str) or not repo_node_id.strip()
+                or not isinstance(repo_slug, str) or not repo_slug.strip()):
+            raise RegistryError("repository identity is missing or invalid")
         rest_repo = _bounded_json(
             ["gh", "api", f"repos/{repo_slug}"], cwd=str(local_path),
         )
-        if (str(rest_repo["node_id"]) != str(repo["id"])
-                or str(rest_repo["full_name"]) != repo_slug):
+        rest_node_id = rest_repo["node_id"]
+        rest_slug = rest_repo["full_name"]
+        if (not isinstance(rest_node_id, str) or not rest_node_id.strip()
+                or not isinstance(rest_slug, str) or not rest_slug.strip()):
+            raise RegistryError("repository identity is missing or invalid")
+        if rest_node_id != repo_node_id or rest_slug != repo_slug:
             raise RegistryError("repository identity APIs returned mismatched data")
         database_id = rest_repo["id"]
-        if isinstance(database_id, bool) or not isinstance(database_id, int):
+        if (isinstance(database_id, bool) or not isinstance(database_id, int)
+                or database_id <= 0):
             raise RegistryError("repository database id is missing or invalid")
         project = _discover_governed_project(repo["nameWithOwner"])
     except (KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         raise RegistryError(f"cannot verify GitHub identity for {local_path}: {exc}") from exc
     return {
-        "github_repo_id": str(repo["id"]),
+        "github_repo_id": repo_node_id,
         "github_repo_database_id": database_id,
         "project_v2_id": str(project["id"]),
-        "repo_slug": str(repo["nameWithOwner"]),
+        "repo_slug": repo_slug,
         "local_path": str(local_path.resolve()),
     }
 
