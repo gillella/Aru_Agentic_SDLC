@@ -20,8 +20,12 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 ## Procedure Steps
 
 ### Step 1: Fetch PR & Create Review Worktree
-1. Fetch PR details, title, body, diffs, and linked issue (`Closes #X`).
-2. Create an isolated git worktree for the PR branch in `.worktrees/review-pr-<PR_ID>` to perform local verification without disturbing your active working directory.
+1. Capture the reviewed repository root before changing directories:
+   `REVIEW_REPO_ROOT="$(git rev-parse --show-toplevel)"`. Fetch PR details,
+   title, body, diffs, and linked issue (`Closes #X`) from that repository.
+2. Create an isolated worktree at
+   `$REVIEW_REPO_ROOT/.worktrees/review-pr-<PR_ID>` to perform local
+   verification without disturbing the primary checkout.
 
 ### Step 2: Goal Alignment & Issue Tracing
 - Verify that the PR links to an open issue (`Closes #X`).
@@ -31,7 +35,9 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Check for subtle bugs, logic flaws, race conditions, or unhandled edge cases.
 - Ensure public API signatures, schema types, and data models remain consistent.
 - Verify zero unused imports, dead code, or debug statements.
-- Apply the **narrower-than-reality** heuristic below to every enforcement, comparison, decision, or state assumption whose effective scope can be narrower than the reality it governs.
+- Apply the **narrower-than-reality** heuristic below to every new or changed
+  rule or assumption whose effective scope can be narrower than the reality it
+  governs.
 
 ### Step 4: Test Coverage & Verification
 - Verify that new feature logic or bug fixes are accompanied by unit/integration tests.
@@ -63,7 +69,15 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Do not move the issue directly to Done. Only the gated `merge_pr.py` close-out
   performs the merge and Done transition after independent review, green CI,
   resolved threads, and the remaining Definition-of-Done checks pass.
-- Return to the primary repository root (`cd "$ARU_SDLC_HOME"` or `cd ../..`) and remove the temporary review worktree directory `.worktrees/review-pr-<PR_ID>` safely without `--force` (`git worktree remove .worktrees/review-pr-<PR_ID>`). If git refuses because untracked or modified files exist, inspect the worktree, remove only known generated build/test caches, or retain it for diagnostic recovery rather than discarding uninspected material.
+- Return to the exact captured reviewed repository root
+  (`cd "$REVIEW_REPO_ROOT"`) and remove its temporary review worktree safely
+  without `--force`:
+  `git -C "$REVIEW_REPO_ROOT" worktree remove "$REVIEW_REPO_ROOT/.worktrees/review-pr-<PR_ID>"`.
+  Never substitute `$ARU_SDLC_HOME`; it may identify the canonical framework,
+  not the repository being reviewed. If Git refuses because untracked or
+  modified files exist, inspect the worktree, remove only known generated
+  build/test caches, or retain it for diagnostic recovery rather than
+  discarding uninspected material.
 
 ---
 
@@ -76,9 +90,9 @@ Apply every pre-submission item before submitting the review, submit the review 
       explicitly deferred with a follow-up issue (do not close incomplete work).
 - [ ] Diff matches the claim in the PR body **and** the gate/script's actual
       behaviour (state machine, not narrative — see below).
-- [ ] **Narrower-than-reality:** for every enforcement, comparison, decision, or state
-      assumption in the diff, answer: *What does the underlying system or environment
-      actually do or accept, and is our enforcement, comparison, or assumption narrower than that reality?*
+- [ ] **Narrower-than-reality:** for every new or changed rule or assumption in
+      the diff, answer: *What reality does this govern, and can its effective
+      scope be narrower than that reality?*
 - [ ] Tests cover the new behaviour; local suite is green in the review worktree.
 - [ ] CI is green (or failures are classified and already under remediation).
 - [ ] No secrets, unsafe shell interpolation, or trust-boundary holes introduced.
@@ -93,15 +107,18 @@ Apply every pre-submission item before submitting the review, submit the review 
 ### Post-Submission Close-Out
 - [ ] Review claim released via `claim_issue.py --pr <PR_ID> --agent <AGENT_ID> --complete-review`
       (if no blocking findings remain) or `--release` (if changes requested).
-- [ ] Return to repository root and clean up temporary review worktree safely without `--force` (`git worktree remove .worktrees/review-pr-<PR_ID>`), inspecting or retaining any uncertain files.
+- [ ] Return to the captured `$REVIEW_REPO_ROOT` and clean up that repository's
+      temporary review worktree safely without `--force`, inspecting or
+      retaining any uncertain files.
 
 ---
 
 ## Narrower-Than-Reality Heuristic
 
-**Core principle:** Whenever code enforces rules, makes comparisons, resolves state, or relies on assumptions about the environment, ask:
+**Core principle:** For every new or changed rule or assumption, ask:
 
-> *What does the underlying system or environment actually do, accept, or produce, and is our enforcement, comparison, or assumption narrower than that reality?*
+> *What reality does this govern, and can its effective scope be narrower than
+> that reality?*
 
 The enforcement layer's design is usually sound. What keeps breaking is the gap
 between what a check or assumption *believes* and what the system *actually does*. When the
