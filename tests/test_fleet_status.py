@@ -615,8 +615,8 @@ class FleetStatusTests(unittest.TestCase):
         ready = questions(status)["ready_depth"]
         self.assertEqual(ready["fleet_size"], 4)
         self.assertEqual(ready["in_flight"], 0)
-        self.assertEqual(ready["severity"], "attn")
-        self.assertIn("starved", ready["summary"])
+        self.assertEqual(ready["severity"], "ok")
+        self.assertEqual(ready["signal"], "complete")
 
     def test_discover_fleet_size_reads_run_fleet_state(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -767,13 +767,13 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(ready_q["signal"], "complete")
         self.assertEqual(ready_q["ready_depth"], 0)
 
-        # When fleet_size is 2 but board is empty, factory state is complete but ready signal alerts starvation
+        # An authoritatively complete board with fleet_size=2 remains complete and non-alarming
         status_active = self.evaluate_fixture(fleet_size=2)
         self.assertEqual(status_active["state"], "complete")
         ready_active_q = questions(status_active)["ready_depth"]
-        self.assertEqual(ready_active_q["severity"], "attn")
-        self.assertEqual(ready_active_q["signal"], "starved")
-        self.assertIn("starved", ready_active_q["summary"])
+        self.assertEqual(ready_active_q["severity"], "ok")
+        self.assertEqual(ready_active_q["signal"], "complete")
+        self.assertNotIn("starved", ready_active_q["summary"])
 
     def test_evaluate_fixture_with_configurable_ready_target(self):
         status = self.evaluate_fixture(
@@ -797,6 +797,7 @@ class FleetStatusTests(unittest.TestCase):
             print_capacity({"ready_total": 1, "concurrent": [10], "deferred": []}, [], ready_target=3)
         printed = out.getvalue()
         self.assertIn("Ready target:            3", printed)
+
     def test_pending_review_eligibility_matches_canonical_rules(self):
         from fleet_status import _pending_review
         # Resolved threads on changes-requested PR: eligible for re-review
@@ -812,6 +813,19 @@ class FleetStatusTests(unittest.TestCase):
             "unresolvedReviewThreadsCount": 2, "labels": [],
         }
         self.assertFalse(_pending_review(pr_unresolved_feedback))
+
+        # Helper fallback when thread counts are missing from gh pr list payload
+        pr_missing_field = {
+            "number": 15, "isDraft": False, "reviewDecision": "COMMENTED", "labels": [],
+        }
+        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[{"id": "t1"}]):
+            self.assertFalse(_pending_review(pr_missing_field))
+
+        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]):
+            pr_clean_field = {
+                "number": 16, "isDraft": False, "reviewDecision": "COMMENTED", "labels": [],
+            }
+            self.assertTrue(_pending_review(pr_clean_field))
 
         # Approved PR: waiting on merge, not review queue
         pr_approved = {

@@ -347,6 +347,8 @@ def _ready_severity(
 ) -> tuple[str, str, str]:
     if ready_target is None:
         return "warn", " — fleet size unavailable", "unknown"
+    if is_complete:
+        return "ok", "", "complete"
     if review_queue_depth >= 6:
         return "attn", f" — review queue flooded ({review_queue_depth} awaiting review)", "flooded"
     if ready_depth < ready_target:
@@ -355,8 +357,6 @@ def _ready_severity(
         return "warn", " — path conflicts starve extra agents", "conflicted"
     if review_queue_depth > 0 and review_queue_depth >= ready_target:
         return "warn", f" — review queue accumulating ({review_queue_depth} awaiting review)", "busy"
-    if is_complete:
-        return "ok", "", "complete"
     return "ok", "", "healthy"
 
 
@@ -460,12 +460,15 @@ def _pending_review(pr: Dict[str, Any]) -> bool:
     decision = (pr.get("reviewDecision") or "").upper()
     if decision == "APPROVED":
         return False
-    # If there are unresolved review threads, the PR is waiting on the author, not awaiting review
-    unresolved = pr.get("unresolvedReviewThreadsCount")
-    if unresolved is not None:
-        if unresolved > 0:
+    if "_active_review_feedback" in pr:
+        feedback = pr["_active_review_feedback"]
+        if feedback is not None and len(feedback) > 0:
             return False
-    else:
+    elif "unresolvedReviewThreadsCount" in pr:
+        unresolved = pr.get("unresolvedReviewThreadsCount")
+        if unresolved is not None and unresolved > 0:
+            return False
+    elif "reviewThreads" in pr:
         threads = pr.get("reviewThreads") or {}
         if isinstance(threads, dict) and "nodes" in threads:
             unresolved_nodes = sum(1 for t in threads["nodes"] if not t.get("isResolved"))
@@ -475,6 +478,15 @@ def _pending_review(pr: Dict[str, Any]) -> bool:
             unresolved_list = sum(1 for t in threads if not t.get("isResolved"))
             if unresolved_list > 0:
                 return False
+    else:
+        try:
+            from fetch_pr_feedback import fetch_active_review_feedback
+            feedback = fetch_active_review_feedback(pr["number"])
+            pr["_active_review_feedback"] = feedback
+            if feedback is not None and len(feedback) > 0:
+                return False
+        except (ImportError, Exception):
+            pass
     return True
 
 
@@ -1020,6 +1032,7 @@ def main():
         print(f"  window: {metrics['window_days']} days")
         print(f"  closed issues: {metrics['closed_issue_count']}")
         print(f"  measured cost per closed issue: {cost_text}")
+        print(f"  outliers: {metrics['outlier_issue_numbers'] or 'none'}")
     sys.exit(status["exit_code"])
 
 
