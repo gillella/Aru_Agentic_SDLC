@@ -112,12 +112,13 @@ class InstallerParityTest(unittest.TestCase):
             result = run_installer(home)
             self.assertEqual(result.returncode, 0, result.stderr)
 
-            dest = home / ".agents" / "skills"
-            for name in skills_on_disk():
-                self.assertTrue(
-                    (dest / name / "SKILL.md").is_file(),
-                    f"{name} installed but its SKILL.md does not resolve",
-                )
+            for sub in (".cursor/skills", ".agents/skills"):
+                dest = home / sub
+                for name in skills_on_disk():
+                    self.assertTrue(
+                        (dest / name / "SKILL.md").is_file(),
+                        f"{name} installed into {sub} but its SKILL.md does not resolve",
+                    )
 
     def test_no_hardcoded_skill_name_list(self):
         """Guards the fix itself: a reintroduced literal list rots the same way."""
@@ -165,10 +166,11 @@ class InstallerRejectionTest(unittest.TestCase):
                 + forensics(result, script, home),
             )
             self.assertIn("SKILL.md", result.stderr, forensics(result, script, home))
-            self.assertFalse(
-                (home / ".agents" / "skills" / "good").exists(),
-                "installer linked skills before validating the whole set",
-            )
+            for sub in (".cursor/skills", ".agents/skills"):
+                self.assertFalse(
+                    (home / sub / "good").exists(),
+                    f"installer linked skills into {sub} before validating the whole set",
+                )
 
     def test_unreadable_skill_md_aborts_before_linking(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,10 +195,11 @@ class InstallerRejectionTest(unittest.TestCase):
                 + forensics(result, script, home),
             )
             self.assertIn("readable SKILL.md", result.stderr, forensics(result, script, home))
-            self.assertFalse(
-                (home / ".agents" / "skills" / "good").exists(),
-                "installer linked skills before validating the whole set",
-            )
+            for sub in (".cursor/skills", ".agents/skills"):
+                self.assertFalse(
+                    (home / sub / "good").exists(),
+                    f"installer linked skills into {sub} before validating the whole set",
+                )
 
     def test_empty_skills_tree_aborts(self):
         with tempfile.TemporaryDirectory() as tmp:
