@@ -37,9 +37,25 @@ def parse_linked_issues(pr_body: str) -> List[int]:
     """Parses issue references using every GitHub-supported closing keyword."""
     if not pr_body:
         return []
-    pattern = r"(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\s+#(\d+)"
+    pattern = r"(?<!\w)(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b\s+#(\d+)"
     matches = re.findall(pattern, pr_body, re.IGNORECASE)
     return sorted(list(set(int(m) for m in matches)))
+
+
+def revert_commit_marker(merge_sha: str) -> str:
+    """Returns the exact commit-message line emitted by ``git revert``."""
+    return f"This reverts commit {merge_sha}."
+
+
+def has_exact_revert_commit(log_output: str, merge_sha: str) -> bool:
+    """Accepts only a complete canonical git-revert marker line."""
+    expected = revert_commit_marker(merge_sha)
+    return any(line.rstrip("\r") == expected for line in log_output.splitlines())
+
+
+def revert_pr_marker(pr_id: int, merge_sha: str) -> str:
+    """Returns the durable marker that binds a recovery PR to its source."""
+    return f"<!-- aru-revert:v1 source-pr={pr_id} merge-commit={merge_sha} -->"
 
 
 def fetch_pr_details(pr_id: int) -> Optional[Dict[str, Any]]:
@@ -51,11 +67,85 @@ def fetch_pr_details(pr_id: int) -> Optional[Dict[str, Any]]:
 
 def find_existing_revert_pr(revert_branch: str) -> Optional[Dict[str, Any]]:
     """Finds an existing open PR for the revert branch if one was already created."""
-    cmd = ["gh", "pr", "list", "--head", revert_branch, "--state", "open", "--json", "number,url,headRefName,baseRefName"]
+    fields = "number,url,body,headRefName,baseRefName,headRefOid,commits"
+    cmd = ["gh", "pr", "list", "--head", revert_branch, "--state", "open", "--json", fields]
     prs = run_gh_json(cmd)
     if isinstance(prs, list) and prs:
         return prs[0]
     return None
+
+
+def validate_existing_revert_pr(
+    existing_pr: Dict[str, Any],
+    *,
+    revert_branch: str,
+    base_ref: str,
+    pr_id: int,
+    merge_sha: str,
+    revert_issue: int,
+) -> bool:
+    """Fail closed unless a recovery PR is bound to the exact revert operation."""
+    expected_lines = {
+        revert_pr_marker(pr_id, merge_sha),
+        f"Reverts #{pr_id}",
+        f"Closes #{revert_issue}",
+    }
+    body_lines = {line.strip() for line in str(existing_pr.get("body") or "").splitlines()}
+    commits = existing_pr.get("commits")
+    commit_is_bound = False
+    if isinstance(commits, list) and len(commits) == 1 and isinstance(commits[0], dict):
+        commit = commits[0]
+        message = f"{commit.get('messageHeadline', '')}\n{commit.get('messageBody', '')}"
+        commit_is_bound = (
+            commit.get("oid") == existing_pr.get("headRefOid")
+            and has_exact_revert_commit(message, merge_sha)
+        )
+    return (
+        existing_pr.get("headRefName") == revert_branch
+        and existing_pr.get("baseRefName") == base_ref
+        and isinstance(existing_pr.get("headRefOid"), str)
+        and bool(existing_pr["headRefOid"].strip())
+        and commit_is_bound
+        and expected_lines.issubset(body_lines)
+    )
+
+
+def validate_existing_worktree(worktree_path: str, revert_branch: str) -> bool:
+    """Verify that a reused path is the clean worktree for the expected branch."""
+    code_root, root, _ = run_cmd(["git", "rev-parse", "--show-toplevel"], check=False, cwd=worktree_path)
+    code_branch, branch, _ = run_cmd(["git", "branch", "--show-current"], check=False, cwd=worktree_path)
+    code_status, status, _ = run_cmd(["git", "status", "--porcelain"], check=False, cwd=worktree_path)
+    return (
+        code_root == 0
+        and os.path.realpath(root.strip()) == os.path.realpath(worktree_path)
+        and code_branch == 0
+        and branch.strip() == revert_branch
+        and code_status == 0
+        and not status.strip()
+    )
+
+
+def validate_reused_branch_state(worktree_path: str, base_ref: str, merge_sha: str) -> bool:
+    """Allow only an untouched base or one canonical revert commit on a reused branch."""
+    code_ancestor, _, _ = run_cmd(
+        ["git", "merge-base", "--is-ancestor", f"origin/{base_ref}", "HEAD"],
+        check=False,
+        cwd=worktree_path,
+    )
+    code_count, count_text, _ = run_cmd(
+        ["git", "rev-list", "--count", f"origin/{base_ref}..HEAD"],
+        check=False,
+        cwd=worktree_path,
+    )
+    if code_ancestor != 0 or code_count != 0 or not count_text.strip().isdigit():
+        return False
+    commit_count = int(count_text.strip())
+    if commit_count == 0:
+        return True
+    if commit_count != 1:
+        return False
+    code_message, message, _ = run_cmd(["git", "log", "-1", "--format=%B", "HEAD"], check=False, cwd=worktree_path)
+    return code_message == 0 and has_exact_revert_commit(message, merge_sha)
 
 
 def get_merge_commit_sha(pr_data: Dict[str, Any]) -> Optional[str]:
@@ -200,6 +290,20 @@ def revert_merge_pr(
     # Check if a revert PR was already created in a previous attempt (resumption support)
     existing_pr = find_existing_revert_pr(revert_branch)
     if existing_pr:
+        if not validate_existing_revert_pr(
+            existing_pr,
+            revert_branch=revert_branch,
+            base_ref=base_ref,
+            pr_id=pr_id,
+            merge_sha=merge_sha,
+            revert_issue=revert_issue,
+        ):
+            print(
+                f"[ERROR] Existing revert PR for branch '{revert_branch}' is not bound to "
+                f"PR #{pr_id}, merge {merge_sha}, base '{base_ref}', and tracking issue #{revert_issue}.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
         revert_pr_num = str(existing_pr["number"])
         revert_pr_url = existing_pr.get("url", f"#{revert_pr_num}")
         print(f"ℹ️ Revert PR #{revert_pr_num} already exists ({revert_pr_url}). Resuming post-creation steps...")
@@ -216,8 +320,16 @@ def revert_merge_pr(
             return EXIT_ERROR
 
         # Create or reuse worktree off origin/<baseRefName>
+        reused_branch = False
         if os.path.exists(worktree_path):
             actual_path = worktree_path
+            reused_branch = True
+            if not validate_existing_worktree(actual_path, revert_branch):
+                print(
+                    f"[ERROR] Existing path '{actual_path}' is not a clean worktree for branch '{revert_branch}'.",
+                    file=sys.stderr,
+                )
+                return EXIT_ERROR
             print(f"ℹ️ Reusing existing worktree at '{actual_path}'.")
         else:
             os.makedirs(os.path.dirname(worktree_path), exist_ok=True)
@@ -234,7 +346,15 @@ def revert_merge_pr(
                 if code_wt2 != 0:
                     print(f"[ERROR] Could not create or attach worktree for branch '{revert_branch}' at '{worktree_path}': {err_wt} / {err_wt2}", file=sys.stderr)
                     return EXIT_ERROR
+                reused_branch = True
             actual_path = worktree_path
+
+        if reused_branch and not validate_reused_branch_state(actual_path, base_ref, merge_sha):
+            print(
+                f"[ERROR] Reused branch '{revert_branch}' is not exactly origin/{base_ref} or one canonical revert commit ahead.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
 
         # Check only commits added on the revert branch. The default message from
         # `git revert --no-edit` records the exact reverted commit in its body.
@@ -243,7 +363,7 @@ def revert_merge_pr(
             check=False,
             cwd=actual_path,
         )
-        has_revert_commit = code_log == 0 and f"This reverts commit {merge_sha}" in out_log
+        has_revert_commit = code_log == 0 and has_exact_revert_commit(out_log, merge_sha)
 
         if not has_revert_commit:
             is_merge = is_merge_commit(merge_sha, cwd=actual_path)
@@ -291,6 +411,7 @@ def revert_merge_pr(
         pr_body = (
             f"## Revert Summary\n"
             f"This PR reverts PR #{pr_id} (\"{title}\"), reverting merge commit `{merge_sha[:7]}`.\n\n"
+            f"{revert_pr_marker(pr_id, merge_sha)}\n\n"
             f"## Reopened Issues\n"
             f"{reopen_text}\n\n"
             f"Reverts #{pr_id}\n"

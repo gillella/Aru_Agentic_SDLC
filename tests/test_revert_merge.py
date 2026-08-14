@@ -32,6 +32,10 @@ class TestRevertMerge(unittest.TestCase):
         body = "Close #1 Closes #2 Closed #3 Fix #4 Fixes #5 Fixed #6 Resolve #7 Resolves #8 Resolved #9"
         self.assertEqual(revert_merge.parse_linked_issues(body), list(range(1, 10)))
 
+    def test_parse_closing_keywords_requires_complete_words(self):
+        body = "discloses #1 prefixes #2 unfixed #3 unresolved #4"
+        self.assertEqual(revert_merge.parse_linked_issues(body), [])
+
     def test_parse_linked_issues_empty(self):
         self.assertEqual(revert_merge.parse_linked_issues("No issues linked"), [])
         self.assertEqual(revert_merge.parse_linked_issues(""), [])
@@ -168,7 +172,7 @@ class TestRevertMerge(unittest.TestCase):
             (0, "", ""),  # git fetch
             (0, "origin/main\n", ""),  # git rev-parse --verify
             (0, "", ""),  # git worktree add
-            (0, "Revert workflow documentation\n", ""),  # branch log has unrelated text
+            (0, "Runbook: This reverts commit mergecommitsha123 after approval\n", ""),
             (0, "", ""),  # git revert -m 1
             (0, "", ""),  # git push
             (0, "https://github.com/gillella/Aru_Agentic_SDLC/pull/99", ""),  # gh pr create
@@ -225,6 +229,19 @@ class TestRevertMerge(unittest.TestCase):
             "url": "https://github.com/gillella/Aru_Agentic_SDLC/pull/99",
             "headRefName": "revert/pr-20-feat-add-feature",
             "baseRefName": "main",
+            "headRefOid": "revertcommitsha123",
+            "body": (
+                "<!-- aru-revert:v1 source-pr=20 merge-commit=mergecommitsha123 -->\n"
+                "Reverts #20\n"
+                "Closes #94\n"
+            ),
+            "commits": [
+                {
+                    "oid": "revertcommitsha123",
+                    "messageHeadline": "Revert feature",
+                    "messageBody": "This reverts commit mergecommitsha123.",
+                }
+            ],
         }
 
         mock_run_cmd.side_effect = [
@@ -239,6 +256,61 @@ class TestRevertMerge(unittest.TestCase):
         mock_identity.assert_called_once_with("99", agent="gemini-1", family="google")
         mock_enqueue.assert_called_once_with("99")
         mock_update_status.assert_called_once_with(30, "Ready", require_board=True)
+
+    @patch("revert_merge.find_existing_revert_pr")
+    @patch("revert_merge.claimed_by", return_value="gemini-1")
+    @patch("revert_merge.get_issue")
+    @patch("revert_merge.apply_identity")
+    @patch("revert_merge.run_cmd")
+    @patch("revert_merge.fetch_pr_details")
+    def test_revert_resume_rejects_mismatched_existing_pr(
+        self, mock_fetch, mock_run_cmd, mock_identity, mock_get_issue, mock_claimed, mock_find_pr
+    ):
+        mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
+        mock_fetch.return_value = {
+            "number": 20,
+            "title": "feat: add feature",
+            "body": "Closes #30",
+            "baseRefName": "main",
+            "state": "MERGED",
+            "mergedAt": "2026-08-13T00:00:00Z",
+            "mergeCommit": {"oid": "mergecommitsha123"},
+        }
+        mock_find_pr.return_value = {
+            "number": 99,
+            "url": "https://github.com/gillella/Aru_Agentic_SDLC/pull/99",
+            "headRefName": "revert/pr-20-feat-add-feature",
+            "baseRefName": "develop",
+            "headRefOid": "unrelatedcommit",
+            "body": "Reverts #20\nCloses #94\n",
+            "commits": [],
+        }
+
+        res = revert_merge.revert_merge_pr(20, agent="gemini-1", family="google", revert_issue=94)
+
+        self.assertEqual(res, revert_merge.EXIT_ERROR)
+        mock_identity.assert_not_called()
+        mock_run_cmd.assert_not_called()
+
+    @patch("revert_merge.run_cmd")
+    def test_reused_branch_requires_one_exact_revert_commit(self, mock_run_cmd):
+        mock_run_cmd.side_effect = [
+            (0, "", ""),
+            (0, "1\n", ""),
+            (0, "Revert feature\n\nThis reverts commit mergecommitsha123.\n", ""),
+        ]
+
+        self.assertTrue(
+            revert_merge.validate_reused_branch_state("/tmp/revert", "main", "mergecommitsha123")
+        )
+
+    @patch("revert_merge.run_cmd")
+    def test_reused_branch_rejects_extra_commits(self, mock_run_cmd):
+        mock_run_cmd.side_effect = [(0, "", ""), (0, "2\n", "")]
+
+        self.assertFalse(
+            revert_merge.validate_reused_branch_state("/tmp/revert", "main", "mergecommitsha123")
+        )
 
     @patch("revert_merge.find_existing_revert_pr", return_value=None)
     @patch("revert_merge.claimed_by", return_value="gemini-1")
