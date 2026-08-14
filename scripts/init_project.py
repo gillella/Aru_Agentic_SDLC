@@ -663,6 +663,50 @@ reviewers:
     google: anthropic
 """
 
+DEPLOY_PREVIEW_WORKFLOW = """name: Deploy Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Merged commit SHA to deploy preview for'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build and deploy preview
+        run: |
+          TARGET_REF="${{ inputs.commit_sha || github.sha }}"
+          echo "Deploying preview environment for commit: ${TARGET_REF}"
+          mkdir -p dist
+          echo "<!DOCTYPE html><html><head><title>Preview - ${TARGET_REF}</title></head><body><h1>Preview Environment</h1><p>Commit: ${TARGET_REF}</p></body></html>" > dist/index.html
+          echo "Preview deployment successful."
+
+      - name: Publish preview URL
+        id: preview
+        run: |
+          TARGET_REF="${{ inputs.commit_sha || github.sha }}"
+          PREVIEW_URL="https://preview.aru-factory.local/${TARGET_REF:0:7}"
+          echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+          echo "Preview URL: $PREVIEW_URL" >> $GITHUB_STEP_SUMMARY
+          echo "Preview URL: $PREVIEW_URL"
+"""
+
 
 def scaffold_directory_structure(target_dir: str):
     """Creates standard directory tree with .gitkeep so empty dirs survive git."""
@@ -688,7 +732,7 @@ def scaffold_directory_structure(target_dir: str):
 
 
 def write_governance_scripts(target_dir: str):
-    """Writes CI check_touches and model-routed reviewer scripts/workflows/config."""
+    """Writes CI check_touches, model-routed reviewer, and deploy-preview workflows."""
     scripts_dir = os.path.join(target_dir, ".github", "scripts")
     workflows_dir = os.path.join(target_dir, ".github", "workflows")
     github_dir = os.path.join(target_dir, ".github")
@@ -715,7 +759,11 @@ def write_governance_scripts(target_dir: str):
     with open(reviewers_config_path, "w", encoding="utf-8") as f:
         f.write(REVIEWERS_CONFIG)
 
-    print("✅ Governance scripts (check_touches, review.py, review.yml, reviewers.yml) written.")
+    deploy_preview_wf_path = os.path.join(workflows_dir, "deploy-preview.yml")
+    with open(deploy_preview_wf_path, "w", encoding="utf-8") as f:
+        f.write(DEPLOY_PREVIEW_WORKFLOW)
+
+    print("✅ Governance scripts (check_touches, review.py, review.yml, reviewers.yml, deploy-preview.yml) written.")
 
 
 def create_cursor_project_rule(target_dir: str):

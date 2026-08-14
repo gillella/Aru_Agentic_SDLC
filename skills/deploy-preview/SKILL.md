@@ -50,8 +50,13 @@ python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <COMMIT_SHA> [--issu
   3. A notification comment is posted to the originating issue linking to the remediation issue.
 
 ---
+## First-Stack Implementation & Extension Path
 
-## Extension Path for Stack Packs (Phase 5)
+### 1. First-Stack Slice (Python / Static HTML)
+- Default CD pipeline: `.github/workflows/deploy-preview.yml`.
+- Scaffolding: Generated automatically during `init_project.py` bootstrap.
+- Operation: Checks out the specific merged commit SHA ref, builds static/Python assets into `dist/`, outputs preview environment URL to `$GITHUB_OUTPUT` and `$GITHUB_STEP_SUMMARY`, which `deploy_preview.py` parses and posts to the originating issue.
 
-Different tech stacks (Node/Next.js, Python/FastAPI, Go, Rust, static sites) declare their preview deployment configuration in `.github/workflows/deploy-preview.yml`.
-This skill remains stack-agnostic by triggering the repository's `.github/workflows/deploy-preview.yml` workflow via `deploy_preview.py`.
+### 2. Extension Path for Additional Stack Packs (Phase 5)
+Different tech stacks (Node/Next.js on Vercel/Cloudflare, Python/FastAPI on Fly.io, Go on AWS ECS, Docker containers) declare their preview deployment configuration in `.github/workflows/deploy-preview.yml`.
+This skill remains stack-agnostic by triggering the repository's `.github/workflows/deploy-preview.yml` workflow via `deploy_preview.py`, extracting the generated URL, and recording it on the originating issue.

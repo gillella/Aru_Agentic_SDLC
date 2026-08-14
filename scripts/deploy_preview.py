@@ -27,19 +27,51 @@ def get_default_branch() -> str:
 
 
 def get_originating_issue(commit_sha: str) -> Optional[int]:
-    """Inspects commit message to find linked Closes #<ID> issue."""
+    """Inspects commit message and associated PR to find linked Closes #<ID> issue."""
     code, out, _ = run_cmd(["git", "log", "-1", "--format=%B", commit_sha], check=False)
     if code != 0 or not out:
         return None
+
+    # 1. Direct Closes #ID in commit body
     match = re.search(r"\b(?:closes|fixes|resolves)\s*#(\d+)\b", out, re.IGNORECASE)
     if match:
         return int(match.group(1))
+
+    # 2. GitHub merge commit format: "Merge pull request #<PR_ID> from ..."
+    pr_match = re.search(r"\bmerge\s+pull\s+request\s+#(\d+)\b", out, re.IGNORECASE)
+    if pr_match:
+        pr_id = int(pr_match.group(1))
+        pr_code, pr_out, _ = run_cmd(["gh", "pr", "view", str(pr_id), "--json", "body"], check=False)
+        if pr_code == 0 and pr_out.strip():
+            try:
+                pr_data = json.loads(pr_out)
+                body = pr_data.get("body", "")
+                issue_match = re.search(r"\b(?:closes|fixes|resolves)\s*#(\d+)\b", body, re.IGNORECASE)
+                if issue_match:
+                    return int(issue_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+    # 3. Query GitHub API for PR associated with this commit SHA
+    pr_code, pr_out, _ = run_cmd(["gh", "pr", "list", "--state", "all", "--search", commit_sha, "--json", "number,body", "--limit", "1"], check=False)
+    if pr_code == 0 and pr_out.strip():
+        try:
+            prs = json.loads(pr_out)
+            if prs and isinstance(prs, list):
+                body = prs[0].get("body", "")
+                issue_match = re.search(r"\b(?:closes|fixes|resolves)\s*#(\d+)\b", body, re.IGNORECASE)
+                if issue_match:
+                    return int(issue_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
     return None
 
 
 def verify_commit_merged(commit_sha: str, default_branch: Optional[str] = None) -> tuple[bool, str]:
     """Verifies that commit_sha exists and is merged into the default branch.
 
+    Checks origin/{default_branch} first to handle stale local tracking branches.
     Returns (is_valid, resolved_full_sha).
     """
     if not commit_sha or commit_sha.startswith("-"):
@@ -54,15 +86,17 @@ def verify_commit_merged(commit_sha: str, default_branch: Optional[str] = None) 
     if not default_branch:
         default_branch = get_default_branch() or "main"
 
-    # Check ancestry against default branch (local or remote tracking)
-    target_ref = default_branch
-    code, _, _ = run_cmd(["git", "rev-parse", "--verify", f"{target_ref}^{{commit}}"], check=False)
-    if code != 0:
-        target_ref = f"origin/{default_branch}"
-        code, _, _ = run_cmd(["git", "rev-parse", "--verify", f"{target_ref}^{{commit}}"], check=False)
+    # Always prefer remote tracking ref (origin/{default_branch}) to avoid stale local branch
+    remote_ref = f"origin/{default_branch}"
+    code, _, _ = run_cmd(["git", "rev-parse", "--verify", f"{remote_ref}^{{commit}}"], check=False)
+    if code == 0:
+        target_ref = remote_ref
+    else:
+        # Fallback to local default_branch if remote ref is not configured
+        code, _, _ = run_cmd(["git", "rev-parse", "--verify", f"{default_branch}^{{commit}}"], check=False)
         if code != 0:
-            # Cannot resolve default branch
             return False, full_sha
+        target_ref = default_branch
 
     code, _, _ = run_cmd(["git", "merge-base", "--is-ancestor", full_sha, target_ref], check=False)
     if code != 0:
@@ -71,8 +105,11 @@ def verify_commit_merged(commit_sha: str, default_branch: Optional[str] = None) 
     return True, full_sha
 
 
-def get_existing_run_ids(workflow_name: str, commit_sha: str) -> Set[int]:
-    """Fetches currently indexed run IDs for workflow and commit."""
+def get_existing_run_ids(workflow_name: str, commit_sha: str) -> Optional[Set[int]]:
+    """Fetches currently indexed run IDs for workflow and commit.
+
+    Returns Set[int] on success, or None on query/parsing failure.
+    """
     list_cmd = [
         "gh", "run", "list",
         "--workflow", workflow_name,
@@ -81,13 +118,15 @@ def get_existing_run_ids(workflow_name: str, commit_sha: str) -> Set[int]:
         "--limit", "30",
     ]
     code, out, _ = run_cmd(list_cmd, check=False)
-    if code != 0 or not out.strip():
+    if code != 0:
+        return None
+    if not out.strip():
         return set()
     try:
         runs = json.loads(out)
         return {r["databaseId"] for r in runs if isinstance(r, dict) and "databaseId" in r}
     except (json.JSONDecodeError, KeyError):
-        return set()
+        return None
 
 
 def dispatch_cd_workflow(
@@ -104,7 +143,11 @@ def dispatch_cd_workflow(
         return 12345
 
     if pre_existing_run_ids is None:
-        pre_existing_run_ids = get_existing_run_ids(workflow_name, commit_sha)
+        initial_ids = get_existing_run_ids(workflow_name, commit_sha)
+        if initial_ids is None:
+            print(f"[ERROR] Failed to query existing runs for workflow '{workflow_name}'.", file=sys.stderr)
+            return None
+        pre_existing_run_ids = initial_ids
 
     cmd = [
         "gh", "workflow", "run", workflow_name,
@@ -120,20 +163,16 @@ def dispatch_cd_workflow(
             print(f"[ERROR] Failed to dispatch workflow '{workflow_name}': {err}", file=sys.stderr)
             return None
 
-    # Poll for the newly created run ID
+    # Poll for the newly created run ID (must be strictly in new_runs)
     for attempt in range(max_poll_attempts):
         if attempt > 0 and poll_interval > 0:
             time.sleep(poll_interval)
         current_runs = get_existing_run_ids(workflow_name, commit_sha)
-        new_runs = current_runs - pre_existing_run_ids
-        if new_runs:
-            # Return newest run ID
-            return max(new_runs)
-
-    # Fallback to latest run if no new ID was distinguished but a run exists
-    current_runs = get_existing_run_ids(workflow_name, commit_sha)
-    if current_runs:
-        return max(current_runs)
+        if current_runs is not None:
+            new_runs = current_runs - pre_existing_run_ids
+            if new_runs:
+                # Return newest run ID
+                return max(new_runs)
 
     print(f"[ERROR] Timed out waiting for new run of workflow '{workflow_name}' for commit '{commit_sha}'.", file=sys.stderr)
     return None

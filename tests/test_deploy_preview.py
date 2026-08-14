@@ -38,16 +38,39 @@ class DeployPreviewSkillTests(unittest.TestCase):
             issue_id = dp.get_originating_issue("abcdef123456")
             self.assertEqual(issue_id, 109)
 
+    def test_get_originating_issue_from_github_merge_commit(self):
+        # Merge commit message with no Closes line, but references PR #159 which closes #100
+        merge_msg = "Merge pull request #159 from gillella/feat/issue-100\n\nfeat(triage): require backtick verify"
+        with patch("deploy_preview.run_cmd") as mock_run:
+            mock_run.side_effect = [
+                (0, merge_msg, ""),  # git log
+                (0, '{"body": "## Summary\\nFixes triage contract.\\n\\nCloses #100"}', ""),  # gh pr view
+            ]
+            issue_id = dp.get_originating_issue("mergecommit123")
+            self.assertEqual(issue_id, 100)
+
     @patch("deploy_preview.run_cmd")
     def test_verify_commit_merged_accepts_ancestor(self, mock_run):
         mock_run.side_effect = [
             (0, "fullsha123456789\n", ""),  # rev-parse commit
-            (0, "mainsha123456789\n", ""),  # rev-parse default_branch
+            (0, "mainsha123456789\n", ""),  # rev-parse origin/main
             (0, "", ""),  # merge-base --is-ancestor
         ]
         is_merged, resolved = dp.verify_commit_merged("fullsha123", default_branch="main")
         self.assertTrue(is_merged)
         self.assertEqual(resolved, "fullsha123456789")
+
+    @patch("deploy_preview.run_cmd")
+    def test_verify_commit_merged_validates_against_refreshed_remote_default_branch(self, mock_run):
+        # Stale local main does not contain commit, but origin/main contains commit
+        mock_run.side_effect = [
+            (0, "commitsha123\n", ""),  # rev-parse commit
+            (0, "remoteheadsha\n", ""),  # rev-parse origin/main exists
+            (0, "", ""),  # merge-base --is-ancestor commitsha123 origin/main
+        ]
+        is_merged, resolved = dp.verify_commit_merged("commitsha123", default_branch="main")
+        self.assertTrue(is_merged)
+        self.assertEqual(resolved, "commitsha123")
 
     @patch("deploy_preview.run_cmd")
     def test_verify_commit_merged_rejects_unmerged_or_invalid_commit(self, mock_run):
@@ -80,6 +103,37 @@ class DeployPreviewSkillTests(unittest.TestCase):
             max_poll_attempts=1,
         )
         self.assertEqual(run_id, 1002)
+
+    @patch("deploy_preview.run_cmd")
+    def test_dispatch_cd_workflow_fails_closed_when_run_query_fails_or_times_out(self, mock_run):
+        # 1. gh run list fails during pre-existing run discovery
+        mock_run.return_value = (1, "", "API rate limit")
+        run_id = dp.dispatch_cd_workflow("abcdef123456", workflow_name="deploy-preview.yml")
+        self.assertIsNone(run_id)
+
+        # 2. Polling only sees existing run 1001 without new run appearing -> must NOT return 1001
+        mock_run.side_effect = [
+            (0, "", ""),  # gh workflow run
+            (0, '[{"databaseId": 1001}]', ""),  # poll 1
+        ]
+        run_id = dp.dispatch_cd_workflow(
+            "abcdef123456",
+            workflow_name="deploy-preview.yml",
+            pre_existing_run_ids={1001},
+            max_poll_attempts=1,
+            poll_interval=0,
+        )
+        self.assertIsNone(run_id)
+
+    def test_deploy_preview_workflow_file_exists_and_init_project_renders_it(self):
+        wf_path = self.root_dir / ".github" / "workflows" / "deploy-preview.yml"
+        self.assertTrue(wf_path.exists(), f"{wf_path} must exist")
+        content = wf_path.read_text()
+        self.assertIn("name: Deploy Preview", content)
+        self.assertIn("workflow_dispatch:", content)
+
+        import init_project as ip
+        self.assertIn("name: Deploy Preview", ip.DEPLOY_PREVIEW_WORKFLOW)
 
     @patch("deploy_preview.verify_commit_merged", return_value=(True, "abcdef123456"))
     @patch("deploy_preview.get_existing_run_ids", return_value=set())
