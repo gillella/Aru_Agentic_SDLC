@@ -85,10 +85,12 @@ class VersionPinningTests(unittest.TestCase):
                 "--aru-home", temp_root,
                 "--target-home", clean_home,
             ]
-            env = dict(os.environ, ARU_SDLC_REF="-f", SHELL="/bin/zsh")
-            res = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            self.assertEqual(res.returncode, 1)
-            self.assertIn("Invalid ARU_SDLC_REF", res.stderr)
+            for ref in ("-f", "feature branch", "v1.0 2"):
+                with self.subTest(ref=ref):
+                    env = dict(os.environ, ARU_SDLC_REF=ref, SHELL="/bin/zsh")
+                    res = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    self.assertEqual(res.returncode, 1)
+                    self.assertIn("Invalid ARU_SDLC_REF", res.stderr)
 
     def test_clean_target_home_persists_exports_and_switches_ref(self):
         import shutil
