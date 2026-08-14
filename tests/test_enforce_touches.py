@@ -205,6 +205,11 @@ class ProtectedBranchTests(unittest.TestCase):
         self.assertIsNone(et._git_write_to_protected("ls # then git commit", "main"))
         self.assertIsNone(et._git_write_to_protected('git status -m "git push origin main"', "main"))
 
+    def test_push_with_following_command_containing_main_is_allowed(self):
+        self.assertIsNone(et._git_write_to_protected("git push origin HEAD && echo main", "feat/issue-1-a"))
+        self.assertIsNone(et._git_write_to_protected("git push origin HEAD ; printf main", "feat/issue-1-a"))
+        self.assertIsNone(et._git_write_to_protected("git push origin HEAD | grep main", "feat/issue-1-a"))
+
 
 class RedirectDetectionTests(unittest.TestCase):
     def test_finds_redirect_and_tee_and_sed_targets(self):
@@ -557,6 +562,9 @@ class HookDecisionTests(unittest.TestCase):
             "cat << 'EOF'\nremember to git commit later\nEOF",
             "ls # then git commit",
             'git status -m "git push origin main"',
+            "git push origin HEAD && echo main",
+            "git push origin HEAD ; printf main",
+            "git push origin HEAD | grep main",
         ]
         for command in allowed_commands:
             with self.subTest(command=command, expected="ALLOW"):
@@ -577,6 +585,48 @@ class HookDecisionTests(unittest.TestCase):
                     "main", None, governed=True,
                 )
                 self.assertEqual(rc, et.EXIT_BLOCK)
+
+    def test_git_write_violation_retargeting_via_main(self):
+        """Pins the _git_write_violation delegation in main().
+
+        Reverting main() to _git_write_to_protected(command, branch) would
+        evaluate only the caller shell's branch ('feat/121') and allow a
+        write retargeted to main, failing this test.
+        """
+        branches = {
+            "/repo/main": "main",
+            "/repo/feat": "feat/121",
+        }
+
+        def branch_for(path):
+            norm = os.path.normpath(str(path))
+            return branches.get(norm, "feat/121")
+
+        # Caller in worktree feat/121, but git -C targets main -> MUST BLOCK
+        payload_block = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git -C /repo/main commit -m x"},
+            "cwd": "/repo/feat",
+        }
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload_block))), \
+             patch.object(et, "repo_root", return_value="/repo/feat"), \
+             patch.object(et, "current_branch", side_effect=branch_for), \
+             patch.object(et, "governed_repo", return_value=True):
+            rc = et.main()
+            self.assertEqual(rc, et.EXIT_BLOCK)
+
+        # Caller on main, but git -C targets worktree feat/121 -> MUST ALLOW
+        payload_allow = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git -C /repo/feat commit -m x"},
+            "cwd": "/repo/main",
+        }
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload_allow))), \
+             patch.object(et, "repo_root", return_value="/repo/main"), \
+             patch.object(et, "current_branch", side_effect=branch_for), \
+             patch.object(et, "governed_repo", return_value=True):
+            rc = et.main()
+            self.assertEqual(rc, et.EXIT_ALLOW)
 
     def test_real_path_aliases_are_correct_on_main_and_issue_branch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
