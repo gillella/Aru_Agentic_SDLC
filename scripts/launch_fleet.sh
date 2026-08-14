@@ -38,7 +38,7 @@ FLEET_DIR="${FLEET_DIR:-$HOME/.aru-fleet/$REPO_NAME}"
 # Show the board before sizing the fleet: more agents than claimable issues
 # just means idle sessions.
 echo "=== Board check ==="
-python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --capacity 2>/dev/null || \
+python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --capacity --ready-target "$AGENTS" 2>/dev/null || \
   python3 "$ARU_SDLC_HOME/scripts/fetch_next_issue.py" --agent fleet-probe
 echo
 

@@ -20,6 +20,7 @@ The Ready contract (all four required):
 """
 
 import argparse
+import os
 import re
 import sys
 from typing import Any, Optional
@@ -352,10 +353,16 @@ def capacity(ready: list[dict[str, Any]], held: list[dict[str, Any]]) -> dict[st
     return {"concurrent": concurrent, "deferred": deferred, "ready_total": len(ready)}
 
 
-def print_capacity(cap: dict[str, Any], held: list[dict[str, Any]]) -> None:
+def print_capacity(
+    cap: dict[str, Any],
+    held: list[dict[str, Any]],
+    ready_target: Optional[int] = None,
+) -> None:
     n = len(cap["concurrent"])
     print("\n=== Fleet capacity ===")
     print(f"  Ready issues:            {cap['ready_total']}")
+    if ready_target is not None:
+        print(f"  Ready target:            {ready_target}")
     print(f"  Claimable simultaneously: {n}  {cap['concurrent']}")
     if cap["deferred"]:
         print("  Deferred this moment:")
@@ -366,6 +373,8 @@ def print_capacity(cap: dict[str, Any], held: list[dict[str, Any]]) -> None:
             f"#{i['number']}({claimed_by(i) or 'parked'})" for i in held
         )
         print(f"  In flight:               {holders}")
+    if ready_target is not None and cap["ready_total"] < ready_target:
+        print(f"\n  ⚠️  Ready depth ({cap['ready_total']}) is below target ({ready_target}) — fleet is starved.")
     if n == 0:
         print("\n  → Launch nothing. Triage first.")
     else:
@@ -378,6 +387,8 @@ def main():
     parser.add_argument("--issue", type=int, action="append", default=[],
                         help="Restrict to specific issue numbers (repeatable)")
     parser.add_argument("--capacity", action="store_true", help="Print only the fleet-capacity summary")
+    parser.add_argument("--ready-target", type=int, default=None,
+                        help="Configured Ready depth target (or set ARU_READY_TARGET)")
     args = parser.parse_args()
 
     issues = list_open_issues()
@@ -387,8 +398,17 @@ def main():
     open_numbers = {i["number"] for i in issues}
     backlog, ready, held = partition(issues)
 
+    target = args.ready_target
+    if target is None:
+        raw = os.environ.get("ARU_READY_TARGET", "").strip()
+        if raw:
+            try:
+                target = int(raw)
+            except ValueError:
+                pass
+
     if args.capacity:
-        print_capacity(capacity(ready, held), held)
+        print_capacity(capacity(ready, held), held, ready_target=target)
         return 0
 
     if args.issue:
@@ -431,7 +451,7 @@ def main():
     elif qualified:
         print(f"\n  {len(qualified)} issue(s) would be promoted. Re-run with --promote.")
 
-    print_capacity(capacity(ready, held), held)
+    print_capacity(capacity(ready, held), held, ready_target=target)
     return 0
 
 
