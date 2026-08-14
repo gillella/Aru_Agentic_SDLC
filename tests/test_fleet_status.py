@@ -19,6 +19,7 @@ from fleet_status import (  # noqa: E402
     apply_closed_issue_cost,
     build_operator_screen,
     collect_codebase_health,
+    discover_fleet_size,
     evaluate_fleet_status,
     format_operator_screen,
     resolve_fleet_size,
@@ -540,6 +541,65 @@ class FleetStatusTests(unittest.TestCase):
         asked = questions(status)["review_rounds"]
         self.assertEqual(asked["max_review_rounds"], 1)
         self.assertEqual(asked["severity"], "ok")
+
+    def test_review_rounds_prefer_changes_requested_over_clean_phrasing(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    37,
+                    reviews=[
+                        {
+                            "state": "COMMENTED",
+                            "body": (
+                                "No blocking compatibility issues; however "
+                                "verdict: CHANGES REQUESTED for correctness"
+                            ),
+                        },
+                        {
+                            "state": "COMMENTED",
+                            "body": "No findings from lint. Blocking finding: runtime failure.",
+                        },
+                    ],
+                )
+            ]
+        )
+        asked = questions(status)["review_rounds"]
+        self.assertEqual(asked["max_review_rounds"], 2)
+
+    def test_default_evaluation_discovers_launch_fleet_clones(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            repo = home / "widgets"
+            repo.mkdir()
+            for name in ("agent-1", "agent-2", "agent-3", "agent-4"):
+                (home / ".aru-fleet" / "widgets" / name / ".git").mkdir(parents=True)
+            with (
+                patch("fleet_status.Path.home", return_value=home),
+                patch("fleet_status.get_repo_slug", return_value="octocat/widgets"),
+                patch("fleet_status.get_repo_projects", return_value=[mock_project()]),
+                patch("fleet_status.query_open_issues", return_value=[]),
+                patch("fleet_status.list_open_prs_details", return_value=[]),
+                patch("fleet_status.list_worktree_branches", return_value=[]),
+            ):
+                status = evaluate_fleet_status(str(repo))
+        ready = questions(status)["ready_depth"]
+        self.assertEqual(ready["fleet_size"], 4)
+        self.assertEqual(ready["in_flight"], 0)
+        self.assertEqual(ready["severity"], "attn")
+        self.assertIn("starved", ready["summary"])
+
+    def test_discover_fleet_size_reads_run_fleet_state(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "widgets"
+            repo.mkdir()
+            state = Path(raw) / "state" / "aru-factory"
+            digest = __import__("hashlib").sha256(str(repo.resolve()).encode("utf-8")).hexdigest()[:16]
+            folder = state / digest
+            folder.mkdir(parents=True)
+            (folder / "cursor-1.json").write_text("{}", encoding="utf-8")
+            (folder / "codex-1.json").write_text("{}", encoding="utf-8")
+            with patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(raw) / "state")}, clear=False):
+                self.assertEqual(discover_fleet_size(str(repo)), 2)
 
     def test_ci_failure_rate_counts_failed_then_green_reruns(self):
         screen = build_operator_screen([], [])

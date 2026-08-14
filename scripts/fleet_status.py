@@ -12,12 +12,14 @@ Provides deterministic evaluation of factory state:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import stat
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from common import (
@@ -51,9 +53,8 @@ _CI_COMPLETED_CONCLUSIONS = _CI_FAILED_CONCLUSIONS | {
     "SUCCESS", "NEUTRAL", "SKIPPED", "CANCELLED",
 }
 _QUEUED_AT_RE = re.compile(r"review-queued-at:\s*(\S+)")
-_REWORK_CLEAN_RE = re.compile(r"\bno blocking\b|\bno findings\b", re.I)
 _REWORK_BLOCKING_RE = re.compile(
-    r"changes[\s_-]*requested|blocking finding|\*\*blocking:\*\*",
+    r"changes[\s_-]*requested|(?<![Nn]o )blocking findings?|\*\*blocking:\*\*",
     re.I,
 )
 
@@ -243,6 +244,32 @@ def resolve_fleet_size(configured: Optional[int] = None) -> Optional[int]:
     return value if value >= 0 else None
 
 
+def _launch_fleet_clone_count(repo_dir: str, home: Optional[Path] = None) -> int:
+    root = (home or Path.home()) / ".aru-fleet" / Path(os.path.abspath(repo_dir)).name
+    if not root.is_dir():
+        return 0
+    return sum(1 for child in root.iterdir() if child.is_dir() and (child / ".git").exists())
+
+
+def _run_fleet_agent_count(repo_dir: str, state_root: Optional[Path] = None) -> int:
+    if state_root is None:
+        base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+        digest = hashlib.sha256(str(Path(repo_dir).resolve()).encode("utf-8")).hexdigest()[:16]
+        state_root = base / "aru-factory" / digest
+    if not state_root.is_dir():
+        return 0
+    return sum(
+        1 for child in state_root.iterdir()
+        if child.is_file() and child.suffix == ".json" and child.stem[0:1] != "."
+    )
+
+
+def discover_fleet_size(repo_dir: str) -> Optional[int]:
+    """Count launch_fleet clones and run_fleet runner state; never use held claims."""
+    launched = max(_launch_fleet_clone_count(repo_dir), _run_fleet_agent_count(repo_dir))
+    return launched or None
+
+
 def fetch_ci_history(window_days: int) -> List[Dict[str, Any]]:
     """Windowed Actions runs, including failed attempts later rerun green."""
     from factory_metrics import fetch_ci_runs
@@ -412,9 +439,9 @@ def _is_rework_review(review: Dict[str, Any]) -> bool:
     if state != "COMMENTED":
         return False
     body = review.get("body") or ""
-    if _REWORK_CLEAN_RE.search(body):
-        return False
-    return bool(_REWORK_BLOCKING_RE.search(body))
+    if _REWORK_BLOCKING_RE.search(body):
+        return True
+    return False
 
 
 def _review_rounds(pr: Dict[str, Any]) -> int:
@@ -618,7 +645,8 @@ def evaluate_fleet_status(
     original = os.getcwd()
     try:
         os.chdir(target)
-        status = _evaluate_current_repo(fleet_size)
+        size = fleet_size if fleet_size is not None else discover_fleet_size(target)
+        status = _evaluate_current_repo(size)
     except OSError as exc:
         return _error(
             f"Could not evaluate repository directory '{target}': {exc}",
