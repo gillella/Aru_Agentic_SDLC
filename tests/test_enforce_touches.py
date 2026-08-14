@@ -237,6 +237,16 @@ class ProtectedBranchTests(unittest.TestCase):
     def test_push_head_on_protected_branch_is_blocked(self):
         self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD", "main"))
         self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD:HEAD", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin @", "main"))
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push origin +HEAD:heads/main", "feat/issue-1-a")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push origin --delete heads/main", "feat/issue-1-a")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push origin '@{upstream}'", "feat/issue-1-a")
+        )
 
     def test_absolute_git_executable_path_is_blocked(self):
         self.assertIsNotNone(et._git_write_to_protected("/usr/bin/git commit -m 'x'", "main"))
@@ -258,6 +268,21 @@ class ProtectedBranchTests(unittest.TestCase):
                 "exec -a ignored /usr/bin/git push origin HEAD", "main"
             )
         )
+        self.assertIsNotNone(et._git_write_to_protected("nice git push origin main", "main"))
+        self.assertIsNotNone(
+            et._git_write_to_protected("/usr/bin/nice -n 5 git push origin main", "main")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected(
+                "/usr/bin/env -P /usr/bin /usr/bin/git push origin main", "main"
+            )
+        )
+
+    def test_tag_only_pushes_are_allowed(self):
+        self.assertIsNone(et._git_write_to_protected("git push --tags origin", "main"))
+        self.assertIsNone(et._git_write_to_protected("git push origin --tags", "main"))
+        self.assertIsNone(et._git_write_to_protected("git push --repo=origin --tags", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("git push --tags origin main", "main"))
 
     def test_malformed_env_split_string_does_not_crash(self):
         self.assertIsNone(et._git_write_to_protected("env -S \"git commit -m '\"", "main"))
@@ -618,6 +643,9 @@ class HookDecisionTests(unittest.TestCase):
             "echo git commit on main",
             "printf %s git push origin main",
             "echo hello && echo main",
+            "git push --tags origin",
+            "git push origin --tags",
+            "git push --repo=origin --tags",
         ]
         for command in allowed_commands:
             with self.subTest(command=command, expected="ALLOW"):
@@ -641,6 +669,12 @@ class HookDecisionTests(unittest.TestCase):
             'env -S "git commit -m x"',
             "exec -a ignored /usr/bin/git commit -m x",
             "exec -a ignored /usr/bin/git push origin HEAD",
+            "git push origin @",
+            "git push origin +HEAD:heads/main",
+            "git push origin --delete heads/main",
+            "nice git push origin main",
+            "/usr/bin/nice -n 5 git push origin main",
+            "/usr/bin/env -P /usr/bin /usr/bin/git push origin main",
         ]
         for command in blocked_commands:
             with self.subTest(command=command, expected="BLOCK"):
@@ -678,6 +712,22 @@ class HookDecisionTests(unittest.TestCase):
              patch.object(et, "governed_repo", return_value=True):
             rc = et.main()
             self.assertEqual(rc, et.EXIT_BLOCK)
+
+        for command in (
+            "env -C /repo/main git push origin HEAD",
+            "env --chdir /repo/main git push origin HEAD",
+            "sudo -D /repo/main git push origin HEAD",
+        ):
+            with self.subTest(command=command), \
+                 patch.object(et.sys, "stdin", io.StringIO(json.dumps({
+                     "tool_name": "Bash",
+                     "tool_input": {"command": command},
+                     "cwd": "/repo/feat",
+                 }))), \
+                 patch.object(et, "repo_root", return_value="/repo/feat"), \
+                 patch.object(et, "current_branch", side_effect=branch_for), \
+                 patch.object(et, "governed_repo", return_value=True):
+                self.assertEqual(et.main(), et.EXIT_BLOCK)
 
         # Caller on main, but git -C targets worktree feat/121 -> MUST ALLOW
         payload_allow = {

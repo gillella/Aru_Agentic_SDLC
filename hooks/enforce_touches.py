@@ -330,7 +330,7 @@ def path_allowed(rel_path, touches):
 
 
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
-_WRAPPERS = frozenset({"env", "nohup", "time", "sudo", "exec", "builtin", "command"})
+_WRAPPERS = frozenset({"env", "nice", "nohup", "time", "sudo", "exec", "builtin", "command"})
 
 _SUDO_VAL_OPTS = frozenset({
     "-u", "--user",
@@ -347,6 +347,7 @@ _SUDO_VAL_OPTS = frozenset({
 _ENV_VAL_OPTS = frozenset({
     "-u", "--unset",
     "-C", "--chdir",
+    "-P",
     "-S", "--split-string",
 })
 
@@ -354,6 +355,8 @@ _TIME_VAL_OPTS = frozenset({
     "-f", "--format",
     "-o", "--output",
 })
+
+_NICE_VAL_OPTS = frozenset({"-n", "--adjustment"})
 
 
 def _is_wrapper(token):
@@ -373,13 +376,15 @@ def _is_git_exe(token):
 def _unwrap_simple_command(words):
     """Strips leading environment variable assignments and command wrappers (env, sudo, etc.).
 
-    Returns (executable, args_list) or (None, []) if empty.
+    Returns (executable, args_list, wrapper_chdirs, wrapper_target_unknown).
     """
     if not words:
-        return None, []
+        return None, [], [], False
 
     words = list(words)
     i = 0
+    wrapper_chdirs = []
+    wrapper_target_unknown = False
     while i < len(words):
         token = words[i]
         if _ENV_ASSIGNMENT.match(token):
@@ -414,21 +419,33 @@ def _unwrap_simple_command(words):
                             s_arg = ""
                         inner_tokens = _shell_tokens(s_arg)
                         if inner_tokens is None:
-                            return None, []
+                            return None, [], wrapper_chdirs, wrapper_target_unknown
                         inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
                         if inner_words:
                             words = words[:i] + inner_words + words[i:]
                         continue
                     elif inline:
+                        if name in {"-C", "--chdir"}:
+                            wrapper_chdirs.append(inline)
                         i += 1
                     elif name in _ENV_VAL_OPTS:
+                        if name in {"-C", "--chdir"}:
+                            wrapper_chdirs.append(words[i + 1] if i + 1 < len(words) else None)
                         i += 2 if i + 1 < len(words) else 1
                     else:
                         i += 1
                 elif wrapper_name == "sudo":
                     if inline:
+                        if name in {"-D", "--chdir"}:
+                            wrapper_chdirs.append(inline)
+                        elif name in {"-R", "--chroot"}:
+                            wrapper_target_unknown = True
                         i += 1
                     elif name in _SUDO_VAL_OPTS:
+                        if name in {"-D", "--chdir"}:
+                            wrapper_chdirs.append(words[i + 1] if i + 1 < len(words) else None)
+                        elif name in {"-R", "--chroot"}:
+                            wrapper_target_unknown = True
                         i += 2 if i + 1 < len(words) else 1
                     elif len(name) > 2 and name.startswith("-") and not name.startswith("--"):
                         i += 1
@@ -438,6 +455,13 @@ def _unwrap_simple_command(words):
                     if inline:
                         i += 1
                     elif name in _TIME_VAL_OPTS:
+                        i += 2 if i + 1 < len(words) else 1
+                    else:
+                        i += 1
+                elif wrapper_name == "nice":
+                    if inline:
+                        i += 1
+                    elif name in _NICE_VAL_OPTS:
                         i += 2 if i + 1 < len(words) else 1
                     else:
                         i += 1
@@ -452,8 +476,8 @@ def _unwrap_simple_command(words):
         break
 
     if i >= len(words):
-        return None, []
-    return words[i], words[i + 1:]
+        return None, [], wrapper_chdirs, wrapper_target_unknown
+    return words[i], words[i + 1:], wrapper_chdirs, wrapper_target_unknown
 
 
 def _git_write_to_protected(command, branch):
@@ -489,7 +513,7 @@ def _git_write_to_protected(command, branch):
             simple_cmds.append(current)
 
     for words in simple_cmds:
-        exe, args = _unwrap_simple_command(words)
+        exe, args, wrapper_chdirs, wrapper_target_unknown = _unwrap_simple_command(words)
         if not _is_git_exe(exe):
             continue
 
@@ -512,6 +536,9 @@ def _git_write_to_protected(command, branch):
         if not subcommand or subcommand not in _GIT_WRITE_SUBCOMMANDS:
             continue
 
+        if wrapper_chdirs or wrapper_target_unknown:
+            return "wrapper changes the git working directory, so the target branch cannot be proven safe"
+
         if subcommand == "commit" and branch in PROTECTED_BRANCHES:
             return f"commit directly on '{branch}'"
 
@@ -519,6 +546,8 @@ def _git_write_to_protected(command, branch):
             push_opts_with_val = {"-o", "--push-option", "-r", "--repo", "--receive-pack", "--exec"}
             pos_args = []
             pushes_all_refs = False
+            pushes_tags_only = False
+            remote_from_option = False
             i = index
             while i < len(args):
                 tok = args[i]
@@ -526,6 +555,10 @@ def _git_write_to_protected(command, branch):
                     name, _, inline = tok.partition("=")
                     if name in {"--all", "--mirror"}:
                         pushes_all_refs = True
+                    elif name == "--tags":
+                        pushes_tags_only = True
+                    if name in {"-r", "--repo"}:
+                        remote_from_option = True
                     if not inline and name in push_opts_with_val:
                         i += 2
                     else:
@@ -537,27 +570,44 @@ def _git_write_to_protected(command, branch):
             if pushes_all_refs:
                 return "push may update protected branches"
 
-            refspecs = pos_args[1:] if len(pos_args) > 1 else []
+            refspecs = pos_args if remote_from_option else (pos_args[1:] if len(pos_args) > 1 else [])
             if refspecs:
                 for refspec in refspecs:
                     normalized_refspec = refspec.removeprefix("+")
-                    if normalized_refspec == ":" or normalized_refspec.startswith("^") or any(
+                    if "@{" in normalized_refspec or normalized_refspec == ":" or normalized_refspec.startswith("^") or any(
                         marker in normalized_refspec for marker in ("*", "?", "[")
                     ):
                         return "push refspec cannot be proven safe"
-                    dest = normalized_refspec.split(":")[-1].replace("refs/heads/", "")
-                    src = normalized_refspec.split(":")[0].replace("refs/heads/", "")
+                    if ":" in normalized_refspec:
+                        src, dest = normalized_refspec.split(":", 1)
+                    else:
+                        src = dest = normalized_refspec
+                    src = _normalize_push_ref(src)
+                    dest = _normalize_push_ref(dest)
+                    dest = dest.removeprefix("refs/heads/")
+                    src = src.removeprefix("refs/heads/")
                     if dest in PROTECTED_BRANCHES:
                         return f"push to '{dest}'"
                     if (src == "HEAD" or dest == "HEAD") and branch in PROTECTED_BRANCHES:
                         return f"push '{branch}'"
             else:
+                if pushes_tags_only:
+                    continue
                 # With no explicit refspec, remote and branch configuration can
                 # select refs other than the current branch. This static guard
                 # cannot prove those refs exclude main/master, so fail closed.
                 return "push has no explicit safe refspec"
 
     return None
+
+
+def _normalize_push_ref(ref):
+    """Normalizes Git's accepted DWIM shorthands for protected-ref comparison."""
+    if ref == "@":
+        return "HEAD"
+    if ref.startswith("heads/"):
+        return f"refs/{ref}"
+    return ref
 
 
 # Subcommands that write to a branch. Anything else git does is a read as far
@@ -621,7 +671,7 @@ def _git_write_violation(command, cwd):
     base = cwd
     base_unknown = False
     for words in simple_cmds:
-        exe, args = _unwrap_simple_command(words)
+        exe, args, wrapper_chdirs, wrapper_target_unknown = _unwrap_simple_command(words)
         if exe in ("cd", "pushd"):
             operand = args[0] if args else None
             if operand is None or operand.startswith("-"):
@@ -637,7 +687,13 @@ def _git_write_violation(command, cwd):
         if not _is_git_exe(exe):
             continue
 
-        target, unknown = base, base_unknown
+        target, unknown = base, base_unknown or wrapper_target_unknown
+        for wrapper_dir in wrapper_chdirs:
+            moved = _resolve_dir(wrapper_dir, target) if wrapper_dir is not None else None
+            if moved is None:
+                unknown = True
+                break
+            target, unknown = moved, False
         index = 0
         subcommand = None
         while index < len(args):
