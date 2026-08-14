@@ -373,6 +373,24 @@ def _is_git_exe(token):
     return base == "git"
 
 
+def _short_option_value(token, value_options, words, index):
+    """Returns (option, value, consumed_words) for a clustered short option."""
+    if not token.startswith("-") or token.startswith("--") or token == "-":
+        return None, None, 1
+    cluster = token[1:]
+    for offset, char in enumerate(cluster):
+        option = f"-{char}"
+        if option not in value_options:
+            continue
+        attached = cluster[offset + 1:]
+        if attached:
+            return option, attached, 1
+        if index + 1 < len(words):
+            return option, words[index + 1], 2
+        return option, None, 1
+    return None, None, 1
+
+
 def _unwrap_simple_command(words):
     """Strips leading environment variable assignments and command wrappers (env, sudo, etc.).
 
@@ -407,16 +425,26 @@ def _unwrap_simple_command(words):
 
                 name, _, inline = w_tok.partition("=")
                 if wrapper_name == "env":
-                    if name in ("-S", "--split-string"):
-                        if inline:
-                            s_arg = inline
-                            i += 1
-                        elif i + 1 < len(words):
-                            s_arg = words[i + 1]
-                            i += 2
-                        else:
-                            i += 1
-                            s_arg = ""
+                    short_opt, short_value, consumed = _short_option_value(
+                        w_tok, _ENV_VAL_OPTS, words, i
+                    )
+                    if short_opt:
+                        i += consumed
+                        if short_opt == "-C":
+                            wrapper_chdirs.append(short_value)
+                        if short_opt != "-S":
+                            continue
+                        s_arg = short_value or ""
+                        inner_tokens = _shell_tokens(s_arg)
+                        if inner_tokens is None:
+                            return None, [], wrapper_chdirs, wrapper_target_unknown
+                        inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
+                        if inner_words:
+                            words = words[:i] + inner_words + words[i:]
+                        continue
+                    if name == "--split-string":
+                        s_arg = inline if inline else (words[i + 1] if i + 1 < len(words) else "")
+                        i += 1 if inline or i + 1 >= len(words) else 2
                         inner_tokens = _shell_tokens(s_arg)
                         if inner_tokens is None:
                             return None, [], wrapper_chdirs, wrapper_target_unknown
@@ -435,7 +463,16 @@ def _unwrap_simple_command(words):
                     else:
                         i += 1
                 elif wrapper_name == "sudo":
-                    if inline:
+                    short_opt, short_value, consumed = _short_option_value(
+                        w_tok, _SUDO_VAL_OPTS, words, i
+                    )
+                    if short_opt:
+                        if short_opt == "-D":
+                            wrapper_chdirs.append(short_value)
+                        elif short_opt == "-R":
+                            wrapper_target_unknown = True
+                        i += consumed
+                    elif inline:
                         if name in {"-D", "--chdir"}:
                             wrapper_chdirs.append(inline)
                         elif name in {"-R", "--chroot"}:
@@ -452,21 +489,37 @@ def _unwrap_simple_command(words):
                     else:
                         i += 1
                 elif wrapper_name == "time":
-                    if inline:
+                    short_opt, _short_value, consumed = _short_option_value(
+                        w_tok, _TIME_VAL_OPTS, words, i
+                    )
+                    if short_opt:
+                        i += consumed
+                    elif inline:
                         i += 1
                     elif name in _TIME_VAL_OPTS:
                         i += 2 if i + 1 < len(words) else 1
                     else:
                         i += 1
                 elif wrapper_name == "nice":
-                    if inline:
+                    short_opt, _short_value, consumed = _short_option_value(
+                        w_tok, _NICE_VAL_OPTS, words, i
+                    )
+                    if short_opt:
+                        i += consumed
+                    elif inline:
                         i += 1
                     elif name in _NICE_VAL_OPTS:
                         i += 2 if i + 1 < len(words) else 1
                     else:
                         i += 1
-                elif wrapper_name == "exec" and name == "-a" and not inline:
-                    i += 2 if i + 1 < len(words) else 1
+                elif wrapper_name == "exec":
+                    short_opt, _short_value, consumed = _short_option_value(
+                        w_tok, frozenset({"-a"}), words, i
+                    )
+                    if short_opt:
+                        i += consumed
+                    else:
+                        i += 1
                 else:
                     if inline:
                         i += 1
@@ -547,7 +600,6 @@ def _git_write_to_protected(command, branch):
             pos_args = []
             pushes_all_refs = False
             pushes_tags_only = False
-            remote_from_option = False
             i = index
             while i < len(args):
                 tok = args[i]
@@ -557,8 +609,6 @@ def _git_write_to_protected(command, branch):
                         pushes_all_refs = True
                     elif name == "--tags":
                         pushes_tags_only = True
-                    if name in {"-r", "--repo"}:
-                        remote_from_option = True
                     if not inline and name in push_opts_with_val:
                         i += 2
                     else:
@@ -570,7 +620,19 @@ def _git_write_to_protected(command, branch):
             if pushes_all_refs:
                 return "push may update protected branches"
 
-            refspecs = pos_args if remote_from_option else (pos_args[1:] if len(pos_args) > 1 else [])
+            raw_refspecs = pos_args[1:] if len(pos_args) > 1 else []
+            refspecs = []
+            has_tag_pseudo_refspec = False
+            ref_index = 0
+            while ref_index < len(raw_refspecs):
+                if raw_refspecs[ref_index] == "tag":
+                    if ref_index + 1 >= len(raw_refspecs):
+                        return "push tag pseudo-refspec is incomplete"
+                    has_tag_pseudo_refspec = True
+                    ref_index += 2
+                    continue
+                refspecs.append(raw_refspecs[ref_index])
+                ref_index += 1
             if refspecs:
                 for refspec in refspecs:
                     normalized_refspec = refspec.removeprefix("+")
@@ -591,7 +653,7 @@ def _git_write_to_protected(command, branch):
                     if (src == "HEAD" or dest == "HEAD") and branch in PROTECTED_BRANCHES:
                         return f"push '{branch}'"
             else:
-                if pushes_tags_only:
+                if pushes_tags_only or has_tag_pseudo_refspec:
                     continue
                 # With no explicit refspec, remote and branch configuration can
                 # select refs other than the current branch. This static guard

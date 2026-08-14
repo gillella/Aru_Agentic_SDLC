@@ -277,12 +277,30 @@ class ProtectedBranchTests(unittest.TestCase):
                 "/usr/bin/env -P /usr/bin /usr/bin/git push origin main", "main"
             )
         )
+        for command in (
+            'env -S"git push origin main"',
+            'env -iS "git push origin main"',
+            "exec -ca ignored /usr/bin/git push origin main",
+            "exec -la ignored /usr/bin/git push origin main",
+            "env -C/repo/main git push origin HEAD",
+            "sudo -D/repo/main git push origin HEAD",
+            "sudo -nD /repo/main git push origin HEAD",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(et._git_write_to_protected(command, "feat/issue-1-a"))
 
     def test_tag_only_pushes_are_allowed(self):
         self.assertIsNone(et._git_write_to_protected("git push --tags origin", "main"))
         self.assertIsNone(et._git_write_to_protected("git push origin --tags", "main"))
         self.assertIsNone(et._git_write_to_protected("git push --repo=origin --tags", "main"))
         self.assertIsNotNone(et._git_write_to_protected("git push --tags origin main", "main"))
+        self.assertIsNone(et._git_write_to_protected("git push origin tag main", "main"))
+        self.assertIsNone(et._git_write_to_protected("git push origin tag master", "main"))
+
+    def test_positional_remote_overrides_repo_option_and_fails_closed(self):
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --repo=origin feature", "feat/issue-1-a")
+        )
 
     def test_malformed_env_split_string_does_not_crash(self):
         self.assertIsNone(et._git_write_to_protected("env -S \"git commit -m '\"", "main"))
@@ -646,6 +664,8 @@ class HookDecisionTests(unittest.TestCase):
             "git push --tags origin",
             "git push origin --tags",
             "git push --repo=origin --tags",
+            "git push origin tag main",
+            "git push origin tag master",
         ]
         for command in allowed_commands:
             with self.subTest(command=command, expected="ALLOW"):
@@ -675,6 +695,11 @@ class HookDecisionTests(unittest.TestCase):
             "nice git push origin main",
             "/usr/bin/nice -n 5 git push origin main",
             "/usr/bin/env -P /usr/bin /usr/bin/git push origin main",
+            'env -S"git push origin main"',
+            'env -iS "git push origin main"',
+            "exec -ca ignored /usr/bin/git push origin main",
+            "exec -la ignored /usr/bin/git push origin main",
+            "git push --repo=origin feature",
         ]
         for command in blocked_commands:
             with self.subTest(command=command, expected="BLOCK"):
@@ -717,6 +742,9 @@ class HookDecisionTests(unittest.TestCase):
             "env -C /repo/main git push origin HEAD",
             "env --chdir /repo/main git push origin HEAD",
             "sudo -D /repo/main git push origin HEAD",
+            "env -C/repo/main git push origin HEAD",
+            "sudo -D/repo/main git push origin HEAD",
+            "sudo -nD /repo/main git push origin HEAD",
         ):
             with self.subTest(command=command), \
                  patch.object(et.sys, "stdin", io.StringIO(json.dumps({
