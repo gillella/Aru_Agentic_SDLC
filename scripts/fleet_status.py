@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -76,6 +77,13 @@ def list_worktree_branches() -> List[str]:
     return branches
 
 
+def _is_regular_file(path: str) -> bool:
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 def _count_lines(path: str) -> Optional[int]:
     try:
         with open(path, encoding="utf-8") as fh:
@@ -96,6 +104,8 @@ def collect_codebase_health(repo_dir: str) -> Dict[str, Any]:
             if not name.endswith(".py"):
                 continue
             path = os.path.join(root, name)
+            if not _is_regular_file(path):
+                continue
             lines = _count_lines(path)
             if lines is None:
                 continue

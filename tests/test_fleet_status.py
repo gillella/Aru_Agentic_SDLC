@@ -302,6 +302,17 @@ class FleetStatusTests(unittest.TestCase):
         )
         self.assertGreater(health["average_file_bytes"], 0)
 
+    def test_codebase_health_skips_symlinks_and_fifos(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            real = root / "real.py"
+            real.write_text("print(1)\n", encoding="utf-8")
+            (root / "link.py").symlink_to(real)
+            os.mkfifo(root / "pipe.py")
+            health = collect_codebase_health(str(root))
+        self.assertEqual(health["file_count"], 1)
+        self.assertEqual(health["loc"], 1)
+
     def test_complete_status_includes_codebase_health(self):
         with tempfile.TemporaryDirectory() as target:
             Path(target, "app.py").write_text("print(1)\n", encoding="utf-8")
