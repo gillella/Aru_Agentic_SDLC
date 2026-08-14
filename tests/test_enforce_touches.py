@@ -204,11 +204,17 @@ class ProtectedBranchTests(unittest.TestCase):
         self.assertIsNone(et._git_write_to_protected("cat << 'EOF'\nremember to git commit later\nEOF", "main"))
         self.assertIsNone(et._git_write_to_protected("ls # then git commit", "main"))
         self.assertIsNone(et._git_write_to_protected('git status -m "git push origin main"', "main"))
+        self.assertIsNone(et._git_write_to_protected("echo git commit on main", "main"))
+        self.assertIsNone(et._git_write_to_protected("printf %s git push origin main", "main"))
 
     def test_push_with_following_command_containing_main_is_allowed(self):
-        self.assertIsNone(et._git_write_to_protected("git push origin HEAD && echo main", "feat/issue-1-a"))
-        self.assertIsNone(et._git_write_to_protected("git push origin HEAD ; printf main", "feat/issue-1-a"))
-        self.assertIsNone(et._git_write_to_protected("git push origin HEAD | grep main", "feat/issue-1-a"))
+        self.assertIsNone(et._git_write_to_protected("git push origin feat && echo main", "feat/issue-1-a"))
+        self.assertIsNone(et._git_write_to_protected("git push origin feat ; printf main", "feat/issue-1-a"))
+        self.assertIsNone(et._git_write_to_protected("git push origin feat | grep main", "feat/issue-1-a"))
+
+    def test_push_head_on_protected_branch_is_blocked(self):
+        self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD:HEAD", "main"))
 
 
 class RedirectDetectionTests(unittest.TestCase):
@@ -562,9 +568,9 @@ class HookDecisionTests(unittest.TestCase):
             "cat << 'EOF'\nremember to git commit later\nEOF",
             "ls # then git commit",
             'git status -m "git push origin main"',
-            "git push origin HEAD && echo main",
-            "git push origin HEAD ; printf main",
-            "git push origin HEAD | grep main",
+            "echo git commit on main",
+            "printf %s git push origin main",
+            "echo hello && echo main",
         ]
         for command in allowed_commands:
             with self.subTest(command=command, expected="ALLOW"):
@@ -577,6 +583,10 @@ class HookDecisionTests(unittest.TestCase):
         blocked_commands = [
             "git commit -m x",
             "git push origin main",
+            "git push origin HEAD",
+            "git push origin HEAD && echo main",
+            "env FOO=1 git commit -m x",
+            "sudo git commit -m x",
         ]
         for command in blocked_commands:
             with self.subTest(command=command, expected="BLOCK"):

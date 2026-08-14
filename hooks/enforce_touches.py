@@ -329,6 +329,36 @@ def path_allowed(rel_path, touches):
     return False
 
 
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_WRAPPERS = frozenset({"env", "nohup", "time", "sudo", "exec", "builtin", "command"})
+
+
+def _unwrap_simple_command(words):
+    """Strips leading environment variable assignments and command wrappers (env, sudo, etc.).
+
+    Returns (executable, args_list) or (None, []) if empty.
+    """
+    i = 0
+    while i < len(words):
+        token = words[i]
+        if _ENV_ASSIGNMENT.match(token):
+            i += 1
+            continue
+        if token in _WRAPPERS:
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                if words[i] in ("-u", "-C", "-g", "-p") and i + 1 < len(words):
+                    i += 2
+                else:
+                    i += 1
+            continue
+        break
+
+    if i >= len(words):
+        return None, []
+    return words[i], words[i + 1:]
+
+
 def _git_write_to_protected(command, branch):
     """Detects commits on, or pushes to, a protected branch.
 
@@ -362,57 +392,60 @@ def _git_write_to_protected(command, branch):
             simple_cmds.append(current)
 
     for words in simple_cmds:
+        exe, args = _unwrap_simple_command(words)
+        if exe != "git":
+            continue
+
         index = 0
-        while index < len(words):
-            word = words[index]
-            if word != "git":
+        subcommand = None
+        while index < len(args):
+            token = args[index]
+            if not token.startswith("-"):
+                subcommand = token
                 index += 1
-                continue
+                break
+            name, _, inline = token.partition("=")
+            if inline:
+                index += 1
+            elif name in _GIT_VALUE_OPTS:
+                index += 2
+            else:
+                index += 1
 
-            index += 1
-            subcommand = None
-            while index < len(words):
-                token = words[index]
-                if not token.startswith("-"):
-                    subcommand = token
-                    index += 1
-                    break
-                name, _, inline = token.partition("=")
-                if inline:
-                    index += 1
-                elif name in _GIT_VALUE_OPTS:
-                    index += 2
-                else:
-                    index += 1
+        if not subcommand or subcommand not in _GIT_WRITE_SUBCOMMANDS:
+            continue
 
-            if not subcommand or subcommand not in _GIT_WRITE_SUBCOMMANDS:
-                continue
+        if subcommand == "commit" and branch in PROTECTED_BRANCHES:
+            return f"commit directly on '{branch}'"
 
-            if subcommand == "commit" and branch in PROTECTED_BRANCHES:
-                return f"commit directly on '{branch}'"
-
-            if subcommand == "push":
-                push_opts_with_val = {"-o", "--push-option", "-r", "--repo", "--receive-pack", "--exec"}
-                pos_args = []
-                i = index
-                while i < len(words):
-                    tok = words[i]
-                    if tok.startswith("-"):
-                        name, _, inline = tok.partition("=")
-                        if not inline and name in push_opts_with_val:
-                            i += 2
-                        else:
-                            i += 1
+        if subcommand == "push":
+            push_opts_with_val = {"-o", "--push-option", "-r", "--repo", "--receive-pack", "--exec"}
+            pos_args = []
+            i = index
+            while i < len(args):
+                tok = args[i]
+                if tok.startswith("-"):
+                    name, _, inline = tok.partition("=")
+                    if not inline and name in push_opts_with_val:
+                        i += 2
                     else:
-                        pos_args.append(tok)
                         i += 1
+                else:
+                    pos_args.append(tok)
+                    i += 1
 
-                for tok in pos_args:
-                    ref = tok.split(":")[-1].replace("refs/heads/", "")
-                    if ref in PROTECTED_BRANCHES:
-                        return f"push to '{ref}'"
-
-                if not pos_args and branch in PROTECTED_BRANCHES:
+            refspecs = pos_args[1:] if len(pos_args) > 1 else []
+            if refspecs:
+                for refspec in refspecs:
+                    dest = refspec.split(":")[-1].replace("refs/heads/", "")
+                    src = refspec.split(":")[0].replace("refs/heads/", "")
+                    if dest in PROTECTED_BRANCHES:
+                        return f"push to '{dest}'"
+                    if (src == "HEAD" or dest == "HEAD") and branch in PROTECTED_BRANCHES:
+                        return f"push '{branch}'"
+            else:
+                # Bare push or remote-only push pushes the current branch
+                if branch in PROTECTED_BRANCHES:
                     return f"push '{branch}'"
 
     return None
@@ -479,69 +512,58 @@ def _git_write_violation(command, cwd):
     base = cwd
     base_unknown = False
     for words in simple_cmds:
-        index = 0
-        while index < len(words):
-            word = words[index]
-
-            # `cd` with no operand returns home, which is never a checkout we can
-            # reason about; treat it as unknown rather than guessing.
-            if word in ("cd", "pushd"):
-                operand = words[index + 1] if index + 1 < len(words) else None
-                if operand is None or operand.startswith("-"):
+        exe, args = _unwrap_simple_command(words)
+        if exe in ("cd", "pushd"):
+            operand = args[0] if args else None
+            if operand is None or operand.startswith("-"):
+                base_unknown = True
+            else:
+                moved = _resolve_dir(operand, base)
+                if moved is None:
                     base_unknown = True
                 else:
-                    moved = _resolve_dir(operand, base)
-                    if moved is None:
-                        base_unknown = True
-                    else:
-                        base, base_unknown = moved, False
-                index += 2
-                continue
+                    base, base_unknown = moved, False
+            continue
 
-            if word != "git":
+        if exe != "git":
+            continue
+
+        target, unknown = base, base_unknown
+        index = 0
+        subcommand = None
+        while index < len(args):
+            token = args[index]
+            if not token.startswith("-"):
+                subcommand = token
+                index += 1
+                break
+            name, _, inline = token.partition("=")
+            if inline:
+                value = inline
+                index += 1
+            elif name in _GIT_VALUE_OPTS:
+                value = args[index + 1] if index + 1 < len(args) else None
+                index += 2
+            else:
                 index += 1
                 continue
+            if name in _GIT_DIR_OPTS and value is not None:
+                # --git-dir names the .git directory; the checkout is its parent.
+                candidate = value[:-len("/.git")] if name == "--git-dir" and value.endswith("/.git") else value
+                moved = _resolve_dir(candidate, base)
+                target, unknown = (base, True) if moved is None else (moved, False)
 
-            # Walk git's pre-subcommand options to find both the subcommand and
-            # any option that moves where it acts.
-            git_start_index = index
-            target, unknown = base, base_unknown
-            index += 1
-            subcommand = None
-            while index < len(words):
-                token = words[index]
-                if not token.startswith("-"):
-                    subcommand = token
-                    index += 1
-                    break
-                name, _, inline = token.partition("=")
-                if inline:
-                    value = inline
-                    index += 1
-                elif name in _GIT_VALUE_OPTS:
-                    value = words[index + 1] if index + 1 < len(words) else None
-                    index += 2
-                else:
-                    index += 1
-                    continue
-                if name in _GIT_DIR_OPTS and value is not None:
-                    # --git-dir names the .git directory; the checkout is its parent.
-                    candidate = value[:-len("/.git")] if name == "--git-dir" and value.endswith("/.git") else value
-                    moved = _resolve_dir(candidate, base)
-                    target, unknown = (base, True) if moved is None else (moved, False)
+        if subcommand not in _GIT_WRITE_SUBCOMMANDS:
+            continue
 
-            if subcommand not in _GIT_WRITE_SUBCOMMANDS:
-                continue
-
-            if unknown:
-                return (
-                    f"run 'git {subcommand}' in a directory this hook cannot "
-                    "resolve, so it cannot prove the target branch is unprotected"
-                )
-            cmd_words = words[git_start_index:]
-            violation = _git_write_to_protected(cmd_words, current_branch(target))
-            if violation:
-                return violation
+        if unknown:
+            return (
+                f"run 'git {subcommand}' in a directory this hook cannot "
+                "resolve, so it cannot prove the target branch is unprotected"
+            )
+        violation = _git_write_to_protected(["git"] + list(args), current_branch(target))
+        if violation:
+            return violation
 
     return None
 
