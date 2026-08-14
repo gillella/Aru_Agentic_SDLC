@@ -127,18 +127,16 @@ Mention the bot and put the verb first:
   `degraded_unreachable` without attempting repository or GitHub work.
 - `stop` records the resolved project's canonical checkout path in
   `~/.aru/factory-loop.stop`.
-- `stop <agent>` records `<canonical-path>::<agent>` and leaves peer projects
-  and agents running.
 - `resume` removes only the resolved project's path and agent tokens.
-- `resume <agent>` removes only that project's agent token.
 - `intervention issue #172 <decision>` or `intervention PR #123 <decision>`
   copies the decision to the resolved repository through the sanctioned GitHub
   comment path.
 
-Slack does not expose a global factory command. `stop all` and `resume all`
-are rejected. The existing `projects: ["*"]` contract is preserved for local
-operator control, and Slack cannot clear it. A degraded project permits status
-only; use local `verify`, `recover`, or `close` for recovery.
+Slack does not expose global or agent-scoped factory commands in V1. `stop all`,
+`resume all`, and agent targets are rejected. The existing `projects: ["*"]`
+contract is preserved for local operator control, and Slack cannot clear it. A
+degraded project permits status only; use local `verify`, `recover`, or `close`
+for recovery.
 
 ## Setup and security
 

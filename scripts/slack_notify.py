@@ -147,7 +147,7 @@ class DedupeCache:
 
 def dedupe_key(event: Dict[str, Any]) -> str:
     if event.get("dedupe_key"):
-        return str(event["dedupe_key"])
+        return "|".join((str(event.get("project_id", "")), str(event["dedupe_key"])))
     return "|".join(
         str(event.get(name, ""))
         for name in ("project_id", "type", "agent", "issue", "pr", "text")

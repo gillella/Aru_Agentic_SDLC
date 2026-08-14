@@ -153,35 +153,17 @@ def write_stop_file(
     mutate_secure_json(destination, {}, lambda _current: payload)
 
 
-def agent_stop_token(project_path: str, agent: str) -> str:
-    return f"{project_path}::{agent}"
-
-
-def agent_stop_applies(
-    project_path: str, agent: str, data: Optional[Dict[str, Any]] = None
-) -> bool:
-    document = _stop_document(data if data is not None else load_stop_file())
-    return bool(
-        "*" in document.get("projects", [])
-        or project_path in document.get("projects", [])
-        or agent_stop_token(project_path, agent) in document.get("agents", [])
-    )
-
-
 def apply_stop(project_path: str, target: str, path: Optional[Path] = None) -> str:
     if target == "all":
         return "global Slack stop is not supported; use the local operator control"
+    if target != "project":
+        return "agent-scoped Slack stop is not supported in V1; stop the project or use local control"
 
     def update(value: Any) -> Dict[str, Any]:
         document = _stop_document(value)
         projects, agents = list(document.get("projects", [])), list(document.get("agents", []))
-        if target == "project":
-            if project_path not in projects:
-                projects.append(project_path)
-        else:
-            token = agent_stop_token(project_path, target)
-            if token not in agents:
-                agents.append(token)
+        if project_path not in projects:
+            projects.append(project_path)
         return {
             **document, "projects": projects, "agents": agents,
             "stopped_at": _now(), "source": "slack_control_room",
@@ -190,11 +172,14 @@ def apply_stop(project_path: str, target: str, path: Optional[Path] = None) -> s
     destination = path or STOP_PATH
     _adopt_legacy_stop_file(destination)
     mutate_secure_json(destination, {}, update)
-    subject = "project" if target == "project" else target
-    return f"stop recorded for {subject} (drain-first; loops check between units)"
+    return "stop recorded for project (drain-first; loops check between units)"
 
 
 def apply_resume(project_path: str, target: str, path: Optional[Path] = None) -> str:
+    if target == "all":
+        return "global Slack resume is not supported; use the local operator control"
+    if target != "project":
+        return "agent-scoped Slack resume is not supported in V1; resume the project or use local control"
     destination = path or STOP_PATH
     _adopt_legacy_stop_file(destination)
     if not destination.is_file():
@@ -207,19 +192,9 @@ def apply_resume(project_path: str, target: str, path: Optional[Path] = None) ->
         if "*" in projects:
             result["message"] = "global stop (*) is local-operator-only and cannot be cleared from Slack"
             return document
-        if target == "all":
-            result["message"] = "global Slack resume is not supported; use the local operator control"
-            return document
-        if target == "project":
-            projects = [item for item in projects if item != project_path]
-            agents = [item for item in agents if not item.startswith(f"{project_path}::")]
-            result["message"] = "cleared operator stop for project"
-        elif project_path in projects:
-            result["message"] = "project stop is in effect; resume the project to clear it"
-            return document
-        else:
-            agents = [item for item in agents if item != agent_stop_token(project_path, target)]
-            result["message"] = f"cleared operator stop for {target}"
+        projects = [item for item in projects if item != project_path]
+        agents = [item for item in agents if not item.startswith(f"{project_path}::")]
+        result["message"] = "cleared operator stop for project"
         return {
             **document, "projects": projects, "agents": agents,
             "stopped_at": _now(), "source": "slack_control_room",
@@ -402,6 +377,15 @@ def handle_slack_message(
         )
         return None
     if not authorize(config, project, str(payload.get("user") or "")):
+        user_hash = hashlib.sha256(str(payload.get("user") or "missing").encode()).hexdigest()[:16]
+        try:
+            registry.audit(
+                "unauthorized_inbound", "slack_bridge",
+                detail=f"project_id={project.project_id} user_hash={user_hash}",
+                throttle_key=f"unauthorized:{project.project_id}:{user_hash}",
+            )
+        except RegistryError as exc:
+            print(f"[ERROR] cannot audit denied Slack command: {redact(str(exc))}", file=sys.stderr)
         return None
     try:
         runtime_health = verified_runtime_health(registry, project)

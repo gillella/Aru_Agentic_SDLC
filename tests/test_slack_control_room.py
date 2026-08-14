@@ -129,12 +129,16 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertFalse(self.seen_path.exists())
 
     def test_unauthorized_message_is_ignored_without_recording_event(self):
+        user_id = "U99999999"
         reply = scr.handle_slack_message(
-            sample_config(), self.registry, self.payload(user="U99999999"), set(),
+            sample_config(), self.registry, self.payload(user=user_id), set(),
             seen_path=self.seen_path,
         )
         self.assertIsNone(reply)
         self.assertFalse(self.seen_path.exists())
+        persisted = self.audit_path.read_text(encoding="utf-8")
+        self.assertNotIn(user_id, persisted)
+        self.assertEqual(json.loads(persisted)["events"][-1]["action"], "unauthorized_inbound")
 
     def test_dedupe_survives_restart_and_is_scoped_by_project_route(self):
         replies = []
@@ -223,12 +227,17 @@ class SlackControlRoomTests(unittest.TestCase):
             self.assertIn("local-operator-only", message)
             self.assertEqual(json.loads(self.stop_path.read_text())["projects"], ["*"])
 
-    def test_agent_stop_does_not_stop_peer_project_or_agent(self):
-        scr.apply_stop(self.project_a.local_path, "cursor-1", self.stop_path)
-        document = scr.load_stop_file(self.stop_path)
-        self.assertTrue(scr.agent_stop_applies(self.project_a.local_path, "cursor-1", document))
-        self.assertFalse(scr.agent_stop_applies(self.project_a.local_path, "codex-1", document))
-        self.assertFalse(scr.agent_stop_applies(self.project_b.local_path, "cursor-1", document))
+    def test_agent_scoped_stop_and_resume_are_rejected_without_state_changes(self):
+        self.assertIn(
+            "not supported in V1",
+            scr.apply_stop(self.project_a.local_path, "cursor-1", self.stop_path),
+        )
+        self.assertFalse(self.stop_path.exists())
+        self.assertIn(
+            "not supported in V1",
+            scr.apply_resume(self.project_a.local_path, "cursor-1", self.stop_path),
+        )
+        self.assertFalse(self.stop_path.exists())
 
     def test_status_filters_peer_project_stop_state(self):
         scr.write_stop_file(
@@ -315,6 +324,19 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertIn("degraded", reply)
         self.assertEqual(comments, [])
         self.assertEqual(len(replies), 1)
+
+    def test_identity_verification_error_does_not_consume_retry(self):
+        with patch.object(
+            scr, "verified_runtime_health",
+            side_effect=scr.RegistryError("identity lookup timed out"),
+        ):
+            reply = scr.handle_slack_message(
+                sample_config(), self.registry,
+                self.payload(event_id="retry-after-recovery"), set(),
+                seen_path=self.seen_path,
+            )
+        self.assertIsNone(reply)
+        self.assertFalse(self.seen_path.exists())
 
     def test_legacy_raw_event_id_prevents_replayed_command(self):
         self.seen_path.write_text(

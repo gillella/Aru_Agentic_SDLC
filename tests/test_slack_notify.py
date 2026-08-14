@@ -132,6 +132,10 @@ class SlackNotifyTests(unittest.TestCase):
             dedupe_key({**base, "project_id": "proj_a"}),
             dedupe_key({**base, "project_id": "proj_b"}),
         )
+        self.assertNotEqual(
+            dedupe_key({**base, "project_id": "proj_a", "dedupe_key": "event-1"}),
+            dedupe_key({**base, "project_id": "proj_b", "dedupe_key": "event-1"}),
+        )
 
     def test_cli_requires_explicit_project_id(self):
         with self.assertRaises(SystemExit):

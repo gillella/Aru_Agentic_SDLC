@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -66,10 +67,9 @@ class SlackProjectRegistryTests(unittest.TestCase):
 
     def test_default_identity_discovers_exact_repo_and_governed_board(self):
         repo = {"id": "R_node", "databaseId": 42, "nameWithOwner": "owner/repo"}
-        with patch.object(slack_projects, "run_cmd", return_value=(0, json.dumps(repo), "")), \
-             patch.object(
-                 slack_projects, "resolve_governed_project", return_value={"id": "PVT_board"}
-             ) as resolve:
+        project = {"id": "PVT_board"}
+        with patch.object(slack_projects, "_bounded_json", return_value=repo), \
+             patch.object(slack_projects, "_discover_governed_project", return_value=project) as resolve:
             found = slack_projects.discover_checkout_identity(self.checkout_a)
         resolve.assert_called_once_with("owner/repo")
         self.assertEqual(found["github_repo_id"], "R_node")
@@ -177,6 +177,11 @@ class SlackProjectRegistryTests(unittest.TestCase):
 
     def test_owned_legacy_0755_registry_directory_is_secured(self):
         self.root.chmod(0o755)
+        with patch.object(os, "chmod", side_effect=NotImplementedError) as chmod, \
+             patch.object(os, "fchmod", wraps=os.fchmod) as secured:
+            slack_projects._private_directory(self.root)
+        chmod.assert_not_called()
+        secured.assert_called()
         record = self.create_a()
         self.assertEqual(record.project_id, "proj_project_a")
         self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
@@ -196,6 +201,15 @@ class SlackProjectRegistryTests(unittest.TestCase):
             self.create_a()
         self.assertTrue(self.registry_path.is_symlink())
         self.assertEqual(target.read_text(encoding="utf-8"), "recoverable")
+
+    def test_non_string_local_path_fails_as_registry_error(self):
+        self.create_a()
+        document = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        document["projects"]["proj_project_a"]["local_path"] = 123
+        self.registry_path.write_text(json.dumps(document), encoding="utf-8")
+        self.registry_path.chmod(0o600)
+        with self.assertRaisesRegex(RegistryError, "invalid local_path"):
+            self.registry.list()
 
     def test_migration_is_idempotent_and_never_copies_credentials(self):
         values = {
@@ -264,13 +278,12 @@ class SlackProjectRegistryTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
     def test_checkout_discovery_resolves_board_from_repo_slug(self):
-        repo_json = json.dumps({
+        repo = {
             "databaseId": 42, "id": "R_node", "nameWithOwner": "owner/repo",
-        })
-        with patch.object(slack_projects, "run_cmd", return_value=(0, repo_json, "")), \
+        }
+        with patch.object(slack_projects, "_bounded_json", return_value=repo), \
              patch.object(
-                 slack_projects, "resolve_governed_project",
-                 return_value={"id": "PVT_board"},
+                 slack_projects, "_discover_governed_project", return_value={"id": "PVT_board"}
              ) as resolve:
             found = slack_projects.discover_checkout_identity(self.checkout_a)
         resolve.assert_called_once_with("owner/repo")
@@ -278,11 +291,45 @@ class SlackProjectRegistryTests(unittest.TestCase):
         self.assertEqual(found["project_v2_id"], "PVT_board")
 
     def test_checkout_discovery_fails_when_board_is_ambiguous(self):
-        repo_json = json.dumps({"id": "R_node", "nameWithOwner": "owner/repo"})
-        with patch.object(slack_projects, "run_cmd", return_value=(0, repo_json, "")), \
-             patch.object(slack_projects, "resolve_governed_project", return_value=None):
+        repo = {"id": "R_node", "nameWithOwner": "owner/repo"}
+        with patch.object(slack_projects, "_bounded_json", return_value=repo), \
+             patch.object(
+                 slack_projects, "_discover_governed_project",
+                 side_effect=RegistryError("cannot resolve one governed ProjectV2 board"),
+             ):
             with self.assertRaisesRegex(RegistryError, "cannot resolve one governed"):
                 slack_projects.discover_checkout_identity(self.checkout_a)
+
+    def test_checkout_identity_commands_are_bounded(self):
+        with patch.object(
+            slack_projects.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(["gh"], slack_projects.IDENTITY_TIMEOUT_SECONDS),
+        ) as invoked:
+            with self.assertRaisesRegex(RegistryError, "timed out"):
+                slack_projects.discover_checkout_identity(self.checkout_a)
+        self.assertEqual(invoked.call_args.kwargs["timeout"], slack_projects.IDENTITY_TIMEOUT_SECONDS)
+
+    def test_checkout_identity_bounds_repo_and_board_queries(self):
+        repo = {"databaseId": 42, "id": "R_node", "nameWithOwner": "owner/repo"}
+        board = {
+            "data": {"repository": {"projectsV2": {"nodes": [{
+                "id": "PVT_board",
+                "title": "repo Board",
+                "repositories": {"nodes": [{"nameWithOwner": "owner/repo"}]},
+            }]}}}
+        }
+        responses = [
+            subprocess.CompletedProcess([], 0, json.dumps(repo), ""),
+            subprocess.CompletedProcess([], 0, json.dumps(board), ""),
+        ]
+        with patch.object(slack_projects.subprocess, "run", side_effect=responses) as invoked:
+            found = slack_projects.discover_checkout_identity(self.checkout_a)
+        self.assertEqual(found["project_v2_id"], "PVT_board")
+        self.assertEqual(invoked.call_count, 2)
+        self.assertTrue(all(
+            call.kwargs["timeout"] == slack_projects.IDENTITY_TIMEOUT_SECONDS
+            for call in invoked.call_args_list
+        ))
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -18,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-from common import resolve_governed_project, run_cmd
+from common import select_governed_projects
 
 
 SCHEMA_VERSION = 1
@@ -28,6 +29,7 @@ REGISTRY_PATH = DEFAULT_REGISTRY_PATH
 AUDIT_PATH = DEFAULT_AUDIT_PATH
 PROJECT_ID_RE = re.compile(r"^proj_[A-Za-z0-9_-]{3,64}$")
 SECRET_RE = re.compile(r"(?:xox[baprs]-|xapp-|Bearer\s+)\S+", re.IGNORECASE)
+IDENTITY_TIMEOUT_SECONDS = 15
 
 
 class RegistryError(RuntimeError):
@@ -51,13 +53,40 @@ def _private_directory(path: Path) -> None:
         if mode & 0o022:
             raise RegistryError(f"registry directory is writable by another user: {path}")
         if mode != 0o700:
+            descriptor = -1
             try:
-                os.chmod(path, 0o700, follow_symlinks=False)
+                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(path, flags)
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or opened.st_uid != os.getuid()
+                    or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                ):
+                    raise RegistryError(f"registry directory changed while securing it: {path}")
+                if stat.S_IMODE(opened.st_mode) & 0o022:
+                    raise RegistryError(f"registry directory is writable by another user: {path}")
+                os.fchmod(descriptor, 0o700)
             except OSError as exc:
                 raise RegistryError(f"cannot secure registry directory {path}: {exc}") from exc
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
         return
     path.mkdir(parents=True, mode=0o700)
-    os.chmod(path, 0o700)
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode) or opened.st_uid != os.getuid():
+            raise RegistryError(f"unsafe registry directory after creation: {path}")
+        os.fchmod(descriptor, 0o700)
+    except OSError as exc:
+        raise RegistryError(f"cannot secure registry directory {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _private_file(path: Path) -> None:
@@ -191,6 +220,7 @@ class ProjectRecord:
             "github_repo_id": self.github_repo_id,
             "project_v2_id": self.project_v2_id,
             "repo_slug": self.repo_slug,
+            "local_path": self.local_path,
             "slack_team_id": self.slack_team_id,
             "slack_channel_id": self.slack_channel_id,
             "updated_by": self.updated_by,
@@ -220,21 +250,71 @@ class ProjectRecord:
 IdentityProvider = Callable[[Path], Dict[str, Any]]
 
 
+def _bounded_json(command: List[str], cwd: Optional[str] = None) -> Any:
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            timeout=IDENTITY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RegistryError(
+            f"identity command timed out after {IDENTITY_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise RegistryError(f"identity command failed: {exc}") from exc
+    if result.returncode != 0 or not result.stdout:
+        raise RegistryError(result.stderr.strip() or "identity command returned no data")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RegistryError(f"identity command returned invalid JSON: {exc}") from exc
+
+
+def _discover_governed_project(repo_slug: str) -> Dict[str, Any]:
+    owner, repo_name = repo_slug.split("/", 1)
+    query = """
+    query($owner:String!, $repo:String!) {
+      repository(owner:$owner, name:$repo) {
+        projectsV2(first:100) {
+          nodes {
+            id number title
+            owner {
+              ... on User { login }
+              ... on Organization { login }
+            }
+            repositories(first:100) { nodes { nameWithOwner } }
+          }
+        }
+      }
+    }
+    """
+    response = _bounded_json([
+        "gh", "api", "graphql", "-f", f"query={query}",
+        "-F", f"owner={owner}", "-F", f"repo={repo_name}",
+    ])
+    try:
+        available = response["data"]["repository"]["projectsV2"]["nodes"]
+    except (KeyError, TypeError) as exc:
+        raise RegistryError("cannot query governed ProjectV2 boards") from exc
+    projects = select_governed_projects(available, repo_slug)
+    if len(projects) != 1 or not projects[0].get("id"):
+        raise RegistryError("cannot resolve one governed ProjectV2 board")
+    return projects[0]
+
+
 def discover_checkout_identity(local_path: Path) -> Dict[str, Any]:
     if not local_path.is_dir():
         raise RegistryError(f"checkout is unavailable: {local_path}")
     try:
-        code, stdout, stderr = run_cmd(
+        repo = _bounded_json(
             ["gh", "repo", "view", "--json", "databaseId,id,nameWithOwner"],
-            check=False,
             cwd=str(local_path),
         )
-        if code != 0 or not stdout:
-            raise RegistryError(stderr or "gh repo view returned no identity")
-        repo = json.loads(stdout)
-        project = resolve_governed_project(repo["nameWithOwner"])
-        if not project or not project.get("id"):
-            raise RegistryError("cannot resolve one governed ProjectV2 board")
+        project = _discover_governed_project(repo["nameWithOwner"])
     except (KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         raise RegistryError(f"cannot verify GitHub identity for {local_path}: {exc}") from exc
     return {
