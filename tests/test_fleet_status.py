@@ -23,6 +23,7 @@ from fleet_status import (  # noqa: E402
     evaluate_fleet_status,
     format_operator_screen,
     resolve_fleet_size,
+    resolve_ready_target,
 )
 
 
@@ -87,7 +88,7 @@ def mock_project_item(status="Ready", repo_slug="octocat/widgets"):
 
 
 class FleetStatusTests(unittest.TestCase):
-    def evaluate_fixture(self, issues=None, prs=None, items=None, fleet_size=None):
+    def evaluate_fixture(self, issues=None, prs=None, items=None, fleet_size=None, ready_target=None):
         issues = [] if issues is None else issues
         prs = [] if prs is None else prs
         item_map = {} if items is None else items
@@ -102,7 +103,7 @@ class FleetStatusTests(unittest.TestCase):
                 side_effect=lambda number: item_map.get(number, [mock_project_item()]),
             ),
         ):
-            return evaluate_fleet_status(".", fleet_size=fleet_size)
+            return evaluate_fleet_status(".", fleet_size=fleet_size, ready_target=ready_target)
 
     def test_complete_state_when_board_and_repo_are_empty(self):
         status = self.evaluate_fixture()
@@ -697,6 +698,106 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(cost["severity"], "attn")
         self.assertEqual(cost["average_cycle_hours"], 3.0)
         self.assertIn("outlier", cost["summary"])
+
+    def test_resolve_ready_target_prefers_explicit_and_env_and_fleet_size(self):
+        self.assertEqual(resolve_ready_target(fleet_size=3, configured=5), 5)
+        with patch.dict(os.environ, {"ARU_READY_TARGET": "4"}, clear=False):
+            self.assertEqual(resolve_ready_target(fleet_size=3, configured=None), 4)
+            self.assertEqual(resolve_ready_target(fleet_size=3, configured=6), 6)
+        with patch.dict(os.environ, {"ARU_READY_TARGET": "invalid"}, clear=False):
+            self.assertEqual(resolve_ready_target(fleet_size=3, configured=None), 3)
+        self.assertEqual(resolve_ready_target(fleet_size=3, configured=None), 3)
+        self.assertIsNone(resolve_ready_target(fleet_size=None, configured=None))
+
+    def test_ready_depth_starved_state_distinct_from_complete(self):
+        # Factory with in-flight work and 0 Ready issues with fleet_size=2 is starved
+        status = self.evaluate_fixture(
+            issues=[
+                mock_issue(50, "status:in-progress", "agent:codex-1"),
+            ],
+            items={50: [mock_project_item("In Progress")]},
+            fleet_size=2,
+        )
+        self.assertEqual(status["state"], "waiting")
+        ready_q = questions(status)["ready_depth"]
+        self.assertEqual(ready_q["severity"], "attn")
+        self.assertEqual(ready_q["signal"], "starved")
+        self.assertEqual(ready_q["ready_depth"], 0)
+        self.assertEqual(ready_q["ready_target"], 2)
+        self.assertIn("starved", ready_q["summary"])
+
+    def test_ready_depth_healthy_state_when_target_met(self):
+        status = self.evaluate_fixture(
+            issues=[
+                mock_issue(51, "status:ready", body="touches: src/a.py\n"),
+                mock_issue(52, "status:ready", body="touches: src/b.py\n"),
+            ],
+            fleet_size=2,
+        )
+        self.assertEqual(status["state"], "waiting")
+        ready_q = questions(status)["ready_depth"]
+        self.assertEqual(ready_q["severity"], "ok")
+        self.assertEqual(ready_q["signal"], "healthy")
+        self.assertEqual(ready_q["ready_depth"], 2)
+        self.assertEqual(ready_q["ready_target"], 2)
+        self.assertEqual(ready_q["claimable"], 2)
+
+    def test_review_queue_depth_reported_and_marks_flooded_queue(self):
+        prs = [mock_pr(i) for i in range(101, 107)]  # 6 open PRs awaiting review
+        status = self.evaluate_fixture(
+            issues=[
+                mock_issue(51, "status:ready", body="touches: src/a.py\n"),
+                mock_issue(52, "status:ready", body="touches: src/b.py\n"),
+            ],
+            prs=prs,
+            fleet_size=2,
+        )
+        ready_q = questions(status)["ready_depth"]
+        self.assertEqual(ready_q["review_queue_depth"], 6)
+        self.assertEqual(ready_q["severity"], "attn")
+        self.assertEqual(ready_q["signal"], "flooded")
+        self.assertIn("flooded", ready_q["summary"])
+
+    def test_ready_depth_complete_state_distinct_from_starved(self):
+        # When fleet_size is 0, empty board is complete and healthy
+        status_empty = self.evaluate_fixture(fleet_size=0)
+        self.assertEqual(status_empty["state"], "complete")
+        ready_q = questions(status_empty)["ready_depth"]
+        self.assertEqual(ready_q["severity"], "ok")
+        self.assertEqual(ready_q["signal"], "complete")
+        self.assertEqual(ready_q["ready_depth"], 0)
+
+        # When fleet_size is 2 but board is empty, factory state is complete but ready signal alerts starvation
+        status_active = self.evaluate_fixture(fleet_size=2)
+        self.assertEqual(status_active["state"], "complete")
+        ready_active_q = questions(status_active)["ready_depth"]
+        self.assertEqual(ready_active_q["severity"], "attn")
+        self.assertEqual(ready_active_q["signal"], "starved")
+        self.assertIn("starved", ready_active_q["summary"])
+
+    def test_evaluate_fixture_with_configurable_ready_target(self):
+        status = self.evaluate_fixture(
+            issues=[
+                mock_issue(51, "status:ready", body="touches: src/a.py\n"),
+            ],
+            fleet_size=1,
+            ready_target=4,
+        )
+        ready_q = questions(status)["ready_depth"]
+        self.assertEqual(ready_q["ready_depth"], 1)
+        self.assertEqual(ready_q["ready_target"], 4)
+        self.assertEqual(ready_q["signal"], "starved")
+        self.assertEqual(ready_q["severity"], "attn")
+
+    def test_triage_backlog_print_capacity_with_ready_target(self):
+        import io
+        from triage_backlog import print_capacity
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            print_capacity({"ready_total": 1, "concurrent": [10], "deferred": []}, [], ready_target=3)
+        printed = out.getvalue()
+        self.assertIn("Ready target:            3", printed)
+        self.assertIn("below target (3) — fleet is starved", printed)
 
     def test_api_failure_still_never_reports_complete(self):
         status = evaluate_fleet_status("/definitely/not/a/repository")

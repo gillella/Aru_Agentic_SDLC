@@ -314,38 +314,89 @@ def _has_reviewed_by(pr: Dict[str, Any]) -> bool:
     )
 
 
+def resolve_ready_target(
+    fleet_size: Optional[int] = None, configured: Optional[int] = None
+) -> Optional[int]:
+    """Prefer an explicit target; otherwise read ARU_READY_TARGET; otherwise fleet_size."""
+    if configured is not None:
+        return configured if configured >= 0 else None
+    raw = os.environ.get("ARU_READY_TARGET", "").strip()
+    if raw:
+        try:
+            val = int(raw)
+            if val >= 0:
+                return val
+        except ValueError:
+            pass
+    if fleet_size is not None and fleet_size >= 0:
+        return fleet_size
+    return None
+
+
+def _review_queue_depth(prs: List[Dict[str, Any]]) -> int:
+    """Counts open PRs awaiting review."""
+    return sum(1 for pr in prs if _pending_review(pr))
+
+
 def _ready_severity(
-    ready_depth: int, fleet_size: Optional[int], claimable: int
-) -> tuple[str, str]:
-    if fleet_size is None:
-        return "warn", " — fleet size unavailable"
-    if ready_depth < fleet_size:
-        return "attn", " — factory is starved"
-    if claimable < fleet_size:
-        return "warn", " — path conflicts starve extra agents"
-    return "ok", ""
+    ready_depth: int,
+    ready_target: Optional[int],
+    claimable: int,
+    review_queue_depth: int = 0,
+    is_complete: bool = False,
+) -> tuple[str, str, str]:
+    if ready_target is None:
+        return "warn", " — fleet size unavailable", "unknown"
+    if review_queue_depth >= 6:
+        return "attn", f" — review queue flooded ({review_queue_depth} awaiting review)", "flooded"
+    if ready_depth < ready_target:
+        return "attn", " — factory is starved", "starved"
+    if claimable < ready_target:
+        return "warn", " — path conflicts starve extra agents", "conflicted"
+    if review_queue_depth > 0 and review_queue_depth >= ready_target:
+        return "warn", f" — review queue accumulating ({review_queue_depth} awaiting review)", "busy"
+    if is_complete:
+        return "ok", "", "complete"
+    return "ok", "", "healthy"
 
 
 def _ready_question(
-    issues: List[Dict[str, Any]], fleet_size: Optional[int] = None
+    issues: List[Dict[str, Any]],
+    prs: Optional[List[Dict[str, Any]]] = None,
+    fleet_size: Optional[int] = None,
+    ready_target: Optional[int] = None,
 ) -> Dict[str, Any]:
     from triage_backlog import capacity, partition
 
+    prs = prs or []
     _, ready, held = partition(issues)
     cap = capacity(ready, held)
     ready_depth = cap["ready_total"]
     in_flight = len(held)
     claimable = len(cap["concurrent"])
-    severity, note = _ready_severity(ready_depth, fleet_size, claimable)
+    target = ready_target if ready_target is not None else resolve_ready_target(fleet_size)
+    review_queue = _review_queue_depth(prs)
+    is_complete = not issues and not prs
+
+    severity, note, signal = _ready_severity(
+        ready_depth, target, claimable, review_queue_depth=review_queue, is_complete=is_complete
+    )
     fleet_text = "" if fleet_size is None else f"; fleet {fleet_size}"
+    target_text = f"; target {target}" if target is not None and target != fleet_size else ""
+    review_text = f", {review_queue} in review queue" if prs or review_queue > 0 else ""
     summary = (
         f"{ready_depth} Ready, {in_flight} in flight, {claimable} claimable"
-        f"{fleet_text}{note}"
+        f"{review_text}{fleet_text}{target_text}{note}"
     )
     return _question(
         "ready_depth", "Ready depth vs fleet size", severity, summary,
-        ready_depth=ready_depth, fleet_size=fleet_size, in_flight=in_flight,
+        ready_depth=ready_depth,
+        ready_target=target,
+        fleet_size=fleet_size,
+        in_flight=in_flight,
         claimable=claimable,
+        review_queue_depth=review_queue,
+        signal=signal,
     )
 
 
@@ -573,13 +624,14 @@ def build_operator_screen(
     closed_issues: Optional[Dict[str, Any]] = None,
     metrics_error: Optional[str] = None,
     fleet_size: Optional[int] = None,
+    ready_target: Optional[int] = None,
     ci_runs: Optional[List[Dict[str, Any]]] = None,
     ci_error: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Answer the six §4.2 questions from already-fetched board and PR facts."""
     clock = now or datetime.now(timezone.utc)
     questions = [
-        _ready_question(issues, fleet_size),
+        _ready_question(issues, prs=prs, fleet_size=fleet_size, ready_target=ready_target),
         _holders_question(issues, prs, clock),
         _review_age_question(prs, clock),
         _review_rounds_question(prs),
@@ -631,13 +683,18 @@ def _with_operator_screen(
     issues: List[Dict[str, Any]],
     prs: List[Dict[str, Any]],
     fleet_size: Optional[int] = None,
+    ready_target: Optional[int] = None,
 ) -> Dict[str, Any]:
-    status["operator_screen"] = build_operator_screen(issues, prs, fleet_size=fleet_size)
+    status["operator_screen"] = build_operator_screen(
+        issues, prs, fleet_size=fleet_size, ready_target=ready_target
+    )
     return status
 
 
 def evaluate_fleet_status(
-    repo_dir: str = ".", fleet_size: Optional[int] = None
+    repo_dir: str = ".",
+    fleet_size: Optional[int] = None,
+    ready_target: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Calculates authoritative factory state for ``repo_dir``."""
     try:
@@ -661,7 +718,8 @@ def evaluate_fleet_status(
             if fleet_size is not None
             else discover_fleet_size(target)
         )
-        status = _evaluate_current_repo(size)
+        resolved_target = resolve_ready_target(size, configured=ready_target)
+        status = _evaluate_current_repo(fleet_size=size, ready_target=resolved_target)
     except OSError as exc:
         return _error(
             f"Could not evaluate repository directory '{target}': {exc}",
@@ -674,7 +732,10 @@ def evaluate_fleet_status(
     return status
 
 
-def _evaluate_current_repo(fleet_size: Optional[int] = None) -> Dict[str, Any]:
+def _evaluate_current_repo(
+    fleet_size: Optional[int] = None,
+    ready_target: Optional[int] = None,
+) -> Dict[str, Any]:
     """Calculates state after the caller has selected the repository cwd."""
     slug = get_repo_slug()
     if not slug:
@@ -826,7 +887,7 @@ def _evaluate_current_repo(fleet_size: Optional[int] = None) -> Dict[str, Any]:
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
-        }, issues, prs, fleet_size)
+        }, issues, prs, fleet_size=fleet_size, ready_target=ready_target)
 
     if waiting_reasons or issues or prs:
         return _with_operator_screen({
@@ -840,7 +901,7 @@ def _evaluate_current_repo(fleet_size: Optional[int] = None) -> Dict[str, Any]:
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
-        }, issues, prs, fleet_size)
+        }, issues, prs, fleet_size=fleet_size, ready_target=ready_target)
 
     return _with_operator_screen({
         "state": "complete",
@@ -853,7 +914,7 @@ def _evaluate_current_repo(fleet_size: Optional[int] = None) -> Dict[str, Any]:
         "active_claims": [],
         "orphans": [],
         "drifted": [],
-    }, issues, prs, fleet_size)
+    }, issues, prs, fleet_size=fleet_size, ready_target=ready_target)
 
 
 def main():
@@ -867,10 +928,16 @@ def main():
         "--fleet-size", type=int, default=None,
         help="Configured/launched agent count (or set ARU_FLEET_SIZE)",
     )
+    parser.add_argument(
+        "--ready-target", type=int, default=None,
+        help="Configured Ready depth target (or set ARU_READY_TARGET)",
+    )
     args = parser.parse_args()
 
     status = evaluate_fleet_status(
-        args.repo_dir, fleet_size=resolve_fleet_size(args.fleet_size),
+        args.repo_dir,
+        fleet_size=resolve_fleet_size(args.fleet_size),
+        ready_target=args.ready_target,
     )
     if status.get("operator_screen") and status.get("state") != "error":
         ci_error = None
@@ -936,7 +1003,6 @@ def main():
         print(f"  window: {metrics['window_days']} days")
         print(f"  closed issues: {metrics['closed_issue_count']}")
         print(f"  measured cost per closed issue: {cost_text}")
-        print(f"  outliers: {metrics['outlier_issue_numbers'] or 'none'}")
     sys.exit(status["exit_code"])
 
 
