@@ -210,7 +210,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
         mock_run.assert_any_call(["git", "fetch", "origin", "release/v1.0"], check=False)
 
     @patch("deploy_preview.run_cmd")
-    def test_extract_preview_url_from_run_logs_and_api(self, mock_run):
+    def test_extract_preview_url_from_run_logs(self, mock_run):
         # 1. Extracted from gh run view --log (Pages output)
         mock_run.side_effect = [
             (0, '{"jobs": [{"steps": [{"name": "Deploy to GitHub Pages"}]}]}', ""),  # json jobs
@@ -219,14 +219,27 @@ class DeployPreviewSkillTests(unittest.TestCase):
         url = dp.extract_preview_url_from_run(12345)
         self.assertEqual(url, "https://gillella.github.io/Aru_Agentic_SDLC/")
 
-        # 2. Extracted from GitHub Pages repository API
+        # 2. When run logs contain no preview URL -> returns None (no stale repository fallback)
         mock_run.side_effect = [
             (0, '{"jobs": []}', ""),  # json jobs
             (0, "No URL in logs", ""),  # log
-            (0, "https://gillella.github.io/Aru_Agentic_SDLC/\n", ""),  # gh api repos/.../pages
         ]
         url2 = dp.extract_preview_url_from_run(12346)
-        self.assertEqual(url2, "https://gillella.github.io/Aru_Agentic_SDLC/")
+        self.assertIsNone(url2)
+
+    def test_deploy_preview_no_wait_without_url_fails(self):
+        exit_code = dp.deploy_preview(commit_sha="abcdef123456", issue_id=109, wait=False, preview_url=None)
+        self.assertEqual(exit_code, 1)
+
+    @patch("deploy_preview.run_cmd")
+    def test_file_remediation_issue_fails_closed_when_originating_comment_fails(self, mock_run):
+        mock_run.side_effect = [
+            (0, "https://github.com/owner/repo/issues/207\n", ""),  # gh issue create
+            (0, "Attached to board", ""),  # update_issue_status.py --require-board
+            (1, "", "Failed to comment on originating issue"),  # gh issue comment failure
+        ]
+        fail_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
+        self.assertIsNone(fail_id)
 
 
 if __name__ == "__main__":

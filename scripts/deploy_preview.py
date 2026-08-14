@@ -116,18 +116,20 @@ def verify_commit_merged(commit_sha: str, default_branch: Optional[str] = None) 
     return True, full_sha
 
 
-def get_existing_run_ids(workflow_name: str, commit_sha: str) -> Optional[Set[int]]:
-    """Fetches currently indexed run IDs for workflow and commit.
+def get_existing_run_ids(workflow_name: str, branch: Optional[str] = None) -> Optional[Set[int]]:
+    """Fetches currently indexed run IDs for workflow_dispatch on target branch.
 
     Returns Set[int] on success, or None on query/parsing failure.
     """
     list_cmd = [
         "gh", "run", "list",
         "--workflow", workflow_name,
-        "--commit", commit_sha,
+        "--event", "workflow_dispatch",
         "--json", "databaseId",
         "--limit", "30",
     ]
+    if branch:
+        list_cmd.extend(["--branch", branch])
     code, out, _ = run_cmd(list_cmd, check=False)
     if code != 0:
         return None
@@ -145,8 +147,8 @@ def dispatch_cd_workflow(
     workflow_name: str = "deploy-preview.yml",
     pre_existing_run_ids: Optional[Set[int]] = None,
     default_branch: Optional[str] = None,
-    max_poll_attempts: int = 5,
-    poll_interval: float = 2.0,
+    max_poll_attempts: int = 10,
+    poll_interval: float = 3.0,
     dry_run: bool = False,
 ) -> Optional[int]:
     """Dispatches preview deployment workflow on default branch with commit_sha input and correlates the new run ID."""
@@ -158,7 +160,7 @@ def dispatch_cd_workflow(
         return 12345
 
     if pre_existing_run_ids is None:
-        initial_ids = get_existing_run_ids(workflow_name, commit_sha)
+        initial_ids = get_existing_run_ids(workflow_name, branch=default_branch)
         if initial_ids is None:
             print(f"[ERROR] Failed to query existing runs for workflow '{workflow_name}'.", file=sys.stderr)
             return None
@@ -178,14 +180,14 @@ def dispatch_cd_workflow(
     for attempt in range(max_poll_attempts):
         if attempt > 0 and poll_interval > 0:
             time.sleep(poll_interval)
-        current_runs = get_existing_run_ids(workflow_name, commit_sha)
+        current_runs = get_existing_run_ids(workflow_name, branch=default_branch)
         if current_runs is not None:
             new_runs = current_runs - pre_existing_run_ids
             if new_runs:
                 # Return newest run ID
                 return max(new_runs)
 
-    print(f"[ERROR] Timed out waiting for new run of workflow '{workflow_name}' for commit '{commit_sha}'.", file=sys.stderr)
+    print(f"[ERROR] Timed out waiting for new run of workflow '{workflow_name}' on branch '{default_branch}'.", file=sys.stderr)
     return None
 
 
@@ -206,7 +208,6 @@ def extract_preview_url_from_run(run_id: int, dry_run: bool = False) -> Optional
     Checks:
     1. gh run view --json jobs,url step names
     2. gh run view --log for emitted Page / Preview URL
-    3. GitHub Pages repository configuration URL
     """
     if dry_run:
         return "https://preview.dry-run.local"
@@ -242,12 +243,6 @@ def extract_preview_url_from_run(run_id: int, dry_run: bool = False) -> Optional
         url_match = re.search(r"https://[a-zA-Z0-9_-]+\.github\.io/[a-zA-Z0-9_.-]+/?(?:\S+)?", log_out)
         if url_match:
             return url_match.group(0).rstrip(".")
-
-    # 3. Check GitHub Pages repository configuration
-    pages_cmd = ["gh", "api", "repos/{owner}/{repo}/pages", "--jq", ".html_url"]
-    p_code, p_out, _ = run_cmd(pages_cmd, check=False)
-    if p_code == 0 and p_out.strip() and p_out.strip().startswith("http"):
-        return p_out.strip()
 
     return None
 
@@ -349,7 +344,10 @@ parallel-eligible: true
         f"Preview deployment failed for commit `{commit_sha[:7]}`. "
         f"Created governed remediation issue #{new_issue_id} on the Project Board."
     )
-    run_cmd(["gh", "issue", "comment", str(issue_id), "--body", notify_body], check=False)
+    code, _, err = run_cmd(["gh", "issue", "comment", str(issue_id), "--body", notify_body], check=False)
+    if code != 0:
+        print(f"[ERROR] Created remediation issue #{new_issue_id} but failed to notify originating issue #{issue_id}: {err}", file=sys.stderr)
+        return None
 
     return new_issue_id
 
@@ -363,6 +361,10 @@ def deploy_preview(
     dry_run: bool = False,
 ) -> int:
     """Executes full preview deployment procedure."""
+    if not wait and not preview_url:
+        print("[ERROR] --no-wait requires an explicit --url because the preview URL cannot be determined before deployment completes.", file=sys.stderr)
+        return 1
+
     # 1. Enforce merged commit invariant
     is_merged, resolved_sha = verify_commit_merged(commit_sha)
     if not is_merged:
@@ -370,6 +372,7 @@ def deploy_preview(
         return 1
 
     commit_sha = resolved_sha
+    default_branch = get_default_branch() or "main"
 
     if not issue_id:
         issue_id = get_originating_issue(commit_sha)
@@ -380,11 +383,12 @@ def deploy_preview(
 
     print(f"Deploying preview for commit {commit_sha[:7]} (originating issue #{issue_id})...")
 
-    pre_existing_runs = get_existing_run_ids(workflow_name, commit_sha) if not dry_run else set()
+    pre_existing_runs = get_existing_run_ids(workflow_name, branch=default_branch) if not dry_run else set()
     run_id = dispatch_cd_workflow(
         commit_sha,
         workflow_name=workflow_name,
         pre_existing_run_ids=pre_existing_runs,
+        default_branch=default_branch,
         dry_run=dry_run,
     )
     if run_id is None and not dry_run:
