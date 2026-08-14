@@ -77,30 +77,8 @@ VERIFY_PLACEHOLDERS = frozenset({
     "placeholder",
 })
 
-VERIFY_OPT_OUT_PREFIXES = (
-    "manual:",
-    "manual -",
-    "opt-out:",
-    "opt-out -",
-    "exempt:",
-    "exempt -",
-    "non-executable:",
-    "non-executable -",
-    "n/a -",
-    "none -",
-)
 
-PROSE_VERIFY_WORDS = frozenset({
-    "manually",
-    "visually",
-    "eyeball",
-    "click",
-    "browse",
-    "human",
-})
-
-
-def _is_valid_verify_command(cmd: str) -> bool:
+def _is_valid_fenced_verify_command(cmd: str) -> bool:
     cleaned = cmd.strip("`'\" \t\r\n").strip()
     if not cleaned:
         return False
@@ -109,40 +87,32 @@ def _is_valid_verify_command(cmd: str) -> bool:
         return False
     if re.match(r"^(?:<.*>|\.{3,}|todo|tbd|none|n/a)$", lower):
         return False
-
-    if any(lower.startswith(prefix) for prefix in VERIFY_OPT_OUT_PREFIXES):
-        return True
-
-    tokens = [t.strip(".,;:!?()[]{}") for t in lower.split()]
-    if not tokens:
-        return False
-
-    if any(t in PROSE_VERIFY_WORDS for t in tokens):
-        return False
-    if tokens[0] in {"ensure", "verify", "check", "see", "make", "inspect", "browse", "test", "look"} and len(tokens) > 2:
-        return False
-
-    first_token = tokens[0]
-    if re.match(r"^[a-zA-Z0-9_\-\./]+$", first_token):
-        return True
-    return False
+    return True
 
 
 def _is_criterion_machine_checkable(criterion: str) -> bool:
-    """Checks if an individual criterion has an executable verify command, structured assertion, or opt-out."""
-    verify_pattern = re.compile(
-        r"\(verify:\s*([^)]+)\)"
-        r"|\bverify(?:_cmd)?\s*:\s*([^\n,)]+)",
+    """Checks if an individual criterion has a structural backticked verify command, assertion, or opt-out."""
+    # 1. Structural backticked verify command: (verify: `cmd`) or verify: `cmd`
+    fenced_verify_pattern = re.compile(
+        r"\((?:verify|verify_cmd):\s*`([^`]+)`\)"
+        r"|\b(?:verify|verify_cmd)\s*:\s*`([^`]+)`",
         re.IGNORECASE,
     )
-    for m in verify_pattern.finditer(criterion):
-        cmd_match = m.group(1) or m.group(2)
-        if cmd_match and _is_valid_verify_command(cmd_match):
+    for m in fenced_verify_pattern.finditer(criterion):
+        cmd = m.group(1) or m.group(2)
+        if cmd and _is_valid_fenced_verify_command(cmd):
             return True
 
-    if re.search(r"\[(?:manual|opt-out|exempt|non-executable)\s*[:\-][^\]]+\]", criterion, re.IGNORECASE):
+    # 2. Explicit machine-readable opt-out: (verify: manual - reason) or [manual: reason]
+    opt_out_pattern = re.compile(
+        r"\((?:verify|verify_cmd):\s*(?:manual|opt-out|exempt|non-executable)\s*[:\-]\s*([^)]+)\)"
+        r"|\[(?:manual|opt-out|exempt|non-executable)\s*[:\-]\s*([^\]]+)\]",
+        re.IGNORECASE,
+    )
+    if opt_out_pattern.search(criterion):
         return True
 
+    # 3. Structured assertions / invariants / exit codes / exceptions
     assertion_pattern = re.compile(
         r"\bexits?\s+(?:with\s+code\s+)?(?:0|1|non-zero)\b"
         r"|\breturns?\s+(?:code\s+)?(?:0|1|true|false)\b"
