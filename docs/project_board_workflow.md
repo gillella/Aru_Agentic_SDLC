@@ -113,16 +113,18 @@ hook, not a path-parser gap. No separate hook-fix issue was filed.
 
 `scripts/enable_main_ruleset.py` creates ruleset `aru-protect-main`: pull
 requests required, and the CI job name from `.github/workflows/ci.yml` as
-the required status check. Default enforcement is `evaluate` so a mismatched
-check name cannot lock `main`. `--disable` and `--delete` are the inverse.
+the required status check. Default enforcement is `active` (#133) so direct
+pushes to `main` are refused by GitHub. `--disable` and `--delete` are the inverse.
 **Required approving review is off** — GitHub will not let the fleet account
 approve its own PRs, so that rule would deadlock every fleet-authored PR
 until #123. **Required linear history is off** — it would forbid merge
 commits and fight #89.
 
-On this private repository the Rulesets API currently returns HTTP 403
-(GitHub Pro or public visibility required). `--apply` exits 3 in that case.
-Live `enforcement: active` and the scratch-clone push test are #133.
+On public repositories or private repositories owned by a GitHub Pro account,
+`--apply` exits 0 and activates the `aru-protect-main` ruleset with its default
+`active` enforcement. Explicit `--enforcement evaluate` or `--enforcement
+disabled` arguments override that default. `--apply` exits 3 if GitHub returns
+HTTP 403.
 
 ### Closing out a review finding
 
@@ -167,5 +169,4 @@ python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" [--json]
 | **`waiting`** | `2` | Active work in flight, Ready/In Progress/In Review/Backlog issues, pending CI, pending reviews, or worktree cleanup. |
 | **`blocked`** | `3` | Issues/PRs carrying human escalation labels, `needs-design`, unresolvable project board identity, or exhausted review/remediation rounds. |
 | **`error`** | `1` | GitHub API/auth failures; fails closed. |
-
 

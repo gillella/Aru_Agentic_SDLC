@@ -5,9 +5,8 @@ Required approving review and required linear history are deliberately
 absent. The former deadlocks a same-account fleet (#123 / S0.7a). The
 latter forbids merge commits and fights #89 / S1.1.
 
-Default enforcement is ``evaluate`` so a misnamed status check cannot
-lock the factory out. ``--enforcement active`` is #133. ``--disable`` and
-``--delete`` are the inverse of ``--apply``.
+Default enforcement is ``active`` so direct pushes to main are refused
+by the server (#133). ``--disable`` and ``--delete`` are the inverse of ``--apply``.
 
 A 403 from GitHub because the plan does not include rulesets is exit 3,
 not a silent success.
@@ -46,7 +45,7 @@ def ci_context_from_workflow(path: Path = WORKFLOW) -> str:
     raise ValueError(f"{path} has no test-and-lint job name")
 
 
-def ruleset_payload(enforcement: str = "evaluate") -> Dict[str, Any]:
+def ruleset_payload(enforcement: str = "active") -> Dict[str, Any]:
     return {
         "name": RULESET_NAME,
         "target": "branch",
@@ -73,6 +72,7 @@ def ruleset_payload(enforcement: str = "evaluate") -> Dict[str, Any]:
                 "type": "required_status_checks",
                 "parameters": {
                     "strict_required_status_checks_policy": True,
+                    "do_not_enforce_on_create": False,
                     "required_status_checks": [
                         {"context": ci_context_from_workflow()}
                     ],
@@ -177,7 +177,7 @@ def _blocked_message(detail: str) -> int:
     return EXIT_BLOCKED
 
 
-def apply_ruleset(slug: str, enforcement: str = "evaluate") -> int:
+def apply_ruleset(slug: str, enforcement: str = "active") -> int:
     payload = ruleset_payload(enforcement)
     assert_safe_payload(payload)
     status, existing, detail = find_existing_id(slug)
@@ -258,8 +258,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--enforcement",
         choices=("evaluate", "active", "disabled"),
-        default="evaluate",
-        help="evaluate is the default so a bad check name cannot lock main.",
+        default="active",
+        help="active is the default live enforcement for protecting main.",
     )
     args = parser.parse_args(argv)
     payload = ruleset_payload(args.enforcement)
