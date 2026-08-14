@@ -46,10 +46,16 @@ CI_FAIL_ATTN = 0.5
 REWORK_WARN = 2
 REWORK_ATTN = 3
 _SEV_RANK = {"ok": 0, "warn": 1, "attn": 2}
-_PASSING_CHECKS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-_PENDING_CHECKS = {
-    "", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED",
+_CI_FAILED_CONCLUSIONS = {"FAILURE", "FAILED", "TIMED_OUT", "STARTUP_FAILURE"}
+_CI_COMPLETED_CONCLUSIONS = _CI_FAILED_CONCLUSIONS | {
+    "SUCCESS", "NEUTRAL", "SKIPPED", "CANCELLED",
 }
+_QUEUED_AT_RE = re.compile(r"review-queued-at:\s*(\S+)")
+_REWORK_CLEAN_RE = re.compile(r"\bno blocking\b|\bno findings\b", re.I)
+_REWORK_BLOCKING_RE = re.compile(
+    r"changes[\s_-]*requested|blocking finding|\*\*blocking:\*\*",
+    re.I,
+)
 
 LINE_CEILING = 400
 SKIP_DIR_NAMES = {
@@ -96,7 +102,7 @@ CODE_FILE_SUFFIXES = frozenset({
 
 PR_FIELDS = (
     "number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
-    "createdAt,headRefName,body,reviewDecision,mergeStateStatus,state"
+    "createdAt,headRefName,body,comments,reviewDecision,mergeStateStatus,state"
 )
 
 
@@ -204,7 +210,7 @@ def _parse_ts(value: Any) -> Optional[datetime]:
 
 
 def _hours_ago(value: Any, now: datetime) -> Optional[float]:
-    parsed = _parse_ts(value)
+    parsed = value if isinstance(value, datetime) else _parse_ts(value)
     if parsed is None:
         return None
     hours = (now - parsed).total_seconds() / 3600.0
@@ -223,26 +229,85 @@ def _question(key: str, title: str, severity: str, summary: str, **payload: Any)
     return {"key": key, "title": title, "severity": severity, "summary": summary, **payload}
 
 
-def _ready_question(issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+def resolve_fleet_size(configured: Optional[int] = None) -> Optional[int]:
+    """Prefer an explicit count; otherwise read ARU_FLEET_SIZE. Never infer from claims."""
+    if configured is not None:
+        return configured if configured >= 0 else None
+    raw = os.environ.get("ARU_FLEET_SIZE", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def fetch_ci_history(window_days: int) -> List[Dict[str, Any]]:
+    """Windowed Actions runs, including failed attempts later rerun green."""
+    from factory_metrics import fetch_ci_runs
+    return fetch_ci_runs(window_days)
+
+
+def _comment_bodies(pr: Dict[str, Any]) -> List[str]:
+    bodies = [pr.get("body") or ""]
+    for comment in pr.get("comments") or []:
+        if isinstance(comment, dict):
+            bodies.append(comment.get("body") or "")
+        elif isinstance(comment, str):
+            bodies.append(comment)
+    return bodies
+
+
+def _latest_queued_at(pr: Dict[str, Any]) -> Optional[datetime]:
+    stamps = []
+    for body in _comment_bodies(pr):
+        for match in _QUEUED_AT_RE.finditer(body):
+            parsed = _parse_ts(match.group(1))
+            if parsed is not None:
+                stamps.append(parsed)
+    return max(stamps) if stamps else None
+
+
+def _has_reviewed_by(pr: Dict[str, Any]) -> bool:
+    return any(
+        name.startswith("reviewed-by:") and name.split(":", 1)[-1]
+        for name in label_names(pr)
+    )
+
+
+def _ready_severity(
+    ready_depth: int, fleet_size: Optional[int], claimable: int
+) -> tuple[str, str]:
+    if fleet_size is None:
+        return "warn", " — fleet size unavailable"
+    if ready_depth < fleet_size:
+        return "attn", " — factory is starved"
+    if claimable < fleet_size:
+        return "warn", " — path conflicts starve extra agents"
+    return "ok", ""
+
+
+def _ready_question(
+    issues: List[Dict[str, Any]], fleet_size: Optional[int] = None
+) -> Dict[str, Any]:
     from triage_backlog import capacity, partition
 
     _, ready, held = partition(issues)
     cap = capacity(ready, held)
     ready_depth = cap["ready_total"]
-    fleet_size = len(held)
+    in_flight = len(held)
     claimable = len(cap["concurrent"])
-    if ready_depth < fleet_size:
-        severity, note = "attn", " — factory is starved"
-    elif claimable < fleet_size:
-        severity, note = "warn", " — path conflicts starve extra agents"
-    else:
-        severity, note = "ok", ""
+    severity, note = _ready_severity(ready_depth, fleet_size, claimable)
+    fleet_text = "" if fleet_size is None else f"; fleet {fleet_size}"
     summary = (
-        f"{ready_depth} Ready, {fleet_size} in flight, {claimable} claimable{note}"
+        f"{ready_depth} Ready, {in_flight} in flight, {claimable} claimable"
+        f"{fleet_text}{note}"
     )
     return _question(
         "ready_depth", "Ready depth vs fleet size", severity, summary,
-        ready_depth=ready_depth, fleet_size=fleet_size, claimable=claimable,
+        ready_depth=ready_depth, fleet_size=fleet_size, in_flight=in_flight,
+        claimable=claimable,
     )
 
 
@@ -299,6 +364,10 @@ def _holders_question(issues: List[Dict[str, Any]], prs: List[Dict[str, Any]], n
 
 
 def _pending_review(pr: Dict[str, Any]) -> bool:
+    if pr.get("isDraft"):
+        return False
+    if _has_reviewed_by(pr):
+        return False
     decision = (pr.get("reviewDecision") or "").upper()
     return decision not in {"APPROVED", "CHANGES_REQUESTED"}
 
@@ -308,7 +377,8 @@ def _review_age_question(prs: List[Dict[str, Any]], now: datetime) -> Dict[str, 
     for pr in prs:
         if not _pending_review(pr):
             continue
-        age = _hours_ago(pr.get("createdAt"), now)
+        queued = _latest_queued_at(pr)
+        age = _hours_ago(queued, now) if queued is not None else None
         pending.append({
             "number": pr["number"], "age_hours": age,
             "age_availability": "measured" if age is not None else "unavailable",
@@ -335,12 +405,20 @@ def _review_age_question(prs: List[Dict[str, Any]], now: datetime) -> Dict[str, 
     )
 
 
+def _is_rework_review(review: Dict[str, Any]) -> bool:
+    state = (review.get("state") or "").upper()
+    if state == "CHANGES_REQUESTED":
+        return True
+    if state != "COMMENTED":
+        return False
+    body = review.get("body") or ""
+    if _REWORK_CLEAN_RE.search(body):
+        return False
+    return bool(_REWORK_BLOCKING_RE.search(body))
+
+
 def _review_rounds(pr: Dict[str, Any]) -> int:
-    counted = {"CHANGES_REQUESTED", "COMMENTED"}
-    return sum(
-        1 for review in (pr.get("reviews") or [])
-        if (review.get("state") or "").upper() in counted
-    )
+    return sum(1 for review in (pr.get("reviews") or []) if _is_rework_review(review))
 
 
 def _review_rounds_question(prs: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -362,45 +440,52 @@ def _review_rounds_question(prs: List[Dict[str, Any]]) -> Dict[str, Any]:
     )
 
 
-def _check_failed(check: Dict[str, Any]) -> Optional[bool]:
-    status = (check.get("status") or "").upper()
-    if status in _PENDING_CHECKS and not (check.get("conclusion") or check.get("state")):
+def _ci_run_failed(run: Dict[str, Any]) -> Optional[bool]:
+    status = (run.get("status") or "").upper()
+    conclusion = (run.get("conclusion") or "").upper()
+    if status in {"IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "REQUESTED"} and not conclusion:
         return None
-    conclusion = (check.get("conclusion") or check.get("state") or "").upper()
-    if conclusion in _PENDING_CHECKS or status in _PENDING_CHECKS and conclusion == "":
+    if not conclusion:
         return None
-    return conclusion not in _PASSING_CHECKS
+    if conclusion not in _CI_COMPLETED_CONCLUSIONS and status != "COMPLETED":
+        return None
+    return conclusion in _CI_FAILED_CONCLUSIONS
 
 
-def _ci_question(prs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _ci_question(
+    ci_runs: Optional[List[Dict[str, Any]]] = None,
+    ci_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    if ci_error or ci_runs is None:
+        detail = f"unavailable ({ci_error})" if ci_error else "unavailable"
+        return _question(
+            "ci_failure_rate", "CI failure rate", "warn", detail,
+            availability="unavailable",
+        )
     completed = 0
     failed = 0
-    for pr in prs:
-        for check in pr.get("statusCheckRollup") or []:
-            result = _check_failed(check)
-            if result is None:
-                continue
-            completed += 1
-            if result:
-                failed += 1
+    for run in ci_runs:
+        result = _ci_run_failed(run)
+        if result is None:
+            continue
+        completed += 1
+        if result:
+            failed += 1
     rate = round(failed / completed, 4) if completed else None
     if rate is not None and rate >= CI_FAIL_ATTN:
         severity = "attn"
     elif rate is not None and rate >= CI_FAIL_WARN:
         severity = "warn"
-    elif prs and completed == 0:
-        severity = "warn"
     else:
         severity = "ok"
-    if not prs:
-        summary = "no open PRs"
-    elif completed == 0:
-        summary = "no completed CI checks on open PRs"
+    if completed == 0:
+        summary = "no completed CI runs in window"
     else:
         summary = f"{failed}/{completed} failed ({rate:.0%})"
     return _question(
         "ci_failure_rate", "CI failure rate", severity, summary,
         failed=failed, completed=completed, failure_rate=rate,
+        availability="measured",
     )
 
 
@@ -449,18 +534,35 @@ def build_operator_screen(
     now: Optional[datetime] = None,
     closed_issues: Optional[Dict[str, Any]] = None,
     metrics_error: Optional[str] = None,
+    fleet_size: Optional[int] = None,
+    ci_runs: Optional[List[Dict[str, Any]]] = None,
+    ci_error: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Answer the six §4.2 questions from already-fetched board and PR facts."""
     clock = now or datetime.now(timezone.utc)
     questions = [
-        _ready_question(issues),
+        _ready_question(issues, fleet_size),
         _holders_question(issues, prs, clock),
         _review_age_question(prs, clock),
         _review_rounds_question(prs),
-        _ci_question(prs),
+        _ci_question(ci_runs, ci_error),
         _cost_question(closed_issues, metrics_error),
     ]
     return {"questions": questions, "severity": _worst_severity(q["severity"] for q in questions)}
+
+
+def apply_ci_failure_rate(
+    screen: Optional[Dict[str, Any]],
+    ci_runs: Optional[List[Dict[str, Any]]],
+    ci_error: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if not screen:
+        return screen
+    questions = [q for q in screen.get("questions") or [] if q.get("key") != "ci_failure_rate"]
+    questions.insert(4, _ci_question(ci_runs, ci_error))
+    screen["questions"] = questions
+    screen["severity"] = _worst_severity(q["severity"] for q in questions)
+    return screen
 
 
 def apply_closed_issue_cost(
@@ -490,12 +592,15 @@ def _with_operator_screen(
     status: Dict[str, Any],
     issues: List[Dict[str, Any]],
     prs: List[Dict[str, Any]],
+    fleet_size: Optional[int] = None,
 ) -> Dict[str, Any]:
-    status["operator_screen"] = build_operator_screen(issues, prs)
+    status["operator_screen"] = build_operator_screen(issues, prs, fleet_size=fleet_size)
     return status
 
 
-def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
+def evaluate_fleet_status(
+    repo_dir: str = ".", fleet_size: Optional[int] = None
+) -> Dict[str, Any]:
     """Calculates authoritative factory state for ``repo_dir``."""
     try:
         target = os.path.abspath(repo_dir)
@@ -513,7 +618,7 @@ def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
     original = os.getcwd()
     try:
         os.chdir(target)
-        status = _evaluate_current_repo()
+        status = _evaluate_current_repo(fleet_size)
     except OSError as exc:
         return _error(
             f"Could not evaluate repository directory '{target}': {exc}",
@@ -526,7 +631,7 @@ def evaluate_fleet_status(repo_dir: str = ".") -> Dict[str, Any]:
     return status
 
 
-def _evaluate_current_repo() -> Dict[str, Any]:
+def _evaluate_current_repo(fleet_size: Optional[int] = None) -> Dict[str, Any]:
     """Calculates state after the caller has selected the repository cwd."""
     slug = get_repo_slug()
     if not slug:
@@ -678,7 +783,7 @@ def _evaluate_current_repo() -> Dict[str, Any]:
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
-        }, issues, prs)
+        }, issues, prs, fleet_size)
 
     if waiting_reasons or issues or prs:
         return _with_operator_screen({
@@ -692,7 +797,7 @@ def _evaluate_current_repo() -> Dict[str, Any]:
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
-        }, issues, prs)
+        }, issues, prs, fleet_size)
 
     return _with_operator_screen({
         "state": "complete",
@@ -705,7 +810,7 @@ def _evaluate_current_repo() -> Dict[str, Any]:
         "active_claims": [],
         "orphans": [],
         "drifted": [],
-    }, issues, prs)
+    }, issues, prs, fleet_size)
 
 
 def main():
@@ -715,12 +820,28 @@ def main():
     parser.add_argument("--metrics", action="store_true", help="Include opt-in closed-issue cost/cycle metrics")
     parser.add_argument("--metrics-window-days", type=int, default=30, help="Closed-issue metrics window")
     parser.add_argument("--metrics-usage-file", help="Optional measured local CLI usage JSON/JSONL")
+    parser.add_argument(
+        "--fleet-size", type=int, default=None,
+        help="Configured/launched agent count (or set ARU_FLEET_SIZE)",
+    )
     args = parser.parse_args()
 
-    status = evaluate_fleet_status(args.repo_dir)
-    closed = None
-    metrics_error = None
-    if status.get("state") != "error":
+    status = evaluate_fleet_status(
+        args.repo_dir, fleet_size=resolve_fleet_size(args.fleet_size),
+    )
+    if status.get("operator_screen") and status.get("state") != "error":
+        ci_error = None
+        ci_runs = None
+        try:
+            if args.metrics_window_days <= 0:
+                raise RuntimeError("--metrics-window-days must be positive.")
+            ci_runs = fetch_ci_history(args.metrics_window_days)
+        except (RuntimeError, TypeError, ValueError, KeyError) as exc:
+            ci_error = str(exc)
+        apply_ci_failure_rate(status.get("operator_screen"), ci_runs, ci_error)
+    if args.metrics and status.get("state") != "error":
+        closed = None
+        metrics_error = None
         try:
             if args.metrics_window_days <= 0:
                 raise RuntimeError("--metrics-window-days must be positive.")
@@ -732,8 +853,7 @@ def main():
             )["closed_issues"]
         except (RuntimeError, TypeError, ValueError, KeyError) as exc:
             metrics_error = str(exc)
-    apply_closed_issue_cost(status.get("operator_screen"), closed, metrics_error)
-    if args.metrics:
+        apply_closed_issue_cost(status.get("operator_screen"), closed, metrics_error)
         if closed is not None:
             status["factory_metrics"] = closed
         else:

@@ -15,9 +15,13 @@ from fleet_status import (  # noqa: E402
     EXIT_ERROR,
     EXIT_WAITING,
     LINE_CEILING,
+    apply_ci_failure_rate,
+    apply_closed_issue_cost,
+    build_operator_screen,
     collect_codebase_health,
     evaluate_fleet_status,
     format_operator_screen,
+    resolve_fleet_size,
 )
 
 
@@ -82,7 +86,7 @@ def mock_project_item(status="Ready", repo_slug="octocat/widgets"):
 
 
 class FleetStatusTests(unittest.TestCase):
-    def evaluate_fixture(self, issues=None, prs=None, items=None):
+    def evaluate_fixture(self, issues=None, prs=None, items=None, fleet_size=None):
         issues = [] if issues is None else issues
         prs = [] if prs is None else prs
         item_map = {} if items is None else items
@@ -97,7 +101,7 @@ class FleetStatusTests(unittest.TestCase):
                 side_effect=lambda number: item_map.get(number, [mock_project_item()]),
             ),
         ):
-            return evaluate_fleet_status(".")
+            return evaluate_fleet_status(".", fleet_size=fleet_size)
 
     def test_complete_state_when_board_and_repo_are_empty(self):
         status = self.evaluate_fixture()
@@ -391,8 +395,9 @@ class FleetStatusTests(unittest.TestCase):
                 "cost",
             ],
         )
-        self.assertEqual(questions(status)["ready_depth"]["severity"], "ok")
-        self.assertIn("[OK]", format_operator_screen(status["operator_screen"]))
+        self.assertEqual(questions(status)["ready_depth"]["severity"], "warn")
+        self.assertIn("fleet size unavailable", questions(status)["ready_depth"]["summary"])
+        self.assertIn("[WARN]", format_operator_screen(status["operator_screen"]))
 
     def test_ready_depth_marks_starved_fleet(self):
         status = self.evaluate_fixture(
@@ -403,12 +408,23 @@ class FleetStatusTests(unittest.TestCase):
                 )
             ],
             items={21: [mock_project_item("In Progress")]},
+            fleet_size=1,
         )
         ready = questions(status)["ready_depth"]
         self.assertEqual(ready["severity"], "attn")
         self.assertEqual(ready["ready_depth"], 0)
         self.assertEqual(ready["fleet_size"], 1)
+        self.assertEqual(ready["in_flight"], 1)
         self.assertIn("[ATTN]", format_operator_screen(status["operator_screen"]))
+
+    def test_idle_configured_fleet_is_starved_when_ready_is_empty(self):
+        status = self.evaluate_fixture(fleet_size=4)
+        ready = questions(status)["ready_depth"]
+        self.assertEqual(ready["severity"], "attn")
+        self.assertEqual(ready["ready_depth"], 0)
+        self.assertEqual(ready["in_flight"], 0)
+        self.assertEqual(ready["fleet_size"], 4)
+        self.assertIn("starved", ready["summary"])
 
     def test_holders_mark_stale_claims(self):
         status = self.evaluate_fixture(
@@ -431,11 +447,8 @@ class FleetStatusTests(unittest.TestCase):
                 mock_pr(
                     30,
                     createdAt=hours_ago(10),
+                    comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
                     reviews=[{"state": "CHANGES_REQUESTED"}, {"state": "CHANGES_REQUESTED"}],
-                    statusCheckRollup=[
-                        {"name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"},
-                        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
-                    ],
                 )
             ]
         )
@@ -445,9 +458,48 @@ class FleetStatusTests(unittest.TestCase):
         self.assertGreaterEqual(asked["review_age"]["oldest_age_hours"], 8)
         self.assertEqual(asked["review_rounds"]["severity"], "warn")
         self.assertEqual(asked["review_rounds"]["max_review_rounds"], 2)
-        self.assertEqual(asked["ci_failure_rate"]["failed"], 1)
-        self.assertEqual(asked["ci_failure_rate"]["completed"], 2)
-        self.assertEqual(asked["ci_failure_rate"]["severity"], "attn")
+        self.assertEqual(asked["ci_failure_rate"]["availability"], "unavailable")
+
+    def test_review_age_ignores_drafts_and_completed_reviews(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    32, isDraft=True,
+                    comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
+                ),
+                mock_pr(
+                    33, "reviewed-by:codex-1",
+                    comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
+                ),
+            ]
+        )
+        asked = questions(status)["review_age"]
+        self.assertEqual(asked["pending"], [])
+        self.assertEqual(asked["severity"], "ok")
+
+    def test_review_age_uses_queued_at_not_created_at(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    34,
+                    createdAt=hours_ago(48),
+                    comments=[{"body": f"review-queued-at: {hours_ago(1)}"}],
+                )
+            ]
+        )
+        asked = questions(status)["review_age"]
+        self.assertEqual(asked["pending"][0]["age_availability"], "measured")
+        self.assertLess(asked["oldest_age_hours"], 2)
+        self.assertEqual(asked["severity"], "ok")
+
+    def test_review_age_without_queue_stamp_is_unavailable(self):
+        status = self.evaluate_fixture(
+            prs=[mock_pr(35, createdAt=hours_ago(48))]
+        )
+        asked = questions(status)["review_age"]
+        self.assertEqual(asked["pending"][0]["age_availability"], "unavailable")
+        self.assertIsNone(asked["oldest_age_hours"])
+        self.assertEqual(asked["severity"], "warn")
 
     def test_review_rounds_count_same_account_commented_reviews(self):
         status = self.evaluate_fixture(
@@ -464,12 +516,77 @@ class FleetStatusTests(unittest.TestCase):
             ]
         )
         asked = questions(status)["review_rounds"]
-        self.assertEqual(asked["max_review_rounds"], 3)
-        self.assertEqual(asked["severity"], "attn")
+        self.assertEqual(asked["max_review_rounds"], 0)
+        self.assertEqual(asked["severity"], "ok")
+
+    def test_review_rounds_count_blocking_commented_reviews_only(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    36,
+                    reviews=[
+                        {
+                            "state": "COMMENTED",
+                            "body": "Verdict: **CHANGES REQUESTED**. Blocking finding below.",
+                        },
+                        {
+                            "state": "COMMENTED",
+                            "body": "Verdict: no blocking findings. LGTM.",
+                        },
+                    ],
+                )
+            ]
+        )
+        asked = questions(status)["review_rounds"]
+        self.assertEqual(asked["max_review_rounds"], 1)
+        self.assertEqual(asked["severity"], "ok")
+
+    def test_ci_failure_rate_counts_failed_then_green_reruns(self):
+        screen = build_operator_screen([], [])
+        apply_ci_failure_rate(
+            screen,
+            [
+                {"status": "completed", "conclusion": "failure", "pull_requests": [{"number": 1}]},
+                {"status": "completed", "conclusion": "success", "pull_requests": [{"number": 1}]},
+            ],
+            None,
+        )
+        ci = {item["key"]: item for item in screen["questions"]}["ci_failure_rate"]
+        self.assertEqual(ci["failed"], 1)
+        self.assertEqual(ci["completed"], 2)
+        self.assertEqual(ci["failure_rate"], 0.5)
+        self.assertEqual(ci["severity"], "attn")
+        self.assertEqual(ci["availability"], "measured")
+
+    def test_resolve_fleet_size_reads_env_and_rejects_invalid(self):
+        with patch.dict(os.environ, {"ARU_FLEET_SIZE": "4"}, clear=False):
+            self.assertEqual(resolve_fleet_size(None), 4)
+        with patch.dict(os.environ, {"ARU_FLEET_SIZE": "nope"}, clear=False):
+            self.assertIsNone(resolve_fleet_size(None))
+        self.assertEqual(resolve_fleet_size(3), 3)
+        self.assertIsNone(resolve_fleet_size(-1))
+
+    def test_default_main_skips_closed_issue_collection(self):
+        status = {
+            "state": "waiting",
+            "exit_code": EXIT_WAITING,
+            "summary": "waiting",
+            "operator_screen": {"questions": [], "severity": "ok"},
+        }
+        with (
+            patch("fleet_status.evaluate_fleet_status", return_value=status),
+            patch("fleet_status.fetch_ci_history", return_value=[]),
+            patch("factory_metrics.collect_factory_metrics") as collect,
+            patch("sys.argv", ["fleet_status.py", "--json"]),
+            patch("builtins.print"),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            from fleet_status import main
+            main()
+        self.assertEqual(raised.exception.code, EXIT_WAITING)
+        collect.assert_not_called()
 
     def test_cost_question_uses_measured_closed_issue_metrics(self):
-        from fleet_status import apply_closed_issue_cost, build_operator_screen
-
         screen = build_operator_screen([], [])
         apply_closed_issue_cost(
             screen,
