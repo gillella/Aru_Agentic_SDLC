@@ -7,6 +7,7 @@ GitHub remains the work queue. Slack downtime must not halt factory work.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -15,7 +16,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -211,23 +212,37 @@ def format_github_alert_comment(event: Dict[str, Any], secrets: Optional[list[st
 
 
 class DedupeCache:
+    """In-memory dedupe. Peek does not record; remember persists after success."""
+
     def __init__(self, ttl_seconds: int = 3600) -> None:
         self.ttl = ttl_seconds
         self._seen: Dict[str, float] = {}
 
-    def seen(self, key: str, now: Optional[float] = None) -> bool:
-        clock = time.time() if now is None else now
+    def _purge(self, clock: float) -> None:
         expired = [item for item, exp in self._seen.items() if exp <= clock]
         for item in expired:
             del self._seen[item]
-        if key in self._seen:
-            return True
+
+    def contains(self, key: str, now: Optional[float] = None) -> bool:
+        clock = time.time() if now is None else now
+        self._purge(clock)
+        return key in self._seen
+
+    def remember(self, key: str, now: Optional[float] = None) -> None:
+        clock = time.time() if now is None else now
+        self._purge(clock)
         self._seen[key] = clock + self.ttl
+
+    def seen(self, key: str, now: Optional[float] = None) -> bool:
+        """Backward-compatible: True if already present; otherwise record and return False."""
+        if self.contains(key, now=now):
+            return True
+        self.remember(key, now=now)
         return False
 
 
 class FileDedupeCache(DedupeCache):
-    """Process-restart durable dedupe for alert heartbeats."""
+    """Lock-protected, restart-durable dedupe for factory alerts."""
 
     def __init__(self, path: Path = DEDUPE_PATH, ttl_seconds: int = 3600) -> None:
         super().__init__(ttl_seconds=ttl_seconds)
@@ -235,12 +250,24 @@ class FileDedupeCache(DedupeCache):
         self._load()
 
     def _load(self) -> None:
-        if not self.path.is_file():
+        try:
+            from slack_projects import RegistryError, read_secure_json
+        except ImportError:
+            if not self.path.is_file():
+                return
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return
+            self._ingest(payload)
             return
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            payload = read_secure_json(self.path, {"entries": {}})
+        except RegistryError:
             return
+        self._ingest(payload)
+
+    def _ingest(self, payload: Any) -> None:
         entries = payload.get("entries") if isinstance(payload, dict) else None
         if not isinstance(entries, dict):
             return
@@ -253,24 +280,65 @@ class FileDedupeCache(DedupeCache):
             if expiry > clock:
                 self._seen[str(key)] = expiry
 
-    def _save(self) -> None:
-        self.path.parent.mkdir(mode=0o700, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        payload = {"entries": self._seen}
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(tmp, self.path)
-        self.path.chmod(0o600)
+    def _persist(self) -> None:
+        snapshot = dict(self._seen)
 
-    def seen(self, key: str, now: Optional[float] = None) -> bool:
-        result = super().seen(key, now=now)
+        def update(payload: Any) -> Dict[str, Any]:
+            entries = payload.get("entries") if isinstance(payload, dict) else {}
+            if not isinstance(entries, dict):
+                entries = {}
+            clock = time.time()
+            merged = {
+                str(key): float(exp)
+                for key, exp in entries.items()
+                if _safe_float(exp) > clock
+            }
+            merged.update(snapshot)
+            return {"entries": merged}
+
         try:
-            self._save()
+            from slack_projects import RegistryError, mutate_secure_json
+        except ImportError:
+            self.path.parent.mkdir(mode=0o700, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"entries": snapshot}, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(tmp, self.path)
+            self.path.chmod(0o600)
+            return
+        try:
+            mutate_secure_json(self.path, {"entries": {}}, update)
+        except RegistryError:
+            pass
+
+    def contains(self, key: str, now: Optional[float] = None) -> bool:
+        self._load()
+        return super().contains(key, now=now)
+
+    def remember(self, key: str, now: Optional[float] = None) -> None:
+        super().remember(key, now=now)
+        try:
+            self._persist()
         except OSError:
             pass
-        return result
+
+    def seen(self, key: str, now: Optional[float] = None) -> bool:
+        if self.contains(key, now=now):
+            return True
+        self.remember(key, now=now)
+        return False
 
 
-def dedupe_key(event: Dict[str, Any]) -> str:
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _raw_dedupe_material(event: Dict[str, Any]) -> str:
     if event.get("dedupe_key"):
         return "|".join((str(event.get("project_id", "")), str(event["dedupe_key"])))
     parts = [
@@ -286,6 +354,14 @@ def dedupe_key(event: Dict[str, Any]) -> str:
             ]
         )
     return "|".join(parts)
+
+
+def dedupe_key(event: Dict[str, Any]) -> str:
+    """Stable digest so raw alert text (and secrets) never hit disk."""
+    material = _raw_dedupe_material(event)
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    project = str(event.get("project_id", "") or "unrouted")
+    return f"{project}|sha256:{digest}"
 
 
 Transport = Callable[[SlackConfig, str, Optional[str]], Dict[str, Any]]
@@ -324,13 +400,17 @@ def post_event(
     cache: Optional[DedupeCache] = None,
     thread_ts: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Post one event. Never raises for Slack/network failures."""
+    """Post one event. Never raises for Slack/network failures.
+
+    Dedupe keys are recorded only after a successful Slack delivery so a
+    transient outage can retry once Slack recovers.
+    """
     kind = str(event.get("type") or "").strip().lower()
     if kind in FORBIDDEN_TYPES:
         return {"ok": False, "error": "forbidden_event_type", "type": kind}
     cache = cache if cache is not None else DedupeCache()
     key = dedupe_key(event)
-    if cache.seen(key):
+    if cache.contains(key):
         return {"ok": True, "deduped": True}
     stamped = dict(event)
     if kind == "hitl" and not stamped.get("operator_user_id") and config.operator_user_id:
@@ -342,6 +422,7 @@ def post_event(
         return {"ok": False, "error": "slack_unavailable", "detail": type(exc).__name__}
     if not result.get("ok"):
         return {"ok": False, "error": result.get("error", "slack_rejected")}
+    cache.remember(key)
     return {"ok": True, "ts": result.get("ts")}
 
 
@@ -360,6 +441,16 @@ def default_github_comment(
 
 
 CommentFn = Callable[[str, int, str, str], bool]
+
+
+def alert_github_targets(event: Dict[str, Any]) -> List[Tuple[str, int]]:
+    """Prefer PR when present; comment on both when both issue and PR are set."""
+    targets: List[Tuple[str, int]] = []
+    if event.get("pr"):
+        targets.append(("pr", int(event["pr"])))
+    if event.get("issue"):
+        targets.append(("issue", int(event["issue"])))
+    return targets
 
 
 def notify_alert(
@@ -383,26 +474,40 @@ def notify_alert(
     if stamped.get("type") == "hitl" and not stamped.get("operator_user_id"):
         stamped["operator_user_id"] = config.operator_user_id
 
+    alert_cache = cache if cache is not None else FileDedupeCache()
+    key = dedupe_key(stamped)
+    github_key = f"github:{key}"
+    if alert_cache.contains(key):
+        return {
+            "ok": True,
+            "slack": {"ok": True, "deduped": True},
+            "github_ok": None,
+            "github_body": format_github_alert_comment(stamped, secrets=secrets),
+            "deduped": True,
+        }
+
     github_ok: Optional[bool] = None
     github_body = format_github_alert_comment(stamped, secrets=secrets)
-    if not skip_github:
-        target_kind = ""
-        target_number = 0
-        if stamped.get("issue"):
-            target_kind, target_number = "issue", int(stamped["issue"])
-        elif stamped.get("pr"):
-            target_kind, target_number = "pr", int(stamped["pr"])
-        if target_kind and target_number:
-            try:
-                github_ok = bool(comment(target_kind, target_number, github_body, repo_dir))
-            except (OSError, TypeError, ValueError):
-                github_ok = False
+    if not skip_github and not alert_cache.contains(github_key):
+        targets = alert_github_targets(stamped)
+        if targets:
+            outcomes = []
+            for target_kind, target_number in targets:
+                try:
+                    outcomes.append(
+                        bool(comment(target_kind, target_number, github_body, repo_dir))
+                    )
+                except (OSError, TypeError, ValueError):
+                    outcomes.append(False)
+            github_ok = all(outcomes) if outcomes else None
+            if github_ok:
+                alert_cache.remember(github_key)
 
     slack = post_event(
         config,
         stamped,
         transport=transport,
-        cache=cache if cache is not None else FileDedupeCache(),
+        cache=alert_cache,
     )
     return {
         "ok": bool(slack.get("ok")),

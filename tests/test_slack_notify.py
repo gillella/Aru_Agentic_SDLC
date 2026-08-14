@@ -141,6 +141,111 @@ class SlackNotifyTests(unittest.TestCase):
             dedupe_key({**base, "project_id": "proj_b", "dedupe_key": "event-1"}),
         )
 
+    def test_dedupe_key_hashes_sensitive_text(self):
+        secret = "xoxb-" + ("a" * 40)
+        key = dedupe_key(
+            {
+                "type": "hitl",
+                "agent": "cursor-1",
+                "project_id": "proj_a",
+                "text": f"leak {secret}",
+            }
+        )
+        self.assertNotIn(secret, key)
+        self.assertIn("sha256:", key)
+
+    def test_post_event_retries_after_slack_failure(self):
+        calls = []
+
+        def transport(config, text, thread_ts):
+            calls.append(text)
+            if len(calls) == 1:
+                raise URLError("down")
+            return {"ok": True, "ts": "2"}
+
+        cache = DedupeCache()
+        event = {"type": "blocked", "agent": "cursor-1", "issue": 1, "text": "x"}
+        first = post_event(sample_config(), event, transport=transport, cache=cache)
+        second = post_event(sample_config(), event, transport=transport, cache=cache)
+        self.assertFalse(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertFalse(second.get("deduped"))
+        self.assertEqual(len(calls), 2)
+
+    def test_notify_alert_dedupes_github_and_comments_pr(self):
+        comments = []
+        calls = []
+
+        def transport(config, text, thread_ts):
+            calls.append(text)
+            return {"ok": True, "ts": "1"}
+
+        def comment(kind, number, body, repo_dir):
+            comments.append((kind, number))
+            return True
+
+        cache = DedupeCache()
+        event = {
+            "type": "hitl",
+            "agent": "cursor-1",
+            "family": "openai",
+            "issue": 181,
+            "pr": 201,
+            "text": "merge close-out failed",
+            "project_id": "proj_a",
+        }
+        first = notify_alert(
+            sample_config(operator_user_id="U01234567"),
+            event,
+            transport=transport,
+            cache=cache,
+            comment=comment,
+        )
+        second = notify_alert(
+            sample_config(operator_user_id="U01234567"),
+            event,
+            transport=transport,
+            cache=cache,
+            comment=comment,
+        )
+        self.assertTrue(first["ok"])
+        self.assertTrue(second.get("deduped"))
+        self.assertEqual(comments, [("pr", 201), ("issue", 181)])
+        self.assertEqual(len(calls), 1)
+
+    def test_notify_alert_skips_github_on_slack_retry(self):
+        comments = []
+        calls = []
+
+        def transport(config, text, thread_ts):
+            calls.append(text)
+            if len(calls) == 1:
+                raise URLError("down")
+            return {"ok": True, "ts": "2"}
+
+        def comment(kind, number, body, repo_dir):
+            comments.append((kind, number))
+            return True
+
+        cache = DedupeCache()
+        event = {
+            "type": "blocked",
+            "agent": "cursor-1",
+            "issue": 9,
+            "text": "depends-on",
+            "project_id": "proj_a",
+        }
+        first = notify_alert(
+            sample_config(), event, transport=transport, cache=cache, comment=comment
+        )
+        second = notify_alert(
+            sample_config(), event, transport=transport, cache=cache, comment=comment
+        )
+        self.assertFalse(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(comments, [("issue", 9)])
+        self.assertEqual(len(calls), 2)
+
     def test_cli_requires_explicit_project_id(self):
         with self.assertRaises(SystemExit):
             main(["--agent", "codex-1", "--family", "openai", "--event", "state"])
