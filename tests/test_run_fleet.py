@@ -2,6 +2,7 @@ import io
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
@@ -253,6 +254,79 @@ class IterationTests(RunnerFixture):
 
 
 class LifecycleTests(RunnerFixture):
+    def test_stop_requested_during_startup_survives_stale_marker_clear(self):
+        store = rf.StateStore(self.state_dir, "codex-1")
+        store.directory.mkdir(parents=True)
+        store.stop_path.write_text("stale\n", encoding="utf-8")
+        clear_started = threading.Event()
+        request_started = threading.Event()
+        original_clear = store._clear_stop_unlocked
+
+        def delayed_clear():
+            clear_started.set()
+            self.assertTrue(request_started.wait(timeout=1.0))
+            original_clear()
+
+        def request_stop():
+            self.assertTrue(clear_started.wait(timeout=1.0))
+            request_started.set()
+            store.request_stop()
+
+        requester = threading.Thread(target=request_stop)
+        requester.start()
+        with patch.object(store, "_clear_stop_unlocked", side_effect=delayed_clear):
+            lock = store.acquire_lock(clear_stop=True)
+        requester.join(timeout=1.0)
+
+        self.assertFalse(requester.is_alive())
+        self.assertIsNotNone(lock)
+        self.addCleanup(store.release_lock, lock)
+        self.assertTrue(store.stop_requested())
+
+    def test_stop_during_status_prevents_picker_and_child_launch(self):
+        commands = FakeCommands([fleet()], [selection("issue", 45)])
+        launched = []
+        runner = self.runner(
+            commands,
+            lambda argv, cwd: launched.append((argv, cwd)) or 0,
+        )
+        original_commands = runner.command_runner
+
+        def stop_after_status(argv, cwd):
+            result = original_commands(argv, cwd)
+            if Path(argv[1]).name == "fleet_status.py":
+                runner.store.request_stop()
+            return result
+
+        runner.command_runner = stop_after_status
+        result = runner.run_iteration()
+
+        self.assertEqual(result.phase, "stopping")
+        self.assertEqual(len(commands.calls), 1)
+        self.assertEqual(launched, [])
+
+    def test_stop_during_selection_prevents_child_launch(self):
+        commands = FakeCommands([fleet()], [selection("issue", 45)])
+        launched = []
+        runner = self.runner(
+            commands,
+            lambda argv, cwd: launched.append((argv, cwd)) or 0,
+        )
+        original_commands = runner.command_runner
+
+        def stop_after_selection(argv, cwd):
+            result = original_commands(argv, cwd)
+            if Path(argv[1]).name == "fetch_next_work.py":
+                runner.store.request_stop()
+            return result
+
+        runner.command_runner = stop_after_selection
+        result = runner.run_iteration()
+
+        self.assertEqual(result.phase, "stopping")
+        self.assertEqual(len(commands.calls), 2)
+        self.assertEqual(launched, [])
+
     def test_second_runner_for_same_identity_is_refused(self):
         commands = FakeCommands([fleet("complete", issues=0)])
         first = self.runner(commands)
@@ -328,6 +402,31 @@ class LifecycleTests(RunnerFixture):
                         "once", "--repo", str(self.repo), "--agent", "codex-1",
                         "--family", "openai", option, "inf",
                     ])
+
+    def test_oversized_finite_timing_options_are_rejected(self):
+        for option in ("--initial-wait", "--max-wait", "--helper-timeout"):
+            with self.subTest(option=option):
+                with (
+                    patch.object(rf, "validate_repo", return_value=self.repo),
+                    redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    rf.main([
+                        "once", "--repo", str(self.repo), "--agent", "codex-1",
+                        "--family", "openai", option, "1e15",
+                    ])
+
+    def test_oversized_finite_jitter_is_safely_capped(self):
+        self.assertEqual(
+            rf.normalize_timing(
+                1e15,
+                "--jitter",
+                minimum=0.0,
+                maximum=1.0,
+                cap_upper=True,
+            ),
+            1.0,
+        )
 
     def test_complete_loop_exits_only_after_explicit_stop_file(self):
         commands = FakeCommands([fleet("complete", issues=0)])

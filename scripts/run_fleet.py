@@ -42,6 +42,8 @@ RECOVERABLE_PHASES = {
     "error_wait",
     "agent_unavailable_wait",
 }
+MAX_WAIT_SECONDS = 86_400.0
+MAX_HELPER_TIMEOUT_SECONDS = 3_600.0
 
 
 @dataclass(frozen=True)
@@ -232,17 +234,29 @@ class StateStore:
         self.path = directory / f"{agent}.json"
         self.stop_path = directory / f"{agent}.stop"
         self.lock_path = directory / f"{agent}.lock"
+        self.control_lock_path = directory / f"{agent}.control.lock"
 
-    def acquire_lock(self) -> Any | None:
-        """Hold one process per repository/agent identity until release."""
+    def _acquire_control_lock(self) -> Any:
         self.directory.mkdir(parents=True, exist_ok=True)
-        handle = self.lock_path.open("a+", encoding="utf-8")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            handle.close()
-            return None
+        handle = self.control_lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         return handle
+
+    def acquire_lock(self, *, clear_stop: bool = False) -> Any | None:
+        """Hold one process per repository/agent identity until release."""
+        control = self._acquire_control_lock()
+        try:
+            handle = self.lock_path.open("a+", encoding="utf-8")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.close()
+                return None
+            if clear_stop:
+                self._clear_stop_unlocked()
+            return handle
+        finally:
+            self.release_lock(control)
 
     @staticmethod
     def release_lock(handle: Any) -> None:
@@ -265,13 +279,23 @@ class StateStore:
         return value if isinstance(value, dict) else None
 
     def request_stop(self) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        self.stop_path.write_text(timestamp() + "\n", encoding="utf-8")
+        control = self._acquire_control_lock()
+        try:
+            self.stop_path.write_text(timestamp() + "\n", encoding="utf-8")
+        finally:
+            self.release_lock(control)
 
     def stop_requested(self) -> bool:
         return self.stop_path.exists()
 
     def clear_stop(self) -> None:
+        control = self._acquire_control_lock()
+        try:
+            self._clear_stop_unlocked()
+        finally:
+            self.release_lock(control)
+
+    def _clear_stop_unlocked(self) -> None:
         try:
             self.stop_path.unlink()
         except OSError:
@@ -430,9 +454,13 @@ class FleetRunner:
         return IterationResult(phase, delay, work_type, work_number)
 
     def run_iteration(self) -> IterationResult:
+        if self._stop_requested():
+            return IterationResult("stopping", 0.0)
         self.cycle += 1
         fleet = self._run_fleet_status()
         fleet_state = str(fleet.get("state") or "error")
+        if self._stop_requested():
+            return IterationResult("stopping", 0.0)
 
         if fleet_state == "complete":
             return self._park("complete_watch", fleet, {"type": "idle"})
@@ -444,6 +472,8 @@ class FleetRunner:
         selection = self._run_picker()
         work = selection.get("work") if isinstance(selection.get("work"), dict) else {"type": "error"}
         work_type, work_number = work_identity(work)
+        if self._stop_requested():
+            return IterationResult("stopping", 0.0, work_type, work_number)
         if work_type == "idle":
             return self._park("waiting", fleet, work)
         if work_type == "error":
@@ -481,6 +511,8 @@ class FleetRunner:
                 child_pid=child_pid,
             )
 
+        if self._stop_requested():
+            return IterationResult("stopping", 0.0, work_type, work_number)
         if self.agent_runner is None:
             child_code = run_agent(argv, self.config.repo, record_child)
         else:
@@ -520,7 +552,7 @@ class FleetRunner:
         self._log("stop_signal", signal=signum, drain="active child is allowed to finish")
 
     def run_loop(self) -> int:
-        lock = self.store.acquire_lock()
+        lock = self.store.acquire_lock(clear_stop=True)
         if lock is None:
             self._log("runner_refused", reason="identity_already_running")
             print(
@@ -530,7 +562,6 @@ class FleetRunner:
             return 2
         previous_handlers: dict[int, Any] = {}
         try:
-            self.store.clear_stop()
             for signum in (signal.SIGINT, signal.SIGTERM):
                 previous_handlers[signum] = signal.getsignal(signum)
                 signal.signal(signum, self._handle_signal)
@@ -561,14 +592,13 @@ class FleetRunner:
         return 0
 
     def run_once(self) -> int:
-        lock = self.store.acquire_lock()
+        lock = self.store.acquire_lock(clear_stop=True)
         if lock is None:
             self._log("runner_refused", reason="identity_already_running")
             return 2
         previous_handlers: dict[int, Any] = {}
         terminal = "once_error"
         try:
-            self.store.clear_stop()
             for signum in (signal.SIGINT, signal.SIGTERM):
                 previous_handlers[signum] = signal.getsignal(signum)
                 signal.signal(signum, self._handle_signal)
@@ -607,6 +637,20 @@ def require_finite(value: float, option: str) -> float:
     return value
 
 
+def normalize_timing(
+    value: float,
+    option: str,
+    *,
+    minimum: float,
+    maximum: float,
+    cap_upper: bool = False,
+) -> float:
+    value = require_finite(value, option)
+    if value > maximum and not cap_upper:
+        raise ValueError(f"{option} must be at most {maximum:g} seconds")
+    return max(minimum, min(maximum, value))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run one optional headless Aru factory CLI worker.",
@@ -640,10 +684,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         repo = validate_repo(Path(args.repo))
         agent = safe_identity(args.agent, "agent")
         family = safe_identity(args.family, "family") if args.mode in {"once", "loop"} else args.family
-        initial_wait = require_finite(args.initial_wait, "--initial-wait")
-        max_wait = require_finite(args.max_wait, "--max-wait")
-        jitter = require_finite(args.jitter, "--jitter")
-        helper_timeout = require_finite(args.helper_timeout, "--helper-timeout")
+        initial_wait = normalize_timing(
+            args.initial_wait,
+            "--initial-wait",
+            minimum=0.1,
+            maximum=MAX_WAIT_SECONDS,
+        )
+        max_wait = normalize_timing(
+            args.max_wait,
+            "--max-wait",
+            minimum=0.1,
+            maximum=MAX_WAIT_SECONDS,
+        )
+        jitter = normalize_timing(
+            args.jitter,
+            "--jitter",
+            minimum=0.0,
+            maximum=1.0,
+            cap_upper=True,
+        )
+        helper_timeout = normalize_timing(
+            args.helper_timeout,
+            "--helper-timeout",
+            minimum=1.0,
+            maximum=MAX_HELPER_TIMEOUT_SECONDS,
+        )
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -678,10 +743,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         family=family,
         adapter=args.adapter,
         adapter_command_json=args.adapter_command_json,
-        initial_wait=max(0.1, initial_wait),
-        max_wait=max(0.1, max_wait),
-        jitter=max(0.0, min(1.0, jitter)),
-        helper_timeout=max(1.0, helper_timeout),
+        initial_wait=initial_wait,
+        max_wait=max_wait,
+        jitter=jitter,
+        helper_timeout=helper_timeout,
         state_dir=directory,
     )
     runner = FleetRunner(config)
