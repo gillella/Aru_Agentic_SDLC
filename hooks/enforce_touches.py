@@ -329,6 +329,260 @@ def path_allowed(rel_path, touches):
     return False
 
 
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_WRAPPERS = frozenset({"env", "nice", "nohup", "time", "sudo", "exec", "builtin", "command"})
+
+_SUDO_VAL_OPTS = frozenset({
+    "-u", "--user",
+    "-g", "--group",
+    "-C", "--close-from",
+    "-p", "--prompt",
+    "-D", "--chdir",
+    "-h", "--host",
+    "-R", "--chroot",
+    "-T", "--command-timeout",
+    "-U", "--other-user",
+})
+
+_ENV_VAL_OPTS = frozenset({
+    "-u", "--unset",
+    "-C", "--chdir",
+    "-P",
+    "-S", "--split-string",
+})
+
+_TIME_VAL_OPTS = frozenset({
+    "-f", "--format",
+    "-o", "--output",
+})
+
+_NICE_VAL_OPTS = frozenset({"-n", "--adjustment"})
+
+
+def _is_wrapper(token):
+    if not token:
+        return False
+    base = os.path.basename(token)
+    return base in _WRAPPERS
+
+
+def _is_git_exe(token):
+    if not token:
+        return False
+    base = os.path.basename(token.rstrip("/"))
+    return base == "git"
+
+
+def _short_option_value(token, value_options, words, index):
+    """Returns (option, value, consumed_words) for a clustered short option."""
+    if not token.startswith("-") or token.startswith("--") or token == "-":
+        return None, None, 1
+    cluster = token[1:]
+    for offset, char in enumerate(cluster):
+        option = f"-{char}"
+        if option not in value_options:
+            continue
+        attached = cluster[offset + 1:]
+        if attached:
+            return option, attached, 1
+        if index + 1 < len(words):
+            return option, words[index + 1], 2
+        return option, None, 1
+    return None, None, 1
+
+
+def _push_short_options(token, args, index):
+    """Returns (flags, consumed_words) for a possibly clustered push option."""
+    if not token.startswith("-") or token.startswith("--") or token == "-":
+        return set(), 1
+    flags = set()
+    cluster = token[1:]
+    for offset, char in enumerate(cluster):
+        option = f"-{char}"
+        flags.add(option)
+        if option in {"-o", "-r"}:
+            return flags, 1 if cluster[offset + 1:] else (2 if index + 1 < len(args) else 1)
+    return flags, 1
+
+
+def _push_state_option(name):
+    """Canonicalizes accepted long spellings that change protected-ref scope."""
+    candidates = {
+        "--delete": "--delete",
+        "--no-delete": "--no-delete",
+        "--tags": "--tags",
+        "--no-tags": "--no-tags",
+        "--all": "--all",
+        "--no-all": "--no-all",
+        "--branches": "--all",
+        "--no-branches": "--no-all",
+        "--mirror": "--mirror",
+        "--no-mirror": "--no-mirror",
+    }
+    if name in candidates:
+        return candidates[name]
+    unique_abbreviations = {
+        "--delete": ("--delete", len("--de")),
+        "--no-delete": ("--no-delete", len("--no-de")),
+        "--tags": ("--tags", len("--ta")),
+        "--no-tags": ("--no-tags", len("--no-ta")),
+        "--all": ("--all", len("--al")),
+        "--no-all": ("--no-all", len("--no-al")),
+        "--branches": ("--all", len("--b")),
+        "--no-branches": ("--no-all", len("--no-b")),
+        "--mirror": ("--mirror", len("--m")),
+        "--no-mirror": ("--no-mirror", len("--no-m")),
+    }
+    matches = {
+        state
+        for canonical, (state, minimum) in unique_abbreviations.items()
+        if len(name) >= minimum and canonical.startswith(name)
+    }
+    return matches.pop() if len(matches) == 1 else None
+
+
+def _unwrap_simple_command(words):
+    """Strips leading environment variable assignments and command wrappers (env, sudo, etc.).
+
+    Returns (executable, args_list, wrapper_chdirs, wrapper_target_unknown).
+    """
+    if not words:
+        return None, [], [], False
+
+    words = list(words)
+    i = 0
+    wrapper_chdirs = []
+    wrapper_target_unknown = False
+    while i < len(words):
+        token = words[i]
+        if _ENV_ASSIGNMENT.match(token):
+            i += 1
+            continue
+
+        if _is_wrapper(token):
+            wrapper_name = os.path.basename(token)
+            i += 1
+            while i < len(words):
+                w_tok = words[i]
+                if w_tok == "--":
+                    i += 1
+                    break
+                if _ENV_ASSIGNMENT.match(w_tok):
+                    i += 1
+                    continue
+                if not w_tok.startswith("-"):
+                    break
+
+                name, _, inline = w_tok.partition("=")
+                if wrapper_name == "env":
+                    short_opt, short_value, consumed = _short_option_value(
+                        w_tok, _ENV_VAL_OPTS, words, i
+                    )
+                    if short_opt:
+                        i += consumed
+                        if short_opt == "-C":
+                            wrapper_chdirs.append(short_value)
+                        if short_opt != "-S":
+                            continue
+                        s_arg = short_value or ""
+                        inner_tokens = _shell_tokens(s_arg)
+                        if inner_tokens is None:
+                            return None, [], wrapper_chdirs, wrapper_target_unknown
+                        inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
+                        if inner_words:
+                            words = words[:i] + inner_words + words[i:]
+                        continue
+                    if name == "--split-string":
+                        s_arg = inline if inline else (words[i + 1] if i + 1 < len(words) else "")
+                        i += 1 if inline or i + 1 >= len(words) else 2
+                        inner_tokens = _shell_tokens(s_arg)
+                        if inner_tokens is None:
+                            return None, [], wrapper_chdirs, wrapper_target_unknown
+                        inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
+                        if inner_words:
+                            words = words[:i] + inner_words + words[i:]
+                        continue
+                    elif inline:
+                        if name in {"-C", "--chdir"}:
+                            wrapper_chdirs.append(inline)
+                        i += 1
+                    elif name in _ENV_VAL_OPTS:
+                        if name in {"-C", "--chdir"}:
+                            wrapper_chdirs.append(words[i + 1] if i + 1 < len(words) else None)
+                        i += 2 if i + 1 < len(words) else 1
+                    else:
+                        i += 1
+                elif wrapper_name == "sudo":
+                    short_opt, short_value, consumed = _short_option_value(
+                        w_tok, _SUDO_VAL_OPTS, words, i
+                    )
+                    if short_opt:
+                        if short_opt == "-D":
+                            wrapper_chdirs.append(short_value)
+                        elif short_opt == "-R":
+                            wrapper_target_unknown = True
+                        i += consumed
+                    elif inline:
+                        if name in {"-D", "--chdir"}:
+                            wrapper_chdirs.append(inline)
+                        elif name in {"-R", "--chroot"}:
+                            wrapper_target_unknown = True
+                        i += 1
+                    elif name in _SUDO_VAL_OPTS:
+                        if name in {"-D", "--chdir"}:
+                            wrapper_chdirs.append(words[i + 1] if i + 1 < len(words) else None)
+                        elif name in {"-R", "--chroot"}:
+                            wrapper_target_unknown = True
+                        i += 2 if i + 1 < len(words) else 1
+                    elif len(name) > 2 and name.startswith("-") and not name.startswith("--"):
+                        i += 1
+                    else:
+                        i += 1
+                elif wrapper_name == "time":
+                    short_opt, _short_value, consumed = _short_option_value(
+                        w_tok, _TIME_VAL_OPTS, words, i
+                    )
+                    if short_opt:
+                        i += consumed
+                    elif inline:
+                        i += 1
+                    elif name in _TIME_VAL_OPTS:
+                        i += 2 if i + 1 < len(words) else 1
+                    else:
+                        i += 1
+                elif wrapper_name == "nice":
+                    short_opt, _short_value, consumed = _short_option_value(
+                        w_tok, _NICE_VAL_OPTS, words, i
+                    )
+                    if short_opt:
+                        i += consumed
+                    elif inline:
+                        i += 1
+                    elif name in _NICE_VAL_OPTS:
+                        i += 2 if i + 1 < len(words) else 1
+                    else:
+                        i += 1
+                elif wrapper_name == "exec":
+                    short_opt, _short_value, consumed = _short_option_value(
+                        w_tok, frozenset({"-a"}), words, i
+                    )
+                    if short_opt:
+                        i += consumed
+                    else:
+                        i += 1
+                else:
+                    if inline:
+                        i += 1
+                    else:
+                        i += 1
+            continue
+        break
+
+    if i >= len(words):
+        return None, [], wrapper_chdirs, wrapper_target_unknown
+    return words[i], words[i + 1:], wrapper_chdirs, wrapper_target_unknown
+
+
 def _git_write_to_protected(command, branch):
     """Detects commits on, or pushes to, a protected branch.
 
@@ -341,25 +595,150 @@ def _git_write_to_protected(command, branch):
     """
     if not command:
         return None
-    # Strip quotes so `git push origin "main"` is seen the same as bare main.
-    normalized = re.sub(r"[\"']", "", command)
 
-    if re.search(r"\bgit\s+(-c\s+\S+\s+)*commit\b", normalized) and branch in PROTECTED_BRANCHES:
-        return f"commit directly on '{branch}'"
+    if isinstance(command, (list, tuple)):
+        simple_cmds = [[text for text in command if isinstance(text, str)]]
+    else:
+        cmd_sans_heredoc = _strip_heredocs(command)
+        tokens = _shell_tokens(cmd_sans_heredoc)
+        if not tokens:
+            return None
+        simple_cmds = []
+        current = []
+        for kind, text in tokens:
+            if kind == "control":
+                if current:
+                    simple_cmds.append(current)
+                    current = []
+            elif kind == "word":
+                current.append(text)
+        if current:
+            simple_cmds.append(current)
 
-    push = re.search(r"\bgit\s+(-c\s+\S+\s+)*push\b(?P<args>[^&|;]*)", normalized)
-    if push:
-        args = push.group("args") or ""
-        targets = args.split()
-        for tok in targets:
-            # Handles `main`, `HEAD:main`, and `refs/heads/main`.
-            ref = tok.split(":")[-1].replace("refs/heads/", "")
-            if ref in PROTECTED_BRANCHES:
-                return f"push to '{ref}'"
-        # A bare `git push` on a protected branch pushes that branch.
-        if not [t for t in targets if not t.startswith("-")] and branch in PROTECTED_BRANCHES:
-            return f"push '{branch}'"
+    for words in simple_cmds:
+        exe, args, wrapper_chdirs, wrapper_target_unknown = _unwrap_simple_command(words)
+        if not _is_git_exe(exe):
+            continue
+
+        index = 0
+        subcommand = None
+        while index < len(args):
+            token = args[index]
+            if not token.startswith("-"):
+                subcommand = token
+                index += 1
+                break
+            name, _, inline = token.partition("=")
+            if inline:
+                index += 1
+            elif name in _GIT_VALUE_OPTS:
+                index += 2
+            else:
+                index += 1
+
+        if not subcommand or subcommand not in _GIT_WRITE_SUBCOMMANDS:
+            continue
+
+        if wrapper_chdirs or wrapper_target_unknown:
+            return "wrapper changes the git working directory, so the target branch cannot be proven safe"
+
+        if subcommand == "commit" and branch in PROTECTED_BRANCHES:
+            return f"commit directly on '{branch}'"
+
+        if subcommand == "push":
+            push_opts_with_val = {"-o", "--push-option", "-r", "--repo", "--receive-pack", "--exec"}
+            pos_args = []
+            pushes_all_branches = False
+            mirrors_all_refs = False
+            pushes_tags_only = False
+            deletes_refs = False
+            i = index
+            while i < len(args):
+                tok = args[i]
+                if tok.startswith("-"):
+                    name, _, inline = tok.partition("=")
+                    short_flags, short_consumed = _push_short_options(tok, args, i)
+                    state_option = _push_state_option(name)
+                    if "-d" in short_flags or state_option == "--delete":
+                        deletes_refs = True
+                    elif state_option == "--no-delete":
+                        deletes_refs = False
+                    if state_option == "--tags":
+                        pushes_tags_only = True
+                    elif state_option == "--no-tags":
+                        pushes_tags_only = False
+                    if state_option == "--all":
+                        pushes_all_branches = True
+                    elif state_option == "--no-all":
+                        pushes_all_branches = False
+                    elif state_option == "--mirror":
+                        mirrors_all_refs = True
+                    elif state_option == "--no-mirror":
+                        mirrors_all_refs = False
+                    if short_flags:
+                        i += short_consumed
+                        continue
+                    if not inline and name in push_opts_with_val:
+                        i += 2
+                    else:
+                        i += 1
+                else:
+                    pos_args.append(tok)
+                    i += 1
+
+            if pushes_all_branches or mirrors_all_refs:
+                return "push may update protected branches"
+
+            raw_refspecs = pos_args[1:] if len(pos_args) > 1 else []
+            refspecs = []
+            has_tag_pseudo_refspec = False
+            ref_index = 0
+            while ref_index < len(raw_refspecs):
+                if raw_refspecs[ref_index] == "tag" and not deletes_refs:
+                    if ref_index + 1 >= len(raw_refspecs):
+                        return "push tag pseudo-refspec is incomplete"
+                    has_tag_pseudo_refspec = True
+                    ref_index += 2
+                    continue
+                refspecs.append(raw_refspecs[ref_index])
+                ref_index += 1
+            if refspecs:
+                for refspec in refspecs:
+                    normalized_refspec = refspec.removeprefix("+")
+                    if "@{" in normalized_refspec or normalized_refspec == ":" or normalized_refspec.startswith("^") or any(
+                        marker in normalized_refspec for marker in ("*", "?", "[")
+                    ):
+                        return "push refspec cannot be proven safe"
+                    if ":" in normalized_refspec:
+                        src, dest = normalized_refspec.split(":", 1)
+                    else:
+                        src = dest = normalized_refspec
+                    src = _normalize_push_ref(src)
+                    dest = _normalize_push_ref(dest)
+                    dest = dest.removeprefix("refs/heads/")
+                    src = src.removeprefix("refs/heads/")
+                    if dest in PROTECTED_BRANCHES:
+                        return f"push to '{dest}'"
+                    if (src == "HEAD" or dest == "HEAD") and branch in PROTECTED_BRANCHES:
+                        return f"push '{branch}'"
+            else:
+                if pushes_tags_only or has_tag_pseudo_refspec:
+                    continue
+                # With no explicit refspec, remote and branch configuration can
+                # select refs other than the current branch. This static guard
+                # cannot prove those refs exclude main/master, so fail closed.
+                return "push has no explicit safe refspec"
+
     return None
+
+
+def _normalize_push_ref(ref):
+    """Normalizes Git's accepted DWIM shorthands for protected-ref comparison."""
+    if ref == "@":
+        return "HEAD"
+    if ref.startswith("heads/"):
+        return f"refs/{ref}"
+    return ref
 
 
 # Subcommands that write to a branch. Anything else git does is a read as far
@@ -407,18 +786,25 @@ def _git_write_violation(command, cwd):
     tokens = _shell_tokens(command)
     if not tokens:
         return None  # Unlexable; matches this module's fail-open contract.
-    words = [text for kind, text in tokens if kind == "word"]
+
+    simple_cmds = []
+    current = []
+    for kind, text in tokens:
+        if kind == "control":
+            if current:
+                simple_cmds.append(current)
+                current = []
+        elif kind == "word":
+            current.append(text)
+    if current:
+        simple_cmds.append(current)
 
     base = cwd
     base_unknown = False
-    index = 0
-    while index < len(words):
-        word = words[index]
-
-        # `cd` with no operand returns home, which is never a checkout we can
-        # reason about; treat it as unknown rather than guessing.
-        if word in ("cd", "pushd"):
-            operand = words[index + 1] if index + 1 < len(words) else None
+    for words in simple_cmds:
+        exe, args, wrapper_chdirs, wrapper_target_unknown = _unwrap_simple_command(words)
+        if exe in ("cd", "pushd"):
+            operand = args[0] if args else None
             if operand is None or operand.startswith("-"):
                 base_unknown = True
             else:
@@ -427,20 +813,22 @@ def _git_write_violation(command, cwd):
                     base_unknown = True
                 else:
                     base, base_unknown = moved, False
-            index += 2
             continue
 
-        if word != "git":
-            index += 1
+        if not _is_git_exe(exe):
             continue
 
-        # Walk git's pre-subcommand options to find both the subcommand and
-        # any option that moves where it acts.
-        target, unknown = base, base_unknown
-        index += 1
+        target, unknown = base, base_unknown or wrapper_target_unknown
+        for wrapper_dir in wrapper_chdirs:
+            moved = _resolve_dir(wrapper_dir, target) if wrapper_dir is not None else None
+            if moved is None:
+                unknown = True
+                break
+            target, unknown = moved, False
+        index = 0
         subcommand = None
-        while index < len(words):
-            token = words[index]
+        while index < len(args):
+            token = args[index]
             if not token.startswith("-"):
                 subcommand = token
                 index += 1
@@ -450,7 +838,7 @@ def _git_write_violation(command, cwd):
                 value = inline
                 index += 1
             elif name in _GIT_VALUE_OPTS:
-                value = words[index + 1] if index + 1 < len(words) else None
+                value = args[index + 1] if index + 1 < len(args) else None
                 index += 2
             else:
                 index += 1
@@ -469,15 +857,9 @@ def _git_write_violation(command, cwd):
                 f"run 'git {subcommand}' in a directory this hook cannot "
                 "resolve, so it cannot prove the target branch is unprotected"
             )
-        violation = _git_write_to_protected(f"git {subcommand}", current_branch(target))
+        violation = _git_write_to_protected(["git"] + list(args), current_branch(target))
         if violation:
             return violation
-        # `git push origin main` names its ref explicitly and is refused from
-        # any branch, so the ref scan still runs against the full command.
-        remainder = " ".join(words[index:])
-        explicit = _git_write_to_protected(f"git push {remainder}", "") if subcommand == "push" else None
-        if explicit:
-            return explicit
 
     return None
 
@@ -578,10 +960,12 @@ def _strip_heredocs(command):
 # Output redirection operators, longest first so the scanner matches greedily
 # and `&>>` is never read as `&>` followed by a stray `>`.
 _REDIR_OPS = ("&>>", ">>&", "&>", ">>", ">&", ">")
+# Control operators that delimit simple commands in shell grammar.
+_CONTROL_OPS = ("&&", "||", ";", "|", "&", "\n")
 
 
 def _shell_tokens(command):
-    """Splits a command into ('word' | 'op', text) pairs, or None if malformed.
+    """Splits a command into ('word' | 'op' | 'control', text) pairs, or None if malformed.
 
     Hand-written rather than delegated to shlex, because neither shlex mode
     answers the question this module actually asks - *was this operator
@@ -659,7 +1043,7 @@ def _shell_tokens(command):
             index += 1
             continue
 
-        if char.isspace():
+        if char.isspace() and char != "\n":
             flush()
             quoted = False
             index += 1
@@ -675,6 +1059,8 @@ def _shell_tokens(command):
             newline = text.find("\n", index)
             if newline == -1:
                 break
+            flush()
+            tokens.append(("control", "\n"))
             index = newline + 1
             continue
 
@@ -698,9 +1084,17 @@ def _shell_tokens(command):
             index += len(operator)
             continue
 
+        ctrl = next((op for op in _CONTROL_OPS if text.startswith(op, index)), None)
+        if ctrl:
+            flush()
+            quoted = False
+            tokens.append(("control", ctrl))
+            index += len(ctrl)
+            continue
+
         # Any other shell metacharacter ends the current word. Their meaning
         # does not matter here; only that they are not part of a filename.
-        if char in "<|;&()":
+        if char in "<()":
             flush()
             quoted = False
             index += 1

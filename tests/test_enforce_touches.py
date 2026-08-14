@@ -176,6 +176,10 @@ class ProtectedBranchTests(unittest.TestCase):
 
     def test_explicit_push_to_main_is_blocked_from_any_branch(self):
         self.assertIsNotNone(et._git_write_to_protected("git push origin main", "feat/issue-1-a"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin +main", "feat/issue-1-a"))
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push origin +HEAD:refs/heads/main", "feat/issue-1-a")
+        )
         self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD:main", "feat/issue-1-a"))
         self.assertIsNotNone(
             et._git_write_to_protected("git push origin refs/heads/master", "feat/issue-1-a")
@@ -184,14 +188,166 @@ class ProtectedBranchTests(unittest.TestCase):
     def test_quoted_ref_is_still_detected(self):
         self.assertIsNotNone(et._git_write_to_protected('git push origin "main"', "feat/issue-1-a"))
 
+    def test_push_with_option_containing_quotes_detects_violation(self):
+        self.assertIsNotNone(
+            et._git_write_to_protected('git push --no-verify -o "message=it\'s" origin HEAD:main', "feat/issue-1-a")
+        )
+
     def test_bare_push_while_on_main_is_blocked(self):
         self.assertIsNotNone(et._git_write_to_protected("git push", "main"))
 
-    def test_bare_push_on_feature_branch_is_allowed(self):
+    def test_omitted_or_configured_refspec_fails_closed(self):
+        self.assertIsNotNone(et._git_write_to_protected("git push", "feat/issue-1-a"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin", "feat/issue-1-a"))
+
+    def test_explicit_feature_refspec_is_allowed(self):
         self.assertIsNone(et._git_write_to_protected("git push -u origin HEAD", "feat/issue-1-a"))
+
+    def test_all_ref_push_forms_are_blocked_from_feature_branches(self):
+        self.assertIsNotNone(et._git_write_to_protected("git push --all origin", "feat/issue-1-a"))
+        self.assertIsNotNone(et._git_write_to_protected("git push --mirror origin", "feat/issue-1-a"))
+        self.assertIsNotNone(
+            et._git_write_to_protected(
+                "git push origin refs/heads/*:refs/heads/*", "feat/issue-1-a"
+            )
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push origin refs/heads/*", "feat/issue-1-a")
+        )
+        self.assertIsNotNone(et._git_write_to_protected("git push origin :", "feat/issue-1-a"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin +:", "feat/issue-1-a"))
 
     def test_unrelated_command_is_allowed(self):
         self.assertIsNone(et._git_write_to_protected("pytest -q", "main"))
+
+    def test_raw_prose_commands_are_safe_direct_to_matcher(self):
+        self.assertIsNone(et._git_write_to_protected('echo "remember to git commit later"', "main"))
+        self.assertIsNone(et._git_write_to_protected("echo 'run git commit when done'", "main"))
+        self.assertIsNone(et._git_write_to_protected("cat << 'EOF'\nremember to git commit later\nEOF", "main"))
+        self.assertIsNone(et._git_write_to_protected("ls # then git commit", "main"))
+        self.assertIsNone(et._git_write_to_protected('git status -m "git push origin main"', "main"))
+        self.assertIsNone(et._git_write_to_protected("echo git commit on main", "main"))
+        self.assertIsNone(et._git_write_to_protected("printf %s git push origin main", "main"))
+
+    def test_push_with_following_command_containing_main_is_allowed(self):
+        self.assertIsNone(et._git_write_to_protected("git push origin feat && echo main", "feat/issue-1-a"))
+        self.assertIsNone(et._git_write_to_protected("git push origin feat ; printf main", "feat/issue-1-a"))
+        self.assertIsNone(et._git_write_to_protected("git push origin feat | grep main", "feat/issue-1-a"))
+
+    def test_push_head_on_protected_branch_is_blocked(self):
+        self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD:HEAD", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin @", "main"))
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push origin +HEAD:heads/main", "feat/issue-1-a")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push origin --delete heads/main", "feat/issue-1-a")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push origin '@{upstream}'", "feat/issue-1-a")
+        )
+
+    def test_absolute_git_executable_path_is_blocked(self):
+        self.assertIsNotNone(et._git_write_to_protected("/usr/bin/git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("/usr/local/bin/git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("/opt/homebrew/bin/git push origin main", "feat/issue-1-a"))
+
+    def test_complex_wrapper_invocations_are_blocked(self):
+        self.assertIsNotNone(et._git_write_to_protected("sudo --user root git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("sudo -u root /usr/bin/git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("env --unset FOO git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("time -f fmt git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected('env -S "git commit -m x"', "main"))
+        self.assertIsNotNone(et._git_write_to_protected('env -S "/usr/bin/git commit -m x"', "main"))
+        self.assertIsNotNone(
+            et._git_write_to_protected("exec -a ignored /usr/bin/git commit -m x", "main")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected(
+                "exec -a ignored /usr/bin/git push origin HEAD", "main"
+            )
+        )
+        self.assertIsNotNone(et._git_write_to_protected("nice git push origin main", "main"))
+        self.assertIsNotNone(
+            et._git_write_to_protected("/usr/bin/nice -n 5 git push origin main", "main")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected(
+                "/usr/bin/env -P /usr/bin /usr/bin/git push origin main", "main"
+            )
+        )
+        for command in (
+            'env -S"git push origin main"',
+            'env -iS "git push origin main"',
+            "exec -ca ignored /usr/bin/git push origin main",
+            "exec -la ignored /usr/bin/git push origin main",
+            "env -C/repo/main git push origin HEAD",
+            "sudo -D/repo/main git push origin HEAD",
+            "sudo -nD /repo/main git push origin HEAD",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(et._git_write_to_protected(command, "feat/issue-1-a"))
+
+    def test_tag_only_pushes_are_allowed(self):
+        self.assertIsNone(et._git_write_to_protected("git push --tags origin", "main"))
+        self.assertIsNone(et._git_write_to_protected("git push origin --tags", "main"))
+        self.assertIsNone(et._git_write_to_protected("git push --repo=origin --tags", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("git push --tags origin main", "main"))
+        self.assertIsNone(et._git_write_to_protected("git push origin tag main", "main"))
+        self.assertIsNone(et._git_write_to_protected("git push origin tag master", "main"))
+
+    def test_delete_mode_treats_tag_name_as_a_deletion_destination(self):
+        for command in (
+            "git push --delete origin tag main",
+            "git push origin --delete tag main",
+            "git push -d origin tag main",
+            "git push -vd origin tag main",
+            "git push -dv origin tag main",
+            "git push --del origin tag main",
+            "git push --no-delete --delete origin tag main",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(et._git_write_to_protected(command, "feat/issue-1-a"))
+
+    def test_push_negations_are_ordered_and_not_sticky(self):
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --tags --no-tags origin", "feat/issue-1-a")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --tags --no-tag origin", "feat/issue-1-a")
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --tags --no-ta origin", "feat/issue-1-a")
+        )
+        self.assertIsNone(
+            et._git_write_to_protected("git push --no-tags --tags origin", "feat/issue-1-a")
+        )
+        self.assertIsNone(
+            et._git_write_to_protected("git push --no-tags --ta origin", "feat/issue-1-a")
+        )
+        self.assertIsNone(
+            et._git_write_to_protected(
+                "git push --delete --no-delete origin tag main", "feat/issue-1-a"
+            )
+        )
+        self.assertIsNone(
+            et._git_write_to_protected(
+                "git push --branches --no-b --tags origin", "feat/issue-1-a"
+            )
+        )
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --no-branches --b origin", "feat/issue-1-a")
+        )
+
+    def test_positional_remote_overrides_repo_option_and_fails_closed(self):
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push --repo=origin feature", "feat/issue-1-a")
+        )
+
+    def test_malformed_env_split_string_does_not_crash(self):
+        self.assertIsNone(et._git_write_to_protected("env -S \"git commit -m '\"", "main"))
+        self.assertIsNotNone(et._git_write_to_protected('/usr/bin/env -i FOO=bar /usr/bin/git commit -m x', "main"))
 
 
 class RedirectDetectionTests(unittest.TestCase):
@@ -536,6 +692,141 @@ class HookDecisionTests(unittest.TestCase):
             "main", None, governed=False,
         )
         self.assertEqual(rc, et.EXIT_ALLOW)
+
+    def test_prose_commands_via_main(self):
+        """Pins the prose false-positive fix for git commands in shell prose through main()."""
+        allowed_commands = [
+            'echo "remember to git commit later"',
+            "echo 'run git commit when done'",
+            "cat << 'EOF'\nremember to git commit later\nEOF",
+            "ls # then git commit",
+            'git status -m "git push origin main"',
+            "echo git commit on main",
+            "printf %s git push origin main",
+            "echo hello && echo main",
+            "git push --tags origin",
+            "git push origin --tags",
+            "git push --repo=origin --tags",
+            "git push origin tag main",
+            "git push origin tag master",
+            "git push --no-tags --tags origin",
+            "git push --no-tags --ta origin",
+            "git push --delete --no-delete origin tag main",
+            "git push --branches --no-b --tags origin",
+        ]
+        for command in allowed_commands:
+            with self.subTest(command=command, expected="ALLOW"):
+                rc = self._run(
+                    {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": "/repo"},
+                    "main", None, governed=True,
+                )
+                self.assertEqual(rc, et.EXIT_ALLOW)
+
+        blocked_commands = [
+            "git commit -m x",
+            "/usr/bin/git commit -m x",
+            "git push origin main",
+            "git push origin HEAD",
+            "git push origin HEAD && echo main",
+            "env FOO=1 git commit -m x",
+            "sudo git commit -m x",
+            "sudo --user root git commit -m x",
+            "env --unset FOO git commit -m x",
+            "time -f fmt git commit -m x",
+            'env -S "git commit -m x"',
+            "exec -a ignored /usr/bin/git commit -m x",
+            "exec -a ignored /usr/bin/git push origin HEAD",
+            "git push origin @",
+            "git push origin +HEAD:heads/main",
+            "git push origin --delete heads/main",
+            "nice git push origin main",
+            "/usr/bin/nice -n 5 git push origin main",
+            "/usr/bin/env -P /usr/bin /usr/bin/git push origin main",
+            'env -S"git push origin main"',
+            'env -iS "git push origin main"',
+            "exec -ca ignored /usr/bin/git push origin main",
+            "exec -la ignored /usr/bin/git push origin main",
+            "git push --repo=origin feature",
+            "git push --delete origin tag main",
+            "git push origin --delete tag main",
+            "git push -d origin tag main",
+            "git push -vd origin tag main",
+            "git push -dv origin tag main",
+            "git push --del origin tag main",
+            "git push --no-delete --delete origin tag main",
+            "git push --tags --no-tags origin",
+            "git push --tags --no-tag origin",
+            "git push --tags --no-ta origin",
+            "git push --no-branches --b origin",
+        ]
+        for command in blocked_commands:
+            with self.subTest(command=command, expected="BLOCK"):
+                rc = self._run(
+                    {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": "/repo"},
+                    "main", None, governed=True,
+                )
+                self.assertEqual(rc, et.EXIT_BLOCK)
+
+    def test_git_write_violation_retargeting_via_main(self):
+        """Pins the _git_write_violation delegation in main().
+
+        Reverting main() to _git_write_to_protected(command, branch) would
+        evaluate only the caller shell's branch ('feat/121') and allow a
+        write retargeted to main, failing this test.
+        """
+        branches = {
+            "/repo/main": "main",
+            "/repo/feat": "feat/121",
+        }
+
+        def branch_for(path):
+            norm = os.path.normpath(str(path))
+            return branches.get(norm, "feat/121")
+
+        # Caller in worktree feat/121, but git -C targets main -> MUST BLOCK
+        payload_block = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git -C /repo/main commit -m x"},
+            "cwd": "/repo/feat",
+        }
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload_block))), \
+             patch.object(et, "repo_root", return_value="/repo/feat"), \
+             patch.object(et, "current_branch", side_effect=branch_for), \
+             patch.object(et, "governed_repo", return_value=True):
+            rc = et.main()
+            self.assertEqual(rc, et.EXIT_BLOCK)
+
+        for command in (
+            "env -C /repo/main git push origin HEAD",
+            "env --chdir /repo/main git push origin HEAD",
+            "sudo -D /repo/main git push origin HEAD",
+            "env -C/repo/main git push origin HEAD",
+            "sudo -D/repo/main git push origin HEAD",
+            "sudo -nD /repo/main git push origin HEAD",
+        ):
+            with self.subTest(command=command), \
+                 patch.object(et.sys, "stdin", io.StringIO(json.dumps({
+                     "tool_name": "Bash",
+                     "tool_input": {"command": command},
+                     "cwd": "/repo/feat",
+                 }))), \
+                 patch.object(et, "repo_root", return_value="/repo/feat"), \
+                 patch.object(et, "current_branch", side_effect=branch_for), \
+                 patch.object(et, "governed_repo", return_value=True):
+                self.assertEqual(et.main(), et.EXIT_BLOCK)
+
+        # Caller on main, but git -C targets worktree feat/121 -> MUST ALLOW
+        payload_allow = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git -C /repo/feat commit -m x"},
+            "cwd": "/repo/main",
+        }
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload_allow))), \
+             patch.object(et, "repo_root", return_value="/repo/main"), \
+             patch.object(et, "current_branch", side_effect=branch_for), \
+             patch.object(et, "governed_repo", return_value=True):
+            rc = et.main()
+            self.assertEqual(rc, et.EXIT_ALLOW)
 
     def test_real_path_aliases_are_correct_on_main_and_issue_branch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1255,4 +1546,3 @@ class GitCommandCheckoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
