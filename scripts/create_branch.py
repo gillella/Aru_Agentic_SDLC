@@ -107,8 +107,11 @@ def validate_plan_depth(text: str, is_risk: bool = False) -> list[str]:
     files_body = _get_section_content(cleaned, r"files|files to touch|affected files|touched files|scope")
     if files_body is None:
         # Fallback to inline touches: check
-        if not re.search(r"\b(?:touches|files to touch|affected files)\s*:\s*[^\n]+", cleaned, re.IGNORECASE):
+        inline_match = re.search(r"\b(?:touches|files to touch|affected files)\s*:\s*([^\n]+)", cleaned, re.IGNORECASE)
+        if not inline_match:
             missing.append("missing section: Files to Touch / Scope")
+        elif _is_placeholder_content(inline_match.group(1)):
+            missing.append("section 'Files to Touch / Scope' contains only placeholder content")
     elif _is_placeholder_content(files_body):
         missing.append("section 'Files to Touch / Scope' contains only placeholder content")
 

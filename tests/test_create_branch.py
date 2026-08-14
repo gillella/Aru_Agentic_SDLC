@@ -113,6 +113,22 @@ class CreateBranchPlanGateTests(unittest.TestCase):
         mock_has_plan.return_value = True
         mock_worktree.return_value = ".worktrees/feat-issue-999-planned-feature"
 
+        path = cb.create_branch(999, branch_type="feat", use_worktree=True, fetch_remote=True)
+        self.assertEqual(path, ".worktrees/feat-issue-999-planned-feature")
+        mock_worktree.assert_called_once_with("feat/issue-999-planned-feature")
+
+    def test_inline_touches_placeholder_rejected(self):
+        plan_with_tbd_touches = (
+            "## Implementation Plan\n\n"
+            "### Approach\n"
+            "We will implement token extraction by decoding JWT payloads.\n\n"
+            "Touches: TBD\n\n"
+            "### Verification & Test Strategy\n"
+            "Run python3 -m unittest tests/test_auth.py."
+        )
+        gaps = cb.validate_plan_depth(plan_with_tbd_touches, is_risk=False)
+        self.assertTrue(any("Files to Touch" in g and "placeholder" in g for g in gaps), f"Expected placeholder error, got: {gaps}")
+
     def test_untouched_template_rejected_for_placeholder_content(self):
         low_risk_template = cb.format_plan_template(is_risk=False)
         low_gaps = cb.validate_plan_depth(low_risk_template, is_risk=False)
