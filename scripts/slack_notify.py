@@ -137,6 +137,7 @@ def validate_alert_event(event: Dict[str, Any]) -> None:
             raise ValueError("waiting-on requires waiting_on_issue and/or waiting_on_pr")
     if kind == "hitl" and not str(event.get("text") or "").strip():
         raise ValueError("hitl requires decision text")
+    event["type"] = kind
 
 
 def _peer_ref(event: Dict[str, Any]) -> str:
@@ -299,12 +300,17 @@ class FileDedupeCache(DedupeCache):
         try:
             from slack_projects import RegistryError, mutate_secure_json
         except ImportError:
-            self.path.parent.mkdir(mode=0o700, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                current = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                current = {"entries": {}}
+            tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
             tmp.write_text(
-                json.dumps({"entries": snapshot}, indent=2, sort_keys=True) + "\n",
+                json.dumps(update(current), indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
+            tmp.chmod(0o600)
             os.replace(tmp, self.path)
             self.path.chmod(0o600)
             return
@@ -490,7 +496,9 @@ def notify_alert(
     github_body = format_github_alert_comment(stamped, secrets=secrets)
     if not skip_github and not alert_cache.contains(github_key):
         targets = alert_github_targets(stamped)
-        if targets:
+        if not targets:
+            github_ok = False
+        else:
             outcomes = []
             for target_kind, target_number in targets:
                 try:
@@ -582,6 +590,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"[WARN] Slack notify skipped: {result.get('detail')}", file=sys.stderr)
             return 0
         slack = result.get("slack") or {}
+        if result.get("github_ok") is False:
+            print("[WARN] Slack alert: durable GitHub comment failed", file=sys.stderr)
         if not result.get("ok"):
             print(f"[WARN] Slack notify failed: {slack.get('error')}", file=sys.stderr)
             return 0
@@ -589,6 +599,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("deduped")
         else:
             print("posted")
+        if result.get("github_ok") is False:
+            return 1
         return 0
 
     result = post_event(config, event)

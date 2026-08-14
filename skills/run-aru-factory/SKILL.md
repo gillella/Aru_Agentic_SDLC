@@ -130,7 +130,7 @@ do not arm native wakes. Ambiguous board identity, an unresolved `touches:`
 conflict, money semantics, security posture, or a hard rule can require that
 intervention; explain the exact decision needed on the linked GitHub issue/PR,
 then notify Slack with `--event hitl` (operator mention) via
-`scripts/slack_notify.py`. For dependency / claim waits use `--event waiting-on`
+`python3 "$ARU_SDLC_HOME/scripts/slack_notify.py"`. For dependency / claim waits use `--event waiting-on`
 (name the peer agent and their issue/PR; never steal the claim). For other
 blocks use `--event blocked`. Idle ticks and heartbeats must **not** notify.
 GitHub remains the work queue; Slack downtime must not halt the loop. Full

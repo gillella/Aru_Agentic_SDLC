@@ -513,6 +513,120 @@ class SlackNotifyTests(unittest.TestCase):
         self.assertNotIn("<@U01234567>", body)
         self.assertIn("HITL", body)
 
+    def test_validate_alert_event_normalizes_type_in_place(self):
+        event = {
+            "type": " HITL ",
+            "agent": "cursor-1",
+            "text": "need a decision",
+        }
+        validate_alert_event(event)
+        self.assertEqual(event["type"], "hitl")
+
+    def test_notify_alert_uppercase_hitl_injects_operator(self):
+        config = sample_config(operator_user_id="U01234567")
+        posted = []
+
+        def transport(cfg, text, thread_ts=None):
+            posted.append(text)
+            return {"ok": True, "ts": "1"}
+
+        result = notify_alert(
+            config,
+            {
+                "type": "HITL",
+                "agent": "cursor-1",
+                "issue": 9,
+                "text": "need a decision",
+                "project_id": "proj_a",
+            },
+            transport=transport,
+            cache=DedupeCache(),
+            comment=lambda *_a, **_k: True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(posted)
+        self.assertIn("<@U01234567>", posted[0])
+
+    def test_file_dedupe_importerror_fallback_merges_existing(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "dedupe.json"
+            path.write_text(
+                '{"entries": {"keep-me": 9999999999.0}}\n',
+                encoding="utf-8",
+            )
+            cache = FileDedupeCache(path)
+            cache._seen = {"new-key": 9999999999.0}
+            real_import = builtins.__import__
+
+            def fake_import(name, *args, **kwargs):
+                if name == "slack_projects":
+                    raise ImportError("forced")
+                return real_import(name, *args, **kwargs)
+
+            with patch.object(builtins, "__import__", side_effect=fake_import):
+                cache._persist()
+            payload = __import__("json").loads(path.read_text(encoding="utf-8"))
+            self.assertIn("keep-me", payload["entries"])
+            self.assertIn("new-key", payload["entries"])
+
+    def test_notify_alert_marks_missing_github_target(self):
+        result = notify_alert(
+            sample_config(),
+            {
+                "type": "blocked",
+                "agent": "cursor-1",
+                "text": "stuck",
+                "project_id": "proj_a",
+            },
+            transport=lambda *_a, **_k: {"ok": True, "ts": "1"},
+            cache=DedupeCache(),
+        )
+        self.assertTrue(result["ok"])
+        self.assertIs(result["github_ok"], False)
+
+    def test_main_warns_when_github_comment_fails(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            os.chmod(root, 0o700)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            registry_path = root / "projects.json"
+            audit_path = root / "audit.json"
+
+            def identity(path):
+                return {
+                    "github_repo_id": "R_repo",
+                    "github_repo_database_id": 1,
+                    "project_v2_id": "P_project",
+                    "repo_slug": "owner/repo",
+                    "local_path": str(path.resolve()),
+                }
+
+            record = ProjectRegistry(registry_path, audit_path, identity).create(
+                checkout, "T01234567", "C01234567", "operator", "proj_outbound"
+            )
+            env_file = root / "slack.env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+                + "\nSLACK_TEAM_ID=T01234567\n",
+                encoding="utf-8",
+            )
+            with patch(
+                "slack_notify.notify_alert",
+                return_value={
+                    "ok": True,
+                    "slack": {"ok": True},
+                    "github_ok": False,
+                    "deduped": False,
+                },
+            ):
+                code = main([
+                    "--agent", "cursor-1", "--family", "openai", "--event", "blocked",
+                    "--project-id", record.project_id, "--issue", "1",
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            self.assertEqual(code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
