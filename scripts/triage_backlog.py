@@ -46,13 +46,25 @@ def acceptance_criteria(body: str) -> list[str]:
     if not body:
         return []
     parts = re.split(
-        r"^\s*#{1,4}\s*acceptance criteria\s*$", body,
+        r"^\s*#{1,4}\s*(?:acceptance\s+criteria(?:\s*[/:]\s*expected\s+behavior)?|expected\s+behavior(?:\s*[/:]\s*predicates)?)\s*$",
+        body,
         flags=re.IGNORECASE | re.MULTILINE,
     )
     if len(parts) < 2:
         return []
     tail = re.split(r"^\s*#{1,4}\s+", parts[1], flags=re.MULTILINE)[0]
     return [ln.strip() for ln in tail.splitlines() if re.match(r"^\s*[-*]\s*\[[ xX]\]", ln)]
+
+
+def has_machine_checkable_predicates(criteria: list[str]) -> bool:
+    """Returns True if at least one acceptance criterion contains an executable verify command or checkable predicate."""
+    if not criteria:
+        return False
+    predicate_pattern = re.compile(
+        r"\(verify:\s*[`'\"]?[^)`'\"]+[`'\"]?\)|`[^`]+`|\bverify\s*:|\bassert(?:s|ions?)?\b|\bexits?\s+0\b",
+        re.IGNORECASE,
+    )
+    return any(predicate_pattern.search(c) for c in criteria)
 
 
 def has_verification(body: str) -> bool:
@@ -185,8 +197,18 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str
         gaps.append("is an epic (never directly implementable)")
         return gaps
 
-    if not acceptance_criteria(body):
+    criteria = acceptance_criteria(body)
+    if not criteria:
         gaps.append("no acceptance criteria checkboxes")
+    elif is_feat_or_fix(issue) and not has_machine_checkable_predicates(criteria):
+        if is_legacy_issue(num, repo_slug):
+            print(
+                f"  [WARN] Pre-existing legacy issue #{num} lacks machine-checkable verification predicates in acceptance criteria; warning only.",
+                file=sys.stderr,
+            )
+        else:
+            gaps.append("acceptance criteria lack machine-checkable predicate (e.g., '(verify: `cmd`)' or test assertion)")
+
     if not has_verification(body):
         gaps.append("no verification section")
     if not parse_touches(body):
@@ -311,10 +333,15 @@ def main():
             print(f"  ✅ #{issue['number']:<4} {issue['title']}")
     if blocked:
         print("\nBlocked — Ready contract incomplete:")
+        has_criteria_gaps = False
         for issue, gaps in blocked:
             print(f"  ❌ #{issue['number']:<4} {issue['title']}")
             for gap in gaps:
                 print(f"        · {gap}")
+                if any(k in gap.lower() for k in ("missing section:", "acceptance criteria lack", "machine-checkable", "decision boundaries", "non-goals")):
+                    has_criteria_gaps = True
+        if has_criteria_gaps:
+            print(f"\n{EXAMPLE_CONFORMING_ISSUE.strip()}\n")
 
     promoted = 0
     if args.promote and qualified:

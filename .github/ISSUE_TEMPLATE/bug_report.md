@@ -9,7 +9,7 @@ assignees: ''
 ## Problem Description
 <!-- A clear and concise description of what the bug is. -->
 
-## Expected Behavior / Predicates
+## Acceptance Criteria / Expected Behavior
 <!-- Assertion predicates that must hold after the fix -->
 - [ ] Predicate 1 (verify: `command to verify`)
 

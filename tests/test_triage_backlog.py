@@ -42,10 +42,22 @@ class SectionParsingTests(unittest.TestCase):
     def test_reads_criteria_under_the_heading(self):
         self.assertEqual(len(tb.acceptance_criteria(READY_BODY)), 2)
 
+    def test_reads_criteria_under_bug_heading_aliases(self):
+        bug_body = "## Acceptance Criteria / Expected Behavior\n\n- [ ] Predicate 1 (verify: `test`)\n\n## Verification\n\nx\n"
+        self.assertEqual(len(tb.acceptance_criteria(bug_body)), 1)
+        pred_body = "## Expected Behavior / Predicates\n\n- [ ] Predicate 1 (verify: `test`)\n\n## Verification\n\nx\n"
+        self.assertEqual(len(tb.acceptance_criteria(pred_body)), 1)
+
     def test_checkboxes_without_the_heading_do_not_count(self):
         # A stray task list is not acceptance criteria; counting it would
         # promote under-specified issues.
         self.assertEqual(tb.acceptance_criteria("## Notes\n\n- [ ] something\n"), [])
+
+    def test_has_machine_checkable_predicates(self):
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] it works", "- [ ] it is done"]))
+        self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `pytest -q`)"]))
+        self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] asserts returncode is 0"]))
+        self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] check `python3 scripts/merge_pr.py` exits 0"]))
 
     def test_verification_section_detected(self):
         self.assertTrue(tb.has_verification(READY_BODY))
@@ -141,10 +153,58 @@ class ReadyContractTests(unittest.TestCase):
         body = READY_BODY.replace("depends-on:", "depends-on: #5")
         self.assertEqual(tb.ready_gaps(issue(10, "type:chore", body=body), set()), [])
 
+    def test_new_feat_issue_with_vague_criteria_is_blocked(self):
+        vague_feat_body = CONFORMING_FEAT_BODY.replace(
+            "- [ ] Predicate 1 (verify: `pytest -q`)",
+            "- [ ] it works",
+        ).replace("- [ ] Predicate 2", "- [ ] it is finished")
+        gaps = tb.ready_gaps(issue(200, "type:feat", body=vague_feat_body), set())
+        self.assertIn("acceptance criteria lack machine-checkable predicate (e.g., '(verify: `cmd`)' or test assertion)", gaps)
+
+    def test_bug_report_template_filled_passes_with_zero_gaps(self):
+        bug_body = """## Problem Description
+A bug occurred.
+
+## Acceptance Criteria / Expected Behavior
+- [ ] Returns exit code 0 when valid (verify: `python3 -m unittest tests/test_foo.py`)
+
+## Decision Boundaries
+- Default: fallback
+- Error handling: raise ValueError on invalid input
+
+## Non-Goals
+- Performance optimizations
+
+## Steps to Reproduce
+1. Run command
+
+## Verification
+`python3 -m unittest tests/test_foo.py` exits 0
+
+## Dependencies
+depends-on: none
+touches: scripts/foo.py
+parallel-eligible: true
+"""
+        gaps = tb.ready_gaps(issue(200, "type:fix", body=bug_body), set())
+        self.assertEqual(gaps, [])
+
     def test_epic_is_never_ready(self):
         gaps = tb.ready_gaps(issue(2, "type:epic", body=READY_BODY), set())
         self.assertEqual(len(gaps), 1)
         self.assertIn("epic", gaps[0])
+
+    def test_main_refusal_emits_example_conforming_issue(self):
+        import io
+        issues_list = [issue(200, "type:feat", "status:backlog", body=READY_BODY)]
+        with patch("triage_backlog.list_open_issues", return_value=issues_list), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout, \
+             patch("sys.argv", ["triage_backlog.py"]):
+            tb.main()
+            output = mock_stdout.getvalue()
+            self.assertIn("Example of a conforming issue with machine-checkable criteria:", output)
+            self.assertIn("## Decision Boundaries", output)
+            self.assertIn("## Non-Goals", output)
 
 
 class PartitionTests(unittest.TestCase):
