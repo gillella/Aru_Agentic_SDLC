@@ -18,6 +18,10 @@ class FactoryMetricsUnitTests(unittest.TestCase):
         self.assertEqual(dt.hour, 10)
         self.assertIsNone(fm.parse_iso("invalid-timestamp"))
 
+    def test_label_value_strips_suffix_and_rejects_empty_value(self):
+        self.assertEqual(fm._label_value([{"name": "type: feat"}], "type:"), "feat")
+        self.assertEqual(fm._label_value([{"name": "type:"}], "type:"), "unavailable")
+
     def test_calculate_dwell_times(self):
         events = [
             {"issue_id": 1, "status": "Backlog", "timestamp": "2026-08-13T10:00:00Z"},
@@ -218,6 +222,7 @@ class FactoryMetricsUnitTests(unittest.TestCase):
             mock_datetime.now.return_value = fixed_now
             runs = fm.fetch_ci_runs(1)
         self.assertEqual([run["id"] for run in runs], [1])
+        self.assertIn("created=>=2026-08-13T12:00:00Z", mock_api.call_args.args[0])
 
     def test_closed_issue_metrics_attribute_measurement_unavailable_and_outliers(self):
         closed = [
@@ -248,6 +253,7 @@ class FactoryMetricsUnitTests(unittest.TestCase):
         self.assertEqual(first["cycle_time_hours"], 1.0)
         self.assertEqual(first["ci_runs"], 2)
         self.assertEqual(first["tokens"]["value"], 100)
+        self.assertEqual(first["outlier_reasons"], [])
         self.assertEqual(first["human_oversight_minutes"]["availability"], "unavailable")
         self.assertTrue(third["outlier"])
         self.assertIn("cost_usd", third["outlier_reasons"])
@@ -256,6 +262,19 @@ class FactoryMetricsUnitTests(unittest.TestCase):
         self.assertEqual(result["cost_per_closed_issue"]["average_usd_measured"], 7.333333)
         self.assertEqual(result["cost_per_closed_issue"]["unavailable_issue_count"], 1)
         self.assertEqual(result["by_issue_type"]["feat"]["closed_issues"], 4)
+
+    def test_closed_issue_metrics_skip_malformed_pr_number(self):
+        closed = [{
+            "event_type": "closed_issue", "issue_id": 1, "title": "Issue 1",
+            "closed_at": "2026-08-14T02:00:00Z", "claim_started_at": "2026-08-14T01:00:00Z",
+            "done_at": "2026-08-14T02:00:00Z", "agents": ["codex-1"], "issue_type": "fix",
+        }]
+        prs = [{
+            "pr_number": None, "merged": True, "issue_numbers": [1],
+            "agent": "codex-1", "family": "openai", "rework_rounds": 0,
+        }]
+        result = fm.build_closed_issue_metrics(closed, prs, [], [], 30)
+        self.assertEqual(result["issues"][0]["ci_runs"], 0)
 
     @patch("factory_metrics.collect_factory_metrics")
     @patch("fleet_status.evaluate_fleet_status")
@@ -278,6 +297,21 @@ class FactoryMetricsUnitTests(unittest.TestCase):
             result = fm.collect_factory_metrics(7, None, repo_dir=tmp)
             self.assertEqual(result["cwd"], str(Path(tmp).resolve()))
         self.assertEqual(Path.cwd(), original)
+
+    @patch("factory_metrics.collect_factory_metrics", side_effect=TypeError("malformed PR number"))
+    @patch("fleet_status.evaluate_fleet_status")
+    def test_fleet_status_metrics_failure_preserves_base_verdict(self, mock_status, _mock_collect):
+        mock_status.return_value = {
+            "state": "waiting", "exit_code": 2, "summary": "waiting", "reasons": ["PR pending"]
+        }
+        with patch("sys.argv", ["fleet_status.py", "--json", "--metrics"]), \
+             patch("builtins.print") as mock_print, self.assertRaises(SystemExit) as raised:
+            fs.main()
+        self.assertEqual(raised.exception.code, 2)
+        payload = json.loads(mock_print.call_args.args[0])
+        self.assertEqual(payload["state"], "waiting")
+        self.assertIn("malformed PR number", payload["factory_metrics_error"])
+        self.assertEqual(payload["reasons"][0], "PR pending")
 
 
 if __name__ == "__main__":

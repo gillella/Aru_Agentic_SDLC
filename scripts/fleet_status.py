@@ -407,11 +407,10 @@ def main():
                 args.metrics_usage_file,
                 repo_dir=args.repo_dir,
             )["closed_issues"]
-        except RuntimeError as exc:
-            status = _error(
-                f"Could not collect factory metrics: {exc}",
-                "ERROR: Closed-issue metrics unavailable.",
-            )
+        except (RuntimeError, TypeError, ValueError, KeyError) as exc:
+            reason = f"Closed-issue metrics unavailable: {exc}"
+            status.setdefault("reasons", []).append(reason)
+            status["factory_metrics_error"] = reason
 
     if args.json:
         print(json.dumps(status, indent=2))

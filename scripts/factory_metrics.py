@@ -39,7 +39,9 @@ def _label_value(labels: List[Any], prefix: str) -> str:
     for label in labels:
         name = label.get("name", "") if isinstance(label, dict) else str(label)
         if name.lower().startswith(prefix.lower()):
-            return name.split(":", 1)[1]
+            value = name[len(prefix):].strip()
+            if value:
+                return value
     return "unavailable"
 
 
@@ -377,10 +379,13 @@ def _usage_breakdown(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def fetch_ci_runs(window_days: int) -> List[Dict[str, Any]]:
-    runs = fetch_paginated_gh_api("repos/{owner}/{repo}/actions/runs?event=pull_request&per_page=100")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+    lower_bound = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+    runs = fetch_paginated_gh_api(
+        f"repos/{{owner}}/{{repo}}/actions/runs?event=pull_request&created=>={lower_bound}&per_page=100"
+    )
     if runs is None:
         raise RuntimeError("Failed to fetch GitHub Actions runs.")
-    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     return [
         run for run in runs
         if (created_at := parse_iso(run.get("created_at") or "")) and created_at >= cutoff
@@ -394,6 +399,8 @@ def _outlier_threshold(values: List[float]) -> Optional[float]:
     median = statistics.median(values)
     deviations = [abs(value - median) for value in values]
     mad = statistics.median(deviations)
+    if median == 0 and mad == 0:
+        return None
     return median + 4.4478 * mad if mad else median * 3
 
 
@@ -462,6 +469,10 @@ def build_closed_issue_metrics(
         start = parse_iso(issue.get("claim_started_at") or "")
         done = parse_iso(issue.get("done_at") or "")
         cycle = round((done - start).total_seconds() / 3600, 4) if start and done and done >= start else None
+        valid_pr_numbers = [
+            number for pr in linked
+            if isinstance((number := pr.get("pr_number")), int) and not isinstance(number, bool)
+        ]
         records.append({
             "issue_number": number,
             "title": issue.get("title") or "",
@@ -472,7 +483,7 @@ def build_closed_issue_metrics(
             "cycle_time_hours": cycle,
             "cycle_time_availability": "measured" if cycle is not None else "unavailable",
             "review_rounds": sum(int(pr.get("rework_rounds") or 0) for pr in linked),
-            "ci_runs": sum(ci_by_pr.get(int(pr["pr_number"]), 0) for pr in linked),
+            "ci_runs": sum(ci_by_pr.get(number, 0) for number in valid_pr_numbers),
             "tokens": _token_measurement(local),
             "cost_usd": _measurement(local, "cost_usd", "USD"),
             "human_oversight_minutes": _measurement(local, "human_oversight_minutes", "minutes"),
