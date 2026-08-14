@@ -32,12 +32,12 @@ python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <COMMIT_SHA> [--issu
 - Identify the originating issue number linked to the merged PR (`Closes #X`).
 
 ### 2. Dispatch Configured CD Pipeline
-- The helper dispatches the project's CD workflow (`.github/workflows/deploy-preview.yml`) for the **exact merged commit SHA** (`--ref <COMMIT_SHA>`).
-- It watches the dispatched workflow run until completion (`gh run watch`) to ensure errors are captured deterministically.
+- The helper dispatches the project's CD workflow (`.github/workflows/deploy-preview.yml`) on the default branch passing the merged commit as input (`-f commit_sha=<COMMIT_SHA>`).
+- It watches the newly correlated workflow run until completion (`gh run watch`) to ensure errors are captured deterministically.
 - Never hardcode credentials, PATs, or ad-hoc shell deployment commands inside the skill.
 
 ### 3. Record Preview URL on Originating Issue
-- Upon successful deployment, the helper captures the preview environment URL.
+- Upon successful deployment, the helper extracts the preview environment URL from the completed workflow run logs or step outputs.
 - It posts a formatted comment to the originating issue with the preview link and commit details.
 
 ### 4. Handle Deployment Failures (Issue-First Remediation)
@@ -52,10 +52,10 @@ python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <COMMIT_SHA> [--issu
 ---
 ## First-Stack Implementation & Extension Path
 
-### 1. First-Stack Slice (Python / Static HTML)
+### 1. First-Stack Slice (Python / Static HTML / GitHub Pages)
 - Default CD pipeline: `.github/workflows/deploy-preview.yml`.
 - Scaffolding: Generated automatically during `init_project.py` bootstrap.
-- Operation: Checks out the specific merged commit SHA ref, builds static/Python assets into `dist/`, outputs preview environment URL to `$GITHUB_OUTPUT` and `$GITHUB_STEP_SUMMARY`, which `deploy_preview.py` parses and posts to the originating issue.
+- Operation: Checks out the specific merged commit SHA ref, bundles project assets/docs into `dist/`, deploys to GitHub Pages environment via `actions/deploy-pages@v4`, and publishes the preview environment URL to `$GITHUB_STEP_SUMMARY` and logs, which `deploy_preview.py` parses and posts to the originating issue.
 
 ### 2. Extension Path for Additional Stack Packs (Phase 5)
 Different tech stacks (Node/Next.js on Vercel/Cloudflare, Python/FastAPI on Fly.io, Go on AWS ECS, Docker containers) declare their preview deployment configuration in `.github/workflows/deploy-preview.yml`.

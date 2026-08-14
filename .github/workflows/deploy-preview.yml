@@ -39,7 +39,39 @@ jobs:
           TARGET_REF="${{ inputs.commit_sha || github.sha }}"
           echo "Building preview for commit: ${TARGET_REF}"
           mkdir -p dist
-          echo "<!DOCTYPE html><html><head><title>Preview - ${TARGET_REF}</title></head><body><h1>Preview Environment</h1><p>Commit: ${TARGET_REF}</p></body></html>" > dist/index.html
+          if [ -f "index.html" ]; then
+            cp -r index.html dist/
+          fi
+          if [ -d "docs" ]; then
+            cp -r docs dist/
+          fi
+          if [ -d "static" ]; then
+            cp -r static dist/
+          fi
+          if [ ! -f "dist/index.html" ]; then
+            cat <<EOF > dist/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Preview - ${TARGET_REF}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 800px; margin: 0 auto; }
+    h1 { color: #0969da; }
+    .badge { background: #dafbe1; color: #1a7f37; padding: 0.25rem 0.5rem; border-radius: 6px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Preview Environment</h1>
+  <p><span class="badge">Active</span> Deployed Commit: <code>${TARGET_REF}</code></p>
+  <h2>Project Artifacts</h2>
+  <ul>
+    <li><a href="docs/">Documentation</a></li>
+  </ul>
+</body>
+</html>
+EOF
+          fi
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
