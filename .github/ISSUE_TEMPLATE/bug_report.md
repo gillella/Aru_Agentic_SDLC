@@ -19,7 +19,7 @@ assignees: ''
 
 ## Non-Goals
 <!-- Explicit non-goals -->
-- 
+-
 
 ## Steps to Reproduce
 1. Go to '...'

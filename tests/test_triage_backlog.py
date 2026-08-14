@@ -63,9 +63,13 @@ class SectionParsingTests(unittest.TestCase):
         self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `<command>`)"]))
         self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `...`)"]))
         self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: none)"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: manually click through the app)"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: ensure the button looks nice)"]))
+        self.assertFalse(tb.has_machine_checkable_predicates(["- [ ] Valid (verify: `pytest -q`)", "- [ ] Vague predicate"]))
         self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: `pytest -q`)"]))
         self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] asserts returncode is 0"]))
         self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] check `python3 scripts/merge_pr.py` exits 0"]))
+        self.assertTrue(tb.has_machine_checkable_predicates(["- [ ] Predicate 1 (verify: manual - docs update)", "- [ ] Predicate 2 [manual: no runtime change]"]))
 
     def test_verification_section_detected(self):
         self.assertTrue(tb.has_verification(READY_BODY))
@@ -91,7 +95,7 @@ Do the feature.
 ## Acceptance Criteria
 
 - [ ] Predicate 1 (verify: `pytest -q`)
-- [ ] Predicate 2
+- [ ] Predicate 2 (verify: `python3 scripts/foo.py --check`)
 
 ## Decision Boundaries
 - Default: value

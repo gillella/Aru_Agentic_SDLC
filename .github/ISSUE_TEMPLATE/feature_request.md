@@ -11,7 +11,7 @@ assignees: ''
 
 ## Acceptance Criteria
 - [ ] Predicate 1 (verify: `command to verify`)
-- [ ] Predicate 2
+- [ ] Predicate 2 (verify: `command to verify`)
 
 ## Decision Boundaries
 <!-- Explicit defaults, edge cases, error paths, and thresholds -->
@@ -21,7 +21,7 @@ assignees: ''
 
 ## Non-Goals
 <!-- Explicit non-goals to bound agent improvisation -->
-- 
+-
 
 ## Verification
 <!-- Commands and steps to verify this feature -->

@@ -77,6 +77,28 @@ VERIFY_PLACEHOLDERS = frozenset({
     "placeholder",
 })
 
+VERIFY_OPT_OUT_PREFIXES = (
+    "manual:",
+    "manual -",
+    "opt-out:",
+    "opt-out -",
+    "exempt:",
+    "exempt -",
+    "non-executable:",
+    "non-executable -",
+    "n/a -",
+    "none -",
+)
+
+PROSE_VERIFY_WORDS = frozenset({
+    "manually",
+    "visually",
+    "eyeball",
+    "click",
+    "browse",
+    "human",
+})
+
 
 def _is_valid_verify_command(cmd: str) -> bool:
     cleaned = cmd.strip("`'\" \t\r\n").strip()
@@ -87,35 +109,58 @@ def _is_valid_verify_command(cmd: str) -> bool:
         return False
     if re.match(r"^(?:<.*>|\.{3,}|todo|tbd|none|n/a)$", lower):
         return False
-    return True
 
+    if any(lower.startswith(prefix) for prefix in VERIFY_OPT_OUT_PREFIXES):
+        return True
 
-def has_machine_checkable_predicates(criteria: list[str]) -> bool:
-    """Returns True if at least one acceptance criterion contains an executable verify command or checkable assertion."""
-    if not criteria:
+    tokens = [t.strip(".,;:!?()[]{}") for t in lower.split()]
+    if not tokens:
         return False
 
+    if any(t in PROSE_VERIFY_WORDS for t in tokens):
+        return False
+    if tokens[0] in {"ensure", "verify", "check", "see", "make", "inspect", "browse", "test", "look"} and len(tokens) > 2:
+        return False
+
+    first_token = tokens[0]
+    if re.match(r"^[a-zA-Z0-9_\-\./]+$", first_token):
+        return True
+    return False
+
+
+def _is_criterion_machine_checkable(criterion: str) -> bool:
+    """Checks if an individual criterion has an executable verify command, structured assertion, or opt-out."""
     verify_pattern = re.compile(
         r"\(verify:\s*([^)]+)\)"
         r"|\bverify(?:_cmd)?\s*:\s*([^\n,)]+)",
         re.IGNORECASE,
     )
+    for m in verify_pattern.finditer(criterion):
+        cmd_match = m.group(1) or m.group(2)
+        if cmd_match and _is_valid_verify_command(cmd_match):
+            return True
+
+    if re.search(r"\[(?:manual|opt-out|exempt|non-executable)\s*[:\-][^\]]+\]", criterion, re.IGNORECASE):
+        return True
+
     assertion_pattern = re.compile(
         r"\bexits?\s+(?:with\s+code\s+)?(?:0|1|non-zero)\b"
         r"|\breturns?\s+(?:code\s+)?(?:0|1|true|false)\b"
-        r"|\bassert(?:s|ions?)?\s+(?:that\s+)?[`'\"]?[a-zA-Z0-9_.\s]+?\s*(?:==|!=|is|<=|>=|<|>|=|equals)\s*[`'\"]?(?:0|1|true|false|empty|non-empty|none|null|\d+)[`'\"]?",
+        r"|\bassert(?:s|ions?)?\s+(?:that\s+)?[`'\"]?[a-zA-Z0-9_.\s]+?\s*(?:==|!=|is|<=|>=|<|>|=|equals)\s*[`'\"]?(?:0|1|true|false|empty|non-empty|none|null|\d+)[`'\"]?"
+        r"|\b(?:raises|throws)\s+(?:error|exception|[A-Z][a-zA-Z0-9_]*(?:Error|Exception))\b",
         re.IGNORECASE,
     )
-
-    for c in criteria:
-        for m in verify_pattern.finditer(c):
-            cmd_match = m.group(1) or m.group(2)
-            if cmd_match and _is_valid_verify_command(cmd_match):
-                return True
-        if assertion_pattern.search(c):
-            return True
+    if assertion_pattern.search(criterion):
+        return True
 
     return False
+
+
+def has_machine_checkable_predicates(criteria: list[str]) -> bool:
+    """Returns True if EVERY acceptance criterion contains an executable verify command, checkable assertion, or valid opt-out."""
+    if not criteria:
+        return False
+    return all(_is_criterion_machine_checkable(c) for c in criteria)
 
 
 def has_verification(body: str) -> bool:
