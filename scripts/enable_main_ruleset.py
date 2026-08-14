@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 EXIT_BLOCKED = 3
 FORBIDDEN_RULE_TYPES = frozenset({"required_linear_history"})
+REQUIRED_RULE_TYPES = frozenset({"pull_request", "deletion", "non_fast_forward"})
 ListResult = Tuple[str, Optional[int], str]
 
 
@@ -65,9 +66,11 @@ def ruleset_payload(enforcement: str = "active") -> Dict[str, Any]:
                     "require_code_owner_review": False,
                     "require_last_push_approval": False,
                     "required_approving_review_count": 0,
-                    "required_review_thread_resolution": False,
+                    "required_review_thread_resolution": True,
                 },
             },
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
             {
                 "type": "required_status_checks",
                 "parameters": {
@@ -83,14 +86,23 @@ def ruleset_payload(enforcement: str = "active") -> Dict[str, Any]:
 
 
 def assert_safe_payload(payload: Dict[str, Any]) -> None:
-    """Refuse to ship the two rules this issue explicitly excludes."""
+    """Refuse to weaken the required protections or enable excluded rules."""
+    counts: Dict[str, int] = {}
     for rule in payload.get("rules") or []:
         rtype = rule.get("type")
+        if isinstance(rtype, str):
+            counts[rtype] = counts.get(rtype, 0) + 1
         if rtype in FORBIDDEN_RULE_TYPES:
             raise ValueError(f"forbidden ruleset rule: {rtype}")
         params = rule.get("parameters") or {}
         if int(params.get("required_approving_review_count") or 0) != 0:
             raise ValueError("required approving review would deadlock the fleet")
+        if (rtype == "pull_request"
+                and params.get("required_review_thread_resolution") is not True):
+            raise ValueError("review thread resolution must remain required")
+    for rtype in sorted(REQUIRED_RULE_TYPES):
+        if counts.get(rtype, 0) != 1:
+            raise ValueError(f"ruleset must contain exactly one {rtype} rule")
 
 
 def _gh_api(method: str, path: str, body: Optional[Dict[str, Any]] = None):

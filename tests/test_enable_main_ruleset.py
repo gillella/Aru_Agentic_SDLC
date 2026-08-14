@@ -17,10 +17,11 @@ class PayloadContractTests(unittest.TestCase):
         self.assertIn("pull_request", types)
         self.assertIn("required_status_checks", types)
         self.assertNotIn("required_linear_history", types)
-        self.assertNotIn("deletion", types)
-        self.assertNotIn("non_fast_forward", types)
+        self.assertEqual(types.count("deletion"), 1)
+        self.assertEqual(types.count("non_fast_forward"), 1)
         pr = next(r for r in payload["rules"] if r["type"] == "pull_request")
         self.assertEqual(pr["parameters"]["required_approving_review_count"], 0)
+        self.assertTrue(pr["parameters"]["required_review_thread_resolution"])
         checks = next(
             r for r in payload["rules"] if r["type"] == "required_status_checks"
         )
@@ -50,6 +51,31 @@ class PayloadContractTests(unittest.TestCase):
                 rule["parameters"]["required_approving_review_count"] = 1
         with self.assertRaises(ValueError):
             ruleset.assert_safe_payload(payload)
+
+    def test_assert_safe_payload_rejects_disabled_thread_resolution(self):
+        payload = ruleset.ruleset_payload()
+        pr = next(r for r in payload["rules"] if r["type"] == "pull_request")
+        pr["parameters"]["required_review_thread_resolution"] = False
+        with self.assertRaisesRegex(ValueError, "thread resolution"):
+            ruleset.assert_safe_payload(payload)
+
+    def test_assert_safe_payload_rejects_missing_required_protections(self):
+        for required in ("deletion", "non_fast_forward"):
+            with self.subTest(required=required):
+                payload = ruleset.ruleset_payload()
+                payload["rules"] = [
+                    rule for rule in payload["rules"] if rule["type"] != required
+                ]
+                with self.assertRaisesRegex(ValueError, f"one {required} rule"):
+                    ruleset.assert_safe_payload(payload)
+
+    def test_assert_safe_payload_rejects_duplicate_required_protections(self):
+        for required in ("deletion", "non_fast_forward"):
+            with self.subTest(required=required):
+                payload = ruleset.ruleset_payload()
+                payload["rules"].append({"type": required})
+                with self.assertRaisesRegex(ValueError, f"one {required} rule"):
+                    ruleset.assert_safe_payload(payload)
 
 
 class FindExistingTests(unittest.TestCase):
