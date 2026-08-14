@@ -21,7 +21,10 @@ This skill defines the declarative workflow for creating clear, actionable GitHu
 
 ### 1. Identify Requirement & Scope
 - Determine issue type: `feature`, `bug`, or `task`.
-- Define clear summary, background context, and explicit acceptance criteria.
+- Define clear summary, background context, and explicit machine-checkable criteria:
+  - **Acceptance Criteria / Predicates**: Machine-checkable assertions with `verify:` commands where possible.
+  - **Decision Boundaries**: Explicit defaults, edge cases, error paths, and thresholds.
+  - **Non-Goals**: Stated boundaries to prevent agent improvisation.
 
 ### 2. Specify Dependencies & Parallel Eligibility
 - Identify if the issue depends on prior issues being completed (`depends-on: #X`).

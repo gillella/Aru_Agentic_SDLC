@@ -22,10 +22,11 @@ The Ready contract (all four required):
 import argparse
 import re
 import sys
-from typing import Any
+from typing import Any, Optional
 
 from common import (
     claimed_by,
+    get_repo_slug,
     label_names,
     list_open_issues,
     parse_touches,
@@ -45,13 +46,91 @@ def acceptance_criteria(body: str) -> list[str]:
     if not body:
         return []
     parts = re.split(
-        r"^\s*#{1,4}\s*acceptance criteria\s*$", body,
+        r"^\s*#{1,4}\s*(?:acceptance\s+criteria(?:\s*[/:]\s*expected\s+behavior)?|expected\s+behavior(?:\s*[/:]\s*predicates)?)\s*$",
+        body,
         flags=re.IGNORECASE | re.MULTILINE,
     )
     if len(parts) < 2:
         return []
     tail = re.split(r"^\s*#{1,4}\s+", parts[1], flags=re.MULTILINE)[0]
     return [ln.strip() for ln in tail.splitlines() if re.match(r"^\s*[-*]\s*\[[ xX]\]", ln)]
+
+
+VERIFY_PLACEHOLDERS = frozenset({
+    "command to verify",
+    "command",
+    "cmd",
+    "commands",
+    "<command>",
+    "<command to verify>",
+    "<command_to_verify>",
+    "todo",
+    "tbd",
+    "none",
+    "null",
+    "n/a",
+    "na",
+    "...",
+    "test",
+    "test command",
+    "your command here",
+    "placeholder",
+})
+
+
+def _is_valid_fenced_verify_command(cmd: str) -> bool:
+    cleaned = cmd.strip("`'\" \t\r\n").strip()
+    if not cleaned:
+        return False
+    lower = cleaned.lower()
+    if lower in VERIFY_PLACEHOLDERS:
+        return False
+    if re.match(r"^(?:<.*>|\.{3,}|todo|tbd|none|n/a)$", lower):
+        return False
+    return True
+
+
+def _is_criterion_machine_checkable(criterion: str) -> bool:
+    """Checks if an individual criterion has a structural backticked verify command, assertion, or opt-out."""
+    # 1. Structural backticked verify command: (verify: `cmd`) or verify: `cmd`
+    fenced_verify_pattern = re.compile(
+        r"\((?:verify|verify_cmd):\s*`([^`]+)`\)"
+        r"|\b(?:verify|verify_cmd)\s*:\s*`([^`]+)`",
+        re.IGNORECASE,
+    )
+    for m in fenced_verify_pattern.finditer(criterion):
+        cmd = m.group(1) or m.group(2)
+        if cmd and _is_valid_fenced_verify_command(cmd):
+            return True
+
+    # 2. Explicit machine-readable opt-out: (verify: manual - reason) or [manual: reason]
+    opt_out_pattern = re.compile(
+        r"\((?:verify|verify_cmd):\s*(?:manual|opt-out|exempt|non-executable)\s*[:\-]\s*([^)]+)\)"
+        r"|\[(?:manual|opt-out|exempt|non-executable)\s*[:\-]\s*([^\]]+)\]",
+        re.IGNORECASE,
+    )
+    if opt_out_pattern.search(criterion):
+        return True
+
+    # 3. Structured assertions / invariants / exit codes / exceptions
+    assertion_pattern = re.compile(
+        r"\bexits?\s+(?:with\s+code\s+)?(?:0|1|non-zero)\b"
+        r"|\breturns?\s+(?:code\s+)?(?:0|1|true|false)\b"
+        r"|\bassert(?:s|ions?)?\s+(?:that\s+)?[`'\"]?[a-zA-Z0-9_.\s]+?\s*(?:==|!=|is|<=|>=|<|>|=|equals)\s*[`'\"]?(?:0|1|true|false|empty|non-empty|none|null|\d+)[`'\"]?"
+        r"|\b(?:raises|throws)\s+(?:error|exception|[A-Z][a-zA-Z0-9_]*(?:Error|Exception))\b",
+        re.IGNORECASE,
+    )
+    if assertion_pattern.search(criterion):
+        return True
+
+    return False
+
+
+def has_machine_checkable_predicates(criteria: list[str]) -> bool:
+    """Returns True if EVERY acceptance criterion contains an executable verify command, checkable assertion, or valid opt-out."""
+    if not criteria:
+        return False
+    return all(_is_criterion_machine_checkable(c) for c in criteria)
 
 
 def has_verification(body: str) -> bool:
@@ -68,21 +147,162 @@ def has_verification(body: str) -> bool:
     return bool(tail.strip())
 
 
-def ready_gaps(issue: dict[str, Any], open_numbers: set) -> list[str]:
+ARU_SDLC_REPO_SLUG = "gillella/Aru_Agentic_SDLC"
+LEGACY_ISSUE_CUTOFF_NUMBER = 158
+
+EXAMPLE_CONFORMING_ISSUE_BODY = """## Feature Description
+Describe the problem and intended change.
+
+## Acceptance Criteria
+- [ ] Predicate 1 (verify: `python3 -m unittest tests.test_foo`)
+- [ ] Predicate 2 (verify: `python3 scripts/foo.py --check`)
+
+## Decision Boundaries
+- Default: return 0 on success
+- Error handling: exit 1 on failure
+- Edge cases: handle empty inputs safely
+
+## Non-Goals
+- Modifying third-party dependencies
+
+## Verification
+`python3 -m unittest discover tests` exits 0.
+
+## Dependencies
+depends-on: none
+touches: scripts/foo.py, tests/test_foo.py
+parallel-eligible: true
+"""
+
+EXAMPLE_CONFORMING_ISSUE = f"""
+Example of a conforming issue with machine-checkable criteria:
+
+{EXAMPLE_CONFORMING_ISSUE_BODY}
+"""
+
+
+def _extract_section(body: str, heading_pattern: str) -> str:
+    """Extracts markdown text under a given heading until the next heading, stripping HTML comments."""
+    if not body:
+        return ""
+    parts = re.split(
+        rf"^\s*#{{1,4}}\s*{heading_pattern}\b.*$", body,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if len(parts) < 2:
+        return ""
+    tail = re.split(r"^\s*#{1,4}\s+", parts[1], flags=re.MULTILINE)[0]
+    tail = re.sub(r"<!--.*?-->", "", tail, flags=re.DOTALL)
+    return tail.strip()
+
+
+def has_decision_boundaries(body: str) -> bool:
+    """Checks for a substantive Decision Boundaries section in the issue body.
+
+    Rejects missing sections, empty sections, and untouched template placeholders
+    such as bare '- Default:', '- Edge cases:', '- Error handling:'.
+    """
+    content = _extract_section(body, r"decision\s+boundaries")
+    if not content:
+        return False
+    placeholder_pattern = re.compile(
+        r"^[-*]?\s*(default|edge\s*cases?|error\s*handling|thresholds?)\s*:\s*$",
+        re.IGNORECASE,
+    )
+    substantive_lines = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line in ("-", "*", "+"):
+            continue
+        if placeholder_pattern.match(line):
+            continue
+        substantive_lines.append(line)
+    return len(substantive_lines) > 0
+
+
+def has_non_goals(body: str) -> bool:
+    """Checks for a substantive Non-Goals section in the issue body.
+
+    Rejects missing sections, empty sections, and untouched template placeholders
+    such as a bare '-' or '*'.
+    """
+    content = _extract_section(body, r"non[- ]goals")
+    if not content:
+        return False
+    substantive_lines = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line in ("-", "*", "+"):
+            continue
+        substantive_lines.append(line)
+    return len(substantive_lines) > 0
+
+
+def is_feat_or_fix(issue: dict[str, Any]) -> bool:
+    """Checks if an issue represents a feature or bug fix."""
+    labels = {lbl.get("name", "").lower() for lbl in (issue.get("labels") or [])}
+    title = (issue.get("title") or "").lower()
+    return (
+        any(lbl in labels for lbl in ("type:feat", "type:fix", "feature", "bug"))
+        or title.startswith("feat:")
+        or title.startswith("fix:")
+    )
+
+
+def is_legacy_issue(num: int, repo_slug: Optional[str] = None) -> bool:
+    """Grandfathering only applies to pre-existing issues in Aru_Agentic_SDLC itself.
+
+    Downstream repositories enforce machine-checkable criteria from issue #1 onwards.
+    """
+    if num <= 0 or num > LEGACY_ISSUE_CUTOFF_NUMBER:
+        return False
+    if repo_slug is None:
+        repo_slug = get_repo_slug()
+    return bool(repo_slug and repo_slug.strip().lower() == ARU_SDLC_REPO_SLUG.lower())
+
+
+def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str] = None) -> list[str]:
     """Returns the list of unmet Ready-contract elements. Empty means ready."""
     body = issue.get("body") or ""
+    num = issue.get("number", 0)
     gaps = []
 
     if is_epic(issue.get("labels", [])):
         gaps.append("is an epic (never directly implementable)")
         return gaps
 
-    if not acceptance_criteria(body):
+    criteria = acceptance_criteria(body)
+    if not criteria:
         gaps.append("no acceptance criteria checkboxes")
+    elif is_feat_or_fix(issue) and not has_machine_checkable_predicates(criteria):
+        if is_legacy_issue(num, repo_slug):
+            print(
+                f"  [WARN] Pre-existing legacy issue #{num} lacks machine-checkable verification predicates in acceptance criteria; warning only.",
+                file=sys.stderr,
+            )
+        else:
+            gaps.append("acceptance criteria lack machine-checkable predicate (e.g., '(verify: `cmd`)' or test assertion)")
+
     if not has_verification(body):
         gaps.append("no verification section")
     if not parse_touches(body):
         gaps.append("no touches: declaration")
+
+    if is_feat_or_fix(issue):
+        missing_db = not has_decision_boundaries(body)
+        missing_ng = not has_non_goals(body)
+        if missing_db or missing_ng:
+            if is_legacy_issue(num, repo_slug):
+                print(
+                    f"  [WARN] Pre-existing legacy issue #{num} is missing machine-checkable criteria sections "
+                    f"({'Decision Boundaries' if missing_db else ''}{' and ' if missing_db and missing_ng else ''}{'Non-Goals' if missing_ng else ''}); warning only.",
+                    file=sys.stderr,
+                )
+            else:
+                if missing_db:
+                    gaps.append("missing section: ## Decision Boundaries")
+                if missing_ng:
+                    gaps.append("missing section: ## Non-Goals")
 
     unresolved = [d for d in parse_dependencies(body) if d in open_numbers]
     if unresolved:
@@ -174,9 +394,10 @@ def main():
     if args.issue:
         backlog = [i for i in backlog if i["number"] in args.issue]
 
+    slug = get_repo_slug()
     qualified, blocked = [], []
     for issue in sorted(backlog, key=lambda i: i["number"]):
-        gaps = ready_gaps(issue, open_numbers)
+        gaps = ready_gaps(issue, open_numbers, repo_slug=slug)
         (blocked if gaps else qualified).append((issue, gaps))
 
     print(f"=== Backlog triage — {len(backlog)} issue(s) examined ===\n")
@@ -186,10 +407,15 @@ def main():
             print(f"  ✅ #{issue['number']:<4} {issue['title']}")
     if blocked:
         print("\nBlocked — Ready contract incomplete:")
+        has_criteria_gaps = False
         for issue, gaps in blocked:
             print(f"  ❌ #{issue['number']:<4} {issue['title']}")
             for gap in gaps:
                 print(f"        · {gap}")
+                if any(k in gap.lower() for k in ("missing section:", "acceptance criteria lack", "machine-checkable", "decision boundaries", "non-goals")):
+                    has_criteria_gaps = True
+        if has_criteria_gaps:
+            print(f"\n{EXAMPLE_CONFORMING_ISSUE.strip()}\n")
 
     promoted = 0
     if args.promote and qualified:

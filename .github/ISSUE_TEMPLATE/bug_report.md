@@ -9,8 +9,17 @@ assignees: ''
 ## Problem Description
 <!-- A clear and concise description of what the bug is. -->
 
-## Expected Behavior
-<!-- A clear description of what you expected to happen. -->
+## Acceptance Criteria / Expected Behavior
+<!-- Assertion predicates that must hold after the fix -->
+- [ ] Predicate 1 (verify: `command to verify`)
+
+## Decision Boundaries
+<!-- Edge cases, error paths, and regression boundaries -->
+- Error handling:
+
+## Non-Goals
+<!-- Explicit non-goals -->
+-
 
 ## Steps to Reproduce
 1. Go to '...'
@@ -20,6 +29,10 @@ assignees: ''
 ## Environment / Logs
 <!-- Paste relevant terminal error logs or stack traces -->
 
+## Verification
+<!-- Commands and steps to verify this fix -->
+
 ## Dependencies
-- **depends-on**: <!-- e.g., none or #X -->
-- **parallel-eligible**: true
+depends-on: <!-- e.g., none or #X -->
+touches: <!-- Paths or globs touched by this issue -->
+parallel-eligible: true
