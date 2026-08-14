@@ -71,6 +71,16 @@ class PruneCodebaseTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("No module named vulture", result["error"])
 
+    @patch("prune_codebase.subprocess.run")
+    def test_run_command_maps_timeout_to_error(self, run):
+        run.side_effect = pc.subprocess.TimeoutExpired(["git", "status"], pc.COMMAND_TIMEOUT_SECONDS)
+
+        code, output, error = pc.run_command(["git", "status"], Path("/repo"))
+
+        self.assertEqual(code, pc.EXIT_ERROR)
+        self.assertEqual(output, "")
+        self.assertIn("timed out", error)
+
     def test_run_vulture_with_pinned_tool_detects_dead_code(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir)
@@ -95,6 +105,22 @@ class PruneCodebaseTests(unittest.TestCase):
             files = [Path("prompts/used.md"), Path("prompts/orphan.md"), Path("docs/guide.md")]
 
             self.assertEqual(pc.unreferenced_prompts(repo, files), ["prompts/orphan.md"])
+
+    def test_unreferenced_prompts_do_not_follow_tracked_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "prompts").mkdir()
+            (repo / "docs").mkdir()
+            (repo / "outside.txt").write_text("Load prompts/used.md")
+            (repo / "prompts" / "used.md").write_text("prompt")
+            (repo / "docs" / "reference.md").symlink_to(repo / "outside.txt")
+
+            unused = pc.unreferenced_prompts(
+                repo,
+                [Path("prompts/used.md"), Path("docs/reference.md")],
+            )
+
+            self.assertEqual(unused, ["prompts/used.md"])
 
     def test_orphaned_worktrees_excludes_registered_and_retained_directories(self):
         with tempfile.TemporaryDirectory() as temp_dir:

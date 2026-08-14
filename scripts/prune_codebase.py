@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 EXIT_CLEAN = 0
 EXIT_ERROR = 1
 EXIT_FINDINGS = 3
+COMMAND_TIMEOUT_SECONDS = 120
 
 VULTURE_FINDING = re.compile(
     r"^(?P<path>.+?):(?P<line>\d+): (?P<message>.+?) "
@@ -33,7 +35,10 @@ def run_command(command: Sequence[str], cwd: Path) -> Tuple[int, str, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            timeout=COMMAND_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired:
+        return EXIT_ERROR, "", f"Command timed out after {COMMAND_TIMEOUT_SECONDS} seconds"
     except OSError as exc:
         return EXIT_ERROR, "", str(exc)
     return result.returncode, result.stdout, result.stderr
@@ -134,7 +139,8 @@ def unreferenced_prompts(repo_dir: Path, files: Sequence[Path]) -> List[str]:
     for path in files:
         full_path = repo_dir / path
         try:
-            if full_path.stat().st_size > 2 * 1024 * 1024:
+            metadata = full_path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 2 * 1024 * 1024:
                 continue
             searchable[path] = full_path.read_text(encoding="utf-8", errors="ignore")
         except OSError:

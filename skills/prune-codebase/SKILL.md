@@ -57,6 +57,6 @@ given.
 
 If removal is warranted, create a tracked cleanup issue with exact `touches:`
 metadata using `create-github-issue`, then implement it through the normal Aru
-issue-first workflow in an isolated worktree. Re-run the scanner and the full
-test suite after each cleanup slice. Do not delete candidates directly from
-this skill.
+issue-first workflow in an isolated worktree under `.worktrees/`. Re-run the
+scanner and the full test suite after each cleanup slice. Do not delete
+candidates directly from this skill.
