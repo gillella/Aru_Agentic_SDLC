@@ -37,14 +37,19 @@ not the factory. Factory stop/resume are Slack **commands**.
 
 ## Operator commands (allowlisted user, allowlisted channel)
 
-Mention the bot:
+Mention the bot, then put the verb first (`<@bot> status`, not a sentence
+that happens to contain `stop`):
 
 - `status` — read-only `fleet_status.py`
 - `stop` / `stop all` — write `~/.aru/factory-loop.stop` (drain-first)
 - `resume` / `resume all` — clear that operator stop only
 - `intervention #172 approved` — copy the decision onto the GitHub issue
+  in `--repo-dir`
 
-Events from other workspaces, channels, users, or bots are ignored.
+A scoped `resume <target>` is rejected while a global `*` stop is in effect.
+Events from other workspaces, channels, users, or bots are ignored. The
+bridge refuses to start, and commands fail closed, unless
+`SLACK_OPERATOR_USER_ID` is set.
 
 ## Setup
 
@@ -53,8 +58,9 @@ Events from other workspaces, channels, users, or bots are ignored.
 2. Enable Socket Mode. Create an app-level token with `connections:write`.
 3. Install to the workspace. `/invite` the bot into the private channel.
 4. Store `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_SIGNING_SECRET`,
-   `SLACK_TEAM_ID`, `SLACK_CHANNEL_ID`, and optionally
-   `SLACK_OPERATOR_USER_ID` in `~/.aru/slack.env` (`chmod 600`).
+   `SLACK_TEAM_ID`, `SLACK_CHANNEL_ID`, and `SLACK_OPERATOR_USER_ID`
+   in `~/.aru/slack.env` (`chmod 600`). The operator id is required for
+   the bridge; notify-only posting can omit it.
 
 Revoke tokens in the Slack app dashboard, then delete `~/.aru/slack.env`.
 

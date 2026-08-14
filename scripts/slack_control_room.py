@@ -37,17 +37,18 @@ def _now() -> str:
 
 
 def authorize(config: SlackConfig, team_id: str, channel_id: str, user_id: str) -> bool:
+    operator = config.operator_user_id
+    if not (operator.startswith("U") and len(operator) >= 8):
+        return False
     if team_id != config.team_id or channel_id != config.channel_id:
         return False
-    if config.operator_user_id and user_id != config.operator_user_id:
-        return False
-    return True
+    return user_id == operator
 
 
 def parse_command(text: str) -> Optional[Dict[str, str]]:
     cleaned = redact(text or "")
     cleaned = re.sub(r"<@[A-Z0-9]+>", "", cleaned).strip()
-    match = COMMAND_RE.search(cleaned)
+    match = COMMAND_RE.match(cleaned)
     if not match:
         return None
     verb = match.group("verb").lower()
@@ -97,14 +98,18 @@ def apply_stop(project: str, target: str) -> str:
 def apply_resume(project: str, target: str) -> str:
     if not STOP_PATH.is_file():
         return "no operator stop is in effect"
-    if target == "all" or not project:
+    data = load_stop_file()
+    projects = list(data.get("projects") or [])
+    scoped = target not in {"", "all"}
+    if scoped and "*" in projects:
+        return "global stop (*) is in effect; resume all to clear it"
+    if not scoped:
         STOP_PATH.unlink()
         return "cleared operator stop for all projects"
-    data = load_stop_file()
-    projects = [item for item in (data.get("projects") or []) if item not in {project, "*"}]
+    projects = [item for item in projects if item != project]
     if not projects:
         STOP_PATH.unlink()
-        return f"cleared operator stop including {project}"
+        return f"cleared operator stop for {project}"
     write_stop_file(projects, "slack_control_room")
     return f"cleared operator stop for {project}"
 
@@ -139,7 +144,7 @@ def handle_command(
     parsed: Dict[str, str],
     project: str,
     repo_dir: str,
-    comment: Callable[[str, int, str], bool],
+    comment: Callable[[str, int, str, str], bool],
 ) -> str:
     verb = parsed["verb"]
     if verb == "status":
@@ -154,14 +159,14 @@ def handle_command(
         if not ref or not decision:
             return "intervention needs `#<issue-or-pr> <decision>`"
         kind, number = parse_ref(ref)
-        ok = comment(kind, number, decision)
+        ok = comment(kind, number, decision, repo_dir)
         if not ok:
             return f"could not copy intervention onto GitHub {kind} #{number}"
         return f"copied intervention to GitHub {kind} #{number}"
     return "unknown command"
 
 
-def github_comment(kind: str, number: int, decision: str) -> bool:
+def github_comment(kind: str, number: int, decision: str, repo_dir: str = ".") -> bool:
     from common import run_cmd
 
     body = (
@@ -172,6 +177,7 @@ def github_comment(kind: str, number: int, decision: str) -> bool:
     code, _, _ = run_cmd(
         ["gh", resource, "comment", str(number), "--body", body],
         check=False,
+        cwd=repo_dir,
     )
     return code == 0
 
@@ -182,7 +188,7 @@ def handle_slack_message(
     seen_ids: set[str],
     project: str,
     repo_dir: str,
-    comment: Callable[[str, int, str], bool] = github_comment,
+    comment: Callable[[str, int, str, str], bool] = github_comment,
     notify: Callable[..., Dict[str, Any]] = post_event,
 ) -> Optional[str]:
     event_id = str(payload.get("client_msg_id") or payload.get("ts") or "")
@@ -289,6 +295,12 @@ def stop_bridge() -> str:
 
 
 def start_bridge(config: SlackConfig, project: str, repo_dir: str) -> int:
+    if not (config.operator_user_id.startswith("U") and len(config.operator_user_id) >= 8):
+        print(
+            "[ERROR] SLACK_OPERATOR_USER_ID is required; commands fail closed.",
+            file=sys.stderr,
+        )
+        return 1
     if not _bolt_available():
         print(
             "[ERROR] slack-bolt is not installed. "

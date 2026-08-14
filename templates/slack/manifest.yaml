@@ -22,6 +22,9 @@ oauth_config:
       - pins:write
       - users:read
 settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
   org_deploy_enabled: false
   socket_mode_enabled: true
   token_rotation_enabled: false
