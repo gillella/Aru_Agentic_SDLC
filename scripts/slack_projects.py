@@ -311,15 +311,25 @@ def discover_checkout_identity(local_path: Path) -> Dict[str, Any]:
         raise RegistryError(f"checkout is unavailable: {local_path}")
     try:
         repo = _bounded_json(
-            ["gh", "repo", "view", "--json", "databaseId,id,nameWithOwner"],
+            ["gh", "repo", "view", "--json", "id,nameWithOwner"],
             cwd=str(local_path),
         )
+        repo_slug = str(repo["nameWithOwner"])
+        rest_repo = _bounded_json(
+            ["gh", "api", f"repos/{repo_slug}"], cwd=str(local_path),
+        )
+        if (str(rest_repo["node_id"]) != str(repo["id"])
+                or str(rest_repo["full_name"]) != repo_slug):
+            raise RegistryError("repository identity APIs returned mismatched data")
+        database_id = rest_repo["id"]
+        if isinstance(database_id, bool) or not isinstance(database_id, int):
+            raise RegistryError("repository database id is missing or invalid")
         project = _discover_governed_project(repo["nameWithOwner"])
     except (KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         raise RegistryError(f"cannot verify GitHub identity for {local_path}: {exc}") from exc
     return {
         "github_repo_id": str(repo["id"]),
-        "github_repo_database_id": repo.get("databaseId"),
+        "github_repo_database_id": database_id,
         "project_v2_id": str(project["id"]),
         "repo_slug": str(repo["nameWithOwner"]),
         "local_path": str(local_path.resolve()),
