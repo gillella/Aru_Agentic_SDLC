@@ -391,9 +391,26 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate factory fleet completion state.")
     parser.add_argument("--json", action="store_true", help="Output state in JSON format")
     parser.add_argument("--repo-dir", default=".", help="Repository working directory")
+    parser.add_argument("--metrics", action="store_true", help="Include opt-in closed-issue cost/cycle metrics")
+    parser.add_argument("--metrics-window-days", type=int, default=30, help="Closed-issue metrics window")
+    parser.add_argument("--metrics-usage-file", help="Optional measured local CLI usage JSON/JSONL")
     args = parser.parse_args()
 
     status = evaluate_fleet_status(args.repo_dir)
+    if args.metrics:
+        try:
+            if args.metrics_window_days <= 0:
+                raise RuntimeError("--metrics-window-days must be positive.")
+            from factory_metrics import collect_factory_metrics
+            status["factory_metrics"] = collect_factory_metrics(
+                args.metrics_window_days,
+                args.metrics_usage_file,
+                repo_dir=args.repo_dir,
+            )["closed_issues"]
+        except (RuntimeError, TypeError, ValueError, KeyError) as exc:
+            reason = f"Closed-issue metrics unavailable: {exc}"
+            status.setdefault("reasons", []).append(reason)
+            status["factory_metrics_error"] = reason
 
     if args.json:
         print(json.dumps(status, indent=2))
@@ -416,6 +433,16 @@ def main():
         print(f"  files at/over {health['line_ceiling']} lines: {len(over)}")
         for item in over[:20]:
             print(f"    • {item['path']} ({item['lines']})")
+    metrics = status.get("factory_metrics")
+    if metrics:
+        cost = metrics["cost_per_closed_issue"]
+        measured = cost["average_usd_measured"]
+        cost_text = f"${measured:.6f}" if measured is not None else "unavailable"
+        print("\nClosed-issue metrics:")
+        print(f"  window: {metrics['window_days']} days")
+        print(f"  closed issues: {metrics['closed_issue_count']}")
+        print(f"  measured cost per closed issue: {cost_text}")
+        print(f"  outliers: {metrics['outlier_issue_numbers'] or 'none'}")
     sys.exit(status["exit_code"])
 
 
