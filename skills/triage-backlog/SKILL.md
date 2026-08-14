@@ -45,6 +45,13 @@ missing — and this is judgment work, not formatting work:
 | depends-on still open | Is it a real dependency, or did the author link a related issue? Remove false dependencies; they serialize the fleet for nothing. |
 | is an epic | Epics are containers. Split into implementable children instead of promoting. |
 
+Issues that satisfy the Ready contract can still receive a `SPLIT`
+recommendation. The script flags either visible oversize signal: more than 8
+acceptance-criteria checkboxes **or** `touches:` paths spanning more than one
+top-level area. It prints the observed checkbox count and area names so the
+scope can be decomposed deliberately. Epics remain blocked by the Ready
+contract rather than entering this overrideable recommendation path.
+
 ## Step 3: Judge readiness beyond the contract
 
 The contract is necessary, not sufficient. Before promoting, ask:
@@ -67,7 +74,12 @@ The contract is necessary, not sufficient. Before promoting, ask:
 ```
 python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --promote
 python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --promote --issue 24 --issue 25
+python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --promote --force
 ```
+
+`--promote` skips `SPLIT` recommendations. `--force` explicitly overrides only
+that recommendation; it never overrides missing Ready-contract elements or
+the rule that epics are unpromotable.
 
 ## Step 5: Size the fleet from the capacity number, not the Ready count
 

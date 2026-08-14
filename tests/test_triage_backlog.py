@@ -1,3 +1,4 @@
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -243,7 +244,6 @@ parallel-eligible: true
         self.assertIn("epic", gaps[0])
 
     def test_main_refusal_emits_example_conforming_issue(self):
-        import io
         issues_list = [issue(200, "type:feat", "status:backlog", body=READY_BODY)]
         with patch("triage_backlog.list_open_issues", return_value=issues_list), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout, \
@@ -254,6 +254,78 @@ parallel-eligible: true
             self.assertIn("## Decision Boundaries", output)
             self.assertIn("## Non-Goals", output)
             self.assertIn("## Dependencies", output)
+
+
+class SplitRecommendationTests(unittest.TestCase):
+    @staticmethod
+    def oversized_body():
+        criteria = "\n".join(f"- [ ] predicate {n}" for n in range(1, 10))
+        return READY_BODY.replace(
+            "- [ ] it works\n- [ ] it is documented",
+            criteria,
+        ).replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: scripts/thing.py, hooks/guard.py, tests/test_thing.py",
+        )
+
+    def test_narrow_issue_promotes(self):
+        narrow_body = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: src/thing.py, src/thing_test.py",
+        )
+        narrow = issue(10, "type:chore", "status:backlog", body=narrow_body)
+        with patch("triage_backlog.list_open_issues", return_value=[narrow]), \
+             patch("triage_backlog.update_status", return_value=True) as update, \
+             patch("sys.argv", ["triage_backlog.py", "--promote"]):
+            self.assertEqual(tb.main(), 0)
+        update.assert_called_once_with(10, "Ready")
+
+    def test_wide_touches_plus_many_criteria_is_held_for_split(self):
+        wide = issue(11, "type:chore", "status:backlog", body=self.oversized_body())
+        with patch("triage_backlog.list_open_issues", return_value=[wide]), \
+             patch("triage_backlog.update_status") as update, \
+             patch("sys.argv", ["triage_backlog.py", "--promote"]), \
+             patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(tb.main(), 0)
+        update.assert_not_called()
+        self.assertIn("SPLIT", output.getvalue())
+        self.assertIn("9 acceptance criteria exceed the threshold of 8", output.getvalue())
+        self.assertIn("3 top-level areas: hooks, scripts, tests", output.getvalue())
+
+    def test_each_oversize_signal_is_independently_actionable(self):
+        wide_only = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: scripts/thing.py, hooks/guard.py",
+        )
+        many_only = self.oversized_body().replace(
+            "touches: scripts/thing.py, hooks/guard.py, tests/test_thing.py",
+            "touches: scripts/thing.py, scripts/thing_test.py",
+        )
+
+        self.assertEqual(
+            tb.split_reasons(issue(20, "type:chore", body=wide_only)),
+            ["touches span 2 top-level areas: hooks, scripts"],
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(21, "type:chore", body=many_only)),
+            ["9 acceptance criteria exceed the threshold of 8"],
+        )
+
+    def test_force_promotes_split_recommended_issue(self):
+        wide = issue(12, "type:chore", "status:backlog", body=self.oversized_body())
+        with patch("triage_backlog.list_open_issues", return_value=[wide]), \
+             patch("triage_backlog.update_status", return_value=True) as update, \
+             patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]):
+            self.assertEqual(tb.main(), 0)
+        update.assert_called_once_with(12, "Ready")
+
+    def test_force_does_not_promote_epic(self):
+        epic = issue(13, "type:epic", "status:backlog", body=self.oversized_body())
+        with patch("triage_backlog.list_open_issues", return_value=[epic]), \
+             patch("triage_backlog.update_status") as update, \
+             patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]):
+            self.assertEqual(tb.main(), 0)
+        update.assert_not_called()
 
 
 class PartitionTests(unittest.TestCase):
