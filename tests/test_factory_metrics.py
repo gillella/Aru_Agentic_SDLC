@@ -60,19 +60,25 @@ class FactoryMetricsUnitTests(unittest.TestCase):
                 self.assertIsNone(items)
 
     @patch("factory_metrics.fetch_paginated_gh_api")
-    def test_fetch_github_telemetry_filters_window_and_detects_comment_threads(self, mock_api):
+    def test_fetch_github_telemetry_filters_window_and_detects_review_cycles(self, mock_api):
         def side_effect(endpoint):
             if "pulls?state=all" in endpoint:
                 return [
-                    # PR within window with comment threads
+                    # PR within window with multiple root comment threads from 1 review session
                     {"number": 1, "created_at": "2026-08-14T00:00:00Z", "merged_at": "2026-08-14T02:00:00Z"},
                     # PR outside window
                     {"number": 2, "created_at": "2020-01-01T00:00:00Z", "merged_at": "2020-01-01T02:00:00Z"},
                 ]
             elif "pulls/1/reviews" in endpoint:
-                return [{"state": "COMMENTED"}]
+                return [{"id": 501, "state": "COMMENTED"}]
             elif "pulls/1/comments" in endpoint:
-                return [{"id": 101, "in_reply_to_id": None}, {"id": 102, "in_reply_to_id": 101}]
+                # 3 root comments, all submitted under pull_request_review_id 501
+                return [
+                    {"id": 101, "pull_request_review_id": 501, "in_reply_to_id": None},
+                    {"id": 102, "pull_request_review_id": 501, "in_reply_to_id": 101},
+                    {"id": 103, "pull_request_review_id": 501, "in_reply_to_id": None},
+                    {"id": 104, "pull_request_review_id": 501, "in_reply_to_id": None},
+                ]
             elif "issues?state=all" in endpoint:
                 return [
                     {"number": 5, "pull_request": None, "created_at": "2026-08-14T00:00:00Z"}
@@ -88,7 +94,8 @@ class FactoryMetricsUnitTests(unittest.TestCase):
         issue_events, pr_list = fm.fetch_github_telemetry(window_days=7)
         self.assertEqual(len(pr_list), 1)
         self.assertEqual(pr_list[0]["pr_number"], 1)
-        self.assertEqual(pr_list[0]["rework_rounds"], 1)  # 1 distinct thread
+        # N root threads under 1 review session must equal 1 rework round (not N)
+        self.assertEqual(pr_list[0]["rework_rounds"], 1)
         self.assertEqual(len(issue_events), 2)
         self.assertEqual(issue_events[0]["status"], "ready")
 

@@ -187,9 +187,13 @@ def fetch_github_telemetry(window_days: int = 30) -> Tuple[List[Dict[str, Any]],
         if comments is None:
             raise RuntimeError(f"Failed to fetch review comments for PR #{pr_num}.")
 
-        changes_requested = sum(1 for r in reviews if r.get("state") == "CHANGES_REQUESTED")
-        thread_ids = {c.get("in_reply_to_id") or c.get("id") for c in comments if c.get("id")}
-        rework_rounds = max(changes_requested, len(thread_ids))
+        review_ids_with_rework = {r.get("id") for r in reviews if r.get("state") == "CHANGES_REQUESTED" and r.get("id")}
+        for c in comments:
+            # Root review comments indicate a finding submitted in that review cycle
+            if not c.get("in_reply_to_id") and c.get("pull_request_review_id"):
+                review_ids_with_rework.add(c["pull_request_review_id"])
+
+        rework_rounds = len(review_ids_with_rework)
 
         pr_list.append({
             "pr_number": pr_num,
