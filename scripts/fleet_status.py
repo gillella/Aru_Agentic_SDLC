@@ -336,9 +336,10 @@ def _review_age_question(prs: List[Dict[str, Any]], now: datetime) -> Dict[str, 
 
 
 def _review_rounds(pr: Dict[str, Any]) -> int:
+    counted = {"CHANGES_REQUESTED", "COMMENTED"}
     return sum(
         1 for review in (pr.get("reviews") or [])
-        if (review.get("state") or "").upper() == "CHANGES_REQUESTED"
+        if (review.get("state") or "").upper() in counted
     )
 
 

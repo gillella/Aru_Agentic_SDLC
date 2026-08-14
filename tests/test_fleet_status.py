@@ -449,6 +449,24 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(asked["ci_failure_rate"]["completed"], 2)
         self.assertEqual(asked["ci_failure_rate"]["severity"], "attn")
 
+    def test_review_rounds_count_same_account_commented_reviews(self):
+        status = self.evaluate_fixture(
+            prs=[
+                mock_pr(
+                    31,
+                    reviews=[
+                        {"state": "COMMENTED"},
+                        {"state": "COMMENTED"},
+                        {"state": "COMMENTED"},
+                        {"state": "APPROVED"},
+                    ],
+                )
+            ]
+        )
+        asked = questions(status)["review_rounds"]
+        self.assertEqual(asked["max_review_rounds"], 3)
+        self.assertEqual(asked["severity"], "attn")
+
     def test_cost_question_uses_measured_closed_issue_metrics(self):
         from fleet_status import apply_closed_issue_cost, build_operator_screen
 
