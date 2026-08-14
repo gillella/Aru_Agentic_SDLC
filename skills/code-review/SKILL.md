@@ -20,8 +20,12 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 ## Procedure Steps
 
 ### Step 1: Fetch PR & Create Review Worktree
-1. Fetch PR details, title, body, diffs, and linked issue (`Closes #X`).
-2. Create an isolated git worktree for the PR branch in `.worktrees/review-pr-<PR_ID>` to perform local verification without disturbing your active working directory.
+1. Capture the reviewed repository root before changing directories:
+   `REVIEW_REPO_ROOT="$(git rev-parse --show-toplevel)"`. Fetch PR details,
+   title, body, diffs, and linked issue (`Closes #X`) from that repository.
+2. Create an isolated worktree at
+   `$REVIEW_REPO_ROOT/.worktrees/review-pr-<PR_ID>` to perform local
+   verification without disturbing the primary checkout.
 
 ### Step 2: Goal Alignment & Issue Tracing
 - Verify that the PR links to an open issue (`Closes #X`).
@@ -31,8 +35,9 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Check for subtle bugs, logic flaws, race conditions, or unhandled edge cases.
 - Ensure public API signatures, schema types, and data models remain consistent.
 - Verify zero unused imports, dead code, or debug statements.
-- Apply the **narrower-than-reality** heuristic below to every new or changed gate,
-  scanner, matcher, or permission check in the diff.
+- Apply the **narrower-than-reality** heuristic below to every new or changed
+  rule or assumption whose effective scope can be narrower than the reality it
+  governs.
 
 ### Step 4: Test Coverage & Verification
 - Verify that new feature logic or bug fixes are accompanied by unit/integration tests.
@@ -64,40 +69,61 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - Do not move the issue directly to Done. Only the gated `merge_pr.py` close-out
   performs the merge and Done transition after independent review, green CI,
   resolved threads, and the remaining Definition-of-Done checks pass.
-- Remove temporary review worktree directory `.worktrees/review-pr-<PR_ID>`.
+- Return to the exact captured reviewed repository root
+  (`cd "$REVIEW_REPO_ROOT"`) and remove its temporary review worktree safely
+  without `--force`:
+  `git -C "$REVIEW_REPO_ROOT" worktree remove "$REVIEW_REPO_ROOT/.worktrees/review-pr-<PR_ID>"`.
+  Never substitute `$ARU_SDLC_HOME`; it may identify the canonical framework,
+  not the repository being reviewed. If Git refuses because untracked or
+  modified files exist, inspect the worktree, remove only known generated
+  build/test caches, or retain it for diagnostic recovery rather than
+  discarding uninspected material.
 
 ---
 
 ## Review Checklist
 
-Apply every item before submitting the review. A chat summary that skips this
-list is not review evidence.
+Apply every pre-submission item before submitting the review, submit the review with clear line comments and verdict, and complete the post-submission close-out after submission. A chat summary that skips this list is not review evidence.
 
+### Pre-Submission Checklist
 - [ ] Linked issue (`Closes #N`) is open; every acceptance criterion is met or
       explicitly deferred with a follow-up issue (do not close incomplete work).
 - [ ] Diff matches the claim in the PR body **and** the gate/script's actual
       behaviour (state machine, not narrative — see below).
-- [ ] **Narrower-than-reality:** for every gate/scanner/matcher in the diff,
-      answer: *What does the thing I am gating actually accept, and am I
-      narrower than it?*
+- [ ] **Narrower-than-reality:** for every new or changed rule or assumption in
+      the diff, answer: *What reality does this govern, and can its effective
+      scope be narrower than that reality?*
 - [ ] Tests cover the new behaviour; local suite is green in the review worktree.
 - [ ] CI is green (or failures are classified and already under remediation).
 - [ ] No secrets, unsafe shell interpolation, or trust-boundary holes introduced.
-- [ ] Blocking findings are each an unresolved inline thread; non-blocking notes
+- [ ] Blocking findings are each prepared as an unresolved inline thread; non-blocking notes
       stay in the review body.
+
+### Review Submission Checklist
+- [ ] Submit substantive GitHub review (`gh pr review --comment` for same-account fleet, or `--approve` / `--request-changes` across distinct accounts).
+- [ ] For changes requested, create unresolved inline review comment threads on specific diff lines for all blocking findings (so the picker routes the PR back to the author).
+- [ ] State overall review verdict and summary in the review body.
+
+### Post-Submission Close-Out
+- [ ] Review claim released via `claim_issue.py --pr <PR_ID> --agent <AGENT_ID> --complete-review`
+      (if no blocking findings remain) or `--release` (if changes requested).
+- [ ] Return to the captured `$REVIEW_REPO_ROOT` and clean up that repository's
+      temporary review worktree safely without `--force`, inspecting or
+      retaining any uncertain files.
 
 ---
 
 ## Narrower-Than-Reality Heuristic
 
-**Question to ask of every gate:**
+**Core principle:** For every new or changed rule or assumption, ask:
 
-> What does the thing I am gating actually accept, and am I narrower than it?
+> *What reality does this govern, and can its effective scope be narrower than
+> that reality?*
 
 The enforcement layer's design is usually sound. What keeps breaking is the gap
-between what a check *believes* and what the system *actually does*. When the
-check is narrower, it either false-passes (misses the real write / real test /
-real label) or false-fails (blocks legitimate layouts the runner accepts).
+between what a check or assumption *believes* and what the system *actually does*. When the
+logic is narrower, it either false-passes (misses the real write / real test /
+real label) or false-fails (blocks legitimate layouts or formats the runner accepts).
 
 ### Worked examples
 
@@ -107,12 +133,12 @@ real label) or false-fails (blocks legitimate layouts the runner accepts).
 | Test-discovery glob | pytest's `python_files` defaults (`test_*.py` **and** `*_test.py`) | Fails projects whose suite the runner would collect |
 | Jest test glob | Jest's `testMatch` (incl. `__tests__/`) | Same false-positive against a passing suite |
 | Merge-gate label read | The labels the framework actually writes (`author:` / `reviewed-by:`) | Accepts the wrong stamp, or requires a stamp nothing applies |
-| `_git_write_to_protected` | Git's real pre-subcommand options (`-C`, `--git-dir`, `--work-tree`, quoting) | `git -C <main> commit` escapes; legitimate worktree commits get refused |
+| `_git_write_to_protected` | Git's real pre-subcommand options (`-C`, `--git-dir`, `--work-tree`, quoting) | Historical defect (#117, fixed in PR #119 / commit `0d1b6d2`): `git -C <main> commit` escaped or legitimate worktree commits got refused |
 
 Recent issues in this family: #69 (hook governed the shell's cwd, not the
 file), #73 (widening `touches:` had no effect until a cache expired), #76
 (redirect target starting with a variable read as a repo path), #117
-(protected-branch guard keyed to the shell's branch).
+(protected-branch guard keyed to the shell's branch — fixed in PR #119 / commit `0d1b6d2`).
 
 ### State machine, not narrative
 
