@@ -10,12 +10,15 @@ Outputs plain text or JSON. No database or external service required.
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from common import run_cmd
+from merge_pr import linked_issues
 
 
 def parse_iso(ts_str: str) -> Optional[datetime]:
@@ -28,6 +31,15 @@ def parse_iso(ts_str: str) -> Optional[datetime]:
         return datetime.fromisoformat(ts_str)
     except Exception:
         return None
+
+
+def _label_value(labels: List[Any], prefix: str) -> str:
+    """Return a governed label suffix, or the explicit unavailable marker."""
+    for label in labels:
+        name = label.get("name", "") if isinstance(label, dict) else str(label)
+        if name.lower().startswith(prefix.lower()):
+            return name.split(":", 1)[1]
+    return "unavailable"
 
 
 def fetch_paginated_gh_api(endpoint: str) -> Optional[List[Dict[str, Any]]]:
@@ -53,6 +65,8 @@ def fetch_paginated_gh_api(endpoint: str) -> Optional[List[Dict[str, Any]]]:
             chunk, idx = decoder.raw_decode(raw[pos:])
             if isinstance(chunk, list):
                 items.extend(chunk)
+            elif isinstance(chunk, dict) and isinstance(chunk.get("workflow_runs"), list):
+                items.extend(chunk["workflow_runs"])
             elif isinstance(chunk, dict):
                 items.append(chunk)
             pos += idx
@@ -72,6 +86,8 @@ def calculate_dwell_times(issue_events: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_issue: Dict[Any, List[Dict[str, Any]]] = {}
 
     for ev in issue_events:
+        if not ev.get("status"):
+            continue
         iid = ev.get("issue_id", 0)
         by_issue.setdefault(iid, []).append(ev)
 
@@ -159,7 +175,10 @@ def format_text_report(dwell_data: Dict[str, Any], rework_data: Dict[str, Any]) 
     return "\n".join(lines)
 
 
-def fetch_github_telemetry(window_days: int = 30) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def fetch_github_telemetry(
+    window_days: int = 30,
+    include_closed_details: bool = False,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Fetches issue status history and PR review data from GitHub API respecting window_days."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
 
@@ -199,6 +218,9 @@ def fetch_github_telemetry(window_days: int = 30) -> Tuple[List[Dict[str, Any]],
             "pr_number": pr_num,
             "merged": merged,
             "rework_rounds": rework_rounds,
+            "issue_numbers": linked_issues(pr.get("body") or ""),
+            "agent": _label_value(pr.get("labels") or [], "author:"),
+            "family": _label_value(pr.get("labels") or [], "family:"),
         })
 
     issues_data = fetch_paginated_gh_api("repos/{owner}/{repo}/issues?state=all&per_page=100")
@@ -221,6 +243,9 @@ def fetch_github_telemetry(window_days: int = 30) -> Tuple[List[Dict[str, Any]],
         if events is None:
             raise RuntimeError(f"Failed to fetch timeline for Issue #{num}.")
 
+        claims: List[Tuple[str, str]] = []
+        in_progress_at: Optional[str] = None
+        done_at: Optional[str] = None
         for ev in events:
             ev_name = ev.get("event")
             if ev_name == "labeled":
@@ -232,33 +257,284 @@ def fetch_github_telemetry(window_days: int = 30) -> Tuple[List[Dict[str, Any]],
                         "status": status_val,
                         "timestamp": ev.get("created_at"),
                     })
+                    if status_val.lower() == "in-progress" and not in_progress_at:
+                        in_progress_at = ev.get("created_at")
+                    if status_val.lower() == "done":
+                        done_at = ev.get("created_at")
+                elif lbl_name.lower().startswith("agent:"):
+                    claims.append((lbl_name.split(":", 1)[1], ev.get("created_at") or ""))
+
+        closed_at = issue.get("closed_at")
+        parsed_closed_at = parse_iso(closed_at or "")
+        if include_closed_details and parsed_closed_at and parsed_closed_at >= cutoff:
+            issue_events.append({
+                "event_type": "closed_issue",
+                "issue_id": num,
+                "title": issue.get("title") or "",
+                "closed_at": closed_at,
+                "claim_started_at": in_progress_at or (claims[0][1] if claims else None),
+                "done_at": done_at or closed_at,
+                "agents": sorted({agent for agent, _ in claims if agent}),
+                "issue_type": _label_value(issue.get("labels") or [], "type:"),
+            })
 
     return issue_events, pr_list
+
+
+def load_local_usage(path: Optional[str]) -> List[Dict[str, Any]]:
+    """Load explicit CLI usage records from a JSON array/object or JSONL file."""
+    if not path:
+        return []
+    try:
+        raw = Path(path).expanduser().read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"Could not read local usage file: {exc}") from exc
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("records", [parsed])
+    except json.JSONDecodeError:
+        try:
+            parsed = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Local usage file is not valid JSON or JSONL: {exc}") from exc
+    if not isinstance(parsed, list) or any(not isinstance(item, dict) for item in parsed):
+        raise RuntimeError("Local usage must be a JSON list/object or JSONL object stream.")
+    if any(
+        isinstance(item.get("issue_number"), bool)
+        or not isinstance(item.get("issue_number"), int)
+        or item["issue_number"] <= 0
+        for item in parsed
+    ):
+        raise RuntimeError("Every local usage record must have a positive integer issue_number.")
+    return parsed
+
+
+def _number(record: Dict[str, Any], key: str) -> Optional[float]:
+    value = record.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def _measurement(records: List[Dict[str, Any]], key: str, unit: str) -> Dict[str, Any]:
+    values = [value for record in records if (value := _number(record, key)) is not None]
+    return {
+        "availability": "measured" if values else "unavailable",
+        "value": round(sum(values), 6) if values else None,
+        "unit": unit,
+    }
+
+
+def _token_measurement(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    values: List[float] = []
+    for record in records:
+        total = _number(record, "total_tokens")
+        if total is None:
+            input_tokens = _number(record, "input_tokens")
+            output_tokens = _number(record, "output_tokens")
+            total = input_tokens + output_tokens if input_tokens is not None and output_tokens is not None else None
+        if total is not None:
+            values.append(total)
+    return {
+        "availability": "measured" if values else "unavailable",
+        "value": int(sum(values)) if values else None,
+        "unit": "tokens",
+    }
+
+
+def _usage_breakdown(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for record in records:
+        key = (str(record.get("agent") or "unavailable"), str(record.get("family") or "unavailable"))
+        groups.setdefault(key, []).append(record)
+    return [
+        {
+            "agent": agent,
+            "family": family,
+            "tokens": _token_measurement(items),
+            "cost_usd": _measurement(items, "cost_usd", "USD"),
+            "human_oversight_minutes": _measurement(items, "human_oversight_minutes", "minutes"),
+            "infrastructure_cost_usd": _measurement(items, "infrastructure_cost_usd", "USD"),
+        }
+        for (agent, family), items in sorted(groups.items())
+    ]
+
+
+def fetch_ci_runs(window_days: int) -> List[Dict[str, Any]]:
+    runs = fetch_paginated_gh_api("repos/{owner}/{repo}/actions/runs?event=pull_request&per_page=100")
+    if runs is None:
+        raise RuntimeError("Failed to fetch GitHub Actions runs.")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+    return [
+        run for run in runs
+        if (created_at := parse_iso(run.get("created_at") or "")) and created_at >= cutoff
+    ]
+
+
+def _outlier_threshold(values: List[float]) -> Optional[float]:
+    """A robust expensive-tail threshold; at least three measured records are required."""
+    if len(values) < 3:
+        return None
+    median = statistics.median(values)
+    deviations = [abs(value - median) for value in values]
+    mad = statistics.median(deviations)
+    return median + 4.4478 * mad if mad else median * 3
+
+
+def _mark_outliers(records: List[Dict[str, Any]]) -> None:
+    selectors = {
+        "cost_usd": lambda row: row["cost_usd"]["value"],
+        "tokens": lambda row: row["tokens"]["value"],
+        "cycle_time_hours": lambda row: row["cycle_time_hours"],
+        "review_rounds": lambda row: row["review_rounds"],
+        "ci_runs": lambda row: row["ci_runs"],
+    }
+    for label, getter in selectors.items():
+        measured = [float(value) for row in records if (value := getter(row)) is not None]
+        threshold = _outlier_threshold(measured)
+        if threshold is None:
+            continue
+        for row in records:
+            value = getter(row)
+            if value is not None and float(value) > threshold:
+                row["outlier_reasons"].append(label)
+    for row in records:
+        row["outlier"] = bool(row["outlier_reasons"])
+
+
+def _group_summary(records: List[Dict[str, Any]], key: str) -> Dict[str, Any]:
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for row in records:
+        groups.setdefault(str(row.get(key) or "unavailable"), []).append(row)
+    result: Dict[str, Any] = {}
+    for name, rows in sorted(groups.items()):
+        cycles = [row["cycle_time_hours"] for row in rows if row["cycle_time_hours"] is not None]
+        costs = [row["cost_usd"]["value"] for row in rows if row["cost_usd"]["value"] is not None]
+        result[name] = {
+            "closed_issues": len(rows),
+            "average_cycle_time_hours": round(statistics.mean(cycles), 2) if cycles else None,
+            "measured_cost_usd": round(sum(costs), 6) if costs else None,
+        }
+    return result
+
+
+def build_closed_issue_metrics(
+    issue_events: List[Dict[str, Any]],
+    prs: List[Dict[str, Any]],
+    ci_runs: List[Dict[str, Any]],
+    usage_records: List[Dict[str, Any]],
+    window_days: int,
+) -> Dict[str, Any]:
+    """Build per-closed-issue records from GitHub lifecycle facts and measured local usage."""
+    ci_by_pr: Dict[int, int] = {}
+    for run in ci_runs:
+        for pr in run.get("pull_requests") or []:
+            number = pr.get("number")
+            if isinstance(number, int):
+                ci_by_pr[number] = ci_by_pr.get(number, 0) + 1
+
+    records: List[Dict[str, Any]] = []
+    for issue in (event for event in issue_events if event.get("event_type") == "closed_issue"):
+        number = issue["issue_id"]
+        linked = [pr for pr in prs if number in (pr.get("issue_numbers") or []) and pr.get("merged")]
+        local = [record for record in usage_records if record.get("issue_number") == number]
+        agents = {value for value in issue.get("agents") or [] if value}
+        agents.update(pr["agent"] for pr in linked if pr.get("agent") not in (None, "unavailable"))
+        agents.update(str(item["agent"]) for item in local if item.get("agent"))
+        families = {pr["family"] for pr in linked if pr.get("family") not in (None, "unavailable")}
+        families.update(str(item["family"]) for item in local if item.get("family"))
+        start = parse_iso(issue.get("claim_started_at") or "")
+        done = parse_iso(issue.get("done_at") or "")
+        cycle = round((done - start).total_seconds() / 3600, 4) if start and done and done >= start else None
+        records.append({
+            "issue_number": number,
+            "title": issue.get("title") or "",
+            "closed_at": issue.get("closed_at"),
+            "issue_type": issue.get("issue_type") or "unavailable",
+            "agent": next(iter(agents)) if len(agents) == 1 else ("multiple" if agents else "unavailable"),
+            "family": next(iter(families)) if len(families) == 1 else ("multiple" if families else "unavailable"),
+            "cycle_time_hours": cycle,
+            "cycle_time_availability": "measured" if cycle is not None else "unavailable",
+            "review_rounds": sum(int(pr.get("rework_rounds") or 0) for pr in linked),
+            "ci_runs": sum(ci_by_pr.get(int(pr["pr_number"]), 0) for pr in linked),
+            "tokens": _token_measurement(local),
+            "cost_usd": _measurement(local, "cost_usd", "USD"),
+            "human_oversight_minutes": _measurement(local, "human_oversight_minutes", "minutes"),
+            "infrastructure_cost_usd": _measurement(local, "infrastructure_cost_usd", "USD"),
+            "usage_by_agent": _usage_breakdown(local),
+            "outlier": False,
+            "outlier_reasons": [],
+        })
+
+    records.sort(key=lambda row: row["issue_number"])
+    _mark_outliers(records)
+    measured_costs = [row["cost_usd"]["value"] for row in records if row["cost_usd"]["value"] is not None]
+    return {
+        "schema_version": 1,
+        "window_days": window_days,
+        "closed_issue_count": len(records),
+        "cost_per_closed_issue": {
+            "availability": "measured" if measured_costs else "unavailable",
+            "average_usd_measured": round(statistics.mean(measured_costs), 6) if measured_costs else None,
+            "measured_issue_count": len(measured_costs),
+            "unavailable_issue_count": len(records) - len(measured_costs),
+        },
+        "outlier_issue_numbers": [row["issue_number"] for row in records if row["outlier"]],
+        "by_agent": _group_summary(records, "agent"),
+        "by_family": _group_summary(records, "family"),
+        "by_issue_type": _group_summary(records, "issue_type"),
+        "issues": records,
+    }
+
+
+def collect_factory_metrics(window_days: int = 30, usage_file: Optional[str] = None) -> Dict[str, Any]:
+    issue_events, prs = fetch_github_telemetry(window_days, include_closed_details=True)
+    dwell = calculate_dwell_times(issue_events)
+    rework = calculate_rework_rounds(prs)
+    closed = build_closed_issue_metrics(issue_events, prs, fetch_ci_runs(window_days), load_local_usage(usage_file), window_days)
+    return {"dwell_time": dwell, "rework_yield": rework, "closed_issues": closed}
+
+
+def format_closed_issue_report(data: Dict[str, Any]) -> str:
+    cost = data["cost_per_closed_issue"]
+    cost_text = (
+        f"${cost['average_usd_measured']:.6f} across {cost['measured_issue_count']} measured issue(s)"
+        if cost["availability"] == "measured" else "unavailable (no measured local CLI cost data)"
+    )
+    return "\n".join([
+        "", "--- Cost & Cycle Time per Closed Issue ---",
+        f"  · Window: {data['window_days']} day(s)",
+        f"  · Closed issues: {data['closed_issue_count']}",
+        f"  · Cost per closed issue: {cost_text}",
+        f"  · Issues with unavailable cost: {cost['unavailable_issue_count']}",
+        f"  · Outlier issues: {data['outlier_issue_numbers'] or 'none'}",
+    ])
 
 
 def main():
     parser = argparse.ArgumentParser(description="Report factory telemetry: constraint dwell time, rework rounds, and first-pass yield.")
     parser.add_argument("--json", action="store_true", help="Output telemetry metrics in JSON format")
     parser.add_argument("--window-days", type=int, default=30, help="Window size in days for metrics calculation")
+    parser.add_argument("--usage-file", help="Optional measured local CLI usage JSON/JSONL; missing data remains unavailable")
     args = parser.parse_args()
 
     try:
-        issue_events, pr_reviews = fetch_github_telemetry(window_days=args.window_days)
+        if args.window_days <= 0:
+            raise RuntimeError("--window-days must be positive.")
+        result = collect_factory_metrics(args.window_days, args.usage_file)
     except RuntimeError as e:
         sys.stderr.write(f"[ERROR] Telemetry extraction aborted: {e}\n")
         return 1
 
-    dwell_data = calculate_dwell_times(issue_events)
-    rework_data = calculate_rework_rounds(pr_reviews)
-
     if args.json:
-        result = {
-            "dwell_time": dwell_data,
-            "rework_yield": rework_data,
-        }
         print(json.dumps(result, indent=2))
     else:
-        print(format_text_report(dwell_data, rework_data))
+        print(format_text_report(result["dwell_time"], result["rework_yield"]))
+        print(format_closed_issue_report(result["closed_issues"]))
     return 0
 
 
