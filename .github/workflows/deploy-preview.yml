@@ -10,12 +10,22 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "preview-${{ github.ref }}"
+  cancel-in-progress: false
 
 jobs:
   deploy-preview:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout merged commit
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit_sha || github.sha }}
 
@@ -24,19 +34,27 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build and deploy preview
+      - name: Build static preview site
         run: |
           TARGET_REF="${{ inputs.commit_sha || github.sha }}"
-          echo "Deploying preview environment for commit: ${TARGET_REF}"
+          echo "Building preview for commit: ${TARGET_REF}"
           mkdir -p dist
           echo "<!DOCTYPE html><html><head><title>Preview - ${TARGET_REF}</title></head><body><h1>Preview Environment</h1><p>Commit: ${TARGET_REF}</p></body></html>" > dist/index.html
-          echo "Preview deployment successful."
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'dist'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
       - name: Publish preview URL
-        id: preview
         run: |
-          TARGET_REF="${{ inputs.commit_sha || github.sha }}"
-          PREVIEW_URL="https://preview.aru-factory.local/${TARGET_REF:0:7}"
-          echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
-          echo "Preview URL: $PREVIEW_URL" >> $GITHUB_STEP_SUMMARY
-          echo "Preview URL: $PREVIEW_URL"
+          PAGE_URL="${{ steps.deployment.outputs.page_url }}"
+          echo "Preview URL: ${PAGE_URL}" >> $GITHUB_STEP_SUMMARY
+          echo "Preview URL: ${PAGE_URL}"

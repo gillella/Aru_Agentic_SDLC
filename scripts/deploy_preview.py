@@ -22,7 +22,14 @@ def get_default_branch() -> str:
     """Resolves default branch from git remote or falls back to main."""
     code, out, _ = run_cmd(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], check=False)
     if code == 0 and out.strip():
-        return out.strip().split("/")[-1]
+        ref = out.strip()
+        prefix = "refs/remotes/origin/"
+        if ref.startswith(prefix):
+            return ref[len(prefix):]
+        return ref
+    code, out, _ = run_cmd(["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], check=False)
+    if code == 0 and out.strip():
+        return out.strip()
     return "main"
 
 
@@ -71,28 +78,32 @@ def get_originating_issue(commit_sha: str) -> Optional[int]:
 def verify_commit_merged(commit_sha: str, default_branch: Optional[str] = None) -> tuple[bool, str]:
     """Verifies that commit_sha exists and is merged into the default branch.
 
-    Checks origin/{default_branch} first to handle stale local tracking branches.
+    Refreshes origin before validating to ensure local clone is not stale.
     Returns (is_valid, resolved_full_sha).
     """
     if not commit_sha or commit_sha.startswith("-"):
         return False, ""
 
-    # Validate commit exists
-    code, out, _ = run_cmd(["git", "rev-parse", "--verify", f"{commit_sha}^{{commit}}"], check=False)
-    if code != 0 or not out.strip():
-        return False, ""
-    full_sha = out.strip()
-
     if not default_branch:
         default_branch = get_default_branch() or "main"
 
-    # Always prefer remote tracking ref (origin/{default_branch}) to avoid stale local branch
+    # Refresh origin so remote tracking ref and newly merged commits are present
+    run_cmd(["git", "fetch", "origin", default_branch], check=False)
+
+    # Validate commit exists locally (or fetch commit from origin if not yet present)
+    code, out, _ = run_cmd(["git", "rev-parse", "--verify", f"{commit_sha}^{{commit}}"], check=False)
+    if code != 0 or not out.strip():
+        run_cmd(["git", "fetch", "origin", commit_sha], check=False)
+        code, out, _ = run_cmd(["git", "rev-parse", "--verify", f"{commit_sha}^{{commit}}"], check=False)
+        if code != 0 or not out.strip():
+            return False, ""
+    full_sha = out.strip()
+
     remote_ref = f"origin/{default_branch}"
     code, _, _ = run_cmd(["git", "rev-parse", "--verify", f"{remote_ref}^{{commit}}"], check=False)
     if code == 0:
         target_ref = remote_ref
     else:
-        # Fallback to local default_branch if remote ref is not configured
         code, _, _ = run_cmd(["git", "rev-parse", "--verify", f"{default_branch}^{{commit}}"], check=False)
         if code != 0:
             return False, full_sha
@@ -190,11 +201,18 @@ def wait_for_run(run_id: int, dry_run: bool = False) -> bool:
 
 
 def extract_preview_url_from_run(run_id: int, dry_run: bool = False) -> Optional[str]:
-    """Inspects completed workflow run for preview environment URL."""
+    """Inspects completed workflow run for preview environment URL.
+
+    Checks:
+    1. gh run view --json jobs,url step names
+    2. gh run view --log for emitted Page / Preview URL
+    3. GitHub Pages repository configuration URL
+    """
     if dry_run:
         return "https://preview.dry-run.local"
 
-    cmd = ["gh", "run", "view", str(run_id), "--json", "jobs"]
+    # 1. Check gh run view --json jobs
+    cmd = ["gh", "run", "view", str(run_id), "--json", "jobs,url"]
     code, out, _ = run_cmd(cmd, check=False)
     if code == 0 and out.strip():
         try:
@@ -203,13 +221,34 @@ def extract_preview_url_from_run(run_id: int, dry_run: bool = False) -> Optional
             for job in jobs:
                 steps = job.get("steps", [])
                 for step in steps:
-                    # Look for URL in step outputs or names
                     step_name = step.get("name", "")
                     match = re.search(r"https?://[^\s'\"<>]+", step_name)
                     if match:
                         return match.group(0)
         except json.JSONDecodeError:
             pass
+
+    # 2. Check gh run view --log for emitted Page / Preview URL
+    log_cmd = ["gh", "run", "view", str(run_id), "--log"]
+    log_code, log_out, _ = run_cmd(log_cmd, check=False)
+    if log_code == 0 and log_out.strip():
+        pages_match = re.search(
+            r"(?:Preview URL|Page URL|Deployed to|page_url):\s*(https?://[^\s'\"<>]+)",
+            log_out,
+            re.IGNORECASE,
+        )
+        if pages_match:
+            return pages_match.group(1).rstrip(".")
+        url_match = re.search(r"https://[a-zA-Z0-9_-]+\.github\.io/[a-zA-Z0-9_.-]+/?(?:\S+)?", log_out)
+        if url_match:
+            return url_match.group(0).rstrip(".")
+
+    # 3. Check GitHub Pages repository configuration
+    pages_cmd = ["gh", "api", "repos/{owner}/{repo}/pages", "--jq", ".html_url"]
+    p_code, p_out, _ = run_cmd(pages_cmd, check=False)
+    if p_code == 0 and p_out.strip() and p_out.strip().startswith("http"):
+        return p_out.strip()
+
     return None
 
 

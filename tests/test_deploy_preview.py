@@ -52,6 +52,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
     @patch("deploy_preview.run_cmd")
     def test_verify_commit_merged_accepts_ancestor(self, mock_run):
         mock_run.side_effect = [
+            (0, "", ""),  # git fetch origin main
             (0, "fullsha123456789\n", ""),  # rev-parse commit
             (0, "mainsha123456789\n", ""),  # rev-parse origin/main
             (0, "", ""),  # merge-base --is-ancestor
@@ -64,6 +65,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
     def test_verify_commit_merged_validates_against_refreshed_remote_default_branch(self, mock_run):
         # Stale local main does not contain commit, but origin/main contains commit
         mock_run.side_effect = [
+            (0, "", ""),  # git fetch origin main
             (0, "commitsha123\n", ""),  # rev-parse commit
             (0, "remoteheadsha\n", ""),  # rev-parse origin/main exists
             (0, "", ""),  # merge-base --is-ancestor commitsha123 origin/main
@@ -75,14 +77,20 @@ class DeployPreviewSkillTests(unittest.TestCase):
     @patch("deploy_preview.run_cmd")
     def test_verify_commit_merged_rejects_unmerged_or_invalid_commit(self, mock_run):
         # Invalid / unknown commit
-        mock_run.return_value = (1, "", "fatal: Not a valid object name")
+        mock_run.side_effect = [
+            (0, "", ""),  # git fetch origin main
+            (1, "", "fatal: Not a valid object name"),  # rev-parse invalidsha
+            (1, "", "fatal: could not fetch"),  # git fetch origin invalidsha
+            (1, "", "fatal: Not a valid object name"),  # rev-parse retry
+        ]
         is_merged, _ = dp.verify_commit_merged("invalidsha", default_branch="main")
         self.assertFalse(is_merged)
 
         # Unmerged commit (not an ancestor of main)
         mock_run.side_effect = [
-            (0, "fullsha123456789\n", ""),
-            (0, "mainsha123456789\n", ""),
+            (0, "", ""),  # git fetch origin main
+            (0, "fullsha123456789\n", ""),  # rev-parse unmergedsha
+            (0, "mainsha123456789\n", ""),  # rev-parse origin/main
             (1, "", ""),  # merge-base failure
         ]
         is_merged, _ = dp.verify_commit_merged("unmergedsha", default_branch="main")
@@ -176,6 +184,43 @@ class DeployPreviewSkillTests(unittest.TestCase):
         ]
         fail_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
         self.assertIsNone(fail_id)
+
+    def test_get_default_branch_preserves_slash_containing_branches(self):
+        with patch("deploy_preview.run_cmd", return_value=(0, "refs/remotes/origin/release/v1.0\n", "")):
+            branch = dp.get_default_branch()
+            self.assertEqual(branch, "release/v1.0")
+
+    @patch("deploy_preview.run_cmd")
+    def test_verify_commit_merged_refreshes_origin_and_handles_slash_default_branch(self, mock_run):
+        mock_run.side_effect = [
+            (0, "", ""),  # git fetch origin release/v1.0
+            (0, "fullsha123\n", ""),  # git rev-parse fullsha123^{commit}
+            (0, "remoteheadsha\n", ""),  # git rev-parse origin/release/v1.0^{commit}
+            (0, "", ""),  # git merge-base --is-ancestor
+        ]
+        is_merged, resolved = dp.verify_commit_merged("fullsha123", default_branch="release/v1.0")
+        self.assertTrue(is_merged)
+        self.assertEqual(resolved, "fullsha123")
+        mock_run.assert_any_call(["git", "fetch", "origin", "release/v1.0"], check=False)
+
+    @patch("deploy_preview.run_cmd")
+    def test_extract_preview_url_from_run_logs_and_api(self, mock_run):
+        # 1. Extracted from gh run view --log (Pages output)
+        mock_run.side_effect = [
+            (0, '{"jobs": [{"steps": [{"name": "Deploy to GitHub Pages"}]}]}', ""),  # json jobs
+            (0, "2026-08-14T20:00:00Z Page URL: https://gillella.github.io/Aru_Agentic_SDLC/\n", ""),  # log
+        ]
+        url = dp.extract_preview_url_from_run(12345)
+        self.assertEqual(url, "https://gillella.github.io/Aru_Agentic_SDLC/")
+
+        # 2. Extracted from GitHub Pages repository API
+        mock_run.side_effect = [
+            (0, '{"jobs": []}', ""),  # json jobs
+            (0, "No URL in logs", ""),  # log
+            (0, "https://gillella.github.io/Aru_Agentic_SDLC/\n", ""),  # gh api repos/.../pages
+        ]
+        url2 = dp.extract_preview_url_from_run(12346)
+        self.assertEqual(url2, "https://gillella.github.io/Aru_Agentic_SDLC/")
 
 
 if __name__ == "__main__":
