@@ -14,4 +14,9 @@ This environment is governed by Aru_Agentic_SDLC.
 4. In the desktop app, `aru code loop`, `continue`, and `keep going` keep the
    current project task working the board. Do not replace it with a CLI agent;
    stop only for an explicit operator stop or required human intervention.
+5. Before continuing a loop, check `$HOME/.aru/factory-loop.stop`. If it applies
+   to this project, stop and do not arm native wakes.
+6. Same-task native wake is an opt-in Codex **thread** automation bound to the
+   current task. Do not create a standalone (new-chat) automation and call it
+   the same task. See `$ARU_SDLC_HOME/docs/desktop-agent-continuity.md`.
 <!-- END ARU_SDLC_GOVERNANCE -->

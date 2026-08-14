@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import tempfile
@@ -198,6 +199,77 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertFalse((user_home / ".codex").exists())
         self.assertFalse((user_home / ".claude").exists())
         self.assertFalse((user_home / ".cursor").exists())
+
+    def test_governance_block_includes_stop_file_contract(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        res = self.run_installer("--codex-only")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        text = (self.target_home / ".codex" / "instructions.md").read_text()
+        self.assertIn("factory-loop.stop", text)
+        self.assertIn("thread", text.lower())
+
+    def test_stop_loop_persists_and_survives_reinstall(self):
+        project = "/tmp/aru-proj-a"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--codex-only")
+        res = self.run_installer("--stop-loop", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn(project, stop["projects"])
+        self.run_installer("--codex-only")
+        stop2 = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn(project, stop2["projects"])
+        res = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+
+    def test_enable_native_wake_requires_absolute_project_and_scopes_prompt(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+        res = self.run_installer("--enable-native-wake")
+        self.assertNotEqual(res.returncode, 0)
+        res = self.run_installer("--enable-native-wake", "--project", "relative/path")
+        self.assertNotEqual(res.returncode, 0)
+        project_a = "/tmp/aru-proj-a"
+        project_b = "/tmp/aru-proj-b"
+        res = self.run_installer("--codex-only", "--enable-native-wake", "--project", project_a)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        prompt = (self.target_home / ".codex" / "automations" / "aru-code-loop" / "PROMPT.md").read_text()
+        self.assertIn(project_a, prompt)
+        self.assertNotIn(project_b, prompt)
+        wake = json.loads((self.target_home / ".aru" / "native-wake.json").read_text())
+        self.assertTrue(wake["projects"][project_a]["enabled"])
+        self.assertNotIn(project_b, wake["projects"])
+
+    def test_stop_pauses_only_managed_codex_heartbeat(self):
+        managed = self.target_home / ".codex" / "automations" / "aru-code-loop"
+        other = self.target_home / ".codex" / "automations" / "india-jobs"
+        managed.mkdir(parents=True)
+        other.mkdir(parents=True)
+        managed.joinpath("automation.toml").write_text(
+            'version = 1\nid = "aru-code-loop"\nstatus = "ACTIVE"\n'
+        )
+        other.joinpath("automation.toml").write_text(
+            'version = 1\nid = "india-jobs"\nstatus = "ACTIVE"\n'
+        )
+        res = self.run_installer("--stop-loop", "--project", "/tmp/aru-proj-a")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+        self.assertIn('status = "ACTIVE"', other.joinpath("automation.toml").read_text())
+
+    def test_antigravity_workflow_and_cursor_stop_command_install(self):
+        (self.target_home / ".gemini" / "antigravity").mkdir(parents=True)
+        (self.target_home / ".cursor").mkdir(parents=True)
+        res = self.run_installer()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(
+            (self.target_home / ".gemini" / "antigravity" / "workflows" / "aru-code-loop.md").is_file()
+        )
+        self.assertTrue((self.target_home / ".cursor" / "commands" / "stop-aru-loop.md").is_file())
+        self.assertTrue((self.target_home / ".cursor" / "commands" / "resume-aru-loop.md").is_file())
+        self.assertIn(
+            "factory-loop.stop",
+            (self.target_home / ".cursor" / "commands" / "continue.md").read_text(),
+        )
 
 
 if __name__ == "__main__":

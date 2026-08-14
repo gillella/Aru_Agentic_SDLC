@@ -29,3 +29,7 @@ Aru_Agentic_SDLC governance:
    id (for example `cursor-1`).
 7. If a project lacks `AGENTS.md` but the user wants this process, offer to
    bootstrap with `init-agent-project` rather than inventing a parallel workflow.
+8. Before continuing a factory loop, check `$HOME/.aru/factory-loop.stop`. If it
+   applies to this project, stop. Cursor's loop skill can wake the same turn
+   while the session lives; Cursor Automations start a new agent and are not
+   same-task wake. App quit, sleep, and reboot are not software guarantees.
