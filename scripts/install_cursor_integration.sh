@@ -8,19 +8,41 @@ CURSOR_HOME="${HOME}/.cursor"
 AGENTS_SKILLS="${HOME}/.agents/skills"
 DEFAULT_ARU_PATH="${SDLC_HOME}"
 
-# Must stay in step with skills/ on disk: a procedure that exists but is not
-# listed here is unreachable from an external workspace, even though AGENTS.md
-# and the README promise every SDLC procedure is installed.
-SKILLS=(
-  aru-agentic-sdlc
-  implement-next-issue
-  init-agent-project
-  create-github-issue
-  triage-backlog
-  code-review
-  remediate-ci-failure
-  address-pr-feedback
-)
+# Derived from skills/ on disk rather than hand-maintained. The previous
+# hardcoded list carried a comment telling the reader to keep it in step with
+# skills/; that invariant held only as long as someone remembered it, and it
+# failed silently. `run-aru-factory` — the entrypoint every other skill is
+# dispatched from — was never added, so no external agent could reach the door
+# the docs pointed at (#163). Enumerating makes a new skill reachable by
+# existing, which is the only version of this rule that cannot rot.
+#
+# Built in the main shell, not a subshell: a pipeline or process substitution
+# would make the `exit` below terminate the subshell and let the install
+# continue with a partial list, which is the failure this whole block exists
+# to prevent.
+SKILLS=()
+skill_count=0
+for skill_dir in "${SDLC_HOME}"/skills/*/; do
+  [[ -d "${skill_dir}" ]] || continue
+  if [[ ! -f "${skill_dir}SKILL.md" || ! -r "${skill_dir}SKILL.md" ]]; then
+    echo "error: ${skill_dir} has no readable SKILL.md" >&2
+    echo "       every directory under skills/ must define one, or it is not a skill" >&2
+    exit 1
+  fi
+  SKILLS+=("$(basename "${skill_dir}")")
+  skill_count=$((skill_count + 1))
+done
+
+# Counted separately rather than via ${#SKILLS[@]}: under `set -u`, bash 3.2
+# (still the /bin/bash on macOS) treats an empty array as unset and aborts
+# with "unbound variable" instead of reporting the real problem. A maintainer
+# on macOS would see a bash internals error where CI sees a clean message.
+if [[ ${skill_count} -eq 0 ]]; then
+  echo "error: no skills found under ${SDLC_HOME}/skills" >&2
+  exit 1
+fi
+
+echo "discovered ${skill_count} skills under ${SDLC_HOME}/skills"
 
 link_skill() {
   local name="$1"
@@ -90,4 +112,3 @@ ensure_env_export() {
 echo "Installing Cursor integration from ${SDLC_HOME}"
 
 exec "${SCRIPT_DIR}/install_local_agent_integrations.sh" --cursor-only --aru-home "${SDLC_HOME}" "$@"
-
