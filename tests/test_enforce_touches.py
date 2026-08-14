@@ -970,7 +970,23 @@ class HookDecisionTests(unittest.TestCase):
     def test_push_to_main_blocked_even_without_a_claim(self):
         rc = self._run(
             {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}, "cwd": "/repo"},
-            "scratch/experiment", None,
+            "scratch/experiment", None, governed=True,
+        )
+        self.assertEqual(rc, et.EXIT_BLOCK)
+
+    def test_push_to_main_in_ungoverned_repo_is_allowed(self):
+        rc = self._run(
+            {"tool_name": "Bash", "tool_input": {"command": "git push origin main"},
+             "cwd": "/repo"},
+            "main", None, governed=False,
+        )
+        self.assertEqual(rc, et.EXIT_ALLOW)
+
+    def test_git_governance_detection_failure_fails_closed(self):
+        rc = self._run(
+            {"tool_name": "Bash", "tool_input": {"command": "git push origin main"},
+             "cwd": "/repo"},
+            "main", None, governed=None,
         )
         self.assertEqual(rc, et.EXIT_BLOCK)
 
@@ -1426,6 +1442,17 @@ class GitCommandCheckoutTests(unittest.TestCase):
         cls.wt = cls.main_root / ".worktrees" / "fix-issue-11"
         git("worktree", "add", "-b", "fix/issue-11-a", str(cls.wt), cwd=cls.main_root)
 
+        cls.ungoverned = base / "ungoverned"
+        cls.ungoverned.mkdir()
+        git("init", "-b", "main", cwd=cls.ungoverned)
+
+        cls.unrelated_agents = base / "unrelated-agents"
+        cls.unrelated_agents.mkdir()
+        git("init", "-b", "main", cwd=cls.unrelated_agents)
+        (cls.unrelated_agents / "AGENTS.md").write_text(
+            "# Local development notes\n", encoding="utf-8"
+        )
+
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
@@ -1446,6 +1473,16 @@ class GitCommandCheckoutTests(unittest.TestCase):
 
     def test_explicit_push_to_main_from_a_worktree_is_still_blocked(self):
         self.assertIsNotNone(self.violation("git push origin main", self.wt))
+
+    def test_push_to_main_in_repo_without_agents_file_is_allowed(self):
+        self.assertIsNone(self.violation("git push origin main", self.ungoverned))
+
+    def test_push_to_main_with_unrelated_agents_file_is_allowed(self):
+        self.assertIsNone(self.violation("git push origin main", self.unrelated_agents))
+
+    def test_governance_detection_failure_still_refuses(self):
+        with patch.object(et, "governed_repo", return_value=None):
+            self.assertIsNotNone(self.violation("git push origin main", self.main_root))
 
     # --- the false permissions (shell in a worktree, target is main) ------
 

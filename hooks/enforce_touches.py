@@ -859,6 +859,14 @@ def _git_write_violation(command, cwd):
             )
         violation = _git_write_to_protected(["git"] + list(args), current_branch(target))
         if violation:
+            # This hook is installed globally. A successfully resolved checkout
+            # that positively lacks the Aru marker never opted into protected-
+            # branch governance, so do not impose this repository's workflow on
+            # it. Resolution or marker-read failures remain fail-closed: only a
+            # definite False releases the guard.
+            target_root = repo_root(target)
+            if target_root and governed_repo(target_root) is False:
+                continue
             return violation
 
     return None
