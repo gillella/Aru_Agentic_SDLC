@@ -107,13 +107,14 @@ def linked_issue(body):
 
 # A finding is disposed of in one of two ways: it is fixed, or it is
 # withdrawn. Only the first leaves evidence in the diff, so the second has to
-# say so out loud. A reply whose first word is "withdrawn" records that the
+# say so out loud. A reply whose first top-level marker is "Withdrawn:"
+# records that the
 # reviewer or author retracted the finding rather than addressing it, and the
 # merge audit line reports it. Without this, requiring a commit per finding
 # would force agents to manufacture no-op commits to clear a thread they had
 # legitimately argued down - an audit trail that actively lies is worse than
 # the gap this closes.
-WITHDRAWN_MARKER = re.compile(r"^\s*(?:\**\s*)?withdrawn\b", re.IGNORECASE | re.MULTILINE)
+WITHDRAWN_MARKER = re.compile(r"^(?:\*\*)?withdrawn:(?:\*\*)?(?:\s|$)", re.IGNORECASE)
 
 
 def _parse_ts(value):
@@ -442,7 +443,10 @@ def _evidence_note(evidence):
     """
     out_addressed = evidence.get("outdated_addressed", 0) if evidence else 0
     if out_addressed > 0:
-        parts = ["reviewed at head", f"no unresolved threads ({out_addressed} outdated with commit evidence)"]
+        parts = [
+            "reviewed at head",
+            f"no blocking unresolved threads ({out_addressed} outdated with commit evidence)",
+        ]
     else:
         parts = ["reviewed at head", "no unresolved threads"]
     if evidence and evidence.get("withdrawn"):

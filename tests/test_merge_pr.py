@@ -1252,7 +1252,16 @@ class WithdrawnMarkerTests(unittest.TestCase):
 
     def test_marker_matches_at_the_start_of_a_reply(self):
         self.assertTrue(merge_pr.WITHDRAWN_MARKER.search("Withdrawn: not a real issue"))
-        self.assertTrue(merge_pr.WITHDRAWN_MARKER.search("withdrawn - my mistake"))
+
+    def test_bare_or_later_marker_does_not_count(self):
+        self.assertIsNone(merge_pr.WITHDRAWN_MARKER.search("withdrawn"))
+        self.assertIsNone(merge_pr.WITHDRAWN_MARKER.search("withdrawn - my mistake"))
+        self.assertIsNone(
+            merge_pr.WITHDRAWN_MARKER.search("Finding details\nWithdrawn: reason")
+        )
+        self.assertIsNone(
+            merge_pr.WITHDRAWN_MARKER.search("Finding details\n> Withdrawn: reason")
+        )
 
     def test_marker_matches_through_bold_formatting(self):
         # Agents routinely write **Withdrawn:**; the convention should not
@@ -1357,7 +1366,11 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
 
     def test_evidence_note_formats_outdated_threads(self):
         note = merge_pr._evidence_note({"outdated_addressed": 2, "withdrawn": 0})
-        self.assertEqual(note, "reviewed at head, no unresolved threads (2 outdated with commit evidence).")
+        self.assertEqual(
+            note,
+            "reviewed at head, no blocking unresolved threads "
+            "(2 outdated with commit evidence).",
+        )
 
         note_clean = merge_pr._evidence_note({"outdated_addressed": 0, "withdrawn": 1})
         self.assertEqual(note_clean, "reviewed at head, no unresolved threads, 1 finding(s) withdrawn, not fixed.")
