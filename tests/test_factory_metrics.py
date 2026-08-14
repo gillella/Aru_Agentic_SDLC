@@ -128,6 +128,33 @@ class FactoryMetricsUnitTests(unittest.TestCase):
         self.assertEqual(detail["done_at"], "2026-08-14T03:00:00Z")
         self.assertEqual(detail["issue_type"], "feat")
 
+    @patch("factory_metrics.fetch_paginated_gh_api")
+    def test_closed_issue_agent_attribution_excludes_losing_claim_contender(self, mock_api):
+        def side_effect(endpoint):
+            if "pulls?state=all" in endpoint:
+                return []
+            if "issues?state=all" in endpoint:
+                return [{
+                    "number": 8, "title": "raced claim", "pull_request": None,
+                    "created_at": "2026-08-14T00:00:00Z", "updated_at": "2026-08-14T03:00:00Z",
+                    "closed_at": "2026-08-14T03:00:00Z", "labels": [{"name": "type:fix"}],
+                }]
+            if "issues/8/timeline" in endpoint:
+                return [
+                    {"event": "labeled", "label": {"name": "agent:claude-1"}, "created_at": "2026-08-14T01:00:00Z"},
+                    {"event": "labeled", "label": {"name": "agent:codex-1"}, "created_at": "2026-08-14T01:00:01Z"},
+                    {"event": "labeled", "label": {"name": "status:in-progress"}, "created_at": "2026-08-14T01:00:02Z"},
+                    {"event": "unlabeled", "label": {"name": "agent:codex-1"}, "created_at": "2026-08-14T01:00:03Z"},
+                    {"event": "labeled", "label": {"name": "status:done"}, "created_at": "2026-08-14T03:00:00Z"},
+                    {"event": "unlabeled", "label": {"name": "agent:claude-1"}, "created_at": "2026-08-14T03:00:01Z"},
+                ]
+            return []
+
+        mock_api.side_effect = side_effect
+        events, _ = fm.fetch_github_telemetry(window_days=7, include_closed_details=True)
+        detail = next(event for event in events if event.get("event_type") == "closed_issue")
+        self.assertEqual(detail["agents"], ["claude-1"])
+
     def test_format_text_report(self):
         dwell = {"median_hours_per_status": {"Backlog": 2.5, "Ready": 1.0}}
         rework = {
@@ -241,7 +268,16 @@ class FactoryMetricsUnitTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         payload = json.loads(mock_print.call_args.args[0])
         self.assertEqual(payload["factory_metrics"]["closed_issue_count"], 3)
-        mock_collect.assert_called_once_with(7, None)
+        mock_collect.assert_called_once_with(7, None, repo_dir=".")
+
+    @patch("factory_metrics._collect_current_repo_metrics")
+    def test_collect_factory_metrics_uses_requested_repo_and_restores_cwd(self, mock_collect):
+        mock_collect.side_effect = lambda *_: {"cwd": str(Path.cwd())}
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = fm.collect_factory_metrics(7, None, repo_dir=tmp)
+            self.assertEqual(result["cwd"], str(Path(tmp).resolve()))
+        self.assertEqual(Path.cwd(), original)
 
 
 if __name__ == "__main__":

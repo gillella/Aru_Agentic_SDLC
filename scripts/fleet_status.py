@@ -403,7 +403,9 @@ def main():
                 raise RuntimeError("--metrics-window-days must be positive.")
             from factory_metrics import collect_factory_metrics
             status["factory_metrics"] = collect_factory_metrics(
-                args.metrics_window_days, args.metrics_usage_file,
+                args.metrics_window_days,
+                args.metrics_usage_file,
+                repo_dir=args.repo_dir,
             )["closed_issues"]
         except RuntimeError as exc:
             status = _error(

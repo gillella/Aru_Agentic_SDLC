@@ -11,6 +11,7 @@ Outputs plain text or JSON. No database or external service required.
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
 from datetime import datetime, timedelta, timezone
@@ -244,6 +245,8 @@ def fetch_github_telemetry(
             raise RuntimeError(f"Failed to fetch timeline for Issue #{num}.")
 
         claims: List[Tuple[str, str]] = []
+        active_agents: set[str] = set()
+        finalized_agents: set[str] = set()
         in_progress_at: Optional[str] = None
         done_at: Optional[str] = None
         for ev in events:
@@ -261,8 +264,17 @@ def fetch_github_telemetry(
                         in_progress_at = ev.get("created_at")
                     if status_val.lower() == "done":
                         done_at = ev.get("created_at")
+                        finalized_agents = set(active_agents)
                 elif lbl_name.lower().startswith("agent:"):
-                    claims.append((lbl_name.split(":", 1)[1], ev.get("created_at") or ""))
+                    agent = lbl_name.split(":", 1)[1]
+                    claims.append((agent, ev.get("created_at") or ""))
+                    active_agents.add(agent)
+            elif ev_name == "unlabeled":
+                lbl_name = (ev.get("label") or {}).get("name", "")
+                if lbl_name.lower().startswith("agent:"):
+                    active_agents.discard(lbl_name.split(":", 1)[1])
+            elif ev_name == "closed" and active_agents:
+                finalized_agents = set(active_agents)
 
         closed_at = issue.get("closed_at")
         parsed_closed_at = parse_iso(closed_at or "")
@@ -274,7 +286,7 @@ def fetch_github_telemetry(
                 "closed_at": closed_at,
                 "claim_started_at": in_progress_at or (claims[0][1] if claims else None),
                 "done_at": done_at or closed_at,
-                "agents": sorted({agent for agent, _ in claims if agent}),
+                "agents": sorted(finalized_agents or active_agents),
                 "issue_type": _label_value(issue.get("labels") or [], "type:"),
             })
 
@@ -491,12 +503,31 @@ def build_closed_issue_metrics(
     }
 
 
-def collect_factory_metrics(window_days: int = 30, usage_file: Optional[str] = None) -> Dict[str, Any]:
+def _collect_current_repo_metrics(window_days: int, usage_file: Optional[str]) -> Dict[str, Any]:
     issue_events, prs = fetch_github_telemetry(window_days, include_closed_details=True)
     dwell = calculate_dwell_times(issue_events)
     rework = calculate_rework_rounds(prs)
     closed = build_closed_issue_metrics(issue_events, prs, fetch_ci_runs(window_days), load_local_usage(usage_file), window_days)
     return {"dwell_time": dwell, "rework_yield": rework, "closed_issues": closed}
+
+
+def collect_factory_metrics(
+    window_days: int = 30,
+    usage_file: Optional[str] = None,
+    repo_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Collect metrics from ``repo_dir`` while preserving the caller's cwd."""
+    if repo_dir is None:
+        return _collect_current_repo_metrics(window_days, usage_file)
+    original = os.getcwd()
+    target = os.path.abspath(repo_dir)
+    try:
+        os.chdir(target)
+        return _collect_current_repo_metrics(window_days, usage_file)
+    except OSError as exc:
+        raise RuntimeError(f"Could not collect metrics from repository '{target}': {exc}") from exc
+    finally:
+        os.chdir(original)
 
 
 def format_closed_issue_report(data: Dict[str, Any]) -> str:
