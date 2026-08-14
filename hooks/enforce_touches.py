@@ -332,25 +332,118 @@ def path_allowed(rel_path, touches):
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _WRAPPERS = frozenset({"env", "nohup", "time", "sudo", "exec", "builtin", "command"})
 
+_SUDO_VAL_OPTS = frozenset({
+    "-u", "--user",
+    "-g", "--group",
+    "-C", "--close-from",
+    "-p", "--prompt",
+    "-D", "--chdir",
+    "-h", "--host",
+    "-R", "--chroot",
+    "-T", "--command-timeout",
+    "-U", "--other-user",
+})
+
+_ENV_VAL_OPTS = frozenset({
+    "-u", "--unset",
+    "-C", "--chdir",
+    "-S", "--split-string",
+})
+
+_TIME_VAL_OPTS = frozenset({
+    "-f", "--format",
+    "-o", "--output",
+})
+
+
+def _is_wrapper(token):
+    if not token:
+        return False
+    base = os.path.basename(token)
+    return base in _WRAPPERS
+
+
+def _is_git_exe(token):
+    if not token:
+        return False
+    base = os.path.basename(token.rstrip("/"))
+    return base == "git"
+
 
 def _unwrap_simple_command(words):
     """Strips leading environment variable assignments and command wrappers (env, sudo, etc.).
 
     Returns (executable, args_list) or (None, []) if empty.
     """
+    if not words:
+        return None, []
+
+    words = list(words)
     i = 0
     while i < len(words):
         token = words[i]
         if _ENV_ASSIGNMENT.match(token):
             i += 1
             continue
-        if token in _WRAPPERS:
+
+        if _is_wrapper(token):
+            wrapper_name = os.path.basename(token)
             i += 1
-            while i < len(words) and words[i].startswith("-"):
-                if words[i] in ("-u", "-C", "-g", "-p") and i + 1 < len(words):
-                    i += 2
-                else:
+            while i < len(words):
+                w_tok = words[i]
+                if w_tok == "--":
                     i += 1
+                    break
+                if _ENV_ASSIGNMENT.match(w_tok):
+                    i += 1
+                    continue
+                if not w_tok.startswith("-"):
+                    break
+
+                name, _, inline = w_tok.partition("=")
+                if wrapper_name == "env":
+                    if name in ("-S", "--split-string"):
+                        if inline:
+                            s_arg = inline
+                            i += 1
+                        elif i + 1 < len(words):
+                            s_arg = words[i + 1]
+                            i += 2
+                        else:
+                            i += 1
+                            s_arg = ""
+                        inner_tokens = _shell_tokens(s_arg)
+                        inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
+                        if inner_words:
+                            words = words[:i] + inner_words + words[i:]
+                        continue
+                    elif inline:
+                        i += 1
+                    elif name in _ENV_VAL_OPTS:
+                        i += 2 if i + 1 < len(words) else 1
+                    else:
+                        i += 1
+                elif wrapper_name == "sudo":
+                    if inline:
+                        i += 1
+                    elif name in _SUDO_VAL_OPTS:
+                        i += 2 if i + 1 < len(words) else 1
+                    elif len(name) > 2 and name.startswith("-") and not name.startswith("--"):
+                        i += 1
+                    else:
+                        i += 1
+                elif wrapper_name == "time":
+                    if inline:
+                        i += 1
+                    elif name in _TIME_VAL_OPTS:
+                        i += 2 if i + 1 < len(words) else 1
+                    else:
+                        i += 1
+                else:
+                    if inline:
+                        i += 1
+                    else:
+                        i += 1
             continue
         break
 
@@ -393,7 +486,7 @@ def _git_write_to_protected(command, branch):
 
     for words in simple_cmds:
         exe, args = _unwrap_simple_command(words)
-        if exe != "git":
+        if not _is_git_exe(exe):
             continue
 
         index = 0
@@ -525,7 +618,7 @@ def _git_write_violation(command, cwd):
                     base, base_unknown = moved, False
             continue
 
-        if exe != "git":
+        if not _is_git_exe(exe):
             continue
 
         target, unknown = base, base_unknown

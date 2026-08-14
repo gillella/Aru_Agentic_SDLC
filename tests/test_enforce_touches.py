@@ -216,6 +216,20 @@ class ProtectedBranchTests(unittest.TestCase):
         self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD", "main"))
         self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD:HEAD", "main"))
 
+    def test_absolute_git_executable_path_is_blocked(self):
+        self.assertIsNotNone(et._git_write_to_protected("/usr/bin/git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("/usr/local/bin/git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("/opt/homebrew/bin/git push origin main", "feat/issue-1-a"))
+
+    def test_complex_wrapper_invocations_are_blocked(self):
+        self.assertIsNotNone(et._git_write_to_protected("sudo --user root git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("sudo -u root /usr/bin/git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("env --unset FOO git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected("time -f fmt git commit -m 'x'", "main"))
+        self.assertIsNotNone(et._git_write_to_protected('env -S "git commit -m x"', "main"))
+        self.assertIsNotNone(et._git_write_to_protected('env -S "/usr/bin/git commit -m x"', "main"))
+        self.assertIsNotNone(et._git_write_to_protected('/usr/bin/env -i FOO=bar /usr/bin/git commit -m x', "main"))
+
 
 class RedirectDetectionTests(unittest.TestCase):
     def test_finds_redirect_and_tee_and_sed_targets(self):
@@ -582,11 +596,16 @@ class HookDecisionTests(unittest.TestCase):
 
         blocked_commands = [
             "git commit -m x",
+            "/usr/bin/git commit -m x",
             "git push origin main",
             "git push origin HEAD",
             "git push origin HEAD && echo main",
             "env FOO=1 git commit -m x",
             "sudo git commit -m x",
+            "sudo --user root git commit -m x",
+            "env --unset FOO git commit -m x",
+            "time -f fmt git commit -m x",
+            'env -S "git commit -m x"',
         ]
         for command in blocked_commands:
             with self.subTest(command=command, expected="BLOCK"):
