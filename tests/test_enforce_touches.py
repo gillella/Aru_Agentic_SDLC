@@ -176,6 +176,10 @@ class ProtectedBranchTests(unittest.TestCase):
 
     def test_explicit_push_to_main_is_blocked_from_any_branch(self):
         self.assertIsNotNone(et._git_write_to_protected("git push origin main", "feat/issue-1-a"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin +main", "feat/issue-1-a"))
+        self.assertIsNotNone(
+            et._git_write_to_protected("git push origin +HEAD:refs/heads/main", "feat/issue-1-a")
+        )
         self.assertIsNotNone(et._git_write_to_protected("git push origin HEAD:main", "feat/issue-1-a"))
         self.assertIsNotNone(
             et._git_write_to_protected("git push origin refs/heads/master", "feat/issue-1-a")
@@ -192,8 +196,16 @@ class ProtectedBranchTests(unittest.TestCase):
     def test_bare_push_while_on_main_is_blocked(self):
         self.assertIsNotNone(et._git_write_to_protected("git push", "main"))
 
-    def test_bare_push_on_feature_branch_is_allowed(self):
+    def test_omitted_or_configured_refspec_fails_closed(self):
+        self.assertIsNotNone(et._git_write_to_protected("git push", "feat/issue-1-a"))
+        self.assertIsNotNone(et._git_write_to_protected("git push origin", "feat/issue-1-a"))
+
+    def test_explicit_feature_refspec_is_allowed(self):
         self.assertIsNone(et._git_write_to_protected("git push -u origin HEAD", "feat/issue-1-a"))
+
+    def test_all_ref_push_forms_are_blocked_from_feature_branches(self):
+        self.assertIsNotNone(et._git_write_to_protected("git push --all origin", "feat/issue-1-a"))
+        self.assertIsNotNone(et._git_write_to_protected("git push --mirror origin", "feat/issue-1-a"))
 
     def test_unrelated_command_is_allowed(self):
         self.assertIsNone(et._git_write_to_protected("pytest -q", "main"))
@@ -1375,4 +1387,3 @@ class GitCommandCheckoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

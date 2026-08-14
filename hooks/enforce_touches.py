@@ -514,11 +514,14 @@ def _git_write_to_protected(command, branch):
         if subcommand == "push":
             push_opts_with_val = {"-o", "--push-option", "-r", "--repo", "--receive-pack", "--exec"}
             pos_args = []
+            pushes_all_refs = False
             i = index
             while i < len(args):
                 tok = args[i]
                 if tok.startswith("-"):
                     name, _, inline = tok.partition("=")
+                    if name in {"--all", "--mirror"}:
+                        pushes_all_refs = True
                     if not inline and name in push_opts_with_val:
                         i += 2
                     else:
@@ -527,19 +530,24 @@ def _git_write_to_protected(command, branch):
                     pos_args.append(tok)
                     i += 1
 
+            if pushes_all_refs:
+                return "push may update protected branches"
+
             refspecs = pos_args[1:] if len(pos_args) > 1 else []
             if refspecs:
                 for refspec in refspecs:
-                    dest = refspec.split(":")[-1].replace("refs/heads/", "")
-                    src = refspec.split(":")[0].replace("refs/heads/", "")
+                    normalized_refspec = refspec.removeprefix("+")
+                    dest = normalized_refspec.split(":")[-1].replace("refs/heads/", "")
+                    src = normalized_refspec.split(":")[0].replace("refs/heads/", "")
                     if dest in PROTECTED_BRANCHES:
                         return f"push to '{dest}'"
                     if (src == "HEAD" or dest == "HEAD") and branch in PROTECTED_BRANCHES:
                         return f"push '{branch}'"
             else:
-                # Bare push or remote-only push pushes the current branch
-                if branch in PROTECTED_BRANCHES:
-                    return f"push '{branch}'"
+                # With no explicit refspec, remote and branch configuration can
+                # select refs other than the current branch. This static guard
+                # cannot prove those refs exclude main/master, so fail closed.
+                return "push has no explicit safe refspec"
 
     return None
 
