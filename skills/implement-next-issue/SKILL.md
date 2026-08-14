@@ -152,10 +152,12 @@ or other irreversible work from the plan gate.
 2. Before any affected source edit, compare the planned reuse decisions and
    proposed helpers with the plan's reuse audit. If no implementation plan
    exists, post an implementation plan with the reuse audit before the first
-   affected edit. Otherwise, if implementation adds an undisclosed helper,
-   stops reusing a documented utility, selects a different utility, or changes
-   from a helper to inline logic, post an amended plan before the first edit
-   that follows the changed decision.
+   affected edit. If an existing implementation plan lacks a complete reuse
+   audit, post an amended plan containing the audit before the first affected
+   edit. Otherwise, if implementation adds an undisclosed helper, stops reusing
+   a documented utility, selects a different utility, or changes from a helper
+   to inline logic, post an amended plan before the first edit that follows the
+   changed decision.
 3. Inspect files inside the isolated worktree directory.
 4. Perform source code modifications while preserving existing docstrings, formatting, and public API contracts.
 
