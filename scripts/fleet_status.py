@@ -50,7 +50,35 @@ SKIP_DIR_NAMES = {
     ".pytest_cache",
     ".worktrees",
     ".mypy_cache",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    "vendor",
+    "target",
+    "Pods",
+    "DerivedData",
+    ".tox",
 }
+
+# Source files the factory actually ships, across stack packs. Docs, lockfiles,
+# images, and generated minified assets stay out so LOC is not inflated.
+CODE_FILE_SUFFIXES = frozenset({
+    ".py", ".pyi",
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".go", ".rs",
+    ".java", ".kt", ".kts",
+    ".swift", ".m", ".mm",
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh",
+    ".cs",
+    ".rb", ".php", ".scala", ".lua", ".r",
+    ".sql",
+    ".sh", ".bash", ".zsh", ".ps1",
+    ".gd", ".dart",
+    ".vue", ".svelte",
+    ".html", ".htm", ".css", ".scss", ".sass", ".less",
+    ".graphql", ".gql",
+})
 
 PR_FIELDS = (
     "number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
@@ -92,6 +120,13 @@ def _count_lines(path: str) -> Optional[int]:
         return None
 
 
+def _is_source_file(name: str) -> bool:
+    lower = name.lower()
+    if lower.endswith(".min.js") or lower.endswith(".min.css"):
+        return False
+    return os.path.splitext(lower)[1] in CODE_FILE_SUFFIXES
+
+
 def collect_codebase_health(repo_dir: str) -> Dict[str, Any]:
     """Summarize local bloat: LOC, average size, files at the 400-line ceiling."""
     loc = 0
@@ -101,7 +136,7 @@ def collect_codebase_health(repo_dir: str) -> Dict[str, Any]:
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [name for name in dirs if name not in SKIP_DIR_NAMES]
         for name in files:
-            if not name.endswith(".py"):
+            if not _is_source_file(name):
                 continue
             path = os.path.join(root, name)
             if not _is_regular_file(path):

@@ -302,6 +302,28 @@ class FleetStatusTests(unittest.TestCase):
         )
         self.assertGreater(health["average_file_bytes"], 0)
 
+    def test_codebase_health_counts_mixed_language_sources(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "app.js").write_text("a\nb\n", encoding="utf-8")
+            (root / "run.sh").write_text("echo\n", encoding="utf-8")
+            (root / "View.swift").write_text("s\n" * LINE_CEILING, encoding="utf-8")
+            (root / "index.html").write_text("<p></p>\n", encoding="utf-8")
+            (root / "app.css").write_text("body{}\n", encoding="utf-8")
+            (root / "notes.md").write_text("m\n" * 500, encoding="utf-8")
+            (root / "bundle.min.js").write_text("x\n" * 500, encoding="utf-8")
+            (root / "node_modules").mkdir()
+            (root / "node_modules" / "dep.js").write_text("d\n" * 500, encoding="utf-8")
+            (root / "dist").mkdir()
+            (root / "dist" / "out.js").write_text("o\n" * 500, encoding="utf-8")
+            health = collect_codebase_health(str(root))
+        self.assertEqual(health["loc"], 2 + 1 + LINE_CEILING + 1 + 1)
+        self.assertEqual(health["file_count"], 5)
+        self.assertEqual(
+            health["files_at_or_over_ceiling"],
+            [{"path": "View.swift", "lines": LINE_CEILING}],
+        )
+
     def test_codebase_health_skips_symlinks_and_fifos(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
