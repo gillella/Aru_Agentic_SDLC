@@ -1014,10 +1014,20 @@ def initial_commit(target_dir: str, project_name: str) -> bool:
         "issue/PR templates. Baseline commit prior to any tracked issue work."
     )
     # Fresh scaffolds are short-lived in tests and automation. Disable Git's
-    # detached auto-gc for this commit so background object packing cannot
-    # outlive the command and race immediate worktree cleanup.
+    # automatic maintenance for this commit so background object packing
+    # cannot outlive the command and race immediate worktree cleanup. Modern
+    # Git uses maintenance.auto; gc.auto covers older Git versions.
     code, _, err = run_cmd(
-        ["git", "-c", "gc.auto=0", "commit", "-m", msg],
+        [
+            "git",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "commit",
+            "-m",
+            msg,
+        ],
         cwd=target_dir,
         check=False,
     )
@@ -1044,6 +1054,8 @@ def commit_project_template_link(target_dir: str, project_ref: str) -> bool:
     code, _, err = run_cmd(
         [
             "git",
+            "-c",
+            "maintenance.auto=false",
             "-c",
             "gc.auto=0",
             "commit",
