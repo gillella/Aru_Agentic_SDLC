@@ -341,20 +341,26 @@ class SplitRecommendationTests(unittest.TestCase):
                 )
 
     def test_directory_spelling_preserves_top_level_areas(self):
-        body = READY_BODY.replace(
-            "touches: src/thing.py, tests/test_thing.py",
-            "touches: scripts/, hooks/",
-        )
-        self.assertEqual(
-            tb.split_reasons(issue(29, "type:chore", body=body)),
-            ["touches span 2 top-level areas: hooks, scripts"],
-        )
+        for declaration in ("scripts/, hooks/", "scripts, hooks"):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(29, "type:chore", body=body)),
+                    ["touches span 2 top-level areas: hooks, scripts"],
+                )
 
     def test_promote_holds_directory_and_slash_free_wildcard_scopes(self):
         bodies = (
             READY_BODY.replace(
                 "touches: src/thing.py, tests/test_thing.py",
                 "touches: scripts/, hooks/",
+            ),
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: scripts, hooks",
             ),
             READY_BODY.replace(
                 "touches: src/thing.py, tests/test_thing.py",

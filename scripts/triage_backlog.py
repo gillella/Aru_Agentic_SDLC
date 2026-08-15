@@ -351,13 +351,18 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
         if not path or path == ".":
             repository_wide = True
             continue
-        # Root-level files share one repository-root area. Treating each file
-        # name as an area makes README.md + pyproject.toml look cross-cutting.
-        # Preserve directory spelling and wildcard identity before grouping
-        # slash-free concrete files under that shared area.
+        # Root-level files share one repository-root area. Treating each
+        # conventional filename as an area makes README.md + pyproject.toml
+        # look cross-cutting. A bare name without a filename suffix is
+        # ambiguous, though: the touches enforcement grammar accepts it as a
+        # directory prefix (for example ``scripts``). Preserve that name as an
+        # area so triage cannot promote a cross-directory scope by mistaking
+        # both prefixes for root files.
         if "/" in path:
             area_roots.append(path.split("/", 1)[0])
         elif any(char in path for char in "*?["):
+            area_roots.append(path)
+        elif "." not in path:
             area_roots.append(path)
         else:
             area_roots.append("<root>")
