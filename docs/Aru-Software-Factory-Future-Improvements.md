@@ -91,7 +91,7 @@ You already own a strong **middle factory** (claim → isolate → implement →
 
 | ID | Improvement | Why |
 |---|---|---|
-| **F0.1** | Land in-flight review/stamp fixes (#19, #24, #27, #25) | Merge gate that can fall open is not a factory |
+| **F0.1** | ~~Land in-flight review/stamp fixes (#19, #24, #27, #25)~~ | **Done** — review gate no longer falls open for bot reviews; claim/completion stamps are mechanical (verified 2026-08-15) |
 | **F0.2** | GitHub Pro + rulesets on private app repos | Server-side: no direct main, required checks, required review |
 | **F0.3** | Align *this* playbook’s `.github/workflows/ci.yml` with the hardened template | Factory dogfoods its own gates |
 | **F0.4** | Close process-ownership doc (#7) | Agents stop getting contradictory process instructions |

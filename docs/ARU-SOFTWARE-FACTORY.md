@@ -49,19 +49,19 @@ Accepting `reviewer:` as proof of review means: author leaves a same-account `CO
 
 **Standing lesson:** the review that caught this read the diff against the *claim in the PR body* rather than against the gate's actual behaviour. Both halves of a two-state protocol have to be checked against the state machine, not against the narrative.
 
-### 2.2 F0.3 understates the dogfooding gap
+### 2.2 F0.3 understates the dogfooding gap — **corrected 2026-08-15**
 
-The source says "align this playbook's CI with the hardened template." Verified, the gap is larger than alignment:
+The source said "align this playbook's CI with the hardened template." At the time of the original audit the gap was larger than alignment. **Verified 2026-08-15** against `.github/workflows/ci.yml`: this playbook now dogfoods the gates it ships.
 
-| | this repo's `ci.yml` | what it ships to new projects |
+| | this repo's `ci.yml` (2026-08-15) | what it ships to new projects |
 |---|---|---|
-| lint | none | `ruff check .`, blocking |
-| secrets | none | gitleaks over full history |
-| deps | none | `pip-audit` |
-| boundaries | none | import-linter when configured |
-| tests | `if [ -d tests ]` | fails when source exists without tests |
+| lint | `ruff check .`, blocking | `ruff check .`, blocking |
+| secrets | gitleaks-action | gitleaks over full history |
+| deps | `pip-audit` | `pip-audit` |
+| boundaries | import-linter when configured | import-linter when configured |
+| tests | unittest suite (fails when source lacks tests) | fails when source exists without tests |
 
-The factory currently ships five gates it does not run on itself. Every defect found today was found by a human or by Codex, not by CI.
+Historical note: before that alignment, defects were found by humans/Codex rather than CI. Do not re-open S0.6 as if the dogfooding gap still exists.
 
 ### 2.3 "Recently hardened" overstates the review layer
 
@@ -91,21 +91,19 @@ More generally: a required flag is an API break, and the blast radius is every p
 
 Eight findings the source document predates. Each is evidenced, not inferred.
 
-### 3.1 Squash merges are deleting 87% of the history — **not in the source doc at all**
+### 3.1 Squash merges were deleting history — **historical finding; fixed**
 
-Every PR merges with `--squash`. **46 branch commits have collapsed into 6 commits on `main`.**
+**Session evidence (pre-fix):** every PR merged with `--squash`. **46 branch commits had collapsed into 6 commits on `main`.** PR #8's branch narrative — implement → harden → test → address review → refactor — became one line on `main`.
 
-PR #8's branch narrative — implement → make concurrent-safe → harden → test → address review → refactor — is one line on `main`. That sequence is precisely the signal you need to detect an agent drifting.
+Three costs were already paid under squash:
 
-Three costs, all already paid:
+1. **Audit loss.** Issue #14's delivery had to be reconstructed forensically from test names.
+2. **Conflict cascades.** Squash commits carry no ancestry across parallel branches (#8, #16).
+3. **No rollback grid.** No addressable known-good state between successive PRs.
 
-1. **Audit loss.** Issue #14's delivery had to be reconstructed forensically from test names, because the squash hid the commit that did it.
-2. **Conflict cascades.** A squash commit carries no ancestry, so parallel branches off shared files conflict on merge. This forced hand-resolution on #8 and #16 and consumed a meaningful share of the session.
-3. **No rollback grid.** There is no addressable known-good state between "this PR" and "the one before."
+**Current behaviour (verified 2026-08-15):** `merge_pr.py` defaults to `--merge-method merge` (PR #157 / `82abd26`). Squash remains available as an explicit override, not the default. Checkpoint tags (`ckpt/*`) and SemVer release tags now provide the rollback grid (see appendix §9).
 
-This is foundational to drift control and belongs before tagging, not after.
-
-### 3.2 Consumers track `main` live, with no way to pin
+### 3.2 Consumers tracked `main` live, with no way to pin — **historical; pinning shipped**
 
 Consuming repos bind by symlink into a live checkout:
 
@@ -113,9 +111,9 @@ Consuming repos bind by symlink into a live checkout:
 ~/.cursor/skills/code-review -> /Users/.../Aru_Agentic_SDLC/skills/code-review
 ```
 
-Zero tags, zero releases, no version string, no CHANGELOG. Every consumer silently follows whatever `main` is at that instant.
+**Session evidence (pre-fix):** zero tags, zero releases, no pin, consumers silently followed `main`. PR #27 (`create_pr.py --agent` required) was the breaking-change example that made pinning urgent.
 
-**A breaking change is in flight right now.** PR #27 makes `create_pr.py --agent` required. On merge, every consumer invoking it without the flag breaks, with no signal and no way to stay on the old behaviour. The source document has versioning at **P4** — the lowest priority. Given live coupling plus in-flight breakage, it belongs at **P1**.
+**Current behaviour (verified 2026-08-15):** annotated `ckpt/*` tags on merge (PR #140), SemVer `v0.x` release tags (PR #155), and `ARU_SDLC_REF` honouring in the installer (PR #158 / `docs/cursor-integration.md`) give consumers an escape from live `main`. See appendix §9.
 
 ### 3.3 Review is the binding constraint, and the source marks it BUILT
 
@@ -207,7 +205,7 @@ Each row is an issue candidate. Issue-First applies to the factory itself. Order
 
 ### Phase 0 — Make the spine trustworthy (days)
 
-Nothing else matters while the merge gate can fall open.
+Gate correctness first. **Verified 2026-08-15:** the review gate no longer falls open for bot/`[bot]` accounts (`is_advisory_review_account` in `scripts/merge_pr.py`); active `reviewer:` claims block shortcuts; resolved threads need a post-finding commit or an explicit `Withdrawn:` reply; reviews must be at current head (#50, #72, #26).
 
 | ID | Work | Rationale | Depends on |
 |---|---|---|---|
@@ -215,8 +213,8 @@ Nothing else matters while the merge gate can fall open.
 | **S0.2** | ~~Make the `reviewed-by:` stamp mechanical, not a prompt step~~ | **Done** in `6e07316`: `complete_review` replaces the prose step | S0.1 |
 | **S0.3** | ~~Fix #27's stale `create_pr.py` call sites~~ | **Done** in `45eae46` + `2b55cfc` — see §2.4 | — |
 | **S0.4** | Fix `_git_write_to_protected` quoting (#28) | Blocks read-only work on `main`; same class as #21 | — |
-| **S0.5** | Fix `merge_pr.py` close-out ordering | Merges silently leave the board stale | — |
-| **S0.6** | Align this repo's CI with the template it ships (#F0.3) | The factory does not run its own gates | — |
+| **S0.5** | ~~Fix `merge_pr.py` close-out ordering~~ | **Done** in PR #55 (`c68abf2`) — close-out is idempotent and recoverable | — |
+| **S0.6** | ~~Align this repo's CI with the template it ships (#F0.3)~~ | **Done** — playbook CI runs ruff, gitleaks, pip-audit, import-linter, tests (verified 2026-08-15; see §2.2) | — |
 | **S0.7** | GitHub Pro + rulesets: no direct push to `main`, required status checks. **Required-approval is deliberately excluded** — see below | Free plan confirmed: no server-side protection exists | purchase |
 | **S0.7a** | Separate reviewer identity (GitHub App or second account) before any required-approval rule | Without it, required approval deadlocks every fleet PR | S0.7 |
 | **S0.8** | Process ownership + merge authority doc (#7) | Agents receive contradictory process instructions | — |
@@ -227,14 +225,14 @@ The ordering constraint is real and easy to get backwards: server-side approval 
 
 ### Phase 1 — History, versioning, and the ability to roll back (days)
 
-Prerequisite for drift control. Currently absent entirely.
+Prerequisite for drift control. **Core history/pinning rows have shipped** (verified 2026-08-15); remaining work is attribution polish and operator docs.
 
 | ID | Work | Rationale | Depends on |
 |---|---|---|---|
-| **S1.1** | Switch `merge_pr.py` default from `squash` to `merge` (`gh pr merge --merge`; there is no `--no-ff` flag on `gh`) | Stops deleting 87% of history; restores ancestry; ends conflict cascades | S0.5 |
-| **S1.2** | Annotated `ckpt/*` tag on every merge, written by `merge_pr.py`, carrying PR, issues, author, reviewer, gate verdicts, test count, gated SHA | The rollback grid and the audit trail, with nothing to remember | S1.1 |
-| **S1.3** | SemVer `v0.x` release tags; MAJOR on consumed-CLI break | #27 is a breaking change shipping with no version signal | S1.2 |
-| **S1.4** | Consumer pinning: `ARU_SDLC_REF` honoured by `install_cursor_integration.sh`; scripts warn on major mismatch | Consumers currently track `main` live with no escape | S1.3 |
+| **S1.1** | ~~Switch `merge_pr.py` default from `squash` to `merge`~~ | **Done** in PR #157 (`82abd26`) — default is `merge`; squash is opt-in | S0.5 |
+| **S1.2** | ~~Annotated `ckpt/*` tag on every merge~~ | **Done** in PR #140 (`54086f3`) | S1.1 |
+| **S1.3** | ~~SemVer `v0.x` release tags; MAJOR on consumed-CLI break~~ | **Done** in PR #155 (`c8defb9`) | S1.2 |
+| **S1.4** | ~~Consumer pinning: `ARU_SDLC_REF`~~ | **Done** in PR #158 (`6af5efc`); see `docs/cursor-integration.md` | S1.3 |
 | **S1.5** | `Agent: <id>` commit trailer | Per-commit attribution; today only the PR is stamped | S1.1 |
 | **S1.6** | Documented revert path in `AGENTS.md` + `revert_merge.py` | A factory needs a reverse gear | S1.2 |
 
@@ -286,9 +284,8 @@ The binding constraint, per §3.3.
 ## 6. Sequencing
 
 ```
-Now        S0.1-S0.5  gate correctness      ← nothing ships past a gate that can fall open
-Then       S0.6-S0.8  dogfood + protection + one process owner
-Days       S1.*       history, tags, versioning, revert
+Done       S0.1-S0.3, S0.5-S0.6, S1.1-S1.4  gate + history spine (verified 2026-08-15)
+Now        S0.4, S0.7-S0.8, S1.5-S1.6       remaining spine polish
 Weeks 1-2  S2.*       review constraint
 Weeks 2-3  S3.*       intake
 Weeks 3-6  S4.*       deploy + telemetry
@@ -325,3 +322,23 @@ Added:
 - Move shipped rows to an appendix rather than deleting them; the record of what was tried is worth more than a tidy list.
 - Re-audit against §3 quarterly. The findings there are evidence from one session; some will age out and new ones will appear.
 - **When adding any gate, apply §3.4:** what does the thing I am gating actually accept, and am I narrower than it?
+- **Statements about current code behaviour should carry a verification date** so aged claims are visible.
+
+---
+
+## 9. Appendix — shipped roadmap rows (verified 2026-08-15)
+
+Moved here per §8 instead of deleting. Commit SHAs are merge commits on `main` unless noted.
+
+| ID | Shipped as | Evidence |
+|---|---|---|
+| S0.1 / S0.2 | Review claim vs `reviewed-by:` completion split | `6e07316` |
+| S0.3 | Required `--agent` call-site sweep | `45eae46`, `2b55cfc` |
+| S0.5 | Idempotent / resumable merge close-out | PR #55 `c68abf2` |
+| S0.6 | Dogfood CI (ruff, gitleaks, pip-audit, import-linter, tests) | `.github/workflows/ci.yml` (aligned with shipped template) |
+| S1.1 | Default merge method `merge` (not squash) | PR #157 `82abd26` |
+| S1.2 | Annotated `ckpt/*` tags on merge | PR #140 `54086f3` |
+| S1.3 | SemVer release tags | PR #155 `c8defb9` |
+| S1.4 | `ARU_SDLC_REF` consumer pinning | PR #158 `6af5efc` |
+
+**Review-gate hardening (issue table in #114):** bot/`[bot]` exclusion, live `reviewer:` claim blocking, thread resolution evidence, and head-SHA review requirements — closed via #50, #72, #26 (and related merge-gate work). Do not document the pre-fix “falls open for bot reviews” behaviour as current.
