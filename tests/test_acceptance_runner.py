@@ -304,9 +304,13 @@ class MergeGateTests(unittest.TestCase):
             git(origin, "add", "readme")
             git(origin, "commit", "-m", "feature")
             head = git(origin, "rev-parse", "HEAD", capture=True)
-            before_shallow = git(clone, "rev-parse", "--is-shallow-repository", capture=True)
-            self.assertEqual(before_shallow, "false")
-            before_base = git(clone, "merge-base", "origin/main", "HEAD", capture=True)
+            git(clone, "fetch", "origin", "feat")
+            self.assertEqual(
+                git(clone, "rev-parse", "--is-shallow-repository", capture=True),
+                "false",
+            )
+            before_base = git(clone, "merge-base", "origin/main", head, capture=True)
+            self.assertTrue(before_base)
 
             path, err = merge_pr.ensure_pr_head_checkout(
                 {"headRefOid": head, "headRefName": "feat"},
@@ -315,16 +319,32 @@ class MergeGateTests(unittest.TestCase):
             self.assertIsNone(err, err)
             self.assertTrue(path)
             try:
-                checked = git(path, "rev-parse", "HEAD", capture=True)
-                self.assertEqual(checked, head)
+                self.assertEqual(git(path, "rev-parse", "HEAD", capture=True), head)
+                self.assertEqual(git(path, "status", "--porcelain", capture=True), "")
+                listed = git(clone, "worktree", "list", "--porcelain", capture=True)
+                self.assertIn(str(Path(path).resolve()), listed)
+                self.assertEqual(
+                    git(clone, "rev-parse", "--is-shallow-repository", capture=True),
+                    "false",
+                )
+                self.assertEqual(
+                    git(clone, "merge-base", "origin/main", head, capture=True),
+                    before_base,
+                )
             finally:
                 merge_pr.release_pr_head_checkout(path, repo_root=str(clone))
 
-            after_shallow = git(clone, "rev-parse", "--is-shallow-repository", capture=True)
-            self.assertEqual(after_shallow, "false")
-            after_base = git(clone, "merge-base", "origin/main", head, capture=True)
-            self.assertEqual(after_base, before_base)
-            self.assertTrue(after_base)
+            self.assertFalse(Path(path).exists())
+            listed = git(clone, "worktree", "list", "--porcelain", capture=True)
+            self.assertNotIn(str(Path(path).resolve()), listed)
+            self.assertEqual(
+                git(clone, "rev-parse", "--is-shallow-repository", capture=True),
+                "false",
+            )
+            self.assertEqual(
+                git(clone, "merge-base", "origin/main", head, capture=True),
+                before_base,
+            )
 
     def test_persist_acceptance_evidence_writes_records(self):
         records = [{
