@@ -251,6 +251,19 @@ class DeployPreviewSkillTests(unittest.TestCase):
         url2 = dp.extract_preview_url_from_run(12346)
         self.assertIsNone(url2)
 
+    def test_is_valid_preview_url_validates_https_and_rejects_untrusted(self):
+        self.assertTrue(dp.is_valid_preview_url("https://example.com/preview"))
+        self.assertTrue(dp.is_valid_preview_url("https://gillella.github.io/Aru_Agentic_SDLC/"))
+        self.assertFalse(dp.is_valid_preview_url("http://example.com/preview"))  # reject non-https
+        self.assertFalse(dp.is_valid_preview_url("javascript:alert(1)"))
+        self.assertFalse(dp.is_valid_preview_url("https://attacker.com/foo<script>"))
+        self.assertFalse(dp.is_valid_preview_url(""))
+        self.assertFalse(dp.is_valid_preview_url(None))
+
+    def test_post_preview_comment_rejects_invalid_url(self):
+        self.assertFalse(dp.post_preview_comment(109, "http://insecure.example.com", "abcdef1"))
+        self.assertFalse(dp.post_preview_comment(109, "", "abcdef1"))
+
     @patch("deploy_preview.run_cmd")
     def test_dispatch_cd_workflow_correlates_matching_run_under_concurrent_dispatches(self, mock_run):
         # Two new runs appear in poll: 2001 (for commit A / token A) and 2002 (for commit B / token B)

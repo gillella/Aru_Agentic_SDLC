@@ -228,6 +228,25 @@ def wait_for_run(run_id: int, dry_run: bool = False) -> bool:
     return code == 0
 
 
+def is_valid_preview_url(url: str) -> bool:
+    """Validates that the preview URL is a well-formed HTTPS URL."""
+    if not url or not isinstance(url, str):
+        return False
+    url = url.strip()
+    if not url.startswith("https://"):
+        return False
+    if re.search(r"[\s'\"<>\\]", url):
+        return False
+    # Validate hostname structure
+    match = re.match(r"^https://([a-zA-Z0-9_.-]+)(?::\d+)?(?:/.*)?$", url)
+    if not match:
+        return False
+    hostname = match.group(1)
+    if not hostname or hostname.startswith(".") or hostname.endswith("."):
+        return False
+    return True
+
+
 def extract_preview_url_from_run(run_id: int, dry_run: bool = False) -> Optional[str]:
     """Inspects completed workflow run for preview environment URL.
 
@@ -249,8 +268,8 @@ def extract_preview_url_from_run(run_id: int, dry_run: bool = False) -> Optional
                 steps = job.get("steps", [])
                 for step in steps:
                     step_name = step.get("name", "")
-                    match = re.search(r"https?://[^\s'\"<>]+", step_name)
-                    if match:
+                    match = re.search(r"https://[^\s'\"<>]+", step_name)
+                    if match and is_valid_preview_url(match.group(0)):
                         return match.group(0)
         except json.JSONDecodeError:
             pass
@@ -260,21 +279,29 @@ def extract_preview_url_from_run(run_id: int, dry_run: bool = False) -> Optional
     log_code, log_out, _ = run_cmd(log_cmd, check=False)
     if log_code == 0 and log_out.strip():
         pages_match = re.search(
-            r"(?:Preview URL|Page URL|Deployed to|page_url):\s*(https?://[^\s'\"<>]+)",
+            r"(?:Preview URL|Page URL|Deployed to|page_url):\s*(https://[^\s'\"<>]+)",
             log_out,
             re.IGNORECASE,
         )
         if pages_match:
-            return pages_match.group(1).rstrip(".")
+            cand = pages_match.group(1).rstrip(".")
+            if is_valid_preview_url(cand):
+                return cand
         url_match = re.search(r"https://[a-zA-Z0-9_-]+\.github\.io/[a-zA-Z0-9_.-]+/?(?:\S+)?", log_out)
         if url_match:
-            return url_match.group(0).rstrip(".")
+            cand = url_match.group(0).rstrip(".")
+            if is_valid_preview_url(cand):
+                return cand
 
     return None
 
 
 def post_preview_comment(issue_id: int, preview_url: str, commit_sha: str, dry_run: bool = False) -> bool:
     """Posts a preview URL comment to the originating issue."""
+    if not is_valid_preview_url(preview_url):
+        print(f"[ERROR] Rejecting invalid/untrusted preview URL: {preview_url}", file=sys.stderr)
+        return False
+
     body = (
         f"🚀 **Preview Environment Deployed**\n\n"
         f"- **Commit**: `{commit_sha[:7]}`\n"

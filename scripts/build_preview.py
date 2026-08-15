@@ -95,8 +95,12 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
                 shutil.copytree(dir_path, dest / dname)
 
         asset_exts = {".css", ".js", ".png", ".svg", ".ico", ".jpg", ".jpeg", ".webp", ".json"}
+        config_json_names = {
+            "package.json", "package-lock.json", "tsconfig.json", "jsconfig.json",
+            "composer.json", "composer.lock", "deno.lock", "biome.json",
+        }
         for item in source_root.iterdir():
-            if item.is_file() and item.suffix.lower() in asset_exts and item.name != "package.json":
+            if item.is_file() and item.suffix.lower() in asset_exts and item.name not in config_json_names:
                 shutil.copy2(item, dest / item.name)
 
         print(f"✅ Assembled preview artifact from root static files into '{dest.name}/'")
