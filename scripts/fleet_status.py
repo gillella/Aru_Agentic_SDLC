@@ -707,6 +707,287 @@ def format_operator_screen(screen: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _pr_label_value(pr: Dict[str, Any], prefix: str) -> Optional[str]:
+    for name in label_names(pr):
+        if name.startswith(prefix):
+            value = name[len(prefix):].strip()
+            if value:
+                return value
+    return None
+
+
+def next_queue_action(
+    ok: bool,
+    first_blocking: Optional[str],
+    unresolved_count: int = 0,
+) -> str:
+    """Map dry-run gate outcome to an operator-facing next action.
+
+    This is intentionally thinner than picker claim eligibility: the queue is
+    global, not agent-relative. Unresolved threads route to feedback even when
+    another gate also fails, matching the picker's feedback-before-merge order.
+    """
+    if ok:
+        return "merge"
+    if unresolved_count > 0:
+        return "feedback"
+    if first_blocking == "review":
+        return "review"
+    return "wait"
+
+
+def queue_ci_label(pr: Optional[Dict[str, Any]], gates: Optional[List[Any]] = None) -> str:
+    """Compact CI state for the merge-queue table (always shown)."""
+    import merge_pr as mp
+
+    if gates:
+        for entry in gates:
+            if isinstance(entry, dict):
+                name, passed, message = entry.get("name"), entry.get("passed"), entry.get("message") or ""
+            else:
+                name, passed, message = entry[0], entry[1], entry[2] if len(entry) > 2 else ""
+            if name == "ci":
+                if passed:
+                    return "green"
+                lowered = (message or "").lower()
+                if "not finished" in lowered or "pending" in lowered:
+                    return "pending"
+                if "no ci" in lowered:
+                    return "none"
+                return "red"
+    if not pr:
+        return "—"
+    ok, message = mp.check_ci(pr)
+    if ok:
+        return "green"
+    lowered = (message or "").lower()
+    if "not finished" in lowered:
+        return "pending"
+    if "no ci" in lowered:
+        return "none"
+    return "red"
+
+
+def queue_thread_label(unresolved: Optional[int], *, known: bool = True) -> str:
+    """Compact review-thread state for the merge-queue table (always shown)."""
+    if not known or unresolved is None:
+        return "unknown"
+    if unresolved <= 0:
+        return "clean"
+    return f"{unresolved} open"
+
+
+def _serialize_queue_gates(gates: List[Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for entry in gates or []:
+        if isinstance(entry, dict):
+            out.append(
+                {
+                    "name": entry.get("name"),
+                    "passed": bool(entry.get("passed")),
+                    "message": entry.get("message") or "",
+                }
+            )
+        else:
+            name, passed, message = entry
+            out.append({"name": name, "passed": bool(passed), "message": message})
+    return out
+
+
+def evaluate_queue_row(
+    pr: Dict[str, Any],
+    *,
+    fetch_pr_fn=None,
+    linked_issues_fn=None,
+    issue_body_fn=None,
+    review_evidence_fn=None,
+    evaluate_dod_fn=None,
+) -> Dict[str, Any]:
+    """Evaluate one open PR for the merge-queue view without merging."""
+    import merge_pr as mp
+
+    fetch_pr_fn = fetch_pr_fn or mp.fetch_pr
+    linked_issues_fn = linked_issues_fn or mp.linked_issues
+    issue_body_fn = issue_body_fn or (
+        lambda num: (mp._gh_json(["gh", "issue", "view", str(num), "--json", "body"]) or {}).get("body") or ""
+    )
+    review_evidence_fn = review_evidence_fn or mp.review_evidence
+    evaluate_dod_fn = evaluate_dod_fn or mp.evaluate_dod
+
+    number = pr.get("number")
+    title = pr.get("title") or ""
+    author = _pr_label_value(pr, "author:")
+    reviewer = _pr_label_value(pr, "reviewed-by:") or _pr_label_value(pr, "reviewer:")
+
+    full = fetch_pr_fn(number) if number is not None else None
+    if not full:
+        return {
+            "pr": number,
+            "title": title,
+            "author": author,
+            "reviewer": reviewer,
+            "ok": False,
+            "first_blocking": "fetch",
+            "verdict": "could not fetch pull request",
+            "next_action": "wait",
+            "gates": [],
+            "unresolved_threads": 0,
+            "ci": "—",
+            "threads": "unknown",
+        }
+
+    title = full.get("title") or title
+    author = _pr_label_value(full, "author:") or author
+    reviewer = (
+        _pr_label_value(full, "reviewed-by:")
+        or _pr_label_value(full, "reviewer:")
+        or reviewer
+    )
+
+    issue_nums = linked_issues_fn(full.get("body"))
+    if not issue_nums:
+        return {
+            "pr": number,
+            "title": title,
+            "author": author,
+            "reviewer": reviewer,
+            "ok": False,
+            "first_blocking": "issue link",
+            "verdict": "PR body has no Closes #<issue>",
+            "next_action": "wait",
+            "gates": [],
+            "unresolved_threads": 0,
+            "ci": queue_ci_label(full, None),
+            "threads": "unknown",
+        }
+
+    issue_bodies: Dict[int, str] = {}
+    for num in issue_nums:
+        try:
+            issue_bodies[num] = issue_body_fn(num) or ""
+        except Exception as exc:  # fail closed per PR, keep the rest of the queue
+            return {
+                "pr": number,
+                "title": title,
+                "author": author,
+                "reviewer": reviewer,
+                "ok": False,
+                "first_blocking": f"accept #{num}",
+                "verdict": f"could not read issue #{num}: {exc}",
+                "next_action": "wait",
+                "gates": [],
+                "unresolved_threads": 0,
+                "ci": queue_ci_label(full, None),
+                "threads": "unknown",
+            }
+
+    evidence = review_evidence_fn(number)
+    # None means the GraphQL/auth query failed — fail closed for this row.
+    # Do not coerce to {} or check_reviews will KeyError on missing keys.
+    if evidence is None or evidence.get("error"):
+        unresolved: Optional[int] = None
+        threads_known = False
+        ok = False
+        # Keep review as the sole blocking gate so first_blocking stays
+        # review-evidence failure; CI still surfaces via queue_ci_label(full).
+        gates: List[Any] = [
+            ("review", False, "Could not determine review-thread state; refusing rather than guessing."),
+        ]
+    else:
+        unresolved = int(evidence.get("unresolved") or 0)
+        threads_known = True
+        ok, gates = evaluate_dod_fn(full, issue_bodies, evidence)
+
+    first_blocking = next((name for name, passed, _ in gates if not passed), None)
+    if ok:
+        verdict = "pass"
+    elif first_blocking:
+        message = next((m for n, p, m in gates if n == first_blocking and not p), "")
+        verdict = f"{first_blocking}: {message}" if message else f"unmet: {first_blocking}"
+    else:
+        verdict = "blocked"
+
+    return {
+        "pr": number,
+        "title": title,
+        "author": author,
+        "reviewer": reviewer,
+        "ok": bool(ok),
+        "first_blocking": first_blocking,
+        "verdict": verdict,
+        "next_action": next_queue_action(
+            bool(ok), first_blocking, 0 if unresolved is None else unresolved
+        ),
+        "gates": _serialize_queue_gates(gates),
+        "unresolved_threads": 0 if unresolved is None else int(unresolved),
+        "ci": queue_ci_label(full, gates),
+        "threads": queue_thread_label(unresolved, known=threads_known),
+    }
+
+
+def build_merge_queue(
+    prs: Optional[List[Dict[str, Any]]] = None,
+    *,
+    evaluate_row_fn=None,
+    list_prs_fn=None,
+) -> Dict[str, Any]:
+    """Build the merge-queue payload for every open PR (read-only).
+
+    When ``prs`` is omitted and the open-PR listing fails, returns
+    ``queue: None`` with an error reason so callers exit non-zero instead of
+    printing a false empty-queue all-clear.
+    """
+    rows_fn = evaluate_row_fn or evaluate_queue_row
+    if prs is not None:
+        open_prs = prs
+    else:
+        listed = (list_prs_fn or list_open_prs_details)()
+        if listed is None:
+            return {
+                "queue": None,
+                "open_prs_count": 0,
+                "mergeable_count": 0,
+                "error": "Could not list open pull requests.",
+            }
+        open_prs = listed
+    rows = [rows_fn(pr) for pr in open_prs]
+    return {
+        "queue": rows,
+        "open_prs_count": len(rows),
+        "mergeable_count": sum(1 for row in rows if row.get("ok")),
+    }
+
+
+def format_merge_queue(queue: Dict[str, Any]) -> str:
+    """Render a compact CLI table for the merge-queue view."""
+    rows = queue.get("queue") or []
+    lines = [
+        "=== Merge queue (dry-run; no merges) ===",
+        f"Open PRs: {queue.get('open_prs_count', len(rows))}  "
+        f"Mergeable: {queue.get('mergeable_count', 0)}",
+        "",
+        f"{'PR':<6} {'Author':<16} {'Reviewer':<16} {'CI':<8} {'Threads':<10} "
+        f"{'Next':<10} Verdict",
+        f"{'-'*6} {'-'*16} {'-'*16} {'-'*8} {'-'*10} {'-'*10} {'-'*36}",
+    ]
+    if not rows:
+        lines.append("(no open PRs)")
+        return "\n".join(lines)
+    for row in rows:
+        pr = f"#{row.get('pr')}"
+        author = (row.get("author") or "—")[:16]
+        reviewer = (row.get("reviewer") or "—")[:16]
+        ci = (row.get("ci") or "—")[:8]
+        threads = (row.get("threads") or "—")[:10]
+        action = row.get("next_action") or "wait"
+        verdict = row.get("verdict") or ""
+        lines.append(
+            f"{pr:<6} {author:<16} {reviewer:<16} {ci:<8} {threads:<10} "
+            f"{action:<10} {verdict}"
+        )
+    return "\n".join(lines)
+
+
 def _with_operator_screen(
     status: Dict[str, Any],
     issues: List[Dict[str, Any]],
@@ -949,6 +1230,16 @@ def _evaluate_current_repo(
 def main():
     parser = argparse.ArgumentParser(description="Evaluate factory fleet completion state.")
     parser.add_argument("--json", action="store_true", help="Output state in JSON format")
+    parser.add_argument(
+        "--queue",
+        action="store_true",
+        help="Show merge-queue view (per-PR merge_pr --dry-run verdicts; never merges)",
+    )
+    parser.add_argument(
+        "--queue-json",
+        action="store_true",
+        help="Emit merge-queue view as JSON (implies --queue; never merges)",
+    )
     parser.add_argument("--repo-dir", default=".", help="Repository working directory")
     parser.add_argument("--metrics", action="store_true", help="Include opt-in closed-issue cost/cycle metrics")
     parser.add_argument("--metrics-window-days", type=int, default=30, help="Closed-issue metrics window")
@@ -962,6 +1253,37 @@ def main():
         help="Configured Ready depth target (or set ARU_READY_TARGET)",
     )
     args = parser.parse_args()
+
+    if args.queue or args.queue_json:
+        try:
+            target = os.path.abspath(args.repo_dir)
+        except (OSError, TypeError, ValueError) as exc:
+            print(f"[ERROR] Could not resolve repository directory '{args.repo_dir}': {exc}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+        if not os.path.isdir(target):
+            print(f"[ERROR] Repository directory does not exist: {target}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+        previous = os.getcwd()
+        try:
+            os.chdir(target)
+            queue = build_merge_queue()
+        except OSError as exc:
+            print(f"[ERROR] Could not access repository directory '{target}': {exc}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+        finally:
+            os.chdir(previous)
+        if queue.get("queue") is None:
+            reason = queue.get("error") or "Could not build merge queue."
+            if args.queue_json or args.json:
+                print(json.dumps(queue, indent=2))
+            else:
+                print(f"[ERROR] {reason}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+        if args.queue_json or args.json:
+            print(json.dumps(queue, indent=2))
+        else:
+            print(format_merge_queue(queue))
+        sys.exit(EXIT_COMPLETE)
 
     status = evaluate_fleet_status(
         args.repo_dir,
