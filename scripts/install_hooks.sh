@@ -85,10 +85,12 @@ if [ -f "$EXISTING_MSG" ] && ! grep -q "Aru_Agentic_SDLC prepare-commit-msg" "$E
   chmod +x "$PRESERVED"
   cp "$HOOK_SRC/prepare-commit-msg" "$EXISTING_MSG"
   chmod +x "$EXISTING_MSG"
+  cp "$HOOK_SRC/prepare_commit_msg.py" "$HOOKS_DIR/prepare_commit_msg.py"
   echo "✅ prepare-commit-msg installed; the previous hook was preserved as $(basename "$PRESERVED") and is chained after it"
 else
   cp "$HOOK_SRC/prepare-commit-msg" "$EXISTING_MSG"
   chmod +x "$EXISTING_MSG"
+  cp "$HOOK_SRC/prepare_commit_msg.py" "$HOOKS_DIR/prepare_commit_msg.py"
   echo "✅ prepare-commit-msg hook installed at $EXISTING_MSG"
 fi
 
