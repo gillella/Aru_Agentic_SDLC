@@ -773,15 +773,66 @@ class RebaseGateTests(unittest.TestCase):
 
 
 class SizeGateTests(unittest.TestCase):
-    def test_oversized_diff_passes_with_visible_independent_review_warning(self):
-        ok, msg = merge_pr.check_size({"additions": 800, "deletions": 100})
+    def test_oversized_diff_blocks_without_waiver(self):
+        ok, msg = merge_pr.check_size({"additions": 800, "deletions": 100, "body": ""})
+        self.assertFalse(ok)
+        self.assertIn("over the 400-line limit", msg)
+        self.assertIn("size-waiver", msg)
+
+    def test_oversized_diff_passes_with_explicit_waiver(self):
+        ok, msg = merge_pr.check_size({
+            "additions": 800,
+            "deletions": 100,
+            "body": "## Notes\nsize-waiver: generated compatibility fixtures\n",
+        })
         self.assertTrue(ok)
-        self.assertIn("soft limit", msg)
-        self.assertIn("Independent review remains mandatory", msg)
-        self.assertNotIn("human", msg.lower())
+        self.assertIn("generated compatibility fixtures", msg)
+
+    def test_oversized_diff_blocks_on_empty_waiver(self):
+        ok, _ = merge_pr.check_size({
+            "additions": 401,
+            "deletions": 0,
+            "body": "size-waiver:   \n",
+        })
+        self.assertFalse(ok)
 
     def test_small_diff_passes(self):
         self.assertTrue(merge_pr.check_size({"additions": 10, "deletions": 2})[0])
+
+
+class TestCoverageGateTests(unittest.TestCase):
+    def test_script_change_requires_changed_test(self):
+        ok, msg = merge_pr.check_test_coverage({
+            "files": [{"path": "scripts/merge_pr.py", "additions": 10, "deletions": 1}],
+        })
+        self.assertFalse(ok)
+        self.assertIn("require a changed", msg)
+
+    def test_source_change_passes_with_changed_test(self):
+        ok, msg = merge_pr.check_test_coverage({
+            "files": [
+                {"path": "src/service.py", "additions": 8, "deletions": 2},
+                {"path": "tests/test_service.py", "additions": 12, "deletions": 0},
+            ],
+        })
+        self.assertTrue(ok)
+        self.assertIn("1 test file", msg)
+
+    def test_deleted_test_does_not_satisfy_gate(self):
+        ok, _ = merge_pr.check_test_coverage({
+            "files": [
+                {"path": "scripts/tool.py", "additions": 2, "deletions": 0},
+                {"path": "tests/test_tool.py", "additions": 0, "deletions": 20},
+            ],
+        })
+        self.assertFalse(ok)
+
+    def test_non_production_change_does_not_require_test(self):
+        ok, msg = merge_pr.check_test_coverage({
+            "files": [{"path": "docs/guide.md", "additions": 4, "deletions": 0}],
+        })
+        self.assertTrue(ok)
+        self.assertIn("No src/ or scripts/ changes", msg)
 
 
 class OpenStateTests(unittest.TestCase):
