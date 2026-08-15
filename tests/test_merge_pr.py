@@ -207,8 +207,49 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
 
         self.assertTrue(evidence["reviewed_head"])
         self.assertEqual(evidence["head_oid"], "head123")
+        self.assertEqual(len(evidence["reviews"]), 101)
         self.assertIn("cursor=review-page-2", gh_json.call_args_list[1].args[0])
         self.assertEqual(gh_json.call_count, 3)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_page_two_changes_requested_blocks_latest_verdict_gate(
+        self, gh_json, _slug
+    ):
+        first_page = [
+            {
+                "id": f"review-{index}",
+                "state": "COMMENTED",
+                "submittedAt": f"2026-08-14T00:{index % 60:02d}:00Z",
+                "author": {"login": f"reviewer-{index}"},
+                "commit": {"oid": "old-head"},
+            }
+            for index in range(100)
+        ]
+        blocker = {
+            "id": "review-101",
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-08-15T00:00:00Z",
+            "author": {"login": "independent-agent"},
+            "commit": {"oid": "head123"},
+        }
+        gh_json.side_effect = [
+            self.review_page(
+                nodes=first_page, has_next=True, cursor="review-page-2"
+            ),
+            self.review_page(nodes=[blocker]),
+            self.thread_page(),
+        ]
+
+        evidence = merge_pr.review_evidence(162)
+        pr = labelled(
+            "author:agent-1", "reviewed-by:agent-2", reviews=first_page
+        )
+
+        ok, message = merge_pr.check_reviews(pr, evidence)
+
+        self.assertFalse(ok)
+        self.assertIn("independent-agent requested changes", message)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
