@@ -705,8 +705,9 @@ jobs:
           python-version: '3.12'
 
       - name: Build static preview site
+        env:
+          TARGET_REF: ${{ inputs.commit_sha || github.sha }}
         run: |
-          TARGET_REF="${{ inputs.commit_sha || github.sha }}"
           echo "Building preview for commit: ${TARGET_REF}"
           if [ -f "scripts/build_preview.py" ]; then
             python3 scripts/build_preview.py --source . --output dist
@@ -742,9 +743,10 @@ jobs:
         uses: actions/deploy-pages@v4
 
       - name: Publish preview URL
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
-          PAGE_URL="${{ steps.deployment.outputs.page_url }}"
-          echo "Preview URL: ${PAGE_URL}" >> $GITHUB_STEP_SUMMARY
+          echo "Preview URL: ${PAGE_URL}" >> "$GITHUB_STEP_SUMMARY"
           echo "Preview URL: ${PAGE_URL}"
 """
 
