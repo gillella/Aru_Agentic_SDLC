@@ -71,6 +71,7 @@ class ResearchSkillTests(unittest.TestCase):
         self.assertIn("before the first repository write", skill)
         self.assertIn("comment-only artifact", skill)
         self.assertIn("outside the checkout", skill)
+        self.assertIn("--repo-root <consumer-repo-root>", skill)
 
     def test_extract_citations_dedupes_kinds(self):
         cites = extract_citations(SAMPLE)
@@ -492,6 +493,25 @@ none
                 self.assertIn(heading, report["findings"])
                 self.assertTrue(report["unclassified_findings"])
 
+    def test_duplicate_findings_sections_fail_closed(self):
+        text = """## Findings
+1. [external] Supported fact ([source](https://example.com/a)).
+
+## Findings
+1. AGENTS.md defines the factory.
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["findings_section_count"], 2)
+        self.assertIn("duplicate_findings_sections", report["errors"])
+
     def test_external_marker_cannot_relabel_source_path_claim(self):
         http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
         for path in ("AGENTS.md", "src/router.py"):
@@ -588,6 +608,30 @@ none
         http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
         report = verify_findings(text, http_get=http)
         self.assertTrue(report["ok"], report["errors"])
+
+    def test_outside_repo_requires_explicit_repository_identity(self):
+        text = """## Findings
+1. [external] requirements-dev.txt defines dependencies ([source](https://example.com/a)).
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        with tempfile.TemporaryDirectory() as raw, patch(
+            "verify_citations.Path.cwd", return_value=Path(raw)
+        ):
+            unknown = verify_findings(text, http_get=http)
+            self.assertFalse(unknown["ok"])
+            self.assertFalse(unknown["repo_identity_known"])
+            self.assertIn("repository_identity_unavailable", unknown["errors"])
+
+            explicit = verify_findings(text, http_get=http, repo_root=ROOT)
+            self.assertFalse(explicit["ok"])
+            self.assertTrue(explicit["repo_identity_known"])
+            self.assertTrue(explicit["external_source_findings"])
 
     def test_structured_repo_finding_with_date_and_path_passes(self):
         text = """## Findings

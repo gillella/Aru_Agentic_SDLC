@@ -881,7 +881,7 @@ def render_research_issue_form(project_ref: Optional[str] = None) -> str:
         "    id: verification",
         "    attributes:",
         "      label: Verification",
-        "      value: 'python3 $ARU_SDLC_HOME/scripts/verify_citations.py <artifact>'",
+        "      value: 'python3 $ARU_SDLC_HOME/scripts/verify_citations.py --repo-root <consumer-repo-root> <artifact>'",
         "    validations:",
         "      required: true",
         "  - type: textarea",

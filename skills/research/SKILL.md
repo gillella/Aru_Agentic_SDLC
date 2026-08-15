@@ -87,8 +87,9 @@ Rules:
   does not satisfy that contract.
 - An `external` finding must not name a repository/source path. Cite the
   external URL without relabeling repository-code evidence as external.
-- Include exactly one `Repo code claims` section. Duplicate sections fail
-  closed even when their individual entries appear valid.
+- Include exactly one `Findings` section and one `Repo code claims` section.
+  Duplicate sections fail closed even when their individual entries appear
+  valid.
 - Do not invent citations. Prefer primary sources.
 
 Write the file under `docs/research/issue-<N>-<slug>.md` when `touches:`
@@ -98,11 +99,16 @@ comment.
 ### 4. Verify citations mechanically
 
 ```bash
-python3 "$ARU_SDLC_HOME/scripts/verify_citations.py" docs/research/issue-<N>-<slug>.md
+python3 "$ARU_SDLC_HOME/scripts/verify_citations.py" \
+  --repo-root <consumer-repo-root> \
+  docs/research/issue-<N>-<slug>.md
 ```
 
 Exit 0 is required. Unresolvable citations fail the acceptance criteria —
-fix or remove them and re-run. Do not mark Done on belief alone.
+fix or remove them and re-run. `--repo-root` remains required for a
+comment-only artifact stored outside the checkout so repository-backed path
+identity cannot silently fall back to the temporary directory. Do not mark
+Done on belief alone.
 
 ### 5. Attach the artifact to the issue
 

@@ -312,15 +312,17 @@ def _strip_markdown_links(text: str) -> str:
     return "".join(chars)
 
 
-def _find_repo_root(start: Path) -> Path:
+def _find_repo_root(start: Path) -> Optional[Path]:
     resolved = start.resolve()
     for candidate in (resolved, *resolved.parents):
         if (candidate / ".git").exists():
             return candidate
-    return resolved
+    return None
 
 
-def _repository_path_exists(path: str, repo_root: Path) -> bool:
+def _repository_path_exists(path: str, repo_root: Optional[Path]) -> bool:
+    if repo_root is None:
+        return False
     parts = Path(path).parts
     if not parts or ".." in parts:
         return False
@@ -335,7 +337,7 @@ def source_path_references(
     scrubbed = URL_RE.sub("", scrubbed)
     scrubbed = ARXIV_RE.sub("", scrubbed)
     scrubbed = DOI_RE.sub("", scrubbed)
-    root = repo_root or _find_repo_root(Path.cwd())
+    root = repo_root if repo_root is not None else _find_repo_root(Path.cwd())
     references: List[str] = []
     for match in PATH_TOKEN_RE.finditer(scrubbed):
         path = match.group(0).strip("`'\"()[]{} ,;:").rstrip(".")
@@ -349,6 +351,10 @@ def source_path_references(
         suffix = Path(basename).suffix.lower()
         looks_like_source = (
             basename.casefold() in SOURCE_BASENAMES_CASEFOLD
+            or (
+                basename.casefold().startswith("requirements")
+                and suffix == ".txt"
+            )
             or suffix in SOURCE_SUFFIXES
             or (path.endswith("/") and parts[0].lower() in SOURCE_ROOTS)
             or _repository_path_exists(candidate, root)
@@ -675,13 +681,24 @@ def resolve_citation(
 
 
 def verify_findings(
-    text: str, http_get: Optional[Resolver] = None
+    text: str,
+    http_get: Optional[Resolver] = None,
+    *,
+    repo_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     getter = http_get or default_http_get
     citations = extract_citations(text)
     results = [resolve_citation(item, http_get=getter) for item in citations]
     repo = extract_repo_claims(text)
     findings = extract_finding_lines(text)
+    findings_section_count = len(_extract_sections(text, r"findings?"))
+    duplicate_findings_sections = findings_section_count > 1
+    resolved_repo_root = (
+        _find_repo_root(repo_root)
+        if repo_root is not None
+        else _find_repo_root(Path.cwd())
+    )
+    repo_identity_unknown = resolved_repo_root is None
     uncited = [line for line in findings if not finding_has_citation(line)]
     unclassified = []
     repo_findings = []
@@ -697,7 +714,7 @@ def verify_findings(
         if not match:
             unclassified.append(line)
             continue
-        references = source_path_references(line)
+        references = source_path_references(line, repo_root=resolved_repo_root)
         if match.group("scope").lower() == "external":
             if references:
                 external_source_findings.append(
@@ -723,7 +740,12 @@ def verify_findings(
         "mixed_none_and_entries"
     ]
     citation_results_ok = bool(citations) and all(item.ok for item in results)
-    findings_ok = bool(findings) and not uncited and not unclassified
+    findings_ok = (
+        findings_section_count == 1
+        and bool(findings)
+        and not uncited
+        and not unclassified
+    )
     citation_ok = citation_results_ok and findings_ok
     repo_ok = not (
         repo["missing_date"]
@@ -735,6 +757,7 @@ def verify_findings(
         or unclassified
         or external_source_findings
         or repo_path_binding_errors
+        or repo_identity_unknown
     )
     ok = citation_ok and repo_ok
     return {
@@ -744,6 +767,9 @@ def verify_findings(
         "citations": [asdict(item) for item in results],
         "repo_claims": repo,
         "findings": findings,
+        "findings_section_count": findings_section_count,
+        "duplicate_findings_sections": duplicate_findings_sections,
+        "repo_identity_known": not repo_identity_unknown,
         "uncited_findings": uncited,
         "unclassified_findings": unclassified,
         "repo_findings": repo_findings,
@@ -762,6 +788,16 @@ def verify_findings(
             *(
                 ["duplicate_repo_code_claims_sections"]
                 if repo["duplicate_sections"]
+                else []
+            ),
+            *(
+                ["duplicate_findings_sections"]
+                if duplicate_findings_sections
+                else []
+            ),
+            *(
+                ["repository_identity_unavailable"]
+                if repo_identity_unknown
                 else []
             ),
             *(f"unclassified_finding:{line}" for line in unclassified),
@@ -784,7 +820,12 @@ def verify_findings(
                 for error in repo_path_binding_errors
             ),
             *(["no_citations_found"] if not citations else []),
-            *(["no_findings_section"] if not findings else []),
+            *(["no_findings_section"] if findings_section_count == 0 else []),
+            *(
+                ["no_findings_found"]
+                if findings_section_count == 1 and not findings
+                else []
+            ),
             *(f"uncited_finding:{line}" for line in uncited),
         ],
     }
@@ -793,13 +834,31 @@ def verify_findings(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Verify research citation identifiers.")
     parser.add_argument("path", type=Path, help="Path to findings markdown")
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        help="Governed repository whose code claims are being verified",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON summary")
     args = parser.parse_args(list(argv) if argv is not None else None)
     if not args.path.is_file():
         print(f"[ERROR] findings file not found: {args.path}", file=sys.stderr)
         return 2
     text = args.path.read_text(encoding="utf-8")
-    report = verify_findings(text)
+    repo_root = None
+    if args.repo_root is not None:
+        repo_root = _find_repo_root(args.repo_root)
+        if repo_root is None:
+            print(
+                f"[ERROR] repository root not found: {args.repo_root}",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        repo_root = _find_repo_root(args.path.parent)
+        if repo_root is None:
+            repo_root = _find_repo_root(Path.cwd())
+    report = verify_findings(text, repo_root=repo_root)
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
