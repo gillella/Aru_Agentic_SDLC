@@ -414,9 +414,14 @@ def partition(issues: list[dict[str, Any]]) -> tuple[list, list, list]:
     backlog, ready, held = [], [], []
     for issue in issues:
         names = {n.lower() for n in label_names(issue)}
+        active = bool(
+            claimed_by(issue)
+            or "status:in-progress" in names
+            or "status:in-review" in names
+        )
         if needs_human(issue.get("labels", [])):
-            backlog.append(issue)
-        elif claimed_by(issue) or "status:in-review" in names:
+            (held if active else backlog).append(issue)
+        elif active:
             held.append(issue)
         elif "status:ready" in names:
             ready.append(issue)

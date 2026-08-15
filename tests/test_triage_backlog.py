@@ -545,6 +545,35 @@ class PartitionTests(unittest.TestCase):
         self.assertIn("Ready issues:            0", output.getvalue())
         self.assertIn("Claimable simultaneously: 0", output.getvalue())
 
+    def test_active_needs_human_touches_block_overlapping_capacity(self):
+        operator_issue = issue(
+            7,
+            "status:in-progress",
+            "agent:human",
+            "needs-human",
+            body=READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: src/operator.py",
+            ),
+        )
+        factory_issue = issue(
+            8,
+            "status:ready",
+            body=READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: src/operator.py",
+            ),
+        )
+
+        backlog, ready, held = tb.partition([operator_issue, factory_issue])
+        cap = tb.capacity(ready, held)
+
+        self.assertEqual(backlog, [])
+        self.assertEqual([item["number"] for item in held], [7])
+        self.assertEqual([item["number"] for item in ready], [8])
+        self.assertEqual(cap["concurrent"], [])
+        self.assertEqual(cap["deferred"], [(8, "path conflict on src/operator.py")])
+
     def test_in_review_issue_is_parked_and_conflict_protected(self):
         issues = [
             issue(39, "status:in-review", "agent:agent-1",
