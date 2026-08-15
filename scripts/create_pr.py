@@ -78,7 +78,7 @@ def collect_verification_evidence(
 
 def render_verification_evidence(evidence: Dict) -> str:
     """Renders stable marker-delimited JSON for machine parsing."""
-    payload = json.dumps(evidence, indent=2, sort_keys=True)
+    payload = serialize_verification_evidence(evidence)
     return (
         "\n\n<details>\n"
         "<summary>Local verification evidence</summary>\n\n"
@@ -91,6 +91,11 @@ def render_verification_evidence(evidence: Dict) -> str:
     )
 
 
+def serialize_verification_evidence(evidence: Dict) -> str:
+    """Serializes JSON without allowing payload text to become raw delimiters."""
+    return json.dumps(evidence, indent=2, sort_keys=True).replace("<", "\\u003c").replace(">", "\\u003e")
+
+
 def replace_verification_evidence(body: str, evidence: Dict) -> Optional[str]:
     """Replaces exactly one evidence payload while preserving the PR prose."""
     if (body.count(VERIFICATION_EVIDENCE_START) != 1
@@ -100,7 +105,7 @@ def replace_verification_evidence(body: str, evidence: Dict) -> Optional[str]:
         return None
     before, _marker, remainder = body.partition(VERIFICATION_EVIDENCE_START)
     _old_payload, _end_marker, after = remainder.partition(VERIFICATION_EVIDENCE_END)
-    payload = json.dumps(evidence, indent=2, sort_keys=True)
+    payload = serialize_verification_evidence(evidence)
     return (
         f"{before}{VERIFICATION_EVIDENCE_START}\n"
         f"```json\n{payload}\n```\n"
@@ -136,21 +141,21 @@ def refresh_pr_evidence(pr_ref: str, verification_commands: List[str]) -> bool:
         print("[ERROR] HEAD changed while verification was running.", file=sys.stderr)
         return False
     code, fresh_out, err = run_cmd(
-        ["gh", "pr", "view", str(pr_ref), "--json", "headRefOid"],
+        ["gh", "pr", "view", str(pr_ref), "--json", "body,headRefOid"],
         check=False,
     )
     try:
-        fresh_head = json.loads(fresh_out).get("headRefOid") if code == 0 else ""
+        fresh_pr = json.loads(fresh_out) if code == 0 else {}
     except json.JSONDecodeError:
-        fresh_head = ""
-    if fresh_head != local_head:
+        fresh_pr = {}
+    if fresh_pr.get("headRefOid") != local_head:
         print(
             "[ERROR] The remote PR head changed while verification was running; rerun refresh.",
             file=sys.stderr,
         )
         return False
 
-    updated_body = replace_verification_evidence(pr.get("body") or "", evidence)
+    updated_body = replace_verification_evidence(fresh_pr.get("body") or "", evidence)
     if updated_body is None:
         print(
             "[ERROR] PR body must contain exactly one complete verification evidence block.",

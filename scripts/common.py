@@ -23,8 +23,10 @@ VERIFICATION_EVIDENCE_END = "<!-- /aru-verification-evidence -->"
 
 _SENSITIVE_ARGUMENT_NAMES = {
     "api-key", "apikey", "auth", "credential", "credentials", "key",
-    "password", "passwd", "secret", "token",
+    "password", "passwd", "secret", "signature", "token",
 }
+
+_OPAQUE_VALUE_OPTIONS = {"-c", "--command", "-Command", "-e", "--eval"}
 
 
 def _looks_sensitive(name: str) -> bool:
@@ -47,6 +49,9 @@ def _redact_local_path(value: str) -> str:
                 return f"{prefix}{separator}{sanitized_url}"
     if Path(value).is_absolute():
         return f"<local-path>/{Path(value).name}" if Path(value).name else "<local-path>"
+    if value.startswith("@") and Path(value[1:]).is_absolute():
+        name = Path(value[1:]).name
+        return f"@<local-path>/{name}" if name else "@<local-path>"
     for separator in ("=", ":"):
         prefix, found, suffix = value.partition(separator)
         if found and Path(suffix).is_absolute():
@@ -55,7 +60,26 @@ def _redact_local_path(value: str) -> str:
             return f"{prefix}{separator}{replacement}"
     if value.startswith("-I/"):
         return f"-I<local-path>/{Path(value[2:]).name}"
-    return value
+    absolute_path = re.compile(r"(?P<prefix>^|[\s@=:(])(?P<path>/(?:[^/\s\"']+/)*[^/\s\"']+)")
+
+    def replace_path(match: re.Match) -> str:
+        path = match.group("path")
+        name = Path(path).name
+        replacement = f"<local-path>/{name}" if name else "<local-path>"
+        return f"{match.group('prefix')}{replacement}"
+
+    return absolute_path.sub(replace_path, value)
+
+
+def _redact_embedded_secrets(value: str) -> str:
+    """Redacts common credentials embedded in otherwise opaque argv values."""
+    value = re.sub(r"(?i)\b(Bearer|Basic)\s+[^\s,;]+", r"\1 <redacted>", value)
+    value = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]+\b", "<redacted>", value)
+    pattern = re.compile(
+        r"(?i)(api[-_]?key|auth(?:orization)?|credential|password|passwd|secret|signature|token)"
+        r"(?P<separator>[\"']?\s*[:=]\s*[\"']?)(?P<value>[^\s,;\"'}]+)"
+    )
+    return pattern.sub(lambda match: f"{match.group(1)}{match.group('separator')}<redacted>", value)
 
 
 def _sanitize_url(value: str) -> Optional[str]:
@@ -94,11 +118,38 @@ def sanitize_command(cmd: List[str]) -> List[str]:
     """Redacts common secret arguments and absolute local paths from evidence."""
     sanitized = []
     redact_next = False
+    redact_header_next = False
+    redact_opaque_next = False
     for raw_arg in cmd:
         arg = str(raw_arg)
         if redact_next:
             sanitized.append("<redacted>")
             redact_next = False
+            continue
+        if redact_opaque_next:
+            sanitized.append("<redacted>")
+            redact_opaque_next = False
+            continue
+        if redact_header_next:
+            name, separator, _value = arg.partition(":")
+            sanitized.append(f"{name}: <redacted>" if separator else arg)
+            redact_header_next = False
+            continue
+        if arg in {"-H", "--header"}:
+            sanitized.append(arg)
+            redact_header_next = True
+            continue
+        if arg.startswith("--header="):
+            name, separator, _value = arg[len("--header="):].partition(":")
+            sanitized.append(f"--header={name}: <redacted>" if separator else arg)
+            continue
+        if arg.startswith("-H") and len(arg) > 2:
+            name, separator, _value = arg[2:].partition(":")
+            sanitized.append(f"-H{name}: <redacted>" if separator else arg)
+            continue
+        if arg in _OPAQUE_VALUE_OPTIONS:
+            sanitized.append(arg)
+            redact_opaque_next = True
             continue
         name, separator, _value = arg.partition("=")
         if separator and _looks_sensitive(name):
@@ -108,7 +159,7 @@ def sanitize_command(cmd: List[str]) -> List[str]:
             sanitized.append(arg)
             redact_next = True
             continue
-        sanitized.append(_redact_local_path(arg))
+        sanitized.append(_redact_embedded_secrets(_redact_local_path(arg)))
     return sanitized
 
 

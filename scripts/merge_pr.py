@@ -21,6 +21,7 @@ Exit codes:
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -615,23 +616,41 @@ def check_issue_link(pr):
 def parse_verification_evidence(body):
     """Parses the marker-delimited verification JSON without scraping prose."""
     body = body or ""
-    if body.count(VERIFICATION_EVIDENCE_START) > 1 or body.count(VERIFICATION_EVIDENCE_END) > 1:
-        return None, "multiple verification evidence blocks"
-    _before, marker, remainder = body.partition(VERIFICATION_EVIDENCE_START)
-    if not marker:
+    start_count = body.count(VERIFICATION_EVIDENCE_START)
+    end_count = body.count(VERIFICATION_EVIDENCE_END)
+    if start_count == 0 and end_count == 0:
         return None, "missing"
+    if start_count != 1 or end_count != 1:
+        return None, "verification evidence markers are unmatched or duplicated"
+    if body.index(VERIFICATION_EVIDENCE_START) > body.index(VERIFICATION_EVIDENCE_END):
+        return None, "verification evidence markers are inverted"
+    _before, marker, remainder = body.partition(VERIFICATION_EVIDENCE_START)
     payload, end_marker, _after = remainder.partition(VERIFICATION_EVIDENCE_END)
-    if not end_marker:
-        return None, "missing closing verification marker"
     payload = payload.strip()
     if payload.startswith("```json"):
         payload = payload[len("```json"):].lstrip()
     if payload.endswith("```"):
         payload = payload[:-3].rstrip()
+
+    def reject_constant(value):
+        raise ValueError(f"non-finite JSON number: {value}")
+
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        evidence = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        return None, f"invalid verification JSON: {exc.msg}"
+        evidence = json.loads(
+            payload,
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        return None, f"invalid verification JSON: {exc}"
     if not isinstance(evidence, dict):
         return None, "verification evidence must be a JSON object"
     if evidence.get("schema") != VERIFICATION_EVIDENCE_SCHEMA:
@@ -674,12 +693,14 @@ def check_verification(pr):
     for record in commands:
         if not isinstance(record, dict):
             return False, "Each verification command record must be a JSON object."
-        if not isinstance(record.get("command"), list) or not record["command"]:
+        if (not isinstance(record.get("command"), list)
+                or not record["command"]
+                or not all(type(arg) is str for arg in record["command"])):
             return False, "A verification command is missing its argv array."
-        if not isinstance(record.get("exit_code"), int):
+        if type(record.get("exit_code")) is not int:
             return False, "A verification command is missing an integer exit_code."
         duration = record.get("duration_seconds")
-        if not isinstance(duration, (int, float)) or duration < 0:
+        if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
             return False, "A verification command has an invalid duration_seconds."
         expected = "passed" if record["exit_code"] == 0 else "failed"
         if record.get("status") != expected:

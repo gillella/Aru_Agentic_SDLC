@@ -196,8 +196,41 @@ class VerificationEvidenceTests(unittest.TestCase):
         for secret in ("ghp_TOKEN", "query-secret", "password", "hidden", "/Users/example"):
             self.assertNotIn(secret, rendered)
         self.assertIn("https://<redacted>@example.com", rendered)
-        self.assertIn("token=%3Credacted%3E", rendered)
+        self.assertIn("token=<redacted>", rendered)
         self.assertIn("file://<local-path>/config.json", rendered)
+
+    def test_command_evidence_redacts_http_header_values(self):
+        for option in ("-H", "--header"):
+            sanitized = common.sanitize_command([
+                "curl", option, "Authorization: Bearer TEST_AUTH_TOKEN",
+            ])
+            rendered = " ".join(sanitized)
+            self.assertNotIn("TEST_AUTH_TOKEN", rendered)
+            self.assertIn("Authorization: <redacted>", rendered)
+
+        attached = common.sanitize_command([
+            "curl",
+            "-HCookie: session=COOKIE_SECRET",
+            "--header=X-Api-Key: HEADER_SECRET",
+        ])
+        self.assertNotIn("COOKIE_SECRET", " ".join(attached))
+        self.assertNotIn("HEADER_SECRET", " ".join(attached))
+
+    def test_command_evidence_redacts_opaque_secrets_and_embedded_paths(self):
+        probes = [
+            ["curl", "https://example.com?X-Amz-Signature=AWSSECRET"],
+            ["sh", "-c", "printf ghp_NESTED /Users/example/private.txt"],
+            ["python", "-c", "open('/Users/example/private.txt')"],
+            ["tool", "@/Users/example/response.txt"],
+            ["tool", "prefix=/Users/example/project/config.json"],
+        ]
+        rendered = " ".join(
+            part for probe in probes for part in common.sanitize_command(probe)
+        )
+        for secret in ("AWSSECRET", "ghp_NESTED", "/Users/example"):
+            self.assertNotIn(secret, rendered)
+        self.assertIn("<redacted>", rendered)
+        self.assertIn("<local-path>", rendered)
 
     def test_rendered_json_is_parseable_without_prose_scraping(self):
         evidence = {
@@ -218,6 +251,25 @@ class VerificationEvidenceTests(unittest.TestCase):
         self.assertTrue(merge_pr.check_verification({
             "body": body, "headRefOid": "head-7",
         })[0])
+
+    def test_evidence_command_cannot_create_raw_delimiters(self):
+        evidence = {
+            "commands": [{
+                "command": [common.VERIFICATION_EVIDENCE_START, common.VERIFICATION_EVIDENCE_END],
+                "duration_seconds": 0.1,
+                "exit_code": 0,
+                "status": "passed",
+            }],
+            "head_sha": "head-7",
+            "schema": "aru.verification.v1",
+            "status": "passed",
+        }
+        body = create_pr.render_verification_evidence(evidence)
+        self.assertEqual(body.count(common.VERIFICATION_EVIDENCE_START), 1)
+        self.assertEqual(body.count(common.VERIFICATION_EVIDENCE_END), 1)
+        parsed, error = merge_pr.parse_verification_evidence(body)
+        self.assertIsNone(error)
+        self.assertEqual(parsed, evidence)
 
     def test_gate_warns_on_missing_or_not_run_and_blocks_failed_or_malformed(self):
         missing_ok, missing_message = merge_pr.check_verification({"body": "legacy"})
@@ -253,6 +305,38 @@ class VerificationEvidenceTests(unittest.TestCase):
             f"{common.VERIFICATION_EVIDENCE_END}"
         )
         self.assertFalse(merge_pr.check_verification({"body": malformed})[0])
+
+    def test_gate_rejects_ambiguous_or_non_strict_evidence(self):
+        def body_for(payload):
+            return (
+                f"{common.VERIFICATION_EVIDENCE_START}\n```json\n{payload}\n```\n"
+                f"{common.VERIFICATION_EVIDENCE_END}"
+            )
+
+        invalid_payloads = [
+            '{"schema":"aru.verification.v1","status":"passed","status":"failed",'
+            '"head_sha":"head-7","commands":[]}',
+            '{"schema":"aru.verification.v1","status":"passed","head_sha":"head-7",'
+            '"commands":[{"command":["true"],"exit_code":0,"duration_seconds":NaN,'
+            '"status":"passed"}]}',
+            '{"schema":"aru.verification.v1","status":"passed","head_sha":"head-7",'
+            '"commands":[{"command":["true"],"exit_code":false,"duration_seconds":0.1,'
+            '"status":"passed"}]}',
+            '{"schema":"aru.verification.v1","status":"passed","head_sha":"head-7",'
+            '"commands":[{"command":["true"],"exit_code":0,"duration_seconds":true,'
+            '"status":"passed"}]}',
+            '{"schema":"aru.verification.v1","status":"passed","head_sha":"head-7",'
+            '"commands":[{"command":[{}],"exit_code":0,"duration_seconds":0.1,'
+            '"status":"passed"}]}',
+        ]
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                self.assertFalse(merge_pr.check_verification({
+                    "body": body_for(payload), "headRefOid": "head-7",
+                })[0])
+
+        lone_end = f"legacy prose\n{common.VERIFICATION_EVIDENCE_END}"
+        self.assertFalse(merge_pr.check_verification({"body": lone_end})[0])
 
     def test_gate_rejects_evidence_for_a_different_pr_head(self):
         body = create_pr.render_verification_evidence({
@@ -303,9 +387,10 @@ class VerificationEvidenceTests(unittest.TestCase):
             "schema": "aru.verification.v1",
             "status": "not_run",
         }) + "\n\nCloses #7"
+        concurrent_body = original.replace("summary", "summary\nconcurrent edit")
         responses = [
             (0, '{"body": ' + json.dumps(original) + ', "headRefOid": "head-7"}', ""),
-            (0, '{"headRefOid": "head-7"}', ""),
+            (0, '{"body": ' + json.dumps(concurrent_body) + ', "headRefOid": "head-7"}', ""),
             (0, "", ""),
         ]
         with patch.object(create_pr, "run_cmd", side_effect=responses) as run, \
@@ -321,6 +406,7 @@ class VerificationEvidenceTests(unittest.TestCase):
         refreshed, error = merge_pr.parse_verification_evidence(edit[-1])
         self.assertIsNone(error)
         self.assertEqual(refreshed["status"], "passed")
+        self.assertIn("concurrent edit", edit[-1])
 
     @patch.object(create_pr, "get_issue", return_value={"title": "t"})
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
@@ -359,7 +445,7 @@ class VerificationEvidenceTests(unittest.TestCase):
         })
         parsed, error = merge_pr.parse_verification_evidence(evidence + evidence)
         self.assertIsNone(parsed)
-        self.assertIn("multiple", error)
+        self.assertIn("duplicated", error)
 
 
 if __name__ == "__main__":
