@@ -846,14 +846,19 @@ def ensure_pr_head_checkout(pr, repo_root=None):
 
     Never falls back to the caller's cwd: a merger clone often has only
     ``main``, and running verify: commands there can false-pass or false-fail.
+    Never shallow-fetches into that clone: worktrees share its Git metadata,
+    and ``--depth=1`` writes ``.git/shallow`` for every worktree.
     """
     sha = (pr or {}).get("headRefOid")
     if not isinstance(sha, str) or not sha:
         return None, "PR is missing a head SHA"
     repo_root = repo_root or repository_root() or os.getcwd()
     dest = tempfile.mkdtemp(prefix=f"aru-accept-{sha[:12]}-")
+    # Never pass --depth=1 here: every worktree shares this clone's Git
+    # metadata, and a shallow fetch writes `.git/shallow`, which breaks
+    # merge-base / rebase / diff for the rest of the factory.
     fetch_code, _, fetch_err = run_cmd(
-        ["git", "fetch", "--no-tags", "--depth=1", "origin", sha],
+        ["git", "fetch", "--no-tags", "origin", sha],
         check=False,
         cwd=repo_root,
     )

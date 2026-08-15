@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -272,6 +273,58 @@ class MergeGateTests(unittest.TestCase):
         path, err = merge_pr.ensure_pr_head_checkout({})
         self.assertIsNone(path)
         self.assertIn("missing a head SHA", err)
+
+    def test_ensure_pr_head_checkout_does_not_shallow_a_full_clone(self):
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+
+        def git(cwd, *args, capture=False):
+            result = subprocess.run(
+                ["git", *args], cwd=cwd, env=env, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            return result.stdout.strip() if capture else None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            origin = Path(temp_dir) / "origin"
+            clone = Path(temp_dir) / "clone"
+            origin.mkdir()
+            git(origin, "init", "-b", "main")
+            (origin / "readme").write_text("base\n")
+            git(origin, "add", "readme")
+            git(origin, "commit", "-m", "base")
+            git(temp_dir, "clone", str(origin), str(clone))
+            git(origin, "checkout", "-b", "feat")
+            (origin / "readme").write_text("feature\n")
+            git(origin, "add", "readme")
+            git(origin, "commit", "-m", "feature")
+            head = git(origin, "rev-parse", "HEAD", capture=True)
+            before_shallow = git(clone, "rev-parse", "--is-shallow-repository", capture=True)
+            self.assertEqual(before_shallow, "false")
+            before_base = git(clone, "merge-base", "origin/main", "HEAD", capture=True)
+
+            path, err = merge_pr.ensure_pr_head_checkout(
+                {"headRefOid": head, "headRefName": "feat"},
+                repo_root=str(clone),
+            )
+            self.assertIsNone(err, err)
+            self.assertTrue(path)
+            try:
+                checked = git(path, "rev-parse", "HEAD", capture=True)
+                self.assertEqual(checked, head)
+            finally:
+                merge_pr.release_pr_head_checkout(path, repo_root=str(clone))
+
+            after_shallow = git(clone, "rev-parse", "--is-shallow-repository", capture=True)
+            self.assertEqual(after_shallow, "false")
+            after_base = git(clone, "merge-base", "origin/main", head, capture=True)
+            self.assertEqual(after_base, before_base)
+            self.assertTrue(after_base)
 
     def test_persist_acceptance_evidence_writes_records(self):
         records = [{
