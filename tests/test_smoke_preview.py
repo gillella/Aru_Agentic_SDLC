@@ -2,7 +2,6 @@
 """Hermetic unit tests for scripts/smoke_preview.py."""
 
 import io
-import json
 import os
 import sys
 import tempfile
