@@ -1626,12 +1626,35 @@ class GitCommandCheckoutTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.violation(command, self.ungoverned))
 
-    def test_assignment_only_git_dir_persists_to_later_git_write(self):
+    def test_new_assignment_only_git_dir_is_not_exported(self):
         for separator in (";", "&&"):
-            with self.subTest(separator=separator):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(separator=separator, operation=operation):
+                    self.assertIsNone(
+                        self.violation(
+                            f"GIT_DIR={self.main_root}/.git {separator} git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
+    def test_assignment_preserves_an_existing_export_attribute(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
                 self.assertIsNotNone(
                     self.violation(
-                        f"GIT_DIR={self.main_root}/.git {separator} git commit -m x",
+                        f"export GIT_DIR={self.ungoverned}/.git; "
+                        f"GIT_DIR={self.main_root}/.git; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_assignment_value_can_be_exported_later_by_name(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"GIT_DIR={self.main_root}/.git; export GIT_DIR; "
+                        f"git {operation}",
                         self.ungoverned,
                     )
                 )
@@ -1680,8 +1703,24 @@ class GitCommandCheckoutTests(unittest.TestCase):
                     )
                 )
 
+    def test_builtin_assignment_preserves_existing_export(self):
+        for declaration in ("readonly", "declare", "typeset", "declare -r", "typeset -r"):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(declaration=declaration, operation=operation):
+                    self.assertIsNotNone(
+                        self.violation(
+                            f"export GIT_DIR={self.ungoverned}/.git; "
+                            f"{declaration} GIT_DIR={self.main_root}/.git; "
+                            f"git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
     def test_shell_builtins_can_remove_git_dir_export(self):
-        for prefix in ("export -n", "declare +x", "typeset +x"):
+        for prefix in (
+            "export -n", "declare +x", "typeset +x",
+            "declare +rx", "typeset +rx",
+        ):
             for operation in ("commit -m x", "push origin main"):
                 with self.subTest(prefix=prefix, operation=operation):
                     self.assertIsNone(
@@ -1691,6 +1730,18 @@ class GitCommandCheckoutTests(unittest.TestCase):
                             self.ungoverned,
                         )
                     )
+
+    def test_conflicting_export_options_honor_removal(self):
+        for builtin in ("declare", "typeset"):
+            commands = (
+                f"export GIT_DIR={self.ungoverned}/.git; {builtin} +x -x "
+                f"GIT_DIR={self.main_root}/.git; git commit -m x",
+                f"export GIT_DIR={self.main_root}/.git; {builtin} -x +x "
+                "GIT_DIR; git push origin main",
+            )
+            for command in commands:
+                with self.subTest(builtin=builtin, command=command):
+                    self.assertIsNone(self.violation(command, self.ungoverned))
 
     def test_env_split_string_resolves_relative_git_dir_after_capital_c(self):
         self.assertIsNotNone(

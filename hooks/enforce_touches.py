@@ -928,13 +928,18 @@ def _update_persistent_git_environment(words, shell_variables, git_environment):
             name, value = assignment.split("=", 1)
             if name in _GIT_REPOSITORY_ENV:
                 shell_variables[name] = value
-                git_environment[name] = value
+                # Assignment-only statements preserve an existing export
+                # attribute but do not create one in a clean shell.
+                if name in git_environment:
+                    git_environment[name] = value
         return True
     if words and words[0] in {"export", "declare", "typeset"}:
         builtin = words[0]
         options = [word for word in words[1:] if word.startswith(('-', '+'))]
         removes_export = any(
-            option == "-n" if builtin == "export" else option == "+x"
+            option.startswith("-") and "n" in option[1:]
+            if builtin == "export"
+            else option.startswith("+") and "x" in option[1:]
             for option in options
         )
         adds_export = builtin == "export" or any(
@@ -949,6 +954,8 @@ def _update_persistent_git_environment(words, shell_variables, git_environment):
                 if name not in _GIT_REPOSITORY_ENV:
                     continue
                 shell_variables[name] = value
+                if name in git_environment and not removes_export:
+                    git_environment[name] = value
             else:
                 name = operand
             if name not in _GIT_REPOSITORY_ENV:
@@ -970,7 +977,7 @@ def _update_persistent_git_environment(words, shell_variables, git_environment):
             name, value = operand.split("=", 1)
             if name in _GIT_REPOSITORY_ENV:
                 shell_variables[name] = value
-                if exports_value:
+                if exports_value or name in git_environment:
                     git_environment[name] = value
         return True
     if words and words[0] == "unset":
