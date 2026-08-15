@@ -54,8 +54,10 @@ SOURCE_SUFFIXES = {
     ".c",
     ".cpp",
     ".cs",
+    ".css",
     ".go",
     ".h",
+    ".html",
     ".java",
     ".js",
     ".json",
@@ -253,16 +255,16 @@ def extract_finding_lines(text: str) -> List[str]:
         if heading:
             level = len(heading.group("marks"))
             title = heading.group("title")
-            if re.match(r"findings?\b", title, re.IGNORECASE):
-                in_findings = True
-                findings_level = level
-                continue
-            if in_findings and level <= findings_level:
-                break
             if in_findings:
+                if level <= findings_level:
+                    break
                 # Nested headings are content inside Findings. Treat them as
                 # claims so their titles cannot hide facts from validation.
                 claims.append(stripped)
+                continue
+            if re.fullmatch(r"findings?", title, re.IGNORECASE):
+                in_findings = True
+                findings_level = level
                 continue
         if not in_findings:
             continue
@@ -280,11 +282,60 @@ def finding_has_citation(line: str) -> bool:
     )
 
 
-def source_path_references(line: str) -> List[str]:
+def _strip_markdown_links(text: str) -> str:
+    """Remove complete Markdown links so labels are not treated as evidence."""
+    chars = list(text)
+    for match in MD_LINK_START_RE.finditer(text):
+        index = match.end()
+        depth = 1
+        quote: Optional[str] = None
+        while index < len(text) and depth:
+            char = text[index]
+            if char == "\\":
+                index += 2
+                continue
+            if quote:
+                if char == quote:
+                    quote = None
+            elif char in {'"', "'"}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char in "\n\r":
+                break
+            index += 1
+        if depth == 0:
+            for offset in range(match.start(), index):
+                chars[offset] = " "
+    return "".join(chars)
+
+
+def _find_repo_root(start: Path) -> Path:
+    resolved = start.resolve()
+    for candidate in (resolved, *resolved.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return resolved
+
+
+def _repository_path_exists(path: str, repo_root: Path) -> bool:
+    parts = Path(path).parts
+    if not parts or ".." in parts:
+        return False
+    return repo_root.joinpath(*parts).exists()
+
+
+def source_path_references(
+    line: str, *, repo_root: Optional[Path] = None
+) -> List[str]:
     """Return repository-like source paths, excluding citation destinations."""
-    scrubbed = URL_RE.sub("", line)
+    scrubbed = _strip_markdown_links(line)
+    scrubbed = URL_RE.sub("", scrubbed)
     scrubbed = ARXIV_RE.sub("", scrubbed)
     scrubbed = DOI_RE.sub("", scrubbed)
+    root = repo_root or _find_repo_root(Path.cwd())
     references: List[str] = []
     for match in PATH_TOKEN_RE.finditer(scrubbed):
         path = match.group(0).strip("`'\"()[]{} ,;:").rstrip(".")
@@ -299,8 +350,8 @@ def source_path_references(line: str) -> List[str]:
         looks_like_source = (
             basename.casefold() in SOURCE_BASENAMES_CASEFOLD
             or suffix in SOURCE_SUFFIXES
-            or (len(parts) > 1 and parts[0].lower() in SOURCE_ROOTS)
             or (path.endswith("/") and parts[0].lower() in SOURCE_ROOTS)
+            or _repository_path_exists(candidate, root)
         )
         if looks_like_source and candidate not in references:
             path = candidate

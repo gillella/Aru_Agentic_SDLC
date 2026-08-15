@@ -468,9 +468,18 @@ none
         self.assertTrue(report["unclassified_findings"])
 
     def test_nested_heading_title_cannot_hide_factual_claim(self):
-        text = """## Findings
+        headings = (
+            "### AGENTS.md defines the factory",
+            "### Finding AGENTS.md defines the factory",
+            "### Findings AGENTS.md defines the factory",
+            "### Findings",
+        )
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        for heading in headings:
+            with self.subTest(heading=heading):
+                text = f"""## Findings
 1. [external] Supported fact ([source](https://example.com/a)).
-### AGENTS.md defines the factory
+{heading}
 
 ## Citations
 - https://example.com/a
@@ -478,11 +487,10 @@ none
 ## Repo code claims
 none
 """
-        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
-        report = verify_findings(text, http_get=http)
-        self.assertFalse(report["ok"])
-        self.assertIn("### AGENTS.md defines the factory", report["findings"])
-        self.assertTrue(report["unclassified_findings"])
+                report = verify_findings(text, http_get=http)
+                self.assertFalse(report["ok"])
+                self.assertIn(heading, report["findings"])
+                self.assertTrue(report["unclassified_findings"])
 
     def test_external_marker_cannot_relabel_source_path_claim(self):
         http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
@@ -536,8 +544,19 @@ none
             "CMakeLists.txt",
             "README",
             "src/",
+            "requirements-dev.txt",
+            "requirements-slack.txt",
+            "sdlc_flow_visualizer/index.html",
+            "styles.css",
         )
-        prose = ("CI/CD", "input/output", "and/or", "client/server", "2026/08/14")
+        prose = (
+            "CI/CD",
+            "input/output",
+            "and/or",
+            "client/server",
+            "app/store",
+            "2026/08/14",
+        )
         for value in source_paths + prose:
             with self.subTest(value=value):
                 text = f"""## Findings
@@ -555,6 +574,20 @@ none
                     value in prose,
                     report["errors"],
                 )
+
+    def test_markdown_citation_label_is_not_a_source_path(self):
+        text = """## Findings
+1. [external] External project documentation ([README](https://example.com/a)).
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertTrue(report["ok"], report["errors"])
 
     def test_structured_repo_finding_with_date_and_path_passes(self):
         text = """## Findings
