@@ -801,6 +801,17 @@ class SizeGateTests(unittest.TestCase):
 
 
 class TestCoverageGateTests(unittest.TestCase):
+    def test_truncated_changed_file_list_fails_closed(self):
+        ok, msg = merge_pr.check_test_coverage({
+            "changedFiles": 101,
+            "files": [
+                {"path": f"docs/note-{index}.md", "additions": 1, "deletions": 0}
+                for index in range(100)
+            ],
+        })
+        self.assertFalse(ok)
+        self.assertIn("truncated (100 of 101)", msg)
+
     def test_script_change_requires_changed_test(self):
         ok, msg = merge_pr.check_test_coverage({
             "files": [{"path": "scripts/merge_pr.py", "additions": 10, "deletions": 1}],

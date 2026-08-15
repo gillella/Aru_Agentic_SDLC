@@ -68,7 +68,8 @@ SIZE_LIMIT = 400
 
 PR_FIELDS = (
     "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,author,"
-    "headRefName,headRefOid,additions,deletions,files,reviews,statusCheckRollup,labels,"
+    "headRefName,headRefOid,additions,deletions,changedFiles,files,reviews,"
+    "statusCheckRollup,labels,"
     "mergedAt,mergeCommit,headRepository,headRepositoryOwner,isCrossRepository"
 )
 
@@ -879,6 +880,12 @@ def check_size(pr):
 def check_test_coverage(pr):
     """Require a changed test whenever production Python roots are changed."""
     files = pr.get("files") or []
+    changed_files = pr.get("changedFiles")
+    if isinstance(changed_files, int) and changed_files > len(files):
+        return False, (
+            f"Changed-file data is truncated ({len(files)} of {changed_files}); "
+            "split the PR so test coverage can be evaluated completely."
+        )
     paths = [entry.get("path", "") for entry in files if isinstance(entry, dict)]
     production = [path for path in paths if path.startswith(("src/", "scripts/"))]
     if not production:
