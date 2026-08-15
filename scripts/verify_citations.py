@@ -35,14 +35,15 @@ DOI_RE = re.compile(
 )
 URL_RE = re.compile(r"https?://[^\s\)\]\>\"']+", re.IGNORECASE)
 MD_LINK_START_RE = re.compile(r"\[[^\]]*\]\(", re.IGNORECASE)
-FINDING_LINE_RE = re.compile(r"^(?:\d+\.|[-*])\s+\S+")
+FINDING_SCOPE_RE = re.compile(
+    r"^(?:\d+\.|[-*])\s+\[(?P<scope>external|repo\s+verified\s*:\s*"
+    r"(?P<date>\d{4}-\d{2}-\d{2}))\]\s+\S+",
+    re.IGNORECASE,
+)
 REPO_CLAIM_RE = re.compile(
     r"^[-*]\s*(?:path|file|code)\s*:\s*(?P<path>\S+)\s*[—\-–]\s*"
     r"verified\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})\b",
     re.IGNORECASE | re.MULTILINE,
-)
-REPO_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?P<path>(?:\.github|docs|hooks|prompts|scripts|skills|templates|tests)/[A-Za-z0-9_./*?\[\]-]+)"
 )
 MAX_ARXIV_BODY = 256 * 1024
 
@@ -165,7 +166,7 @@ def extract_citations(text: str) -> List[Dict[str, str]]:
 
 
 def extract_finding_lines(text: str) -> List[str]:
-    """Return claim lines under a Findings section (numbered or bulleted)."""
+    """Return every non-empty claim line under a Findings section."""
     lines = text.splitlines()
     in_findings = False
     claims: List[str] = []
@@ -179,7 +180,7 @@ def extract_finding_lines(text: str) -> List[str]:
             break
         if not in_findings:
             continue
-        if FINDING_LINE_RE.match(stripped):
+        if stripped and not stripped.startswith("<!--"):
             claims.append(stripped)
     return claims
 
@@ -227,26 +228,6 @@ def extract_repo_claims(text: str) -> Dict[str, Any]:
         line.strip().lower() in {"none", "- none", "* none"}
         for line in section.splitlines()
     )
-    dated_paths = {claim["path"].rstrip(".,;:") for claim in dated}
-    undated_findings = []
-    for line in extract_finding_lines(text):
-        paths = [m.group("path").rstrip(".,;:") for m in REPO_PATH_RE.finditer(line)]
-        repository_phrase = bool(re.search(r"\bthis\s+repository\b", line, re.IGNORECASE))
-        if not paths and not repository_phrase:
-            continue
-        inline = re.search(r"\bverified\s*:\s*(\d{4}-\d{2}-\d{2})\b", line, re.IGNORECASE)
-        inline_valid = False
-        if inline:
-            try:
-                inline_date = date.fromisoformat(inline.group(1))
-                inline_valid = inline_date <= date.today()
-            except ValueError:
-                inline_valid = False
-        if inline_valid:
-            continue
-        if paths and all(path in dated_paths for path in paths):
-            continue
-        undated_findings.append(line)
     missing_acknowledgement = not section_match or (
         not dated and not missing and not explicit_none
     )
@@ -257,7 +238,6 @@ def extract_repo_claims(text: str) -> Dict[str, Any]:
         "section_present": bool(section_match),
         "explicit_none": explicit_none,
         "missing_acknowledgement": missing_acknowledgement,
-        "undated_findings": undated_findings,
     }
 
 
@@ -517,14 +497,35 @@ def verify_findings(
     repo = extract_repo_claims(text)
     findings = extract_finding_lines(text)
     uncited = [line for line in findings if not finding_has_citation(line)]
+    unclassified = []
+    repo_findings = []
+    invalid_repo_finding_dates = []
+    for line in findings:
+        match = FINDING_SCOPE_RE.match(line)
+        if not match:
+            unclassified.append(line)
+            continue
+        if match.group("scope").lower().startswith("repo"):
+            repo_findings.append(line)
+            try:
+                verified = date.fromisoformat(match.group("date"))
+                if verified > date.today():
+                    invalid_repo_finding_dates.append(line)
+            except ValueError:
+                invalid_repo_finding_dates.append(line)
+    repo_section_conflict = bool(repo_findings) and (
+        repo["explicit_none"] or not repo["dated"]
+    )
     citation_results_ok = bool(citations) and all(item.ok for item in results)
-    findings_ok = bool(findings) and not uncited
+    findings_ok = bool(findings) and not uncited and not unclassified
     citation_ok = citation_results_ok and findings_ok
     repo_ok = not (
         repo["missing_date"]
         or repo["invalid_dates"]
         or repo["missing_acknowledgement"]
-        or repo["undated_findings"]
+        or invalid_repo_finding_dates
+        or repo_section_conflict
+        or unclassified
     )
     ok = citation_ok and repo_ok
     return {
@@ -535,6 +536,9 @@ def verify_findings(
         "repo_claims": repo,
         "findings": findings,
         "uncited_findings": uncited,
+        "unclassified_findings": unclassified,
+        "repo_findings": repo_findings,
+        "invalid_repo_finding_dates": invalid_repo_finding_dates,
         "errors": [
             *(f"unresolved:{item.kind}:{item.identifier}:{item.detail}" for item in results if not item.ok),
             *(f"missing_verification_date:{line}" for line in repo["missing_date"]),
@@ -544,9 +548,15 @@ def verify_findings(
                 if repo["missing_acknowledgement"]
                 else []
             ),
+            *(f"unclassified_finding:{line}" for line in unclassified),
             *(
-                f"undated_repository_finding:{line}"
-                for line in repo["undated_findings"]
+                f"invalid_repo_finding_date:{line}"
+                for line in invalid_repo_finding_dates
+            ),
+            *(
+                ["repo_finding_requires_dated_path_section"]
+                if repo_section_conflict
+                else []
             ),
             *(["no_citations_found"] if not citations else []),
             *(["no_findings_section"] if not findings else []),

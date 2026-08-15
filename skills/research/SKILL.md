@@ -60,8 +60,8 @@ Produce a markdown artifact with this shape:
 <exact question>
 
 ## Findings
-1. <claim> ([source](https://...))
-2. ...
+1. [external] <claim> ([source](https://...))
+2. [repo verified: YYYY-MM-DD] <claim about this repository> ([source](https://...))
 
 ## Citations
 - https://example.com/paper
@@ -77,7 +77,11 @@ Produce a markdown artifact with this shape:
 Rules:
 
 - Every factual claim needs a citation identifier (URL, `arXiv:`, or DOI).
-- Claims about this repository's code **must** include `verified: YYYY-MM-DD`.
+- Every non-empty Findings line must be one complete numbered/bulleted claim
+  beginning with `[external]` or `[repo verified: YYYY-MM-DD]`; continuation
+  prose fails verification rather than inheriting another line's evidence.
+- Claims about this repository's code **must** use the `repo verified` marker
+  and have a corresponding dated path under `Repo code claims`.
 - Do not invent citations. Prefer primary sources.
 
 Write the file under `docs/research/issue-<N>-<slug>.md` when `touches:`

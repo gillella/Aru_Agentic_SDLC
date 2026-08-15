@@ -17,6 +17,7 @@ assignees: ''
 ## Acceptance Criteria
 - [ ] Findings artifact attached to this issue (verify: artifact comment or `docs/research/` path present)
 - [ ] Every citation carries a resolvable identifier (verify: `python3 scripts/verify_citations.py <artifact>`)
+- [ ] Every Findings line is marked `[external]` or `[repo verified: YYYY-MM-DD]` and carries its own citation (verify: verifier exits 0)
 - [ ] Citation resolution passes mechanically (verify: same command exits 0)
 - [ ] Artifact has a `Repo code claims` section containing dated path entries or exactly `none` (verify: verifier repo-claim check)
 - [ ] Claims about this repository's code include a verification date (verify: verifier repo-claim check)

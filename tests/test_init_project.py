@@ -92,6 +92,7 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertIn("Repository under docs/research/", research)
         self.assertIn("Issue comment only", research)
         self.assertIn("Every factual claim carries a resolvable", research)
+        self.assertIn("Every Findings line is marked", research)
         self.assertIn("Citation verification exits 0", research)
         self.assertIn("Repo code claims are dated", research)
         self.assertIn("verify_citations.py <artifact>", research)

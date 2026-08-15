@@ -871,6 +871,7 @@ def render_research_issue_form(project_ref: Optional[str] = None) -> str:
         "      value: |",
         "        - [ ] Findings artifact attached to this issue.",
         "        - [ ] Every factual claim carries a resolvable URL, arXiv ID, or DOI.",
+        "        - [ ] Every Findings line is marked `[external]` or `[repo verified: YYYY-MM-DD]`.",
         "        - [ ] Citation verification exits 0.",
         "        - [ ] Repo code claims are dated, or the artifact records `none`.",
         "        - [ ] Follow-on issues are proposed when findings warrant them.",

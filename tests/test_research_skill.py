@@ -30,9 +30,9 @@ SAMPLE = """# Research findings: citation checks
 Do the identifiers resolve?
 
 ## Findings
-1. Agentic PRs are studied ([paper](https://arxiv.org/abs/2605.22534)).
-2. External note at https://example.com/factory-note
-3. DOI item ([source](https://doi.org/10.1234/example.item))
+1. [external] Agentic PRs are studied ([paper](https://arxiv.org/abs/2605.22534)).
+2. [external] External note at https://example.com/factory-note
+3. [external] DOI item ([source](https://doi.org/10.1234/example.item))
 
 ## Citations
 - arXiv:2605.22534
@@ -151,8 +151,8 @@ class ResearchSkillTests(unittest.TestCase):
 
     def test_uncited_finding_fails(self):
         text = """## Findings
-1. Unsupported claim with no citation.
-2. Supported ([ok](https://example.com/a))
+1. [external] Unsupported claim with no citation.
+2. [external] Supported ([ok](https://example.com/a))
 
 ## Citations
 - https://example.com/a
@@ -166,7 +166,7 @@ class ResearchSkillTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             assert_public_url("http://127.0.0.1/secret")
         report = verify_findings(
-            "## Findings\n1. local ([x](http://127.0.0.1/x))\n\n## Citations\n- http://127.0.0.1/x\n",
+            "## Findings\n1. [external] local ([x](http://127.0.0.1/x))\n\n## Citations\n- http://127.0.0.1/x\n",
             http_get=default_rejecting_http,
         )
         self.assertFalse(report["ok"])
@@ -235,7 +235,7 @@ class ResearchSkillTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "findings.md"
             path.write_text(
-                "## Findings\n1. note ([a](https://example.com/a))\n\n"
+                "## Findings\n1. [external] note ([a](https://example.com/a))\n\n"
                 "## Citations\n- https://example.com/a\n\n"
                 "## Repo code claims\nnone\n",
                 encoding="utf-8",
@@ -261,7 +261,7 @@ class ResearchSkillTests(unittest.TestCase):
 
     def test_markdown_title_is_not_part_of_resolved_url(self):
         text = """## Findings
-1. Standard link ([source](https://example.com/a "Primary source")).
+1. [external] Standard link ([source](https://example.com/a "Primary source")).
 
 ## Citations
 - [source](https://example.com/a "Primary source")
@@ -278,7 +278,7 @@ none
         doi = "10.1002/(SICI)1099-0844(199912)17:4<290::AID-CBF849>3.0.CO;2-P"
         url = f"https://doi.org/{doi}"
         text = f"""## Findings
-1. DOI result ([source]({url})).
+1. [external] DOI result ([source]({url})).
 
 ## Citations
 - doi:{doi}
@@ -420,12 +420,51 @@ none
         report = verify_findings(text, http_get=http)
         self.assertFalse(report["repo_ok"])
         self.assertTrue(
-            any("undated_repository_finding" in err for err in report["errors"])
+            any("unclassified_finding" in err for err in report["errors"])
         )
+
+    def test_root_arbitrary_path_and_continuation_claims_fail_closed(self):
+        claims = (
+            "1. AGENTS.md defines the factory rules ([source](https://example.com/a)).",
+            "1. src/router.py routes work ([source](https://example.com/a)).",
+            "1. lib/router.py routes work ([source](https://example.com/a)).",
+            "1. aru/router.py routes work ([source](https://example.com/a)).",
+            "1. [external] Cited statement ([source](https://example.com/a)).\n"
+            "   AGENTS.md defines this factory.",
+        )
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        for claim in claims:
+            with self.subTest(claim=claim):
+                text = f"""## Findings
+{claim}
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+none
+"""
+                report = verify_findings(text, http_get=http)
+                self.assertFalse(report["ok"])
+                self.assertTrue(report["unclassified_findings"])
+
+    def test_structured_repo_finding_with_date_and_path_passes(self):
+        text = """## Findings
+1. [repo verified: 2026-08-14] AGENTS.md defines the factory rules ([source](https://example.com/a)).
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+- path: AGENTS.md — verified: 2026-08-14
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertTrue(report["ok"], report["errors"])
 
     def test_repo_claims_section_requires_dated_entries_or_none(self):
         text = """## Findings
-1. External fact ([source](https://example.com/a)).
+1. [external] External fact ([source](https://example.com/a)).
 
 ## Citations
 - https://example.com/a
