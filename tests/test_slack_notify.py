@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 import os
+import time
 import builtins
 import json
 from pathlib import Path
@@ -1188,6 +1189,13 @@ class SlackNotifyTests(unittest.TestCase):
             alias.symlink_to(payload)
             with self.assertRaises(OSError):
                 read_alert_payload_file(alias)
+
+            fifo = root / "summary.fifo"
+            os.mkfifo(fifo, mode=0o600)
+            started = time.monotonic()
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                read_alert_payload_file(fifo)
+            self.assertLess(time.monotonic() - started, 0.5)
 
     def test_main_rejects_multiple_payload_sources(self):
         with self.assertRaises(SystemExit) as ctx:

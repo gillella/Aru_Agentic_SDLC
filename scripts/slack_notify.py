@@ -220,7 +220,9 @@ def _forbidden_content_field(event: Dict[str, Any]) -> str:
 
 def read_alert_payload_file(path: Path) -> str:
     """Read one local, operator-owned private file without following symlinks."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK prevents a FIFO/device path from hanging before fstat can
+    # prove that the opened descriptor is a regular file.
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
         metadata = os.fstat(handle.fileno())
