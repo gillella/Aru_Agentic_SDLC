@@ -522,6 +522,10 @@ def _handle_sprint_decision(
         return "sprint decision paused: Slack event timestamp is missing or invalid"
     action = str(parsed["action"])
     increment_store = store or DeliveryIncrementStore()
+    try:
+        increment_store.list(project.project_id)
+    except IncrementError as exc:
+        return f"sprint decision paused: {exc}"
     if action == "authorize":
         increment_id = increment_id_for_event(project.project_id, event_id)
         control_issue = int(parsed["control_issue"])

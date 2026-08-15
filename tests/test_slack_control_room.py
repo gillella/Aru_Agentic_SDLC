@@ -215,6 +215,32 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertEqual(store.list(), [])
         self.assertFalse(self.seen_path.exists())
 
+    def test_corrupt_increment_encoding_pauses_before_github_or_state(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        store.path.write_bytes(b'{"schema": 1, "increments": []}\xff')
+        store.path.chmod(0o600)
+        calls = []
+        original = store.path.read_bytes()
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry,
+            self.payload(
+                event_id="corrupt-registry",
+                text=(
+                    "sprint authorize control #300 issues #10 baseline " + "a" * 40
+                ),
+            ),
+            set(), notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: True,
+            record_increment=lambda *args: calls.append(args),
+        )
+        self.assertIn("sprint decision paused", reply)
+        self.assertIn("cannot read", reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.path.read_bytes(), original)
+        self.assertFalse(self.seen_path.exists())
+
     def test_baseline_verifier_requires_the_supplied_object_to_be_a_commit(self):
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.checkout_a, check=True)
         subprocess.run(
