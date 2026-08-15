@@ -234,7 +234,7 @@ Prerequisite for drift control. **Core history/pinning rows have shipped** (veri
 | **S1.3** | ~~SemVer `v0.x` release tags; MAJOR on consumed-CLI break~~ | **Done** in PR #155 (`c8defb9`) | S1.2 |
 | **S1.4** | ~~Consumer pinning: `ARU_SDLC_REF`~~ | **Done** in PR #158 (`6af5efc`); see `docs/cursor-integration.md` | S1.3 |
 | **S1.5** | `Agent: <id>` commit trailer | Per-commit attribution; today only the PR is stamped | S1.1 |
-| **S1.6** | Documented revert path in `AGENTS.md` + `revert_merge.py` | A factory needs a reverse gear | S1.2 |
+| **S1.6** | ~~Documented revert path + `revert_merge.py`~~ | **Done** in PR #166 (`7ebf667`); helper listed in `AGENTS.md` | S1.2 |
 
 ### Phase 2 — Close the review constraint (1–2 weeks)
 
@@ -340,5 +340,6 @@ Moved here per §8 instead of deleting. Commit SHAs are merge commits on `main` 
 | S1.2 | Annotated `ckpt/*` tags on merge | PR #140 `54086f3` |
 | S1.3 | SemVer release tags | PR #155 `c8defb9` |
 | S1.4 | `ARU_SDLC_REF` consumer pinning | PR #158 `6af5efc` |
+| S1.6 | Governed revert helper | PR #166 `7ebf667` |
 
 **Review-gate hardening (issue table in #114):** bot/`[bot]` exclusion, live `reviewer:` claim blocking, thread resolution evidence, and head-SHA review requirements — closed via #50, #72, #26 (and related merge-gate work). Do not document the pre-fix “falls open for bot reviews” behaviour as current.
