@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -35,6 +36,12 @@ class RunOutcome:
     run_url: str = ""
 
 
+@dataclass(frozen=True)
+class RemediationMatch:
+    number: int
+    status: str
+
+
 def get_default_branch() -> str:
     """Resolve the authoritative GitHub repository default branch."""
     code, out, _ = run_cmd(["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], check=False)
@@ -53,48 +60,79 @@ def get_repo_slug() -> str:
     return slug if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", slug) else ""
 
 
-def ensure_pages_enabled(repo_slug: str, dry_run: bool = False) -> bool:
-    """Ensure Pages uses the workflow build type via the operator's gh credential."""
+def _normalize_pages_url(url: str) -> str:
+    if not isinstance(url, str) or not url or url != url.strip():
+        return ""
+    if re.search(r"[\s'\"<>\\\[\]()]", url):
+        return ""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    path = parsed.path.rstrip("/") + "/"
+    return f"https://{parsed.hostname.lower()}{path}"
+
+
+def _default_pages_url(repo_slug: str) -> str:
+    owner, repository = repo_slug.split("/", 1)
+    path = "/" if repository.lower() == f"{owner.lower()}.github.io" else f"/{repository}/"
+    return f"https://{owner.lower()}.github.io{path}"
+
+
+def _pages_url_from_response(raw: str) -> tuple[str, str]:
+    try:
+        pages = json.loads(raw)
+    except json.JSONDecodeError:
+        return "", ""
+    if not isinstance(pages, dict):
+        return "", ""
+    return str(pages.get("build_type") or ""), _normalize_pages_url(pages.get("html_url"))
+
+
+def ensure_pages_enabled(repo_slug: str, dry_run: bool = False) -> Optional[str]:
+    """Ensure workflow-mode Pages and return its authoritative base URL."""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_slug or ""):
-        return False
+        return None
     if dry_run:
         print(f"[DRY-RUN] Would verify GitHub Pages workflow mode for {repo_slug}")
-        return True
+        return _default_pages_url(repo_slug)
 
     endpoint = f"repos/{repo_slug}/pages"
     code, out, err = run_cmd(["gh", "api", endpoint], check=False)
     if code == 0:
-        try:
-            pages = json.loads(out)
-        except json.JSONDecodeError:
-            return False
-        if not isinstance(pages, dict):
-            return False
-        if pages.get("build_type") == "workflow":
-            return True
-        code, _, _ = run_cmd(
+        build_type, pages_url = _pages_url_from_response(out)
+        if build_type == "workflow":
+            return pages_url or None
+        update_code, _, _ = run_cmd(
             ["gh", "api", "--method", "PUT", endpoint, "-f", "build_type=workflow"],
             check=False,
         )
-        return code == 0
+        if update_code != 0:
+            return None
+    else:
+        if "HTTP 404" not in err:
+            return None
+        _post_code, _, _ = run_cmd(
+            ["gh", "api", "--method", "POST", endpoint, "-f", "build_type=workflow"],
+            check=False,
+        )
+        # Re-read even on failure: a concurrent operator may have enabled it.
 
-    if "HTTP 404" not in err:
-        return False
-    code, _, _ = run_cmd(
-        ["gh", "api", "--method", "POST", endpoint, "-f", "build_type=workflow"],
-        check=False,
-    )
-    if code == 0:
-        return True
-
-    # A concurrent operator may have enabled Pages between GET and POST.
     code, verify_out, _ = run_cmd(["gh", "api", endpoint], check=False)
     if code != 0:
-        return False
-    try:
-        return json.loads(verify_out).get("build_type") == "workflow"
-    except (json.JSONDecodeError, AttributeError):
-        return False
+        return None
+    build_type, pages_url = _pages_url_from_response(verify_out)
+    return pages_url if build_type == "workflow" and pages_url else None
 
 
 def _valid_branch_name(branch: str) -> bool:
@@ -308,14 +346,23 @@ def wait_for_run(
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     last_url = ""
     while True:
-        code, out, _ = run_cmd(
-            ["gh", "run", "view", str(run_id), "--json", "status,conclusion,url"],
-            check=False,
-        )
-        if code != 0 or not out.strip():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return RunOutcome(False, "timed-out", last_url)
+        try:
+            result = subprocess.run(
+                ["gh", "run", "view", str(run_id), "--json", "status,conclusion,url"],
+                capture_output=True,
+                text=True,
+                timeout=remaining,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return RunOutcome(False, "timed-out", last_url)
+        if result.returncode != 0 or not result.stdout.strip():
             return RunOutcome(False, "query-failed", last_url)
         try:
-            data = json.loads(out)
+            data = json.loads(result.stdout)
         except json.JSONDecodeError:
             return RunOutcome(False, "query-failed", last_url)
         if not isinstance(data, dict):
@@ -328,38 +375,15 @@ def wait_for_run(
             return RunOutcome(state == "success", state, last_url)
         if not isinstance(status, str) or status not in {"queued", "in_progress", "pending", "waiting", "requested"}:
             return RunOutcome(False, "unknown-state", last_url)
-        if time.monotonic() >= deadline:
-            return RunOutcome(False, "timed-out", last_url)
         if poll_interval > 0:
             time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
 
-def is_valid_preview_url(url: str, repo_slug: str) -> bool:
-    """Validate the exact canonical GitHub Pages root URL for owner/repository."""
-    if not url or not isinstance(url, str):
-        return False
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_slug or ""):
-        return False
-    if url != url.strip() or re.search(r"[\s'\"<>\\\[\]()]", url):
-        return False
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return False
-    if (
-        parsed.scheme != "https"
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.port is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        return False
-    owner, repository = repo_slug.split("/", 1)
-    if (parsed.hostname or "").lower() != f"{owner.lower()}.github.io":
-        return False
-    expected_path = "/" if repository.lower() == f"{owner.lower()}.github.io" else f"/{repository}/"
-    return parsed.path == expected_path
+def is_valid_preview_url(url: str, pages_url: str) -> bool:
+    """Validate a preview URL against the authoritative Pages site base URL."""
+    normalized = _normalize_pages_url(url)
+    expected = _normalize_pages_url(pages_url)
+    return bool(normalized and expected and normalized == expected)
 
 
 def _strict_json_object(raw: str) -> Optional[dict]:
@@ -382,12 +406,12 @@ def extract_preview_url_from_run(
     run_id: int,
     commit_sha: str,
     repo_slug: str,
+    pages_url: str,
     dry_run: bool = False,
 ) -> Optional[str]:
     """Read and validate metadata uploaded by this exact deployment run."""
     if dry_run:
-        owner, repository = repo_slug.split("/", 1)
-        return f"https://{owner.lower()}.github.io/{repository}/"
+        return _normalize_pages_url(pages_url) or None
 
     with tempfile.TemporaryDirectory(prefix="aru-preview-metadata-") as temp_dir:
         code, _, _ = run_cmd(
@@ -414,8 +438,8 @@ def extract_preview_url_from_run(
         if data.get("commit_sha") != commit_sha or data.get("repository") != repo_slug:
             return None
         preview_url = data.get("preview_url")
-        if isinstance(preview_url, str) and is_valid_preview_url(preview_url, repo_slug):
-            return preview_url
+        if isinstance(preview_url, str) and is_valid_preview_url(preview_url, pages_url):
+            return _normalize_pages_url(preview_url)
     return None
 
 
@@ -423,11 +447,11 @@ def post_preview_comment(
     issue_id: int,
     preview_url: str,
     commit_sha: str,
-    repo_slug: str,
+    pages_url: str,
     dry_run: bool = False,
 ) -> bool:
     """Posts a preview URL comment to the originating issue."""
-    if not is_valid_preview_url(preview_url, repo_slug):
+    if not is_valid_preview_url(preview_url, pages_url):
         print(f"[ERROR] Rejecting invalid/untrusted preview URL: {preview_url}", file=sys.stderr)
         return False
 
@@ -448,14 +472,14 @@ def post_preview_comment(
     return True
 
 
-def find_existing_remediation_issue(commit_sha: str) -> tuple[bool, Optional[int]]:
+def find_existing_remediation_issue(commit_sha: str) -> tuple[bool, Optional[RemediationMatch]]:
     """Return query success and an exact-marker remediation issue match."""
     if not FULL_SHA_RE.fullmatch(commit_sha):
         return False, None
     marker = REMEDIATION_MARKER.format(commit_sha=commit_sha)
     cmd = [
         "gh", "issue", "list", "--state", "open", "--label", "type:fix",
-        "--json", "number,title,body", "--limit", "10000",
+        "--json", "number,title,body,labels", "--limit", "10000",
     ]
     code, out, _ = run_cmd(cmd, check=False)
     if code != 0:
@@ -472,7 +496,25 @@ def find_existing_remediation_issue(commit_sha: str) -> tuple[bool, Optional[int
         body = issue.get("body", "")
         number = issue.get("number")
         if marker in body and isinstance(number, int):
-            return True, number
+            labels = issue.get("labels", [])
+            if not isinstance(labels, list):
+                return False, None
+            label_names = {
+                label.get("name", "").lower()
+                for label in labels
+                if isinstance(label, dict) and isinstance(label.get("name"), str)
+            }
+            status_map = {
+                "status:backlog": "Backlog",
+                "status:ready": "Ready",
+                "status:in-progress": "In Progress",
+                "status:in-review": "In Review",
+                "status:done": "Done",
+            }
+            statuses = [status for label, status in status_map.items() if label in label_names]
+            if len(statuses) > 1:
+                return False, None
+            return True, RemediationMatch(number, statuses[0] if statuses else "Ready")
     return True, None
 
 
@@ -525,25 +567,25 @@ def file_remediation_issue(
         return None
 
     sdlc_home = os.environ.get("ARU_SDLC_HOME", ".")
-    query_ok, existing_id = find_existing_remediation_issue(commit_sha)
+    query_ok, existing = find_existing_remediation_issue(commit_sha)
     if not query_ok:
         print("[ERROR] Could not safely query existing deployment remediation issues.", file=sys.stderr)
         return None
-    if existing_id is not None:
-        # Ensure existing remediation issue is attached to the project board as Ready
+    if existing is not None:
+        # Re-attach at its current lifecycle state; never regress active work to Ready.
         attach_cmd = [
             sys.executable,
             str(Path(sdlc_home) / "scripts" / "update_issue_status.py"),
-            "--issue", str(existing_id),
-            "--status", "Ready",
+            "--issue", str(existing.number),
+            "--status", existing.status,
             "--require-board",
         ]
         code, _, err = run_cmd(attach_cmd, check=False)
         if code != 0:
-            print(f"[ERROR] Failed to attach existing remediation issue #{existing_id} to Project Board: {err}", file=sys.stderr)
+            print(f"[ERROR] Failed to attach existing remediation issue #{existing.number} to Project Board: {err}", file=sys.stderr)
             return None
-        print(f"ℹ️ Reusing existing open remediation issue #{existing_id} for commit {commit_sha[:7]}")
-        return existing_id
+        print(f"ℹ️ Reusing existing open remediation issue #{existing.number} for commit {commit_sha[:7]}")
+        return existing.number
 
     title = f"fix(deploy): preview deployment failed for commit {commit_sha[:7]}"
     marker = REMEDIATION_MARKER.format(commit_sha=commit_sha)
@@ -574,7 +616,7 @@ Preview deployment failed for merged commit `{commit_sha}` (originating from iss
 
 ## Dependencies
 depends-on: none
-touches: .
+touches: **
 parallel-eligible: false
 """
 
@@ -658,7 +700,8 @@ def deploy_preview(
         print(f"[ERROR] Originating issue ID not provided and could not be inferred for commit {commit_sha}.", file=sys.stderr)
         return 1
 
-    if not ensure_pages_enabled(repo_slug, dry_run=dry_run):
+    pages_url = ensure_pages_enabled(repo_slug, dry_run=dry_run)
+    if not pages_url:
         print("[ERROR] GitHub Pages could not be verified in workflow mode.", file=sys.stderr)
         if not dry_run:
             file_remediation_issue(
@@ -709,6 +752,7 @@ def deploy_preview(
             run_id,
             commit_sha,
             repo_slug,
+            pages_url,
             dry_run=dry_run,
         )
 
@@ -732,20 +776,28 @@ def deploy_preview(
         run_id or 12345,
         commit_sha,
         repo_slug,
+        pages_url,
         dry_run=True,
     )
-    if not final_url or not is_valid_preview_url(final_url, repo_slug):
+    if not final_url or not is_valid_preview_url(final_url, pages_url):
         print("[ERROR] Preview URL is not the canonical repository Pages URL.", file=sys.stderr)
         return 1
     comment_ok = post_preview_comment(
         issue_id,
         final_url,
         commit_sha,
-        repo_slug,
+        pages_url,
         dry_run=dry_run,
     )
     if not comment_ok and not dry_run:
         print(f"[ERROR] Failed to record preview URL on issue #{issue_id}.", file=sys.stderr)
+        file_remediation_issue(
+            issue_id,
+            commit_sha,
+            f"Deployment succeeded but the preview URL comment on issue {issue_id} failed.",
+            failure_stage="origin-comment",
+            run_url=run_outcome.run_url,
+        )
         return 1
 
     print(f"✅ Preview deployed successfully: {final_url}")

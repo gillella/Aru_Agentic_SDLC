@@ -197,12 +197,19 @@ class ProjectBootstrapTests(unittest.TestCase):
             review_py = Path(temp_dir) / ".github" / "scripts" / "review.py"
             review_wf = Path(temp_dir) / ".github" / "workflows" / "review.yml"
             reviewers_yml = Path(temp_dir) / ".github" / "reviewers.yml"
+            build_preview = Path(temp_dir) / "scripts" / "build_preview.py"
 
             self.assertTrue(check_touches.is_file())
             self.assertTrue(check_touches_wf.is_file())
             self.assertTrue(review_py.is_file())
             self.assertTrue(review_wf.is_file())
             self.assertTrue(reviewers_yml.is_file())
+            self.assertTrue(build_preview.is_file())
+            self.assertEqual(
+                build_preview.read_text(),
+                (ROOT / "scripts" / "build_preview.py").read_text(),
+            )
+            self.assertTrue(os.access(build_preview, os.X_OK))
 
             # Test review.py degrades to notice without API keys
             env = {k: v for k, v in os.environ.items() if not k.endswith("_API_KEY")}

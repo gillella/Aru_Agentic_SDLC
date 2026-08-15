@@ -799,11 +799,21 @@ def scaffold_directory_structure(target_dir: str):
 
 def write_governance_scripts(target_dir: str):
     """Writes CI check_touches, model-routed reviewer, and deploy-preview workflows."""
+    project_scripts_dir = os.path.join(target_dir, "scripts")
     scripts_dir = os.path.join(target_dir, ".github", "scripts")
     workflows_dir = os.path.join(target_dir, ".github", "workflows")
     github_dir = os.path.join(target_dir, ".github")
     os.makedirs(scripts_dir, exist_ok=True)
     os.makedirs(workflows_dir, exist_ok=True)
+    os.makedirs(project_scripts_dir, exist_ok=True)
+
+    build_preview_source = os.path.join(os.path.dirname(__file__), "build_preview.py")
+    build_preview_target = os.path.join(project_scripts_dir, "build_preview.py")
+    with open(build_preview_source, "r", encoding="utf-8") as source:
+        build_preview_content = source.read()
+    with open(build_preview_target, "w", encoding="utf-8") as target:
+        target.write(build_preview_content)
+    os.chmod(build_preview_target, 0o755)
 
     check_touches_path = os.path.join(scripts_dir, "check_touches.py")
     with open(check_touches_path, "w", encoding="utf-8") as f:
@@ -829,7 +839,7 @@ def write_governance_scripts(target_dir: str):
     with open(deploy_preview_wf_path, "w", encoding="utf-8") as f:
         f.write(DEPLOY_PREVIEW_WORKFLOW)
 
-    print("✅ Governance scripts (check_touches, review.py, review.yml, reviewers.yml, deploy-preview.yml) written.")
+    print("✅ Governance scripts and trusted preview builder written.")
 
 
 def create_cursor_project_rule(target_dir: str):

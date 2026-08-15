@@ -39,7 +39,7 @@ python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <COMMIT_SHA> [--issu
 - Never hardcode credentials, PATs, or ad-hoc shell deployment commands inside the skill.
 
 ### 3. Record Preview URL on Originating Issue
-- Upon successful deployment, the helper downloads metadata uploaded by that exact run and verifies its run ID, commit SHA, repository identity, and canonical GitHub Pages URL. Logs and user-supplied arbitrary hosts are not trusted.
+- Upon successful deployment, the helper downloads metadata uploaded by that exact run and verifies its run ID, commit SHA, repository identity, and URL against the authoritative Pages API base URL (including a configured custom domain). Logs and user-supplied arbitrary hosts are not trusted.
 - It posts a formatted comment to the originating issue with the preview link and commit details.
 
 ### 4. Handle Deployment Failures (Issue-First Remediation)

@@ -1,8 +1,9 @@
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -172,7 +173,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
     @patch("deploy_preview.get_repo_slug", return_value="gillella/Aru_Agentic_SDLC")
     @patch("deploy_preview.get_default_branch", return_value="main")
     @patch("deploy_preview.verify_commit_merged", return_value=(True, "a" * 40))
-    @patch("deploy_preview.ensure_pages_enabled", return_value=True)
+    @patch("deploy_preview.ensure_pages_enabled", return_value="https://gillella.github.io/Aru_Agentic_SDLC/")
     @patch("deploy_preview.get_existing_run_ids", return_value=set())
     @patch("deploy_preview.dispatch_cd_workflow", return_value=12345)
     @patch("deploy_preview.wait_for_run", return_value=dp.RunOutcome(True, "success", "https://github.com/gillella/Aru_Agentic_SDLC/actions/runs/12345"))
@@ -188,16 +189,16 @@ class DeployPreviewSkillTests(unittest.TestCase):
         mock_dispatch.assert_called_once()
         mock_wait.assert_called_once_with(12345, dry_run=False)
         mock_extract.assert_called_once_with(
-            12345, self.commit_sha, self.repo_slug, dry_run=False,
+            12345, self.commit_sha, self.repo_slug, self.preview_url, dry_run=False,
         )
         mock_comment.assert_called_once_with(
-            109, self.preview_url, self.commit_sha, self.repo_slug, dry_run=False,
+            109, self.preview_url, self.commit_sha, self.preview_url, dry_run=False,
         )
 
     @patch("deploy_preview.get_repo_slug", return_value="gillella/Aru_Agentic_SDLC")
     @patch("deploy_preview.get_default_branch", return_value="main")
     @patch("deploy_preview.verify_commit_merged", return_value=(True, "a" * 40))
-    @patch("deploy_preview.ensure_pages_enabled", return_value=True)
+    @patch("deploy_preview.ensure_pages_enabled", return_value="https://gillella.github.io/Aru_Agentic_SDLC/")
     @patch("deploy_preview.get_existing_run_ids", return_value=set())
     @patch("deploy_preview.dispatch_cd_workflow", return_value=12345)
     @patch("deploy_preview.wait_for_run", return_value=dp.RunOutcome(False, "timed-out", "https://github.com/gillella/Aru_Agentic_SDLC/actions/runs/12345"))
@@ -217,6 +218,29 @@ class DeployPreviewSkillTests(unittest.TestCase):
                 1,
             )
         mock_default.assert_not_called()
+
+    @patch("deploy_preview.get_repo_slug", return_value="gillella/Aru_Agentic_SDLC")
+    @patch("deploy_preview.get_default_branch", return_value="main")
+    @patch("deploy_preview.verify_commit_merged", return_value=(True, "a" * 40))
+    @patch("deploy_preview.ensure_pages_enabled", return_value="https://gillella.github.io/Aru_Agentic_SDLC/")
+    @patch("deploy_preview.get_existing_run_ids", return_value=set())
+    @patch("deploy_preview.dispatch_cd_workflow", return_value=12345)
+    @patch("deploy_preview.wait_for_run", return_value=dp.RunOutcome(True, "success", "https://github.com/gillella/Aru_Agentic_SDLC/actions/runs/12345"))
+    @patch("deploy_preview.extract_preview_url_from_run", return_value="https://gillella.github.io/Aru_Agentic_SDLC/")
+    @patch("deploy_preview.post_preview_comment", return_value=False)
+    @patch("deploy_preview.file_remediation_issue", return_value=224)
+    def test_success_comment_failure_creates_durable_remediation(
+        self, mock_remediate, mock_comment, mock_extract, mock_wait, mock_dispatch,
+        mock_existing, mock_pages, mock_verify, mock_default, mock_repo,
+    ):
+        self.assertEqual(dp.deploy_preview(self.commit_sha, issue_id=109), 1)
+        mock_remediate.assert_called_once_with(
+            109,
+            self.commit_sha,
+            "Deployment succeeded but the preview URL comment on issue 109 failed.",
+            failure_stage="origin-comment",
+            run_url="https://github.com/gillella/Aru_Agentic_SDLC/actions/runs/12345",
+        )
 
     @patch("deploy_preview.run_cmd")
     def test_file_remediation_issue_attaches_to_board_or_fails_closed(self, mock_run):
@@ -279,9 +303,10 @@ class DeployPreviewSkillTests(unittest.TestCase):
     def test_ensure_pages_enabled_uses_operator_credential_for_missing_site(self, mock_run):
         mock_run.side_effect = [
             (1, "", "gh: Not Found (HTTP 404)"),
-            (0, '{"build_type":"workflow"}', ""),
+            (0, "", ""),
+            (0, json.dumps({"build_type": "workflow", "html_url": self.preview_url}), ""),
         ]
-        self.assertTrue(dp.ensure_pages_enabled(self.repo_slug))
+        self.assertEqual(dp.ensure_pages_enabled(self.repo_slug), self.preview_url)
         self.assertEqual(
             mock_run.call_args_list[1].args[0],
             [
@@ -299,11 +324,36 @@ class DeployPreviewSkillTests(unittest.TestCase):
     @patch("deploy_preview.run_cmd")
     def test_ensure_pages_enabled_switches_legacy_site_to_workflow(self, mock_run):
         mock_run.side_effect = [
-            (0, '{"build_type":"legacy"}', ""),
+            (0, json.dumps({"build_type": "legacy", "html_url": self.preview_url}), ""),
             (0, "", ""),
+            (0, json.dumps({"build_type": "workflow", "html_url": self.preview_url}), ""),
         ]
-        self.assertTrue(dp.ensure_pages_enabled(self.repo_slug))
+        self.assertEqual(dp.ensure_pages_enabled(self.repo_slug), self.preview_url)
         self.assertIn("PUT", mock_run.call_args_list[1].args[0])
+
+    @patch("deploy_preview.run_cmd")
+    def test_ensure_pages_enabled_accepts_authoritative_custom_domain(self, mock_run):
+        mock_run.return_value = (
+            0,
+            '{"build_type":"workflow","html_url":"https://preview.example.com/"}',
+            "",
+        )
+        self.assertEqual(
+            dp.ensure_pages_enabled(self.repo_slug),
+            "https://preview.example.com/",
+        )
+        self.assertTrue(
+            dp.is_valid_preview_url(
+                "https://preview.example.com",
+                "https://preview.example.com/",
+            )
+        )
+
+    def test_dry_run_user_site_url_has_no_duplicate_repo_path(self):
+        self.assertEqual(
+            dp.ensure_pages_enabled("octocat/octocat.github.io", dry_run=True),
+            "https://octocat.github.io/",
+        )
 
     @patch("deploy_preview.run_cmd")
     def test_verify_commit_merged_refreshes_origin_and_handles_slash_default_branch(self, mock_run):
@@ -335,7 +385,9 @@ class DeployPreviewSkillTests(unittest.TestCase):
 
         mock_run.side_effect = download_metadata
         self.assertEqual(
-            dp.extract_preview_url_from_run(12345, self.commit_sha, self.repo_slug),
+            dp.extract_preview_url_from_run(
+                12345, self.commit_sha, self.repo_slug, self.preview_url,
+            ),
             self.preview_url,
         )
 
@@ -351,22 +403,24 @@ class DeployPreviewSkillTests(unittest.TestCase):
 
         mock_run.side_effect = stale_metadata
         self.assertIsNone(
-            dp.extract_preview_url_from_run(12345, self.commit_sha, self.repo_slug)
+            dp.extract_preview_url_from_run(
+                12345, self.commit_sha, self.repo_slug, self.preview_url,
+            )
         )
 
     def test_is_valid_preview_url_validates_https_and_rejects_untrusted(self):
-        self.assertTrue(dp.is_valid_preview_url(self.preview_url, self.repo_slug))
-        self.assertFalse(dp.is_valid_preview_url("https://example.com/preview", self.repo_slug))
-        self.assertFalse(dp.is_valid_preview_url("https://gillella.github.io/wrong/", self.repo_slug))
-        self.assertFalse(dp.is_valid_preview_url(f"{self.preview_url}?old=1", self.repo_slug))
-        self.assertFalse(dp.is_valid_preview_url("javascript:alert(1)", self.repo_slug))
-        self.assertFalse(dp.is_valid_preview_url("https://gillella.github.io/Aru_Agentic_SDLC/(bad)", self.repo_slug))
-        self.assertFalse(dp.is_valid_preview_url("", self.repo_slug))
-        self.assertFalse(dp.is_valid_preview_url(None, self.repo_slug))
+        self.assertTrue(dp.is_valid_preview_url(self.preview_url, self.preview_url))
+        self.assertFalse(dp.is_valid_preview_url("https://example.com/preview", self.preview_url))
+        self.assertFalse(dp.is_valid_preview_url("https://gillella.github.io/wrong/", self.preview_url))
+        self.assertFalse(dp.is_valid_preview_url(f"{self.preview_url}?old=1", self.preview_url))
+        self.assertFalse(dp.is_valid_preview_url("javascript:alert(1)", self.preview_url))
+        self.assertFalse(dp.is_valid_preview_url("https://gillella.github.io/Aru_Agentic_SDLC/(bad)", self.preview_url))
+        self.assertFalse(dp.is_valid_preview_url("", self.preview_url))
+        self.assertFalse(dp.is_valid_preview_url(None, self.preview_url))
 
     def test_post_preview_comment_rejects_invalid_url(self):
-        self.assertFalse(dp.post_preview_comment(109, "http://insecure.example.com", self.commit_sha, self.repo_slug))
-        self.assertFalse(dp.post_preview_comment(109, "", self.commit_sha, self.repo_slug))
+        self.assertFalse(dp.post_preview_comment(109, "http://insecure.example.com", self.commit_sha, self.preview_url))
+        self.assertFalse(dp.post_preview_comment(109, "", self.commit_sha, self.preview_url))
 
     @patch("deploy_preview.run_cmd")
     def test_dispatch_cd_workflow_correlates_matching_run_under_concurrent_dispatches(self, mock_run):
@@ -410,6 +464,24 @@ class DeployPreviewSkillTests(unittest.TestCase):
         ]
         issue_id = dp.file_remediation_issue(issue_id=109, commit_sha=self.commit_sha, error_details="Deploy failed")
         self.assertEqual(issue_id, 199)
+
+    @patch("deploy_preview.run_cmd")
+    def test_file_remediation_reuse_preserves_active_lifecycle_state(self, mock_run):
+        mock_run.side_effect = [
+            (0, json.dumps([{
+                "number": 199,
+                "title": "fix(deploy): active remediation",
+                "body": dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha),
+                "labels": [{"name": "status:in-progress"}],
+            }]), ""),
+            (0, "Attached", ""),
+        ]
+        self.assertEqual(
+            dp.file_remediation_issue(109, self.commit_sha, "Deploy failed"),
+            199,
+        )
+        attach_cmd = mock_run.call_args_list[1].args[0]
+        self.assertEqual(attach_cmd[attach_cmd.index("--status") + 1], "In Progress")
 
     @patch("deploy_preview.run_cmd")
     def test_file_remediation_issue_returns_created_id_on_notification_warning(self, mock_run):
@@ -509,22 +581,31 @@ class DeployPreviewSkillTests(unittest.TestCase):
         self.assertNotIn("pages: write", build_job)
         self.assertNotIn("id-token: write", build_job)
 
-    @patch("deploy_preview.run_cmd")
+    @patch("deploy_preview.subprocess.run")
     def test_wait_for_run_times_out_without_blocking_watch(self, mock_run):
-        mock_run.return_value = (
-            0,
-            json.dumps({
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout=json.dumps({
                 "status": "queued",
                 "conclusion": "",
                 "url": "https://github.com/gillella/Aru_Agentic_SDLC/actions/runs/12345",
             }),
-            "",
+            stderr="",
         )
-        with patch("deploy_preview.time.monotonic", return_value=10.0):
-            outcome = dp.wait_for_run(12345, timeout_seconds=0, poll_interval=0)
+        with patch("deploy_preview.time.monotonic", side_effect=[10.0, 10.0, 10.01]):
+            outcome = dp.wait_for_run(12345, timeout_seconds=0.005, poll_interval=0)
         self.assertEqual(outcome.state, "timed-out")
         self.assertFalse(outcome.success)
         self.assertNotIn("watch", mock_run.call_args.args[0])
+
+    @patch("deploy_preview.subprocess.run")
+    def test_wait_for_run_bounds_a_hung_gh_process(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(["gh", "run", "view"], 0.01)
+        with patch("deploy_preview.time.monotonic", side_effect=[10.0, 10.0]):
+            outcome = dp.wait_for_run(12345, timeout_seconds=0.01, poll_interval=0)
+        self.assertEqual(outcome.state, "timed-out")
+        self.assertFalse(outcome.success)
+        self.assertLessEqual(mock_run.call_args.kwargs["timeout"], 0.01)
 
     def test_build_preview_rejects_output_escape_without_deleting_source(self):
         import tempfile
@@ -610,8 +691,27 @@ class DeployPreviewSkillTests(unittest.TestCase):
         self.assertIn(dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha), body)
         self.assertIn("Stage: `workflow-run`", body)
         self.assertIn(run_url, body)
-        self.assertIn("touches: .", body)
+        self.assertIn("touches: **", body)
         self.assertIn("parallel-eligible: false", body)
+
+    def test_repository_wide_remediation_touch_is_enforced_and_held(self):
+        import importlib.util
+        import triage_backlog
+
+        hook_path = self.root_dir / "hooks" / "enforce_touches.py"
+        spec = importlib.util.spec_from_file_location("preview_touch_hook", hook_path)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        self.assertTrue(hook.path_allowed("README.md", ["**"]))
+        self.assertTrue(hook.path_allowed("deep/path/app.py", ["**"]))
+
+        issue = {
+            "body": "## Acceptance Criteria\n- [ ] recover\n\ntouches: **\nparallel-eligible: false",
+        }
+        self.assertIn(
+            "touches use wildcard top-level area patterns: **",
+            triage_backlog.split_reasons(issue),
+        )
 
 
 if __name__ == "__main__":
