@@ -121,7 +121,7 @@ def find_preview_source(root_dir: str) -> Optional[Tuple[str, str]]:
 
 
 def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
-    """Copy only public static files into a non-symlink output below the source."""
+    """Copy only public static files into the source checkout's canonical dist/."""
     lexical_source = _absolute_lexical(source_dir)
     if lexical_source.is_symlink() or not lexical_source.is_dir():
         print("[ERROR] Preview source must be a real directory, not a symlink.", file=sys.stderr)
@@ -140,6 +140,9 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
         return False
     if relative_dest == Path(".") or _has_symlink_component(dest, source_root):
         print("[ERROR] Preview output must be a non-symlink descendant of the source checkout.", file=sys.stderr)
+        return False
+    if dest != source_root / "dist":
+        print("[ERROR] Preview output must be the canonical <source>/dist directory.", file=sys.stderr)
         return False
 
     found = find_preview_source(str(source_root))
@@ -232,9 +235,13 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Assemble a contained static preview artifact.")
     parser.add_argument("--source", default=".", help="Project source directory (default: .)")
-    parser.add_argument("--output", default="dist", help="Output directory inside the source (default: dist)")
+    parser.add_argument(
+        "--output",
+        help="Canonical <source>/dist output directory (default: <source>/dist)",
+    )
     args = parser.parse_args()
-    return 0 if assemble_preview_artifact(args.source, args.output) else 1
+    output = args.output or str(Path(args.source) / "dist")
+    return 0 if assemble_preview_artifact(args.source, output) else 1
 
 
 if __name__ == "__main__":

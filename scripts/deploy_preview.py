@@ -749,7 +749,7 @@ Preview deployment failed for merged commit `{commit_sha}` (originating from iss
 
 ## Dependencies
 depends-on: none
-touches: **
+touches: `**`
 parallel-eligible: false
 """
 

@@ -258,7 +258,8 @@ class ProjectBootstrapTests(unittest.TestCase):
             self.assertFalse(mod.path_allowed("docs/readme.md", touches_dir))
 
             # Repository-wide remediation scope covers both root and nested files.
-            touches_repo = ["**"]
+            touches_repo = mod.parse_touches("touches: `**`")
+            self.assertEqual(touches_repo, ["**"])
             self.assertTrue(mod.path_allowed("README.md", touches_repo))
             self.assertTrue(mod.path_allowed("deep/path/app.py", touches_repo))
 

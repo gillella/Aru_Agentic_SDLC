@@ -667,6 +667,18 @@ class DeployPreviewSkillTests(unittest.TestCase):
             self.assertTrue((out / "styles.css").is_file())
             self.assertTrue((out / "assets" / "logo.svg").is_file())
 
+    def test_build_preview_cli_defaults_output_to_source_dist(self):
+        import tempfile
+        import build_preview as bp
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "project"
+            source.mkdir()
+            (source / "index.html").write_text("safe")
+            with patch.object(sys, "argv", ["build_preview.py", "--source", str(source)]):
+                self.assertEqual(bp.main(), 0)
+            self.assertEqual((source / "dist" / "index.html").read_text(), "safe")
+
     def test_build_preview_artifact_fails_on_unsupported_project(self):
         import tempfile
         import build_preview as bp
@@ -841,6 +853,34 @@ class DeployPreviewSkillTests(unittest.TestCase):
             )
             self.assertFalse(nested_output.exists())
 
+    def test_build_preview_never_deletes_arbitrary_existing_checkout_directories(self):
+        import tempfile
+        import build_preview as bp
+
+        for layout in ("root", "public"):
+            for output_name in (".", "src", ".git", "assets", "static", "docs"):
+                with self.subTest(layout=layout, output=output_name):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        source = Path(temp_dir) / "project"
+                        source.mkdir()
+                        if layout == "root":
+                            (source / "index.html").write_text("safe")
+                        else:
+                            public = source / "public"
+                            public.mkdir()
+                            (public / "index.html").write_text("safe")
+
+                        output = source if output_name == "." else source / output_name
+                        if output != source:
+                            output.mkdir(exist_ok=True)
+                        sentinel = output / "important.py"
+                        sentinel.write_text("keep")
+
+                        self.assertFalse(
+                            bp.assemble_preview_artifact(str(source), str(output))
+                        )
+                        self.assertEqual(sentinel.read_text(), "keep")
+
     def test_build_preview_never_publishes_credential_json(self):
         import tempfile
         import build_preview as bp
@@ -892,7 +932,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
         self.assertIn(dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha), body)
         self.assertIn("Stage: `workflow-run`", body)
         self.assertIn(run_url, body)
-        self.assertIn("touches: **", body)
+        self.assertIn("touches: `**`", body)
         self.assertIn("parallel-eligible: false", body)
 
     def test_repository_wide_remediation_touch_is_enforced_and_held(self):
@@ -900,20 +940,23 @@ class DeployPreviewSkillTests(unittest.TestCase):
         import common
         import triage_backlog
 
+        body = "## Acceptance Criteria\n- [ ] recover\n\ntouches: `**`\nparallel-eligible: false"
+        self.assertEqual(common.parse_touches(body), ["**"])
+
         hook_path = self.root_dir / "hooks" / "enforce_touches.py"
         spec = importlib.util.spec_from_file_location("preview_touch_hook", hook_path)
         hook = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(hook)
-        self.assertTrue(hook.path_allowed("README.md", ["**"]))
-        self.assertTrue(hook.path_allowed("deep/path/app.py", ["**"]))
+        hook_touches = hook.parse_touches(body)
+        self.assertEqual(hook_touches, ["**"])
+        self.assertTrue(hook.path_allowed("README.md", hook_touches))
+        self.assertTrue(hook.path_allowed("deep/path/app.py", hook_touches))
         self.assertEqual(
-            common.touches_conflict(["**"], ["deep/path/app.py"]),
+            common.touches_conflict(common.parse_touches(body), ["deep/path/app.py"]),
             ("**", "deep/path/app.py"),
         )
 
-        issue = {
-            "body": "## Acceptance Criteria\n- [ ] recover\n\ntouches: **\nparallel-eligible: false",
-        }
+        issue = {"body": body}
         self.assertIn(
             "touches use wildcard top-level area patterns: **",
             triage_backlog.split_reasons(issue),
