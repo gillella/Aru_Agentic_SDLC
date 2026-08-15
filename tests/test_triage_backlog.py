@@ -329,6 +329,47 @@ class SplitRecommendationTests(unittest.TestCase):
             tb.split_reasons(issue(23, "type:chore", body=per_area)),
             ["touches use wildcard top-level area patterns: *"],
         )
+        for declaration in ("scripts*", "[st]rc", "?", "*.py"):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(28, "type:chore", body=body)),
+                    [f"touches use wildcard top-level area patterns: {declaration}"],
+                )
+
+    def test_directory_spelling_preserves_top_level_areas(self):
+        body = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: scripts/, hooks/",
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(29, "type:chore", body=body)),
+            ["touches span 2 top-level areas: hooks, scripts"],
+        )
+
+    def test_promote_holds_directory_and_slash_free_wildcard_scopes(self):
+        bodies = (
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: scripts/, hooks/",
+            ),
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: scripts*",
+            ),
+        )
+        for number, body in enumerate(bodies, start=30):
+            candidate = issue(number, "type:chore", "status:backlog", body=body)
+            with self.subTest(number=number), \
+                 patch("triage_backlog.list_open_issues", return_value=[candidate]), \
+                 patch("triage_backlog.update_status") as update, \
+                 patch("sys.argv", ["triage_backlog.py", "--promote"]), \
+                 patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(tb.main(), 0)
+                update.assert_not_called()
 
     def test_leading_dot_slash_is_normalized_before_area_classification(self):
         body = READY_BODY.replace(

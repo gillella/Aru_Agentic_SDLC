@@ -347,13 +347,20 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
         if path in {"", ".", "/"}:
             repository_wide = True
             continue
-        path = path.lstrip("/").rstrip("/")
+        path = path.lstrip("/")
         if not path or path == ".":
             repository_wide = True
             continue
         # Root-level files share one repository-root area. Treating each file
         # name as an area makes README.md + pyproject.toml look cross-cutting.
-        area_roots.append(path.split("/", 1)[0] if "/" in path else "<root>")
+        # Preserve directory spelling and wildcard identity before grouping
+        # slash-free concrete files under that shared area.
+        if "/" in path:
+            area_roots.append(path.split("/", 1)[0])
+        elif any(char in path for char in "*?["):
+            area_roots.append(path)
+        else:
+            area_roots.append("<root>")
     wildcard_roots = sorted({
         root for root in area_roots if any(char in root for char in "*?[")
     })
