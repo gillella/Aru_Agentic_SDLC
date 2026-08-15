@@ -617,6 +617,7 @@ class HookDecisionTests(unittest.TestCase):
              patch.object(et, "repo_root", return_value=root), \
              patch.object(et, "_canonical_git_root", return_value=root), \
              patch.object(et, "current_branch", return_value=branch), \
+             patch.object(et, "_current_branch_for_git_dir", return_value=branch), \
              patch.object(et, "governed_repo", return_value=governed), \
              patch.object(et, "touches_for", return_value=touches):
             return et.main()
@@ -793,6 +794,10 @@ class HookDecisionTests(unittest.TestCase):
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload_block))), \
              patch.object(et, "repo_root", return_value="/repo/feat"), \
              patch.object(et, "current_branch", side_effect=branch_for), \
+             patch.object(et, "_current_branch_for_git_dir",
+                          side_effect=lambda _git_dir, path, _env: branch_for(path)), \
+             patch.object(et, "_canonical_git_root",
+                          side_effect=lambda path, *_args: path), \
              patch.object(et, "governed_repo", return_value=True):
             rc = et.main()
             self.assertEqual(rc, et.EXIT_BLOCK)
@@ -813,6 +818,10 @@ class HookDecisionTests(unittest.TestCase):
                  }))), \
                  patch.object(et, "repo_root", return_value="/repo/feat"), \
                  patch.object(et, "current_branch", side_effect=branch_for), \
+                 patch.object(et, "_current_branch_for_git_dir",
+                              side_effect=lambda _git_dir, path, _env: branch_for(path)), \
+                 patch.object(et, "_canonical_git_root",
+                              side_effect=lambda path, *_args: path), \
                  patch.object(et, "governed_repo", return_value=True):
                 self.assertEqual(et.main(), et.EXIT_BLOCK)
 
@@ -825,6 +834,10 @@ class HookDecisionTests(unittest.TestCase):
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload_allow))), \
              patch.object(et, "repo_root", return_value="/repo/main"), \
              patch.object(et, "current_branch", side_effect=branch_for), \
+             patch.object(et, "_current_branch_for_git_dir",
+                          side_effect=lambda _git_dir, path, _env: branch_for(path)), \
+             patch.object(et, "_canonical_git_root",
+                          side_effect=lambda path, *_args: path), \
              patch.object(et, "governed_repo", return_value=True):
             rc = et.main()
             self.assertEqual(rc, et.EXIT_ALLOW)
@@ -1475,6 +1488,25 @@ class GitCommandCheckoutTests(unittest.TestCase):
             cls.AGENTS_MD, encoding="utf-8"
         )
 
+        cls.ungoverned_separate_worktree = base / "ungoverned-separate-worktree"
+        cls.ungoverned_separate_git_dir = base / "ungoverned-separate-meta" / "repo.git"
+        cls.ungoverned_separate_git_dir.parent.mkdir()
+        subprocess.run(
+            [
+                "git", "init", "-b", "main", "--separate-git-dir",
+                str(cls.ungoverned_separate_git_dir),
+                str(cls.ungoverned_separate_worktree),
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        git("config", "user.email", "t@example.com", cwd=cls.ungoverned_separate_worktree)
+        git("config", "user.name", "t", cwd=cls.ungoverned_separate_worktree)
+        (cls.ungoverned_separate_worktree / "app.py").write_text(
+            "x = 1\n", encoding="utf-8"
+        )
+        git("add", "-A", cwd=cls.ungoverned_separate_worktree)
+        git("commit", "-m", "init", cwd=cls.ungoverned_separate_worktree)
+
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
@@ -1574,6 +1606,78 @@ class GitCommandCheckoutTests(unittest.TestCase):
     def test_symlinked_git_dir_uses_canonical_governed_checkout(self):
         self.assertIsNotNone(
             self.violation("git commit -m x", self.symlinked_git_checkout)
+        )
+
+    def test_relative_git_dir_environment_is_resolved_after_capital_c(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"GIT_DIR=.git git -C {self.main_root} commit -m x",
+                self.ungoverned,
+            )
+        )
+
+    def test_git_common_dir_environment_binds_governed_refs(self):
+        for command in (
+            f"GIT_COMMON_DIR={self.main_root}/.git git commit -m x",
+            f"GIT_COMMON_DIR={self.main_root}/.git git push origin main",
+            f"GIT_DIR={self.ungoverned}/.git "
+            f"GIT_COMMON_DIR={self.main_root}/.git git commit -m x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.violation(command, self.ungoverned))
+
+    def test_assignment_only_git_dir_persists_to_later_git_write(self):
+        for separator in (";", "&&"):
+            with self.subTest(separator=separator):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"GIT_DIR={self.main_root}/.git {separator} git commit -m x",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_exported_git_dir_persists_to_commit_and_push(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"export GIT_DIR={self.main_root}/.git; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_env_split_string_resolves_relative_git_dir_after_capital_c(self):
+        self.assertIsNotNone(
+            self.violation(
+                f'env -S "GIT_DIR=.git git -C {self.main_root} commit -m x"',
+                self.ungoverned,
+            )
+        )
+
+    def test_env_unset_and_ignore_remove_prefixed_git_dir(self):
+        commands = (
+            f"GIT_DIR={self.main_root}/.git env -u GIT_DIR git commit -m x",
+            f"GIT_DIR={self.main_root}/.git env --unset=GIT_DIR git commit -m x",
+            f'GIT_DIR={self.main_root}/.git env -i PATH="$PATH" git commit -m x',
+            f"GIT_DIR={self.main_root}/.git env -u GIT_DIR git push origin main",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIsNone(self.violation(command, self.ungoverned))
+
+    def test_inherited_git_dir_is_applied_to_later_git_write(self):
+        with patch.dict(os.environ, {"GIT_DIR": str(self.main_root / ".git")}):
+            self.assertIsNotNone(self.violation("git commit -m x", self.ungoverned))
+
+    def test_ungoverned_separate_git_dir_checkout_is_allowed(self):
+        self.assertIsNone(
+            self.violation("git commit -m x", self.ungoverned_separate_worktree)
+        )
+        self.assertIsNone(
+            self.violation(
+                f"git -C {self.ungoverned_separate_worktree} commit -m x",
+                self.main_root,
+            )
         )
 
     def test_ungoverned_git_dir_with_governed_work_tree_is_allowed(self):
