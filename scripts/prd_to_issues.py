@@ -444,7 +444,7 @@ def validate_source_prd(issue_number: int, repo_slug: str) -> None:
     labels = {
         item.get("name", "") for item in data.get("labels", []) if isinstance(item, dict)
     }
-    body = data.get("body") or ""
+    body = (data.get("body") or "").replace("\r\n", "\n").replace("\r", "\n")
     if data.get("state") != "OPEN" or "type:epic" not in labels:
         raise PublicationError(f"source PRD #{issue_number} must be an open type:epic issue")
     if not re.search(
@@ -468,7 +468,7 @@ def validate_publication_labels(plan: PreparedPlan, repo_slug: str) -> None:
     for issue in plan.issues:
         required.update({f"type:{issue.issue_type}", f"priority:{issue.priority}"})
     code, out, err = run_cmd(
-        ["gh", "label", "list", "--repo", repo_slug, "--limit", "200", "--json", "name"],
+        ["gh", "label", "list", "--repo", repo_slug, "--limit", "1000", "--json", "name"],
         check=False,
     )
     if code != 0:
@@ -614,7 +614,7 @@ def main() -> int:
         created = publish_plan(plan, repo_root, repo_slug)
         print(json.dumps({"created": created}, indent=2, sort_keys=True))
         return 0
-    except (OSError, json.JSONDecodeError, PlanError, PublicationError) as exc:
+    except (OSError, ValueError, PublicationError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 

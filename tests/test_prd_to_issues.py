@@ -1,3 +1,4 @@
+import io
 import json
 import sys
 import tempfile
@@ -126,7 +127,10 @@ class PrdToIssuesTests(unittest.TestCase):
         manifest = self.manifest()
         manifest["issues"][0]["depends_on"] = ["interface"]
 
-        with self.assertRaisesRegex(pti.PlanError, r"cycle detected at edge \w+ -> \w+"):
+        with self.assertRaisesRegex(
+            pti.PlanError,
+            r"cycle detected at edge (?:foundation -> interface|interface -> foundation)",
+        ):
             pti.prepare_plan(manifest, self.repo, self.inventory)
 
     def test_overlap_detection_derives_parallel_eligibility(self):
@@ -260,11 +264,35 @@ class PrdToIssuesTests(unittest.TestCase):
             json.dumps({
                 "state": "OPEN",
                 "labels": [{"name": "type:epic"}],
-                "body": "- Readiness: `READY_FOR_PLANNING`\n- Operator approval: `APPROVED`",
+                "body": "- Readiness: `READY_FOR_PLANNING`\r\n- Operator approval: `APPROVED`\r\n",
             }),
             "",
         )
         pti.validate_source_prd(82, "owner/repo")
+
+        run_cmd.return_value = (
+            0,
+            json.dumps({
+                "state": "CLOSED",
+                "labels": [{"name": "type:epic"}],
+                "body": "- Readiness: `READY_FOR_PLANNING`\n- Operator approval: `APPROVED`",
+            }),
+            "",
+        )
+        with self.assertRaisesRegex(pti.PublicationError, "must be an open type:epic issue"):
+            pti.validate_source_prd(82, "owner/repo")
+
+        run_cmd.return_value = (
+            0,
+            json.dumps({
+                "state": "OPEN",
+                "labels": [{"name": "type:epic"}],
+                "body": "- Readiness: `READY_FOR_PLANNING`\n- Operator approval: `PENDING`",
+            }),
+            "",
+        )
+        with self.assertRaisesRegex(pti.PublicationError, "not operator-approved"):
+            pti.validate_source_prd(82, "owner/repo")
 
         run_cmd.return_value = (
             0,
@@ -287,6 +315,7 @@ class PrdToIssuesTests(unittest.TestCase):
             pti.PublicationError, "required governance labels are missing"
         ):
             pti.validate_publication_labels(plan, "owner/repo")
+        self.assertIn("1000", run_cmd.call_args.args[0])
 
     @patch.object(pti, "publish_plan")
     @patch.object(pti, "get_repo_slug")
@@ -308,6 +337,22 @@ class PrdToIssuesTests(unittest.TestCase):
         self.assertEqual(result, 0)
         repo_slug.assert_not_called()
         publish.assert_not_called()
+
+    @patch.object(pti, "resolve_repo_root")
+    def test_main_reports_invalid_utf8_plan_without_traceback(self, resolve):
+        resolve.return_value = self.repo
+        plan_file = self.repo / "invalid.json"
+        plan_file.write_bytes(b"{\xff}")
+
+        stderr = io.StringIO()
+        with (
+            patch.object(sys, "argv", ["prd_to_issues.py", "--plan", str(plan_file)]),
+            patch.object(sys, "stderr", stderr),
+        ):
+            result = pti.main()
+
+        self.assertEqual(result, 1)
+        self.assertIn("[ERROR]", stderr.getvalue())
 
 
 if __name__ == "__main__":
