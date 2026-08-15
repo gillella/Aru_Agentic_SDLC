@@ -62,8 +62,10 @@ lifecycle, or make product decisions for the operator.
 
 ### 3. Draft the PRD
 
-Transform only the confirmed interrogation results into the PRD structure in
-`.github/ISSUE_TEMPLATE/prd.md`.
+Transform only the confirmed interrogation results into the PRD structure at
+`$ARU_SDLC_HOME/.github/ISSUE_TEMPLATE/prd.md`. Resolve it from the canonical
+playbook rather than the current repository: consumer repositories are not
+required to carry their own copy of this template.
 
 Use stable identifiers:
 
