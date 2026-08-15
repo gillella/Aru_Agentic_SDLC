@@ -137,6 +137,10 @@ def derive_touches(
                 raise PlanError(f"{field}: new paths cannot contain glob syntax: {path}")
             if path in inventory_set:
                 raise PlanError(f"{field}: path already exists and cannot be marked new: {path}")
+            if any(candidate.startswith(path + "/") for candidate in inventory):
+                raise PlanError(
+                    f"{field}: path is an existing directory and cannot be marked new: {path}"
+                )
             parent = PurePosixPath(path).parent
             parent_text = "" if str(parent) == "." else str(parent)
             ancestor_known = not parent_text

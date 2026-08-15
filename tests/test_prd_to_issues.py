@@ -188,6 +188,15 @@ class PrdToIssuesTests(unittest.TestCase):
 
         self.assertEqual(touches, ("src/auth/session/login.py",))
 
+    def test_new_file_rejects_existing_directory(self):
+        with self.assertRaisesRegex(pti.PlanError, "existing directory"):
+            pti.derive_touches(
+                [{"path": "src/nested", "kind": "new"}],
+                self.repo,
+                self.inventory,
+                issue_key="directory-collision",
+            )
+
     def test_intake_contract_rejects_type_title_and_verify_placeholders(self):
         manifest = self.manifest()
         manifest["issues"][0]["type"] = "test"
