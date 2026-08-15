@@ -414,7 +414,9 @@ def partition(issues: list[dict[str, Any]]) -> tuple[list, list, list]:
     backlog, ready, held = [], [], []
     for issue in issues:
         names = {n.lower() for n in label_names(issue)}
-        if claimed_by(issue) or "status:in-review" in names:
+        if needs_human(issue.get("labels", [])):
+            backlog.append(issue)
+        elif claimed_by(issue) or "status:in-review" in names:
             held.append(issue)
         elif "status:ready" in names:
             ready.append(issue)
@@ -430,6 +432,7 @@ def capacity(ready: list[dict[str, Any]], held: list[dict[str, Any]]) -> dict[st
     cannot run at the same time, and neither can one that collides with work
     already in flight. This walks the list greedily the way the picker would.
     """
+    ready = [issue for issue in ready if not needs_human(issue.get("labels", []))]
     in_flight_paths: list[str] = []
     for issue in held:
         in_flight_paths.extend(parse_touches(issue.get("body") or ""))

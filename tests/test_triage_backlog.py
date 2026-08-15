@@ -519,6 +519,32 @@ class PartitionTests(unittest.TestCase):
         self.assertEqual(ready, [])
         self.assertEqual([i["number"] for i in held], [4])
 
+    def test_ready_needs_human_issue_is_backlog_and_not_capacity(self):
+        operator_issue = issue(
+            7,
+            "status:ready",
+            "needs-human",
+            body=READY_BODY,
+        )
+
+        backlog, ready, held = tb.partition([operator_issue])
+
+        self.assertEqual([item["number"] for item in backlog], [7])
+        self.assertEqual(ready, [])
+        self.assertEqual(held, [])
+        self.assertEqual(tb.capacity([operator_issue], []), {
+            "concurrent": [],
+            "deferred": [],
+            "ready_total": 0,
+        })
+
+        with patch("triage_backlog.list_open_issues", return_value=[operator_issue]), \
+             patch("sys.stdout", new_callable=io.StringIO) as output, \
+             patch("sys.argv", ["triage_backlog.py", "--capacity"]):
+            self.assertEqual(tb.main(), 0)
+        self.assertIn("Ready issues:            0", output.getvalue())
+        self.assertIn("Claimable simultaneously: 0", output.getvalue())
+
     def test_in_review_issue_is_parked_and_conflict_protected(self):
         issues = [
             issue(39, "status:in-review", "agent:agent-1",

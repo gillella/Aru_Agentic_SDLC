@@ -130,9 +130,10 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
         if ts > cutoff or has_open_pr(num) or has_remote_branch(num):
             continue
 
-        if not update_status(num, "Ready", require_board=True):
+        target_status = "Backlog" if needs_human(issue.get("labels", [])) else "Ready"
+        if not update_status(num, target_status, require_board=True):
             print(
-                f"[WARN] Could not synchronize #{num} to Ready; claim retained.",
+                f"[WARN] Could not synchronize #{num} to {target_status}; claim retained.",
                 file=sys.stderr,
             )
             continue
@@ -257,11 +258,14 @@ def main():
         branch_num = int(m.group(1))
         match = next((i for i in issues if i["number"] == branch_num), None)
         holder = claimed_by(match) if match else None
-        if match and args.agent and holder == args.agent:
+        operator_only = bool(match and needs_human(match.get("labels", [])))
+        if match and args.agent and holder == args.agent and not operator_only:
             branch_issue = branch_num
         else:
             if not match:
                 reason = "not open"
+            elif operator_only:
+                reason = "operator-only (needs-human)"
             elif not args.agent:
                 reason = "no --agent to validate ownership"
             elif holder and holder != args.agent:
@@ -332,6 +336,7 @@ def main():
         "blocked_by_file_conflict": parts["conflicted"],
         "not_ready": parts["not_ready"],
         "missing_touches": parts["missing_touches"],
+        "operator_only_issues": parts["operator_only"],
         "held_by_other_agents": [
             {"number": i["number"], "agent": claimed_by(i)}
             for i in issues if claimed_by(i) and claimed_by(i) != args.agent
