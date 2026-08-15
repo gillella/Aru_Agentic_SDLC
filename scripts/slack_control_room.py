@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from delivery_increments import (
     DeliveryIncrementStore,
     IncrementError,
+    _strict_json_loads,
     increment_id_for_event,
     operator_evidence,
 )
@@ -107,11 +108,12 @@ def _slack_event_time(value: str) -> Optional[str]:
 
 def _run_bounded(
     command: List[str], *, cwd: str, timeout: int,
+    env: Optional[Dict[str, str]] = None,
 ) -> Tuple[int, str, str]:
     try:
         result = subprocess.run(
             command, cwd=cwd, text=True, capture_output=True,
-            timeout=timeout, check=False,
+            timeout=timeout, check=False, env=env,
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
@@ -121,9 +123,13 @@ def _run_bounded(
 
 
 def verify_baseline_commit(repo_dir: str, commit_sha: str) -> bool:
+    clean_env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+    }
     code, stdout, _ = _run_bounded(
-        ["git", "cat-file", "-t", commit_sha],
-        cwd=repo_dir, timeout=BASELINE_TIMEOUT_SECONDS,
+        ["git", "--no-replace-objects", "cat-file", "-t", commit_sha],
+        cwd=repo_dir, timeout=BASELINE_TIMEOUT_SECONDS, env=clean_env,
     )
     return code == 0 and stdout == "commit"
 
@@ -437,15 +443,29 @@ def github_increment_decision(
     """Write the authoritative decision before local increment state changes."""
     marker = hashlib.sha256(str(payload["decision_id"]).encode()).hexdigest()[:20]
     marker_text = f"<!-- aru-delivery-decision:v1:{marker} -->"
+    repository = payload.get("github_repository")
+    if (
+        not isinstance(repository, str)
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+    ):
+        return None
+    repo_target = f"github.com/{repository}"
+    clean_env = {
+        key: value for key, value in os.environ.items()
+        if key not in {"GH_REPO", "GH_HOST"} and not key.startswith("GIT_")
+    }
     code, stdout, _ = _run_bounded(
-        ["gh", "issue", "view", str(control_issue), "--json", "comments"],
-        cwd=repo_dir, timeout=GITHUB_TIMEOUT_SECONDS,
+        [
+            "gh", "issue", "view", str(control_issue), "--repo", repo_target,
+            "--json", "comments",
+        ],
+        cwd=repo_dir, timeout=GITHUB_TIMEOUT_SECONDS, env=clean_env,
     )
     if code != 0:
         return None
     try:
-        comments = json.loads(stdout).get("comments", [])
-    except (AttributeError, json.JSONDecodeError):
+        comments = _strict_json_loads(stdout).get("comments", [])
+    except (AttributeError, IncrementError):
         return None
     if not isinstance(comments, list):
         return None
@@ -457,10 +477,12 @@ def github_increment_decision(
         return None
     if matches:
         body = str(matches[0].get("body") or "")
-        fenced = re.search(r"```json\s*\n(?P<payload>.*?)\n```", body, re.DOTALL)
+        fenced = re.findall(r"```json\s*\n(.*?)\n```", body, re.DOTALL)
+        if body.count(marker_text) != 1 or len(fenced) != 1:
+            return None
         try:
-            existing_payload = json.loads(fenced.group("payload")) if fenced else None
-        except json.JSONDecodeError:
+            existing_payload = _strict_json_loads(fenced[0])
+        except IncrementError:
             return None
         url = matches[0].get("url")
         if existing_payload != payload:
@@ -474,8 +496,11 @@ def github_increment_decision(
         + "\n```\n"
     )
     code, stdout, _ = _run_bounded(
-        ["gh", "issue", "comment", str(control_issue), "--body", body],
-        cwd=repo_dir, timeout=GITHUB_TIMEOUT_SECONDS,
+        [
+            "gh", "issue", "comment", str(control_issue), "--repo", repo_target,
+            "--body", body,
+        ],
+        cwd=repo_dir, timeout=GITHUB_TIMEOUT_SECONDS, env=clean_env,
     )
     if code != 0:
         return None

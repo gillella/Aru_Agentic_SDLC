@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from slack_projects import RegistryError, mutate_secure_json, read_secure_json
+from slack_projects import RegistryError, _file_lock, _private_file, _write_unlocked
 
 
 SCHEMA_VERSION = 1
@@ -33,6 +34,55 @@ ACTIONS = {
 
 class IncrementError(RegistryError):
     """The requested increment decision is invalid or unsafe."""
+
+
+def _unique_json_object(pairs: List[tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise IncrementError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(constant: str) -> Any:
+    raise IncrementError(f"invalid JSON constant: {constant}")
+
+
+def _strict_json_loads(value: str) -> Any:
+    try:
+        return json.loads(
+            value,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except json.JSONDecodeError as exc:
+        raise IncrementError(f"invalid Delivery Increment JSON: {exc}") from exc
+
+
+def _read_increment_unlocked(path: Path, default: Any) -> Any:
+    if path.is_symlink():
+        raise IncrementError(f"refusing symlink: {path}")
+    if not path.exists():
+        return deepcopy(default)
+    _private_file(path)
+    try:
+        return _strict_json_loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise IncrementError(f"cannot read {path}: {exc}") from exc
+
+
+def _read_increment_json(path: Path, default: Any) -> Any:
+    with _file_lock(path):
+        return _read_increment_unlocked(path, default)
+
+
+def _mutate_increment_json(path: Path, default: Any, updater: Any) -> Any:
+    with _file_lock(path):
+        current = _read_increment_unlocked(path, default)
+        updated = updater(deepcopy(current))
+        _write_unlocked(path, updated)
+        return updated
 
 
 def _timestamp(value: Any, name: str) -> str:
@@ -394,7 +444,7 @@ class DeliveryIncrementStore:
         self.path = path
 
     def list(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        document = _document(read_secure_json(
+        document = _document(_read_increment_json(
             self.path, {"schema": SCHEMA_VERSION, "increments": []}
         ))
         records = document["increments"]
@@ -529,7 +579,7 @@ class DeliveryIncrementStore:
             result.update(deepcopy(record))
             return document
 
-        mutate_secure_json(
+        _mutate_increment_json(
             self.path, {"schema": SCHEMA_VERSION, "increments": []}, update
         )
         return result

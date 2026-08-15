@@ -244,6 +244,39 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertTrue(scr.verify_baseline_commit(str(self.checkout_a), commit_sha))
         self.assertFalse(scr.verify_baseline_commit(str(self.checkout_a), tag_sha))
 
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=foreign, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "tests@example.com"], cwd=foreign, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Aru Tests"], cwd=foreign, check=True,
+        )
+        (foreign / "foreign.txt").write_text("foreign\n", encoding="utf-8")
+        subprocess.run(["git", "add", "foreign.txt"], cwd=foreign, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "foreign"], cwd=foreign, check=True)
+        foreign_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=foreign,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        git_envs = (
+            {"GIT_DIR": str(foreign / ".git")},
+            {"GIT_OBJECT_DIRECTORY": str(foreign / ".git" / "objects")},
+            {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(foreign / ".git" / "objects")},
+        )
+        for inherited in git_envs:
+            with self.subTest(inherited=inherited), patch.dict(os.environ, inherited):
+                self.assertFalse(
+                    scr.verify_baseline_commit(str(self.checkout_a), foreign_sha)
+                )
+
+        subprocess.run(
+            ["git", "update-ref", f"refs/replace/{tag_sha}", commit_sha],
+            cwd=self.checkout_a, check=True,
+        )
+        self.assertFalse(scr.verify_baseline_commit(str(self.checkout_a), tag_sha))
+
     def test_concurrent_same_event_creates_one_github_record_and_transition(self):
         store = DeliveryIncrementStore(self.root / "increments.json")
         calls = []
@@ -289,7 +322,10 @@ class SlackControlRoomTests(unittest.TestCase):
             )
 
     def test_github_decision_comment_is_idempotent_by_event_marker(self):
-        payload = {"decision_id": "proj_alpha|T01234567|C01234567|evt-1"}
+        payload = {
+            "decision_id": "proj_alpha|T01234567|C01234567|evt-1",
+            "github_repository": "owner/repo",
+        }
         marker = hashlib.sha256(payload["decision_id"].encode()).hexdigest()[:20]
         existing_url = "https://github.com/owner/repo/issues/300#issuecomment-8"
         existing_payload = dict(payload)
@@ -302,12 +338,43 @@ class SlackControlRoomTests(unittest.TestCase):
                 "url": existing_url,
             }]
         })
-        with patch.object(scr, "_run_bounded", return_value=(0, existing, "")) as run:
+        with patch.dict(os.environ, {
+            "GH_REPO": "other/repo", "GH_HOST": "example.invalid",
+            "GIT_DIR": str(self.root / "other.git"),
+        }), patch.object(scr, "_run_bounded", return_value=(0, existing, "")) as run:
             self.assertEqual(
                 scr.github_increment_decision(300, payload, str(self.checkout_a)),
                 existing_url,
             )
         run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertIn("--repo", command)
+        self.assertIn("github.com/owner/repo", command)
+        self.assertNotIn("GH_REPO", run.call_args.kwargs["env"])
+        self.assertNotIn("GH_HOST", run.call_args.kwargs["env"])
+        self.assertNotIn("GIT_DIR", run.call_args.kwargs["env"])
+
+        duplicate_payload = (
+            f"<!-- aru-delivery-decision:v1:{marker} -->\n"
+            "```json\n"
+            '{"decision_id":"wrong","decision_id":"proj_alpha|T01234567|C01234567|evt-1",'
+            '"github_repository":"owner/repo"}\n```'
+        )
+        duplicate_marker = (
+            f"<!-- aru-delivery-decision:v1:{marker} -->\n"
+            f"<!-- aru-delivery-decision:v1:{marker} -->\n"
+            f"```json\n{json.dumps(payload)}\n```"
+        )
+        for body in (duplicate_payload, duplicate_marker):
+            response = json.dumps({
+                "comments": [{"body": body, "url": existing_url}],
+            })
+            with self.subTest(body=body), patch.object(
+                scr, "_run_bounded", return_value=(0, response, ""),
+            ):
+                self.assertIsNone(
+                    scr.github_increment_decision(300, payload, str(self.checkout_a))
+                )
 
         with patch.object(
             scr, "_run_bounded",
@@ -319,6 +386,8 @@ class SlackControlRoomTests(unittest.TestCase):
             created = scr.github_increment_decision(300, payload, str(self.checkout_a))
         self.assertTrue(created.endswith("issuecomment-9"))
         self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertIn("github.com/owner/repo", call.args[0])
 
     def test_wrong_operator_cannot_create_sprint_or_github_record(self):
         store = DeliveryIncrementStore(self.root / "increments.json")

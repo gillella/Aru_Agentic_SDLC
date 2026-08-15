@@ -111,6 +111,15 @@ class DeliveryIncrementSchemaTests(IncrementFixture):
         with self.assertRaises(IncrementError):
             self.store.list()
 
+        for document in (
+            '{"schema": 2, "schema": 1, "increments": []}',
+            '{"schema": 1, "increments": [{"broken": true}], "increments": []}',
+        ):
+            self.store.path.write_text(document, encoding="utf-8")
+            self.store.path.chmod(0o600)
+            with self.subTest(document=document), self.assertRaises(IncrementError):
+                self.store.list()
+
     def test_schema_boolean_and_list_valued_fields_fail_closed(self):
         self.authorize()
         self.mutate_file(lambda payload: payload.__setitem__("schema", True))
@@ -128,14 +137,15 @@ class DeliveryIncrementSchemaTests(IncrementFixture):
         with self.assertRaises(IncrementError):
             self.store.list()
 
+        valid_store = DeliveryIncrementStore(self.root / "valid-project-filter.json")
+        with self.assertRaises(IncrementError):
+            valid_store.list([])
+
         self.store = DeliveryIncrementStore(self.root / "float-schema.json")
         self.store.path.write_text('{"schema": 1.0, "increments": []}')
         self.store.path.chmod(0o600)
         with self.assertRaises(IncrementError):
             self.store.list()
-
-        with self.assertRaises(IncrementError):
-            self.store.list([])
 
     def test_numeric_baseline_and_ambiguous_slack_authority_fail_closed(self):
         _, decision = self.authorize()
