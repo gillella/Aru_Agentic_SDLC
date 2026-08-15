@@ -145,7 +145,7 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
         holders = agent_labels(issue)
         if _needs_human(issue):
             if my_label in holders:
-                _remove_agent_label(issue_id, agent)
+                _rollback_claim(issue_id, agent, "@me", target_status="Backlog")
             print(
                 f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
                 "while the claim was settling.",
@@ -208,7 +208,7 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
     holders = agent_labels(issue)
     if _needs_human(issue):
         if my_label in holders:
-            _remove_agent_label(issue_id, agent)
+            _rollback_claim(issue_id, agent, assignee, target_status="Backlog")
         print(
             f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
             "before claim finalization.",

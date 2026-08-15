@@ -137,7 +137,9 @@ depends-on: #2, #4
 
         run_cmd.side_effect = command_result
 
-        released = fetch_next_issue.reap_stale_claims([stale], 4)
+        current = dict(stale)
+        with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
+            released = fetch_next_issue.reap_stale_claims([stale], 4)
 
         self.assertEqual(released, [8])
         update_status.assert_called_once_with(8, "Ready", require_board=True)
@@ -155,13 +157,45 @@ depends-on: #2, #4
             labels=("agent:agent-a", "status:in-progress", "needs-human"),
         )
         stale["updatedAt"] = old
+        current = dict(stale)
         run_cmd.side_effect = [
             (0, "[]", ""),
             (0, "", ""),
             (0, "", ""),
         ]
 
-        released = fetch_next_issue.reap_stale_claims([stale], 4)
+        with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
+            released = fetch_next_issue.reap_stale_claims([stale], 4)
+
+        self.assertEqual(released, [9])
+        update_status.assert_called_once_with(9, "Backlog", require_board=True)
+
+    @patch.object(fetch_next_issue, "update_status", return_value=True)
+    @patch.object(fetch_next_issue, "run_cmd")
+    def test_reaper_detects_needs_human_label_added_after_stale_snapshot(
+        self, run_cmd, update_status
+    ):
+        old = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        stale = issue(
+            9,
+            "touches: operator/slack-setup\n",
+            labels=("agent:agent-a", "status:in-progress"),
+        )
+        stale["updatedAt"] = old
+        current = issue(
+            9,
+            "touches: operator/slack-setup\n",
+            labels=("agent:agent-a", "status:in-progress", "needs-human"),
+        )
+        current["updatedAt"] = old
+        run_cmd.side_effect = [
+            (0, "[]", ""),
+            (0, "", ""),
+            (0, "", ""),
+        ]
+
+        with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
+            released = fetch_next_issue.reap_stale_claims([stale], 4)
 
         self.assertEqual(released, [9])
         update_status.assert_called_once_with(9, "Backlog", require_board=True)

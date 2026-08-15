@@ -25,6 +25,7 @@ from common import (
     agent_labels,
     claimed_by,
     get_current_branch,
+    get_issue,
     list_open_issues,
     parse_touches,
     run_cmd,
@@ -118,7 +119,8 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
     released = []
     for issue in issues:
         num = issue["number"]
-        if not agent_labels(issue):
+        original_holders = agent_labels(issue)
+        if not original_holders:
             continue
         updated = issue.get("updatedAt")
         if not updated:
@@ -130,7 +132,26 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
         if ts > cutoff or has_open_pr(num) or has_remote_branch(num):
             continue
 
-        target_status = "Backlog" if needs_human(issue.get("labels", [])) else "Ready"
+        current = get_issue(num)
+        if not current:
+            print(f"[WARN] Could not revalidate stale claim on #{num}; claim retained.",
+                  file=sys.stderr)
+            continue
+        current_holders = agent_labels(current)
+        if current_holders != original_holders:
+            print(f"[INFO] Claim holders changed on #{num}; stale snapshot ignored.",
+                  file=sys.stderr)
+            continue
+        current_updated = current.get("updatedAt")
+        if current_updated:
+            try:
+                current_ts = datetime.fromisoformat(current_updated.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if current_ts > cutoff:
+                continue
+
+        target_status = "Backlog" if needs_human(current.get("labels", [])) else "Ready"
         if not update_status(num, target_status, require_board=True):
             print(
                 f"[WARN] Could not synchronize #{num} to {target_status}; claim retained.",
@@ -138,8 +159,22 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
             )
             continue
 
+        after_status = get_issue(num)
+        if not after_status:
+            update_status(num, "In Progress", require_board=True)
+            print(f"[WARN] Could not verify stale-claim status on #{num}; status restored.",
+                  file=sys.stderr)
+            continue
+        if needs_human(after_status.get("labels", [])) and target_status != "Backlog":
+            if not update_status(num, "Backlog", require_board=True):
+                update_status(num, "In Progress", require_board=True)
+                print(f"[WARN] Could not return operator-only #{num} to Backlog; claim retained.",
+                      file=sys.stderr)
+                continue
+            target_status = "Backlog"
+
         cmd = ["gh", "issue", "edit", str(num), "--remove-assignee", "@me"]
-        for lbl in agent_labels(issue):
+        for lbl in original_holders:
             cmd += ["--remove-label", lbl]
         if run_cmd(cmd, check=False)[0] == 0:
             released.append(num)
