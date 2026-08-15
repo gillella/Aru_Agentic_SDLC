@@ -24,9 +24,17 @@ lifecycle, or make product decisions for the operator.
 
 ## Non-Negotiable Rules
 
-1. Discover `grill-aru` from the active skill registry and read its complete
-   `SKILL.md` before beginning. If it is unavailable, stop and report the
-   missing dependency; never recreate its interrogation here.
+1. Resolve `grill-aru` deterministically and read its complete `SKILL.md`
+   before beginning. Prefer the exact path supplied by the active runtime's
+   available-skills registry. If the registry has no entry, check these paths
+   in order: `$ARU_SDLC_HOME/skills/grill-aru/SKILL.md`,
+   `~/.agents/skills/grill-aru/SKILL.md`,
+   `~/.codex/skills/grill-aru/SKILL.md`,
+   `~/.cursor/skills/grill-aru/SKILL.md`, and
+   `~/.claude/skills/grill-aru/SKILL.md`. Do not search arbitrary directories
+   or infer availability from the skill name alone. If none exists, stop and
+   report the missing dependency plus every checked path; never recreate its
+   interrogation here.
 2. During interrogation, follow Grill-Aru exactly, including its rule to ask
    exactly one question per turn. Do not draft the PRD, summarize prematurely,
    or start planning while the interrogation is active.
@@ -49,8 +57,9 @@ lifecycle, or make product decisions for the operator.
 - Capture the raw idea in the operator's words.
 - If a repository is in scope, inspect its current product and technical
   baseline before asking questions.
-- Identify the governed repository and its `ARU_SDLC_HOME` before any eventual
-  publication.
+- Identify the governed repository root, its unambiguous `<owner>/<name>`
+  identity, and its `ARU_SDLC_HOME` before any eventual publication. Fail
+  closed if the root or repository identity cannot be resolved and verified.
 
 ### 2. Run Grill-Aru
 
@@ -99,19 +108,39 @@ mean the epic or any implementation work is `Ready` on the board.
 ### 5. Publish the Approved PRD
 
 Create a GitHub issue from the approved PRD. Direct `gh` is permitted here
-because the framework has no dedicated PRD publication helper:
+because the framework has no dedicated PRD publication helper. First change to
+the governed repository root and verify that the repository identity resolved
+there is the same identity captured in Step 1. The template may live in the
+playbook clone; the epic must live in the governed consumer repository.
+
+Use task-specific variables rather than relying on whichever repository `gh`
+happens to infer from the current directory. Set both values from the verified
+Step 1 context before running the commands:
 
 ```bash
+ARU_GOVERNED_REPO_ROOT="/absolute/path/to/governed/repository"
+ARU_GOVERNED_REPO="owner/name"
+test -d "$ARU_GOVERNED_REPO_ROOT/.git"
+cd "$ARU_GOVERNED_REPO_ROOT"
+test "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" = \
+  "$ARU_GOVERNED_REPO"
 gh issue create \
+  --repo "$ARU_GOVERNED_REPO" \
   --title "prd: <product or capability name>" \
   --label "type:epic" \
   --body-file <approved-prd-file>
 ```
 
-Capture the created issue number, then attach it to the governed board and set
-its initial status using the framework helper:
+Capture the created issue number, remain in `$ARU_GOVERNED_REPO_ROOT`, and
+confirm `gh repo view --json nameWithOwner --jq .nameWithOwner` still matches
+`$ARU_GOVERNED_REPO`. Then attach the issue to that repository's governed board
+and set its initial status using the framework helper, which resolves its
+repository from the current working directory:
 
 ```bash
+cd "$ARU_GOVERNED_REPO_ROOT"
+test "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" = \
+  "$ARU_GOVERNED_REPO"
 python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" \
   --issue <ID> \
   --status Backlog \
