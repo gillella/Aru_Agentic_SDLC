@@ -45,14 +45,81 @@ REPO_CLAIM_RE = re.compile(
     r"verified\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})\b",
     re.IGNORECASE | re.MULTILINE,
 )
-SOURCE_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:"
-    r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
-    r"|[A-Za-z0-9_.-]+\.(?:py|md|toml|ya?ml|json|js|jsx|ts|tsx|swift|go|rs|java|kt|sh|bash|zsh|sql|rb|php|cs|cpp|c|h)"
-    r"|Makefile|Dockerfile|LICENSE"
-    r")(?![A-Za-z0-9_.-])",
-    re.IGNORECASE,
+PATH_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*/?"
+    r"(?![A-Za-z0-9_.-])"
 )
+SOURCE_SUFFIXES = {
+    ".bash",
+    ".c",
+    ".cpp",
+    ".cs",
+    ".go",
+    ".h",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".md",
+    ".php",
+    ".py",
+    ".rb",
+    ".rs",
+    ".sh",
+    ".sql",
+    ".swift",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".yaml",
+    ".yml",
+    ".zsh",
+}
+SOURCE_ROOTS = {
+    ".devcontainer",
+    ".github",
+    "app",
+    "apps",
+    "aru",
+    "cmd",
+    "config",
+    "configs",
+    "docs",
+    "hooks",
+    "include",
+    "internal",
+    "lib",
+    "packages",
+    "prompts",
+    "resources",
+    "scripts",
+    "skills",
+    "src",
+    "templates",
+    "tests",
+}
+SOURCE_BASENAMES = {
+    ".dockerignore",
+    ".gitignore",
+    "AGENTS.md",
+    "BUILD",
+    "CMakeLists.txt",
+    "Dockerfile",
+    "Gemfile",
+    "LICENSE",
+    "Makefile",
+    "Podfile",
+    "README",
+    "WORKSPACE",
+    "go.mod",
+    "go.sum",
+    "package-lock.json",
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+}
+SOURCE_BASENAMES_CASEFOLD = {name.casefold() for name in SOURCE_BASENAMES}
 MAX_ARXIV_BODY = 256 * 1024
 
 Resolver = Callable[[str], Dict[str, Any]]
@@ -193,7 +260,9 @@ def extract_finding_lines(text: str) -> List[str]:
             if in_findings and level <= findings_level:
                 break
             if in_findings:
-                # A nested heading does not end Findings or hide later claims.
+                # Nested headings are content inside Findings. Treat them as
+                # claims so their titles cannot hide facts from validation.
+                claims.append(stripped)
                 continue
         if not in_findings:
             continue
@@ -217,41 +286,51 @@ def source_path_references(line: str) -> List[str]:
     scrubbed = ARXIV_RE.sub("", scrubbed)
     scrubbed = DOI_RE.sub("", scrubbed)
     references: List[str] = []
-    for match in SOURCE_PATH_RE.finditer(scrubbed):
-        path = match.group(0).strip("`'\"()[]{}.,;:")
+    for match in PATH_TOKEN_RE.finditer(scrubbed):
+        path = match.group(0).strip("`'\"()[]{} ,;:").rstrip(".")
         while path.startswith("./"):
             path = path[2:]
-        if path and path not in references:
+        candidate = path.rstrip("/")
+        if not candidate:
+            continue
+        parts = candidate.split("/")
+        basename = parts[-1]
+        suffix = Path(basename).suffix.lower()
+        looks_like_source = (
+            basename.casefold() in SOURCE_BASENAMES_CASEFOLD
+            or suffix in SOURCE_SUFFIXES
+            or (len(parts) > 1 and parts[0].lower() in SOURCE_ROOTS)
+            or (path.endswith("/") and parts[0].lower() in SOURCE_ROOTS)
+        )
+        if looks_like_source and candidate not in references:
+            path = candidate
             references.append(path)
     return references
 
 
-def _extract_section(text: str, title_pattern: str) -> tuple[bool, str]:
+def _extract_sections(text: str, title_pattern: str) -> List[str]:
     heading_re = re.compile(r"^(?P<marks>#{1,6})\s+(?P<title>.+?)\s*$")
     lines = text.splitlines()
-    start: Optional[int] = None
-    level = 0
+    sections: List[str] = []
+    starts: List[tuple[int, int]] = []
     for index, line in enumerate(lines):
         heading = heading_re.match(line.strip())
         if heading and re.fullmatch(title_pattern, heading.group("title"), re.I):
-            start = index + 1
-            level = len(heading.group("marks"))
-            break
-    if start is None:
-        return False, ""
-    end = len(lines)
-    for index in range(start, len(lines)):
-        heading = heading_re.match(lines[index].strip())
-        if heading and len(heading.group("marks")) <= level:
-            end = index
-            break
-    return True, "\n".join(lines[start:end])
+            starts.append((index + 1, len(heading.group("marks"))))
+    for start, level in starts:
+        end = len(lines)
+        for index in range(start, len(lines)):
+            heading = heading_re.match(lines[index].strip())
+            if heading and len(heading.group("marks")) <= level:
+                end = index
+                break
+        sections.append("\n".join(lines[start:end]))
+    return sections
 
 
 def extract_repo_claims(text: str) -> Dict[str, Any]:
-    section_present, section = _extract_section(
-        text, r"repo(?:sitory)?\s+code\s+claims?"
-    )
+    sections = _extract_sections(text, r"repo(?:sitory)?\s+code\s+claims?")
+    section = "\n".join(sections)
     dated = [
         {
             "path": m.group("path").strip("`'\".,;:"),
@@ -280,14 +359,17 @@ def extract_repo_claims(text: str) -> Dict[str, Any]:
         for line in section.splitlines()
     )
     mixed_none_and_entries = explicit_none and bool(dated or missing)
-    missing_acknowledgement = not section_present or (
+    duplicate_sections = len(sections) > 1
+    missing_acknowledgement = not sections or (
         not dated and not missing and not explicit_none
     )
     return {
         "dated": dated,
         "missing_date": missing,
         "invalid_dates": invalid_dates,
-        "section_present": section_present,
+        "section_present": bool(sections),
+        "section_count": len(sections),
+        "duplicate_sections": duplicate_sections,
         "explicit_none": explicit_none,
         "mixed_none_and_entries": mixed_none_and_entries,
         "missing_acknowledgement": missing_acknowledgement,
@@ -596,6 +678,7 @@ def verify_findings(
         repo["missing_date"]
         or repo["invalid_dates"]
         or repo["missing_acknowledgement"]
+        or repo["duplicate_sections"]
         or invalid_repo_finding_dates
         or repo_section_conflict
         or unclassified
@@ -623,6 +706,11 @@ def verify_findings(
             *(
                 ["missing_repo_code_claims_acknowledgement"]
                 if repo["missing_acknowledgement"]
+                else []
+            ),
+            *(
+                ["duplicate_repo_code_claims_sections"]
+                if repo["duplicate_sections"]
                 else []
             ),
             *(f"unclassified_finding:{line}" for line in unclassified),

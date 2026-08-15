@@ -79,13 +79,16 @@ Rules:
 - Every factual claim needs a citation identifier (URL, `arXiv:`, or DOI).
 - Every non-empty Findings line must be one complete numbered/bulleted claim
   beginning with `[external]` or `[repo verified: YYYY-MM-DD]`; continuation
-  prose fails verification rather than inheriting another line's evidence.
+  prose and nested headings fail verification rather than inheriting another
+  line's evidence.
 - Claims about this repository's code **must** use the `repo verified` marker
   and name at least one source path. Every named path must have an exact,
   same-date entry under `Repo code claims`; evidence elsewhere in the artifact
   does not satisfy that contract.
 - An `external` finding must not name a repository/source path. Cite the
   external URL without relabeling repository-code evidence as external.
+- Include exactly one `Repo code claims` section. Duplicate sections fail
+  closed even when their individual entries appear valid.
 - Do not invent citations. Prefer primary sources.
 
 Write the file under `docs/research/issue-<N>-<slug>.md` when `touches:`

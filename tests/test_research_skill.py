@@ -463,7 +463,25 @@ none
         http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
         report = verify_findings(text, http_get=http)
         self.assertFalse(report["ok"])
+        self.assertIn("### Additional findings", report["findings"])
         self.assertIn("AGENTS.md defines the factory.", report["findings"])
+        self.assertTrue(report["unclassified_findings"])
+
+    def test_nested_heading_title_cannot_hide_factual_claim(self):
+        text = """## Findings
+1. [external] Supported fact ([source](https://example.com/a)).
+### AGENTS.md defines the factory
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertFalse(report["ok"])
+        self.assertIn("### AGENTS.md defines the factory", report["findings"])
         self.assertTrue(report["unclassified_findings"])
 
     def test_external_marker_cannot_relabel_source_path_claim(self):
@@ -504,6 +522,39 @@ none
         )
         report = verify_findings(text, http_get=http)
         self.assertTrue(report["ok"], report["errors"])
+
+    def test_source_path_detection_covers_build_files_without_prose_false_positives(self):
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        source_paths = (
+            "BUILD",
+            "WORKSPACE",
+            "Gemfile",
+            "Podfile",
+            "go.mod",
+            "requirements.txt",
+            ".gitignore",
+            "CMakeLists.txt",
+            "README",
+            "src/",
+        )
+        prose = ("CI/CD", "input/output", "and/or", "client/server", "2026/08/14")
+        for value in source_paths + prose:
+            with self.subTest(value=value):
+                text = f"""## Findings
+1. [external] {value} observation ([source](https://example.com/a)).
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+none
+"""
+                report = verify_findings(text, http_get=http)
+                self.assertEqual(
+                    report["ok"],
+                    value in prose,
+                    report["errors"],
+                )
 
     def test_structured_repo_finding_with_date_and_path_passes(self):
         text = """## Findings
@@ -556,6 +607,25 @@ none
         self.assertFalse(report["ok"])
         self.assertEqual(report["repo_claims"]["dated"], [])
         self.assertTrue(report["repo_path_binding_errors"])
+
+    def test_duplicate_repo_claim_sections_fail_closed(self):
+        text = """## Findings
+1. [repo verified: 2026-08-14] AGENTS.md defines the rules ([source](https://example.com/a)).
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+- path: AGENTS.md — verified: 2026-08-14
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["repo_claims"]["section_count"], 2)
+        self.assertIn("duplicate_repo_code_claims_sections", report["errors"])
 
     def test_repo_claims_section_requires_dated_entries_or_none(self):
         text = """## Findings
