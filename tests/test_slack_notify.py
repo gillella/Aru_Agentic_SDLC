@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import os
 import builtins
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -246,6 +247,80 @@ class SlackNotifyTests(unittest.TestCase):
         self.assertEqual(comments, [("issue", 9)])
         self.assertEqual(len(calls), 2)
 
+    def test_notify_alert_retries_failed_github_before_slack(self):
+        comments = []
+        slack = []
+
+        def comment(kind, number, body, repo_dir):
+            comments.append((kind, number))
+            return len(comments) > 1
+
+        def transport(config, text, thread_ts):
+            slack.append(text)
+            return {"ok": True, "ts": "1"}
+
+        event = {
+            "type": "blocked",
+            "agent": "cursor-1",
+            "issue": 181,
+            "text": "dependency unavailable",
+            "project_id": "proj_a",
+        }
+        cache = DedupeCache()
+        first = notify_alert(
+            sample_config(), event, transport=transport, cache=cache, comment=comment
+        )
+        second = notify_alert(
+            sample_config(), event, transport=transport, cache=cache, comment=comment
+        )
+        self.assertFalse(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(comments, [("issue", 181), ("issue", 181)])
+        self.assertEqual(len(slack), 1)
+
+    def test_notify_alert_retries_only_failed_github_target(self):
+        comments = []
+        slack = []
+        issue_attempts = 0
+
+        def comment(kind, number, body, repo_dir):
+            nonlocal issue_attempts
+            comments.append((kind, number))
+            if kind == "issue":
+                issue_attempts += 1
+                return issue_attempts > 1
+            return True
+
+        event = {
+            "type": "blocked",
+            "agent": "cursor-1",
+            "issue": 181,
+            "pr": 201,
+            "text": "dependency unavailable",
+            "project_id": "proj_a",
+        }
+        cache = DedupeCache()
+        first = notify_alert(
+            sample_config(),
+            event,
+            transport=lambda *_a: slack.append("posted") or {"ok": True},
+            cache=cache,
+            comment=comment,
+        )
+        second = notify_alert(
+            sample_config(),
+            event,
+            transport=lambda *_a: slack.append("posted") or {"ok": True},
+            cache=cache,
+            comment=comment,
+        )
+        self.assertFalse(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(
+            comments, [("pr", 201), ("issue", 181), ("issue", 181)]
+        )
+        self.assertEqual(slack, ["posted"])
+
     def test_cli_requires_explicit_project_id(self):
         with self.assertRaises(SystemExit):
             main(["--agent", "codex-1", "--family", "openai", "--event", "state"])
@@ -326,7 +401,7 @@ class SlackNotifyTests(unittest.TestCase):
             raise URLError("down")
 
         result = post_event(
-            sample_config(),
+            sample_config(operator_user_id="U01234567"),
             {"type": "hitl", "agent": "cursor-1", "text": "need decision"},
             transport=transport,
             cache=DedupeCache(),
@@ -361,6 +436,61 @@ class SlackNotifyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "forbidden_event_type")
         self.assertEqual(calls, [])
+
+    def test_allowed_type_rejects_forbidden_payload_content(self):
+        calls = []
+        for body in (
+            "raw diff: +secret",
+            "prompt: do this",
+            "test log: failed",
+            "tokens used: 500",
+        ):
+            result = notify_alert(
+                sample_config(),
+                {
+                    "type": "blocked",
+                    "agent": "cursor-1",
+                    "issue": 181,
+                    "text": body,
+                },
+                transport=lambda *_a: calls.append("slack") or {"ok": True},
+                cache=DedupeCache(),
+                comment=lambda *_a: calls.append("github") or True,
+            )
+            self.assertEqual(result["error"], "invalid_alert")
+        self.assertEqual(calls, [])
+
+    def test_all_formatted_fields_redact_common_credentials(self):
+        secrets = [
+            "github_pat_" + ("A" * 24),
+            "ghp_" + ("B" * 24),
+            "AKIA" + ("C" * 16),
+            "password=" + ("D" * 20),
+            "AWS_SECRET_ACCESS_KEY=" + ("E" * 40),
+        ]
+        posted = []
+        comments = []
+        result = notify_alert(
+            sample_config(),
+            {
+                "type": "blocked",
+                "agent": secrets[0],
+                "family": secrets[1],
+                "repo": secrets[2],
+                "state": secrets[3],
+                "issue": 181,
+                "text": "safe blocker summary " + secrets[4],
+                "project_id": "proj_a",
+            },
+            transport=lambda _c, text, _t: posted.append(text) or {"ok": True},
+            cache=DedupeCache(),
+            comment=lambda _k, _n, body, _r: comments.append(body) or True,
+        )
+        self.assertTrue(result["ok"])
+        combined = "\n".join([*posted, *comments])
+        for secret in secrets:
+            self.assertNotIn(secret, combined)
+        self.assertIn("[redacted]", combined)
 
     def test_waiting_on_formats_peer_and_requires_fields(self):
         with self.assertRaises(ValueError):
@@ -547,6 +677,59 @@ class SlackNotifyTests(unittest.TestCase):
         self.assertTrue(posted)
         self.assertIn("<@U01234567>", posted[0])
 
+    def test_hitl_uses_only_configured_operator_identity(self):
+        posted = []
+        event = {
+            "type": "hitl",
+            "agent": "cursor-1",
+            "issue": 181,
+            "text": "need a decision",
+            "operator_user_id": "U99999999",
+        }
+        result = notify_alert(
+            sample_config(operator_user_id="U01234567"),
+            event,
+            transport=lambda _c, text, _t: posted.append(text) or {"ok": True},
+            cache=DedupeCache(),
+            comment=lambda *_a: True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertIn("<@U01234567>", posted[0])
+        self.assertNotIn("U99999999", posted[0])
+
+        direct = []
+        direct_result = post_event(
+            sample_config(operator_user_id="U01234567"),
+            event,
+            transport=lambda _c, text, _t: direct.append(text) or {"ok": True},
+            cache=DedupeCache(),
+        )
+        self.assertTrue(direct_result["ok"])
+        self.assertIn("<@U01234567>", direct[0])
+        self.assertNotIn("U99999999", direct[0])
+
+    def test_hitl_rejects_missing_or_malformed_configured_operator(self):
+        for operator in ("", "U1", "C01234567", "U0123-456"):
+            event = {
+                "type": "hitl",
+                "agent": "cursor-1",
+                "issue": 181,
+                "text": "need a decision",
+            }
+            result = notify_alert(
+                sample_config(operator_user_id=operator),
+                event,
+                cache=DedupeCache(),
+                comment=lambda *_a: True,
+            )
+            self.assertEqual(result["error"], "invalid_alert")
+            direct = post_event(
+                sample_config(operator_user_id=operator),
+                event,
+                cache=DedupeCache(),
+            )
+            self.assertEqual(direct["error"], "invalid_operator_user_id")
+
     def test_file_dedupe_importerror_fallback_merges_existing(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "dedupe.json"
@@ -581,8 +764,84 @@ class SlackNotifyTests(unittest.TestCase):
             transport=lambda *_a, **_k: {"ok": True, "ts": "1"},
             cache=DedupeCache(),
         )
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertIs(result["github_ok"], False)
+
+    def test_notify_alert_refuses_slack_only_bypass(self):
+        calls = []
+        result = notify_alert(
+            sample_config(),
+            {
+                "type": "blocked",
+                "agent": "cursor-1",
+                "issue": 181,
+                "text": "dependency unavailable",
+            },
+            skip_github=True,
+            transport=lambda *_a: calls.append("slack") or {"ok": True},
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "invalid_alert")
+        self.assertEqual(calls, [])
+
+    def test_slack_failure_audit_persists_and_records_recovery(self):
+        with tempfile.TemporaryDirectory() as raw:
+            audit_path = Path(raw) / "notify-audit.json"
+            calls = []
+
+            def transport(config, text, thread_ts):
+                calls.append(text)
+                if len(calls) == 1:
+                    raise URLError("down")
+                return {"ok": True, "ts": "2"}
+
+            event = {
+                "type": "blocked",
+                "agent": "ghp_" + ("Z" * 24),
+                "issue": 181,
+                "text": "dependency unavailable",
+                "project_id": "proj_a",
+            }
+            cache = DedupeCache()
+            first = notify_alert(
+                sample_config(),
+                event,
+                transport=transport,
+                cache=cache,
+                comment=lambda *_a: True,
+                audit_path=audit_path,
+            )
+            second = notify_alert(
+                sample_config(),
+                event,
+                transport=transport,
+                cache=cache,
+                comment=lambda *_a: True,
+                audit_path=audit_path,
+            )
+            self.assertFalse(first["ok"])
+            self.assertTrue(second["ok"])
+            payload = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["retry_state"] for item in payload["events"]],
+                ["pending_retry", "complete"],
+            )
+            self.assertEqual(
+                [item["outcome"] for item in payload["events"]],
+                ["slack_failed", "delivered"],
+            )
+            self.assertTrue(all("sha256:" in item["dedupe_id"] for item in payload["events"]))
+            self.assertNotIn("ghp_", audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(audit_path.stat().st_mode & 0o777, 0o600)
+
+    def test_ci_remediation_skill_contains_blocked_hitl_alert_contract(self):
+        skill = (ROOT / "skills" / "remediate-ci-failure" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("scripts/slack_notify.py", skill)
+        self.assertIn("--event blocked", skill)
+        self.assertIn("--event hitl", skill)
+        self.assertIn("structured failure audit", skill)
 
     def test_main_warns_when_github_comment_fails(self):
         with tempfile.TemporaryDirectory() as raw:

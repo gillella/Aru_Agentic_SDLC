@@ -91,11 +91,15 @@ python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --text "waiting on depends-on #110"
 ```
 
-An unknown or closed project posts nothing. Slack downtime still returns a
-warning without halting factory work. Deduplication includes `project_id`, so
-identical events from different projects do not suppress one another.
-Alert events also persist dedupe under `~/.aru/slack-notify-dedupe.json` so
-loop heartbeats do not re-post the same blocker after a process restart.
+An unknown or closed project posts nothing. A required GitHub issue/PR comment
+must succeed before Slack is attempted; partial GitHub delivery is tracked per
+target and remains retryable. Slack downtime still returns a warning without
+halting factory work, and writes a secret-safe structured retry record under
+`~/.aru/slack-notify-audit.json`. A later successful retry records recovery.
+Deduplication includes `project_id`, so identical events from different
+projects do not suppress one another. Alert events persist delivery keys under
+`~/.aru/slack-notify-dedupe.json` so the same completed blocker is not re-posted
+after a process restart.
 
 ### Alert events (`blocked`, `waiting-on`, `hitl`)
 
@@ -106,7 +110,7 @@ issue/PR comment with the same facts **before** the Slack message:
 |---|---|---|
 | `blocked` | unresolved `depends-on`, missing product decision, merge/close-out stuck | stamped identity + reason |
 | `waiting-on` | peer holds a claim, review, or overlapping `touches:` path | names `--waiting-on-agent` and the peer issue/PR; never steals the claim |
-| `hitl` | severe merge/close-out failure, exhausted credits, or an unresolvable decision | mentions `<@SLACK_OPERATOR_USER_ID>`; agents still stop per `AGENTS.md` |
+| `hitl` | severe merge/close-out failure, exhausted credits, or an unresolvable decision | mentions only the validated `<@SLACK_OPERATOR_USER_ID>` from configuration; agents still stop per `AGENTS.md` |
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \

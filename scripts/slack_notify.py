@@ -23,8 +23,22 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ENV_PATH = Path.home() / ".aru" / "slack.env"
 DEDUPE_PATH = Path.home() / ".aru" / "slack-notify-dedupe.json"
+AUDIT_PATH = Path.home() / ".aru" / "slack-notify-audit.json"
 SECRET_RE = re.compile(
-    r"(xox[baprs]-[A-Za-z0-9-]{8,}|xapp-[A-Za-z0-9-]{8,}|Bearer\s+\S+)",
+    r"(xox[baprs]-[A-Za-z0-9-]{8,}|xapp-[A-Za-z0-9-]{8,}|Bearer\s+\S+"
+    r"|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}"
+    r"|(?:AKIA|ASIA)[A-Z0-9]{16}"
+    r"|\b(?:password|passwd|api[_-]?key|client[_-]?secret|private[_-]?key"
+    r"|access[_-]?key(?:[_-]?id)?|(?:aws[_-]?)?secret[_-]?access[_-]?key"
+    r"|authorization|secret|token)\s*[:=]\s*[^\s,;]+)",
+    re.IGNORECASE,
+)
+SLACK_USER_RE = re.compile(r"^U[A-Z0-9]{8,}$")
+FORBIDDEN_CONTENT_RE = re.compile(
+    r"(?:\bheartbeat\b|\bdiffs?\b|\bprompts?\b|\btokens?\b|\braw\s+diff\b"
+    r"|\bgit\s+diff\b|\bprompt\s*:"
+    r"|\bsystem\s+prompt\b|\buser\s+prompt\b|\bagent\s+prompt\b"
+    r"|\btest[-_\s]+logs?\b|\btest\s+output\b)",
     re.IGNORECASE,
 )
 ENV_KEYS = (
@@ -62,6 +76,10 @@ class SlackConfig:
     app_token: str = ""
     signing_secret: str = ""
     channel_name: str = "project-aru-code"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def load_slack_env(path: Path = ENV_PATH) -> Dict[str, str]:
@@ -114,6 +132,29 @@ def secrets_from_config(config: SlackConfig) -> list[str]:
     return [value for value in (config.bot_token, config.app_token, config.signing_secret) if value]
 
 
+def sanitize_event(
+    event: Dict[str, Any], secrets: Optional[list[str]] = None
+) -> Dict[str, Any]:
+    """Redact every string-valued field before it reaches either transport."""
+    def clean(value: Any) -> Any:
+        if isinstance(value, str):
+            return redact(value, extra=secrets)
+        if isinstance(value, dict):
+            return {redact(str(key), extra=secrets): clean(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [clean(item) for item in value]
+        return value
+
+    return {redact(str(key), extra=secrets): clean(value) for key, value in event.items()}
+
+
+def _forbidden_content_field(event: Dict[str, Any]) -> str:
+    for key, value in event.items():
+        if isinstance(value, str) and FORBIDDEN_CONTENT_RE.search(value):
+            return key
+    return ""
+
+
 def config_for_project(config: SlackConfig, project: Any) -> SlackConfig:
     """Bind workspace credentials to one registry-controlled destination."""
     if project.slack_team_id != config.team_id:
@@ -128,7 +169,23 @@ def validate_alert_event(event: Dict[str, Any]) -> None:
         raise ValueError(f"forbidden Slack event type: {kind}")
     if kind not in ALERT_TYPES:
         raise ValueError(f"alert type must be one of {sorted(ALERT_TYPES)}; got {kind!r}")
-    if not event.get("agent"):
+    for field in (
+        "agent",
+        "family",
+        "repo",
+        "state",
+        "text",
+        "project_id",
+        "waiting_on_agent",
+        "operator_user_id",
+    ):
+        if field in event and event[field] is not None and not isinstance(event[field], str):
+            raise ValueError(f"alert field {field} must be a string")
+    for field in ("issue", "pr", "waiting_on_issue", "waiting_on_pr"):
+        value = event.get(field)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+            raise ValueError(f"alert field {field} must be a positive integer")
+    if not str(event.get("agent") or "").strip():
         raise ValueError("alert requires agent")
     if kind == "waiting-on":
         if not event.get("waiting_on_agent"):
@@ -137,6 +194,9 @@ def validate_alert_event(event: Dict[str, Any]) -> None:
             raise ValueError("waiting-on requires waiting_on_issue and/or waiting_on_pr")
     if kind == "hitl" and not str(event.get("text") or "").strip():
         raise ValueError("hitl requires decision text")
+    forbidden_field = _forbidden_content_field(event)
+    if forbidden_field:
+        raise ValueError(f"forbidden alert content in {forbidden_field}")
     event["type"] = kind
 
 
@@ -150,6 +210,7 @@ def _peer_ref(event: Dict[str, Any]) -> str:
 
 
 def format_event(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> str:
+    event = sanitize_event(event, secrets)
     kind = event.get("type", "state")
     agent = event.get("agent", "unknown")
     family = event.get("family", "unknown")
@@ -187,6 +248,7 @@ def format_event(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> 
 
 def format_github_alert_comment(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> str:
     """Durable GitHub twin of a Slack alert (no Slack mention markup)."""
+    event = sanitize_event(event, secrets)
     kind = str(event.get("type") or "state")
     body = redact(str(event.get("text") or ""), extra=secrets).strip()
     lines = [
@@ -414,13 +476,25 @@ def post_event(
     kind = str(event.get("type") or "").strip().lower()
     if kind in FORBIDDEN_TYPES:
         return {"ok": False, "error": "forbidden_event_type", "type": kind}
+    stamped = dict(event)
+    stamped["type"] = kind
+    if kind in ALERT_TYPES:
+        try:
+            validate_alert_event(stamped)
+        except ValueError as exc:
+            return {"ok": False, "error": "invalid_alert", "detail": str(exc)}
+    if kind == "hitl":
+        operator = str(config.operator_user_id or "").strip()
+        if not SLACK_USER_RE.fullmatch(operator):
+            return {"ok": False, "error": "invalid_operator_user_id"}
+        # The configured allowlist is authoritative; caller-supplied mention
+        # identities are never trusted.
+        stamped["operator_user_id"] = operator
+    stamped = sanitize_event(stamped, secrets_from_config(config))
     cache = cache if cache is not None else DedupeCache()
-    key = dedupe_key(event)
+    key = dedupe_key(stamped)
     if cache.contains(key):
         return {"ok": True, "deduped": True}
-    stamped = dict(event)
-    if kind == "hitl" and not stamped.get("operator_user_id") and config.operator_user_id:
-        stamped["operator_user_id"] = config.operator_user_id
     text = format_event(stamped, secrets=secrets_from_config(config))
     try:
         result = transport(config, text, thread_ts)
@@ -459,6 +533,58 @@ def alert_github_targets(event: Dict[str, Any]) -> List[Tuple[str, int]]:
     return targets
 
 
+def record_delivery_audit(
+    path: Path,
+    event: Dict[str, Any],
+    key: str,
+    slack: Dict[str, Any],
+    retry_state: str,
+) -> bool:
+    """Append a secret-safe, lock-protected Slack delivery audit record."""
+    safe = sanitize_event(event)
+    record = {
+        "timestamp": _now(),
+        "project_id": safe.get("project_id") or "unrouted",
+        "event_type": safe.get("type") or "unknown",
+        "agent": safe.get("agent") or "unknown",
+        "issue": safe.get("issue"),
+        "pr": safe.get("pr"),
+        "dedupe_id": key,
+        "outcome": "delivered" if slack.get("ok") else "slack_failed",
+        "error_class": redact(str(slack.get("detail") or slack.get("error") or "")),
+        "retry_state": retry_state,
+    }
+
+    def update(payload: Any) -> Dict[str, Any]:
+        events = payload.get("events") if isinstance(payload, dict) else []
+        if not isinstance(events, list):
+            events = []
+        return {"events": [*events[-999:], record]}
+
+    try:
+        from slack_projects import mutate_secure_json
+
+        mutate_secure_json(path, {"events": []}, update)
+        return True
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return False
+
+
+def delivery_retry_pending(path: Path, key: str) -> bool:
+    """Return whether the last recorded delivery for this key needs retry."""
+    try:
+        from slack_projects import read_secure_json
+
+        payload = read_secure_json(path, {"events": []})
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return False
+    events = payload.get("events") if isinstance(payload, dict) else []
+    if not isinstance(events, list):
+        return False
+    matches = [item for item in events if isinstance(item, dict) and item.get("dedupe_id") == key]
+    return bool(matches and matches[-1].get("retry_state") == "pending_retry")
+
+
 def notify_alert(
     config: SlackConfig,
     event: Dict[str, Any],
@@ -468,8 +594,15 @@ def notify_alert(
     comment: CommentFn = default_github_comment,
     repo_dir: str = ".",
     skip_github: bool = False,
+    audit_path: Path = AUDIT_PATH,
 ) -> Dict[str, Any]:
     """GitHub-first factory alert, then Slack. Never raises for Slack failures."""
+    if skip_github:
+        return {
+            "ok": False,
+            "error": "invalid_alert",
+            "detail": "alert delivery requires a durable GitHub comment",
+        }
     try:
         validate_alert_event(event)
     except ValueError as exc:
@@ -477,52 +610,90 @@ def notify_alert(
 
     secrets = secrets_from_config(config)
     stamped = dict(event)
-    if stamped.get("type") == "hitl" and not stamped.get("operator_user_id"):
-        stamped["operator_user_id"] = config.operator_user_id
+    if stamped.get("type") == "hitl":
+        operator = str(config.operator_user_id or "").strip()
+        if not SLACK_USER_RE.fullmatch(operator):
+            return {
+                "ok": False,
+                "error": "invalid_alert",
+                "detail": "configured operator user id is missing or invalid",
+            }
+        stamped["operator_user_id"] = operator
+    stamped = sanitize_event(stamped, secrets)
 
     alert_cache = cache if cache is not None else FileDedupeCache()
     key = dedupe_key(stamped)
-    github_key = f"github:{key}"
-    if alert_cache.contains(key):
+    github_body = format_github_alert_comment(stamped, secrets=secrets)
+    targets = alert_github_targets(stamped)
+    if not targets:
         return {
-            "ok": True,
-            "slack": {"ok": True, "deduped": True},
-            "github_ok": None,
-            "github_body": format_github_alert_comment(stamped, secrets=secrets),
-            "deduped": True,
+            "ok": False,
+            "error": "github_comment_failed",
+            "slack": {"ok": False, "error": "github_comment_failed"},
+            "github_ok": False,
+            "github_body": github_body,
+            "deduped": False,
         }
 
-    github_ok: Optional[bool] = None
-    github_body = format_github_alert_comment(stamped, secrets=secrets)
-    if not skip_github and not alert_cache.contains(github_key):
-        targets = alert_github_targets(stamped)
-        if not targets:
-            github_ok = False
+    github_ok = True
+    github_was_new = False
+    for target_kind, target_number in targets:
+        target_key = f"github:{target_kind}:{target_number}:{key}"
+        if alert_cache.contains(target_key):
+            continue
+        try:
+            delivered = bool(comment(target_kind, target_number, github_body, repo_dir))
+        except (OSError, TypeError, ValueError):
+            delivered = False
+        if delivered:
+            alert_cache.remember(target_key)
+            github_was_new = True
         else:
-            outcomes = []
-            for target_kind, target_number in targets:
-                try:
-                    outcomes.append(
-                        bool(comment(target_kind, target_number, github_body, repo_dir))
-                    )
-                except (OSError, TypeError, ValueError):
-                    outcomes.append(False)
-            github_ok = all(outcomes) if outcomes else None
-            if github_ok:
-                alert_cache.remember(github_key)
+            github_ok = False
 
+    # Slack is discussion only. If any required durable target failed, leave
+    # Slack unsent and every failed GitHub target retryable.
+    if not github_ok:
+        return {
+            "ok": False,
+            "error": "github_comment_failed",
+            "slack": {"ok": False, "error": "github_comment_failed"},
+            "github_ok": False,
+            "github_body": github_body,
+            "deduped": False,
+        }
+
+    retry_was_pending = delivery_retry_pending(audit_path, key)
     slack = post_event(
         config,
         stamped,
         transport=transport,
         cache=alert_cache,
     )
+    audit_ok: Optional[bool] = None
+    if not slack.get("ok"):
+        audit_ok = record_delivery_audit(
+            audit_path,
+            stamped,
+            key,
+            slack,
+            "pending_retry",
+        )
+    elif retry_was_pending and not slack.get("deduped"):
+        audit_ok = record_delivery_audit(
+            audit_path,
+            stamped,
+            key,
+            slack,
+            "complete",
+        )
     return {
         "ok": bool(slack.get("ok")),
         "slack": slack,
-        "github_ok": github_ok,
+        "github_ok": True,
         "github_body": github_body,
-        "deduped": bool(slack.get("deduped")),
+        "deduped": bool(slack.get("deduped")) and not github_was_new,
+        "audit_ok": audit_ok,
     }
 
 
@@ -588,19 +759,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         if result.get("error") == "invalid_alert":
             print(f"[WARN] Slack notify skipped: {result.get('detail')}", file=sys.stderr)
-            return 0
+            return 2
         slack = result.get("slack") or {}
         if result.get("github_ok") is False:
             print("[WARN] Slack alert: durable GitHub comment failed", file=sys.stderr)
+            return 1
         if not result.get("ok"):
             print(f"[WARN] Slack notify failed: {slack.get('error')}", file=sys.stderr)
+            if result.get("audit_ok") is False:
+                print("[WARN] Slack failure audit could not be persisted", file=sys.stderr)
+                return 1
             return 0
         if result.get("deduped"):
             print("deduped")
         else:
             print("posted")
-        if result.get("github_ok") is False:
-            return 1
         return 0
 
     result = post_event(config, event)

@@ -33,6 +33,22 @@ This skill provides a structured failure diagnosis protocol for inspecting and f
 | **Type Compiler Error** | `TypeScript error TS...`, `mypy error`, `compile error` | Correct variable/function type annotations to match schema definitions. |
 | **Missing Dependency / Env** | `ModuleNotFoundError`, `Command not found`, `Missing secret` | Update build manifest / package dependencies or notify maintainer if environment secret is missing. |
 
+#### Blocking and HITL notification
+
+Ordinary actionable CI failures stay in the GitHub remediation loop and do
+not produce Slack noise. If remediation is blocked by an unavailable
+dependency/agent, a missing product decision, exhausted credentials/credits,
+or a severe failure that cannot be resolved safely, invoke
+`scripts/slack_notify.py` with the registry-resolved `--project-id`, the linked
+`--issue`/`--pr`, and `--event blocked` or `--event hitl` as appropriate.
+
+The helper must write its durable GitHub alert comment before posting to
+Slack. For HITL, state only the decision needed; the configured operator
+allowlist supplies the mention. Never include prompts, diffs, tokens, test
+logs, or credential values. Slack failure does not halt GitHub remediation,
+but the helper's structured failure audit must remain available for retry and
+recovery evidence.
+
 ### Step 3: Local Verification & Fix Commit
 1. Reproduce the failure locally inside the branch worktree.
 2. Apply minimal code changes targeting the exact root cause.
