@@ -51,8 +51,11 @@ FORBIDDEN_CONTENT_RE = re.compile(
     r"|\btoken(?:s)?\s*(?:used|remaining|count|:|=)"
     r"|^(?:diff --git\s|---\s+[ab]/|\+\+\+\s+[ab]/|@@\s)"
     r"|^(?:FAILED\s+\S+|FAIL:\s+\S+|ERROR:\s+\S+|Traceback \(most recent call last\):)"
+    r"|^\S+\.py(?:::\S+)+\s+(?:FAILED|ERROR)(?:\s+\[[^\]]+\])?\s*$"
+    r"|^\s*\d+\s+(?:failed|errors?)(?:\s*,|\s+in\s+|\s*$)"
     r"|^(?:ERROR\s+collecting\s+\S+|E\s{2,}.+)"
     r"|\b(?:act as|your task is|follow (?:these|the) instructions)\b"
+    r"|\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?\b"
     r"|^\s*(?:###\s*)?(?:system|developer|user|assistant|instructions)\s*:"
     r"|<\/?(?:system|developer|user|assistant)>"
     r"|={3,}\s*(?:FAILURES|ERRORS)\s*={3,})",
