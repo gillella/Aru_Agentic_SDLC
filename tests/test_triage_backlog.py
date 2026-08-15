@@ -330,6 +330,45 @@ class SplitRecommendationTests(unittest.TestCase):
             ["touches use wildcard top-level area patterns: *"],
         )
 
+    def test_leading_dot_slash_is_normalized_before_area_classification(self):
+        body = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: ./scripts/a.py, ./hooks/b.py",
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(24, "type:chore", body=body)),
+            ["touches span 2 top-level areas: hooks, scripts"],
+        )
+
+    def test_explicit_repository_root_is_inherently_wide(self):
+        for declaration in (".", "./", "/"):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(25, "type:chore", body=body)),
+                    ["touches include the whole repository root"],
+                )
+
+    def test_root_files_share_one_area_but_conflict_with_a_directory_area(self):
+        root_files = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: README.md, pyproject.toml",
+        )
+        root_and_scripts = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: README.md, scripts/tool.py",
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(26, "type:chore", body=root_files)), []
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(27, "type:chore", body=root_and_scripts)),
+            ["touches span 2 top-level areas: <root>, scripts"],
+        )
+
     def test_force_promotes_split_recommended_issue(self):
         wide = issue(12, "type:chore", "status:backlog", body=self.oversized_body())
         with patch("triage_backlog.list_open_issues", return_value=[wide]), \

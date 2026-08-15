@@ -326,22 +326,36 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
     """
     body = issue.get("body") or ""
     criteria_count = len(acceptance_criteria(body))
-    paths = [path.strip("/") for path in parse_touches(body) if path.strip("/")]
-    area_roots = [path.split("/", 1)[0] for path in paths]
-    raw_touches = re.search(
+    touches_match = re.search(
         r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
         body,
         re.IGNORECASE | re.MULTILINE,
     )
-    raw_area_roots = []
-    if raw_touches:
-        raw_area_roots = [
-            path.strip().strip("`").strip("/").split("/", 1)[0]
-            for path in raw_touches.group(1).split(",")
-            if path.strip().strip("`").strip("/")
+    declared_paths = []
+    if touches_match:
+        declared_paths = [
+            path.strip().strip("`")
+            for path in touches_match.group(1).split(",")
+            if path.strip().strip("`")
         ]
+    area_roots = []
+    repository_wide = False
+    for declared_path in declared_paths:
+        path = declared_path.strip()
+        while path.startswith("./"):
+            path = path[2:]
+        if path in {"", ".", "/"}:
+            repository_wide = True
+            continue
+        path = path.lstrip("/").rstrip("/")
+        if not path or path == ".":
+            repository_wide = True
+            continue
+        # Root-level files share one repository-root area. Treating each file
+        # name as an area makes README.md + pyproject.toml look cross-cutting.
+        area_roots.append(path.split("/", 1)[0] if "/" in path else "<root>")
     wildcard_roots = sorted({
-        root for root in raw_area_roots if any(char in root for char in "*?[")
+        root for root in area_roots if any(char in root for char in "*?[")
     })
     areas = sorted({
         root for root in area_roots if not any(char in root for char in "*?[")
@@ -352,6 +366,8 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
             f"{criteria_count} acceptance criteria exceed the threshold of "
             f"{SPLIT_ACCEPTANCE_CRITERIA_THRESHOLD}"
         )
+    if repository_wide:
+        reasons.append("touches include the whole repository root")
     if len(areas) > 1:
         reasons.append(f"touches span {len(areas)} top-level areas: {', '.join(areas)}")
     if wildcard_roots:

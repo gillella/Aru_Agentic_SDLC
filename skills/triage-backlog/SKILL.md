@@ -50,9 +50,12 @@ recommendation. The script flags either visible oversize signal: more than 8
 acceptance-criteria checkboxes **or** `touches:` paths spanning more than one
 top-level area. A wildcard-bearing first component such as `**/*.py` or
 `*/config.yml` is inherently wide because it can match multiple top-level
-areas. The output prints the observed checkbox count, area names, or wildcard
-roots so the scope can be decomposed deliberately. Epics remain blocked by the
-Ready contract rather than entering this overrideable recommendation path.
+areas. Leading `./` is normalized, root-level files share one `<root>` area,
+and an explicit whole-repository declaration (`.`, `./`, or `/`) is always
+held for splitting. The output prints the observed checkbox count, area names,
+or wildcard roots so the scope can be decomposed deliberately. Epics remain
+blocked by the Ready contract rather than entering this overrideable
+recommendation path.
 
 ## Step 3: Judge readiness beyond the contract
 
