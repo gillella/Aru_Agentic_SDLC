@@ -1463,10 +1463,10 @@ def main():
             return EXIT_BLOCKED
 
     if is_merged(pr):
-        print(f"=== Merge execution — PR #{args.pr}: already merged; resuming close-out ===")
         final_pr = pr
         if args.dry_run:
             if args.json:
+                # JSON mode must emit only a parseable document on stdout.
                 print(json.dumps({
                     "pr": args.pr,
                     "title": pr.get("title") or "",
@@ -1476,8 +1476,10 @@ def main():
                     "already_merged": True,
                 }))
             else:
+                print(f"=== Merge execution — PR #{args.pr}: already merged; resuming close-out ===")
                 print("No mutations performed in --dry-run mode.")
             return EXIT_OK
+        print(f"=== Merge execution — PR #{args.pr}: already merged; resuming close-out ===")
     else:
         issue_bodies = {}
         for num in issue_nums:

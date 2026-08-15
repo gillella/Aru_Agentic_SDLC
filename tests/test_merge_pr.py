@@ -1784,3 +1784,25 @@ class DryRunJsonTests(unittest.TestCase):
         printed = " ".join(str(c.args[0]) for c in printer.call_args_list if c.args)
         self.assertIn('"first_blocking": "review"', printed)
         self.assertIn('"ok": false', printed)
+
+    def test_already_merged_dry_run_json_is_pure_json(self):
+        pr = {
+            "number": 9,
+            "title": "feat",
+            "body": "Closes #1",
+            "state": "MERGED",
+            "mergedAt": "2026-01-01T00:00:00Z",
+            "headRefOid": "abc",
+            "labels": [],
+        }
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9", "--dry-run", "--json"]), \
+             patch.object(merge_pr, "fetch_pr", return_value=pr), \
+             patch.object(merge_pr, "is_merged", return_value=True), \
+             patch("builtins.print") as printer:
+            code = merge_pr.main()
+        self.assertEqual(code, merge_pr.EXIT_OK)
+        printed = [str(c.args[0]) for c in printer.call_args_list if c.args]
+        self.assertEqual(len(printed), 1)
+        payload = __import__("json").loads(printed[0])
+        self.assertTrue(payload["already_merged"])
+        self.assertTrue(payload["ok"])

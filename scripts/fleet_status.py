@@ -817,8 +817,10 @@ def evaluate_queue_row(
                 "unresolved_threads": 0,
             }
 
-    evidence = review_evidence_fn(number) or {}
-    if evidence.get("error"):
+    evidence = review_evidence_fn(number)
+    # None means the GraphQL/auth query failed — fail closed for this row.
+    # Do not coerce to {} or check_reviews will KeyError on missing keys.
+    if evidence is None or evidence.get("error"):
         unresolved = 0
         ok = False
         gates = [("review", False, "Could not determine review-thread state; refusing rather than guessing.")]
@@ -855,10 +857,27 @@ def build_merge_queue(
     prs: Optional[List[Dict[str, Any]]] = None,
     *,
     evaluate_row_fn=None,
+    list_prs_fn=None,
 ) -> Dict[str, Any]:
-    """Build the merge-queue payload for every open PR (read-only)."""
+    """Build the merge-queue payload for every open PR (read-only).
+
+    When ``prs`` is omitted and the open-PR listing fails, returns
+    ``queue: None`` with an error reason so callers exit non-zero instead of
+    printing a false empty-queue all-clear.
+    """
     rows_fn = evaluate_row_fn or evaluate_queue_row
-    open_prs = prs if prs is not None else (list_open_prs_details() or [])
+    if prs is not None:
+        open_prs = prs
+    else:
+        listed = (list_prs_fn or list_open_prs_details)()
+        if listed is None:
+            return {
+                "queue": None,
+                "open_prs_count": 0,
+                "mergeable_count": 0,
+                "error": "Could not list open pull requests.",
+            }
+        open_prs = listed
     rows = [rows_fn(pr) for pr in open_prs]
     return {
         "queue": rows,
@@ -1158,18 +1177,35 @@ def main():
     args = parser.parse_args()
 
     if args.queue or args.queue_json:
+        try:
+            target = os.path.abspath(args.repo_dir)
+        except (OSError, TypeError, ValueError) as exc:
+            print(f"[ERROR] Could not resolve repository directory '{args.repo_dir}': {exc}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+        if not os.path.isdir(target):
+            print(f"[ERROR] Repository directory does not exist: {target}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
         previous = os.getcwd()
         try:
-            os.chdir(args.repo_dir)
+            os.chdir(target)
             queue = build_merge_queue()
+        except OSError as exc:
+            print(f"[ERROR] Could not access repository directory '{target}': {exc}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
         finally:
             os.chdir(previous)
+        if queue.get("queue") is None:
+            reason = queue.get("error") or "Could not build merge queue."
+            if args.queue_json or args.json:
+                print(json.dumps(queue, indent=2))
+            else:
+                print(f"[ERROR] {reason}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
         if args.queue_json or args.json:
             print(json.dumps(queue, indent=2))
         else:
             print(format_merge_queue(queue))
-        # Queue is informational; exit 0 unless the listing itself failed open.
-        sys.exit(EXIT_COMPLETE if queue.get("queue") is not None else EXIT_ERROR)
+        sys.exit(EXIT_COMPLETE)
 
     status = evaluate_fleet_status(
         args.repo_dir,

@@ -1005,6 +1005,27 @@ class MergeQueueViewTests(unittest.TestCase):
         execute_merge.assert_not_called()
         merge_main.assert_not_called()
 
+    def test_unavailable_review_evidence_fails_closed_without_keyerror(self):
+        pr = self._full_pr(30, "author:agent-a")
+        row = evaluate_queue_row(
+            pr,
+            fetch_pr_fn=lambda _n: pr,
+            linked_issues_fn=lambda _body: [1],
+            issue_body_fn=lambda _n: "- [x] done",
+            review_evidence_fn=lambda _n: None,
+            evaluate_dod_fn=lambda *_a, **_k: (_ for _ in ()).throw(
+                AssertionError("evaluate_dod must not run when evidence is unavailable")
+            ),
+        )
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["first_blocking"], "review")
+        self.assertEqual(row["next_action"], "review")
+
+    def test_open_pr_list_failure_does_not_look_empty(self):
+        payload = build_merge_queue(list_prs_fn=lambda: None)
+        self.assertIsNone(payload["queue"])
+        self.assertIn("error", payload)
+
 
 if __name__ == "__main__":
     unittest.main()
