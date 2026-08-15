@@ -2009,6 +2009,9 @@ class AgentCommitTrailerTests(unittest.TestCase):
         with patch.dict(os.environ, {"ARU_AGENT": "agent-gamma"}, clear=True):
             self.assertEqual(common.get_agent_id(), "agent-gamma")
 
+        with patch.dict(os.environ, {"AGENT": "agent-delta"}, clear=True):
+            self.assertEqual(common.get_agent_id(), "agent-delta")
+
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(common.get_agent_id())
 

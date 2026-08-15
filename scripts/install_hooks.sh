@@ -26,15 +26,19 @@ HOOK_SRC="$ARU_SDLC_HOME/hooks"
 
 cd "$TARGET"
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "$TARGET is not a git repo" >&2; exit 1; }
-# --git-common-dir points at the shared .git even from inside a worktree, so
-# hooks install once and apply to every worktree of the clone.
-GIT_DIR="$(git rev-parse --git-common-dir)"
-case "$GIT_DIR" in /*) ;; *) GIT_DIR="$TARGET/$GIT_DIR" ;; esac
+# --git-path hooks derives the effective hooks path (respecting core.hooksPath)
+# across primary checkouts and worktrees.
+HOOKS_DIR="$(git rev-parse --git-path hooks)"
+case "$HOOKS_DIR" in /*) ;; *) HOOKS_DIR="$TARGET/$HOOKS_DIR" ;; esac
 
 if [ "$CHECK_ONLY" = "1" ]; then
   echo "repo:       $TARGET"
-  if [ -x "$GIT_DIR/hooks/pre-push" ]; then echo "pre-push:   installed"; else echo "pre-push:   MISSING"; fi
-  if [ -x "$GIT_DIR/hooks/prepare-commit-msg" ]; then echo "prepare-commit-msg: installed"; else echo "prepare-commit-msg: MISSING"; fi
+  if [ -x "$HOOKS_DIR/pre-push" ]; then echo "pre-push:   installed"; else echo "pre-push:   MISSING"; fi
+  if [ -x "$HOOKS_DIR/prepare-commit-msg" ] && grep -q "Aru_Agentic_SDLC prepare-commit-msg" "$HOOKS_DIR/prepare-commit-msg" 2>/dev/null; then
+    echo "prepare-commit-msg: installed"
+  else
+    echo "prepare-commit-msg: MISSING"
+  fi
   if grep -q enforce_touches .claude/settings.json 2>/dev/null; then
     echo "PreToolUse: installed"
   else
@@ -43,15 +47,15 @@ if [ "$CHECK_ONLY" = "1" ]; then
   exit 0
 fi
 
-mkdir -p "$GIT_DIR/hooks"
-EXISTING="$GIT_DIR/hooks/pre-push"
+mkdir -p "$HOOKS_DIR"
+EXISTING="$HOOKS_DIR/pre-push"
 
 # Never clobber an existing hook. A repo's pre-push may already run tests,
 # secret scanning, or policy checks, and silently deleting those while
 # installing "enforcement" would remove more protection than it adds. The
 # Claude settings are merged rather than overwritten for the same reason.
 if [ -f "$EXISTING" ] && ! grep -q "Aru_Agentic_SDLC pre-push" "$EXISTING" 2>/dev/null; then
-  PRESERVED="$GIT_DIR/hooks/pre-push.pre-aru"
+  PRESERVED="$HOOKS_DIR/pre-push.pre-aru"
   if [ ! -f "$PRESERVED" ]; then
     mv "$EXISTING" "$PRESERVED"
     chmod +x "$PRESERVED"
@@ -67,16 +71,21 @@ else
   echo "✅ pre-push hook installed at $EXISTING"
 fi
 
-EXISTING_MSG="$GIT_DIR/hooks/prepare-commit-msg"
+EXISTING_MSG="$HOOKS_DIR/prepare-commit-msg"
 if [ -f "$EXISTING_MSG" ] && ! grep -q "Aru_Agentic_SDLC prepare-commit-msg" "$EXISTING_MSG" 2>/dev/null; then
-  PRESERVED="$GIT_DIR/hooks/prepare-commit-msg.pre-aru"
-  if [ ! -f "$PRESERVED" ]; then
-    mv "$EXISTING_MSG" "$PRESERVED"
-    chmod +x "$PRESERVED"
+  PRESERVED="$HOOKS_DIR/prepare-commit-msg.pre-aru"
+  if [ -f "$PRESERVED" ]; then
+    COUNTER=1
+    while [ -f "$HOOKS_DIR/prepare-commit-msg.pre-aru.$COUNTER" ]; do
+      COUNTER=$((COUNTER + 1))
+    done
+    PRESERVED="$HOOKS_DIR/prepare-commit-msg.pre-aru.$COUNTER"
   fi
+  mv "$EXISTING_MSG" "$PRESERVED"
+  chmod +x "$PRESERVED"
   cp "$HOOK_SRC/prepare-commit-msg" "$EXISTING_MSG"
   chmod +x "$EXISTING_MSG"
-  echo "✅ prepare-commit-msg installed; the previous hook was preserved as prepare-commit-msg.pre-aru and is chained after it"
+  echo "✅ prepare-commit-msg installed; the previous hook was preserved as $(basename "$PRESERVED") and is chained after it"
 else
   cp "$HOOK_SRC/prepare-commit-msg" "$EXISTING_MSG"
   chmod +x "$EXISTING_MSG"

@@ -5,15 +5,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SDLC_HOME="${ARU_SDLC_HOME:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 
+PRIOR="$(dirname "$0")/prepare-commit-msg.pre-aru"
+if [ -x "$PRIOR" ]; then
+  "$PRIOR" "$@" || exit $?
+fi
+
 if [ -f "${SDLC_HOME}/hooks/prepare_commit_msg.py" ]; then
   python3 "${SDLC_HOME}/hooks/prepare_commit_msg.py" "$@" || true
 elif [ -f "${SCRIPT_DIR}/prepare_commit_msg.py" ]; then
   python3 "${SCRIPT_DIR}/prepare_commit_msg.py" "$@" || true
-fi
-
-PRIOR="$(dirname "$0")/prepare-commit-msg.pre-aru"
-if [ -x "$PRIOR" ]; then
-  "$PRIOR" "$@" || exit $?
 fi
 
 exit 0
