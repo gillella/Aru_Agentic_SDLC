@@ -1013,7 +1013,14 @@ def initial_commit(target_dir: str, project_name: str) -> bool:
         "Scaffolds directory layout, AGENTS.md governance, CI pipeline, and\n"
         "issue/PR templates. Baseline commit prior to any tracked issue work."
     )
-    code, _, err = run_cmd(["git", "commit", "-m", msg], cwd=target_dir, check=False)
+    # Fresh scaffolds are short-lived in tests and automation. Disable Git's
+    # detached auto-gc for this commit so background object packing cannot
+    # outlive the command and race immediate worktree cleanup.
+    code, _, err = run_cmd(
+        ["git", "-c", "gc.auto=0", "commit", "-m", msg],
+        cwd=target_dir,
+        check=False,
+    )
     if code == 0:
         print("✅ Initial commit created.")
         return True
@@ -1035,7 +1042,14 @@ def commit_project_template_link(target_dir: str, project_ref: str) -> bool:
     if not ensure_git_identity(target_dir):
         return False
     code, _, err = run_cmd(
-        ["git", "commit", "-m", "chore: link issue forms to project board"],
+        [
+            "git",
+            "-c",
+            "gc.auto=0",
+            "commit",
+            "-m",
+            "chore: link issue forms to project board",
+        ],
         cwd=target_dir,
         check=False,
     )
