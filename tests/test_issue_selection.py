@@ -73,6 +73,37 @@ depends-on: #2, #4
         self.assertEqual(result["not_ready"], [4])
         self.assertEqual(result["missing_touches"], [5])
 
+    def test_ready_needs_human_issue_is_not_a_candidate(self):
+        issues = [
+            issue(
+                1,
+                "touches: operator/slack-setup\n",
+                labels=("status:ready", "needs-human"),
+            ),
+            issue(2, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        result = build_candidates(issues, "agent-a")
+
+        self.assertEqual([item["number"] for item in result["candidates"]], [2])
+        self.assertEqual(result["operator_only"], [1])
+
+    def test_claimed_needs_human_issue_is_not_resumable(self):
+        issues = [
+            issue(
+                1,
+                "touches: operator/slack-setup\n",
+                labels=("status:in-progress", "agent:agent-a", "needs-human"),
+            ),
+            issue(2, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        result = build_candidates(issues, "agent-a")
+
+        self.assertIsNone(result["my_in_flight"])
+        self.assertEqual([item["number"] for item in result["candidates"]], [2])
+        self.assertEqual(result["operator_only"], [1])
+
     @patch.object(fetch_next_issue, "update_status", return_value=True)
     @patch.object(fetch_next_issue, "run_cmd")
     def test_reaper_synchronizes_board_before_removing_claim(self, run_cmd, update_status):

@@ -458,7 +458,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
                 "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
                 "escalated_prs": [], "claimable_issues": [],
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
-                "missing_touches": []}
+                "missing_touches": [], "operator_only_issues": []}
 
     unreadable_threads = [
         pr["number"] for pr in prs if review_thread_count(pr) is None
@@ -472,7 +472,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
                 "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
                 "escalated_prs": [], "claimable_issues": [],
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
-                "missing_touches": []}
+                "missing_touches": [], "operator_only_issues": []}
 
     # 1. Finish what I started.
     mine = [p for p in prs if needs_my_attention(p, agent)]
@@ -562,6 +562,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         "blocked_by_dependencies": parts["blocked"],
         "blocked_by_file_conflict": parts["conflicted"],
         "missing_touches": parts["missing_touches"],
+        "operator_only_issues": parts.get("operator_only", []),
     }
 
 

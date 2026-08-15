@@ -103,6 +103,16 @@ class ProjectBootstrapTests(unittest.TestCase):
         names = [name for name, _, _ in init_project.GOVERNANCE_LABELS]
         self.assertIn("type:research", names)
 
+    def test_governance_labels_include_needs_human(self):
+        labels = {
+            name: description
+            for name, _color, description in init_project.GOVERNANCE_LABELS
+        }
+        self.assertEqual(
+            labels["needs-human"],
+            "Operator must complete; factory agents must not claim",
+        )
+
     def test_documented_private_flag_is_accepted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env = os.environ.copy()

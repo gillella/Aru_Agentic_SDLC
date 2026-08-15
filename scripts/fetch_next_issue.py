@@ -57,6 +57,11 @@ def is_epic(labels: List[Dict[str, Any]]) -> bool:
     return "type:epic" in [label.get("name", "").lower() for label in labels]
 
 
+def needs_human(labels: List[Dict[str, Any]]) -> bool:
+    """Operator-only issues are visible board work, never factory work."""
+    return "needs-human" in [label.get("name", "").lower() for label in labels]
+
+
 def is_parallel_eligible(body: str, labels: List[Dict[str, Any]]) -> bool:
     """Checks if issue is flagged as parallel-eligible."""
     names = [label.get("name", "").lower() for label in labels]
@@ -156,7 +161,10 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
     my_in_flight_issues: List[Dict[str, Any]] = []
 
     for issue in issues:
-        names = {label.get("name", "").lower() for label in issue.get("labels", [])}
+        labels = issue.get("labels", [])
+        if needs_human(labels):
+            continue
+        names = {label.get("name", "").lower() for label in labels}
         holder = claimed_by(issue)
         if holder or "status:in-progress" in names or "status:in-review" in names:
             in_flight_paths.extend(parse_touches(issue.get("body") or ""))
@@ -165,6 +173,7 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
                 my_in_flight_issues.append(issue)
 
     candidates, blocked, conflicted, not_ready, missing_touches = [], [], [], [], []
+    operator_only = []
 
     for issue in issues:
         num = issue["number"]
@@ -172,6 +181,9 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
         labels = issue.get("labels", [])
         names = {label.get("name", "").lower() for label in labels}
 
+        if needs_human(labels):
+            operator_only.append(num)
+            continue
         if is_epic(labels):
             continue
         if claimed_by(issue) or "status:in-progress" in names or "status:in-review" in names:
@@ -203,6 +215,7 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
         "conflicted": conflicted,
         "not_ready": not_ready,
         "missing_touches": missing_touches,
+        "operator_only": operator_only,
         "my_in_flight": min(my_in_flight_issues, key=lambda x: x["number"])
         if my_in_flight_issues else None,
     }

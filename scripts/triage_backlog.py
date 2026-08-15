@@ -38,7 +38,7 @@ from common import (
     parse_touches,
     touches_conflict,
 )
-from fetch_next_issue import is_epic, parse_dependencies
+from fetch_next_issue import is_epic, needs_human, parse_dependencies
 from update_issue_status import update_status
 
 
@@ -273,6 +273,10 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str
     body = issue.get("body") or ""
     num = issue.get("number", 0)
     gaps = []
+
+    if needs_human(issue.get("labels", [])):
+        gaps.append("needs-human (operator-only; factory agents must not claim)")
+        return gaps
 
     if is_epic(issue.get("labels", [])):
         gaps.append("is an epic (never directly implementable)")

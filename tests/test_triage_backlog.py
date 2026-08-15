@@ -244,6 +244,30 @@ parallel-eligible: true
         self.assertEqual(len(gaps), 1)
         self.assertIn("epic", gaps[0])
 
+    def test_needs_human_issue_is_never_promoted(self):
+        operator_issue = issue(
+            14,
+            "type:chore",
+            "status:backlog",
+            "needs-human",
+            body=READY_BODY,
+        )
+        gaps = tb.ready_gaps(operator_issue, set())
+        self.assertEqual(
+            gaps,
+            ["needs-human (operator-only; factory agents must not claim)"],
+        )
+
+        for force in (False, True):
+            argv = ["triage_backlog.py", "--promote"]
+            if force:
+                argv.append("--force")
+            with patch("triage_backlog.list_open_issues", return_value=[operator_issue]), \
+                 patch("triage_backlog.update_status") as update, \
+                 patch("sys.argv", argv):
+                self.assertEqual(tb.main(), 0)
+            update.assert_not_called()
+
     def test_main_refusal_emits_example_conforming_issue(self):
         issues_list = [issue(200, "type:feat", "status:backlog", body=READY_BODY)]
         with patch("triage_backlog.list_open_issues", return_value=issues_list), \
