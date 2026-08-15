@@ -116,7 +116,7 @@ issue/PR comment with the same facts **before** the Slack message:
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id proj_... \
   --agent cursor-1 --family other \
-  --event waiting-on --issue 181 \
+  --event waiting-on --repo gillella/Aru_Agentic_SDLC --issue 181 \
   --waiting-on-agent claude-1 --waiting-on-issue 163 \
   --repo-dir . \
   --text "path conflict on scripts/merge_pr.py"
@@ -124,7 +124,7 @@ python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id proj_... \
   --agent cursor-1 --family other \
-  --event hitl --pr 170 \
+  --event hitl --repo gillella/Aru_Agentic_SDLC --pr 170 \
   --repo-dir . \
   --decision "merge close-out failed after retries; need operator recovery"
 ```

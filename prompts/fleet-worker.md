@@ -302,7 +302,7 @@ tick. Slack downtime must not stop the GitHub loop.
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id <PROJECT_ID> \
   --agent <AGENT_ID> --family <FAMILY> \
-  --event blocked --issue <N> \
+  --event blocked --repo <OWNER/REPO> --issue <N> \
   --repo-dir . \
   --text "blocked: <concrete reason>"
 
@@ -310,7 +310,7 @@ python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id <PROJECT_ID> \
   --agent <AGENT_ID> --family <FAMILY> \
-  --event waiting-on --issue <N> \
+  --event waiting-on --repo <OWNER/REPO> --issue <N> \
   --waiting-on-agent <PEER_ID> --waiting-on-issue <PEER_ISSUE> \
   --repo-dir . \
   --text "waiting on peer claim; not stealing it"
@@ -319,7 +319,7 @@ python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id <PROJECT_ID> \
   --agent <AGENT_ID> --family <FAMILY> \
-  --event hitl --issue <N> --pr <PR> \
+  --event hitl --repo <OWNER/REPO> --issue <N> --pr <PR> \
   --repo-dir . \
   --decision "<exact decision needed>"
 ```

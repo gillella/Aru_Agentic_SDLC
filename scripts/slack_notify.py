@@ -26,20 +26,33 @@ DEDUPE_PATH = Path.home() / ".aru" / "slack-notify-dedupe.json"
 AUDIT_PATH = Path.home() / ".aru" / "slack-notify-audit.json"
 SECRET_RE = re.compile(
     r"(xox[baprs]-[A-Za-z0-9-]{8,}|xapp-[A-Za-z0-9-]{8,}|Bearer\s+\S+"
+    r"|Authorization\s*:\s*(?:Basic|Bearer)\s+\S+"
     r"|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}"
     r"|(?:AKIA|ASIA)[A-Z0-9]{16}"
+    r"|https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"
+    r"|[?&](?:X-Amz-Signature|sig|signature)=[^&\s]+"
+    r"|-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----.*?"
+    r"-----END(?: [A-Z0-9]+)? PRIVATE KEY-----"
     r"|\b(?:password|passwd|api[_-]?key|client[_-]?secret|private[_-]?key"
     r"|access[_-]?key(?:[_-]?id)?|(?:aws[_-]?)?secret[_-]?access[_-]?key"
     r"|authorization|secret|token)\s*[:=]\s*[^\s,;]+)",
-    re.IGNORECASE,
+    re.IGNORECASE | re.DOTALL,
 )
 SLACK_USER_RE = re.compile(r"^U[A-Z0-9]{8,}$")
+REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SLACK_MENTION_RE = re.compile(
+    r"<(?:@[UW][A-Z0-9]+|![^>]+|#[A-Z0-9]+(?:\|[^>]*)?)>", re.IGNORECASE
+)
 FORBIDDEN_CONTENT_RE = re.compile(
-    r"(?:\bheartbeat\b|\bdiffs?\b|\bprompts?\b|\btokens?\b|\braw\s+diff\b"
-    r"|\bgit\s+diff\b|\bprompt\s*:"
+    r"(?:\bheartbeat\b|\braw\s+diff\b|\bgit\s+diff\b|\bprompt\s*:"
+    r"|\btest[-_\s]+logs?\s*:|\btest\s+output\s*:"
     r"|\bsystem\s+prompt\b|\buser\s+prompt\b|\bagent\s+prompt\b"
-    r"|\btest[-_\s]+logs?\b|\btest\s+output\b)",
-    re.IGNORECASE,
+    r"|\byou\s+are\s+(?:an?\s+)?(?:ai|assistant|coding\s+agent)\b"
+    r"|\btoken(?:s)?\s*(?:used|remaining|count|:|=)"
+    r"|^(?:diff --git\s|---\s+[ab]/|\+\+\+\s+[ab]/|@@\s)"
+    r"|^(?:FAILED\s+\S+|FAIL:\s+\S+|ERROR:\s+\S+|Traceback \(most recent call last\):)"
+    r"|={3,}\s*(?:FAILURES|ERRORS)\s*={3,})",
+    re.IGNORECASE | re.MULTILINE,
 )
 ENV_KEYS = (
     "SLACK_BOT_TOKEN",
@@ -138,7 +151,9 @@ def sanitize_event(
     """Redact every string-valued field before it reaches either transport."""
     def clean(value: Any) -> Any:
         if isinstance(value, str):
-            return redact(value, extra=secrets)
+            return SLACK_MENTION_RE.sub(
+                "[mention removed]", redact(value, extra=secrets)
+            )
         if isinstance(value, dict):
             return {redact(str(key), extra=secrets): clean(item) for key, item in value.items()}
         if isinstance(value, (list, tuple, set)):
@@ -149,10 +164,8 @@ def sanitize_event(
 
 
 def _forbidden_content_field(event: Dict[str, Any]) -> str:
-    for key, value in event.items():
-        if isinstance(value, str) and FORBIDDEN_CONTENT_RE.search(value):
-            return key
-    return ""
+    text = event.get("text")
+    return "text" if isinstance(text, str) and FORBIDDEN_CONTENT_RE.search(text) else ""
 
 
 def config_for_project(config: SlackConfig, project: Any) -> SlackConfig:
@@ -187,6 +200,9 @@ def validate_alert_event(event: Dict[str, Any]) -> None:
             raise ValueError(f"alert field {field} must be a positive integer")
     if not str(event.get("agent") or "").strip():
         raise ValueError("alert requires agent")
+    repo = str(event.get("repo") or "").strip()
+    if not REPO_SLUG_RE.fullmatch(repo):
+        raise ValueError("alert requires authoritative repo as owner/name")
     if kind == "waiting-on":
         if not event.get("waiting_on_agent"):
             raise ValueError("waiting-on requires waiting_on_agent")
@@ -220,10 +236,13 @@ def format_event(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> 
     state = event.get("state", "")
     stamp = event.get("ts") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     ref = []
+    repo_url = f"https://github.com/{repo}" if REPO_SLUG_RE.fullmatch(str(repo)) else ""
     if issue:
-        ref.append(f"issue #{issue}")
+        suffix = f" ({repo_url}/issues/{issue})" if repo_url else ""
+        ref.append(f"issue #{issue}{suffix}")
     if pr:
-        ref.append(f"PR #{pr}")
+        suffix = f" ({repo_url}/pull/{pr})" if repo_url else ""
+        ref.append(f"PR #{pr}{suffix}")
     ref_s = " ".join(ref) if ref else "no GitHub ref"
     body = redact(str(event.get("text") or ""), extra=secrets).strip()
     lines: list[str] = []
@@ -258,10 +277,16 @@ def format_github_alert_comment(event: Dict[str, Any], secrets: Optional[list[st
         f"- family: `{event.get('family', 'unknown')}`",
         f"- project: `{event.get('project_id', '') or 'unrouted'}`",
     ]
+    repo = str(event.get("repo") or "")
+    repo_url = f"https://github.com/{repo}" if REPO_SLUG_RE.fullmatch(repo) else ""
+    if repo_url:
+        lines.append(f"- repository: [{repo}]({repo_url})")
     if event.get("issue"):
-        lines.append(f"- issue: #{event['issue']}")
+        issue = event["issue"]
+        lines.append(f"- issue: [#{issue}]({repo_url}/issues/{issue})" if repo_url else f"- issue: #{issue}")
     if event.get("pr"):
-        lines.append(f"- PR: #{event['pr']}")
+        pr = event["pr"]
+        lines.append(f"- PR: [#{pr}]({repo_url}/pull/{pr})" if repo_url else f"- PR: #{pr}")
     if kind == "waiting-on":
         lines.append(f"- waiting on agent: `{event.get('waiting_on_agent')}`")
         lines.append(f"- peer holds: {_peer_ref(event)}")
@@ -736,7 +761,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "type": args.type,
         "agent": args.agent,
         "family": args.family,
-        "repo": args.repo,
+        "repo": args.repo or project.repo_slug,
         "issue": args.issue,
         "pr": args.pr,
         "state": args.state,

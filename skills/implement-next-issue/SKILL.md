@@ -148,8 +148,8 @@ or other irreversible work from the plan gate.
    complete implementation. After the GitHub comment, notify the Slack control
    room once via
    `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" --project-id <PROJECT_ID>
-   --agent <AGENT_ID> --family <FAMILY> --event blocked --issue <N>
-   --repo-dir . --text "<blocker>"`. Use `--event hitl --decision
+   --agent <AGENT_ID> --family <FAMILY> --event blocked --repo <OWNER/REPO>
+   --issue <N> --repo-dir <CONSUMER_REPO_ROOT> --text "<blocker>"`. Use `--event hitl --decision
    "<decision needed>"` instead when a human decision is required. See
    `prompts/fleet-worker.md` for complete examples.
    Do not post heartbeats or steal another agent's claim.
@@ -157,8 +157,9 @@ or other irreversible work from the plan gate.
    an overlapping `touches:` claim, comment on the issue naming the peer
    `agent:` id and the issue/PR they hold, then
    `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" --project-id <PROJECT_ID>
-   --agent <AGENT_ID> --family <FAMILY> --event waiting-on --issue <N>
-   --waiting-on-agent <id> --waiting-on-issue <peer-issue> --repo-dir .
+   --agent <AGENT_ID> --family <FAMILY> --event waiting-on --repo <OWNER/REPO>
+   --issue <N> --waiting-on-agent <id> --waiting-on-issue <peer-issue>
+   --repo-dir <CONSUMER_REPO_ROOT>
    --text "<wait reason>"`. Release
    or wait; never steal the claim.
 

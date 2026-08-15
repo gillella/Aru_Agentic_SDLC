@@ -38,9 +38,20 @@ This skill provides a structured failure diagnosis protocol for inspecting and f
 Ordinary actionable CI failures stay in the GitHub remediation loop and do
 not produce Slack noise. If remediation is blocked by an unavailable
 dependency/agent, a missing product decision, exhausted credentials/credits,
-or a severe failure that cannot be resolved safely, invoke
-`scripts/slack_notify.py` with the registry-resolved `--project-id`, the linked
-`--issue`/`--pr`, and `--event blocked` or `--event hitl` as appropriate.
+or a severe failure that cannot be resolved safely, use one of these complete
+consumer-repository commands:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id <PROJECT_ID> --agent <AGENT_ID> --family <FAMILY> \
+  --event blocked --repo <OWNER/REPO> --pr <PR_ID> \
+  --repo-dir <CONSUMER_REPO_ROOT> --text "<secret-safe blocker summary>"
+
+python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id <PROJECT_ID> --agent <AGENT_ID> --family <FAMILY> \
+  --event hitl --repo <OWNER/REPO> --pr <PR_ID> \
+  --repo-dir <CONSUMER_REPO_ROOT> --decision "<exact decision needed>"
+```
 
 The helper must write its durable GitHub alert comment before posting to
 Slack. For HITL, state only the decision needed; the configured operator

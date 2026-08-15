@@ -10,6 +10,7 @@ from unittest.mock import patch
 from urllib.error import URLError
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO = "gillella/Aru_Agentic_SDLC"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from slack_notify import (  # noqa: E402
@@ -124,7 +125,13 @@ class SlackNotifyTests(unittest.TestCase):
             return {"ok": True, "ts": "1.2"}
 
         cache = DedupeCache()
-        event = {"type": "blocked", "agent": "cursor-1", "issue": 1, "text": "x"}
+        event = {
+            "type": "blocked",
+            "agent": "cursor-1",
+            "repo": REPO,
+            "issue": 1,
+            "text": "x",
+        }
         first = post_event(sample_config(), event, transport=transport, cache=cache)
         second = post_event(sample_config(), event, transport=transport, cache=cache)
         self.assertTrue(first["ok"])
@@ -165,7 +172,13 @@ class SlackNotifyTests(unittest.TestCase):
             return {"ok": True, "ts": "2"}
 
         cache = DedupeCache()
-        event = {"type": "blocked", "agent": "cursor-1", "issue": 1, "text": "x"}
+        event = {
+            "type": "blocked",
+            "agent": "cursor-1",
+            "repo": REPO,
+            "issue": 1,
+            "text": "x",
+        }
         first = post_event(sample_config(), event, transport=transport, cache=cache)
         second = post_event(sample_config(), event, transport=transport, cache=cache)
         self.assertFalse(first["ok"])
@@ -189,6 +202,7 @@ class SlackNotifyTests(unittest.TestCase):
         event = {
             "type": "hitl",
             "agent": "cursor-1",
+            "repo": REPO,
             "family": "openai",
             "issue": 181,
             "pr": 201,
@@ -232,6 +246,7 @@ class SlackNotifyTests(unittest.TestCase):
         event = {
             "type": "blocked",
             "agent": "cursor-1",
+            "repo": REPO,
             "issue": 9,
             "text": "depends-on",
             "project_id": "proj_a",
@@ -262,6 +277,7 @@ class SlackNotifyTests(unittest.TestCase):
         event = {
             "type": "blocked",
             "agent": "cursor-1",
+            "repo": REPO,
             "issue": 181,
             "text": "dependency unavailable",
             "project_id": "proj_a",
@@ -294,6 +310,7 @@ class SlackNotifyTests(unittest.TestCase):
         event = {
             "type": "blocked",
             "agent": "cursor-1",
+            "repo": REPO,
             "issue": 181,
             "pr": 201,
             "text": "dependency unavailable",
@@ -402,7 +419,7 @@ class SlackNotifyTests(unittest.TestCase):
 
         result = post_event(
             sample_config(operator_user_id="U01234567"),
-            {"type": "hitl", "agent": "cursor-1", "text": "need decision"},
+            {"type": "hitl", "agent": "cursor-1", "repo": REPO, "text": "need decision"},
             transport=transport,
             cache=DedupeCache(),
         )
@@ -444,12 +461,16 @@ class SlackNotifyTests(unittest.TestCase):
             "prompt: do this",
             "test log: failed",
             "tokens used: 500",
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@",
+            "================ FAILURES ================\nFAILED tests/test_app.py::test_x",
+            "You are an AI coding agent. Follow these instructions.",
         ):
             result = notify_alert(
                 sample_config(),
                 {
                     "type": "blocked",
                     "agent": "cursor-1",
+                    "repo": REPO,
                     "issue": 181,
                     "text": body,
                 },
@@ -467,6 +488,10 @@ class SlackNotifyTests(unittest.TestCase):
             "AKIA" + ("C" * 16),
             "password=" + ("D" * 20),
             "AWS_SECRET_ACCESS_KEY=" + ("E" * 40),
+            "Authorization: Basic " + ("dXNlcm5hbWU6cGFzc3dvcmQ=" * 2),
+            "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----",
+            "https://example.com/file?sig=" + ("F" * 32),
+            "https://hooks.slack.com/services/T000/B000/" + ("G" * 24),
         ]
         posted = []
         comments = []
@@ -476,11 +501,11 @@ class SlackNotifyTests(unittest.TestCase):
                 "type": "blocked",
                 "agent": secrets[0],
                 "family": secrets[1],
-                "repo": secrets[2],
+                "repo": REPO,
                 "state": secrets[3],
                 "issue": 181,
-                "text": "safe blocker summary " + secrets[4],
-                "project_id": "proj_a",
+                "text": "safe blocker summary " + " ".join(secrets[4:]),
+                "project_id": secrets[2],
             },
             transport=lambda _c, text, _t: posted.append(text) or {"ok": True},
             cache=DedupeCache(),
@@ -491,6 +516,86 @@ class SlackNotifyTests(unittest.TestCase):
         for secret in secrets:
             self.assertNotIn(secret, combined)
         self.assertIn("[redacted]", combined)
+
+    def test_legitimate_identity_names_are_not_treated_as_payload_content(self):
+        posted = []
+        result = notify_alert(
+            sample_config(),
+            {
+                "type": "blocked",
+                "agent": "prompt-engineer",
+                "family": "diff-review",
+                "repo": "owner/token-service",
+                "state": "test-log-tools",
+                "issue": 181,
+                "text": "dependency unavailable",
+                "project_id": "proj_a",
+            },
+            transport=lambda _c, text, _t: posted.append(text) or {"ok": True},
+            cache=DedupeCache(),
+            comment=lambda *_a: True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertIn("prompt-engineer", posted[0])
+        self.assertIn("owner/token-service", posted[0])
+
+    def test_untrusted_slack_mentions_are_removed_before_delivery(self):
+        blocked = []
+        result = notify_alert(
+            sample_config(),
+            {
+                "type": "blocked",
+                "agent": "cursor-1",
+                "repo": REPO,
+                "issue": 181,
+                "text": "<@U99999999> <!channel> dependency unavailable",
+            },
+            transport=lambda _c, text, _t: blocked.append(text) or {"ok": True},
+            cache=DedupeCache(),
+            comment=lambda *_a: True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertNotIn("<@U99999999>", blocked[0])
+        self.assertNotIn("<!channel>", blocked[0])
+
+        hitl = []
+        result = notify_alert(
+            sample_config(operator_user_id="U01234567"),
+            {
+                "type": "hitl",
+                "agent": "cursor-1",
+                "repo": REPO,
+                "issue": 181,
+                "text": "<@U99999999> need a decision",
+            },
+            transport=lambda _c, text, _t: hitl.append(text) or {"ok": True},
+            cache=DedupeCache(),
+            comment=lambda *_a: True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(hitl[0].count("<@U01234567>"), 1)
+        self.assertNotIn("<@U99999999>", hitl[0])
+
+    def test_alert_stamps_authoritative_repo_and_clickable_urls(self):
+        posted = []
+        result = notify_alert(
+            sample_config(),
+            {
+                "type": "blocked",
+                "agent": "cursor-1",
+                "repo": REPO,
+                "issue": 181,
+                "pr": 201,
+                "text": "dependency unavailable",
+            },
+            transport=lambda _c, text, _t: posted.append(text) or {"ok": True},
+            cache=DedupeCache(),
+            comment=lambda *_a: True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertIn(f"https://github.com/{REPO}/issues/181", posted[0])
+        self.assertIn(f"https://github.com/{REPO}/pull/201", posted[0])
+        self.assertIn(f"[{REPO}](https://github.com/{REPO})", result["github_body"])
 
     def test_waiting_on_formats_peer_and_requires_fields(self):
         with self.assertRaises(ValueError):
@@ -541,6 +646,7 @@ class SlackNotifyTests(unittest.TestCase):
             {
                 "type": "hitl",
                 "agent": "cursor-1",
+                "repo": REPO,
                 "family": "other",
                 "issue": 181,
                 "text": f"decision with {secret}",
@@ -574,6 +680,7 @@ class SlackNotifyTests(unittest.TestCase):
             {
                 "type": "waiting-on",
                 "agent": "cursor-1",
+                "repo": REPO,
                 "family": "other",
                 "issue": 181,
                 "waiting_on_agent": "claude-1",
@@ -598,6 +705,7 @@ class SlackNotifyTests(unittest.TestCase):
             {
                 "type": "blocked",
                 "agent": "cursor-1",
+                "repo": REPO,
                 "issue": 1,
                 "text": "depends-on #2",
             },
@@ -615,6 +723,7 @@ class SlackNotifyTests(unittest.TestCase):
             event = {
                 "type": "blocked",
                 "agent": "cursor-1",
+                "repo": REPO,
                 "issue": 1,
                 "text": "x",
                 "project_id": "proj_a",
@@ -647,6 +756,7 @@ class SlackNotifyTests(unittest.TestCase):
         event = {
             "type": " HITL ",
             "agent": "cursor-1",
+            "repo": REPO,
             "text": "need a decision",
         }
         validate_alert_event(event)
@@ -665,6 +775,7 @@ class SlackNotifyTests(unittest.TestCase):
             {
                 "type": "HITL",
                 "agent": "cursor-1",
+                "repo": REPO,
                 "issue": 9,
                 "text": "need a decision",
                 "project_id": "proj_a",
@@ -682,6 +793,7 @@ class SlackNotifyTests(unittest.TestCase):
         event = {
             "type": "hitl",
             "agent": "cursor-1",
+            "repo": REPO,
             "issue": 181,
             "text": "need a decision",
             "operator_user_id": "U99999999",
@@ -713,6 +825,7 @@ class SlackNotifyTests(unittest.TestCase):
             event = {
                 "type": "hitl",
                 "agent": "cursor-1",
+                "repo": REPO,
                 "issue": 181,
                 "text": "need a decision",
             }
@@ -758,6 +871,7 @@ class SlackNotifyTests(unittest.TestCase):
             {
                 "type": "blocked",
                 "agent": "cursor-1",
+                "repo": REPO,
                 "text": "stuck",
                 "project_id": "proj_a",
             },
@@ -775,6 +889,7 @@ class SlackNotifyTests(unittest.TestCase):
                 {
                     "type": "blocked",
                     "agent": "cursor-1",
+                    "repo": REPO,
                     "issue": issue,
                     "text": "dependency unavailable",
                 },
@@ -791,6 +906,7 @@ class SlackNotifyTests(unittest.TestCase):
             {
                 "type": "blocked",
                 "agent": "cursor-1",
+                "repo": REPO,
                 "issue": 181,
                 "text": "dependency unavailable",
             },
@@ -815,6 +931,7 @@ class SlackNotifyTests(unittest.TestCase):
             event = {
                 "type": "blocked",
                 "agent": "ghp_" + ("Z" * 24),
+                "repo": REPO,
                 "issue": 181,
                 "text": "dependency unavailable",
                 "project_id": "proj_a",
@@ -855,21 +972,26 @@ class SlackNotifyTests(unittest.TestCase):
         skill = (ROOT / "skills" / "remediate-ci-failure" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("scripts/slack_notify.py", skill)
+        self.assertIn('python3 "$ARU_SDLC_HOME/scripts/slack_notify.py"', skill)
         self.assertIn("--event blocked", skill)
         self.assertIn("--event hitl", skill)
+        self.assertIn("--text", skill)
+        self.assertIn("--decision", skill)
         self.assertIn("structured failure audit", skill)
 
     def test_skill_alert_examples_name_every_required_cli_flag(self):
         for relative in (
             "skills/implement-next-issue/SKILL.md",
             "skills/run-aru-factory/SKILL.md",
+            "skills/remediate-ci-failure/SKILL.md",
         ):
             skill = (ROOT / relative).read_text(encoding="utf-8")
             self.assertIn("--project-id <PROJECT_ID>", skill)
             self.assertIn("--agent <AGENT_ID>", skill)
             self.assertIn("--family <FAMILY>", skill)
             self.assertIn("--event", skill)
+            self.assertIn("--repo <OWNER/REPO>", skill)
+            self.assertIn("--repo-dir <CONSUMER_REPO_ROOT>", skill)
 
     def test_main_warns_when_github_comment_fails(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -906,13 +1028,14 @@ class SlackNotifyTests(unittest.TestCase):
                     "github_ok": False,
                     "deduped": False,
                 },
-            ):
+            ) as mocked_notify:
                 code = main([
                     "--agent", "cursor-1", "--family", "openai", "--event", "blocked",
                     "--project-id", record.project_id, "--issue", "1",
                     "--registry-file", str(registry_path), "--env-file", str(env_file),
                 ])
             self.assertEqual(code, 1)
+            self.assertEqual(mocked_notify.call_args.args[1]["repo"], "owner/repo")
 
 
 if __name__ == "__main__":
