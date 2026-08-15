@@ -383,9 +383,23 @@ sequence.
 | delivery-loop | `github.com/blakemartz/delivery-loop` | Specs-to-merge loop using claims, worktrees, and adversarial review |
 | software-factory | `github.com/deepkawal/software-factory` | Enterprise multi-role pipeline with explicit governance |
 | SWE-agent | `github.com/SWE-agent/SWE-agent` | Agent-computer interface research and SWE-bench implementation |
+| Mini-SWE-Agent | Princeton / Stanford successor to SWE-agent | A deliberately small agent implementation showing that interface simplicity can outperform orchestration complexity |
 | OpenHands Agent Canvas | `github.com/OpenHands/OpenHands` | Self-hosted multi-agent control surface and protocol work |
+| OurArk | Academic agent-owned software-body project | Governed self-evolution in which software changes remain under human custody and merge control |
+| MSEval / LegoGent | Academic multi-agent evaluation project | Comparison of collaboration topologies showing that coordination design rivals model selection |
 | jddelia/agentic-factory | `github.com/jddelia/agentic-factory` | Codex-oriented factory with durable SQLite ledgers |
 | repoach | `github.com/repoachhq/repoach` | Autonomous review-and-merge pipeline focused on the review constraint |
+
+### Adjacent orchestration and platform comparisons
+
+| Project or platform | Relevance and retained conclusion |
+|---|---|
+| CrewAI | Crews and event-driven flows are useful role/task references, but Aru does not need a second orchestrator beside the board |
+| LangGraph | Durable execution and human-interrupt patterns are useful for exception design; adopting its state machine would duplicate board state |
+| Claude Code Agent Teams | Its shared `tasks.md` model is less durable than GitHub Issues and Projects, so Aru keeps the board authoritative |
+| GitHub Spec Kit | Its specify → plan → tasks artifact pattern informs intake without replacing board execution |
+| GitHub Copilot Workspace | Demonstrates GitHub-native issue-to-plan-to-PR flows and supports the platform-as-factory direction |
+| GitHub Models and Copilot Extensions | Demonstrate GitHub's role as an integration surface for models and agent capabilities |
 
 ### Industry guidance retained
 
