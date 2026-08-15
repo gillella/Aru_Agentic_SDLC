@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -13,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import slack_control_room as scr  # noqa: E402
+from delivery_increments import DeliveryIncrementStore  # noqa: E402
 from slack_notify import SlackConfig  # noqa: E402
 from slack_projects import ProjectRegistry  # noqa: E402
 
@@ -65,12 +68,16 @@ class SlackControlRoomTests(unittest.TestCase):
         self.temp.cleanup()
 
     @staticmethod
-    def payload(channel="C01234567", event_id="evt-1", text="status", user="U01234567"):
+    def payload(
+        channel="C01234567", event_id="evt-1", text="status", user="U01234567",
+        ts="1786795200.000001",
+    ):
         return {
             "team": "T01234567",
             "channel": channel,
             "user": user,
             "client_msg_id": event_id,
+            "ts": ts,
             "text": text,
         }
 
@@ -82,6 +89,391 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertEqual(intervention["kind"], "pr")
         self.assertEqual(intervention["ref"], "77")
         self.assertEqual(intervention["decision"], "use option B")
+
+    def test_parse_sprint_commands_are_explicit_and_deterministic(self):
+        sha = "a" * 40
+        authorize = scr.parse_command(
+            f"sprint authorize control #300 issues #12,#10 baseline {sha}"
+        )
+        self.assertEqual(authorize["action"], "authorize")
+        self.assertEqual(authorize["control_issue"], 300)
+        self.assertEqual(authorize["issue_scope"], [10, 12])
+        self.assertEqual(authorize["kind"], "normal")
+        emergency = scr.parse_command(
+            f"sprint authorize control 301 issues 99 baseline {sha} emergency"
+        )
+        self.assertEqual(emergency["kind"], "emergency")
+        self.assertEqual(
+            scr.parse_command("sprint accept inc_0123456789abcdef0123 risk-accepted")[
+                "risk_accepted"
+            ],
+            True,
+        )
+        self.assertEqual(scr.parse_command("sprint do something")["verb"], "sprint-invalid")
+        duplicate = scr.parse_command(
+            f"sprint authorize control #300 issues #10,#10 baseline {sha}"
+        )
+        self.assertEqual(duplicate["verb"], "sprint-invalid")
+        self.assertIn("duplicates", duplicate["decision"])
+        for action in ("start", "authorize-deployment", "deployed", "cancel"):
+            malformed = scr.parse_command(
+                f"sprint {action} inc_0123456789abcdef0123 risk-accepted"
+            )
+            self.assertEqual(malformed["verb"], "sprint-invalid")
+
+    def test_sprint_decision_records_github_before_state_and_dedupes(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        sha = "b" * 40
+        recorded = []
+        replies = []
+
+        def recorder(control, payload, repo_dir):
+            self.assertEqual(store.list(), [])
+            recorded.append((control, payload, repo_dir))
+            return "https://github.com/owner/checkout-a/issues/300#issuecomment-1"
+
+        payload = self.payload(
+            event_id="sprint-authorize-1",
+            text=f"sprint authorize control #300 issues #12,#10 baseline {sha}",
+        )
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry, payload, set(),
+            notify=lambda _config, event: replies.append(event["text"]) or {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: True,
+            record_increment=recorder,
+        )
+        self.assertIn("sprint authorize recorded", reply)
+        self.assertEqual(replies, [reply])
+        self.assertEqual(len(recorded), 1)
+        increment = store.list(self.project_a.project_id)[0]
+        self.assertEqual(increment["issue_scope"], [10, 12])
+
+        duplicate = scr.handle_slack_message(
+            sample_config(), self.registry, payload, set(),
+            notify=lambda *_args: self.fail("duplicate must not notify"),
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: True,
+            record_increment=recorder,
+        )
+        self.assertIsNone(duplicate)
+        self.assertEqual(len(recorded), 1)
+
+    def test_github_record_failure_pauses_without_consuming_retry(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        sha = "c" * 40
+        payload = self.payload(
+            event_id="retryable-sprint",
+            text=f"sprint authorize control #300 issues #10 baseline {sha}",
+        )
+        failed = scr.handle_slack_message(
+            sample_config(), self.registry, payload, set(),
+            notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: True,
+            record_increment=lambda *_args: None,
+        )
+        self.assertIn("GitHub decision record failed", failed)
+        self.assertEqual(store.list(), [])
+        self.assertFalse(self.seen_path.exists())
+
+        retried = scr.handle_slack_message(
+            sample_config(), self.registry, payload, set(),
+            notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: True,
+            record_increment=lambda *_args: (
+                "https://github.com/owner/checkout-a/issues/300#issuecomment-2"
+            ),
+        )
+        self.assertIn("sprint authorize recorded", retried)
+        self.assertEqual(len(store.list()), 1)
+
+    def test_invalid_baseline_pauses_before_github_or_state(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        calls = []
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry,
+            self.payload(
+                event_id="bad-baseline",
+                text=(
+                    "sprint authorize control #300 issues #10 baseline " + "f" * 40
+                ),
+            ),
+            set(), notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: False,
+            record_increment=lambda *args: calls.append(args),
+        )
+        self.assertIn("baseline commit", reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.list(), [])
+        self.assertFalse(self.seen_path.exists())
+
+    def test_corrupt_increment_encoding_pauses_before_github_or_state(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        store.path.write_bytes(b'{"schema": 1, "increments": []}\xff')
+        store.path.chmod(0o600)
+        calls = []
+        original = store.path.read_bytes()
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry,
+            self.payload(
+                event_id="corrupt-registry",
+                text=(
+                    "sprint authorize control #300 issues #10 baseline " + "a" * 40
+                ),
+            ),
+            set(), notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: True,
+            record_increment=lambda *args: calls.append(args),
+        )
+        self.assertIn("sprint decision paused", reply)
+        self.assertIn("cannot read", reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.path.read_bytes(), original)
+        self.assertFalse(self.seen_path.exists())
+
+    def test_baseline_verifier_requires_the_supplied_object_to_be_a_commit(self):
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.checkout_a, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "tests@example.com"],
+            cwd=self.checkout_a, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Aru Tests"],
+            cwd=self.checkout_a, check=True,
+        )
+        (self.checkout_a / "README.md").write_text("baseline\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=self.checkout_a, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "baseline"], cwd=self.checkout_a, check=True)
+        commit_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.checkout_a,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "tag", "-a", "baseline-tag", "-m", "annotated"],
+            cwd=self.checkout_a, check=True,
+        )
+        tag_sha = subprocess.run(
+            ["git", "rev-parse", "baseline-tag^{tag}"], cwd=self.checkout_a,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+
+        self.assertTrue(scr.verify_baseline_commit(str(self.checkout_a), commit_sha))
+        self.assertFalse(scr.verify_baseline_commit(str(self.checkout_a), tag_sha))
+
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=foreign, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "tests@example.com"], cwd=foreign, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Aru Tests"], cwd=foreign, check=True,
+        )
+        (foreign / "foreign.txt").write_text("foreign\n", encoding="utf-8")
+        subprocess.run(["git", "add", "foreign.txt"], cwd=foreign, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "foreign"], cwd=foreign, check=True)
+        foreign_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=foreign,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        git_envs = (
+            {"GIT_DIR": str(foreign / ".git")},
+            {"GIT_OBJECT_DIRECTORY": str(foreign / ".git" / "objects")},
+            {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(foreign / ".git" / "objects")},
+        )
+        for inherited in git_envs:
+            with self.subTest(inherited=inherited), patch.dict(os.environ, inherited):
+                self.assertFalse(
+                    scr.verify_baseline_commit(str(self.checkout_a), foreign_sha)
+                )
+
+        subprocess.run(
+            ["git", "update-ref", f"refs/replace/{tag_sha}", commit_sha],
+            cwd=self.checkout_a, check=True,
+        )
+        self.assertFalse(scr.verify_baseline_commit(str(self.checkout_a), tag_sha))
+
+    def test_concurrent_same_event_creates_one_github_record_and_transition(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        calls = []
+        guard = threading.Lock()
+
+        def recorder(*args):
+            with guard:
+                calls.append(args)
+            time.sleep(0.02)
+            return "https://github.com/owner/checkout-a/issues/300#issuecomment-1"
+
+        payload = self.payload(
+            event_id="concurrent-sprint",
+            text=(
+                "sprint authorize control #300 issues #10 baseline " + "a" * 40
+            ),
+        )
+
+        def deliver():
+            return scr.handle_slack_message(
+                sample_config(), self.registry, payload, set(),
+                notify=lambda *_args: {"ok": True},
+                seen_path=self.seen_path,
+                increment_store=store,
+                baseline_verifier=lambda *_args: True,
+                record_increment=recorder,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            replies = list(executor.map(lambda _index: deliver(), range(2)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(store.list()), 1)
+        self.assertEqual(sum(reply is not None for reply in replies), 1)
+
+    def test_bounded_runner_turns_timeout_into_failure(self):
+        with patch.object(
+            scr.subprocess, "run",
+            side_effect=scr.subprocess.TimeoutExpired(["gh"], 1),
+        ):
+            self.assertEqual(
+                scr._run_bounded(["gh"], cwd=str(self.checkout_a), timeout=1)[0],
+                124,
+            )
+
+    def test_github_decision_comment_is_idempotent_by_event_marker(self):
+        payload = {
+            "decision_id": "proj_alpha|T01234567|C01234567|evt-1",
+            "github_repository": "owner/repo",
+        }
+        marker = hashlib.sha256(payload["decision_id"].encode()).hexdigest()[:20]
+        existing_url = "https://github.com/owner/repo/issues/300#issuecomment-8"
+        existing_payload = dict(payload)
+        existing = json.dumps({
+            "comments": [{
+                "body": (
+                    f"<!-- aru-delivery-decision:v1:{marker} -->\n"
+                    f"```json\n{json.dumps(existing_payload, indent=2, sort_keys=True)}\n```"
+                ),
+                "url": existing_url,
+            }]
+        })
+        with patch.dict(os.environ, {
+            "GH_REPO": "other/repo", "GH_HOST": "example.invalid",
+            "GIT_DIR": str(self.root / "other.git"),
+        }), patch.object(scr, "_run_bounded", return_value=(0, existing, "")) as run:
+            self.assertEqual(
+                scr.github_increment_decision(300, payload, str(self.checkout_a)),
+                existing_url,
+            )
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertIn("--repo", command)
+        self.assertIn("github.com/owner/repo", command)
+        self.assertNotIn("GH_REPO", run.call_args.kwargs["env"])
+        self.assertNotIn("GH_HOST", run.call_args.kwargs["env"])
+        self.assertNotIn("GIT_DIR", run.call_args.kwargs["env"])
+
+        duplicate_payload = (
+            f"<!-- aru-delivery-decision:v1:{marker} -->\n"
+            "```json\n"
+            '{"decision_id":"wrong","decision_id":"proj_alpha|T01234567|C01234567|evt-1",'
+            '"github_repository":"owner/repo"}\n```'
+        )
+        duplicate_marker = (
+            f"<!-- aru-delivery-decision:v1:{marker} -->\n"
+            f"<!-- aru-delivery-decision:v1:{marker} -->\n"
+            f"```json\n{json.dumps(payload)}\n```"
+        )
+        for body in (duplicate_payload, duplicate_marker):
+            response = json.dumps({
+                "comments": [{"body": body, "url": existing_url}],
+            })
+            with self.subTest(body=body), patch.object(
+                scr, "_run_bounded", return_value=(0, response, ""),
+            ):
+                self.assertIsNone(
+                    scr.github_increment_decision(300, payload, str(self.checkout_a))
+                )
+
+        with patch.object(
+            scr, "_run_bounded",
+            side_effect=[
+                (0, '{"comments": []}', ""),
+                (0, "https://github.com/owner/repo/issues/300#issuecomment-9\n", ""),
+            ],
+        ) as run:
+            created = scr.github_increment_decision(300, payload, str(self.checkout_a))
+        self.assertTrue(created.endswith("issuecomment-9"))
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertIn("github.com/owner/repo", call.args[0])
+
+    def test_wrong_operator_cannot_create_sprint_or_github_record(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        calls = []
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry,
+            self.payload(
+                user="U99999999",
+                text=(
+                    "sprint authorize control #300 issues #10 baseline " + "d" * 40
+                ),
+            ),
+            set(),
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: True,
+            record_increment=lambda *args: calls.append(args),
+        )
+        self.assertIsNone(reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.list(), [])
+
+    def test_wrong_project_transition_fails_before_github_record(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        authorize_payload = self.payload(
+            event_id="project-a-auth",
+            text=(
+                "sprint authorize control #300 issues #10 baseline " + "e" * 40
+            ),
+        )
+        authorized = scr.handle_slack_message(
+            sample_config(), self.registry, authorize_payload, set(),
+            notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: True,
+            record_increment=lambda *_args: (
+                "https://github.com/owner/checkout-a/issues/300#issuecomment-1"
+            ),
+        )
+        increment_id = store.list(self.project_a.project_id)[0]["increment_id"]
+        self.assertIn(increment_id, authorized)
+
+        calls = []
+        wrong_project = self.payload(
+            channel="C11111111",
+            event_id="project-b-start",
+            text=f"sprint start {increment_id}",
+        )
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry, wrong_project, set(),
+            notify=lambda *_args: {"ok": True},
+            seen_path=self.root / "project-b-seen.json",
+            increment_store=store,
+            baseline_verifier=lambda *_args: True,
+            record_increment=lambda *args: calls.append(args),
+        )
+        self.assertIn("another project", reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.get(increment_id)["lifecycle_state"], "authorized")
 
     def test_claim_merge_review_verbs_are_refused_without_github_mutation(self):
         for verb in ("claim", "merge", "review"):

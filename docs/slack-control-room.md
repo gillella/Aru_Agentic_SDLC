@@ -178,6 +178,36 @@ Mention the bot and put the verb first:
   copies the decision to the resolved repository through the sanctioned GitHub
   comment path.
 
+### Sprint decisions
+
+Agents can recommend scope, but these commands are accepted only from the
+configured operator in the resolved project channel:
+
+```text
+sprint authorize control #300 issues #180,#205 baseline <full-commit-sha>
+sprint revise <increment-id> issues #180,#205
+sprint start <increment-id>
+sprint accept <increment-id>
+sprint accept <increment-id> risk-accepted
+sprint authorize-deployment <increment-id>
+sprint deployed <increment-id>
+sprint cancel <increment-id>
+```
+
+Append `emergency` to `sprint authorize` to create a separate emergency
+increment. The control issue is the durable GitHub anchor. Every decision is
+posted there as structured `aru.delivery-decision.v1` JSON before the private
+increment registry changes. If that post fails, the transition remains paused
+and the same Slack event can be retried. Duplicate successful events are
+idempotent across bridge restarts. Authorization also verifies that the full
+baseline SHA resolves to a commit in the project checkout before it records
+anything.
+
+`accept` records sprint acceptance only. It does not tag, release, authorize
+deployment, or deploy. `authorize-deployment` and `deployed` are distinct
+operator decisions; this implementation records those decisions but does not
+run a deployment command.
+
 Slack does not expose global or agent-scoped factory commands in V1. `stop all`,
 `resume all`, and agent targets are rejected. The existing `projects: ["*"]`
 contract is preserved for local operator control, and Slack cannot clear it. A
