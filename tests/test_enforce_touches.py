@@ -2047,6 +2047,42 @@ class AgentCommitTrailerTests(unittest.TestCase):
             msg_with_trailer,
         )
 
+    def test_format_commit_message_prose_containing_agent_does_not_suppress_trailer(self):
+        body_with_agent_prose = (
+            "feat(auth): support token login\n\n"
+            "The Agent: service account is configured to handle user tokens.\n"
+            "This was requested by security."
+        )
+        result = common.format_commit_message(body_with_agent_prose, agent="agent-4")
+        expected = (
+            "feat(auth): support token login\n\n"
+            "The Agent: service account is configured to handle user tokens.\n"
+            "This was requested by security.\n\n"
+            "Agent: agent-4"
+        )
+        self.assertEqual(result, expected)
+
+    def test_prepare_commit_msg_hook_stamps_file(self):
+        import importlib.util
+        hook_path = ROOT / "hooks" / "prepare_commit_msg.py"
+        spec = importlib.util.spec_from_file_location("prepare_commit_msg", hook_path)
+        prepare_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prepare_mod)
+
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f:
+            f.write("fix(cli): handle edge case\n")
+            f.flush()
+            temp_path = f.name
+
+        try:
+            stamped = prepare_mod.stamp_commit_message_file(temp_path, agent="agent-test")
+            self.assertTrue(stamped)
+            content = Path(temp_path).read_text()
+            self.assertEqual(content.strip(), "fix(cli): handle edge case\n\nAgent: agent-test")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
     def test_format_commit_message_returns_unmodified_when_no_agent_available(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(

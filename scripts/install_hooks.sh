@@ -34,6 +34,7 @@ case "$GIT_DIR" in /*) ;; *) GIT_DIR="$TARGET/$GIT_DIR" ;; esac
 if [ "$CHECK_ONLY" = "1" ]; then
   echo "repo:       $TARGET"
   if [ -x "$GIT_DIR/hooks/pre-push" ]; then echo "pre-push:   installed"; else echo "pre-push:   MISSING"; fi
+  if [ -x "$GIT_DIR/hooks/prepare-commit-msg" ]; then echo "prepare-commit-msg: installed"; else echo "prepare-commit-msg: MISSING"; fi
   if grep -q enforce_touches .claude/settings.json 2>/dev/null; then
     echo "PreToolUse: installed"
   else
@@ -64,6 +65,22 @@ else
   cp "$HOOK_SRC/pre-push" "$EXISTING"
   chmod +x "$EXISTING"
   echo "✅ pre-push hook installed at $EXISTING"
+fi
+
+EXISTING_MSG="$GIT_DIR/hooks/prepare-commit-msg"
+if [ -f "$EXISTING_MSG" ] && ! grep -q "Aru_Agentic_SDLC prepare-commit-msg" "$EXISTING_MSG" 2>/dev/null; then
+  PRESERVED="$GIT_DIR/hooks/prepare-commit-msg.pre-aru"
+  if [ ! -f "$PRESERVED" ]; then
+    mv "$EXISTING_MSG" "$PRESERVED"
+    chmod +x "$PRESERVED"
+  fi
+  cp "$HOOK_SRC/prepare-commit-msg" "$EXISTING_MSG"
+  chmod +x "$EXISTING_MSG"
+  echo "✅ prepare-commit-msg installed; the previous hook was preserved as prepare-commit-msg.pre-aru and is chained after it"
+else
+  cp "$HOOK_SRC/prepare-commit-msg" "$EXISTING_MSG"
+  chmod +x "$EXISTING_MSG"
+  echo "✅ prepare-commit-msg hook installed at $EXISTING_MSG"
 fi
 
 # Merge the PreToolUse entry into .claude/settings.json without clobbering

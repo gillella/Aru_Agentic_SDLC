@@ -215,11 +215,55 @@ def get_agent_id() -> Optional[str]:
     return None
 
 
+def _parse_terminal_trailers(message: str) -> Tuple[str, List[str]]:
+    """Splits a commit message into the main content (subject/body) and terminal trailer lines.
+
+    According to Git trailer conventions:
+    - Trailers appear in a contiguous block at the end of the message.
+    - Each trailer line matches `<Token>: <value>`.
+    - The first line (subject) is never a trailer.
+    - If the terminal paragraph contains any non-trailer lines, the entire paragraph is body prose.
+    """
+    raw_lines = message.rstrip().splitlines()
+    if not raw_lines:
+        return "", []
+
+    # Find the last paragraph (separated by blank lines)
+    idx = len(raw_lines) - 1
+    while idx >= 0 and not raw_lines[idx].strip():
+        idx -= 1
+
+    if idx <= 0:
+        # Only 1 line (subject) or empty
+        return "\n".join(raw_lines).rstrip(), []
+
+    paragraph_end = idx
+    while idx >= 0 and raw_lines[idx].strip():
+        idx -= 1
+    paragraph_start = idx + 1
+
+    # If paragraph_start == 0, the entire message is one paragraph (subject + body or subject only).
+    # The first line is the subject, so it cannot be a trailer block unless separated by a blank line.
+    if paragraph_start == 0:
+        return "\n".join(raw_lines).rstrip(), []
+
+    candidate_lines = raw_lines[paragraph_start:paragraph_end + 1]
+    trailer_regex = re.compile(r"^[A-Za-z0-9_-]+:\s*.+$")
+
+    # Every line in the terminal paragraph must match trailer_regex
+    if not all(trailer_regex.match(l.strip()) for l in candidate_lines):
+        return "\n".join(raw_lines).rstrip(), []
+
+    body = "\n".join(raw_lines[:paragraph_start]).rstrip()
+    trailers = [l.strip() for l in candidate_lines]
+    return body, trailers
+
+
 def format_commit_message(message: str, agent: Optional[str] = None) -> str:
     """Formats a git commit message with standard trailers.
 
     If an agent ID is provided or resolved from the environment, attaches an
-    'Agent: <id>' trailer if not already present.
+    'Agent: <id>' trailer if not already present in the terminal trailer block.
     """
     msg = message.strip()
     if not msg:
@@ -230,18 +274,18 @@ def format_commit_message(message: str, agent: Optional[str] = None) -> str:
         return msg
 
     trailer = f"Agent: {agent_id}"
+    body, trailers = _parse_terminal_trailers(msg)
 
-    # Check if Agent trailer is already present (case-insensitive key)
-    if re.search(r"^\s*Agent\s*:\s*.+$", msg, re.IGNORECASE | re.MULTILINE):
+    # Check if Agent trailer is already present in the terminal trailer block
+    if any(re.match(r"^agent\s*:", t, re.IGNORECASE) for t in trailers):
         return msg
 
-    lines = msg.splitlines()
-    trailer_pattern = re.compile(r"^[A-Za-z0-9-]+:\s*.+$")
+    if trailers:
+        trailers.append(trailer)
+        return body + "\n\n" + "\n".join(trailers)
 
-    # If the message ends with a trailer line and preceding contiguous lines in the
-    # current paragraph are trailers, append directly to the trailer block.
-    if lines and trailer_pattern.match(lines[-1].strip()):
-        return msg + "\n" + trailer
+    if body:
+        return body + "\n\n" + trailer
 
     return msg + "\n\n" + trailer
 

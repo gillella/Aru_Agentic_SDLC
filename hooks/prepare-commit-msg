@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Aru_Agentic_SDLC prepare-commit-msg hook: stamps Agent: <id> on commits.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SDLC_HOME="${ARU_SDLC_HOME:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+
+if [ -f "${SDLC_HOME}/hooks/prepare_commit_msg.py" ]; then
+  python3 "${SDLC_HOME}/hooks/prepare_commit_msg.py" "$@" || true
+elif [ -f "${SCRIPT_DIR}/prepare_commit_msg.py" ]; then
+  python3 "${SCRIPT_DIR}/prepare_commit_msg.py" "$@" || true
+fi
+
+PRIOR="$(dirname "$0")/prepare-commit-msg.pre-aru"
+if [ -x "$PRIOR" ]; then
+  "$PRIOR" "$@" || exit $?
+fi
+
+exit 0
