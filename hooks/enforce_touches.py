@@ -461,18 +461,29 @@ def _push_state_option(name):
 def _unwrap_simple_command(words):
     """Strips leading environment variable assignments and command wrappers (env, sudo, etc.).
 
-    Returns (executable, args_list, wrapper_chdirs, wrapper_target_unknown).
+    Returns (executable, args_list, wrapper_chdirs, wrapper_target_unknown,
+    git_environment). The last value retains environment variables that can
+    select Git's refs repository; dropping them would let a command write a
+    governed repository while the guard inspects an unrelated cwd.
     """
     if not words:
-        return None, [], [], False
+        return None, [], [], False, {}
 
     words = list(words)
     i = 0
     wrapper_chdirs = []
     wrapper_target_unknown = False
+    git_environment = {}
+
+    def remember_git_environment(assignment):
+        name, value = assignment.split("=", 1)
+        if name in {"GIT_DIR", "GIT_WORK_TREE"}:
+            git_environment[name] = value
+
     while i < len(words):
         token = words[i]
         if _ENV_ASSIGNMENT.match(token):
+            remember_git_environment(token)
             i += 1
             continue
 
@@ -485,6 +496,7 @@ def _unwrap_simple_command(words):
                     i += 1
                     break
                 if _ENV_ASSIGNMENT.match(w_tok):
+                    remember_git_environment(w_tok)
                     i += 1
                     continue
                 if not w_tok.startswith("-"):
@@ -504,7 +516,7 @@ def _unwrap_simple_command(words):
                         s_arg = short_value or ""
                         inner_tokens = _shell_tokens(s_arg)
                         if inner_tokens is None:
-                            return None, [], wrapper_chdirs, wrapper_target_unknown
+                            return None, [], wrapper_chdirs, wrapper_target_unknown, git_environment
                         inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
                         if inner_words:
                             words = words[:i] + inner_words + words[i:]
@@ -514,7 +526,7 @@ def _unwrap_simple_command(words):
                         i += 1 if inline or i + 1 >= len(words) else 2
                         inner_tokens = _shell_tokens(s_arg)
                         if inner_tokens is None:
-                            return None, [], wrapper_chdirs, wrapper_target_unknown
+                            return None, [], wrapper_chdirs, wrapper_target_unknown, git_environment
                         inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
                         if inner_words:
                             words = words[:i] + inner_words + words[i:]
@@ -596,8 +608,8 @@ def _unwrap_simple_command(words):
         break
 
     if i >= len(words):
-        return None, [], wrapper_chdirs, wrapper_target_unknown
-    return words[i], words[i + 1:], wrapper_chdirs, wrapper_target_unknown
+        return None, [], wrapper_chdirs, wrapper_target_unknown, git_environment
+    return words[i], words[i + 1:], wrapper_chdirs, wrapper_target_unknown, git_environment
 
 
 def _git_write_to_protected(command, branch):
@@ -633,7 +645,9 @@ def _git_write_to_protected(command, branch):
             simple_cmds.append(current)
 
     for words in simple_cmds:
-        exe, args, wrapper_chdirs, wrapper_target_unknown = _unwrap_simple_command(words)
+        exe, args, wrapper_chdirs, wrapper_target_unknown, _git_environment = (
+            _unwrap_simple_command(words)
+        )
         if not _is_git_exe(exe):
             continue
 
@@ -777,6 +791,42 @@ def _resolve_dir(raw, base):
     return os.path.normpath(os.path.join(base, resolved))
 
 
+def _canonical_git_root(target, git_dir=None):
+    """Returns the checkout that owns the refs used by a Git invocation.
+
+    ``--show-toplevel`` describes the visible work tree, which is insufficient
+    for explicit ``GIT_DIR``/``--git-dir`` commands and for a work tree whose
+    ``.git`` is a symlink. The canonical common directory identifies the refs
+    repository. A normal repository (and a linked worktree) maps from its real
+    ``.git`` directory back to the primary checkout. Separate git dirs use
+    their configured worktree when one can be proven; otherwise callers fail
+    closed.
+    """
+    prefix = ["git"]
+    if git_dir:
+        prefix.extend(["--git-dir", git_dir])
+    rc, out = _run(
+        prefix + ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=target,
+    )
+    if rc != 0 or not out:
+        return None
+    common_dir = os.path.realpath(
+        out if os.path.isabs(out) else os.path.join(target, out)
+    )
+    if os.path.basename(common_dir) == ".git":
+        return os.path.dirname(common_dir)
+
+    rc, worktree = _run(
+        prefix + ["config", "--path", "--get", "core.worktree"], cwd=target
+    )
+    if rc != 0 or not worktree:
+        return None
+    if not os.path.isabs(worktree):
+        worktree = os.path.join(common_dir, worktree)
+    return os.path.realpath(worktree)
+
+
 def _git_write_violation(command, cwd):
     """Whether `command` writes to a protected branch, in whatever checkout it
     actually acts on.
@@ -819,7 +869,9 @@ def _git_write_violation(command, cwd):
     base = cwd
     base_unknown = False
     for words in simple_cmds:
-        exe, args, wrapper_chdirs, wrapper_target_unknown = _unwrap_simple_command(words)
+        exe, args, wrapper_chdirs, wrapper_target_unknown, git_environment = (
+            _unwrap_simple_command(words)
+        )
         if exe in ("cd", "pushd"):
             operand = args[0] if args else None
             if operand is None or operand.startswith("-"):
@@ -836,13 +888,17 @@ def _git_write_violation(command, cwd):
             continue
 
         target, unknown = base, base_unknown or wrapper_target_unknown
-        git_dir = None
         for wrapper_dir in wrapper_chdirs:
             moved = _resolve_dir(wrapper_dir, target) if wrapper_dir is not None else None
             if moved is None:
                 unknown = True
                 break
             target, unknown = moved, False
+        git_dir = None
+        if "GIT_DIR" in git_environment:
+            git_dir = _resolve_dir(git_environment["GIT_DIR"], target)
+            if git_dir is None or not git_environment["GIT_DIR"]:
+                unknown = True
         index = 0
         subcommand = None
         while index < len(args):
@@ -905,7 +961,7 @@ def _git_write_violation(command, cwd):
             # branch governance, so do not impose this repository's workflow on
             # it. Resolution or marker-read failures remain fail-closed: only a
             # definite False releases the guard.
-            target_root = repo_root(target)
+            target_root = _canonical_git_root(target, git_dir)
             if target_root and governed_repo(target_root) is False:
                 continue
             return violation

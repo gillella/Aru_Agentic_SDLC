@@ -615,6 +615,7 @@ class HookDecisionTests(unittest.TestCase):
         with samefile, \
              patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
              patch.object(et, "repo_root", return_value=root), \
+             patch.object(et, "_canonical_git_root", return_value=root), \
              patch.object(et, "current_branch", return_value=branch), \
              patch.object(et, "governed_repo", return_value=governed), \
              patch.object(et, "touches_for", return_value=touches):
@@ -1446,6 +1447,10 @@ class GitCommandCheckoutTests(unittest.TestCase):
         cls.ungoverned.mkdir()
         git("init", "-b", "main", cwd=cls.ungoverned)
 
+        cls.symlinked_git_checkout = base / "symlinked-git-checkout"
+        cls.symlinked_git_checkout.mkdir()
+        (cls.symlinked_git_checkout / ".git").symlink_to(cls.main_root / ".git")
+
         cls.unrelated_agents = base / "unrelated-agents"
         cls.unrelated_agents.mkdir()
         git("init", "-b", "main", cwd=cls.unrelated_agents)
@@ -1529,6 +1534,46 @@ class GitCommandCheckoutTests(unittest.TestCase):
                 f"--work-tree={self.ungoverned} commit -m x",
                 self.wt,
             )
+        )
+
+    def test_git_dir_environment_with_ungoverned_work_tree_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"GIT_DIR={self.main_root}/.git "
+                f"GIT_WORK_TREE={self.ungoverned} git commit -m x",
+                self.ungoverned,
+            )
+        )
+
+    def test_env_wrapper_git_dir_with_ungoverned_work_tree_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"env GIT_DIR={self.main_root}/.git "
+                f"GIT_WORK_TREE={self.ungoverned} git commit -m x",
+                self.ungoverned,
+            )
+        )
+
+    def test_git_dir_environment_push_to_governed_main_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"GIT_DIR={self.main_root}/.git git push origin main",
+                self.ungoverned,
+            )
+        )
+
+    def test_git_dir_before_capital_c_keeps_governed_refs_identity(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"git --git-dir={self.main_root}/.git "
+                f"-C {self.ungoverned} commit -m x",
+                self.ungoverned,
+            )
+        )
+
+    def test_symlinked_git_dir_uses_canonical_governed_checkout(self):
+        self.assertIsNotNone(
+            self.violation("git commit -m x", self.symlinked_git_checkout)
         )
 
     def test_ungoverned_git_dir_with_governed_work_tree_is_allowed(self):
