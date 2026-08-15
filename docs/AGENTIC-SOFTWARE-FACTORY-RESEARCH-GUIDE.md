@@ -1,15 +1,21 @@
-# Building an Agentic Software Factory
+# Agentic Software Factory — Research and Evidence Guide
 
-**A research and strategy guide for transforming a 25-year SDLC into an idea→product agent factory**
+**Evidence for transforming a 25-year SDLC into an idea→product agent factory**
 
 **Audience:** Factory owner / architect (25 years of software craft)  
 **Date:** 2026-08-11  
-**Issue:** Closes context for #78  
+**Research origin:** #78 (closed; consolidated by #113)
 **Companion artifacts:**
 - Working build plan: [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md)
 - Board choice deep-dive: [`PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](PROJECT-BOARD-FOR-AGENTIC-FACTORY.md)
-- Landscape and citations: [`AGENTIC-SOFTWARE-FACTORY-GUIDE.md`](AGENTIC-SOFTWARE-FACTORY-GUIDE.md)
 - Process baseline: [`PROCESS-AUDIT-2026-08.md`](PROCESS-AUDIT-2026-08.md)
+
+> **Authority boundary.** This document is evidence, not plan. It explains the
+> research, industry patterns, and operating-model implications behind Aru.
+> [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md) is the sole authority
+> for roadmap phases, sequencing, implementation status, and non-goals. If an
+> example or historical recommendation here appears to conflict with that
+> plan, the plan wins.
 
 > **Scope note.** An interactive briefing over this material is **not** part of
 > this change and is tracked in #122. It is referenced by issue rather than by
@@ -214,38 +220,17 @@ From your own factory docs and audits:
 
 ---
 
-## 6. Transformation roadmap — idea to product factory
+## 6. Relationship to the canonical plan
 
-Aligned with [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md). Do not reorder casually: feeding more intake into a broken review gate worsens the queue.
+The evidence above supports a trust-first sequence: harden the execution spine,
+close verification constraints, then extend the factory toward intake and
+deployment. It does not define or duplicate that sequence.
 
-### Phase 0 — Spine trustworthy (days)
-Make the merge gate and stamps mechanically correct; dogfood CI; protect `main`; one process owner.
-
-### Phase 1 — Memory & rollback (days)
-Merge (not squash) by default; checkpoint tags; SemVer for consumed CLI; pin consumers; revert path.
-
-### Phase 2 — Close the review constraint (1–2 weeks)
-Evidence trail; acceptance-criteria runner; “narrower-than-reality” review heuristic; split oversized scopes at triage.
-
-### Phase 3 — Front of factory (1–2 weeks)
-`idea-to-prd` → `prd-to-issues` → plan gate as mechanism → Ready-depth SLO → always attach issues to board.
-
-**Recommended intake recipe (industry + Aru):**
-
-```
-Human idea
-  → research board item (claimed)
-  → Spec Kit / grill-aru → PRD
-  → prd-to-issues (depends-on DAG)
-  → triage_backlog → Ready
-  → fleet picker
-```
-
-### Phase 4 — Back of factory (2–4 weeks)
-`fleet_status.py`; cost/cycle metrics; deploy-preview; promote path; smoke/E2E; cleanup automation.
-
-### Phase 5 — Productization
-Stack packs (post-CI release templates); trust boundary for untrusted issue text; degraded-mode decision; golden-path demo repo.
+For the current phases, issue mapping, order, status, and non-goals, use only
+[`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md). Historical roadmap
+restatements from the two predecessor research guides were consolidated into
+that plan and intentionally removed here so agents cannot choose among
+competing versions.
 
 ---
 
@@ -331,30 +316,18 @@ Ship `fleet_status.py` early in Phase 4 — operator visibility is the differenc
 
 ---
 
-## 11. 90-day achievement plan (practical)
+## 11. Evidence-to-plan boundary
 
-### Days 1–14 — Trust the spine
-- Finish Phase 0/1 items still open in `ARU-SOFTWARE-FACTORY.md`.
-- Run one golden-path demo: issue → worktree → PR → peer review → merge — measured.
+Use this guide to evaluate claims, choose mechanisms, and understand tradeoffs.
+Use the canonical build plan to decide what happens next. A research finding
+may justify changing the plan, but that change must be reconciled in the plan
+and its governed issues rather than introduced here as a parallel schedule.
 
-### Days 15–45 — Intake + review
-- Wire Spec Kit *or* grill-aru into `idea-to-prd` / `prd-to-issues`.
-- Acceptance-criteria runner + PR evidence trail.
-- Ready-depth SLO; stop starting new products until Ready feeds the fleet.
-
-### Days 46–90 — Ship and learn
-- Preview deploy skill; smoke tests; `fleet_status` + cost capture.
-- One product built end-to-end through the factory (idea → production).
-- Write a postmortem of harness defects into skills (entropy → mechanism).
-
-**Success criteria for “we have a factory”:**
-
-1. A new idea becomes board issues without chat archaeology.
-2. Any listed coding agent can claim and ship under the same contract.
-3. Merge only through the gated helper; main protected.
-4. Operator sees status on one screen.
-5. At least one product has preview→prod with issue trail after merge.
-6. You can quote cost and cycle time per closed issue.
+Evidence that the factory is functioning includes: ideas becoming durable
+board work, agents sharing one lifecycle contract, merges passing the governed
+gate, operator-visible state, deploy-to-observe traceability, and measurable
+cost and cycle time. These are evaluation dimensions, not a dated delivery
+sequence.
 
 ---
 
@@ -388,6 +361,60 @@ Ship `fleet_status.py` early in Phase 4 — operator visibility is the differenc
 | [Agentic SDLC Handbook (Meppiel)](https://danielmeppiel.github.io/agentic-sdlc-handbook/) | Methodology / PROSE for orgs |
 | Forrester — State of Agentic Software Development 2026 | Market frame: assistants → orchestrated SDLC agents |
 | Your [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md) | Local truth — sequencing & non-goals |
+
+### Academic evidence index
+
+| Paper | arXiv ID | Evidence retained from the predecessor landscape guide |
+|---|---|---|
+| SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering | 2405.15793 | Interface design matters as much as model capability |
+| An Empirical Study of Coordination Mode as the First-Class Citizen in From-Scratch Multi-Agent Coding | 2607.27877 | Topology rivals model capability in speed-cost-quality |
+| ACEM: A Cost Estimation Model for Agentic Software Engineering | 2608.02582 | Agentic cost includes tokens, human oversight, and infrastructure |
+| The Productivity-Reliability Paradox: Specification-Driven Governance | 2605.01160 | Specification discipline is a binding reliability constraint |
+| Trust but Verify? Uncovering the Security Debt of Autonomous Coding Agents | 2607.12428 | Agent-generated changes accumulate security debt without gates |
+| Early Adoption of Agentic Coding Tools by GitHub Projects | 2607.14037 | Adoption is real but concentrated among intensive users |
+| AgentForge: An Immersive Role-Playing Platform for Learning Agentic Software Engineering | 2608.04148 | Multi-role repair workflows support specialized agent stations |
+| Code Is the Body: Agent-Owned Software Bodies for Recursive Evolution and Descent | 2607.28691 | Self-evolution still requires governed custody and merge control |
+| Where Is the Cost of Third-Party API Routers in Agentic Software Development? | 2607.23624 | Routers occupy a consequential trust and cost boundary |
+| Why Are Agentic Pull Requests Merged or Rejected? | 2605.22534 | Workflow constraints explain many agentic PR rejections |
+
+### Open-source landscape index
+
+| Project | Reference | Evidence retained from the predecessor landscape guide |
+|---|---|---|
+| delivery-loop | `github.com/blakemartz/delivery-loop` | Specs-to-merge loop using claims, worktrees, and adversarial review |
+| software-factory | `github.com/deepkawal/software-factory` | Enterprise multi-role pipeline with explicit governance |
+| SWE-agent | `github.com/SWE-agent/SWE-agent` | Agent-computer interface research and SWE-bench implementation |
+| OpenHands Agent Canvas | `github.com/OpenHands/OpenHands` | Self-hosted multi-agent control surface and protocol work |
+| jddelia/agentic-factory | `github.com/jddelia/agentic-factory` | Codex-oriented factory with durable SQLite ledgers |
+| repoach | `github.com/repoachhq/repoach` | Autonomous review-and-merge pipeline focused on the review constraint |
+
+### Industry guidance retained
+
+| Source | Evidence retained from the predecessor landscape guide |
+|---|---|
+| Anthropic, *Steering Claude Code* | Deterministic hooks and permissions make stronger guardrails than prose |
+| GitHub Spec Kit | Specify → plan → tasks → implement is a reusable intake artifact pattern |
+| OpenHands best-practice and protocol work | Vendor-neutral agent interfaces reduce runtime lock-in |
+| The New Stack, *85% say code review is the new bottleneck* | Review capacity becomes the constraint as implementation accelerates |
+
+### Consolidation record
+
+Issue #113 merged the evidence produced under #78 with the earlier *State of
+the Art & Guide*. Nothing was silently discarded:
+
+| Predecessor material | Canonical location after consolidation |
+|---|---|
+| Vision and classical-to-agentic mapping | Sections 0-1 |
+| Industry and open-source landscape | Section 2 and the source indexes above |
+| Academic findings and all ten arXiv identifiers | Sections 3 and 13 |
+| Board, claim, worktree, path-budget, merge, and plan patterns | Sections 3-5 and 8 |
+| Constraints, metrics, and anti-patterns | Sections 5 and 7-10 |
+| Roadmap and non-goal restatements | Solely [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md) |
+
+The deleted predecessor filename was
+`AGENTIC-SOFTWARE-FACTORY-GUIDE.md`. Git history preserves its exact prose;
+this appendix preserves its evidence, findings, citations, and mapping without
+leaving a second document that an agent could mistake for the plan.
 
 ---
 
