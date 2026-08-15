@@ -251,11 +251,11 @@ def _parse_terminal_trailers(message: str) -> Tuple[str, List[str]]:
     trailer_regex = re.compile(r"^[A-Za-z0-9_-]+:\s*.+$")
 
     # Every line in the terminal paragraph must match trailer_regex
-    if not all(trailer_regex.match(l.strip()) for l in candidate_lines):
+    if not all(trailer_regex.match(line.strip()) for line in candidate_lines):
         return "\n".join(raw_lines).rstrip(), []
 
     body = "\n".join(raw_lines[:paragraph_start]).rstrip()
-    trailers = [l.strip() for l in candidate_lines]
+    trailers = [line.strip() for line in candidate_lines]
     return body, trailers
 
 
