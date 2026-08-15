@@ -448,6 +448,63 @@ none
                 self.assertFalse(report["ok"])
                 self.assertTrue(report["unclassified_findings"])
 
+    def test_nested_heading_cannot_hide_unclassified_finding(self):
+        text = """## Findings
+1. [external] Supported fact ([source](https://example.com/a)).
+### Additional findings
+AGENTS.md defines the factory.
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertFalse(report["ok"])
+        self.assertIn("AGENTS.md defines the factory.", report["findings"])
+        self.assertTrue(report["unclassified_findings"])
+
+    def test_external_marker_cannot_relabel_source_path_claim(self):
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        for path in ("AGENTS.md", "src/router.py"):
+            with self.subTest(path=path):
+                text = f"""## Findings
+1. [external] {path} defines routing ([source](https://example.com/a)).
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+none
+"""
+                report = verify_findings(text, http_get=http)
+                self.assertFalse(report["ok"])
+                self.assertTrue(report["external_source_findings"])
+                self.assertTrue(
+                    any(
+                        "external_finding_references_source_path" in error
+                        for error in report["errors"]
+                    )
+                )
+
+    def test_external_doi_identifier_is_not_mistaken_for_source_path(self):
+        text = """## Findings
+1. [external] Published result doi:10.1234/example.item
+
+## Citations
+- doi:10.1234/example.item
+
+## Repo code claims
+none
+"""
+        http = FakeHttp(
+            {"https://doi.org/10.1234/example.item": {"status": 200, "body": ""}}
+        )
+        report = verify_findings(text, http_get=http)
+        self.assertTrue(report["ok"], report["errors"])
+
     def test_structured_repo_finding_with_date_and_path_passes(self):
         text = """## Findings
 1. [repo verified: 2026-08-14] AGENTS.md defines the factory rules ([source](https://example.com/a)).
@@ -461,6 +518,44 @@ none
         http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
         report = verify_findings(text, http_get=http)
         self.assertTrue(report["ok"], report["errors"])
+
+    def test_repo_finding_requires_matching_section_path_and_date(self):
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        sections = (
+            "- path: scripts/other.py — verified: 2026-08-14",
+            "- path: AGENTS.md — verified: 2026-08-13",
+        )
+        for section in sections:
+            with self.subTest(section=section):
+                text = f"""## Findings
+1. [repo verified: 2026-08-14] AGENTS.md defines the rules ([source](https://example.com/a)).
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+{section}
+"""
+                report = verify_findings(text, http_get=http)
+                self.assertFalse(report["ok"])
+                self.assertTrue(report["repo_path_binding_errors"])
+
+    def test_repo_evidence_outside_section_does_not_satisfy_finding(self):
+        text = """## Findings
+1. [repo verified: 2026-08-14] AGENTS.md defines the rules ([source](https://example.com/a)).
+
+## Citations
+- https://example.com/a
+- path: AGENTS.md — verified: 2026-08-14
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["repo_claims"]["dated"], [])
+        self.assertTrue(report["repo_path_binding_errors"])
 
     def test_repo_claims_section_requires_dated_entries_or_none(self):
         text = """## Findings

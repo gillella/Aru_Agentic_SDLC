@@ -81,7 +81,11 @@ Rules:
   beginning with `[external]` or `[repo verified: YYYY-MM-DD]`; continuation
   prose fails verification rather than inheriting another line's evidence.
 - Claims about this repository's code **must** use the `repo verified` marker
-  and have a corresponding dated path under `Repo code claims`.
+  and name at least one source path. Every named path must have an exact,
+  same-date entry under `Repo code claims`; evidence elsewhere in the artifact
+  does not satisfy that contract.
+- An `external` finding must not name a repository/source path. Cite the
+  external URL without relabeling repository-code evidence as external.
 - Do not invent citations. Prefer primary sources.
 
 Write the file under `docs/research/issue-<N>-<slug>.md` when `touches:`
