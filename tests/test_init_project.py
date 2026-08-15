@@ -89,6 +89,14 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertIn("        touches:", feature)
         self.assertIn("type:research", research)
         self.assertIn("research: ", research)
+        self.assertIn("Repository under docs/research/", research)
+        self.assertIn("Issue comment only", research)
+        self.assertIn("Every factual claim carries a resolvable", research)
+        self.assertIn("Citation verification exits 0", research)
+        self.assertIn("Repo code claims are dated", research)
+        self.assertIn("verify_citations.py <artifact>", research)
+        self.assertIn("touches: docs/research/**", research)
+        self.assertIn("replace it with issue-comment-only", research)
 
     def test_governance_labels_include_research(self):
         names = [name for name, _, _ in init_project.GOVERNANCE_LABELS]

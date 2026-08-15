@@ -187,9 +187,13 @@ say so in one sentence rather than inventing findings to look thorough.
 
 ---
 
-#### D. `issue` — implement
+#### D. `issue` — follow the picker-selected skill
 
-Follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`.
+Read `work.skill` from the claimed picker result. When it is `research`
+(`skill: research`), follow `$ARU_SDLC_HOME/skills/research/SKILL.md`.
+Otherwise follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`. Never
+collapse every issue into implementation after the picker has selected a
+narrower workflow.
 
 1. **Read the issue in full.** `gh issue view <N> --json title,body,labels`.
    Write down its `touches:` list — that is your **write budget**.

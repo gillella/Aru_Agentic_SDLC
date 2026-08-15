@@ -97,9 +97,15 @@ It returns one item and claims it. Follow the skill for its type:
 |---|---|
 | `feedback` | `address-pr-feedback` |
 | `review` | `code-review` |
-| `issue` | `implement-next-issue` |
+| `issue` with `skill: research` | `research` |
+| any other `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
 | `idle` | `next` stops; `loop` waits and asks again |
+
+The picker's `work.skill` field is authoritative for issue work. Do not discard it
+and route every issue through implementation: a research issue has its own
+artifact, verification, and close-out contract in
+`$ARU_SDLC_HOME/skills/research/SKILL.md`.
 
 The order is deliberate: unblocking work already in flight comes before
 starting anything new.

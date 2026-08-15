@@ -830,6 +830,73 @@ def render_issue_form(
     return "\n".join(lines) + "\n"
 
 
+def render_research_issue_form(project_ref: Optional[str] = None) -> str:
+    """Renders research intake with its mechanical completion contract."""
+    project_line = f'projects: ["{project_ref}"]' if project_ref else "projects: []"
+    return "\n".join([
+        "name: Research",
+        "description: Bounded research question with a cited findings artifact",
+        "title: 'research: '",
+        'labels: ["type:research", "status:backlog"]',
+        project_line,
+        "body:",
+        "  - type: textarea",
+        "    id: question",
+        "    attributes:",
+        "      label: Research question",
+        "      description: Ask one bounded question.",
+        "    validations:",
+        "      required: true",
+        "  - type: textarea",
+        "    id: scope",
+        "    attributes:",
+        "      label: Scope bounds",
+        "      description: State what is in scope, out of scope, and the stop condition.",
+        "    validations:",
+        "      required: true",
+        "  - type: dropdown",
+        "    id: artifact-location",
+        "    attributes:",
+        "      label: Findings location",
+        "      description: Repository artifacts require an isolated branch and worktree; comment-only artifacts make no repository writes.",
+        "      options:",
+        "        - Repository under docs/research/",
+        "        - Issue comment only",
+        "    validations:",
+        "      required: true",
+        "  - type: textarea",
+        "    id: acceptance",
+        "    attributes:",
+        "      label: Acceptance criteria",
+        "      value: |",
+        "        - [ ] Findings artifact attached to this issue.",
+        "        - [ ] Every factual claim carries a resolvable URL, arXiv ID, or DOI.",
+        "        - [ ] Citation verification exits 0.",
+        "        - [ ] Repo code claims are dated, or the artifact records `none`.",
+        "        - [ ] Follow-on issues are proposed when findings warrant them.",
+        "    validations:",
+        "      required: true",
+        "  - type: textarea",
+        "    id: verification",
+        "    attributes:",
+        "      label: Verification",
+        "      value: 'python3 $ARU_SDLC_HOME/scripts/verify_citations.py <artifact>'",
+        "    validations:",
+        "      required: true",
+        "  - type: textarea",
+        "    id: workflow-metadata",
+        "    attributes:",
+        "      label: Workflow metadata",
+        "      description: Keep docs/research/** only for a repository artifact; replace it with issue-comment-only for a comment-only artifact.",
+        "      value: |",
+        "        depends-on:",
+        "        touches: docs/research/**",
+        "        parallel-eligible: true",
+        "    validations:",
+        "      required: true",
+    ]) + "\n"
+
+
 def write_templates(target_dir: str, project_ref: Optional[str] = None):
     """Writes issue forms and a PR template.
 
@@ -866,14 +933,7 @@ def write_templates(target_dir: str, project_ref: Optional[str] = None):
              ("gating", "Gating contract"), ("children", "Child issues")],
             project_ref,
         )),
-        ("research.yml", render_issue_form(
-            "Research", "Bounded research question with a cited findings artifact",
-            "research: ",
-            ["type:research", "status:backlog"],
-            [("question", "Research question"), ("scope", "Scope bounds"),
-             ("acceptance", "Acceptance criteria"), ("verification", "Verification")],
-            project_ref,
-        )),
+        ("research.yml", render_research_issue_form(project_ref)),
     ]:
         with open(os.path.join(tpl_dir, filename), "w") as f:
             f.write(body)

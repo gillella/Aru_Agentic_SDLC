@@ -2,6 +2,7 @@ import json
 import socket
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,9 +13,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from verify_citations import (  # noqa: E402
     assert_public_url,
+    default_http_get,
     extract_citations,
     extract_repo_claims,
     main,
+    resolve_arxiv,
+    resolve_doi,
+    resolve_url,
     verify_findings,
 )
 
@@ -55,6 +60,18 @@ class FakeHttp:
 
 
 class ResearchSkillTests(unittest.TestCase):
+    def test_skill_creates_worktree_before_repository_artifact_write(self):
+        skill = (ROOT / "skills" / "research" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(
+            skill.index("create_branch.py"),
+            skill.index("### 3. Investigate and write findings"),
+        )
+        self.assertIn("before the first repository write", skill)
+        self.assertIn("comment-only artifact", skill)
+        self.assertIn("outside the checkout", skill)
+
     def test_extract_citations_dedupes_kinds(self):
         cites = extract_citations(SAMPLE)
         kinds = {(c["kind"], c["identifier"]) for c in cites}
@@ -97,6 +114,34 @@ class ResearchSkillTests(unittest.TestCase):
         report = verify_findings(SAMPLE, http_get=http)
         self.assertFalse(report["ok"])
         self.assertTrue(any("unresolved:arxiv" in err for err in report["errors"]))
+
+    def test_only_final_2xx_status_resolves(self):
+        matching_error = FakeHttp(
+            {
+                "https://export.arxiv.org/api/query?id_list=2605.22534": {
+                    "status": 500,
+                    "body": "<entry><id>http://arxiv.org/abs/2605.22534</id></entry>",
+                }
+            }
+        )
+        self.assertEqual(
+            resolve_arxiv("2605.22534", http_get=matching_error).detail,
+            "http_500",
+        )
+        redirect = FakeHttp(
+            {
+                "https://example.com/a": {"status": 302, "body": ""},
+                "https://doi.org/10.1234/example": {"status": 302, "body": ""},
+            }
+        )
+        self.assertEqual(
+            resolve_url("https://example.com/a", http_get=redirect).detail,
+            "http_302",
+        )
+        self.assertEqual(
+            resolve_doi("10.1234/example", http_get=redirect).detail,
+            "http_302",
+        )
 
     def test_missing_citation_identifier_fails(self):
         text = "# Findings\n\nNo sources here.\n"
@@ -191,7 +236,8 @@ class ResearchSkillTests(unittest.TestCase):
             path = Path(raw) / "findings.md"
             path.write_text(
                 "## Findings\n1. note ([a](https://example.com/a))\n\n"
-                "## Citations\n- https://example.com/a\n",
+                "## Citations\n- https://example.com/a\n\n"
+                "## Repo code claims\nnone\n",
                 encoding="utf-8",
             )
             from io import StringIO
@@ -212,6 +258,39 @@ class ResearchSkillTests(unittest.TestCase):
         cites = extract_citations(text)
         self.assertEqual(cites[0]["kind"], "doi")
         self.assertEqual(cites[0]["identifier"], "10.1000/example(part-a)")
+
+    def test_markdown_title_is_not_part_of_resolved_url(self):
+        text = """## Findings
+1. Standard link ([source](https://example.com/a "Primary source")).
+
+## Citations
+- [source](https://example.com/a "Primary source")
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(http.calls, ["https://example.com/a"])
+
+    def test_complex_registered_doi_resolves_without_truncation(self):
+        doi = "10.1002/(SICI)1099-0844(199912)17:4<290::AID-CBF849>3.0.CO;2-P"
+        url = f"https://doi.org/{doi}"
+        text = f"""## Findings
+1. DOI result ([source]({url})).
+
+## Citations
+- doi:{doi}
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({url: {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["citations"][0]["identifier"], doi)
+        self.assertEqual(http.calls, [url])
 
     def test_future_verification_date_fails(self):
         text = SAMPLE.replace("2026-08-14", "2099-01-01")
@@ -238,8 +317,6 @@ class ResearchSkillTests(unittest.TestCase):
             assert_public_url("http://100.64.0.1/secret")
 
     def test_dns_rebinding_connects_to_validated_address_only(self):
-        from verify_citations import default_http_get
-
         infos = [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80)),
         ]
@@ -273,6 +350,90 @@ class ResearchSkillTests(unittest.TestCase):
             payload = default_http_get("http://evil.example/path", read_body=False)
         self.assertEqual(payload["status"], 200)
         self.assertEqual(seen, ["8.8.8.8"])
+
+    def test_dns_resolution_obeys_total_deadline(self):
+        def slow_lookup(*args, **kwargs):
+            time.sleep(0.08)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80))]
+
+        started = time.monotonic()
+        with patch("verify_citations.socket.getaddrinfo", side_effect=slow_lookup):
+            with self.assertRaises(TimeoutError):
+                default_http_get("http://slow.example/", timeout=0.01)
+        self.assertLess(time.monotonic() - started, 0.06)
+
+    def test_redirect_body_is_never_read(self):
+        infos = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80))]
+        responses = []
+
+        class FakeResp:
+            def __init__(self, status, location=None):
+                self.status = status
+                self.location = location
+                self.read_called = False
+
+            def getheader(self, name, default=None):
+                return self.location if name == "Location" else default
+
+            def read(self, n=-1):
+                self.read_called = True
+                raise AssertionError("redirect or status-only body was consumed")
+
+        class FakeConn:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            def request(self, *args, **kwargs):
+                return None
+
+            def getresponse(self):
+                response = (
+                    FakeResp(302, "http://next.example/")
+                    if not responses
+                    else FakeResp(200)
+                )
+                responses.append(response)
+                return response
+
+            def close(self):
+                return None
+
+        with patch("verify_citations.socket.getaddrinfo", return_value=infos), patch(
+            "verify_citations.http.client.HTTPConnection", FakeConn
+        ):
+            payload = default_http_get("http://start.example/", read_body=False)
+        self.assertEqual(payload, {"status": 200, "body": ""})
+        self.assertEqual(len(responses), 2)
+        self.assertFalse(any(response.read_called for response in responses))
+
+    def test_prose_repository_claim_without_date_fails_closed(self):
+        text = """## Findings
+1. This repository routes research through scripts/fetch_next_work.py. ([source](https://example.com/a))
+
+## Citations
+- https://example.com/a
+
+## Repo code claims
+none
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertFalse(report["repo_ok"])
+        self.assertTrue(
+            any("undated_repository_finding" in err for err in report["errors"])
+        )
+
+    def test_repo_claims_section_requires_dated_entries_or_none(self):
+        text = """## Findings
+1. External fact ([source](https://example.com/a)).
+
+## Citations
+- https://example.com/a
+"""
+        http = FakeHttp({"https://example.com/a": {"status": 200, "body": ""}})
+        report = verify_findings(text, http_get=http)
+        self.assertFalse(report["repo_ok"])
+        self.assertIn("missing_repo_code_claims_acknowledgement", report["errors"])
 
 
 def default_rejecting_http(url: str, timeout: float = 20.0):

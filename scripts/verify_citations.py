@@ -11,10 +11,12 @@ import argparse
 import http.client
 import ipaddress
 import json
+import queue
 import re
 import socket
 import ssl
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -28,7 +30,7 @@ ARXIV_RE = re.compile(
     re.IGNORECASE,
 )
 DOI_RE = re.compile(
-    r"(?:doi\.org/|doi:\s*)(?P<id>10\.\d{4,9}/[-._;()/:A-Z0-9]+)",
+    r"(?:doi\.org/|doi:\s*)(?P<id>10\.\d{4,9}/[-._;()/:<>A-Z0-9]+)",
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"https?://[^\s\)\]\>\"']+", re.IGNORECASE)
@@ -38,6 +40,9 @@ REPO_CLAIM_RE = re.compile(
     r"^[-*]\s*(?:path|file|code)\s*:\s*(?P<path>\S+)\s*[—\-–]\s*"
     r"verified\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})\b",
     re.IGNORECASE | re.MULTILINE,
+)
+REPO_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?P<path>(?:\.github|docs|hooks|prompts|scripts|skills|templates|tests)/[A-Za-z0-9_./*?\[\]-]+)"
 )
 MAX_ARXIV_BODY = 256 * 1024
 
@@ -60,14 +65,24 @@ def _clean_doi(raw: str) -> str:
 
 
 def extract_markdown_link_urls(text: str) -> List[str]:
-    """Extract Markdown link destinations, allowing balanced parentheses in URLs."""
+    """Extract Markdown destinations, excluding an optional link title."""
     urls: List[str] = []
     for match in MD_LINK_START_RE.finditer(text):
         i = match.end()
         depth = 1
+        quote: Optional[str] = None
+        top_level_space = False
         while i < len(text) and depth:
             ch = text[i]
-            if ch == "(":
+            if ch == "\\":
+                i += 2
+                continue
+            if quote:
+                if ch == quote:
+                    quote = None
+            elif top_level_space and ch in {'"', "'"}:
+                quote = ch
+            elif ch == "(":
                 depth += 1
             elif ch == ")":
                 depth -= 1
@@ -75,10 +90,35 @@ def extract_markdown_link_urls(text: str) -> List[str]:
                     break
             elif ch in "\n\r":
                 break
+            elif ch.isspace() and depth == 1:
+                top_level_space = True
             i += 1
         if depth != 0:
             continue
-        dest = text[match.end():i].strip()
+        content = text[match.end():i].strip()
+        if content.startswith("<"):
+            close = content.find(">")
+            if close < 0:
+                continue
+            dest = content[1:close].strip()
+        else:
+            nested = 0
+            end = len(content)
+            escaped = False
+            for offset, ch in enumerate(content):
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                elif ch == "(":
+                    nested += 1
+                elif ch == ")" and nested:
+                    nested -= 1
+                elif ch.isspace() and nested == 0:
+                    end = offset
+                    break
+            dest = content[:end].strip()
         if dest.startswith("<") and dest.endswith(">"):
             dest = dest[1:-1].strip()
         if dest.lower().startswith(("http://", "https://")):
@@ -174,10 +214,50 @@ def extract_repo_claims(text: str) -> Dict[str, Any]:
                 invalid_dates.append(claim)
         except ValueError:
             invalid_dates.append(claim)
+    section_match = re.search(
+        r"^#{1,6}\s*repo(?:sitory)?\s+code\s+claims?\s*$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    section = ""
+    if section_match:
+        tail = text[section_match.end():]
+        section = re.split(r"^#{1,6}\s+", tail, maxsplit=1, flags=re.MULTILINE)[0]
+    explicit_none = any(
+        line.strip().lower() in {"none", "- none", "* none"}
+        for line in section.splitlines()
+    )
+    dated_paths = {claim["path"].rstrip(".,;:") for claim in dated}
+    undated_findings = []
+    for line in extract_finding_lines(text):
+        paths = [m.group("path").rstrip(".,;:") for m in REPO_PATH_RE.finditer(line)]
+        repository_phrase = bool(re.search(r"\bthis\s+repository\b", line, re.IGNORECASE))
+        if not paths and not repository_phrase:
+            continue
+        inline = re.search(r"\bverified\s*:\s*(\d{4}-\d{2}-\d{2})\b", line, re.IGNORECASE)
+        inline_valid = False
+        if inline:
+            try:
+                inline_date = date.fromisoformat(inline.group(1))
+                inline_valid = inline_date <= date.today()
+            except ValueError:
+                inline_valid = False
+        if inline_valid:
+            continue
+        if paths and all(path in dated_paths for path in paths):
+            continue
+        undated_findings.append(line)
+    missing_acknowledgement = not section_match or (
+        not dated and not missing and not explicit_none
+    )
     return {
         "dated": dated,
         "missing_date": missing,
         "invalid_dates": invalid_dates,
+        "section_present": bool(section_match),
+        "explicit_none": explicit_none,
+        "missing_acknowledgement": missing_acknowledgement,
+        "undated_findings": undated_findings,
     }
 
 
@@ -189,9 +269,36 @@ def is_public_ip(address: str) -> bool:
     return bool(ip.is_global)
 
 
-def resolve_public_addresses(host: str, port: int) -> List[str]:
+def resolve_public_addresses(
+    host: str, port: int, *, deadline: Optional[float] = None
+) -> List[str]:
+    def lookup() -> Any:
+        return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        if deadline is None:
+            infos = lookup()
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("request_deadline")
+            result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+            def run_lookup() -> None:
+                try:
+                    result.put((True, lookup()))
+                except BaseException as exc:  # transported to the caller
+                    result.put((False, exc))
+
+            worker = threading.Thread(target=run_lookup, daemon=True)
+            worker.start()
+            worker.join(remaining)
+            if worker.is_alive():
+                raise TimeoutError("request_deadline")
+            succeeded, value = result.get_nowait()
+            if not succeeded:
+                raise value
+            infos = value
     except socket.gaierror as exc:
         raise ValueError(f"dns:{exc}") from exc
     if not infos:
@@ -207,7 +314,9 @@ def resolve_public_addresses(host: str, port: int) -> List[str]:
     return addresses
 
 
-def assert_public_url(url: str) -> List[str]:
+def assert_public_url(
+    url: str, *, deadline: Optional[float] = None
+) -> List[str]:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("unsupported_scheme")
@@ -215,7 +324,7 @@ def assert_public_url(url: str) -> List[str]:
     if not host:
         raise ValueError("missing_host")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    return resolve_public_addresses(host, port)
+    return resolve_public_addresses(host, port, deadline=deadline)
 
 
 def _request_path(parsed) -> str:
@@ -259,7 +368,7 @@ def default_http_get(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("request_deadline")
-        addresses = assert_public_url(current)
+        addresses = assert_public_url(current, deadline=deadline)
         parsed = urlparse(current)
         host = parsed.hostname or ""
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -294,17 +403,12 @@ def default_http_get(
                     status = resp.status
                     location = resp.getheader("Location")
                     if status in {301, 302, 303, 307, 308} and location:
-                        resp.read()
                         current = urljoin(current, location)
                         redirected = True
                         break
                     if not read_body:
-                        # Drain nothing useful; status is enough for URL/DOI checks.
-                        while resp.read(8192):
-                            remaining = deadline - time.monotonic()
-                            if remaining <= 0:
-                                raise TimeoutError("request_deadline")
-                            break
+                        # Status is enough for URL/DOI checks. Closing the
+                        # connection avoids consuming an untrusted body.
                         return {"status": status, "body": ""}
                     chunks: List[bytes] = []
                     total = 0
@@ -312,6 +416,9 @@ def default_http_get(
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise TimeoutError("request_deadline")
+                        sock = getattr(conn, "sock", None)
+                        if sock is not None:
+                            sock.settimeout(remaining)
                         chunk = resp.read(min(8192, max_body - total))
                         if not chunk:
                             break
@@ -341,6 +448,9 @@ def resolve_arxiv(arxiv_id: str, http_get: Optional[Resolver] = None) -> Citatio
         payload = getter(api)
     except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
         return CitationResult(arxiv_id, "arxiv", False, f"network:{type(exc).__name__}")
+    status = int(payload.get("status") or 0)
+    if not 200 <= status < 300:
+        return CitationResult(arxiv_id, "arxiv", False, f"http_{status}")
     body = payload.get("body") or ""
     if f"<id>http://arxiv.org/abs/{arxiv_id}" in body or (
         "<entry>" in body and arxiv_id in body
@@ -363,7 +473,7 @@ def resolve_doi(doi: str, http_get: Optional[Resolver] = None) -> CitationResult
             return CitationResult(doi, "doi", False, str(exc))
         return CitationResult(doi, "doi", False, f"network:{type(exc).__name__}")
     status = int(payload.get("status") or 0)
-    if status and status >= 400:
+    if not 200 <= status < 300:
         return CitationResult(doi, "doi", False, f"http_{status}")
     return CitationResult(doi, "doi", True, "resolved")
 
@@ -381,7 +491,7 @@ def resolve_url(url: str, http_get: Optional[Resolver] = None) -> CitationResult
             return CitationResult(url, "url", False, f"http_{exc.code}")
         return CitationResult(url, "url", False, f"network:{type(exc).__name__}")
     status = int(payload.get("status") or 0)
-    if status and status >= 400:
+    if not 200 <= status < 300:
         return CitationResult(url, "url", False, f"http_{status}")
     return CitationResult(url, "url", True, "resolved")
 
@@ -410,7 +520,12 @@ def verify_findings(
     citation_results_ok = bool(citations) and all(item.ok for item in results)
     findings_ok = bool(findings) and not uncited
     citation_ok = citation_results_ok and findings_ok
-    repo_ok = not repo["missing_date"] and not repo["invalid_dates"]
+    repo_ok = not (
+        repo["missing_date"]
+        or repo["invalid_dates"]
+        or repo["missing_acknowledgement"]
+        or repo["undated_findings"]
+    )
     ok = citation_ok and repo_ok
     return {
         "ok": ok,
@@ -424,6 +539,15 @@ def verify_findings(
             *(f"unresolved:{item.kind}:{item.identifier}:{item.detail}" for item in results if not item.ok),
             *(f"missing_verification_date:{line}" for line in repo["missing_date"]),
             *(f"invalid_verification_date:{c['path']}:{c['verified']}" for c in repo["invalid_dates"]),
+            *(
+                ["missing_repo_code_claims_acknowledgement"]
+                if repo["missing_acknowledgement"]
+                else []
+            ),
+            *(
+                f"undated_repository_finding:{line}"
+                for line in repo["undated_findings"]
+            ),
             *(["no_citations_found"] if not citations else []),
             *(["no_findings_section"] if not findings else []),
             *(f"uncited_finding:{line}" for line in uncited),

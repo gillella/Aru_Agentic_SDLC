@@ -3,7 +3,7 @@ name: research
 description: Turns a bounded research board issue into a cited findings artifact with mechanical citation verification. Use when the user asks to research a question on the board, run a research issue, or produce a research artifact with citations.
 triggers:
   - "research issue"
-  - "run research"
+  - "research:run"
   - "research this question"
   - "produce research findings"
 do_not_trigger_for:
@@ -33,7 +33,23 @@ Restate the question, in-scope / out-of-scope, and stop conditions in one
 short comment if the issue body is ambiguous. If a product decision is
 missing, leave the issue blocked — do not invent scope.
 
-### 2. Investigate and write findings
+### 2. Prepare the artifact location
+
+If the artifact will be committed under `docs/research/**`, create the normal
+isolated docs branch and worktree **before the first repository write**:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_branch.py" \
+  --issue <N> --type docs --worktree
+cd <reported-worktree-path>
+```
+
+If the issue explicitly chooses a comment-only artifact, do not create a
+branch and do not write inside the repository. Prepare the Markdown in a local
+temporary location outside the checkout, verify it there, and attach it in
+Step 5.
+
+### 3. Investigate and write findings
 
 Produce a markdown artifact with this shape:
 
@@ -55,6 +71,7 @@ Produce a markdown artifact with this shape:
 ## Repo code claims
 <!-- Only for claims about *this* repository's code. Required date. -->
 - path: scripts/foo.py — verified: YYYY-MM-DD
+<!-- Or write exactly `none` when the findings make no repository-code claims. -->
 ```
 
 Rules:
@@ -67,7 +84,7 @@ Write the file under `docs/research/issue-<N>-<slug>.md` when `touches:`
 allows `docs/research/**`; otherwise keep it as a local file to attach via
 comment.
 
-### 3. Verify citations mechanically
+### 4. Verify citations mechanically
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/verify_citations.py" docs/research/issue-<N>-<slug>.md
@@ -76,7 +93,7 @@ python3 "$ARU_SDLC_HOME/scripts/verify_citations.py" docs/research/issue-<N>-<sl
 Exit 0 is required. Unresolvable citations fail the acceptance criteria —
 fix or remove them and re-run. Do not mark Done on belief alone.
 
-### 4. Attach the artifact to the issue
+### 5. Attach the artifact to the issue
 
 Direct `gh` is allowed here: there is no findings-attach helper yet, and this
 is the sanctioned exception for posting the findings artifact (parallel to
@@ -89,13 +106,13 @@ gh issue comment <N> --body-file <FINDINGS_OR_SUMMARY_FILE>
 If the findings live in-repo, the comment may summarize and link the path;
 the path must exist on the branch that closes the issue.
 
-### 5. Optional follow-on issues
+### 6. Optional follow-on issues
 
 When findings imply engineering work, file follow-ons with
 `create-github-issue` and set `depends-on: #<research-issue>`. Do not
 implement those follow-ons under this skill.
 
-### 6. Close out
+### 7. Close out
 
 1. Tick acceptance criteria on the issue body when the verifier passes.
 2. Open a PR with `Closes #<N>` if the artifact is committed in-repo
