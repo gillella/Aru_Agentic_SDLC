@@ -51,6 +51,10 @@ FORBIDDEN_CONTENT_RE = re.compile(
     r"|\btoken(?:s)?\s*(?:used|remaining|count|:|=)"
     r"|^(?:diff --git\s|---\s+[ab]/|\+\+\+\s+[ab]/|@@\s)"
     r"|^(?:FAILED\s+\S+|FAIL:\s+\S+|ERROR:\s+\S+|Traceback \(most recent call last\):)"
+    r"|^(?:ERROR\s+collecting\s+\S+|E\s{2,}.+)"
+    r"|\b(?:act as|your task is|follow (?:these|the) instructions)\b"
+    r"|^\s*(?:###\s*)?(?:system|developer|user|assistant|instructions)\s*:"
+    r"|<\/?(?:system|developer|user|assistant)>"
     r"|={3,}\s*(?:FAILURES|ERRORS)\s*={3,})",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -64,6 +68,8 @@ ENV_KEYS = (
     "SLACK_CHANNEL_NAME",
 )
 ALERT_TYPES = frozenset({"blocked", "waiting-on", "hitl"})
+MAX_ALERT_TEXT_CHARS = 1000
+MAX_ALERT_TEXT_LINES = 12
 FORBIDDEN_TYPES = frozenset(
     {
         "heartbeat",
@@ -210,6 +216,12 @@ def validate_alert_event(event: Dict[str, Any]) -> None:
             raise ValueError("waiting-on requires waiting_on_issue and/or waiting_on_pr")
     if kind == "hitl" and not str(event.get("text") or "").strip():
         raise ValueError("hitl requires decision text")
+    text = str(event.get("text") or "")
+    if len(text) > MAX_ALERT_TEXT_CHARS or len(text.splitlines()) > MAX_ALERT_TEXT_LINES:
+        raise ValueError(
+            f"alert summary exceeds {MAX_ALERT_TEXT_CHARS} characters or "
+            f"{MAX_ALERT_TEXT_LINES} lines"
+        )
     forbidden_field = _forbidden_content_field(event)
     if forbidden_field:
         raise ValueError(f"forbidden alert content in {forbidden_field}")
@@ -761,7 +773,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "type": args.type,
         "agent": args.agent,
         "family": args.family,
-        "repo": args.repo or project.repo_slug,
+        # Project registry identity is authoritative. Never let a caller
+        # redirect alert links by overriding the repository slug.
+        "repo": project.repo_slug,
         "issue": args.issue,
         "pr": args.pr,
         "state": args.state,
@@ -779,7 +793,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         result = notify_alert(
             config,
             event,
-            repo_dir=args.repo_dir,
+            repo_dir=project.local_path,
             skip_github=args.no_github_comment,
         )
         if result.get("error") == "invalid_alert":
