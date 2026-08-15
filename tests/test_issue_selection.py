@@ -73,6 +73,54 @@ depends-on: #2, #4
         self.assertEqual(result["not_ready"], [4])
         self.assertEqual(result["missing_touches"], [5])
 
+    def test_ready_needs_human_issue_is_not_a_candidate(self):
+        issues = [
+            issue(
+                1,
+                "touches: operator/slack-setup\n",
+                labels=("status:ready", "needs-human"),
+            ),
+            issue(2, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        result = build_candidates(issues, "agent-a")
+
+        self.assertEqual([item["number"] for item in result["candidates"]], [2])
+        self.assertEqual(result["operator_only"], [1])
+
+    def test_claimed_needs_human_issue_is_not_resumable(self):
+        issues = [
+            issue(
+                1,
+                "touches: operator/slack-setup\n",
+                labels=("status:in-progress", "agent:agent-a", "needs-human"),
+            ),
+            issue(2, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        result = build_candidates(issues, "agent-a")
+
+        self.assertIsNone(result["my_in_flight"])
+        self.assertEqual([item["number"] for item in result["candidates"]], [2])
+        self.assertEqual(result["operator_only"], [1])
+
+    def test_active_needs_human_touches_still_block_overlapping_agent_work(self):
+        issues = [
+            issue(
+                1,
+                "touches: src/operator.py\n",
+                labels=("status:in-progress", "needs-human"),
+            ),
+            issue(2, "touches: src/operator.py\n", labels=("status:ready",)),
+            issue(3, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        result = build_candidates(issues, "agent-a")
+
+        self.assertEqual([item["number"] for item in result["candidates"]], [3])
+        self.assertEqual(result["conflicted"][0]["number"], 2)
+        self.assertEqual(result["operator_only"], [1])
+
     @patch.object(fetch_next_issue, "update_status", return_value=True)
     @patch.object(fetch_next_issue, "run_cmd")
     def test_reaper_synchronizes_board_before_removing_claim(self, run_cmd, update_status):
@@ -89,13 +137,68 @@ depends-on: #2, #4
 
         run_cmd.side_effect = command_result
 
-        released = fetch_next_issue.reap_stale_claims([stale], 4)
+        current = dict(stale)
+        with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
+            released = fetch_next_issue.reap_stale_claims([stale], 4)
 
         self.assertEqual(released, [8])
         update_status.assert_called_once_with(8, "Ready", require_board=True)
         release_command = run_cmd.call_args_list[-1].args[0]
         self.assertIn("--remove-assignee", release_command)
         self.assertIn("agent:agent-a", release_command)
+
+    @patch.object(fetch_next_issue, "update_status", return_value=True)
+    @patch.object(fetch_next_issue, "run_cmd")
+    def test_reaper_returns_needs_human_claim_to_backlog(self, run_cmd, update_status):
+        old = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        stale = issue(
+            9,
+            "touches: operator/slack-setup\n",
+            labels=("agent:agent-a", "status:in-progress", "needs-human"),
+        )
+        stale["updatedAt"] = old
+        current = dict(stale)
+        run_cmd.side_effect = [
+            (0, "[]", ""),
+            (0, "", ""),
+            (0, "", ""),
+        ]
+
+        with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
+            released = fetch_next_issue.reap_stale_claims([stale], 4)
+
+        self.assertEqual(released, [9])
+        update_status.assert_called_once_with(9, "Backlog", require_board=True)
+
+    @patch.object(fetch_next_issue, "update_status", return_value=True)
+    @patch.object(fetch_next_issue, "run_cmd")
+    def test_reaper_detects_needs_human_label_added_after_stale_snapshot(
+        self, run_cmd, update_status
+    ):
+        old = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        stale = issue(
+            9,
+            "touches: operator/slack-setup\n",
+            labels=("agent:agent-a", "status:in-progress"),
+        )
+        stale["updatedAt"] = old
+        current = issue(
+            9,
+            "touches: operator/slack-setup\n",
+            labels=("agent:agent-a", "status:in-progress", "needs-human"),
+        )
+        current["updatedAt"] = old
+        run_cmd.side_effect = [
+            (0, "[]", ""),
+            (0, "", ""),
+            (0, "", ""),
+        ]
+
+        with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
+            released = fetch_next_issue.reap_stale_claims([stale], 4)
+
+        self.assertEqual(released, [9])
+        update_status.assert_called_once_with(9, "Backlog", require_board=True)
 
 
 class ClaimWalkTests(unittest.TestCase):
@@ -175,6 +278,28 @@ class ClaimWalkTests(unittest.TestCase):
             output = buf.getvalue()
 
         self.assertIn('"resumable_in_flight_issue": 9', output)
+
+    @patch.object(fetch_next_issue, "get_current_branch", return_value="feat/issue-9-operator")
+    @patch.object(fetch_next_issue, "list_open_issues")
+    def test_needs_human_branch_resume_is_ignored(self, list_open_issues, _branch):
+        list_open_issues.return_value = [
+            issue(
+                9,
+                "touches: operator/slack-setup\n",
+                labels=("agent:agent-b", "status:in-progress", "needs-human"),
+            ),
+            issue(12, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        with patch.object(sys, "argv", ["fetch_next_issue.py", "--agent", "agent-b", "--json"]):
+            buf = io.StringIO()
+            err = io.StringIO()
+            with patch.object(sys, "stdout", buf), patch.object(sys, "stderr", err):
+                fetch_next_issue.main()
+
+        self.assertIn('"resumable_in_flight_issue": null', buf.getvalue())
+        self.assertIn('"next_progressive_issue": 12', buf.getvalue())
+        self.assertIn("operator-only (needs-human)", err.getvalue())
 
 
 def fetch_next_issue_claim_conflict():

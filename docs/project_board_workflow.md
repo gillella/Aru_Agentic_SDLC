@@ -28,6 +28,12 @@ When a repository is bootstrapped via `skills/init-agent-project/SKILL.md`, it p
 | **In Review** | Pull Request opened (`Closes #X`), CI pipeline green. | PR submitted via `create_pr.py`. |
 | **Done** | PR merged into main, issue closed. | A factory agent runs the gated `merge_pr.py` close-out. |
 
+Issues labeled `needs-human` are operator-only work. They remain visible in
+Backlog, are never promoted by automated triage, and are excluded from both new
+issue pickup and in-flight resume. Agents must not remove the label or claim the
+issue to be helpful; only the operator may complete the work or remove the
+label before the ordinary Ready lifecycle begins.
+
 ---
 
 ## 🌳 Git Worktree Isolation Guidelines

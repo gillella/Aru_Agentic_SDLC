@@ -25,6 +25,7 @@ from common import (
     agent_labels,
     claimed_by,
     get_current_branch,
+    get_issue,
     list_open_issues,
     parse_touches,
     run_cmd,
@@ -55,6 +56,11 @@ def is_epic(labels: List[Dict[str, Any]]) -> bool:
     would hand an agent an epic every single time.
     """
     return "type:epic" in [label.get("name", "").lower() for label in labels]
+
+
+def needs_human(labels: List[Dict[str, Any]]) -> bool:
+    """Operator-only issues are visible board work, never factory work."""
+    return "needs-human" in [label.get("name", "").lower() for label in labels]
 
 
 def is_parallel_eligible(body: str, labels: List[Dict[str, Any]]) -> bool:
@@ -113,7 +119,8 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
     released = []
     for issue in issues:
         num = issue["number"]
-        if not agent_labels(issue):
+        original_holders = agent_labels(issue)
+        if not original_holders:
             continue
         updated = issue.get("updatedAt")
         if not updated:
@@ -125,15 +132,49 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
         if ts > cutoff or has_open_pr(num) or has_remote_branch(num):
             continue
 
-        if not update_status(num, "Ready", require_board=True):
+        current = get_issue(num)
+        if not current:
+            print(f"[WARN] Could not revalidate stale claim on #{num}; claim retained.",
+                  file=sys.stderr)
+            continue
+        current_holders = agent_labels(current)
+        if current_holders != original_holders:
+            print(f"[INFO] Claim holders changed on #{num}; stale snapshot ignored.",
+                  file=sys.stderr)
+            continue
+        current_updated = current.get("updatedAt")
+        if current_updated:
+            try:
+                current_ts = datetime.fromisoformat(current_updated.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if current_ts > cutoff:
+                continue
+
+        target_status = "Backlog" if needs_human(current.get("labels", [])) else "Ready"
+        if not update_status(num, target_status, require_board=True):
             print(
-                f"[WARN] Could not synchronize #{num} to Ready; claim retained.",
+                f"[WARN] Could not synchronize #{num} to {target_status}; claim retained.",
                 file=sys.stderr,
             )
             continue
 
+        after_status = get_issue(num)
+        if not after_status:
+            update_status(num, "In Progress", require_board=True)
+            print(f"[WARN] Could not verify stale-claim status on #{num}; status restored.",
+                  file=sys.stderr)
+            continue
+        if needs_human(after_status.get("labels", [])) and target_status != "Backlog":
+            if not update_status(num, "Backlog", require_board=True):
+                update_status(num, "In Progress", require_board=True)
+                print(f"[WARN] Could not return operator-only #{num} to Backlog; claim retained.",
+                      file=sys.stderr)
+                continue
+            target_status = "Backlog"
+
         cmd = ["gh", "issue", "edit", str(num), "--remove-assignee", "@me"]
-        for lbl in agent_labels(issue):
+        for lbl in original_holders:
             cmd += ["--remove-label", lbl]
         if run_cmd(cmd, check=False)[0] == 0:
             released.append(num)
@@ -156,15 +197,19 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
     my_in_flight_issues: List[Dict[str, Any]] = []
 
     for issue in issues:
-        names = {label.get("name", "").lower() for label in issue.get("labels", [])}
+        labels = issue.get("labels", [])
+        names = {label.get("name", "").lower() for label in labels}
         holder = claimed_by(issue)
         if holder or "status:in-progress" in names or "status:in-review" in names:
             in_flight_paths.extend(parse_touches(issue.get("body") or ""))
+        if needs_human(labels):
+            continue
         if holder:
             if agent and holder == agent:
                 my_in_flight_issues.append(issue)
 
     candidates, blocked, conflicted, not_ready, missing_touches = [], [], [], [], []
+    operator_only = []
 
     for issue in issues:
         num = issue["number"]
@@ -172,6 +217,9 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
         labels = issue.get("labels", [])
         names = {label.get("name", "").lower() for label in labels}
 
+        if needs_human(labels):
+            operator_only.append(num)
+            continue
         if is_epic(labels):
             continue
         if claimed_by(issue) or "status:in-progress" in names or "status:in-review" in names:
@@ -203,6 +251,7 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
         "conflicted": conflicted,
         "not_ready": not_ready,
         "missing_touches": missing_touches,
+        "operator_only": operator_only,
         "my_in_flight": min(my_in_flight_issues, key=lambda x: x["number"])
         if my_in_flight_issues else None,
     }
@@ -244,11 +293,14 @@ def main():
         branch_num = int(m.group(1))
         match = next((i for i in issues if i["number"] == branch_num), None)
         holder = claimed_by(match) if match else None
-        if match and args.agent and holder == args.agent:
+        operator_only = bool(match and needs_human(match.get("labels", [])))
+        if match and args.agent and holder == args.agent and not operator_only:
             branch_issue = branch_num
         else:
             if not match:
                 reason = "not open"
+            elif operator_only:
+                reason = "operator-only (needs-human)"
             elif not args.agent:
                 reason = "no --agent to validate ownership"
             elif holder and holder != args.agent:
@@ -319,6 +371,7 @@ def main():
         "blocked_by_file_conflict": parts["conflicted"],
         "not_ready": parts["not_ready"],
         "missing_touches": parts["missing_touches"],
+        "operator_only_issues": parts["operator_only"],
         "held_by_other_agents": [
             {"number": i["number"], "agent": claimed_by(i)}
             for i in issues if claimed_by(i) and claimed_by(i) != args.agent

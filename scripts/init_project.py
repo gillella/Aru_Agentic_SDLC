@@ -41,6 +41,7 @@ GOVERNANCE_LABELS = [
     ("type:docs", "0075ca", "Specification or documentation"),
     ("type:research", "bfd4f2", "Bounded research producing a cited artifact"),
     ("needs-design", "d4c5f9", "Requires an implementation plan before editing"),
+    ("needs-human", "b60205", "Operator must complete; factory agents must not claim"),
     ("priority:p0", "b60205", "Blocking; drop everything"),
     ("priority:p1", "d93f0b", "Current phase critical path"),
     ("priority:p2", "fbca04", "Current phase, not critical path"),

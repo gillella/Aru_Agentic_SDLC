@@ -244,6 +244,30 @@ parallel-eligible: true
         self.assertEqual(len(gaps), 1)
         self.assertIn("epic", gaps[0])
 
+    def test_needs_human_issue_is_never_promoted(self):
+        operator_issue = issue(
+            14,
+            "type:chore",
+            "status:backlog",
+            "needs-human",
+            body=READY_BODY,
+        )
+        gaps = tb.ready_gaps(operator_issue, set())
+        self.assertEqual(
+            gaps,
+            ["needs-human (operator-only; factory agents must not claim)"],
+        )
+
+        for force in (False, True):
+            argv = ["triage_backlog.py", "--promote"]
+            if force:
+                argv.append("--force")
+            with patch("triage_backlog.list_open_issues", return_value=[operator_issue]), \
+                 patch("triage_backlog.update_status") as update, \
+                 patch("sys.argv", argv):
+                self.assertEqual(tb.main(), 0)
+            update.assert_not_called()
+
     def test_main_refusal_emits_example_conforming_issue(self):
         issues_list = [issue(200, "type:feat", "status:backlog", body=READY_BODY)]
         with patch("triage_backlog.list_open_issues", return_value=issues_list), \
@@ -494,6 +518,61 @@ class PartitionTests(unittest.TestCase):
         _backlog, ready, held = tb.partition(issues)
         self.assertEqual(ready, [])
         self.assertEqual([i["number"] for i in held], [4])
+
+    def test_ready_needs_human_issue_is_backlog_and_not_capacity(self):
+        operator_issue = issue(
+            7,
+            "status:ready",
+            "needs-human",
+            body=READY_BODY,
+        )
+
+        backlog, ready, held = tb.partition([operator_issue])
+
+        self.assertEqual([item["number"] for item in backlog], [7])
+        self.assertEqual(ready, [])
+        self.assertEqual(held, [])
+        self.assertEqual(tb.capacity([operator_issue], []), {
+            "concurrent": [],
+            "deferred": [],
+            "ready_total": 0,
+        })
+
+        with patch("triage_backlog.list_open_issues", return_value=[operator_issue]), \
+             patch("sys.stdout", new_callable=io.StringIO) as output, \
+             patch("sys.argv", ["triage_backlog.py", "--capacity"]):
+            self.assertEqual(tb.main(), 0)
+        self.assertIn("Ready issues:            0", output.getvalue())
+        self.assertIn("Claimable simultaneously: 0", output.getvalue())
+
+    def test_active_needs_human_touches_block_overlapping_capacity(self):
+        operator_issue = issue(
+            7,
+            "status:in-progress",
+            "agent:human",
+            "needs-human",
+            body=READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: src/operator.py",
+            ),
+        )
+        factory_issue = issue(
+            8,
+            "status:ready",
+            body=READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: src/operator.py",
+            ),
+        )
+
+        backlog, ready, held = tb.partition([operator_issue, factory_issue])
+        cap = tb.capacity(ready, held)
+
+        self.assertEqual(backlog, [])
+        self.assertEqual([item["number"] for item in held], [7])
+        self.assertEqual([item["number"] for item in ready], [8])
+        self.assertEqual(cap["concurrent"], [])
+        self.assertEqual(cap["deferred"], [(8, "path conflict on src/operator.py")])
 
     def test_in_review_issue_is_parked_and_conflict_protected(self):
         issues = [

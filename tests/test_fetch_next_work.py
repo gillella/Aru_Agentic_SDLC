@@ -205,6 +205,30 @@ class PriorityTests(unittest.TestCase):
     def test_idle_when_there_is_nothing_at_all(self):
         self.assertEqual(self._select([], candidates=[])["work"]["type"], "idle")
 
+    def test_unified_picker_reports_but_never_selects_needs_human_issue(self):
+        operator_issue = {
+            "number": 1,
+            "title": "configure workspace",
+            "body": "touches: operator/slack-setup\n",
+            "labels": [
+                {"name": "status:ready"},
+                {"name": "needs-human"},
+            ],
+        }
+        ordinary_issue = {
+            "number": 2,
+            "title": "document behavior",
+            "body": "touches: docs/**\n",
+            "labels": [{"name": "status:ready"}],
+        }
+        with patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "list_open_issues", return_value=[operator_issue, ordinary_issue]):
+            result = fnw.select("agent-2", "openai", 3, 30)
+
+        self.assertEqual(result["work"]["issue"], 2)
+        self.assertEqual(result["claimable_issues"], [2])
+        self.assertEqual(result["operator_only_issues"], [1])
+
     def test_pending_ci_cross_family_pr_is_offered_immediately(self):
         candidate = pr(4, "author:agent-1", "family:anthropic", checks="pending")
         res = self._select([candidate], candidates=[7])

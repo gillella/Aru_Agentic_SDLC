@@ -109,9 +109,14 @@ def _has_ready(issue: dict) -> bool:
     return _status_labels(issue) == ["status:ready"]
 
 
-def _rollback_claim(issue_id: int, agent: str, assignee: str) -> None:
+def _needs_human(issue: dict) -> bool:
+    return "needs-human" in {name.lower() for name in label_names(issue)}
+
+
+def _rollback_claim(issue_id: int, agent: str, assignee: str,
+                    target_status: str = "Ready") -> None:
     """Best-effort undo after a late contender wins during/after status update."""
-    update_status(issue_id, "Ready", require_board=True)
+    update_status(issue_id, target_status, require_board=True)
     _remove_agent_label(issue_id, agent)
     run_cmd(
         ["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee],
@@ -138,6 +143,15 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
             return EXIT_ERROR
 
         holders = agent_labels(issue)
+        if _needs_human(issue):
+            if my_label in holders:
+                _rollback_claim(issue_id, agent, "@me", target_status="Backlog")
+            print(
+                f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
+                "while the claim was settling.",
+                file=sys.stderr,
+            )
+            return EXIT_CONFLICT
         if my_label not in holders:
             print(
                 f"[ERROR] Claim label '{my_label}' was not present during read-back "
@@ -192,6 +206,15 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
               file=sys.stderr)
         return EXIT_ERROR
     holders = agent_labels(issue)
+    if _needs_human(issue):
+        if my_label in holders:
+            _rollback_claim(issue_id, agent, assignee, target_status="Backlog")
+        print(
+            f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
+            "before claim finalization.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFLICT
     if _has_in_progress(issue) and holders == [my_label]:
         print(f"[INFO] Issue #{issue_id} is already yours; resuming.")
         return EXIT_OK
@@ -233,6 +256,14 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
         return EXIT_ERROR
 
     holders = agent_labels(issue)
+    if _needs_human(issue):
+        print(
+            f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
+            "during claim finalization; returning it to Backlog.",
+            file=sys.stderr,
+        )
+        _rollback_claim(issue_id, agent, assignee, target_status="Backlog")
+        return EXIT_CONFLICT
     if my_label not in holders or holders[0] != my_label:
         contenders = ", ".join(h[len(AGENT_LABEL_PREFIX):] for h in holders) or "(none)"
         print(
@@ -257,6 +288,14 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
     my_label = _label_for(agent)
 
     # --- Step 1: pre-check -------------------------------------------------
+    if _needs_human(issue):
+        print(
+            f"[CONFLICT] Issue #{issue_id} is operator-only (needs-human); "
+            "factory agents must not claim it.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFLICT
+
     holder = claimed_by(issue)
     if holder and holder != agent:
         print(f"[CONFLICT] Issue #{issue_id} is already held by '{holder}'.", file=sys.stderr)
@@ -326,7 +365,8 @@ def release_issue(issue_id: int, agent: str) -> int:
         print(f"[CONFLICT] Issue #{issue_id} is held by '{holder}', not '{agent}'.", file=sys.stderr)
         return EXIT_CONFLICT
 
-    if not update_status(issue_id, "Ready", require_board=True):
+    target_status = "Backlog" if _needs_human(issue) else "Ready"
+    if not update_status(issue_id, target_status, require_board=True):
         return EXIT_ERROR
     if not _remove_agent_label(issue_id, agent):
         update_status(issue_id, "In Progress", require_board=True)
@@ -337,7 +377,7 @@ def release_issue(issue_id: int, agent: str) -> int:
     )
     if code != 0:
         print(f"[WARN] Unable to remove assignee: {err}", file=sys.stderr)
-    print(f"♻️  Issue #{issue_id} released by '{agent}' and returned to Ready.")
+    print(f"♻️  Issue #{issue_id} released by '{agent}' and returned to {target_status}.")
 
 
 # --- Reviewing a pull request ----------------------------------------------

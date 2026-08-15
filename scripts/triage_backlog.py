@@ -38,7 +38,7 @@ from common import (
     parse_touches,
     touches_conflict,
 )
-from fetch_next_issue import is_epic, parse_dependencies
+from fetch_next_issue import is_epic, needs_human, parse_dependencies
 from update_issue_status import update_status
 
 
@@ -274,6 +274,10 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str
     num = issue.get("number", 0)
     gaps = []
 
+    if needs_human(issue.get("labels", [])):
+        gaps.append("needs-human (operator-only; factory agents must not claim)")
+        return gaps
+
     if is_epic(issue.get("labels", [])):
         gaps.append("is an epic (never directly implementable)")
         return gaps
@@ -410,7 +414,14 @@ def partition(issues: list[dict[str, Any]]) -> tuple[list, list, list]:
     backlog, ready, held = [], [], []
     for issue in issues:
         names = {n.lower() for n in label_names(issue)}
-        if claimed_by(issue) or "status:in-review" in names:
+        active = bool(
+            claimed_by(issue)
+            or "status:in-progress" in names
+            or "status:in-review" in names
+        )
+        if needs_human(issue.get("labels", [])):
+            (held if active else backlog).append(issue)
+        elif active:
             held.append(issue)
         elif "status:ready" in names:
             ready.append(issue)
@@ -426,6 +437,7 @@ def capacity(ready: list[dict[str, Any]], held: list[dict[str, Any]]) -> dict[st
     cannot run at the same time, and neither can one that collides with work
     already in flight. This walks the list greedily the way the picker would.
     """
+    ready = [issue for issue in ready if not needs_human(issue.get("labels", []))]
     in_flight_paths: list[str] = []
     for issue in held:
         in_flight_paths.extend(parse_touches(issue.get("body") or ""))
