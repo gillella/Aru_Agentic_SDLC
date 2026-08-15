@@ -68,7 +68,7 @@ def _read_increment_unlocked(path: Path, default: Any) -> Any:
     _private_file(path)
     try:
         return _strict_json_loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise IncrementError(f"cannot read {path}: {exc}") from exc
 
 

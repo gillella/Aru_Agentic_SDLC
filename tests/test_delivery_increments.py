@@ -120,6 +120,11 @@ class DeliveryIncrementSchemaTests(IncrementFixture):
             with self.subTest(document=document), self.assertRaises(IncrementError):
                 self.store.list()
 
+        self.store.path.write_bytes(b'{"schema": 1, "increments": []}\xff')
+        self.store.path.chmod(0o600)
+        with self.assertRaises(IncrementError):
+            self.store.list()
+
     def test_schema_boolean_and_list_valued_fields_fail_closed(self):
         self.authorize()
         self.mutate_file(lambda payload: payload.__setitem__("schema", True))
