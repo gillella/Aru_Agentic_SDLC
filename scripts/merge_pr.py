@@ -223,8 +223,8 @@ def _reviewed_current_head(owner, name, pr_id):
             login = (author or {}).get("login")
             oid = (commit or {}).get("oid")
             if (
-                login is not None and (not isinstance(login, str) or not login)
-                or oid is not None and (not isinstance(oid, str) or not oid)
+                author is not None and (not isinstance(login, str) or not login)
+                or commit is not None and (not isinstance(oid, str) or not oid)
                 or state == "PENDING" and submitted_at is not None
                 or state != "PENDING" and _parse_review_ts(submitted_at) is None
             ):

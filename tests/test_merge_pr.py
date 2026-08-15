@@ -298,6 +298,10 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             [dict(valid, submittedAt=None)],
             [dict(valid, submittedAt="not-a-time")],
             [dict(valid, submittedAt="2026-08-15T00:00:00")],
+            [dict(valid, author={})],
+            [dict(valid, author={"name": "missing-login"})],
+            [dict(valid, commit={})],
+            [dict(valid, commit={"abbreviatedOid": "head123"})],
             [valid, dict(valid)],
         ]
         for nodes in malformed_pages:
@@ -305,6 +309,32 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 gh_json.reset_mock(side_effect=True, return_value=True)
                 gh_json.side_effect = [self.review_page(nodes=nodes)]
                 self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_malformed_later_approval_cannot_clear_change_request(
+        self, gh_json, _slug
+    ):
+        nodes = [
+            {
+                "id": "current-comment", "state": "COMMENTED",
+                "submittedAt": "2026-08-15T00:00:00Z",
+                "author": {"login": "peer"}, "commit": {"oid": "head123"},
+            },
+            {
+                "id": "blocker", "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-15T01:00:00Z",
+                "author": {"login": "bob"}, "commit": {"oid": "head123"},
+            },
+            {
+                "id": "malformed-approval", "state": "APPROVED",
+                "submittedAt": "2026-08-15T02:00:00Z",
+                "author": {"login": "bob"}, "commit": {},
+            },
+        ]
+        gh_json.return_value = self.review_page(nodes=nodes)
+
+        self.assertIsNone(merge_pr.review_evidence(162))
 
     def test_latest_verdict_uses_timestamp_not_page_order(self):
         reviews = [
