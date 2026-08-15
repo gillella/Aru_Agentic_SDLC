@@ -120,15 +120,21 @@ Step 1 context before running the commands:
 ```bash
 ARU_GOVERNED_REPO_ROOT="/absolute/path/to/governed/repository"
 ARU_GOVERNED_REPO="owner/name"
-test -d "$ARU_GOVERNED_REPO_ROOT/.git"
+ARU_APPROVED_PRD_FILE="/absolute/path/to/approved-prd.md"
+test "$(git -C "$ARU_GOVERNED_REPO_ROOT" rev-parse --show-toplevel)" = \
+  "$ARU_GOVERNED_REPO_ROOT"
+test -f "$ARU_APPROVED_PRD_FILE"
 cd "$ARU_GOVERNED_REPO_ROOT"
 test "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" = \
   "$ARU_GOVERNED_REPO"
-gh issue create \
+ARU_PRD_ISSUE_URL="$(gh issue create \
   --repo "$ARU_GOVERNED_REPO" \
   --title "prd: <product or capability name>" \
   --label "type:epic" \
-  --body-file <approved-prd-file>
+  --body-file "$ARU_APPROVED_PRD_FILE")"
+ARU_PRD_ISSUE_ID="${ARU_PRD_ISSUE_URL##*/}"
+test -n "$ARU_PRD_ISSUE_ID"
+test "$ARU_PRD_ISSUE_ID" -eq "$ARU_PRD_ISSUE_ID" 2>/dev/null
 ```
 
 Capture the created issue number, remain in `$ARU_GOVERNED_REPO_ROOT`, and
@@ -142,7 +148,7 @@ cd "$ARU_GOVERNED_REPO_ROOT"
 test "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" = \
   "$ARU_GOVERNED_REPO"
 python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" \
-  --issue <ID> \
+  --issue "$ARU_PRD_ISSUE_ID" \
   --status Backlog \
   --require-board
 ```
