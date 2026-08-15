@@ -1121,6 +1121,21 @@ def evaluate_dod(pr, issue_bodies, evidence):
     return ok, gates
 
 
+def dry_run_json_payload(pr, gates, ok):
+    """Serialize a dry-run DoD evaluation for ``--dry-run --json`` callers."""
+    first_blocking = next((name for name, passed, _ in gates if not passed), None)
+    return {
+        "pr": pr.get("number"),
+        "title": pr.get("title") or "",
+        "ok": bool(ok),
+        "gates": [
+            {"name": name, "passed": bool(passed), "message": message}
+            for name, passed, message in gates
+        ],
+        "first_blocking": first_blocking,
+    }
+
+
 def dod_status(pr_id):
     """Fetch-and-evaluate helper for callers that only need pass/fail + reason.
 
@@ -1406,6 +1421,11 @@ def main():
     parser = argparse.ArgumentParser(description="Merge a PR only if the Definition of Done is met.")
     parser.add_argument("--pr", type=int, required=True, help="Pull request number")
     parser.add_argument("--dry-run", action="store_true", help="Run every check, merge nothing")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With --dry-run, emit machine-readable gate results instead of text",
+    )
     parser.add_argument("--merge-method", default="merge", choices=["squash", "merge", "rebase"])
     parser.add_argument(
         "--expected-head",
@@ -1414,6 +1434,10 @@ def main():
         help="Head SHA selected by the picker; refuse if the live head differs",
     )
     args = parser.parse_args()
+
+    if args.json and not args.dry_run:
+        print("[ERROR] --json requires --dry-run (refusing to emit JSON for a live merge).", file=sys.stderr)
+        return EXIT_ERROR
 
     pr = fetch_pr(args.pr)
     if not pr:
@@ -1442,7 +1466,17 @@ def main():
         print(f"=== Merge execution — PR #{args.pr}: already merged; resuming close-out ===")
         final_pr = pr
         if args.dry_run:
-            print("No mutations performed in --dry-run mode.")
+            if args.json:
+                print(json.dumps({
+                    "pr": args.pr,
+                    "title": pr.get("title") or "",
+                    "ok": True,
+                    "gates": [],
+                    "first_blocking": None,
+                    "already_merged": True,
+                }))
+            else:
+                print("No mutations performed in --dry-run mode.")
             return EXIT_OK
     else:
         issue_bodies = {}
@@ -1454,6 +1488,10 @@ def main():
 
         evidence = review_evidence(args.pr)
         ok, gates = evaluate_dod(pr, issue_bodies, evidence)
+
+        if args.json:
+            print(json.dumps(dry_run_json_payload(pr, gates, ok)))
+            return EXIT_OK if ok else EXIT_BLOCKED
 
         print(f"=== Definition of Done — PR #{args.pr}: {pr.get('title','')} ===")
         blocked = []

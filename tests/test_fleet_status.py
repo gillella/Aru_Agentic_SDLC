@@ -17,11 +17,15 @@ from fleet_status import (  # noqa: E402
     LINE_CEILING,
     apply_ci_failure_rate,
     apply_closed_issue_cost,
+    build_merge_queue,
     build_operator_screen,
     collect_codebase_health,
     discover_fleet_size,
     evaluate_fleet_status,
+    evaluate_queue_row,
+    format_merge_queue,
     format_operator_screen,
+    next_queue_action,
     resolve_fleet_size,
     resolve_ready_target,
 )
@@ -850,6 +854,156 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "error")
         self.assertNotEqual(status["state"], "complete")
         self.assertNotIn("operator_screen", status)
+
+
+class MergeQueueViewTests(unittest.TestCase):
+    """§5.5 merge-queue view wrapping dry-run DoD verdicts."""
+
+    def _full_pr(self, number, *labels, title=None, body="Closes #1"):
+        return mock_pr(
+            number,
+            *labels,
+            title=title or f"PR {number}",
+            body=body,
+            headRefOid="abc123",
+        )
+
+    def test_next_queue_action_mapping(self):
+        self.assertEqual(next_queue_action(True, None, 0), "merge")
+        self.assertEqual(next_queue_action(False, "review", 0), "review")
+        self.assertEqual(next_queue_action(False, "ci", 2), "feedback")
+        self.assertEqual(next_queue_action(False, "ci", 0), "wait")
+        self.assertEqual(next_queue_action(False, "rebased", 0), "wait")
+
+    def test_queue_reports_mergeable_pr(self):
+        pr = self._full_pr(10, "author:agent-a", "reviewed-by:agent-b")
+        gates = [
+            ("open", True, "open"),
+            ("issue link", True, "linked"),
+            ("verification", True, "ok"),
+            ("ci", True, "green"),
+            ("review", True, "reviewed"),
+            ("rebased", True, "clean"),
+            ("size", True, "ok"),
+            ("accept #1", True, "done"),
+        ]
+
+        row = evaluate_queue_row(
+            pr,
+            fetch_pr_fn=lambda _n: pr,
+            linked_issues_fn=lambda _body: [1],
+            issue_body_fn=lambda _n: "- [x] done",
+            review_evidence_fn=lambda _n: {"unresolved": 0, "unfixed": 0, "withdrawn": 0},
+            evaluate_dod_fn=lambda *_a, **_k: (True, gates),
+        )
+        self.assertTrue(row["ok"])
+        self.assertIsNone(row["first_blocking"])
+        self.assertEqual(row["next_action"], "merge")
+        self.assertEqual(row["verdict"], "pass")
+        self.assertEqual(row["author"], "agent-a")
+        self.assertEqual(row["reviewer"], "agent-b")
+
+    def test_queue_reports_missing_review_as_first_blocking_gate(self):
+        pr = self._full_pr(11, "author:agent-a")
+        gates = [
+            ("open", True, "open"),
+            ("issue link", True, "linked"),
+            ("verification", True, "ok"),
+            ("ci", True, "green"),
+            ("review", False, "no independent reviewed-by:<id>"),
+            ("rebased", True, "clean"),
+            ("size", True, "ok"),
+        ]
+        row = evaluate_queue_row(
+            pr,
+            fetch_pr_fn=lambda _n: pr,
+            linked_issues_fn=lambda _body: [1],
+            issue_body_fn=lambda _n: "- [x] done",
+            review_evidence_fn=lambda _n: {"unresolved": 0, "unfixed": 0, "withdrawn": 0},
+            evaluate_dod_fn=lambda *_a, **_k: (False, gates),
+        )
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["first_blocking"], "review")
+        self.assertEqual(row["next_action"], "review")
+        self.assertIn("review:", row["verdict"])
+
+    def test_queue_routes_unresolved_threads_to_feedback(self):
+        pr = self._full_pr(12, "author:agent-a", "reviewed-by:agent-b")
+        gates = [
+            ("open", True, "open"),
+            ("issue link", True, "linked"),
+            ("verification", True, "ok"),
+            ("ci", True, "green"),
+            ("review", False, "2 unresolved review thread(s)."),
+            ("rebased", True, "clean"),
+            ("size", True, "ok"),
+        ]
+        row = evaluate_queue_row(
+            pr,
+            fetch_pr_fn=lambda _n: pr,
+            linked_issues_fn=lambda _body: [1],
+            issue_body_fn=lambda _n: "- [x] done",
+            review_evidence_fn=lambda _n: {"unresolved": 2, "unfixed": 0, "withdrawn": 0},
+            evaluate_dod_fn=lambda *_a, **_k: (False, gates),
+        )
+        self.assertEqual(row["first_blocking"], "review")
+        self.assertEqual(row["next_action"], "feedback")
+        self.assertEqual(row["unresolved_threads"], 2)
+
+    def test_queue_reports_red_ci_as_first_blocking_gate(self):
+        pr = self._full_pr(13, "author:agent-a", "reviewed-by:agent-b")
+        gates = [
+            ("open", True, "open"),
+            ("issue link", True, "linked"),
+            ("verification", True, "ok"),
+            ("ci", False, "CI is red"),
+            ("review", True, "reviewed"),
+            ("rebased", True, "clean"),
+            ("size", True, "ok"),
+        ]
+        row = evaluate_queue_row(
+            pr,
+            fetch_pr_fn=lambda _n: pr,
+            linked_issues_fn=lambda _body: [1],
+            issue_body_fn=lambda _n: "- [x] done",
+            review_evidence_fn=lambda _n: {"unresolved": 0, "unfixed": 0, "withdrawn": 0},
+            evaluate_dod_fn=lambda *_a, **_k: (False, gates),
+        )
+        self.assertEqual(row["first_blocking"], "ci")
+        self.assertEqual(row["next_action"], "wait")
+        self.assertIn("ci:", row["verdict"])
+
+    def test_build_merge_queue_never_invokes_merge_side_effects(self):
+        prs = [self._full_pr(20, "author:a"), self._full_pr(21, "author:b")]
+        calls = {"n": 0}
+
+        def fake_row(pr):
+            calls["n"] += 1
+            return {
+                "pr": pr["number"],
+                "title": pr["title"],
+                "author": "a",
+                "reviewer": None,
+                "ok": False,
+                "first_blocking": "review",
+                "verdict": "review: missing",
+                "next_action": "review",
+                "gates": [],
+                "unresolved_threads": 0,
+            }
+
+        with patch("merge_pr.execute_merge") as execute_merge, \
+             patch("merge_pr.main") as merge_main:
+            payload = build_merge_queue(prs, evaluate_row_fn=fake_row)
+            text = format_merge_queue(payload)
+
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(payload["open_prs_count"], 2)
+        self.assertEqual(payload["mergeable_count"], 0)
+        self.assertIn("Merge queue", text)
+        self.assertIn("#20", text)
+        execute_merge.assert_not_called()
+        merge_main.assert_not_called()
 
 
 if __name__ == "__main__":

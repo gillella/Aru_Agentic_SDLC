@@ -1724,3 +1724,63 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
             merge_pr.main()
         load.assert_called_once()
         self.assertEqual(tag.call_args.args[3], list(CHECKPOINT_GATES))
+
+
+class DryRunJsonTests(unittest.TestCase):
+    """merge_pr --dry-run --json exposes first failing gate without merging."""
+
+    def test_dry_run_json_payload_shape(self):
+        pr = {"number": 42, "title": "feat(x): y"}
+        gates = [
+            ("open", True, "open"),
+            ("ci", False, "CI is red"),
+            ("review", True, "ok"),
+        ]
+        payload = merge_pr.dry_run_json_payload(pr, gates, False)
+        self.assertEqual(payload["pr"], 42)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["first_blocking"], "ci")
+        self.assertEqual(payload["gates"][1]["name"], "ci")
+        self.assertFalse(payload["gates"][1]["passed"])
+
+    def test_json_without_dry_run_is_refused(self):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9", "--json"]), \
+             patch.object(merge_pr, "fetch_pr") as fetch:
+            code = merge_pr.main()
+        self.assertEqual(code, merge_pr.EXIT_ERROR)
+        fetch.assert_not_called()
+
+    def test_dry_run_json_prints_payload_and_skips_merge(self):
+        pr = {
+            "number": 9,
+            "title": "feat",
+            "body": "Closes #1",
+            "state": "OPEN",
+            "mergedAt": None,
+            "headRefOid": "abc",
+            "labels": [{"name": "author:a"}, {"name": "reviewed-by:b"}],
+        }
+        gates = [
+            ("open", True, "open"),
+            ("issue link", True, "linked"),
+            ("verification", True, "ok"),
+            ("ci", True, "green"),
+            ("review", False, "missing review"),
+            ("rebased", True, "clean"),
+            ("size", True, "ok"),
+            ("accept #1", True, "done"),
+        ]
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9", "--dry-run", "--json"]), \
+             patch.object(merge_pr, "fetch_pr", return_value=pr), \
+             patch.object(merge_pr, "is_merged", return_value=False), \
+             patch.object(merge_pr, "_gh_json", return_value={"body": "- [x] done"}), \
+             patch.object(merge_pr, "review_evidence", return_value={"unresolved": 0, "unfixed": 0, "withdrawn": 0}), \
+             patch.object(merge_pr, "evaluate_dod", return_value=(False, gates)), \
+             patch.object(merge_pr, "execute_merge") as execute_merge, \
+             patch("builtins.print") as printer:
+            code = merge_pr.main()
+        self.assertEqual(code, merge_pr.EXIT_BLOCKED)
+        execute_merge.assert_not_called()
+        printed = " ".join(str(c.args[0]) for c in printer.call_args_list if c.args)
+        self.assertIn('"first_blocking": "review"', printed)
+        self.assertIn('"ok": false', printed)
