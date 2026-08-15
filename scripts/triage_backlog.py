@@ -17,11 +17,16 @@ The Ready contract (all four required):
   * acceptance criteria present, as checkboxes
   * a touches: declaration
   * every depends-on issue is closed
+
+Oversized-scope recommendation (either signal is sufficient):
+  * more than 8 acceptance-criteria checkboxes
+  * touches: spans more than one top-level area
 """
 
 import argparse
 import os
 import re
+import subprocess
 import sys
 from typing import Any, Optional
 
@@ -150,6 +155,7 @@ def has_verification(body: str) -> bool:
 
 ARU_SDLC_REPO_SLUG = "gillella/Aru_Agentic_SDLC"
 LEGACY_ISSUE_CUTOFF_NUMBER = 158
+SPLIT_ACCEPTANCE_CRITERIA_THRESHOLD = 8
 
 EXAMPLE_CONFORMING_ISSUE_BODY = """## Feature Description
 Describe the problem and intended change.
@@ -312,6 +318,93 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str
     return gaps
 
 
+def _repository_root() -> str:
+    """Returns the checkout root used to classify bare touches entries."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return os.getcwd()
+    return result.stdout.strip() if result.returncode == 0 else os.getcwd()
+
+
+def split_reasons(issue: dict[str, Any]) -> list[str]:
+    """Returns concrete reasons a Ready-contract issue should be split.
+
+    This is deliberately advisory: each visible oversize signal is enough to
+    hold automatic promotion, while ``--force`` lets a triager record an
+    explicit exception.
+    """
+    body = issue.get("body") or ""
+    criteria_count = len(acceptance_criteria(body))
+    touches_match = re.search(
+        r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
+        body,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    declared_paths = []
+    if touches_match:
+        declared_paths = [
+            path.strip().strip("`")
+            for path in touches_match.group(1).split(",")
+            if path.strip().strip("`")
+        ]
+    area_roots = []
+    repository_wide = False
+    repository_root = _repository_root()
+    for declared_path in declared_paths:
+        path = declared_path.strip()
+        while path.startswith("./"):
+            path = path[2:]
+        if path in {"", ".", "/"}:
+            repository_wide = True
+            continue
+        path = path.lstrip("/")
+        if not path or path == ".":
+            repository_wide = True
+            continue
+        # Existing root-level files share one repository-root area. A bare
+        # concrete token can also be a directory prefix in the enforcement
+        # grammar, regardless of dots (for example ``scripts`` or
+        # ``.github``). Use checkout evidence to recognize files; preserve
+        # directories and unknown names conservatively as distinct areas.
+        if "/" in path:
+            area_roots.append(path.split("/", 1)[0])
+        elif any(char in path for char in "*?["):
+            area_roots.append(path)
+        elif os.path.isfile(os.path.join(repository_root, path)):
+            area_roots.append("<root>")
+        else:
+            area_roots.append(path)
+    wildcard_roots = sorted({
+        root for root in area_roots if any(char in root for char in "*?[")
+    })
+    areas = sorted({
+        root for root in area_roots if not any(char in root for char in "*?[")
+    })
+    reasons = []
+    if criteria_count > SPLIT_ACCEPTANCE_CRITERIA_THRESHOLD:
+        reasons.append(
+            f"{criteria_count} acceptance criteria exceed the threshold of "
+            f"{SPLIT_ACCEPTANCE_CRITERIA_THRESHOLD}"
+        )
+    if repository_wide:
+        reasons.append("touches include the whole repository root")
+    if len(areas) > 1:
+        reasons.append(f"touches span {len(areas)} top-level areas: {', '.join(areas)}")
+    if wildcard_roots:
+        reasons.append(
+            "touches use wildcard top-level area patterns: "
+            + ", ".join(wildcard_roots)
+        )
+    return reasons
+
+
 def partition(issues: list[dict[str, Any]]) -> tuple[list, list, list]:
     """Splits open issues into (backlog, ready, held)."""
     backlog, ready, held = [], [], []
@@ -384,6 +477,11 @@ def print_capacity(
 def main():
     parser = argparse.ArgumentParser(description="Verify the Ready contract and promote Backlog issues.")
     parser.add_argument("--promote", action="store_true", help="Promote qualifying issues to Ready")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --promote, override SPLIT recommendations (never Ready-contract gaps or epics)",
+    )
     parser.add_argument("--issue", type=int, action="append", default=[],
                         help="Restrict to specific issue numbers (repeatable)")
     parser.add_argument("--capacity", action="store_true", help="Print only the fleet-capacity summary")
@@ -415,16 +513,26 @@ def main():
         backlog = [i for i in backlog if i["number"] in args.issue]
 
     slug = get_repo_slug()
-    qualified, blocked = [], []
+    qualified, split_recommended, blocked = [], [], []
     for issue in sorted(backlog, key=lambda i: i["number"]):
         gaps = ready_gaps(issue, open_numbers, repo_slug=slug)
-        (blocked if gaps else qualified).append((issue, gaps))
+        if gaps:
+            blocked.append((issue, gaps))
+            continue
+        reasons = split_reasons(issue)
+        (split_recommended if reasons else qualified).append((issue, reasons))
 
     print(f"=== Backlog triage — {len(backlog)} issue(s) examined ===\n")
     if qualified:
         print("Meets the Ready contract:")
         for issue, _ in qualified:
             print(f"  ✅ #{issue['number']:<4} {issue['title']}")
+    if split_recommended:
+        print("\nSPLIT — Ready contract met, but scope looks oversized:")
+        for issue, reasons in split_recommended:
+            print(f"  ⚠️  #{issue['number']:<4} {issue['title']}")
+            for reason in reasons:
+                print(f"        · {reason}")
     if blocked:
         print("\nBlocked — Ready contract incomplete:")
         has_criteria_gaps = False
@@ -438,9 +546,10 @@ def main():
             print(f"\n{EXAMPLE_CONFORMING_ISSUE.strip()}\n")
 
     promoted = 0
-    if args.promote and qualified:
+    promotable = qualified + (split_recommended if args.force else [])
+    if args.promote and promotable:
         print()
-        for issue, _ in qualified:
+        for issue, _ in promotable:
             if update_status(issue["number"], "Ready"):
                 print(f"  ⬆️  #{issue['number']} → Ready")
                 promoted += 1
@@ -450,6 +559,12 @@ def main():
         ready = partition(list_open_issues())[1]
     elif qualified:
         print(f"\n  {len(qualified)} issue(s) would be promoted. Re-run with --promote.")
+
+    if split_recommended and not (args.promote and args.force):
+        print(
+            f"\n  {len(split_recommended)} issue(s) held for splitting. "
+            "Use --promote --force to override the recommendation."
+        )
 
     print_capacity(capacity(ready, held), held, ready_target=target)
     return 0

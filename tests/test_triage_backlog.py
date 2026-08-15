@@ -1,4 +1,6 @@
+import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -243,7 +245,6 @@ parallel-eligible: true
         self.assertIn("epic", gaps[0])
 
     def test_main_refusal_emits_example_conforming_issue(self):
-        import io
         issues_list = [issue(200, "type:feat", "status:backlog", body=READY_BODY)]
         with patch("triage_backlog.list_open_issues", return_value=issues_list), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout, \
@@ -254,6 +255,226 @@ parallel-eligible: true
             self.assertIn("## Decision Boundaries", output)
             self.assertIn("## Non-Goals", output)
             self.assertIn("## Dependencies", output)
+
+
+class SplitRecommendationTests(unittest.TestCase):
+    @staticmethod
+    def oversized_body():
+        criteria = "\n".join(f"- [ ] predicate {n}" for n in range(1, 10))
+        return READY_BODY.replace(
+            "- [ ] it works\n- [ ] it is documented",
+            criteria,
+        ).replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: scripts/thing.py, hooks/guard.py, tests/test_thing.py",
+        )
+
+    def test_narrow_issue_promotes(self):
+        narrow_body = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: src/thing.py, src/thing_test.py",
+        )
+        narrow = issue(10, "type:chore", "status:backlog", body=narrow_body)
+        with patch("triage_backlog.list_open_issues", return_value=[narrow]), \
+             patch("triage_backlog.update_status", return_value=True) as update, \
+             patch("sys.argv", ["triage_backlog.py", "--promote"]):
+            self.assertEqual(tb.main(), 0)
+        update.assert_called_once_with(10, "Ready")
+
+    def test_wide_touches_plus_many_criteria_is_held_for_split(self):
+        wide = issue(11, "type:chore", "status:backlog", body=self.oversized_body())
+        with patch("triage_backlog.list_open_issues", return_value=[wide]), \
+             patch("triage_backlog.update_status") as update, \
+             patch("sys.argv", ["triage_backlog.py", "--promote"]), \
+             patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(tb.main(), 0)
+        update.assert_not_called()
+        self.assertIn("SPLIT", output.getvalue())
+        self.assertIn("9 acceptance criteria exceed the threshold of 8", output.getvalue())
+        self.assertIn("3 top-level areas: hooks, scripts, tests", output.getvalue())
+
+    def test_each_oversize_signal_is_independently_actionable(self):
+        wide_only = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: scripts/thing.py, hooks/guard.py",
+        )
+        many_only = self.oversized_body().replace(
+            "touches: scripts/thing.py, hooks/guard.py, tests/test_thing.py",
+            "touches: scripts/thing.py, scripts/thing_test.py",
+        )
+
+        self.assertEqual(
+            tb.split_reasons(issue(20, "type:chore", body=wide_only)),
+            ["touches span 2 top-level areas: hooks, scripts"],
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(21, "type:chore", body=many_only)),
+            ["9 acceptance criteria exceed the threshold of 8"],
+        )
+
+    def test_wildcard_top_level_roots_are_inherently_wide(self):
+        repo_wide = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: **/*.py",
+        )
+        per_area = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: */config.yml",
+        )
+
+        self.assertEqual(
+            tb.split_reasons(issue(22, "type:chore", body=repo_wide)),
+            ["touches use wildcard top-level area patterns: **"],
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(23, "type:chore", body=per_area)),
+            ["touches use wildcard top-level area patterns: *"],
+        )
+        for declaration in ("scripts*", "[st]rc", "?", "*.py"):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(28, "type:chore", body=body)),
+                    [f"touches use wildcard top-level area patterns: {declaration}"],
+                )
+
+    def test_directory_spelling_preserves_top_level_areas(self):
+        for declaration in (
+            "scripts/, hooks/",
+            "scripts, hooks",
+            ".github, .devcontainer",
+            ".github, README.md",
+        ):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                reasons = tb.split_reasons(issue(29, "type:chore", body=body))
+                self.assertEqual(len(reasons), 1)
+                self.assertIn("touches span 2 top-level areas", reasons[0])
+
+    def test_promote_holds_directory_and_slash_free_wildcard_scopes(self):
+        bodies = (
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: scripts/, hooks/",
+            ),
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: scripts, hooks",
+            ),
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: .github, .devcontainer",
+            ),
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: .github, README.md",
+            ),
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: scripts*",
+            ),
+        )
+        for number, body in enumerate(bodies, start=30):
+            candidate = issue(number, "type:chore", "status:backlog", body=body)
+            with self.subTest(number=number), \
+                 patch("triage_backlog.list_open_issues", return_value=[candidate]), \
+                 patch("triage_backlog.update_status") as update, \
+                 patch("sys.argv", ["triage_backlog.py", "--promote"]), \
+                 patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(tb.main(), 0)
+                update.assert_not_called()
+
+    def test_leading_dot_slash_is_normalized_before_area_classification(self):
+        body = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: ./scripts/a.py, ./hooks/b.py",
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(24, "type:chore", body=body)),
+            ["touches span 2 top-level areas: hooks, scripts"],
+        )
+
+    def test_explicit_repository_root_is_inherently_wide(self):
+        for declaration in (".", "./", "/"):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(25, "type:chore", body=body)),
+                    ["touches include the whole repository root"],
+                )
+
+    def test_root_files_share_one_area_but_conflict_with_a_directory_area(self):
+        root_files = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: README.md, pyproject.toml",
+        )
+        root_and_scripts = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: README.md, scripts/tool.py",
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(26, "type:chore", body=root_files)), []
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(27, "type:chore", body=root_and_scripts)),
+            ["touches span 2 top-level areas: <root>, scripts"],
+        )
+
+    def test_bare_names_use_repository_evidence_and_unknowns_are_conservative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "LICENSE").write_text("license", encoding="utf-8")
+            (root / "Makefile").write_text("all:", encoding="utf-8")
+            (root / ".github").mkdir()
+            root_files = READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: LICENSE, Makefile",
+            )
+            dotted_dir = READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: .github, LICENSE",
+            )
+            unknowns = READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: FutureDir, AnotherDir",
+            )
+            with patch("triage_backlog._repository_root", return_value=tmp):
+                self.assertEqual(
+                    tb.split_reasons(issue(32, "type:chore", body=root_files)), []
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(33, "type:chore", body=dotted_dir)),
+                    ["touches span 2 top-level areas: .github, <root>"],
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(34, "type:chore", body=unknowns)),
+                    ["touches span 2 top-level areas: AnotherDir, FutureDir"],
+                )
+
+    def test_force_promotes_split_recommended_issue(self):
+        wide = issue(12, "type:chore", "status:backlog", body=self.oversized_body())
+        with patch("triage_backlog.list_open_issues", return_value=[wide]), \
+             patch("triage_backlog.update_status", return_value=True) as update, \
+             patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]):
+            self.assertEqual(tb.main(), 0)
+        update.assert_called_once_with(12, "Ready")
+
+    def test_force_does_not_promote_epic(self):
+        epic = issue(13, "type:epic", "status:backlog", body=self.oversized_body())
+        with patch("triage_backlog.list_open_issues", return_value=[epic]), \
+             patch("triage_backlog.update_status") as update, \
+             patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]):
+            self.assertEqual(tb.main(), 0)
+        update.assert_not_called()
 
 
 class PartitionTests(unittest.TestCase):
