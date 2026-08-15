@@ -231,7 +231,7 @@ def _reviewed_current_head(owner, name, pr_id):
                 return None
             seen_review_ids.add(review_id)
             reviews.append(review)
-            if state == "PENDING" or is_advisory_review_account(login or ""):
+            if state in {"PENDING", "DISMISSED"} or is_advisory_review_account(login or ""):
                 continue
             if oid == expected_head:
                 reviewed_head = True
@@ -1291,6 +1291,13 @@ def dod_status(pr_id):
             return False, f"could not read issue #{num}"
         issue_bodies[num] = issue.get("body") or ""
     evidence = review_evidence(pr_id)
+    evidence_head = evidence.get("head_oid") if evidence else None
+    snapshot_head = pr.get("headRefOid")
+    if not heads_match(snapshot_head, evidence_head):
+        return False, (
+            f"review evidence covers {evidence_head or 'unknown'}, but the PR "
+            f"snapshot is {snapshot_head or 'unknown'}"
+        )
     ok, gates = evaluate_dod(pr, issue_bodies, evidence)
     if ok:
         return True, "every Definition-of-Done gate passed"
@@ -1623,12 +1630,17 @@ def main():
         evidence = review_evidence(args.pr)
         evidence_head = evidence.get("head_oid") if evidence else None
         if not heads_match(gated_head, evidence_head):
-            print(
+            reason = (
                 f"[ERROR] Review evidence covers head {evidence_head or 'unknown'}, "
                 f"but the gated PR snapshot is {gated_head}. Refusing to combine "
-                "evidence from different commits.",
-                file=sys.stderr,
+                "evidence from different commits."
             )
+            if args.json:
+                print(json.dumps(dry_run_json_payload(
+                    pr, [("review", False, reason.removeprefix("[ERROR] "))], False
+                )))
+            else:
+                print(reason, file=sys.stderr)
             return EXIT_BLOCKED
         ok, gates = evaluate_dod(pr, issue_bodies, evidence)
 

@@ -1,3 +1,4 @@
+import json
 import sys
 import subprocess
 import tempfile
@@ -336,6 +337,24 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
 
         self.assertIsNone(merge_pr.review_evidence(162))
 
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_dismissed_review_does_not_attest_to_current_head(
+        self, gh_json, _slug
+    ):
+        dismissed = {
+            "id": "dismissed", "state": "DISMISSED",
+            "submittedAt": "2026-08-15T00:00:00Z",
+            "author": {"login": "peer"}, "commit": {"oid": "head123"},
+        }
+        gh_json.side_effect = [
+            self.review_page(nodes=[dismissed]), self.thread_page()
+        ]
+
+        evidence = merge_pr.review_evidence(162)
+
+        self.assertFalse(evidence["reviewed_head"])
+
     def test_latest_verdict_uses_timestamp_not_page_order(self):
         reviews = [
             {
@@ -476,8 +495,14 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn("No review", msg)
 
     def test_changes_requested_blocks(self):
-        ok, _ = _gate({"reviews": [{"state": "CHANGES_REQUESTED"}]}, 0)
+        review = {
+            "id": "blocking-review", "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-01-01T00:00:00Z",
+            "author": {"login": "peer"},
+        }
+        ok, msg = _gate({"reviews": [review]}, 0)
         self.assertFalse(ok)
+        self.assertIn("requested changes", msg)
 
     def test_advisory_bot_changes_requested_does_not_block_after_threads_resolve(self):
         reviews = [{
@@ -532,9 +557,14 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn("3 unresolved", msg)
 
     def test_unknown_thread_state_blocks_rather_than_guesses(self):
-        ok, msg = _gate({"reviews": [{"state": "APPROVED"}]}, None)
+        review = {
+            "id": "approval", "state": "APPROVED",
+            "submittedAt": "2026-01-01T00:00:00Z",
+            "author": {"login": "peer"},
+        }
+        ok, msg = _gate({"reviews": [review]}, None)
         self.assertFalse(ok)
-        self.assertIn("refusing", msg)
+        self.assertIn("review-thread state", msg)
 
     def test_approved_and_resolved_passes(self):
         ok, _ = _gate(
@@ -657,9 +687,14 @@ class SelfReviewTests(unittest.TestCase):
 
     def test_self_review_refusal_outranks_nothing_else_being_wrong(self):
         # CI green, threads resolved, criteria ticked - still refused.
+        approval = {
+            "id": "self-approval", "state": "APPROVED",
+            "submittedAt": "2026-01-01T00:00:00Z",
+            "author": {"login": "gillella"},
+        }
         ok, _ = _gate(
             labelled("author:solo", "reviewed-by:solo",
-                     reviews=[{"state": "APPROVED"}, {"state": "COMMENTED"}]), 0)
+                     reviews=[approval, {"state": "COMMENTED"}]), 0)
         self.assertFalse(ok)
 
 
@@ -1466,6 +1501,24 @@ class ExpectedHeadGateTests(unittest.TestCase):
         execute.assert_not_called()
 
 
+class DodStatusHeadBindingTests(unittest.TestCase):
+    @patch.object(merge_pr, "evaluate_dod")
+    @patch.object(merge_pr, "review_evidence", return_value={"head_oid": "H2"})
+    @patch.object(merge_pr, "_gh_json", return_value={"body": ""})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_status_refuses_evidence_from_a_different_head(
+        self, fetch_pr, _issue, _evidence, evaluate
+    ):
+        fetch_pr.return_value = ExpectedHeadGateTests.open_pr("H1")
+
+        ok, reason = merge_pr.dod_status(9)
+
+        self.assertFalse(ok)
+        self.assertIn("evidence covers H2", reason)
+        self.assertIn("snapshot is H1", reason)
+        evaluate.assert_not_called()
+
+
 class CloseoutMarkerTests(unittest.TestCase):
     def test_failed_board_reconcile_keeps_recovery_discoverable(self):
         pr = {
@@ -2101,6 +2154,31 @@ class DryRunJsonTests(unittest.TestCase):
             code = merge_pr.main()
         self.assertEqual(code, merge_pr.EXIT_ERROR)
         fetch.assert_not_called()
+
+    def test_evidence_head_mismatch_emits_blocking_json(self):
+        pr = {
+            "number": 9, "title": "feat", "body": "Closes #1",
+            "state": "OPEN", "mergedAt": None, "headRefOid": "H1",
+            "labels": [],
+        }
+        with patch.object(
+            sys, "argv", ["merge_pr.py", "--pr", "9", "--dry-run", "--json"]
+        ), patch.object(
+            merge_pr, "fetch_pr", return_value=pr
+        ), patch.object(
+            merge_pr, "_gh_json", return_value={"body": ""}
+        ), patch.object(
+            merge_pr, "review_evidence", return_value={"head_oid": "H2"}
+        ), patch("builtins.print") as printer:
+            code = merge_pr.main()
+
+        self.assertEqual(code, merge_pr.EXIT_BLOCKED)
+        printed = [str(call.args[0]) for call in printer.call_args_list if call.args]
+        self.assertEqual(len(printed), 1)
+        payload = json.loads(printed[0])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["first_blocking"], "review")
+        self.assertIn("different commits", payload["gates"][0]["message"])
 
     def test_dry_run_json_prints_payload_and_skips_merge(self):
         pr = {
