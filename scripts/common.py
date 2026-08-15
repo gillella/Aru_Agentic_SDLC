@@ -12,20 +12,198 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
-def run_cmd(cmd: List[str], check: bool = True, cwd: Optional[str] = None) -> Tuple[int, str, str]:
-    """Runs a system command and returns (returncode, stdout, stderr)."""
+VERIFICATION_EVIDENCE_SCHEMA = "aru.verification.v1"
+VERIFICATION_EVIDENCE_START = "<!-- aru-verification-evidence:v1 -->"
+VERIFICATION_EVIDENCE_END = "<!-- /aru-verification-evidence -->"
+
+_SENSITIVE_ARGUMENT_NAMES = {
+    "api-key", "apikey", "auth", "credential", "credentials", "key",
+    "password", "passwd", "secret", "sig", "signature", "token",
+}
+
+_OPAQUE_VALUE_OPTIONS = {"-c", "--command", "-Command", "-e", "--eval"}
+
+
+def _looks_sensitive(name: str) -> bool:
+    normalized = name.lstrip("-").replace("_", "-").lower()
+    return any(part in _SENSITIVE_ARGUMENT_NAMES for part in normalized.split("-"))
+
+
+def _redact_local_path(value: str) -> str:
+    """Removes absolute filesystem locations while keeping a useful basename."""
+    if not value:
+        return value
+    sanitized_url = _sanitize_url(value)
+    if sanitized_url is not None:
+        return sanitized_url
+    for separator in ("=", ":"):
+        prefix, found, suffix = value.partition(separator)
+        if found:
+            sanitized_url = _sanitize_url(suffix)
+            if sanitized_url is not None:
+                return f"{prefix}{separator}{sanitized_url}"
+    if Path(value).is_absolute():
+        return f"<local-path>/{Path(value).name}" if Path(value).name else "<local-path>"
+    if value.startswith("@") and Path(value[1:]).is_absolute():
+        name = Path(value[1:]).name
+        return f"@<local-path>/{name}" if name else "@<local-path>"
+    for separator in ("=", ":"):
+        prefix, found, suffix = value.partition(separator)
+        if found and Path(suffix).is_absolute():
+            name = Path(suffix).name
+            replacement = f"<local-path>/{name}" if name else "<local-path>"
+            return f"{prefix}{separator}{replacement}"
+    if value.startswith("-I/"):
+        return f"-I<local-path>/{Path(value[2:]).name}"
+    absolute_path = re.compile(
+        r"(?P<prefix>^|[\s@=:,(\[{\"'])(?P<path>/(?:[^/\s\"']+/)*[^/\s\"']+)"
+    )
+
+    def replace_path(match: re.Match) -> str:
+        path = match.group("path")
+        name = Path(path).name
+        replacement = f"<local-path>/{name}" if name else "<local-path>"
+        return f"{match.group('prefix')}{replacement}"
+
+    return absolute_path.sub(replace_path, value)
+
+
+def _redact_embedded_secrets(value: str) -> str:
+    """Redacts common credentials embedded in otherwise opaque argv values."""
+    value = re.sub(r"(?i)\b(Bearer|Basic)\s+[^\s,;]+", r"\1 <redacted>", value)
+    value = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]+\b", "<redacted>", value)
+    pattern = re.compile(
+        r"(?i)(api[-_]?key|auth(?:orization)?|credential|password|passwd|secret|signature|token)"
+        r"(?P<separator>[\"']?\s*[:=]\s*[\"']?)(?P<value>[^\s,;\"'}]+)"
+    )
+    return pattern.sub(lambda match: f"{match.group(1)}{match.group('separator')}<redacted>", value)
+
+
+def _sanitize_url(value: str) -> Optional[str]:
+    """Redacts URL credentials, sensitive query values, and local file paths."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if not parsed.scheme or (not parsed.netloc and parsed.scheme != "file"):
+        return None
+    if parsed.scheme == "file":
+        basename = Path(parsed.path).name
+        suffix = f"/{basename}" if basename else ""
+        return f"file://<local-path>{suffix}"
+
+    netloc = parsed.netloc
+    if parsed.username is not None or parsed.password is not None:
+        hostname = parsed.hostname or ""
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        host = f"{hostname}:{port}" if port is not None else hostname
+        netloc = f"<redacted>@{host}"
+
+    query = urlencode([
+        (name, "<redacted>" if _looks_sensitive(name) else val)
+        for name, val in parse_qsl(parsed.query, keep_blank_values=True)
+    ], doseq=True)
+    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+
+
+def sanitize_command(cmd: List[str]) -> List[str]:
+    """Redacts common secret arguments and absolute local paths from evidence."""
+    sanitized = []
+    redact_next = False
+    redact_header_next = False
+    redact_opaque_next = False
+    for raw_arg in cmd:
+        arg = str(raw_arg)
+        if redact_next:
+            sanitized.append("<redacted>")
+            redact_next = False
+            continue
+        if redact_opaque_next:
+            sanitized.append("<redacted>")
+            redact_opaque_next = False
+            continue
+        if redact_header_next:
+            name, separator, _value = arg.partition(":")
+            sanitized.append(f"{name}: <redacted>" if separator else "<redacted>")
+            redact_header_next = False
+            continue
+        if arg in {"-H", "--header"}:
+            sanitized.append(arg)
+            redact_header_next = True
+            continue
+        if arg.startswith("--header="):
+            name, separator, _value = arg[len("--header="):].partition(":")
+            sanitized.append(f"--header={name}: <redacted>" if separator else "--header=<redacted>")
+            continue
+        if arg.startswith("-H") and len(arg) > 2:
+            name, separator, _value = arg[2:].partition(":")
+            sanitized.append(f"-H{name}: <redacted>" if separator else "-H<redacted>")
+            continue
+        if arg in _OPAQUE_VALUE_OPTIONS:
+            sanitized.append(arg)
+            redact_opaque_next = True
+            continue
+        attached_opaque = next(
+            (option for option in _OPAQUE_VALUE_OPTIONS if arg.startswith(option) and len(arg) > len(option)),
+            None,
+        )
+        if attached_opaque:
+            separator = "=" if arg[len(attached_opaque):].startswith("=") else ""
+            sanitized.append(f"{attached_opaque}{separator}<redacted>")
+            continue
+        name, separator, _value = arg.partition("=")
+        if separator and _looks_sensitive(name):
+            sanitized.append(f"{name}=<redacted>")
+            continue
+        if arg.startswith("-") and _looks_sensitive(arg):
+            sanitized.append(arg)
+            redact_next = True
+            continue
+        sanitized.append(_redact_embedded_secrets(_redact_local_path(arg)))
+    return sanitized
+
+
+def run_cmd(
+    cmd: List[str],
+    check: bool = True,
+    cwd: Optional[str] = None,
+    evidence: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[int, str, str]:
+    """Runs a command and optionally appends sanitized verification evidence."""
+    started = time.monotonic()
     try:
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
         if check and res.returncode != 0:
             print(f"[ERROR] Command failed ({' '.join(cmd)}):\n{res.stderr.strip()}", file=sys.stderr)
-        return res.returncode, res.stdout.strip(), res.stderr.strip()
+        code, stdout, stderr = res.returncode, res.stdout.strip(), res.stderr.strip()
     except Exception as e:
         if check:
             print(f"[EXCEPT] Exception running command ({' '.join(cmd)}): {e}", file=sys.stderr)
-        return 1, "", str(e)
+        code, stdout, stderr = 1, "", str(e)
+    if evidence is not None:
+        evidence.append({
+            "command": sanitize_command(cmd),
+            "duration_seconds": round(max(0.0, time.monotonic() - started), 3),
+            "exit_code": code,
+            "status": "passed" if code == 0 else "failed",
+        })
+    return code, stdout, stderr
+
+
+def get_current_commit() -> str:
+    """Returns the checked-out commit SHA, or an empty string on failure."""
+    code, stdout, _ = run_cmd(["git", "rev-parse", "HEAD"], check=False)
+    return stdout.strip() if code == 0 else ""
 
 
 def run_gh_json(cmd: List[str]) -> Optional[Any]:

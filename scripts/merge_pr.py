@@ -21,13 +21,20 @@ Exit codes:
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 from datetime import datetime
 
-from common import get_repo_slug, run_cmd
+from common import (
+    VERIFICATION_EVIDENCE_END,
+    VERIFICATION_EVIDENCE_SCHEMA,
+    VERIFICATION_EVIDENCE_START,
+    get_repo_slug,
+    run_cmd,
+)
 from update_issue_status import update_status
 
 EXIT_OK = 0
@@ -606,6 +613,105 @@ def check_issue_link(pr):
     return True, "Linked to " + ", ".join(f"#{i}" for i in issues) + "."
 
 
+def parse_verification_evidence(body):
+    """Parses the marker-delimited verification JSON without scraping prose."""
+    body = body or ""
+    start_count = body.count(VERIFICATION_EVIDENCE_START)
+    end_count = body.count(VERIFICATION_EVIDENCE_END)
+    if start_count == 0 and end_count == 0:
+        return None, "missing"
+    if start_count != 1 or end_count != 1:
+        return None, "verification evidence markers are unmatched or duplicated"
+    if body.index(VERIFICATION_EVIDENCE_START) > body.index(VERIFICATION_EVIDENCE_END):
+        return None, "verification evidence markers are inverted"
+    _before, marker, remainder = body.partition(VERIFICATION_EVIDENCE_START)
+    payload, end_marker, _after = remainder.partition(VERIFICATION_EVIDENCE_END)
+    payload = payload.strip()
+    if payload.startswith("```json"):
+        payload = payload[len("```json"):].lstrip()
+    if payload.endswith("```"):
+        payload = payload[:-3].rstrip()
+
+    def reject_constant(value):
+        raise ValueError(f"non-finite JSON number: {value}")
+
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        evidence = json.loads(
+            payload,
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        return None, f"invalid verification JSON: {exc}"
+    if not isinstance(evidence, dict):
+        return None, "verification evidence must be a JSON object"
+    if evidence.get("schema") != VERIFICATION_EVIDENCE_SCHEMA:
+        return None, "unsupported verification evidence schema"
+    return evidence, None
+
+
+def check_verification(pr):
+    """Validates recorded commands while warning on legacy or not-run PRs."""
+    evidence, error = parse_verification_evidence(pr.get("body") or "")
+    if error == "missing":
+        return True, "⚠️  No verification evidence block; legacy warning only."
+    if error:
+        return False, f"Verification evidence is malformed: {error}."
+
+    status = evidence.get("status")
+    commands = evidence.get("commands")
+    evidence_head = evidence.get("head_sha")
+    pr_head = pr.get("headRefOid")
+    if not isinstance(evidence_head, str) or not evidence_head:
+        return False, "Verification evidence is missing the tested head SHA."
+    if not isinstance(pr_head, str) or not pr_head:
+        return False, "The live PR head SHA is unavailable; verification cannot be bound."
+    if evidence_head != pr_head:
+        return False, (
+            f"Verification was recorded for {evidence_head}, but the PR head is {pr_head}; "
+            "refresh evidence with create_pr.py --refresh-pr."
+        )
+    if not isinstance(commands, list):
+        return False, "Verification evidence commands must be a JSON array."
+    if status == "not_run":
+        if commands:
+            return False, "Verification status is not_run but command records are present."
+        return True, "⚠️  Local verification was explicitly not run; warning-only rollout."
+    if status not in {"passed", "failed"}:
+        return False, f"Unknown verification status: {status!r}."
+    if not commands:
+        return False, f"Verification status is {status} but no commands were recorded."
+
+    for record in commands:
+        if not isinstance(record, dict):
+            return False, "Each verification command record must be a JSON object."
+        if (not isinstance(record.get("command"), list)
+                or not record["command"]
+                or not all(type(arg) is str for arg in record["command"])):
+            return False, "A verification command is missing its argv array."
+        if type(record.get("exit_code")) is not int:
+            return False, "A verification command is missing an integer exit_code."
+        duration = record.get("duration_seconds")
+        if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
+            return False, "A verification command has an invalid duration_seconds."
+        expected = "passed" if record["exit_code"] == 0 else "failed"
+        if record.get("status") != expected:
+            return False, "A verification command status disagrees with its exit_code."
+
+    failed = [record for record in commands if record["exit_code"] != 0]
+    if status == "failed" or failed:
+        return False, f"Local verification recorded {len(failed)} failing command(s)."
+    return True, f"Local verification passed {len(commands)} recorded command(s)."
+
+
 def check_acceptance(issue_num, issue_body):
     pending = unticked_criteria(issue_body)
     if pending:
@@ -1003,6 +1109,7 @@ def evaluate_dod(pr, issue_bodies, evidence):
     gates = [
         ("open", *check_open(pr)),
         ("issue link", *check_issue_link(pr)),
+        ("verification", *check_verification(pr)),
         ("ci", *check_ci(pr)),
         ("review", *check_reviews(pr, evidence)),
         ("rebased", *check_rebased(pr)),
