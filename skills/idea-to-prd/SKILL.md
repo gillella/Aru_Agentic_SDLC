@@ -105,6 +105,18 @@ mean the epic or any implementation work is `Ready` on the board.
 - If the operator approves, record that approval in the PRD's Artifact Status.
 - If approval is absent or ambiguous, stop before publication.
 
+After approval, bind it to the exact file bytes that the operator reviewed.
+Preserve both variables in the same shell session used for publication. Any
+content change invalidates the digest and requires renewed approval:
+
+```bash
+set -euo pipefail
+ARU_APPROVED_PRD_FILE="/absolute/path/to/approved-prd.md"
+test -f "$ARU_APPROVED_PRD_FILE"
+ARU_APPROVED_PRD_SHA256="$(shasum -a 256 "$ARU_APPROVED_PRD_FILE" | awk '{print $1}')"
+test -n "$ARU_APPROVED_PRD_SHA256"
+```
+
 ### 5. Publish the Approved PRD
 
 Create a GitHub issue from the approved PRD. Direct `gh` is permitted here
@@ -118,12 +130,14 @@ happens to infer from the current directory. Set both values from the verified
 Step 1 context before running the commands:
 
 ```bash
+set -euo pipefail
 ARU_GOVERNED_REPO_ROOT="/absolute/path/to/governed/repository"
 ARU_GOVERNED_REPO="owner/name"
-ARU_APPROVED_PRD_FILE="/absolute/path/to/approved-prd.md"
 test "$(git -C "$ARU_GOVERNED_REPO_ROOT" rev-parse --show-toplevel)" = \
   "$ARU_GOVERNED_REPO_ROOT"
 test -f "$ARU_APPROVED_PRD_FILE"
+test "$(shasum -a 256 "$ARU_APPROVED_PRD_FILE" | awk '{print $1}')" = \
+  "$ARU_APPROVED_PRD_SHA256"
 cd "$ARU_GOVERNED_REPO_ROOT"
 test "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" = \
   "$ARU_GOVERNED_REPO"
@@ -144,6 +158,7 @@ and set its initial status using the framework helper, which resolves its
 repository from the current working directory:
 
 ```bash
+set -euo pipefail
 cd "$ARU_GOVERNED_REPO_ROOT"
 test "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" = \
   "$ARU_GOVERNED_REPO"
