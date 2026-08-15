@@ -145,12 +145,16 @@ or other irreversible work from the plan gate.
 4. If a required product decision is absent from the issue, document the
    concrete options and leave the issue blocked for clarification. This is
    requirement discovery, not a mandatory human review of an otherwise
-   complete implementation. After the GitHub comment, notify the Slack control
-   room once via
+   complete implementation. Store the concise blocker or decision in an
+   operator-owned `0600` file using a non-shell file-writing mechanism, and set
+   `ARU_ALERT_TEXT_FILE` or `ARU_ALERT_DECISION_FILE` to that path. After the
+   GitHub comment, notify the Slack control room once via
    `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" --project-id <PROJECT_ID>
    --agent <AGENT_ID> --family <FAMILY> --event blocked --repo <OWNER/REPO>
-   --issue <N> --repo-dir <CONSUMER_REPO_ROOT> --text "<blocker>"`. Use `--event hitl --decision
-   "<decision needed>"` instead when a human decision is required. See
+   --issue <N> --repo-dir <CONSUMER_REPO_ROOT> --text-file "$ARU_ALERT_TEXT_FILE"`.
+   Use `--event hitl --decision-file "$ARU_ALERT_DECISION_FILE"` instead when a
+   human decision is required. The registry record, not these compatibility
+   flags, is authoritative for repository identity and checkout path. See
    `prompts/fleet-worker.md` for complete examples.
    Do not post heartbeats or steal another agent's claim.
 5. If work cannot start because of an unresolved `depends-on` or a peer holds
@@ -160,7 +164,7 @@ or other irreversible work from the plan gate.
    --agent <AGENT_ID> --family <FAMILY> --event waiting-on --repo <OWNER/REPO>
    --issue <N> --waiting-on-agent <id> --waiting-on-issue <peer-issue>
    --repo-dir <CONSUMER_REPO_ROOT>
-   --text "<wait reason>"`. Release
+   --text-file "$ARU_ALERT_TEXT_FILE"`. Release
    or wait; never steal the claim.
 
 ### Step 5: Implement Solution

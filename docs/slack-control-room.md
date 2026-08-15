@@ -81,14 +81,16 @@ the workspace authorized for the single credential set in this first version.
 ## Outbound notifications
 
 Every notification must name a registry project. The destination channel comes
-only from its active record:
+only from its active record. Write the concise alert summary to an
+operator-owned `0600` file using a non-shell file-writing mechanism and set
+`ARU_ALERT_TEXT_FILE` to that path before invoking the helper:
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id proj_... \
   --agent cursor-1 --family xai \
   --event blocked --issue 172 \
-  --text "waiting on depends-on #110"
+  --text-file "$ARU_ALERT_TEXT_FILE"
 ```
 
 An unknown or closed project posts nothing. A required GitHub issue/PR comment
@@ -112,6 +114,11 @@ issue/PR comment with the same facts **before** the Slack message:
 | `waiting-on` | peer holds a claim, review, or overlapping `touches:` path | names `--waiting-on-agent` and the peer issue/PR; never steals the claim |
 | `hitl` | severe merge/close-out failure, exhausted credits, or an unresolvable decision | mentions only the validated `<@SLACK_OPERATOR_USER_ID>` from configuration; agents still stop per `AGENTS.md` |
 
+For the examples below, prepare `ARU_ALERT_TEXT_FILE` or
+`ARU_ALERT_DECISION_FILE` with the same secure file procedure. The registry
+record is authoritative for both repository slug and checkout path; `--repo`
+and `--repo-dir` cannot redirect an alert.
+
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id proj_... \
@@ -119,14 +126,14 @@ python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --event waiting-on --repo gillella/Aru_Agentic_SDLC --issue 181 \
   --waiting-on-agent claude-1 --waiting-on-issue 163 \
   --repo-dir . \
-  --text "path conflict on scripts/merge_pr.py"
+  --text-file "$ARU_ALERT_TEXT_FILE"
 
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id proj_... \
   --agent cursor-1 --family other \
   --event hitl --repo gillella/Aru_Agentic_SDLC --pr 170 \
   --repo-dir . \
-  --decision "merge close-out failed after retries; need operator recovery"
+  --decision-file "$ARU_ALERT_DECISION_FILE"
 ```
 
 Do **not** post heartbeats, diffs, prompts, tokens, or test logs. The helper

@@ -297,6 +297,11 @@ PR, then notify Slack. Never post heartbeats, diffs, prompts, tokens, or test
 logs. Deduplication is built into the helper — do not re-spam on every loop
 tick. Slack downtime must not stop the GitHub loop.
 
+Before invoking the helper, write the concise secret-safe summary or decision
+to an operator-owned `0600` file using a non-shell file-writing mechanism. Set
+`ARU_ALERT_TEXT_FILE` or `ARU_ALERT_DECISION_FILE` to that path; alert contents
+must never be interpolated into a shell command.
+
 ```bash
 # blocked — unresolved depends-on, missing product decision, merge/close-out stuck
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
@@ -304,7 +309,7 @@ python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --agent <AGENT_ID> --family <FAMILY> \
   --event blocked --repo <OWNER/REPO> --issue <N> \
   --repo-dir . \
-  --text "blocked: <concrete reason>"
+  --text-file "$ARU_ALERT_TEXT_FILE"
 
 # waiting-on — peer holds a claim, review slot, or overlapping touches path
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
@@ -313,7 +318,7 @@ python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --event waiting-on --repo <OWNER/REPO> --issue <N> \
   --waiting-on-agent <PEER_ID> --waiting-on-issue <PEER_ISSUE> \
   --repo-dir . \
-  --text "waiting on peer claim; not stealing it"
+  --text-file "$ARU_ALERT_TEXT_FILE"
 
 # hitl — severe merge/close-out failure, exhausted credits, or unresolvable decision
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
@@ -321,7 +326,7 @@ python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --agent <AGENT_ID> --family <FAMILY> \
   --event hitl --repo <OWNER/REPO> --issue <N> --pr <PR> \
   --repo-dir . \
-  --decision "<exact decision needed>"
+  --decision-file "$ARU_ALERT_DECISION_FILE"
 ```
 
 For CI remediation that cannot proceed (missing secret, external outage) and

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -85,9 +86,12 @@ FORBIDDEN_CONTENT_RE = re.compile(
     r"|^(?:ERROR\s+collecting\s+\S+|E\s{2,}.+)"
     r"|\b(?:act as|your task is|follow (?:these|the) instructions)\b"
     r"|\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?\b"
-    r"|^\s*\[(?:system|developer|user|assistant|human|inst)\]\s*"
-    r"|[\"']?role[\"']?\s*:\s*[\"']?(?:system|developer|user|assistant|human|model)\b"
-    r"|^\s*-?\s*role\s*=\s*(?:system|developer|user|assistant|human|model)\b"
+    r"|^\s*\[(?:system(?:\s+message)?|developer|user|assistant|human|inst)\]\s*"
+    r"|[\"']role[\"']\s*:\s*[\"'](?:system|developer|user|assistant|human|model|tool|function)[\"']"
+    r"|(?:^|[{,]\s*)role\s*:\s*(?:system|developer|user|assistant|human|model|tool|function)\s*(?:[,}]|$)"
+    r"|^\s*-\s*role\s*:\s*(?:system|developer|user|assistant|human|model|tool|function)\s*$"
+    r"|^\s*role\s*=\s*(?:system|developer|user|assistant|human|model|tool|function)\s*$"
+    r"|[\"']system[\"']\s*:\s*[\"']|^\s*system\s*=\s*\S+"
     r"|<\|(?:system|developer|user|assistant|human|model)\|>|<\|im_(?:start|end)\|>"
     r"|^\s*<\|im_start\|>\s*(?:system|developer|user|assistant|human|model)\b"
     r"|^\s*(?:<<\/?SYS>>|\[/?INST\])"
@@ -212,6 +216,21 @@ def sanitize_event(
 def _forbidden_content_field(event: Dict[str, Any]) -> str:
     text = event.get("text")
     return "text" if isinstance(text, str) and FORBIDDEN_CONTENT_RE.search(text) else ""
+
+
+def read_alert_payload_file(path: Path) -> str:
+    """Read one local, operator-owned private file without following symlinks."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+        metadata = os.fstat(handle.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("alert payload path is not a regular file")
+        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+            raise ValueError("alert payload file is not owned by the current operator")
+        if metadata.st_mode & 0o077:
+            raise ValueError("alert payload file permissions must be 0600 or stricter")
+        return handle.read(MAX_ALERT_TEXT_CHARS + 1).rstrip("\r\n")
 
 
 def config_for_project(config: SlackConfig, project: Any) -> SlackConfig:
@@ -783,11 +802,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--issue", type=int)
     parser.add_argument("--pr", type=int)
     parser.add_argument("--state", default="")
-    parser.add_argument("--text", default="")
+    payload = parser.add_mutually_exclusive_group()
+    payload.add_argument("--text", default="")
+    payload.add_argument("--text-file", default="")
     parser.add_argument("--waiting-on-agent", default="")
     parser.add_argument("--waiting-on-issue", type=int)
     parser.add_argument("--waiting-on-pr", type=int)
-    parser.add_argument("--decision", default="", help="HITL decision text (alias for --text)")
+    payload.add_argument("--decision", default="", help="HITL decision text (alias for --text)")
+    payload.add_argument("--decision-file", default="", help="read HITL decision text from a file")
     parser.add_argument("--repo-dir", default=".")
     parser.add_argument("--no-github-comment", action="store_true")
     parser.add_argument("--project-id", required=True)
@@ -809,6 +831,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"[WARN] Slack notify skipped: {exc}", file=sys.stderr)
         return 0
     text = args.decision or args.text
+    payload_file = args.decision_file or args.text_file
+    if payload_file:
+        try:
+            text = read_alert_payload_file(Path(payload_file))
+        except (OSError, UnicodeError, ValueError) as exc:
+            print(
+                f"[WARN] Slack notify skipped: cannot read alert payload file: {exc}",
+                file=sys.stderr,
+            )
+            return 2
     event: Dict[str, Any] = {
         "type": args.type,
         "agent": args.agent,
