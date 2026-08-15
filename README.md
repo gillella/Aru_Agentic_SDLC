@@ -64,10 +64,9 @@ Aru_Agentic_SDLC/
 
 **Explore the lifecycle:** open the no-build [interactive SDLC factory flow visualizer](sdlc_flow_visualizer/index.html) locally to inspect the current claim, worktree, review, merge, and remediation mechanics. Roadmap-only mechanisms are labelled as planned in the visualizer.
 
-> **Note on the research documents.** There are currently two overlapping
-> research guides alongside the build plan. `ARU-SOFTWARE-FACTORY.md` remains
-> authoritative for sequencing and non-goals; the research guides are evidence,
-> not plan. Consolidating them into one canonical source is tracked in #113.
+> **Research authority.** `AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md` is the
+> single research and evidence guide. `ARU-SOFTWARE-FACTORY.md` remains the
+> sole authority for sequencing, implementation status, and non-goals.
 
 ---
 

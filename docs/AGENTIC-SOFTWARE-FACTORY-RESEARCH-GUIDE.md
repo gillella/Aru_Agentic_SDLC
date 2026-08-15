@@ -16,7 +16,6 @@
 > for roadmap phases, sequencing, implementation status, and non-goals. If an
 > example or historical recommendation here appears to conflict with that
 > plan, the plan wins.
-
 > **Scope note.** An interactive briefing over this material is **not** part of
 > this change and is tracked in #122. It is referenced by issue rather than by
 > filename, because a document that advertises an artifact which does not exist
