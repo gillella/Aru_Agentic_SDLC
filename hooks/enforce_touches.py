@@ -982,9 +982,6 @@ def _update_persistent_git_environment(
             option == "-x" or (option.startswith("-") and "x" in option[1:])
             for option in options
         )
-        prints_only = builtin == "export" and any(
-            option.startswith("-") and "p" in option[1:] for option in options
-        )
         for operand in words[1:]:
             if operand.startswith(("-", "+")):
                 continue
@@ -1000,7 +997,7 @@ def _update_persistent_git_environment(
             if name in _GIT_REPOSITORY_ENV:
                 if removes_export:
                     git_environment.pop(name, None)
-                elif adds_export and not prints_only and name in shell_variables:
+                elif adds_export and name in shell_variables:
                     git_environment[name] = shell_variables[name]
         return True, allexport
     if words and words[0] == "readonly":

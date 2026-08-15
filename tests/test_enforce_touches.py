@@ -1821,16 +1821,34 @@ class GitCommandCheckoutTests(unittest.TestCase):
                             )
                         )
 
-    def test_export_print_mode_does_not_export_local_selector(self):
+    def test_export_print_mode_with_operand_exports_local_selector(self):
         with patch.dict(os.environ, {"G": str(self.main_root)}):
-            for operation in ("commit -m x", "push origin main"):
-                with self.subTest(operation=operation):
-                    self.assertIsNone(
-                        self.violation(
-                            f"GIT_DIR=$G/.git; export -p GIT_DIR; git {operation}",
-                            self.ungoverned,
+            prefixes = (
+                "GIT_DIR=$G/.git; export -p GIT_DIR;",
+                "export -p GIT_DIR=$G/.git;",
+                "GIT_DIR=$G/.git; export -p -- GIT_DIR;",
+                "export -p -- GIT_DIR=$G/.git;",
+            )
+            for prefix in prefixes:
+                for operation in ("commit -m x", "push origin main"):
+                    with self.subTest(prefix=prefix, operation=operation):
+                        self.assertIsNotNone(
+                            self.violation(
+                                f"{prefix} git {operation}", self.ungoverned
+                            )
                         )
-                    )
+
+    def test_export_print_and_remove_keeps_selector_unexported(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            for options in ("-pn", "-np"):
+                for operation in ("commit -m x", "push origin main"):
+                    with self.subTest(options=options, operation=operation):
+                        self.assertIsNone(
+                            self.violation(
+                                f"export {options} GIT_DIR=$G/.git; git {operation}",
+                                self.ungoverned,
+                            )
+                        )
 
     def test_env_split_string_resolves_relative_git_dir_after_capital_c(self):
         self.assertIsNotNone(
