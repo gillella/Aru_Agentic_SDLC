@@ -28,6 +28,7 @@ import subprocess
 import sys
 from datetime import datetime
 
+import acceptance_runner
 from common import (
     VERIFICATION_EVIDENCE_END,
     VERIFICATION_EVIDENCE_SCHEMA,
@@ -458,21 +459,13 @@ def unticked_criteria(issue_body):
 
     Only counts checkboxes under an 'Acceptance Criteria' heading; a checklist
     elsewhere in the body (a reviewer's notes, say) must not gate the merge.
+    Criteria that carry a `verify:` command are executed by the runner instead
+    of being certified by a tick.
     """
-    if not issue_body:
-        return []
-    section = re.split(
-        r"^\s*#{1,4}\s*acceptance criteria\s*$", issue_body,
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-    if len(section) < 2:
-        return []
-    # Stop at the next heading.
-    tail = re.split(r"^\s*#{1,4}\s+", section[1], flags=re.MULTILINE)[0]
     return [
-        line.strip()
-        for line in tail.splitlines()
-        if re.match(r"^\s*[-*]\s*\[\s\]", line)
+        item.text
+        for item in acceptance_runner.parse_criteria(issue_body)
+        if item.argv is None and not item.ticked
     ]
 
 
@@ -845,14 +838,48 @@ def check_verification(pr):
     return True, f"Local verification passed {len(commands)} recorded command(s)."
 
 
-def check_acceptance(issue_num, issue_body):
-    pending = unticked_criteria(issue_body)
-    if pending:
-        preview = "\n      ".join(pending[:5])
-        more = f"\n      ... and {len(pending) - 5} more" if len(pending) > 5 else ""
-        return False, (
-            f"Issue #{issue_num} has {len(pending)} unticked acceptance criteria:\n"
-            f"      {preview}{more}"
+def pr_checkout_path(pr):
+    """Prefers the PR branch worktree so verify: commands run in that checkout."""
+    branch = (pr or {}).get("headRefName")
+    expected = (pr or {}).get("headRefOid")
+    repo_root = repository_root()
+    if not branch or not repo_root:
+        return os.getcwd()
+    code, out, _ = run_cmd(
+        ["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root
+    )
+    if code != 0:
+        return os.getcwd()
+    path, sha = find_branch_worktree(out, branch)
+    if path and (not expected or sha == expected):
+        return path
+    return os.getcwd()
+
+
+def check_acceptance(issue_num, issue_body, cwd=None):
+    ok, message, result = acceptance_runner.evaluate_issue(
+        issue_body, cwd=cwd or os.getcwd()
+    )
+    if not ok:
+        pending = [
+            item.text
+            for item in result["criteria"]
+            if item.argv is None and not item.ticked
+        ]
+        if pending and "unticked" in message:
+            preview = "\n      ".join(pending[:5])
+            more = (
+                f"\n      ... and {len(pending) - 5} more" if len(pending) > 5 else ""
+            )
+            return False, (
+                f"Issue #{issue_num} has {len(pending)} unticked acceptance criteria:\n"
+                f"      {preview}{more}"
+            )
+        return False, f"Issue #{issue_num}: {message}"
+    ran = sum(1 for item in result["criteria"] if item.argv)
+    if ran:
+        return True, (
+            f"Acceptance criteria on #{issue_num} passed ({ran} verify: command(s))."
         )
     return True, f"All acceptance criteria on #{issue_num} are ticked."
 
@@ -1288,8 +1315,11 @@ def evaluate_dod(pr, issue_bodies, evidence):
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
     ]
+    checkout = pr_checkout_path(pr)
     for num in issue_nums:
-        gates.append((f"accept #{num}", *check_acceptance(num, issue_bodies.get(num, ""))))
+        gates.append(
+            (f"accept #{num}", *check_acceptance(num, issue_bodies.get(num, ""), cwd=checkout))
+        )
     ok = all(passed for _, passed, _ in gates)
     return ok, gates
 

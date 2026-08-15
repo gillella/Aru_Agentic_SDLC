@@ -10,6 +10,10 @@ assignees: ''
 <!-- Clear and concise description of what the feature is and why it is needed -->
 
 ## Acceptance Criteria
+<!-- `verify:` commands in backticks (or an indented `verify:` line) are executed
+     at merge by scripts/acceptance_runner.py in the PR checkout. Only python3/python
+     -m unittest, relative tests|scripts|docs `*.py` paths, and pytest are allowed.
+     Shell metacharacters are refused. Criteria without a command still use the checkbox. -->
 - [ ] Predicate 1 (verify: `command to verify`)
 - [ ] Predicate 2 (verify: `command to verify`)
 

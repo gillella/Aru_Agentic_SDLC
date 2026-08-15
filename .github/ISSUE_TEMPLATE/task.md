@@ -10,6 +10,8 @@ assignees: ''
 <!-- Overview of the engineering task or maintenance chore -->
 
 ## Definition of Done
+<!-- Checkbox-only items stay tick-gated. To execute a check at merge, add an
+     Acceptance Criteria section with a backticked verify: command; see feature_request.md. -->
 - [ ] Task completion checklist item 1
 - [ ] Task completion checklist item 2
 

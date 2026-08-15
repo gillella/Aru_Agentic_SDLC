@@ -10,7 +10,10 @@ assignees: ''
 <!-- A clear and concise description of what the bug is. -->
 
 ## Acceptance Criteria / Expected Behavior
-<!-- Assertion predicates that must hold after the fix -->
+<!-- Assertion predicates that must hold after the fix.
+     Backticked `verify:` commands are executed at merge by scripts/acceptance_runner.py.
+     Only allowlisted runners (python3 -m unittest, relative tests/scripts/docs .py, pytest);
+     shell metacharacters are refused. Criteria without a command still use the checkbox. -->
 - [ ] Predicate 1 (verify: `command to verify`)
 
 ## Decision Boundaries
