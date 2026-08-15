@@ -282,7 +282,7 @@ corrupts someone else's work, not just yours.
    (`gh issue comment` for implementation plans). MCP GitHub is optional and
    non-authoritative — do not copy a PAT into it.
 
-### Waiting, continuity, and intentional stop
+### Waiting, continuity, intentional stop, and Slack alerts
 
 Do **not** write a final response for a recoverable state. When the picker is
 idle, the board is Complete, work is waiting on review/CI/dependencies, another
@@ -290,6 +290,49 @@ agent wins a conflict, credits or rate limits are unavailable, or a helper,
 GitHub, or the network fails transiently, record the state, wait with bounded
 dynamic backoff, and ask again. Use a supported app-native wait/background
 primitive when available. A fixed-interval busy loop wastes credits.
+
+**Slack control-room alerts (GitHub first).** When work is blocked, waiting on
+another agent, or needs HITL, post the same facts to the linked GitHub issue or
+PR, then notify Slack. Never post heartbeats, diffs, prompts, tokens, or test
+logs. Deduplication is built into the helper — do not re-spam on every loop
+tick. Slack downtime must not stop the GitHub loop.
+
+Before invoking the helper, write the concise secret-safe summary or decision
+to an operator-owned `0600` file using a non-shell file-writing mechanism. Set
+`ARU_ALERT_TEXT_FILE` or `ARU_ALERT_DECISION_FILE` to that path; alert contents
+must never be interpolated into a shell command.
+
+```bash
+# blocked — unresolved depends-on, missing product decision, merge/close-out stuck
+python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id <PROJECT_ID> \
+  --agent <AGENT_ID> --family <FAMILY> \
+  --event blocked --repo <OWNER/REPO> --issue <N> \
+  --repo-dir . \
+  --text-file "$ARU_ALERT_TEXT_FILE"
+
+# waiting-on — peer holds a claim, review slot, or overlapping touches path
+python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id <PROJECT_ID> \
+  --agent <AGENT_ID> --family <FAMILY> \
+  --event waiting-on --repo <OWNER/REPO> --issue <N> \
+  --waiting-on-agent <PEER_ID> --waiting-on-issue <PEER_ISSUE> \
+  --repo-dir . \
+  --text-file "$ARU_ALERT_TEXT_FILE"
+
+# hitl — severe merge/close-out failure, exhausted credits, or unresolvable decision
+python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id <PROJECT_ID> \
+  --agent <AGENT_ID> --family <FAMILY> \
+  --event hitl --repo <OWNER/REPO> --issue <N> --pr <PR> \
+  --repo-dir . \
+  --decision-file "$ARU_ALERT_DECISION_FILE"
+```
+
+For CI remediation that cannot proceed (missing secret, external outage) and
+for `merge_pr.py` exit paths that leave close-out incomplete after retries,
+use `blocked` or `hitl` the same way — comment on the PR, then notify. Do not
+steal another agent's claim when posting `waiting-on`.
 
 Context running short is a recovery event, not a stop condition. Preserve the
 truth in GitHub, the branch, and the worktree; let the desktop product compact
@@ -303,13 +346,17 @@ End the loop intentionally only when:
 - A specific human decision or approval is required and cannot be derived from
   the issue: for example an unsettled schema, external contract, money
   semantics, security posture, approval boundary, or a severe merge/close-out
-  failure agents cannot resolve safely. Record the options and exact question.
+  failure agents cannot resolve safely. Record the options and exact question
+  on the issue, then post a `hitl` Slack alert as above. Agents still stop;
+  Slack does not replace that stop.
 - Continuing would require breaking a hard governance or safety rule. State
   the rule and the human action required.
 
 A vendor-enforced task termination, app quit, logout, exhausted credits,
 machine sleep, or power-off may physically stop execution. Report those as
 platform limits if observed; instructions cannot honestly override them.
+When credits are exhausted, post `hitl` once (deduped) before the platform
+stops the task.
 
 ### Final report (only on intentional stop/intervention)
 

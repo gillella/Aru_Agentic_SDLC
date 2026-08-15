@@ -83,6 +83,21 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertEqual(intervention["ref"], "77")
         self.assertEqual(intervention["decision"], "use option B")
 
+    def test_claim_merge_review_verbs_are_refused_without_github_mutation(self):
+        for verb in ("claim", "merge", "review"):
+            parsed = scr.parse_command(f"<@U999> {verb} 181")
+            self.assertEqual(parsed["verb"], "refused-queue")
+            self.assertEqual(parsed["refused"], verb)
+        comments = []
+        reply = scr.handle_command(
+            sample_config(),
+            {"verb": "refused-queue", "refused": "merge"},
+            self.project_a,
+            comment=lambda *args: comments.append(args) or True,
+        )
+        self.assertIn("not a work queue", reply)
+        self.assertEqual(comments, [])
+
     def test_authorization_requires_operator_and_project_workspace(self):
         self.assertTrue(scr.authorize(sample_config(), self.project_a, "U01234567"))
         self.assertFalse(scr.authorize(sample_config(), self.project_a, "U99999999"))

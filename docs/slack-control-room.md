@@ -81,19 +81,65 @@ the workspace authorized for the single credential set in this first version.
 ## Outbound notifications
 
 Every notification must name a registry project. The destination channel comes
-only from its active record:
+only from its active record. Write the concise alert summary to an
+operator-owned `0600` file using a non-shell file-writing mechanism and set
+`ARU_ALERT_TEXT_FILE` to that path before invoking the helper:
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id proj_... \
   --agent cursor-1 --family xai \
   --event blocked --issue 172 \
-  --text "waiting on depends-on #110"
+  --text-file "$ARU_ALERT_TEXT_FILE"
 ```
 
-An unknown or closed project posts nothing. Slack downtime still returns a
-warning without halting factory work. Deduplication includes `project_id`, so
-identical events from different projects do not suppress one another.
+An unknown or closed project posts nothing. A required GitHub issue/PR comment
+must succeed before Slack is attempted; partial GitHub delivery is tracked per
+target and remains retryable. Slack downtime still returns a warning without
+halting factory work, and writes a secret-safe structured retry record under
+`~/.aru/slack-notify-audit.json`. A later successful retry records recovery.
+Deduplication includes `project_id`, so identical events from different
+projects do not suppress one another. Alert events persist delivery keys under
+`~/.aru/slack-notify-dedupe.json` so the same completed blocker is not re-posted
+after a process restart.
+
+### Alert events (`blocked`, `waiting-on`, `hitl`)
+
+Factory agents use three alert kinds. Each alert posts a durable GitHub
+issue/PR comment with the same facts **before** the Slack message:
+
+| Event | When | Slack extras |
+|---|---|---|
+| `blocked` | unresolved `depends-on`, missing product decision, merge/close-out stuck | stamped identity + reason |
+| `waiting-on` | peer holds a claim, review, or overlapping `touches:` path | names `--waiting-on-agent` and the peer issue/PR; never steals the claim |
+| `hitl` | severe merge/close-out failure, exhausted credits, or an unresolvable decision | mentions only the validated `<@SLACK_OPERATOR_USER_ID>` from configuration; agents still stop per `AGENTS.md` |
+
+For the examples below, prepare `ARU_ALERT_TEXT_FILE` or
+`ARU_ALERT_DECISION_FILE` with the same secure file procedure. The registry
+record is authoritative for both repository slug and checkout path; `--repo`
+and `--repo-dir` cannot redirect an alert.
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id proj_... \
+  --agent cursor-1 --family other \
+  --event waiting-on --repo gillella/Aru_Agentic_SDLC --issue 181 \
+  --waiting-on-agent claude-1 --waiting-on-issue 163 \
+  --repo-dir . \
+  --text-file "$ARU_ALERT_TEXT_FILE"
+
+python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
+  --project-id proj_... \
+  --agent cursor-1 --family other \
+  --event hitl --repo gillella/Aru_Agentic_SDLC --pr 170 \
+  --repo-dir . \
+  --decision-file "$ARU_ALERT_DECISION_FILE"
+```
+
+Do **not** post heartbeats, diffs, prompts, tokens, or test logs. The helper
+rejects those event types. A Slack reply cannot claim, review, or merge —
+inbound `claim` / `merge` / `review` verbs are refused; only GitHub helpers
+mutate work state.
 
 ## Bridge process
 
