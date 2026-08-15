@@ -121,11 +121,11 @@ def _run_bounded(
 
 
 def verify_baseline_commit(repo_dir: str, commit_sha: str) -> bool:
-    code, _, _ = _run_bounded(
-        ["git", "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+    code, stdout, _ = _run_bounded(
+        ["git", "cat-file", "-t", commit_sha],
         cwd=repo_dir, timeout=BASELINE_TIMEOUT_SECONDS,
     )
-    return code == 0
+    return code == 0 and stdout == "commit"
 
 
 def authorize(config: SlackConfig, project: ProjectRecord, user_id: str) -> bool:

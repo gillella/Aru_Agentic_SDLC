@@ -128,6 +128,42 @@ class DeliveryIncrementSchemaTests(IncrementFixture):
         with self.assertRaises(IncrementError):
             self.store.list()
 
+        self.store = DeliveryIncrementStore(self.root / "float-schema.json")
+        self.store.path.write_text('{"schema": 1.0, "increments": []}')
+        self.store.path.chmod(0o600)
+        with self.assertRaises(IncrementError):
+            self.store.list()
+
+        with self.assertRaises(IncrementError):
+            self.store.list([])
+
+    def test_numeric_baseline_and_ambiguous_slack_authority_fail_closed(self):
+        _, decision = self.authorize()
+        numeric = dict(decision, baseline_commit=int("1" * 40))
+        other_store = DeliveryIncrementStore(self.root / "numeric-baseline.json")
+        with self.assertRaises(IncrementError):
+            other_store.apply_operator_decision(numeric, self.evidence(event="numeric"))
+
+        for overrides in (
+            {"user_id": "U"},
+            {"team_id": "T01234567|C2"},
+            {"channel_id": "C01234567|C3"},
+        ):
+            values = {
+                "user_id": "U01234567",
+                "team_id": "T01234567",
+                "channel_id": "C01234567",
+                "event_id": "authority",
+                "github_repository": "owner/repo",
+                "github_record_url": (
+                    "https://github.com/owner/repo/issues/300#issuecomment-1"
+                ),
+                "recorded_at": "2026-08-15T12:00:00Z",
+                **overrides,
+            }
+            with self.subTest(overrides=overrides), self.assertRaises(IncrementError):
+                operator_evidence(**values)
+
     def test_lifecycle_fields_are_derived_from_history(self):
         self.authorize()
 

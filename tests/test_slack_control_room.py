@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -213,6 +214,35 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(store.list(), [])
         self.assertFalse(self.seen_path.exists())
+
+    def test_baseline_verifier_requires_the_supplied_object_to_be_a_commit(self):
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.checkout_a, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "tests@example.com"],
+            cwd=self.checkout_a, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Aru Tests"],
+            cwd=self.checkout_a, check=True,
+        )
+        (self.checkout_a / "README.md").write_text("baseline\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=self.checkout_a, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "baseline"], cwd=self.checkout_a, check=True)
+        commit_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.checkout_a,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "tag", "-a", "baseline-tag", "-m", "annotated"],
+            cwd=self.checkout_a, check=True,
+        )
+        tag_sha = subprocess.run(
+            ["git", "rev-parse", "baseline-tag^{tag}"], cwd=self.checkout_a,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+
+        self.assertTrue(scr.verify_baseline_commit(str(self.checkout_a), commit_sha))
+        self.assertFalse(scr.verify_baseline_commit(str(self.checkout_a), tag_sha))
 
     def test_concurrent_same_event_creates_one_github_record_and_transition(self):
         store = DeliveryIncrementStore(self.root / "increments.json")

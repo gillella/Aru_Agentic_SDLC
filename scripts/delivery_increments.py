@@ -19,6 +19,9 @@ INCREMENT_ID_RE = re.compile(r"^inc_[0-9a-f]{20}$")
 PROJECT_ID_RE = re.compile(r"^proj_[A-Za-z0-9_-]{3,64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SLACK_USER_RE = re.compile(r"^U[A-Z0-9]{7,}$")
+SLACK_TEAM_RE = re.compile(r"^T[A-Z0-9]{7,}$")
+SLACK_CHANNEL_RE = re.compile(r"^[CG][A-Z0-9]{7,}$")
 ACTIVE_NORMAL_STATES = {"authorized", "active"}
 LIFECYCLE_STATES = {"authorized", "active", "accepted", "closed"}
 RELEASE_STATES = {"unreleased", "deployment-authorized", "deployed"}
@@ -117,9 +120,12 @@ def _validate_evidence(value: Any) -> Dict[str, Any]:
             raise IncrementError(f"invalid {key}")
     if "|" in value["slack_event_id"]:
         raise IncrementError("invalid slack_event_id")
-    if not value["slack_user_id"].startswith("U") or not value["slack_team_id"].startswith("T"):
+    if (
+        not SLACK_USER_RE.fullmatch(value["slack_user_id"])
+        or not SLACK_TEAM_RE.fullmatch(value["slack_team_id"])
+    ):
         raise IncrementError("invalid Slack operator identity")
-    if not value["slack_channel_id"].startswith(("C", "G")):
+    if not SLACK_CHANNEL_RE.fullmatch(value["slack_channel_id"]):
         raise IncrementError("invalid Slack channel identity")
     repository = _string(value["github_repository"], "github_repository", REPOSITORY_RE)
     url = value["github_record_url"]
@@ -144,7 +150,7 @@ def _validate_decision(value: Any) -> Dict[str, Any]:
     _string(value["increment_id"], "increment_id", INCREMENT_ID_RE)
     _string(value["project_id"], "project_id", PROJECT_ID_RE)
     operator = _string(value["operator_user_id"], "operator_user_id")
-    if not operator.startswith("U"):
+    if not SLACK_USER_RE.fullmatch(operator):
         raise IncrementError("invalid operator_user_id")
     _string(value["github_repository"], "github_repository", REPOSITORY_RE)
     allowed = required | {
@@ -159,10 +165,11 @@ def _validate_decision(value: Any) -> Dict[str, Any]:
         if isinstance(value.get("control_issue"), bool) or not isinstance(value.get("control_issue"), int) or value["control_issue"] <= 0:
             raise IncrementError("control_issue must be a positive issue number")
         normalized["issue_scope"] = _issues(value.get("issue_scope"))
-        if not COMMIT_RE.fullmatch(str(value.get("baseline_commit") or "")):
+        baseline = _string(value.get("baseline_commit"), "baseline_commit")
+        if not COMMIT_RE.fullmatch(baseline):
             raise IncrementError("baseline_commit must be a full commit SHA")
         normalized["kind"] = value.get("kind", "normal")
-        normalized["baseline_commit"] = str(value["baseline_commit"]).lower()
+        normalized["baseline_commit"] = baseline.lower()
     elif value["action"] == "revise":
         normalized["issue_scope"] = _issues(value.get("issue_scope"))
     elif any(key in value for key in ("kind", "control_issue", "issue_scope", "baseline_commit")):
@@ -360,7 +367,11 @@ def _global_invariants(records: List[Dict[str, Any]]) -> None:
 def _document(value: Any) -> Dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"schema", "increments"}:
         raise IncrementError("invalid Delivery Increment registry")
-    if isinstance(value["schema"], bool) or value["schema"] != SCHEMA_VERSION:
+    if (
+        isinstance(value["schema"], bool)
+        or not isinstance(value["schema"], int)
+        or value["schema"] != SCHEMA_VERSION
+    ):
         raise IncrementError("unsupported Delivery Increment registry schema")
     if not isinstance(value["increments"], list):
         raise IncrementError("invalid Delivery Increment registry")
@@ -388,7 +399,7 @@ class DeliveryIncrementStore:
         ))
         records = document["increments"]
         if project_id is not None:
-            if not PROJECT_ID_RE.fullmatch(project_id):
+            if not isinstance(project_id, str) or not PROJECT_ID_RE.fullmatch(project_id):
                 raise IncrementError("invalid project_id")
             records = [item for item in records if item["project_id"] == project_id]
         return deepcopy(records)
