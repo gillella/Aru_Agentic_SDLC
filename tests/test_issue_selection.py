@@ -104,6 +104,23 @@ depends-on: #2, #4
         self.assertEqual([item["number"] for item in result["candidates"]], [2])
         self.assertEqual(result["operator_only"], [1])
 
+    def test_active_needs_human_touches_still_block_overlapping_agent_work(self):
+        issues = [
+            issue(
+                1,
+                "touches: src/operator.py\n",
+                labels=("status:in-progress", "needs-human"),
+            ),
+            issue(2, "touches: src/operator.py\n", labels=("status:ready",)),
+            issue(3, "touches: docs/**\n", labels=("status:ready",)),
+        ]
+
+        result = build_candidates(issues, "agent-a")
+
+        self.assertEqual([item["number"] for item in result["candidates"]], [3])
+        self.assertEqual(result["conflicted"][0]["number"], 2)
+        self.assertEqual(result["operator_only"], [1])
+
     @patch.object(fetch_next_issue, "update_status", return_value=True)
     @patch.object(fetch_next_issue, "run_cmd")
     def test_reaper_synchronizes_board_before_removing_claim(self, run_cmd, update_status):

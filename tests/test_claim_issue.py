@@ -13,6 +13,71 @@ def issue_with_labels(*names):
 
 
 class ClaimProtocolTests(unittest.TestCase):
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_direct_claim_refuses_needs_human_issue(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels("status:ready", "needs-human")
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_needs_human_label_race_during_settle_releases_claim(
+        self, get_issue, _ensure, run_cmd, update_status, _sleep
+    ):
+        get_issue.side_effect = [
+            issue_with_labels("status:ready"),
+            issue_with_labels("status:ready", "agent:agent-a", "needs-human"),
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        update_status.assert_not_called()
+        self.assertEqual(
+            run_cmd.call_args_list[-1].args[0],
+            ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
+        )
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_needs_human_label_race_after_status_returns_to_backlog(
+        self, get_issue, _ensure, _run, update_status, _sleep
+    ):
+        get_issue.side_effect = [
+            issue_with_labels("status:ready"),
+            issue_with_labels("status:ready", "agent:agent-a"),
+            issue_with_labels("status:ready", "agent:agent-a"),
+            issue_with_labels("status:ready", "agent:agent-a"),
+            issue_with_labels("status:in-progress", "agent:agent-a", "needs-human"),
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        self.assertEqual(
+            update_status.call_args_list,
+            [
+                call(7, "In Progress", require_board=True),
+                call(7, "Backlog", require_board=True),
+            ],
+        )
+
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "update_status")
     @patch.object(claim_issue, "run_cmd")
@@ -250,6 +315,21 @@ class ClaimProtocolTests(unittest.TestCase):
         ensure_label.assert_not_called()
         run_cmd.assert_not_called()
         update_status.assert_not_called()
+
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "get_issue")
+    def test_release_returns_needs_human_issue_to_backlog(
+        self, get_issue, _run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:in-progress", "agent:agent-a", "needs-human"
+        )
+
+        result = claim_issue.release_issue(7, "agent-a")
+
+        self.assertIsNone(result)
+        update_status.assert_called_once_with(7, "Backlog", require_board=True)
 
     @patch.object(claim_issue, "update_status")
     @patch.object(claim_issue, "run_cmd")

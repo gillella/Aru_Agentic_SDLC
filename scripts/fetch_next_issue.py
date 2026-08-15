@@ -163,12 +163,12 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
 
     for issue in issues:
         labels = issue.get("labels", [])
-        if needs_human(labels):
-            continue
         names = {label.get("name", "").lower() for label in labels}
         holder = claimed_by(issue)
         if holder or "status:in-progress" in names or "status:in-review" in names:
             in_flight_paths.extend(parse_touches(issue.get("body") or ""))
+        if needs_human(labels):
+            continue
         if holder:
             if agent and holder == agent:
                 my_in_flight_issues.append(issue)
