@@ -972,6 +972,39 @@ class MergeQueueViewTests(unittest.TestCase):
         self.assertEqual(row["first_blocking"], "ci")
         self.assertEqual(row["next_action"], "wait")
         self.assertIn("ci:", row["verdict"])
+        self.assertEqual(row["ci"], "red")
+        self.assertEqual(row["threads"], "clean")
+
+    def test_queue_table_shows_ci_and_threads_when_earlier_gate_fails(self):
+        """CI and thread state stay visible even when verification fails first."""
+        pr = self._full_pr(14, "author:agent-a", "reviewed-by:agent-b")
+        gates = [
+            ("open", True, "open"),
+            ("issue link", True, "linked"),
+            ("verification", False, "missing verified: trailer"),
+            ("ci", True, "CI green (4 checks)."),
+            ("review", False, "2 unresolved review thread(s)."),
+            ("rebased", True, "clean"),
+            ("size", True, "ok"),
+        ]
+        row = evaluate_queue_row(
+            pr,
+            fetch_pr_fn=lambda _n: pr,
+            linked_issues_fn=lambda _body: [1],
+            issue_body_fn=lambda _n: "- [x] done",
+            review_evidence_fn=lambda _n: {"unresolved": 2, "unfixed": 0, "withdrawn": 0},
+            evaluate_dod_fn=lambda *_a, **_k: (False, gates),
+        )
+        self.assertEqual(row["first_blocking"], "verification")
+        self.assertEqual(row["ci"], "green")
+        self.assertEqual(row["threads"], "2 open")
+        self.assertNotIn("ci:", row["verdict"])
+        text = format_merge_queue(
+            {"queue": [row], "open_prs_count": 1, "mergeable_count": 0}
+        )
+        self.assertIn("CI", text.splitlines()[3])
+        self.assertIn("Threads", text.splitlines()[3])
+        self.assertRegex(text, r"#14\s+agent-a\s+agent-b\s+green\s+2 open")
 
     def test_build_merge_queue_never_invokes_merge_side_effects(self):
         prs = [self._full_pr(20, "author:a"), self._full_pr(21, "author:b")]
@@ -990,6 +1023,8 @@ class MergeQueueViewTests(unittest.TestCase):
                 "next_action": "review",
                 "gates": [],
                 "unresolved_threads": 0,
+                "ci": "none",
+                "threads": "clean",
             }
 
         with patch("merge_pr.execute_merge") as execute_merge, \
@@ -1002,6 +1037,7 @@ class MergeQueueViewTests(unittest.TestCase):
         self.assertEqual(payload["mergeable_count"], 0)
         self.assertIn("Merge queue", text)
         self.assertIn("#20", text)
+        self.assertIn("none", text)
         execute_merge.assert_not_called()
         merge_main.assert_not_called()
 
@@ -1020,6 +1056,9 @@ class MergeQueueViewTests(unittest.TestCase):
         self.assertFalse(row["ok"])
         self.assertEqual(row["first_blocking"], "review")
         self.assertEqual(row["next_action"], "review")
+        self.assertEqual(row["threads"], "unknown")
+        # CI still surfaces from the fetched PR even when evidence is missing.
+        self.assertIn(row["ci"], {"none", "red", "pending", "green", "—"})
 
     def test_open_pr_list_failure_does_not_look_empty(self):
         payload = build_merge_queue(list_prs_fn=lambda: None)

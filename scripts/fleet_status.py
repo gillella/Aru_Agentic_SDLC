@@ -736,6 +736,64 @@ def next_queue_action(
     return "wait"
 
 
+def queue_ci_label(pr: Optional[Dict[str, Any]], gates: Optional[List[Any]] = None) -> str:
+    """Compact CI state for the merge-queue table (always shown)."""
+    import merge_pr as mp
+
+    if gates:
+        for entry in gates:
+            if isinstance(entry, dict):
+                name, passed, message = entry.get("name"), entry.get("passed"), entry.get("message") or ""
+            else:
+                name, passed, message = entry[0], entry[1], entry[2] if len(entry) > 2 else ""
+            if name == "ci":
+                if passed:
+                    return "green"
+                lowered = (message or "").lower()
+                if "not finished" in lowered or "pending" in lowered:
+                    return "pending"
+                if "no ci" in lowered:
+                    return "none"
+                return "red"
+    if not pr:
+        return "—"
+    ok, message = mp.check_ci(pr)
+    if ok:
+        return "green"
+    lowered = (message or "").lower()
+    if "not finished" in lowered:
+        return "pending"
+    if "no ci" in lowered:
+        return "none"
+    return "red"
+
+
+def queue_thread_label(unresolved: Optional[int], *, known: bool = True) -> str:
+    """Compact review-thread state for the merge-queue table (always shown)."""
+    if not known or unresolved is None:
+        return "unknown"
+    if unresolved <= 0:
+        return "clean"
+    return f"{unresolved} open"
+
+
+def _serialize_queue_gates(gates: List[Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for entry in gates or []:
+        if isinstance(entry, dict):
+            out.append(
+                {
+                    "name": entry.get("name"),
+                    "passed": bool(entry.get("passed")),
+                    "message": entry.get("message") or "",
+                }
+            )
+        else:
+            name, passed, message = entry
+            out.append({"name": name, "passed": bool(passed), "message": message})
+    return out
+
+
 def evaluate_queue_row(
     pr: Dict[str, Any],
     *,
@@ -774,6 +832,8 @@ def evaluate_queue_row(
             "next_action": "wait",
             "gates": [],
             "unresolved_threads": 0,
+            "ci": "—",
+            "threads": "unknown",
         }
 
     title = full.get("title") or title
@@ -797,6 +857,8 @@ def evaluate_queue_row(
             "next_action": "wait",
             "gates": [],
             "unresolved_threads": 0,
+            "ci": queue_ci_label(full, None),
+            "threads": "unknown",
         }
 
     issue_bodies: Dict[int, str] = {}
@@ -815,17 +877,25 @@ def evaluate_queue_row(
                 "next_action": "wait",
                 "gates": [],
                 "unresolved_threads": 0,
+                "ci": queue_ci_label(full, None),
+                "threads": "unknown",
             }
 
     evidence = review_evidence_fn(number)
     # None means the GraphQL/auth query failed — fail closed for this row.
     # Do not coerce to {} or check_reviews will KeyError on missing keys.
     if evidence is None or evidence.get("error"):
-        unresolved = 0
+        unresolved: Optional[int] = None
+        threads_known = False
         ok = False
-        gates = [("review", False, "Could not determine review-thread state; refusing rather than guessing.")]
+        # Keep review as the sole blocking gate so first_blocking stays
+        # review-evidence failure; CI still surfaces via queue_ci_label(full).
+        gates: List[Any] = [
+            ("review", False, "Could not determine review-thread state; refusing rather than guessing."),
+        ]
     else:
         unresolved = int(evidence.get("unresolved") or 0)
+        threads_known = True
         ok, gates = evaluate_dod_fn(full, issue_bodies, evidence)
 
     first_blocking = next((name for name, passed, _ in gates if not passed), None)
@@ -845,11 +915,13 @@ def evaluate_queue_row(
         "ok": bool(ok),
         "first_blocking": first_blocking,
         "verdict": verdict,
-        "next_action": next_queue_action(bool(ok), first_blocking, unresolved),
-        "gates": [
-            {"name": n, "passed": bool(p), "message": m} for n, p, m in gates
-        ],
-        "unresolved_threads": unresolved,
+        "next_action": next_queue_action(
+            bool(ok), first_blocking, 0 if unresolved is None else unresolved
+        ),
+        "gates": _serialize_queue_gates(gates),
+        "unresolved_threads": 0 if unresolved is None else int(unresolved),
+        "ci": queue_ci_label(full, gates),
+        "threads": queue_thread_label(unresolved, known=threads_known),
     }
 
 
@@ -894,19 +966,25 @@ def format_merge_queue(queue: Dict[str, Any]) -> str:
         f"Open PRs: {queue.get('open_prs_count', len(rows))}  "
         f"Mergeable: {queue.get('mergeable_count', 0)}",
         "",
-        f"{'PR':<6} {'Author':<18} {'Reviewer':<18} {'Next':<10} Verdict",
-        f"{'-'*6} {'-'*18} {'-'*18} {'-'*10} {'-'*40}",
+        f"{'PR':<6} {'Author':<16} {'Reviewer':<16} {'CI':<8} {'Threads':<10} "
+        f"{'Next':<10} Verdict",
+        f"{'-'*6} {'-'*16} {'-'*16} {'-'*8} {'-'*10} {'-'*10} {'-'*36}",
     ]
     if not rows:
         lines.append("(no open PRs)")
         return "\n".join(lines)
     for row in rows:
         pr = f"#{row.get('pr')}"
-        author = (row.get("author") or "—")[:18]
-        reviewer = (row.get("reviewer") or "—")[:18]
+        author = (row.get("author") or "—")[:16]
+        reviewer = (row.get("reviewer") or "—")[:16]
+        ci = (row.get("ci") or "—")[:8]
+        threads = (row.get("threads") or "—")[:10]
         action = row.get("next_action") or "wait"
         verdict = row.get("verdict") or ""
-        lines.append(f"{pr:<6} {author:<18} {reviewer:<18} {action:<10} {verdict}")
+        lines.append(
+            f"{pr:<6} {author:<16} {reviewer:<16} {ci:<8} {threads:<10} "
+            f"{action:<10} {verdict}"
+        )
     return "\n".join(lines)
 
 
