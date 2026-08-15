@@ -74,16 +74,19 @@ For each proposed issue, record structured `change_targets` separately from
 the prose:
 
 - `{"path": "existing/file.py", "kind": "existing"}` for a tracked file;
-- `{"path": "existing/directory", "kind": "existing"}` when the whole
-  directory is in scope (the helper canonicalizes it to `directory/**`);
+- `{"path": "existing/directory", "kind": "existing"}` when every currently
+  tracked file below that directory is in scope (the helper expands it to
+  exact tracked paths);
 - `{"path": "existing/**/*.py", "kind": "existing"}` for a glob that must
-  match tracked files; or
+  match tracked files and is likewise expanded to exact paths; or
 - `{"path": "existing/parent/new_file.py", "kind": "new"}` for a proposed
   file whose parent already exists in the repository.
 
 The helper refuses unknown existing paths, unmatched globs, new-file globs,
-and new files under unknown parents. When exact scope is uncertain,
-over-declare a validated directory and split the issue; never under-declare.
+and new files under unknown parents. Exact-path expansion keeps generated
+metadata compatible with both the framework hook and consumer CI guards,
+whose wildcard semantics differ. When exact scope is uncertain, over-declare
+a validated directory and split the issue; never under-declare.
 
 ### 3. Build the Decomposition Manifest
 

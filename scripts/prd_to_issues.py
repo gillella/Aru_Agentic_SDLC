@@ -144,20 +144,25 @@ def derive_touches(
             )
             if not parent_known or not (repo_root / parent_text).is_dir():
                 raise PlanError(f"{field}: parent directory is not in the repository: {parent_text}")
-            canonical = path
+            canonical_paths = [path]
         elif any(char in path for char in GLOB_CHARS):
-            if not any(fnmatch.fnmatch(candidate, path) for candidate in inventory):
+            canonical_paths = [
+                candidate for candidate in inventory if fnmatch.fnmatch(candidate, path)
+            ]
+            if not canonical_paths:
                 raise PlanError(f"{field}: glob matches no tracked repository path: {path}")
-            canonical = path
         elif path in inventory_set:
-            canonical = path
+            canonical_paths = [path]
         elif any(candidate.startswith(path + "/") for candidate in inventory):
-            canonical = f"{path}/**"
+            canonical_paths = [
+                candidate for candidate in inventory if candidate.startswith(path + "/")
+            ]
         else:
             raise PlanError(f"{field}: path is not present in the repository: {path}")
 
-        if canonical not in touches:
-            touches.append(canonical)
+        for canonical in canonical_paths:
+            if canonical not in touches:
+                touches.append(canonical)
     return tuple(touches)
 
 

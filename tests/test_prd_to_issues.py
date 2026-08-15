@@ -21,6 +21,7 @@ class PrdToIssuesTests(unittest.TestCase):
         self.inventory = (
             "docs/guide.md",
             "src/core.py",
+            "src/nested/deep.py",
             "src/ui.py",
             "tests/test_core.py",
             "tests/test_ui.py",
@@ -140,7 +141,10 @@ class PrdToIssuesTests(unittest.TestCase):
 
         plan = pti.prepare_plan(manifest, self.repo, self.inventory)
 
-        self.assertEqual(plan.issues[1].touches, ("src/**",))
+        self.assertEqual(
+            plan.issues[1].touches,
+            ("src/core.py", "src/nested/deep.py", "src/ui.py"),
+        )
         self.assertFalse(plan.issues[0].parallel_eligible)
         self.assertFalse(plan.issues[1].parallel_eligible)
 
@@ -154,7 +158,10 @@ class PrdToIssuesTests(unittest.TestCase):
             self.inventory,
             issue_key="new-slice",
         )
-        self.assertEqual(touches, ("src/*.py", "tests/test_new.py"))
+        self.assertEqual(
+            touches,
+            ("src/core.py", "src/nested/deep.py", "src/ui.py", "tests/test_new.py"),
+        )
 
         with self.assertRaisesRegex(pti.PlanError, "parent directory is not in the repository"):
             pti.derive_touches(
