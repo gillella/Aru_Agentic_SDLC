@@ -1453,6 +1453,23 @@ class GitCommandCheckoutTests(unittest.TestCase):
             "# Local development notes\n", encoding="utf-8"
         )
 
+        cls.separate_worktree = base / "separate-worktree"
+        cls.separate_git_dir = base / "separate-metadata" / "repo.git"
+        cls.separate_git_dir.parent.mkdir()
+        subprocess.run(
+            [
+                "git", "init", "-b", "main",
+                "--separate-git-dir", str(cls.separate_git_dir),
+                str(cls.separate_worktree),
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        # Deliberately leave this repository unborn: rev-parse prints HEAD and
+        # fails before the first commit, while the next commit still writes main.
+        (cls.separate_worktree / "AGENTS.md").write_text(
+            cls.AGENTS_MD, encoding="utf-8"
+        )
+
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
@@ -1519,6 +1536,15 @@ class GitCommandCheckoutTests(unittest.TestCase):
             self.violation(
                 f"git --git-dir={self.ungoverned}/.git "
                 f"--work-tree={self.main_root} commit -m x",
+                self.wt,
+            )
+        )
+
+    def test_unborn_separate_git_dir_on_main_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"git --git-dir={self.separate_git_dir} "
+                f"--work-tree={self.separate_worktree} commit -m x",
                 self.wt,
             )
         )

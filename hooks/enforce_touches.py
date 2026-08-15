@@ -74,7 +74,24 @@ def repo_root(cwd):
 
 
 def current_branch(cwd):
+    """Returns the checked-out branch, including for an unborn repository."""
     rc, out = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
+    if rc == 0 and out and out != "HEAD":
+        return out
+    # rev-parse reports an error (and sometimes prints ``HEAD``) before the
+    # first commit. symbolic-ref still identifies the protected branch that
+    # the pending commit will create.
+    rc, out = _run(["git", "symbolic-ref", "--short", "HEAD"], cwd=cwd)
+    return out if rc == 0 else ""
+
+
+def _current_branch_for_git_dir(git_dir, cwd):
+    """Returns the branch whose refs are supplied by an explicit git dir."""
+    prefix = ["git", "--git-dir", git_dir]
+    rc, out = _run(prefix + ["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
+    if rc == 0 and out and out != "HEAD":
+        return out
+    rc, out = _run(prefix + ["symbolic-ref", "--short", "HEAD"], cwd=cwd)
     return out if rc == 0 else ""
 
 
@@ -819,6 +836,7 @@ def _git_write_violation(command, cwd):
             continue
 
         target, unknown = base, base_unknown or wrapper_target_unknown
+        git_dir = None
         for wrapper_dir in wrapper_chdirs:
             moved = _resolve_dir(wrapper_dir, target) if wrapper_dir is not None else None
             if moved is None:
@@ -843,7 +861,10 @@ def _git_write_violation(command, cwd):
             else:
                 index += 1
                 continue
-            if name in {"-C", "--git-dir"} and value is not None:
+            if name == "-C" and value is not None:
+                moved = _resolve_dir(value, target)
+                target, unknown = (target, True) if moved is None else (moved, False)
+            elif name == "--git-dir" and value is not None:
                 # The protected branch and governance marker belong to the
                 # repository supplying HEAD and refs.  ``--work-tree`` only
                 # changes where files are checked out; it must not replace a
@@ -851,13 +872,19 @@ def _git_write_violation(command, cwd):
                 # Otherwise ``--git-dir=<governed>/.git
                 # --work-tree=<ungoverned>`` can write governed refs while the
                 # marker check incorrectly inspects the ungoverned directory.
-                candidate = (
-                    value[:-len("/.git")]
-                    if name == "--git-dir" and value.endswith("/.git")
-                    else value
-                )
-                moved = _resolve_dir(candidate, base)
-                target, unknown = (base, True) if moved is None else (moved, False)
+                resolved_git_dir = _resolve_dir(value, target)
+                if resolved_git_dir is None:
+                    unknown = True
+                    continue
+                git_dir = resolved_git_dir
+                if os.path.basename(value.rstrip("/")) == ".git":
+                    target = os.path.dirname(resolved_git_dir)
+                else:
+                    # An arbitrary/separate git directory has no reliable
+                    # reverse pointer to its checkout. Keeping it as the
+                    # governance target makes repo_root() fail closed below.
+                    target = resolved_git_dir
+                unknown = False
 
         if subcommand not in _GIT_WRITE_SUBCOMMANDS:
             continue
@@ -867,7 +894,11 @@ def _git_write_violation(command, cwd):
                 f"run 'git {subcommand}' in a directory this hook cannot "
                 "resolve, so it cannot prove the target branch is unprotected"
             )
-        violation = _git_write_to_protected(["git"] + list(args), current_branch(target))
+        branch = (
+            _current_branch_for_git_dir(git_dir, target)
+            if git_dir else current_branch(target)
+        )
+        violation = _git_write_to_protected(["git"] + list(args), branch)
         if violation:
             # This hook is installed globally. A successfully resolved checkout
             # that positively lacks the Aru marker never opted into protected-
