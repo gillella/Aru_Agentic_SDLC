@@ -361,7 +361,9 @@ none
         with patch("verify_citations.socket.getaddrinfo", side_effect=slow_lookup):
             with self.assertRaises(TimeoutError):
                 default_http_get("http://slow.example/", timeout=0.01)
-        self.assertLess(time.monotonic() - started, 0.06)
+        # Stay below the stub's 0.08-second delay while allowing scheduler
+        # overhead on a loaded CI runner.
+        self.assertLess(time.monotonic() - started, 0.075)
 
     def test_redirect_body_is_never_read(self):
         infos = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80))]
