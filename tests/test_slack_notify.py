@@ -767,6 +767,23 @@ class SlackNotifyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIs(result["github_ok"], False)
 
+    def test_notify_alert_rejects_invalid_programmatic_targets_without_raising(self):
+        calls = []
+        for issue in ("not-a-number", [], True, -1):
+            result = notify_alert(
+                sample_config(),
+                {
+                    "type": "blocked",
+                    "agent": "cursor-1",
+                    "issue": issue,
+                    "text": "dependency unavailable",
+                },
+                transport=lambda *_a: calls.append("slack") or {"ok": True},
+                comment=lambda *_a: calls.append("github") or True,
+            )
+            self.assertEqual(result["error"], "invalid_alert")
+        self.assertEqual(calls, [])
+
     def test_notify_alert_refuses_slack_only_bypass(self):
         calls = []
         result = notify_alert(
@@ -842,6 +859,17 @@ class SlackNotifyTests(unittest.TestCase):
         self.assertIn("--event blocked", skill)
         self.assertIn("--event hitl", skill)
         self.assertIn("structured failure audit", skill)
+
+    def test_skill_alert_examples_name_every_required_cli_flag(self):
+        for relative in (
+            "skills/implement-next-issue/SKILL.md",
+            "skills/run-aru-factory/SKILL.md",
+        ):
+            skill = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("--project-id <PROJECT_ID>", skill)
+            self.assertIn("--agent <AGENT_ID>", skill)
+            self.assertIn("--family <FAMILY>", skill)
+            self.assertIn("--event", skill)
 
     def test_main_warns_when_github_comment_fails(self):
         with tempfile.TemporaryDirectory() as raw:

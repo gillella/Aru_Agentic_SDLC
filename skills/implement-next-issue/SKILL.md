@@ -146,15 +146,20 @@ or other irreversible work from the plan gate.
    concrete options and leave the issue blocked for clarification. This is
    requirement discovery, not a mandatory human review of an otherwise
    complete implementation. After the GitHub comment, notify the Slack control
-   room once (`--event blocked` or `--event hitl` when a human decision is
-   required) via `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py"` — see
-   `prompts/fleet-worker.md`.
+   room once via
+   `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" --project-id <PROJECT_ID>
+   --agent <AGENT_ID> --family <FAMILY> --event blocked --issue <N>
+   --repo-dir . --text "<blocker>"`. Use `--event hitl --decision
+   "<decision needed>"` instead when a human decision is required. See
+   `prompts/fleet-worker.md` for complete examples.
    Do not post heartbeats or steal another agent's claim.
 5. If work cannot start because of an unresolved `depends-on` or a peer holds
    an overlapping `touches:` claim, comment on the issue naming the peer
    `agent:` id and the issue/PR they hold, then
-   `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" --event waiting-on
-   --waiting-on-agent <id> ...`. Release
+   `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" --project-id <PROJECT_ID>
+   --agent <AGENT_ID> --family <FAMILY> --event waiting-on --issue <N>
+   --waiting-on-agent <id> --waiting-on-issue <peer-issue> --repo-dir .
+   --text "<wait reason>"`. Release
    or wait; never steal the claim.
 
 ### Step 5: Implement Solution
