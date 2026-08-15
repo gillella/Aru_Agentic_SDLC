@@ -11,7 +11,9 @@ from unittest.mock import mock_open, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "hooks"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
+import common
 import enforce_touches as et
 
 
@@ -416,10 +418,28 @@ class RedirectFalsePositiveTests(unittest.TestCase):
             et._redirect_targets(f'git commit -m "msg" -m "{self.TRAILER}"'), []
         )
 
+    def test_agent_trailer_via_m_flag_is_not_a_redirect(self):
+        self.assertEqual(
+            et._redirect_targets('git commit -m "msg" -m "Agent: agent-1"'), []
+        )
+
+    def test_co_authored_by_and_agent_trailers_combined_are_not_a_redirect(self):
+        self.assertEqual(
+            et._redirect_targets(f'git commit -m "msg" -m "{self.TRAILER}" -m "Agent: agent-1"'), []
+        )
+
     def test_co_authored_by_trailer_in_a_heredoc_is_not_a_redirect(self):
         # '\\s*' used to span the newline, so the trailing '>' swallowed the
         # heredoc terminator and the hook reported a write to 'EOF'.
         command = "git commit -F - <<'EOF'\nsubject\n\n" + self.TRAILER + "\nEOF"
+        self.assertEqual(et._redirect_targets(command), [])
+
+    def test_agent_trailer_in_a_heredoc_is_not_a_redirect(self):
+        command = "git commit -F - <<'EOF'\nsubject\n\nAgent: agent-1\nEOF"
+        self.assertEqual(et._redirect_targets(command), [])
+
+    def test_agent_and_co_authored_by_trailers_in_a_heredoc_are_not_a_redirect(self):
+        command = f"git commit -F - <<'EOF'\nsubject\n\n{self.TRAILER}\nAgent: agent-1\nEOF"
         self.assertEqual(et._redirect_targets(command), [])
 
     def test_quoted_argument_beginning_with_the_operator_is_not_a_redirect(self):
@@ -1976,6 +1996,63 @@ class GitCommandCheckoutTests(unittest.TestCase):
         # this function's business.
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(self.violation("cd $SOMEWHERE && ls", self.wt))
+
+
+class AgentCommitTrailerTests(unittest.TestCase):
+    def test_get_agent_id_resolves_environment_variables(self):
+        with patch.dict(os.environ, {"ARU_AGENT_ID": "agent-alpha"}, clear=True):
+            self.assertEqual(common.get_agent_id(), "agent-alpha")
+
+        with patch.dict(os.environ, {"AGENT_ID": "agent-beta"}, clear=True):
+            self.assertEqual(common.get_agent_id(), "agent-beta")
+
+        with patch.dict(os.environ, {"ARU_AGENT": "agent-gamma"}, clear=True):
+            self.assertEqual(common.get_agent_id(), "agent-gamma")
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(common.get_agent_id())
+
+    def test_format_commit_message_appends_agent_trailer(self):
+        msg = common.format_commit_message("feat(core): add feature", agent="agent-1")
+        self.assertEqual(msg, "feat(core): add feature\n\nAgent: agent-1")
+
+    def test_format_commit_message_resolves_from_environment(self):
+        with patch.dict(os.environ, {"ARU_AGENT_ID": "agent-2"}):
+            msg = common.format_commit_message("fix(bug): resolve issue")
+            self.assertEqual(msg, "fix(bug): resolve issue\n\nAgent: agent-2")
+
+    def test_format_commit_message_preserves_existing_trailer_block(self):
+        base = (
+            "feat(auth): support token login\n\n"
+            "Detailed explanation of token login.\n\n"
+            "Co-Authored-By: Peer <peer@example.com>"
+        )
+        msg = common.format_commit_message(base, agent="agent-3")
+        expected = (
+            "feat(auth): support token login\n\n"
+            "Detailed explanation of token login.\n\n"
+            "Co-Authored-By: Peer <peer@example.com>\n"
+            "Agent: agent-3"
+        )
+        self.assertEqual(msg, expected)
+
+    def test_format_commit_message_is_idempotent_when_agent_trailer_present(self):
+        msg_with_trailer = "feat(core): add feature\n\nAgent: agent-1"
+        self.assertEqual(
+            common.format_commit_message(msg_with_trailer, agent="agent-1"),
+            msg_with_trailer,
+        )
+        self.assertEqual(
+            common.format_commit_message(msg_with_trailer, agent="agent-different"),
+            msg_with_trailer,
+        )
+
+    def test_format_commit_message_returns_unmodified_when_no_agent_available(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                common.format_commit_message("chore: update docs"),
+                "chore: update docs",
+            )
 
 
 if __name__ == "__main__":

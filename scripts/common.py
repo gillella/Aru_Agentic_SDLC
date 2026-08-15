@@ -206,6 +206,46 @@ def get_current_commit() -> str:
     return stdout.strip() if code == 0 else ""
 
 
+def get_agent_id() -> Optional[str]:
+    """Returns the active agent ID from environment variables, or None if unset."""
+    for var in ("ARU_AGENT_ID", "AGENT_ID", "ARU_AGENT", "AGENT"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            return val
+    return None
+
+
+def format_commit_message(message: str, agent: Optional[str] = None) -> str:
+    """Formats a git commit message with standard trailers.
+
+    If an agent ID is provided or resolved from the environment, attaches an
+    'Agent: <id>' trailer if not already present.
+    """
+    msg = message.strip()
+    if not msg:
+        return msg
+
+    agent_id = agent.strip() if agent else (get_agent_id() or "")
+    if not agent_id:
+        return msg
+
+    trailer = f"Agent: {agent_id}"
+
+    # Check if Agent trailer is already present (case-insensitive key)
+    if re.search(r"^\s*Agent\s*:\s*.+$", msg, re.IGNORECASE | re.MULTILINE):
+        return msg
+
+    lines = msg.splitlines()
+    trailer_pattern = re.compile(r"^[A-Za-z0-9-]+:\s*.+$")
+
+    # If the message ends with a trailer line and preceding contiguous lines in the
+    # current paragraph are trailers, append directly to the trailer block.
+    if lines and trailer_pattern.match(lines[-1].strip()):
+        return msg + "\n" + trailer
+
+    return msg + "\n\n" + trailer
+
+
 def run_gh_json(cmd: List[str]) -> Optional[Any]:
     """Runs a gh CLI command and parses JSON output."""
     code, stdout, stderr = run_cmd(cmd, check=False)
