@@ -145,6 +145,124 @@ class UnresolvedThreadQueryTests(unittest.TestCase):
         self.assertIsNone(merge_pr.unresolved_threads(57))
 
 
+class ReviewEvidencePaginationTests(unittest.TestCase):
+    @staticmethod
+    def review_page(head="head123", nodes=None, has_next=False, cursor=None):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": head,
+            "reviews": {
+                "nodes": [] if nodes is None else nodes,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            },
+        }}}}
+
+    @staticmethod
+    def thread_page(head="head123"):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": head,
+            "commits": {"nodes": []},
+            "reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+        }}}}
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_review_evidence_paginates_reviews_beyond_first_page(
+        self, gh_json, _slug
+    ):
+        stale_reviews = [
+            {
+                "state": "COMMENTED",
+                "author": {"login": f"reviewer-{index}"},
+                "commit": {"oid": "old-head"},
+            }
+            for index in range(100)
+        ]
+        stale_reviews[0] = {
+            "state": "COMMENTED",
+            "author": {"login": "coderabbitai[bot]"},
+            "commit": {"oid": "head123"},
+        }
+        stale_reviews[1] = {
+            "state": "PENDING",
+            "author": {"login": "draft-reviewer"},
+            "commit": {"oid": "head123"},
+        }
+        current_review = {
+            "state": "COMMENTED",
+            "author": {"login": "independent-agent"},
+            "commit": {"oid": "head123"},
+        }
+        gh_json.side_effect = [
+            self.review_page(
+                nodes=stale_reviews, has_next=True, cursor="review-page-2"
+            ),
+            self.review_page(nodes=[current_review]),
+            self.thread_page(),
+        ]
+
+        evidence = merge_pr.review_evidence(162)
+
+        self.assertTrue(evidence["reviewed_head"])
+        self.assertIn("cursor=review-page-2", gh_json.call_args_list[1].args[0])
+        self.assertEqual(gh_json.call_count, 3)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_review_pagination_failures_return_unknown(self, gh_json, _slug):
+        malformed_cases = [
+            None,
+            {"errors": [{"message": "rate limited"}]},
+            {"data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "reviews": {"nodes": []},
+            }}}},
+            self.review_page(nodes="not-a-list"),
+            self.review_page(nodes=[None]),
+            self.review_page(has_next=True, cursor=None),
+        ]
+        for page in malformed_cases:
+            with self.subTest(page=page):
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.return_value = page
+                self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_repeated_review_cursor_returns_unknown(self, gh_json, _slug):
+        gh_json.side_effect = [
+            self.review_page(has_next=True, cursor="same"),
+            self.review_page(has_next=True, cursor="same"),
+        ]
+
+        self.assertIsNone(merge_pr.review_evidence(162))
+        self.assertEqual(gh_json.call_count, 2)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_review_head_change_returns_unknown(self, gh_json, _slug):
+        gh_json.side_effect = [
+            self.review_page(has_next=True, cursor="next"),
+            self.review_page(head="pushed-head"),
+        ]
+
+        self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_thread_page_head_change_after_review_pagination_returns_unknown(
+        self, gh_json, _slug
+    ):
+        gh_json.side_effect = [
+            self.review_page(),
+            self.thread_page(head="pushed-head"),
+        ]
+
+        self.assertIsNone(merge_pr.review_evidence(162))
+
+
 class CiGateTests(unittest.TestCase):
     def test_all_successful_passes(self):
         pr = {"statusCheckRollup": [
@@ -1312,7 +1430,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                 "repository": {
                     "pullRequest": {
                         "headRefOid": "head123",
-                        "reviews": {"nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}]},
+                        "reviews": {
+                            "nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
                         "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
                         "reviewThreads": {
                             "nodes": [
@@ -1338,7 +1459,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                 "repository": {
                     "pullRequest": {
                         "headRefOid": "head123",
-                        "reviews": {"nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}]},
+                        "reviews": {
+                            "nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
                         "commits": {
                             "nodes": [
                                 {"commit": {"committedDate": "2026-08-10T10:00:00Z"}},

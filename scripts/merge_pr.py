@@ -134,6 +134,99 @@ def _parse_ts(value):
         return None
 
 
+def _reviewed_current_head(owner, name, pr_id):
+    """Returns ``(head_oid, reviewed_head)`` after reading every review page.
+
+    GitHub caps connection pages at 100 entries.  Review-heavy pull requests
+    therefore need an independent cursor from review-thread pagination; using
+    only the first page can hide the only review submitted against the current
+    head.  Every page repeats ``headRefOid`` so a concurrent push makes the
+    whole result unknown instead of combining evidence from different heads.
+    """
+    query = """
+    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
+      repository(owner:$owner, name:$name) {
+        pullRequest(number:$pr) {
+          headRefOid
+          reviews(first:100, after:$cursor) {
+            nodes { state author { login } commit { oid } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }"""
+    cursor = None
+    seen_cursors = set()
+    expected_head = None
+    reviewed_head = False
+
+    while True:
+        args = [
+            "gh", "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
+        ]
+        if cursor:
+            args.extend(["-F", f"cursor={cursor}"])
+        data = _gh_json(args)
+        if not data or (isinstance(data, dict) and data.get("errors")):
+            return None
+        try:
+            pull = data["data"]["repository"]["pullRequest"]
+            head = pull["headRefOid"]
+            connection = pull["reviews"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            has_next = page_info["hasNextPage"]
+        except (KeyError, TypeError):
+            return None
+        if (
+            not isinstance(head, str) or not head
+            or not isinstance(nodes, list)
+            or not isinstance(has_next, bool)
+        ):
+            return None
+        if expected_head is None:
+            expected_head = head
+        elif head != expected_head:
+            return None
+
+        for review in nodes:
+            if not isinstance(review, dict):
+                return None
+            state = review.get("state")
+            author = review.get("author")
+            commit = review.get("commit")
+            if (
+                not isinstance(state, str)
+                or (author is not None and not isinstance(author, dict))
+                or (commit is not None and not isinstance(commit, dict))
+            ):
+                return None
+            login = (author or {}).get("login")
+            oid = (commit or {}).get("oid")
+            if (
+                login is not None and not isinstance(login, str)
+                or oid is not None and not isinstance(oid, str)
+            ):
+                return None
+            if state.upper() == "PENDING" or is_advisory_review_account(login or ""):
+                continue
+            if oid == expected_head:
+                reviewed_head = True
+
+        if not has_next:
+            return expected_head, reviewed_head
+        next_cursor = page_info.get("endCursor")
+        if (
+            not isinstance(next_cursor, str) or not next_cursor
+            or next_cursor in seen_cursors
+        ):
+            return None
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
 def review_evidence(pr_id):
     """Facts the review gate needs beyond a count of open threads.
 
@@ -160,14 +253,15 @@ def review_evidence(pr_id):
     if not slug:
         return None
     owner, name = slug.split("/", 1)
+    review_result = _reviewed_current_head(owner, name, pr_id)
+    if review_result is None:
+        return None
+    expected_head, reviewed_head = review_result
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
         pullRequest(number:$pr) {
           headRefOid
-          reviews(first:100) {
-            nodes { state author { login } commit { oid } }
-          }
           commits(last:100) {
             nodes { commit { committedDate } }
           }
@@ -191,7 +285,6 @@ def review_evidence(pr_id):
     outdated_addressed = 0
     withdrawn = 0
     commit_times = None
-    reviewed_head = False
 
     while True:
         args = [
@@ -214,10 +307,12 @@ def review_evidence(pr_id):
             return None
         if not isinstance(nodes, list) or not isinstance(has_next, bool):
             return None
+        if pull.get("headRefOid") != expected_head:
+            return None
 
-        # Commits and reviews do not change between thread pages; read once.
+        # Commits do not change between thread pages; read once. The repeated
+        # head check above rejects a concurrent push on every page.
         if commit_times is None:
-            head = pull.get("headRefOid")
             try:
                 commit_times = sorted(
                     ts for ts in (
@@ -227,14 +322,6 @@ def review_evidence(pr_id):
                 )
             except (AttributeError, TypeError):
                 return None
-            for review in (pull.get("reviews") or {}).get("nodes") or []:
-                if (review.get("state") or "").upper() == "PENDING":
-                    continue
-                who = ((review.get("author") or {}).get("login") or "")
-                if is_advisory_review_account(who):
-                    continue
-                if head and ((review.get("commit") or {}).get("oid")) == head:
-                    reviewed_head = True
 
         for node in nodes:
             outdated = bool(node.get("isOutdated"))
