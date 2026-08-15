@@ -199,7 +199,9 @@ increment. The control issue is the durable GitHub anchor. Every decision is
 posted there as structured `aru.delivery-decision.v1` JSON before the private
 increment registry changes. If that post fails, the transition remains paused
 and the same Slack event can be retried. Duplicate successful events are
-idempotent across bridge restarts.
+idempotent across bridge restarts. Authorization also verifies that the full
+baseline SHA resolves to a commit in the project checkout before it records
+anything.
 
 `accept` records sprint acceptance only. It does not tag, release, authorize
 deployment, or deploy. `authorize-deployment` and `deployed` are distinct

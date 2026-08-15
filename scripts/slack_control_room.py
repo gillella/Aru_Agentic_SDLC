@@ -9,6 +9,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -49,6 +50,9 @@ PID_PATH = Path.home() / ".aru" / "slack-control-room.pid"
 SEEN_PATH = Path.home() / ".aru" / "slack-control-room-seen.json"
 BRIDGE_IDENTITY = "aru-slack-control-room"
 _STATUS_LOCK = threading.Lock()
+_SPRINT_DECISION_LOCK = threading.Lock()
+GITHUB_TIMEOUT_SECONDS = 20
+BASELINE_TIMEOUT_SECONDS = 15
 COMMAND_RE = re.compile(
     r"(?P<verb>status|stop|resume|intervention)\b(?:\s+(?P<rest>.+))?",
     re.IGNORECASE,
@@ -76,7 +80,12 @@ SPRINT_REVISE_RE = re.compile(
     re.IGNORECASE,
 )
 SPRINT_TRANSITION_RE = re.compile(
-    r"^sprint\s+(?P<action>start|accept|authorize-deployment|deployed|cancel)\s+"
+    r"^sprint\s+(?P<action>start|authorize-deployment|deployed|cancel)\s+"
+    r"(?P<increment>inc_[0-9a-f]{20})$",
+    re.IGNORECASE,
+)
+SPRINT_ACCEPT_RE = re.compile(
+    r"^sprint\s+(?P<action>accept)\s+"
     r"(?P<increment>inc_[0-9a-f]{20})(?:\s+(?P<risk>risk-accepted))?$",
     re.IGNORECASE,
 )
@@ -94,6 +103,29 @@ def _slack_event_time(value: str) -> Optional[str]:
         return datetime.fromtimestamp(float(seconds), timezone.utc).isoformat()
     except (InvalidOperation, OverflowError, OSError, ValueError):
         return None
+
+
+def _run_bounded(
+    command: List[str], *, cwd: str, timeout: int,
+) -> Tuple[int, str, str]:
+    try:
+        result = subprocess.run(
+            command, cwd=cwd, text=True, capture_output=True,
+            timeout=timeout, check=False,
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return 124, "", f"command timed out after {timeout}s"
+    except OSError as exc:
+        return 1, "", str(exc)
+
+
+def verify_baseline_commit(repo_dir: str, commit_sha: str) -> bool:
+    code, _, _ = _run_bounded(
+        ["git", "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+        cwd=repo_dir, timeout=BASELINE_TIMEOUT_SECONDS,
+    )
+    return code == 0
 
 
 def authorize(config: SlackConfig, project: ProjectRecord, user_id: str) -> bool:
@@ -168,12 +200,12 @@ def parse_sprint_command(text: str) -> Dict[str, Any]:
             "increment_id": revise.group("increment").lower(),
             "issue_scope": _issue_scope(revise.group("issues")),
         }
-    transition = SPRINT_TRANSITION_RE.fullmatch(text)
+    transition = SPRINT_ACCEPT_RE.fullmatch(text) or SPRINT_TRANSITION_RE.fullmatch(text)
     if transition:
         return {
             "verb": "sprint", "action": transition.group("action").lower(),
             "increment_id": transition.group("increment").lower(),
-            "risk_accepted": bool(transition.group("risk")),
+            "risk_accepted": bool(transition.groupdict().get("risk")),
         }
     return {
         "verb": "sprint-invalid",
@@ -403,13 +435,11 @@ def github_increment_decision(
     control_issue: int, payload: Dict[str, Any], repo_dir: str,
 ) -> Optional[str]:
     """Write the authoritative decision before local increment state changes."""
-    from common import run_cmd
-
     marker = hashlib.sha256(str(payload["decision_id"]).encode()).hexdigest()[:20]
     marker_text = f"<!-- aru-delivery-decision:v1:{marker} -->"
-    code, stdout, _ = run_cmd(
+    code, stdout, _ = _run_bounded(
         ["gh", "issue", "view", str(control_issue), "--json", "comments"],
-        check=False, cwd=repo_dir,
+        cwd=repo_dir, timeout=GITHUB_TIMEOUT_SECONDS,
     )
     if code != 0:
         return None
@@ -443,9 +473,9 @@ def github_increment_decision(
         + json.dumps(payload, indent=2, sort_keys=True)
         + "\n```\n"
     )
-    code, stdout, _ = run_cmd(
+    code, stdout, _ = _run_bounded(
         ["gh", "issue", "comment", str(control_issue), "--body", body],
-        check=False, cwd=repo_dir,
+        cwd=repo_dir, timeout=GITHUB_TIMEOUT_SECONDS,
     )
     if code != 0:
         return None
@@ -457,6 +487,7 @@ def _handle_sprint_decision(
     parsed: Dict[str, Any], project: ProjectRecord,
     store: Optional[DeliveryIncrementStore] = None,
     recorder: Callable[[int, Dict[str, Any], str], Optional[str]] = github_increment_decision,
+    baseline_verifier: Callable[[str, str], bool] = verify_baseline_commit,
 ) -> str:
     event_id = str(parsed.get("event_id") or "")
     if not event_id:
@@ -469,6 +500,8 @@ def _handle_sprint_decision(
     if action == "authorize":
         increment_id = increment_id_for_event(project.project_id, event_id)
         control_issue = int(parsed["control_issue"])
+        if not baseline_verifier(project.local_path, str(parsed["baseline_commit"])):
+            return "sprint decision paused: baseline commit is not present in the resolved project"
     else:
         increment_id = str(parsed["increment_id"])
         try:
@@ -489,6 +522,8 @@ def _handle_sprint_decision(
         "action": action,
         "increment_id": increment_id,
         "project_id": project.project_id,
+        "operator_user_id": str(parsed.get("user_id") or ""),
+        "github_repository": project.repo_slug,
     }
     if action == "authorize":
         decision.update({
@@ -505,7 +540,7 @@ def _handle_sprint_decision(
     durable_payload = {
         "schema": "aru.delivery-decision.v1",
         **decision,
-        "operator_user_id": str(parsed.get("user_id") or ""),
+        "operator_user_id": decision["operator_user_id"],
         "slack_team_id": str(parsed.get("team_id") or ""),
         "slack_channel_id": str(parsed.get("channel_id") or ""),
         "recorded_at": decided_at,
@@ -519,6 +554,7 @@ def _handle_sprint_decision(
             team_id=durable_payload["slack_team_id"],
             channel_id=durable_payload["slack_channel_id"],
             event_id=event_id,
+            github_repository=project.repo_slug,
             github_record_url=github_url,
             recorded_at=durable_payload["recorded_at"],
         )
@@ -539,6 +575,7 @@ def handle_command(
     record_increment: Callable[
         [int, Dict[str, Any], str], Optional[str]
     ] = github_increment_decision,
+    baseline_verifier: Callable[[str, str], bool] = verify_baseline_commit,
 ) -> str:
     verb = parsed["verb"]
     if verb == "refused-queue":
@@ -551,7 +588,9 @@ def handle_command(
     if health != "healthy":
         return "project checkout is degraded; use registry verify, recover, or close locally"
     if verb == "sprint":
-        return _handle_sprint_decision(parsed, project, increment_store, record_increment)
+        return _handle_sprint_decision(
+            parsed, project, increment_store, record_increment, baseline_verifier
+        )
     if verb == "stop":
         return apply_stop(project.local_path, parsed.get("target") or "project")
     if verb == "resume":
@@ -604,6 +643,7 @@ def handle_slack_message(
     record_increment: Callable[
         [int, Dict[str, Any], str], Optional[str]
     ] = github_increment_decision,
+    baseline_verifier: Callable[[str, str], bool] = verify_baseline_commit,
 ) -> Optional[str]:
     team_id = str(payload.get("team") or payload.get("team_id") or "")
     channel_id = str(payload.get("channel") or "")
@@ -642,43 +682,43 @@ def handle_slack_message(
         if not parsed:
             return None
         delayed_dedupe = parsed["verb"] == "sprint"
-        if event_id:
-            durable_seen = load_seen_ids(seen_path) if delayed_dedupe else {}
-            if (
-                event_key in seen_ids
-                or event_id in seen_ids
-                or (
-                    delayed_dedupe
+        if delayed_dedupe:
+            with _SPRINT_DECISION_LOCK:
+                durable_seen = load_seen_ids(seen_path) if event_id else {}
+                if (
+                    event_id
                     and (
-                        event_key in durable_seen
+                        event_key in seen_ids
+                        or event_id in seen_ids
+                        or event_key in durable_seen
                         or event_id in durable_seen
                     )
+                ):
+                    return None
+                parsed.update({
+                    "event_id": event_id,
+                    "event_time": str(payload.get("ts") or ""),
+                    "team_id": team_id,
+                    "channel_id": channel_id,
+                    "user_id": str(payload.get("user") or ""),
+                })
+                reply = handle_command(
+                    config, parsed, project, comment, runtime_health,
+                    increment_store, record_increment, baseline_verifier,
                 )
-                or (
-                    not delayed_dedupe
-                    and record_seen_id(event_key, seen_path, legacy_key=event_id)
-                )
+                if reply.startswith("sprint ") and " recorded for " in reply and event_id:
+                    if record_seen_id(event_key, seen_path, legacy_key=event_id):
+                        return None
+                    seen_ids.add(event_key)
+        else:
+            if event_id and (
+                event_key in seen_ids
+                or event_id in seen_ids
+                or record_seen_id(event_key, seen_path, legacy_key=event_id)
             ):
                 return None
-            if not delayed_dedupe:
+            if event_id:
                 seen_ids.add(event_key)
-        if delayed_dedupe:
-            parsed.update({
-                "event_id": event_id,
-                "event_time": str(payload.get("ts") or ""),
-                "team_id": team_id,
-                "channel_id": channel_id,
-                "user_id": str(payload.get("user") or ""),
-            })
-            reply = handle_command(
-                config, parsed, project, comment, runtime_health,
-                increment_store, record_increment,
-            )
-            if reply.startswith("sprint ") and " recorded for " in reply and event_id:
-                if record_seen_id(event_key, seen_path, legacy_key=event_id):
-                    return None
-                seen_ids.add(event_key)
-        else:
             reply = handle_command(config, parsed, project, comment, runtime_health)
     except RegistryError as exc:
         print(

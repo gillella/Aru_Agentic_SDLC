@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import slack_control_room as scr  # noqa: E402
-import common  # noqa: E402
 from delivery_increments import DeliveryIncrementStore  # noqa: E402
 from slack_notify import SlackConfig  # noqa: E402
 from slack_projects import ProjectRegistry  # noqa: E402
@@ -115,6 +114,11 @@ class SlackControlRoomTests(unittest.TestCase):
         )
         self.assertEqual(duplicate["verb"], "sprint-invalid")
         self.assertIn("duplicates", duplicate["decision"])
+        for action in ("start", "authorize-deployment", "deployed", "cancel"):
+            malformed = scr.parse_command(
+                f"sprint {action} inc_0123456789abcdef0123 risk-accepted"
+            )
+            self.assertEqual(malformed["verb"], "sprint-invalid")
 
     def test_sprint_decision_records_github_before_state_and_dedupes(self):
         store = DeliveryIncrementStore(self.root / "increments.json")
@@ -125,7 +129,7 @@ class SlackControlRoomTests(unittest.TestCase):
         def recorder(control, payload, repo_dir):
             self.assertEqual(store.list(), [])
             recorded.append((control, payload, repo_dir))
-            return "https://github.com/owner/repo/issues/300#issuecomment-1"
+            return "https://github.com/owner/checkout-a/issues/300#issuecomment-1"
 
         payload = self.payload(
             event_id="sprint-authorize-1",
@@ -136,6 +140,7 @@ class SlackControlRoomTests(unittest.TestCase):
             notify=lambda _config, event: replies.append(event["text"]) or {"ok": True},
             seen_path=self.seen_path,
             increment_store=store,
+            baseline_verifier=lambda *_args: True,
             record_increment=recorder,
         )
         self.assertIn("sprint authorize recorded", reply)
@@ -149,6 +154,7 @@ class SlackControlRoomTests(unittest.TestCase):
             notify=lambda *_args: self.fail("duplicate must not notify"),
             seen_path=self.seen_path,
             increment_store=store,
+            baseline_verifier=lambda *_args: True,
             record_increment=recorder,
         )
         self.assertIsNone(duplicate)
@@ -166,6 +172,7 @@ class SlackControlRoomTests(unittest.TestCase):
             notify=lambda *_args: {"ok": True},
             seen_path=self.seen_path,
             increment_store=store,
+            baseline_verifier=lambda *_args: True,
             record_increment=lambda *_args: None,
         )
         self.assertIn("GitHub decision record failed", failed)
@@ -177,12 +184,79 @@ class SlackControlRoomTests(unittest.TestCase):
             notify=lambda *_args: {"ok": True},
             seen_path=self.seen_path,
             increment_store=store,
+            baseline_verifier=lambda *_args: True,
             record_increment=lambda *_args: (
-                "https://github.com/owner/repo/issues/300#issuecomment-2"
+                "https://github.com/owner/checkout-a/issues/300#issuecomment-2"
             ),
         )
         self.assertIn("sprint authorize recorded", retried)
         self.assertEqual(len(store.list()), 1)
+
+    def test_invalid_baseline_pauses_before_github_or_state(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        calls = []
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry,
+            self.payload(
+                event_id="bad-baseline",
+                text=(
+                    "sprint authorize control #300 issues #10 baseline " + "f" * 40
+                ),
+            ),
+            set(), notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            baseline_verifier=lambda *_args: False,
+            record_increment=lambda *args: calls.append(args),
+        )
+        self.assertIn("baseline commit", reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.list(), [])
+        self.assertFalse(self.seen_path.exists())
+
+    def test_concurrent_same_event_creates_one_github_record_and_transition(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        calls = []
+        guard = threading.Lock()
+
+        def recorder(*args):
+            with guard:
+                calls.append(args)
+            time.sleep(0.02)
+            return "https://github.com/owner/checkout-a/issues/300#issuecomment-1"
+
+        payload = self.payload(
+            event_id="concurrent-sprint",
+            text=(
+                "sprint authorize control #300 issues #10 baseline " + "a" * 40
+            ),
+        )
+
+        def deliver():
+            return scr.handle_slack_message(
+                sample_config(), self.registry, payload, set(),
+                notify=lambda *_args: {"ok": True},
+                seen_path=self.seen_path,
+                increment_store=store,
+                baseline_verifier=lambda *_args: True,
+                record_increment=recorder,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            replies = list(executor.map(lambda _index: deliver(), range(2)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(store.list()), 1)
+        self.assertEqual(sum(reply is not None for reply in replies), 1)
+
+    def test_bounded_runner_turns_timeout_into_failure(self):
+        with patch.object(
+            scr.subprocess, "run",
+            side_effect=scr.subprocess.TimeoutExpired(["gh"], 1),
+        ):
+            self.assertEqual(
+                scr._run_bounded(["gh"], cwd=str(self.checkout_a), timeout=1)[0],
+                124,
+            )
 
     def test_github_decision_comment_is_idempotent_by_event_marker(self):
         payload = {"decision_id": "proj_alpha|T01234567|C01234567|evt-1"}
@@ -198,7 +272,7 @@ class SlackControlRoomTests(unittest.TestCase):
                 "url": existing_url,
             }]
         })
-        with patch.object(common, "run_cmd", return_value=(0, existing, "")) as run:
+        with patch.object(scr, "_run_bounded", return_value=(0, existing, "")) as run:
             self.assertEqual(
                 scr.github_increment_decision(300, payload, str(self.checkout_a)),
                 existing_url,
@@ -206,7 +280,7 @@ class SlackControlRoomTests(unittest.TestCase):
         run.assert_called_once()
 
         with patch.object(
-            common, "run_cmd",
+            scr, "_run_bounded",
             side_effect=[
                 (0, '{"comments": []}', ""),
                 (0, "https://github.com/owner/repo/issues/300#issuecomment-9\n", ""),
@@ -230,6 +304,7 @@ class SlackControlRoomTests(unittest.TestCase):
             set(),
             seen_path=self.seen_path,
             increment_store=store,
+            baseline_verifier=lambda *_args: True,
             record_increment=lambda *args: calls.append(args),
         )
         self.assertIsNone(reply)
@@ -249,8 +324,9 @@ class SlackControlRoomTests(unittest.TestCase):
             notify=lambda *_args: {"ok": True},
             seen_path=self.seen_path,
             increment_store=store,
+            baseline_verifier=lambda *_args: True,
             record_increment=lambda *_args: (
-                "https://github.com/owner/repo/issues/300#issuecomment-1"
+                "https://github.com/owner/checkout-a/issues/300#issuecomment-1"
             ),
         )
         increment_id = store.list(self.project_a.project_id)[0]["increment_id"]
@@ -267,6 +343,7 @@ class SlackControlRoomTests(unittest.TestCase):
             notify=lambda *_args: {"ok": True},
             seen_path=self.root / "project-b-seen.json",
             increment_store=store,
+            baseline_verifier=lambda *_args: True,
             record_increment=lambda *args: calls.append(args),
         )
         self.assertIn("another project", reply)

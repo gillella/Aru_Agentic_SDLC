@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -32,6 +33,12 @@ class IncrementFixture(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def mutate_file(self, updater):
+        payload = json.loads(self.store.path.read_text(encoding="utf-8"))
+        updater(payload)
+        self.store.path.write_text(json.dumps(payload), encoding="utf-8")
+        self.store.path.chmod(0o600)
+
     def evidence(self, event=None, url=None, control=300):
         self.counter += 1
         event_id = event or f"evt-{self.counter}"
@@ -40,6 +47,7 @@ class IncrementFixture(unittest.TestCase):
             team_id="T01234567",
             channel_id="C01234567",
             event_id=event_id,
+            github_repository="owner/repo",
             github_record_url=url or f"https://github.com/owner/repo/issues/{control}#issuecomment-{self.counter}",
             recorded_at=f"2026-08-15T12:{self.counter:02d}:00Z",
         )
@@ -54,6 +62,8 @@ class IncrementFixture(unittest.TestCase):
             "action": "authorize",
             "increment_id": increment_id,
             "project_id": project,
+            "operator_user_id": "U01234567",
+            "github_repository": "owner/repo",
             "kind": kind,
             "control_issue": control,
             "issue_scope": scope or [10, 11],
@@ -70,6 +80,8 @@ class IncrementFixture(unittest.TestCase):
             "action": action,
             "increment_id": record["increment_id"],
             "project_id": record["project_id"],
+            "operator_user_id": "U01234567",
+            "github_repository": "owner/repo",
             **extra,
         }
         return self.store.apply_operator_decision(
@@ -99,6 +111,35 @@ class DeliveryIncrementSchemaTests(IncrementFixture):
         with self.assertRaises(IncrementError):
             self.store.list()
 
+    def test_schema_boolean_and_list_valued_fields_fail_closed(self):
+        self.authorize()
+        self.mutate_file(lambda payload: payload.__setitem__("schema", True))
+        with self.assertRaises(IncrementError):
+            self.store.list()
+
+        self.store = DeliveryIncrementStore(self.root / "list-fields.json")
+        self.counter = 0
+        self.authorize(event="fresh", project="proj_beta")
+        self.mutate_file(
+            lambda payload: payload["increments"][0]["decisions"][0]["decision"].__setitem__(
+                "action", []
+            )
+        )
+        with self.assertRaises(IncrementError):
+            self.store.list()
+
+    def test_lifecycle_fields_are_derived_from_history(self):
+        self.authorize()
+
+        def forge(payload):
+            record = payload["increments"][0]
+            record["lifecycle_state"] = "accepted"
+            record["accepted_at"] = record["updated_at"]
+
+        self.mutate_file(forge)
+        with self.assertRaisesRegex(IncrementError, "replayed decision history"):
+            self.store.list()
+
     def test_operator_evidence_must_point_to_the_increment_control_issue(self):
         increment_id = increment_id_for_event("proj_alpha", "wrong-anchor")
         decision = {
@@ -106,6 +147,8 @@ class DeliveryIncrementSchemaTests(IncrementFixture):
             "action": "authorize",
             "increment_id": increment_id,
             "project_id": "proj_alpha",
+            "operator_user_id": "U01234567",
+            "github_repository": "owner/repo",
             "kind": "normal",
             "control_issue": 300,
             "issue_scope": [10],
@@ -113,7 +156,7 @@ class DeliveryIncrementSchemaTests(IncrementFixture):
         }
         with self.assertRaisesRegex(IncrementError, "wrong control issue"):
             self.store.apply_operator_decision(
-                decision, self.evidence(control=999)
+                decision, self.evidence(event="wrong-anchor", control=999)
             )
 
     def test_generated_id_is_stable_for_the_same_project_event(self):
@@ -158,6 +201,29 @@ class SlackAuthorizationTests(IncrementFixture):
         with self.assertRaisesRegex(IncrementError, "reused"):
             self.store.apply_operator_decision(changed, evidence)
 
+    def test_decision_identity_operator_and_repository_bind_to_evidence(self):
+        _, decision = self.authorize()
+        other_store = DeliveryIncrementStore(self.root / "authority.json")
+        evidence = self.evidence(event="authority")
+        mismatched = dict(
+            decision,
+            decision_id="proj_alpha|T99999999|C99999999|other-event",
+        )
+        with self.assertRaisesRegex(IncrementError, "decision identity"):
+            other_store.apply_operator_decision(mismatched, evidence)
+        mismatched = dict(
+            decision,
+            decision_id="proj_alpha|T01234567|C01234567|authority",
+            github_repository="other/repo",
+        )
+        with self.assertRaisesRegex(IncrementError, "authority"):
+            other_store.apply_operator_decision(mismatched, evidence)
+
+    def test_risk_accepted_field_is_rejected_on_non_accept_decisions(self):
+        record, _ = self.authorize()
+        with self.assertRaisesRegex(IncrementError, "only for sprint acceptance"):
+            self.transition(record, "start", risk_accepted=False)
+
 
 class ScopeFreezeTests(IncrementFixture):
     def test_scope_is_frozen_until_a_new_operator_decision(self):
@@ -177,6 +243,42 @@ class ScopeFreezeTests(IncrementFixture):
         record = self.transition(record, "accept")
         with self.assertRaisesRegex(IncrementError, "authorized or active"):
             self.transition(record, "revise", issue_scope=[77])
+
+    def test_non_revise_scope_change_and_out_of_order_decision_fail_closed(self):
+        record, _ = self.authorize(scope=[10])
+        record = self.transition(record, "start")
+
+        def forge(payload):
+            stored = payload["increments"][0]
+            stored["issue_scope"] = [999]
+            stored["decisions"][-1]["scope_after"] = [999]
+
+        self.mutate_file(forge)
+        with self.assertRaisesRegex(IncrementError, "without a revise"):
+            self.store.list()
+
+        self.store = DeliveryIncrementStore(self.root / "chronology.json")
+        self.counter = 0
+        record, _ = self.authorize(scope=[10])
+        record = self.transition(record, "start")
+        record = self.transition(record, "revise", issue_scope=[20])
+        older = {
+            "decision_id": "proj_alpha|T01234567|C01234567|late-delivery",
+            "action": "revise",
+            "increment_id": record["increment_id"],
+            "project_id": "proj_alpha",
+            "operator_user_id": "U01234567",
+            "github_repository": "owner/repo",
+            "issue_scope": [30],
+        }
+        evidence = operator_evidence(
+            user_id="U01234567", team_id="T01234567", channel_id="C01234567",
+            event_id="late-delivery", github_repository="owner/repo",
+            github_record_url="https://github.com/owner/repo/issues/300#issuecomment-old",
+            recorded_at="2026-08-15T12:02:30Z",
+        )
+        with self.assertRaisesRegex(IncrementError, "strictly chronological"):
+            self.store.apply_operator_decision(older, evidence)
 
 
 class ProjectConcurrencyTests(IncrementFixture):
@@ -202,6 +304,8 @@ class ProjectConcurrencyTests(IncrementFixture):
                 "action": "authorize",
                 "increment_id": increment_id_for_event("proj_alpha", event),
                 "project_id": "proj_alpha",
+                "operator_user_id": "U01234567",
+                "github_repository": "owner/repo",
                 "kind": "normal",
                 "control_issue": 300,
                 "issue_scope": [index],
@@ -210,6 +314,7 @@ class ProjectConcurrencyTests(IncrementFixture):
             evidence = operator_evidence(
                 user_id="U01234567", team_id="T01234567", channel_id="C01234567",
                 event_id=event,
+                github_repository="owner/repo",
                 github_record_url=(
                     f"https://github.com/owner/repo/issues/300#issuecomment-{index}"
                 ),
@@ -225,6 +330,19 @@ class ProjectConcurrencyTests(IncrementFixture):
             outcomes = list(executor.map(attempt, (1, 2)))
         self.assertEqual(sorted(outcomes), ["blocked", "created"])
         self.assertEqual(len(self.store.list("proj_alpha")), 1)
+
+    def test_document_rejects_two_tampered_active_normal_increments(self):
+        self.authorize(event="normal", scope=[10])
+        self.authorize(event="emergency", scope=[99], kind="emergency", control=301)
+
+        def forge(payload):
+            emergency = payload["increments"][1]
+            emergency["kind"] = "normal"
+            emergency["decisions"][0]["decision"]["kind"] = "normal"
+
+        self.mutate_file(forge)
+        with self.assertRaisesRegex(IncrementError, "multiple active normal"):
+            self.store.list()
 
 
 class ReleaseQueueTests(IncrementFixture):
@@ -251,6 +369,13 @@ class ReleaseQueueTests(IncrementFixture):
             self.transition(second, "accept")
         accepted = self.transition(second, "accept", risk_accepted=True)
         self.assertEqual(accepted["lifecycle_state"], "accepted")
+
+        def remove_risk(payload):
+            payload["increments"][1]["decisions"][-1]["decision"].pop("risk_accepted")
+
+        self.mutate_file(remove_risk)
+        with self.assertRaisesRegex(IncrementError, "queue lacks explicit risk"):
+            self.store.list()
 
 
 class EmergencyIncrementTests(IncrementFixture):
