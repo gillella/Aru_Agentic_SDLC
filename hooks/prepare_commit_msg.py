@@ -12,19 +12,22 @@ import os
 import sys
 from pathlib import Path
 
-# Add scripts directory to path to reuse common.py
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+# Search candidate locations for common.py across canonical home and consumer repos
+SCRIPT_DIR = Path(__file__).resolve().parent
+candidates = [
+    Path(os.environ.get("ARU_SDLC_HOME", "")) / "scripts",
+    SCRIPT_DIR.parent / "scripts",
+    SCRIPT_DIR.parents[1] / "scripts" if len(SCRIPT_DIR.parents) > 1 else None,
+    SCRIPT_DIR / "scripts",
+]
+for candidate in candidates:
+    if candidate and candidate.is_dir() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
 
 try:
     import common
 except ImportError:
-    sdlc_home = os.environ.get("ARU_SDLC_HOME")
-    if sdlc_home and (Path(sdlc_home) / "scripts").is_dir():
-        sys.path.insert(0, str(Path(sdlc_home) / "scripts"))
-        import common
-    else:
-        common = None
+    common = None
 
 
 def stamp_commit_message_file(msg_file_path: str, agent: str = None) -> bool:
@@ -52,11 +55,10 @@ def stamp_commit_message_file(msg_file_path: str, agent: str = None) -> bool:
     if not agent_id:
         return False
 
-    if common:
-        formatted = common.format_commit_message(content, agent=agent_id)
-    else:
-        # Fallback if common is not importable
-        formatted = content.rstrip() + f"\n\nAgent: {agent_id}"
+    if not common:
+        return False
+
+    formatted = common.format_commit_message(content, agent=agent_id)
 
     if formatted.rstrip() != content.rstrip():
         try:

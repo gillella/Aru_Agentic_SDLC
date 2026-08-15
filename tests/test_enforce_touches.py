@@ -2086,12 +2086,28 @@ class AgentCommitTrailerTests(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    def test_format_commit_message_returns_unmodified_when_no_agent_available(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(
-                common.format_commit_message("chore: update docs"),
-                "chore: update docs",
-            )
+    def test_end_to_end_git_commit_with_installed_hook_stamps_agent_trailer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir)
+            # Initialize a clean git repo
+            subprocess.run(["git", "init", "-b", "main", str(repo_path)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "Test Agent"], check=True)
+            subprocess.run(["git", "-C", str(repo_path), "config", "user.email", "agent@test.local"], check=True)
+
+            # Install hooks
+            env = dict(os.environ, ARU_SDLC_HOME=str(ROOT))
+            install_script = ROOT / "scripts" / "install_hooks.sh"
+            subprocess.run(["bash", str(install_script), "-r", str(repo_path)], check=True, env=env, capture_output=True)
+
+            # Make a commit with ARU_AGENT_ID set
+            (repo_path / "file.txt").write_text("content")
+            subprocess.run(["git", "-C", str(repo_path), "add", "file.txt"], check=True)
+            commit_env = dict(os.environ, ARU_AGENT_ID="agent-integration-test", ARU_SDLC_HOME=str(ROOT))
+            subprocess.run(["git", "-C", str(repo_path), "commit", "-m", "feat(test): initial commit"], check=True, env=commit_env, capture_output=True)
+
+            # Verify the commit message in git log contains the trailer
+            log_out = subprocess.check_output(["git", "-C", str(repo_path), "log", "-1", "--pretty=%B"]).decode()
+            self.assertIn("Agent: agent-integration-test", log_out)
 
 
 if __name__ == "__main__":
