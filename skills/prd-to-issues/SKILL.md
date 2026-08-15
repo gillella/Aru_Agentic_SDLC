@@ -80,10 +80,10 @@ the prose:
 - `{"path": "existing/**/*.py", "kind": "existing"}` for a glob that must
   match tracked files and is likewise expanded to exact paths; or
 - `{"path": "existing/parent/new_file.py", "kind": "new"}` for a proposed
-  file whose parent already exists in the repository.
+  file below a tracked ancestor directory; intermediate directories may be new.
 
 The helper refuses unknown existing paths, unmatched globs, new-file globs,
-and new files under unknown parents. Exact-path expansion keeps generated
+and new files without a tracked ancestor directory. Exact-path expansion keeps generated
 metadata compatible with both the framework hook and consumer CI guards,
 whose wildcard semantics differ. When exact scope is uncertain, over-declare
 a validated directory and split the issue; never under-declare.

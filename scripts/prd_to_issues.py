@@ -139,10 +139,15 @@ def derive_touches(
                 raise PlanError(f"{field}: path already exists and cannot be marked new: {path}")
             parent = PurePosixPath(path).parent
             parent_text = "" if str(parent) == "." else str(parent)
-            parent_known = not parent_text or any(
-                candidate.startswith(parent_text + "/") for candidate in inventory
-            )
-            if not parent_known or not (repo_root / parent_text).is_dir():
+            ancestor_known = not parent_text
+            ancestor = parent
+            while not ancestor_known and str(ancestor) != ".":
+                ancestor_text = str(ancestor)
+                ancestor_known = (repo_root / ancestor_text).is_dir() and any(
+                    candidate.startswith(ancestor_text + "/") for candidate in inventory
+                )
+                ancestor = ancestor.parent
+            if not ancestor_known:
                 raise PlanError(f"{field}: parent directory is not in the repository: {parent_text}")
             canonical_paths = [path]
         elif any(char in path for char in GLOB_CHARS):

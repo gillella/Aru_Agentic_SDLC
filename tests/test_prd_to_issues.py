@@ -178,6 +178,16 @@ class PrdToIssuesTests(unittest.TestCase):
                 issue_key="escape",
             )
 
+    def test_new_file_accepts_missing_intermediate_directories_under_known_ancestor(self):
+        touches = pti.derive_touches(
+            [{"path": "src/auth/session/login.py", "kind": "new"}],
+            self.repo,
+            self.inventory,
+            issue_key="nested-new-slice",
+        )
+
+        self.assertEqual(touches, ("src/auth/session/login.py",))
+
     def test_intake_contract_rejects_type_title_and_verify_placeholders(self):
         manifest = self.manifest()
         manifest["issues"][0]["type"] = "test"
