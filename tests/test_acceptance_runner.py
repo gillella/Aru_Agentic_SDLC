@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -88,19 +89,37 @@ class ValidateTests(unittest.TestCase):
         with self.assertRaises(acceptance_runner.CommandRejected):
             acceptance_runner.validate_command("python3 -m http.server")
 
-    def test_path_traversal_is_rejected(self):
+    def test_timeout_is_recorded_as_failure(self):
+        body = _issue("- [ ] Slow (verify: `python3 -m unittest tests.ok`)")
+
+        def boom(*_args, **_kwargs):
+            raise acceptance_runner.subprocess.TimeoutExpired(["python3"], 120)
+
+        with patch.object(acceptance_runner.subprocess, "run", side_effect=boom):
+            result = acceptance_runner.run_issue(body, cwd=".")
+        self.assertEqual(result["errors"][0][0], "failed")
+        self.assertEqual(result["records"][0]["exit_code"], 124)
+        self.assertEqual(result["records"][0]["status"], "failed")
+
+    def test_side_effectful_python_script_is_rejected(self):
         with self.assertRaises(acceptance_runner.CommandRejected):
-            acceptance_runner.validate_command("python3 tests/../scripts/merge_pr.py")
+            acceptance_runner.validate_command(
+                "python3 scripts/slack_control_room.py stop"
+            )
 
     def test_absolute_runner_is_rejected(self):
         with self.assertRaises(acceptance_runner.CommandRejected):
             acceptance_runner.validate_command("/usr/bin/python3 -m unittest tests.x")
 
+    def test_path_traversal_is_rejected(self):
+        with self.assertRaises(acceptance_runner.CommandRejected):
+            acceptance_runner.validate_command("python3 tests/../scripts/merge_pr.py")
+
 
 class RunTests(unittest.TestCase):
     def test_malicious_command_never_executes(self):
         body = _issue("- [ ] Exploit (verify: `python3 -c print(1)`)")
-        with patch.object(acceptance_runner, "run_cmd") as run:
+        with patch.object(acceptance_runner, "_run_verify") as run:
             result = acceptance_runner.run_issue(body, cwd=".")
         run.assert_not_called()
         self.assertEqual(result["errors"][0][0], "rejected")
@@ -190,8 +209,9 @@ class MergeGateTests(unittest.TestCase):
                 })
             return 0, "", ""
 
-        with patch.object(acceptance_runner, "run_cmd", side_effect=fake_run):
-            ok, message = merge_pr.check_acceptance(96, body, cwd=".")
+        ok, message = merge_pr.check_acceptance(
+            96, body, cwd=".", execute=True, run_cmd_fn=fake_run
+        )
         self.assertTrue(ok)
         self.assertIn("verify:", message)
 
@@ -208,32 +228,98 @@ class MergeGateTests(unittest.TestCase):
                 })
             return 1, "", "nope"
 
-        with patch.object(acceptance_runner, "run_cmd", side_effect=fake_run):
-            ok, message = merge_pr.check_acceptance(96, body, cwd=".")
+        ok, message = merge_pr.check_acceptance(
+            96, body, cwd=".", execute=True, run_cmd_fn=fake_run
+        )
         self.assertFalse(ok)
         self.assertIn("failed", message)
 
     def test_malicious_command_refuses_merge_without_running(self):
         body = _issue("- [x] Exploit (verify: `rm -rf /`)")
-        with patch.object(acceptance_runner, "run_cmd") as run:
-            ok, message = merge_pr.check_acceptance(96, body, cwd=".")
+        with patch.object(acceptance_runner, "_run_verify") as run:
+            ok, message = merge_pr.check_acceptance(96, body, execute=False)
         run.assert_not_called()
         self.assertFalse(ok)
         self.assertIn("illegal", message)
+
+    def test_execute_without_checkout_fails_closed(self):
+        body = _issue("- [ ] Runner works (verify: `python3 -m unittest tests.ok`)")
+        ok, message = merge_pr.check_acceptance(96, body, cwd=None, execute=True)
+        self.assertFalse(ok)
+        self.assertIn("no verified PR-head checkout", message)
+
+    def test_evaluate_dod_does_not_execute_commands(self):
+        body = _issue("- [ ] Runner works (verify: `python3 -m unittest tests.ok`)")
+        pr = {
+            "state": "OPEN", "isDraft": False, "body": "Closes #96",
+            "headRefOid": "abc", "baseRefOid": "abc",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "reviews": [], "labels": [{"name": "author:a"}, {"name": "reviewed-by:b"}],
+            "additions": 1, "deletions": 0, "files": [],
+            "mergeStateStatus": "CLEAN",
+        }
+        with patch.object(acceptance_runner, "_run_verify") as run:
+            ok, gates = merge_pr.evaluate_dod(
+                pr, {96: body},
+                {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+            )
+        run.assert_not_called()
+        accept = [gate for gate in gates if gate[0] == "accept #96"][0]
+        self.assertTrue(accept[1], accept[2])
+        self.assertIn("deferred", accept[2])
+
+    def test_ensure_pr_head_checkout_fails_closed_without_sha(self):
+        path, err = merge_pr.ensure_pr_head_checkout({})
+        self.assertIsNone(path)
+        self.assertIn("missing a head SHA", err)
+
+    def test_persist_acceptance_evidence_writes_records(self):
+        records = [{
+            "command": ["python3", "-m", "unittest", "tests.ok"],
+            "duration_seconds": 0.1,
+            "exit_code": 0,
+            "status": "passed",
+        }]
+        pr = {"headRefOid": "abc123"}
+        existing = {
+            "schema": "aru.verification.v1",
+            "status": "passed",
+            "head_sha": "abc123",
+            "commands": [{
+                "command": ["ruff", "check", "."],
+                "duration_seconds": 1,
+                "exit_code": 0,
+                "status": "passed",
+            }],
+        }
+        body = (
+            "hello\n"
+            f"{merge_pr.VERIFICATION_EVIDENCE_START}\n"
+            f"```json\n{json.dumps(existing)}\n```\n"
+            f"{merge_pr.VERIFICATION_EVIDENCE_END}\n"
+        )
+        with patch.object(merge_pr, "_gh_json", return_value={"body": body, "headRefOid": "abc123"}), \
+                patch.object(merge_pr, "run_cmd", return_value=(0, "", "")) as edited:
+            ok, message = merge_pr.persist_acceptance_evidence(227, pr, records)
+        self.assertTrue(ok, message)
+        self.assertIn("persisted", message)
+        self.assertEqual(edited.call_args.args[0][0:3], ["gh", "pr", "edit"])
+        written = edited.call_args.args[0][edited.call_args.args[0].index("--body") + 1]
+        self.assertIn("tests.ok", written)
 
     def test_absent_command_unticked_still_blocks(self):
         body = (
             "## Acceptance Criteria\n\n- [x] first done\n- [ ] second not done\n\n"
             "## Verification\n\nx\n"
         )
-        ok, message = merge_pr.check_acceptance(7, body, cwd=".")
+        ok, message = merge_pr.check_acceptance(7, body)
         self.assertFalse(ok)
         self.assertIn("unticked", message)
 
     def test_live_allowlisted_unittest_passes(self):
         target = "tests.test_acceptance_runner.AlwaysPass"
         body = _issue(f"- [ ] Live runner (verify: `python3 -m unittest {target}`)")
-        ok, message = merge_pr.check_acceptance(96, body, cwd=str(ROOT))
+        ok, message = merge_pr.check_acceptance(96, body, cwd=str(ROOT), execute=True)
         self.assertTrue(ok, message)
 
 

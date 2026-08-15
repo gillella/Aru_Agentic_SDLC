@@ -10,10 +10,11 @@ boundary that keeps the vector from becoming a shell:
 - Commands are parsed as data and executed as argv (`shell=False`).
 - The raw command string is rejected if it contains shell metacharacters.
 - argv[0] must be a bare name on an explicit runner allowlist.
-- `python` / `python3` may only run `-m unittest` or a relative `.py` path
-  under `tests/` or `scripts/`.
+- `python` / `python3` may only run `-m unittest`, or the explicit verifier
+  `scripts/verify_citations.py`.
+- Each command is bounded by VERIFY_TIMEOUT_SECONDS; timeouts are failed evidence.
 - No `python -c`, no other `-m` modules, no absolute paths, no `env`/`bash`
-  prefixes, no path traversal.
+  prefixes, no path traversal, no arbitrary `scripts/*.py`.
 
 Today the board is authored by trusted operators, so the practical risk is
 low. The allowlist exists so that opening the factory to external issues
@@ -32,15 +33,21 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
+import time
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
-from common import VERIFICATION_EVIDENCE_SCHEMA, run_cmd
+from common import VERIFICATION_EVIDENCE_SCHEMA, sanitize_command
 
 ALLOWED_RUNNERS = frozenset({"python3", "python", "pytest"})
+ALLOWED_PYTHON_SCRIPTS = frozenset({
+    "scripts/verify_citations.py",
+})
 PYTHON_UNITTEST_FLAGS = frozenset({"-v", "-q", "-b", "-f"})
 PYTHON_SCRIPT_FLAGS = frozenset({"-q", "-v", "--check"})
 PYTEST_FLAGS = frozenset({"-q", "-v", "--tb=short", "--quiet"})
+VERIFY_TIMEOUT_SECONDS = 120
 UNITTEST_MODULE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$"
 )
@@ -121,9 +128,9 @@ def _validate_python_argv(argv: List[str]) -> None:
         return
     if argv[1].startswith("-"):
         raise CommandRejected("python flags other than -m unittest are not allowed")
-    if not _is_safe_relpath(argv[1]) or not argv[1].endswith(".py"):
+    if argv[1] not in ALLOWED_PYTHON_SCRIPTS:
         raise CommandRejected(
-            "python script must be a .py path under tests/, scripts/, or docs/"
+            f"python script {argv[1]!r} is not an allowlisted verifier"
         )
     for arg in argv[2:]:
         if arg in PYTHON_SCRIPT_FLAGS:
@@ -217,13 +224,47 @@ def parse_criteria(issue_body: str) -> List[Criterion]:
     return parsed
 
 
+def _run_verify(
+    argv: List[str],
+    cwd: Optional[str] = None,
+    evidence: Optional[List[Dict[str, Any]]] = None,
+    check: bool = False,
+    timeout: int = VERIFY_TIMEOUT_SECONDS,
+) -> Tuple[int, str, str]:
+    """Runs one issue-sourced command with a bounded timeout and no shell."""
+    del check
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            timeout=timeout,
+        )
+        code, stdout, stderr = result.returncode, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        code, stdout, stderr = 124, "", f"timed out after {timeout}s"
+    except Exception as exc:
+        code, stdout, stderr = 1, "", str(exc)
+    if evidence is not None:
+        evidence.append({
+            "command": sanitize_command(list(argv)),
+            "duration_seconds": round(max(0.0, time.monotonic() - started), 3),
+            "exit_code": code,
+            "status": "passed" if code == 0 else "failed",
+        })
+    return code, stdout, stderr
+
+
 def run_parsed(
     criteria: List[Criterion],
     cwd: Optional[str] = None,
     run_cmd_fn: Optional[Callable[..., Tuple[int, str, str]]] = None,
 ) -> Dict[str, Any]:
     """Executes allowlisted commands; never runs a rejected command."""
-    runner = run_cmd_fn or run_cmd
+    runner = run_cmd_fn or _run_verify
     records: List[Dict[str, Any]] = []
     errors: List[Tuple[str, str]] = []
     for item in criteria:
@@ -268,7 +309,12 @@ def merge_into_evidence(
     return merged
 
 
-def evaluate_issue(issue_body: str, cwd: Optional[str] = None) -> Tuple[bool, str, Dict[str, Any]]:
+def evaluate_issue(
+    issue_body: str,
+    cwd: Optional[str] = None,
+    execute: bool = True,
+    run_cmd_fn: Optional[Callable[..., Tuple[int, str, str]]] = None,
+) -> Tuple[bool, str, Dict[str, Any]]:
     """Returns (ok, message, run_result) for merge-gate callers."""
     parsed = parse_criteria(issue_body)
     rejected = [item for item in parsed if item.rejected]
@@ -276,14 +322,19 @@ def evaluate_issue(issue_body: str, cwd: Optional[str] = None) -> Tuple[bool, st
         return False, f"illegal verify: command: {rejected[0].rejected}", {
             "criteria": parsed, "records": [], "errors": [("rejected", rejected[0].rejected)],
         }
-    result = run_parsed(parsed, cwd=cwd)
-    failed = [item for item in result["errors"] if item[0] == "failed"]
-    if failed:
-        return False, f"verify: command failed for: {failed[0][1]}", result
+    if execute:
+        result = run_parsed(parsed, cwd=cwd, run_cmd_fn=run_cmd_fn)
+        failed = [item for item in result["errors"] if item[0] == "failed"]
+        if failed:
+            return False, f"verify: command failed for: {failed[0][1]}", result
+    else:
+        result = {"criteria": parsed, "records": [], "errors": []}
     pending = [item.text for item in parsed if item.argv is None and not item.ticked]
     if pending:
         return False, "unticked acceptance criteria without verify: commands", result
-    return True, "acceptance criteria passed", result
+    if execute:
+        return True, "acceptance criteria passed", result
+    return True, "verify: commands validated; execution deferred to merge", result
 
 
 def main() -> int:
