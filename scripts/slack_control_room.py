@@ -12,10 +12,17 @@ import stat
 import sys
 import threading
 import time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from delivery_increments import (
+    DeliveryIncrementStore,
+    IncrementError,
+    increment_id_for_event,
+    operator_evidence,
+)
 from fleet_status import evaluate_fleet_status
 from slack_notify import (
     ENV_PATH,
@@ -57,10 +64,36 @@ ISSUE_RE = re.compile(
 REFUSED_QUEUE_MESSAGE = (
     "refused: Slack is not a work queue; use GitHub helpers for claim, merge, and review"
 )
+SPRINT_AUTHORIZE_RE = re.compile(
+    r"^sprint\s+authorize\s+control\s+#?(?P<control>\d+)\s+issues\s+"
+    r"(?P<issues>[#\d,\s]+?)\s+baseline\s+(?P<baseline>[0-9a-f]{40})"
+    r"(?:\s+(?P<emergency>emergency))?$",
+    re.IGNORECASE,
+)
+SPRINT_REVISE_RE = re.compile(
+    r"^sprint\s+revise\s+(?P<increment>inc_[0-9a-f]{20})\s+issues\s+"
+    r"(?P<issues>[#\d,\s]+)$",
+    re.IGNORECASE,
+)
+SPRINT_TRANSITION_RE = re.compile(
+    r"^sprint\s+(?P<action>start|accept|authorize-deployment|deployed|cancel)\s+"
+    r"(?P<increment>inc_[0-9a-f]{20})(?:\s+(?P<risk>risk-accepted))?$",
+    re.IGNORECASE,
+)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _slack_event_time(value: str) -> Optional[str]:
+    try:
+        seconds = Decimal(value)
+        if not seconds.is_finite() or seconds <= 0:
+            return None
+        return datetime.fromtimestamp(float(seconds), timezone.utc).isoformat()
+    except (InvalidOperation, OverflowError, OSError, ValueError):
+        return None
 
 
 def authorize(config: SlackConfig, project: ProjectRecord, user_id: str) -> bool:
@@ -73,8 +106,13 @@ def authorize(config: SlackConfig, project: ProjectRecord, user_id: str) -> bool
     )
 
 
-def parse_command(text: str) -> Optional[Dict[str, str]]:
+def parse_command(text: str) -> Optional[Dict[str, Any]]:
     cleaned = re.sub(r"<@[A-Z0-9]+>", "", redact(text or "")).strip()
+    if cleaned.lower().startswith("sprint"):
+        try:
+            return parse_sprint_command(cleaned)
+        except ValueError as exc:
+            return {"verb": "sprint-invalid", "decision": str(exc)}
     refused = QUEUE_VERB_RE.match(cleaned)
     if refused:
         return {
@@ -101,6 +139,50 @@ def parse_command(text: str) -> Optional[Dict[str, str]]:
             parsed["ref"] = found.group("numbered") or found.group("hash") or ""
             parsed["decision"] = rest[found.end():].strip()
     return parsed
+
+
+def _issue_scope(value: str) -> List[int]:
+    tokens = [item.strip().lstrip("#") for item in value.split(",")]
+    if not tokens or any(not item.isdigit() or int(item) <= 0 for item in tokens):
+        raise ValueError("sprint issues must be comma-separated positive issue numbers")
+    issues = [int(item) for item in tokens]
+    if len(issues) != len(set(issues)):
+        raise ValueError("sprint issue scope contains duplicates")
+    return sorted(issues)
+
+
+def parse_sprint_command(text: str) -> Dict[str, Any]:
+    authorize = SPRINT_AUTHORIZE_RE.fullmatch(text)
+    if authorize:
+        return {
+            "verb": "sprint", "action": "authorize",
+            "control_issue": int(authorize.group("control")),
+            "issue_scope": _issue_scope(authorize.group("issues")),
+            "baseline_commit": authorize.group("baseline").lower(),
+            "kind": "emergency" if authorize.group("emergency") else "normal",
+        }
+    revise = SPRINT_REVISE_RE.fullmatch(text)
+    if revise:
+        return {
+            "verb": "sprint", "action": "revise",
+            "increment_id": revise.group("increment").lower(),
+            "issue_scope": _issue_scope(revise.group("issues")),
+        }
+    transition = SPRINT_TRANSITION_RE.fullmatch(text)
+    if transition:
+        return {
+            "verb": "sprint", "action": transition.group("action").lower(),
+            "increment_id": transition.group("increment").lower(),
+            "risk_accepted": bool(transition.group("risk")),
+        }
+    return {
+        "verb": "sprint-invalid",
+        "decision": (
+            "use `sprint authorize control #N issues #1,#2 baseline <full-sha>`, "
+            "`sprint revise <increment-id> issues #1,#2`, or "
+            "`sprint <start|accept|authorize-deployment|deployed|cancel> <increment-id>`"
+        ),
+    }
 
 
 def _stop_document(value: Any) -> Dict[str, Any]:
@@ -317,10 +399,146 @@ def github_comment(kind: str, number: int, decision: str, repo_dir: str) -> bool
     return code == 0
 
 
+def github_increment_decision(
+    control_issue: int, payload: Dict[str, Any], repo_dir: str,
+) -> Optional[str]:
+    """Write the authoritative decision before local increment state changes."""
+    from common import run_cmd
+
+    marker = hashlib.sha256(str(payload["decision_id"]).encode()).hexdigest()[:20]
+    marker_text = f"<!-- aru-delivery-decision:v1:{marker} -->"
+    code, stdout, _ = run_cmd(
+        ["gh", "issue", "view", str(control_issue), "--json", "comments"],
+        check=False, cwd=repo_dir,
+    )
+    if code != 0:
+        return None
+    try:
+        comments = json.loads(stdout).get("comments", [])
+    except (AttributeError, json.JSONDecodeError):
+        return None
+    if not isinstance(comments, list):
+        return None
+    matches = [
+        item for item in comments
+        if isinstance(item, dict) and marker_text in str(item.get("body") or "")
+    ]
+    if len(matches) > 1:
+        return None
+    if matches:
+        body = str(matches[0].get("body") or "")
+        fenced = re.search(r"```json\s*\n(?P<payload>.*?)\n```", body, re.DOTALL)
+        try:
+            existing_payload = json.loads(fenced.group("payload")) if fenced else None
+        except json.JSONDecodeError:
+            return None
+        url = matches[0].get("url")
+        if existing_payload != payload:
+            return None
+        return str(url) if str(url).startswith("https://github.com/") else None
+    body = (
+        "## Delivery Increment operator decision\n\n"
+        f"{marker_text}\n"
+        "```json\n"
+        + json.dumps(payload, indent=2, sort_keys=True)
+        + "\n```\n"
+    )
+    code, stdout, _ = run_cmd(
+        ["gh", "issue", "comment", str(control_issue), "--body", body],
+        check=False, cwd=repo_dir,
+    )
+    if code != 0:
+        return None
+    url = stdout.strip().splitlines()[-1] if stdout.strip() else ""
+    return url if url.startswith("https://github.com/") else None
+
+
+def _handle_sprint_decision(
+    parsed: Dict[str, Any], project: ProjectRecord,
+    store: Optional[DeliveryIncrementStore] = None,
+    recorder: Callable[[int, Dict[str, Any], str], Optional[str]] = github_increment_decision,
+) -> str:
+    event_id = str(parsed.get("event_id") or "")
+    if not event_id:
+        return "sprint decision paused: Slack event identity is missing"
+    decided_at = _slack_event_time(str(parsed.get("event_time") or ""))
+    if not decided_at:
+        return "sprint decision paused: Slack event timestamp is missing or invalid"
+    action = str(parsed["action"])
+    increment_store = store or DeliveryIncrementStore()
+    if action == "authorize":
+        increment_id = increment_id_for_event(project.project_id, event_id)
+        control_issue = int(parsed["control_issue"])
+    else:
+        increment_id = str(parsed["increment_id"])
+        try:
+            existing = increment_store.get(increment_id)
+            if existing["project_id"] != project.project_id:
+                return "sprint decision paused: increment belongs to another project"
+            control_issue = int(existing["control_issue"])
+        except IncrementError as exc:
+            return f"sprint decision paused: {exc}"
+
+    decision: Dict[str, Any] = {
+        "decision_id": "|".join((
+            project.project_id,
+            str(parsed.get("team_id") or ""),
+            str(parsed.get("channel_id") or ""),
+            event_id,
+        )),
+        "action": action,
+        "increment_id": increment_id,
+        "project_id": project.project_id,
+    }
+    if action == "authorize":
+        decision.update({
+            "kind": parsed["kind"],
+            "control_issue": control_issue,
+            "issue_scope": parsed["issue_scope"],
+            "baseline_commit": parsed["baseline_commit"],
+        })
+    elif action == "revise":
+        decision["issue_scope"] = parsed["issue_scope"]
+    elif action == "accept" and parsed.get("risk_accepted"):
+        decision["risk_accepted"] = True
+
+    durable_payload = {
+        "schema": "aru.delivery-decision.v1",
+        **decision,
+        "operator_user_id": str(parsed.get("user_id") or ""),
+        "slack_team_id": str(parsed.get("team_id") or ""),
+        "slack_channel_id": str(parsed.get("channel_id") or ""),
+        "recorded_at": decided_at,
+    }
+    github_url = recorder(control_issue, durable_payload, project.local_path)
+    if not github_url:
+        return "sprint decision paused: GitHub decision record failed"
+    try:
+        evidence = operator_evidence(
+            user_id=durable_payload["operator_user_id"],
+            team_id=durable_payload["slack_team_id"],
+            channel_id=durable_payload["slack_channel_id"],
+            event_id=event_id,
+            github_record_url=github_url,
+            recorded_at=durable_payload["recorded_at"],
+        )
+        record = increment_store.apply_operator_decision(decision, evidence)
+    except IncrementError as exc:
+        return f"sprint decision paused: {exc}"
+    return (
+        f"sprint {action} recorded for {record['increment_id']}: "
+        f"lifecycle={record['lifecycle_state']} release={record['release_state']}"
+    )
+
+
 def handle_command(
-    config: SlackConfig, parsed: Dict[str, str], project: ProjectRecord,
+    config: SlackConfig, parsed: Dict[str, Any], project: ProjectRecord,
     comment: Callable[[str, int, str, str], bool] = github_comment,
     runtime_health: Optional[str] = None,
+    increment_store: Optional[DeliveryIncrementStore] = None,
+    record_increment: Callable[
+        [int, Dict[str, Any], str], Optional[str]
+    ] = github_increment_decision,
 ) -> str:
     verb = parsed["verb"]
     if verb == "refused-queue":
@@ -328,8 +546,12 @@ def handle_command(
     health = runtime_health or ("healthy" if project.healthy else "degraded_unreachable")
     if verb == "status":
         return status_text(project, health)
+    if verb == "sprint-invalid":
+        return str(parsed.get("decision") or "invalid sprint command")
     if health != "healthy":
         return "project checkout is degraded; use registry verify, recover, or close locally"
+    if verb == "sprint":
+        return _handle_sprint_decision(parsed, project, increment_store, record_increment)
     if verb == "stop":
         return apply_stop(project.local_path, parsed.get("target") or "project")
     if verb == "resume":
@@ -378,6 +600,10 @@ def handle_slack_message(
     comment: Callable[[str, int, str, str], bool] = github_comment,
     notify: Callable[..., Dict[str, Any]] = post_event,
     seen_path: Optional[Path] = None,
+    increment_store: Optional[DeliveryIncrementStore] = None,
+    record_increment: Callable[
+        [int, Dict[str, Any], str], Optional[str]
+    ] = github_increment_decision,
 ) -> Optional[str]:
     team_id = str(payload.get("team") or payload.get("team_id") or "")
     channel_id = str(payload.get("channel") or "")
@@ -412,18 +638,48 @@ def handle_slack_message(
     event_id = str(payload.get("client_msg_id") or payload.get("event_id") or payload.get("ts") or "")
     event_key = "|".join((project.project_id, team_id, channel_id, event_id))
     try:
-        if event_id:
-            if (
-                event_key in seen_ids
-                or event_id in seen_ids
-                or record_seen_id(event_key, seen_path, legacy_key=event_id)
-            ):
-                return None
-            seen_ids.add(event_key)
         parsed = parse_command(str(payload.get("text") or ""))
         if not parsed:
             return None
-        reply = handle_command(config, parsed, project, comment, runtime_health)
+        delayed_dedupe = parsed["verb"] == "sprint"
+        if event_id:
+            durable_seen = load_seen_ids(seen_path) if delayed_dedupe else {}
+            if (
+                event_key in seen_ids
+                or event_id in seen_ids
+                or (
+                    delayed_dedupe
+                    and (
+                        event_key in durable_seen
+                        or event_id in durable_seen
+                    )
+                )
+                or (
+                    not delayed_dedupe
+                    and record_seen_id(event_key, seen_path, legacy_key=event_id)
+                )
+            ):
+                return None
+            if not delayed_dedupe:
+                seen_ids.add(event_key)
+        if delayed_dedupe:
+            parsed.update({
+                "event_id": event_id,
+                "event_time": str(payload.get("ts") or ""),
+                "team_id": team_id,
+                "channel_id": channel_id,
+                "user_id": str(payload.get("user") or ""),
+            })
+            reply = handle_command(
+                config, parsed, project, comment, runtime_health,
+                increment_store, record_increment,
+            )
+            if reply.startswith("sprint ") and " recorded for " in reply and event_id:
+                if record_seen_id(event_key, seen_path, legacy_key=event_id):
+                    return None
+                seen_ids.add(event_key)
+        else:
+            reply = handle_command(config, parsed, project, comment, runtime_health)
     except RegistryError as exc:
         print(
             f"[ERROR] control-room state is unusable: {redact(str(exc))}",

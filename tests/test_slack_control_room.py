@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sys
@@ -13,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import slack_control_room as scr  # noqa: E402
+import common  # noqa: E402
+from delivery_increments import DeliveryIncrementStore  # noqa: E402
 from slack_notify import SlackConfig  # noqa: E402
 from slack_projects import ProjectRegistry  # noqa: E402
 
@@ -65,12 +68,16 @@ class SlackControlRoomTests(unittest.TestCase):
         self.temp.cleanup()
 
     @staticmethod
-    def payload(channel="C01234567", event_id="evt-1", text="status", user="U01234567"):
+    def payload(
+        channel="C01234567", event_id="evt-1", text="status", user="U01234567",
+        ts="1786795200.000001",
+    ):
         return {
             "team": "T01234567",
             "channel": channel,
             "user": user,
             "client_msg_id": event_id,
+            "ts": ts,
             "text": text,
         }
 
@@ -82,6 +89,189 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertEqual(intervention["kind"], "pr")
         self.assertEqual(intervention["ref"], "77")
         self.assertEqual(intervention["decision"], "use option B")
+
+    def test_parse_sprint_commands_are_explicit_and_deterministic(self):
+        sha = "a" * 40
+        authorize = scr.parse_command(
+            f"sprint authorize control #300 issues #12,#10 baseline {sha}"
+        )
+        self.assertEqual(authorize["action"], "authorize")
+        self.assertEqual(authorize["control_issue"], 300)
+        self.assertEqual(authorize["issue_scope"], [10, 12])
+        self.assertEqual(authorize["kind"], "normal")
+        emergency = scr.parse_command(
+            f"sprint authorize control 301 issues 99 baseline {sha} emergency"
+        )
+        self.assertEqual(emergency["kind"], "emergency")
+        self.assertEqual(
+            scr.parse_command("sprint accept inc_0123456789abcdef0123 risk-accepted")[
+                "risk_accepted"
+            ],
+            True,
+        )
+        self.assertEqual(scr.parse_command("sprint do something")["verb"], "sprint-invalid")
+        duplicate = scr.parse_command(
+            f"sprint authorize control #300 issues #10,#10 baseline {sha}"
+        )
+        self.assertEqual(duplicate["verb"], "sprint-invalid")
+        self.assertIn("duplicates", duplicate["decision"])
+
+    def test_sprint_decision_records_github_before_state_and_dedupes(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        sha = "b" * 40
+        recorded = []
+        replies = []
+
+        def recorder(control, payload, repo_dir):
+            self.assertEqual(store.list(), [])
+            recorded.append((control, payload, repo_dir))
+            return "https://github.com/owner/repo/issues/300#issuecomment-1"
+
+        payload = self.payload(
+            event_id="sprint-authorize-1",
+            text=f"sprint authorize control #300 issues #12,#10 baseline {sha}",
+        )
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry, payload, set(),
+            notify=lambda _config, event: replies.append(event["text"]) or {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            record_increment=recorder,
+        )
+        self.assertIn("sprint authorize recorded", reply)
+        self.assertEqual(replies, [reply])
+        self.assertEqual(len(recorded), 1)
+        increment = store.list(self.project_a.project_id)[0]
+        self.assertEqual(increment["issue_scope"], [10, 12])
+
+        duplicate = scr.handle_slack_message(
+            sample_config(), self.registry, payload, set(),
+            notify=lambda *_args: self.fail("duplicate must not notify"),
+            seen_path=self.seen_path,
+            increment_store=store,
+            record_increment=recorder,
+        )
+        self.assertIsNone(duplicate)
+        self.assertEqual(len(recorded), 1)
+
+    def test_github_record_failure_pauses_without_consuming_retry(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        sha = "c" * 40
+        payload = self.payload(
+            event_id="retryable-sprint",
+            text=f"sprint authorize control #300 issues #10 baseline {sha}",
+        )
+        failed = scr.handle_slack_message(
+            sample_config(), self.registry, payload, set(),
+            notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            record_increment=lambda *_args: None,
+        )
+        self.assertIn("GitHub decision record failed", failed)
+        self.assertEqual(store.list(), [])
+        self.assertFalse(self.seen_path.exists())
+
+        retried = scr.handle_slack_message(
+            sample_config(), self.registry, payload, set(),
+            notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            record_increment=lambda *_args: (
+                "https://github.com/owner/repo/issues/300#issuecomment-2"
+            ),
+        )
+        self.assertIn("sprint authorize recorded", retried)
+        self.assertEqual(len(store.list()), 1)
+
+    def test_github_decision_comment_is_idempotent_by_event_marker(self):
+        payload = {"decision_id": "proj_alpha|T01234567|C01234567|evt-1"}
+        marker = hashlib.sha256(payload["decision_id"].encode()).hexdigest()[:20]
+        existing_url = "https://github.com/owner/repo/issues/300#issuecomment-8"
+        existing_payload = dict(payload)
+        existing = json.dumps({
+            "comments": [{
+                "body": (
+                    f"<!-- aru-delivery-decision:v1:{marker} -->\n"
+                    f"```json\n{json.dumps(existing_payload, indent=2, sort_keys=True)}\n```"
+                ),
+                "url": existing_url,
+            }]
+        })
+        with patch.object(common, "run_cmd", return_value=(0, existing, "")) as run:
+            self.assertEqual(
+                scr.github_increment_decision(300, payload, str(self.checkout_a)),
+                existing_url,
+            )
+        run.assert_called_once()
+
+        with patch.object(
+            common, "run_cmd",
+            side_effect=[
+                (0, '{"comments": []}', ""),
+                (0, "https://github.com/owner/repo/issues/300#issuecomment-9\n", ""),
+            ],
+        ) as run:
+            created = scr.github_increment_decision(300, payload, str(self.checkout_a))
+        self.assertTrue(created.endswith("issuecomment-9"))
+        self.assertEqual(run.call_count, 2)
+
+    def test_wrong_operator_cannot_create_sprint_or_github_record(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        calls = []
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry,
+            self.payload(
+                user="U99999999",
+                text=(
+                    "sprint authorize control #300 issues #10 baseline " + "d" * 40
+                ),
+            ),
+            set(),
+            seen_path=self.seen_path,
+            increment_store=store,
+            record_increment=lambda *args: calls.append(args),
+        )
+        self.assertIsNone(reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.list(), [])
+
+    def test_wrong_project_transition_fails_before_github_record(self):
+        store = DeliveryIncrementStore(self.root / "increments.json")
+        authorize_payload = self.payload(
+            event_id="project-a-auth",
+            text=(
+                "sprint authorize control #300 issues #10 baseline " + "e" * 40
+            ),
+        )
+        authorized = scr.handle_slack_message(
+            sample_config(), self.registry, authorize_payload, set(),
+            notify=lambda *_args: {"ok": True},
+            seen_path=self.seen_path,
+            increment_store=store,
+            record_increment=lambda *_args: (
+                "https://github.com/owner/repo/issues/300#issuecomment-1"
+            ),
+        )
+        increment_id = store.list(self.project_a.project_id)[0]["increment_id"]
+        self.assertIn(increment_id, authorized)
+
+        calls = []
+        wrong_project = self.payload(
+            channel="C11111111",
+            event_id="project-b-start",
+            text=f"sprint start {increment_id}",
+        )
+        reply = scr.handle_slack_message(
+            sample_config(), self.registry, wrong_project, set(),
+            notify=lambda *_args: {"ok": True},
+            seen_path=self.root / "project-b-seen.json",
+            increment_store=store,
+            record_increment=lambda *args: calls.append(args),
+        )
+        self.assertIn("another project", reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.get(increment_id)["lifecycle_state"], "authorized")
 
     def test_claim_merge_review_verbs_are_refused_without_github_mutation(self):
         for verb in ("claim", "merge", "review"):

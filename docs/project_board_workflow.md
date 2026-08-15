@@ -34,6 +34,29 @@ issue pickup and in-flight resume. Agents must not remove the label or claim the
 issue to be helpful; only the operator may complete the work or remove the
 label before the ordinary Ready lifecycle begins.
 
+## Delivery Increments (user-facing: Sprints)
+
+A Sprint is represented internally by one durable Delivery Increment. It does
+not replace issue Status and is not assumed to be a two-week Scrum timebox.
+The increment control issue and structured operator-decision comments are the
+GitHub authority record; `~/.aru/delivery-increments.json` is the private,
+lock-protected local materialization used by the control room.
+
+New boards include `Delivery Increment` and `Increment State` fields for the
+control issue. Ordinary stories continue through Backlog → Done unchanged.
+Agents may propose a bounded issue set, but only the configured operator can
+authorize, revise, start, accept, cancel, authorize deployment, or record
+deployment through the project Slack channel. The Slack decision has no local
+effect until its structured GitHub comment succeeds.
+
+An authorized scope is frozen. Adding, removing, or replacing an issue needs a
+new Slack `revise` decision, whose history preserves the prior exact scope.
+One project has at most one active normal increment. Emergency increments are
+separate records and never rewrite normal scope. Grooming remains independent,
+and the release state is separate from the increment lifecycle: acceptance
+does not authorize deployment. A second accepted-but-undeployed increment is
+refused unless the operator explicitly records risk acceptance.
+
 ---
 
 ## 🌳 Git Worktree Isolation Guidelines

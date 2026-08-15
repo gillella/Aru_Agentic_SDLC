@@ -1344,7 +1344,7 @@ def configure_project_views(project_id: str) -> bool:
 
 def configure_board(number: int, owner: str, project_id: str = "") -> bool:
     """Renames the built-in Status options to the five-status contract and adds
-    Priority / Story Points / Phase fields. Without this the board ships GitHub's
+    Priority / Story Points / Phase / Delivery Increment fields. Without this the board ships GitHub's
     default Todo/In Progress/Done and three of the five statuses the workflow
     scripts use do not exist."""
     if not project_id:
@@ -1390,6 +1390,8 @@ def configure_board(number: int, owner: str, project_id: str = "") -> bool:
         ("Priority", "SINGLE_SELECT", "P0,P1,P2,P3"),
         ("Story Points", "NUMBER", None),
         ("Phase", "SINGLE_SELECT", "Phase -1,Phase 0,Phase 1,Phase 2,Phase 3,Phase 4,Phase 5,Migration"),
+        ("Delivery Increment", "TEXT", None),
+        ("Increment State", "SINGLE_SELECT", "Authorized,Active,Accepted,Closed"),
     ]
     custom_ok = True
     for name, dtype, options in custom:
