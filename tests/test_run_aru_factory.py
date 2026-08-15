@@ -198,6 +198,25 @@ class DelegationTests(unittest.TestCase):
         ):
             self.assertIn(skill, text, f"unreferenced route: {skill}")
 
+    def test_research_picker_skill_survives_both_canonical_consumers(self):
+        entrypoint = flat(skill_text())
+        fleet = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
+        for consumer in (entrypoint, fleet):
+            self.assertIn("skill: research", consumer)
+            self.assertIn("skills/research/skill.md", consumer)
+            self.assertIn("work.skill", consumer)
+        self.assertNotIn(
+            "| `issue` | `implement-next-issue` |", skill_text()
+        )
+        prompt = FLEET_PROMPT.read_text(encoding="utf-8")
+        research_branch = prompt.split("##### Research issue", 1)[1].split(
+            "##### Implementation issue", 1
+        )[0]
+        self.assertIn("return to\nthe top of the loop", research_branch)
+        self.assertIn("Do not execute the implementation sequence", research_branch)
+        for forbidden in ("create_branch.py", "git push", "create_pr.py"):
+            self.assertNotIn(forbidden, research_branch)
+
     def test_it_does_not_restate_the_implementation_procedure(self):
         """Concrete markers of a forked procedure rather than a pointer."""
         text = skill_text()

@@ -187,9 +187,23 @@ say so in one sentence rather than inventing findings to look thorough.
 
 ---
 
-#### D. `issue` — implement
+#### D. `issue` — follow the picker-selected skill
 
-Follow `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`.
+Read `work.skill` from the claimed picker result.
+
+##### Research issue
+
+When it is `research` (`skill: research`), follow
+`$ARU_SDLC_HOME/skills/research/SKILL.md` to its own close-out, then return to
+the top of the loop. **Do not execute the implementation sequence below.** A
+comment-only research artifact creates no branch, repository write, push, or
+PR.
+
+##### Implementation issue
+
+For every other issue skill, follow
+`$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`, then execute Steps 1-9
+below. Never collapse research into this implementation branch.
 
 1. **Read the issue in full.** `gh issue view <N> --json title,body,labels`.
    Write down its `touches:` list — that is your **write budget**.

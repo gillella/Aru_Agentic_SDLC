@@ -83,9 +83,25 @@ class ProjectBootstrapTests(unittest.TestCase):
             os.makedirs(Path(temp_dir) / ".github" / "ISSUE_TEMPLATE")
             write_templates(temp_dir, "octocat/12")
             feature = (Path(temp_dir) / ".github" / "ISSUE_TEMPLATE" / "feature.yml").read_text()
+            research = (Path(temp_dir) / ".github" / "ISSUE_TEMPLATE" / "research.yml").read_text()
 
         self.assertIn('projects: ["octocat/12"]', feature)
         self.assertIn("        touches:", feature)
+        self.assertIn("type:research", research)
+        self.assertIn("research: ", research)
+        self.assertIn("Repository under docs/research/", research)
+        self.assertIn("Issue comment only", research)
+        self.assertIn("Every factual claim carries a resolvable", research)
+        self.assertIn("Every Findings line is marked", research)
+        self.assertIn("Citation verification exits 0", research)
+        self.assertIn("exact same-date entries", research)
+        self.assertIn("--repo-root <consumer-repo-root> <artifact>", research)
+        self.assertIn("touches: docs/research/**", research)
+        self.assertIn("replace it with issue-comment-only", research)
+
+    def test_governance_labels_include_research(self):
+        names = [name for name, _, _ in init_project.GOVERNANCE_LABELS]
+        self.assertIn("type:research", names)
 
     def test_documented_private_flag_is_accepted(self):
         with tempfile.TemporaryDirectory() as temp_dir:

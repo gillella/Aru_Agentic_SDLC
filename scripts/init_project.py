@@ -39,6 +39,7 @@ GOVERNANCE_LABELS = [
     ("type:fix", "d73a4a", "Defect repair"),
     ("type:chore", "cfd3d7", "Tooling, CI, or maintenance"),
     ("type:docs", "0075ca", "Specification or documentation"),
+    ("type:research", "bfd4f2", "Bounded research producing a cited artifact"),
     ("needs-design", "d4c5f9", "Requires an implementation plan before editing"),
     ("priority:p0", "b60205", "Blocking; drop everything"),
     ("priority:p1", "d93f0b", "Current phase critical path"),
@@ -829,6 +830,74 @@ def render_issue_form(
     return "\n".join(lines) + "\n"
 
 
+def render_research_issue_form(project_ref: Optional[str] = None) -> str:
+    """Renders research intake with its mechanical completion contract."""
+    project_line = f'projects: ["{project_ref}"]' if project_ref else "projects: []"
+    return "\n".join([
+        "name: Research",
+        "description: Bounded research question with a cited findings artifact",
+        "title: 'research: '",
+        'labels: ["type:research", "status:backlog"]',
+        project_line,
+        "body:",
+        "  - type: textarea",
+        "    id: question",
+        "    attributes:",
+        "      label: Research question",
+        "      description: Ask one bounded question.",
+        "    validations:",
+        "      required: true",
+        "  - type: textarea",
+        "    id: scope",
+        "    attributes:",
+        "      label: Scope bounds",
+        "      description: State what is in scope, out of scope, and the stop condition.",
+        "    validations:",
+        "      required: true",
+        "  - type: dropdown",
+        "    id: artifact-location",
+        "    attributes:",
+        "      label: Findings location",
+        "      description: Repository artifacts require an isolated branch and worktree; comment-only artifacts make no repository writes.",
+        "      options:",
+        "        - Repository under docs/research/",
+        "        - Issue comment only",
+        "    validations:",
+        "      required: true",
+        "  - type: textarea",
+        "    id: acceptance",
+        "    attributes:",
+        "      label: Acceptance criteria",
+        "      value: |",
+        "        - [ ] Findings artifact attached to this issue.",
+        "        - [ ] Every factual claim carries a resolvable URL, arXiv ID, or DOI.",
+        "        - [ ] Every Findings line is marked `[external]` or `[repo verified: YYYY-MM-DD]`.",
+        "        - [ ] Citation verification exits 0.",
+        "        - [ ] Repo code findings name source paths with exact same-date entries under the single `Repo code claims` section, or that section records `none`.",
+        "        - [ ] Follow-on issues are proposed when findings warrant them.",
+        "    validations:",
+        "      required: true",
+        "  - type: textarea",
+        "    id: verification",
+        "    attributes:",
+        "      label: Verification",
+        "      value: 'python3 $ARU_SDLC_HOME/scripts/verify_citations.py --repo-root <consumer-repo-root> <artifact>'",
+        "    validations:",
+        "      required: true",
+        "  - type: textarea",
+        "    id: workflow-metadata",
+        "    attributes:",
+        "      label: Workflow metadata",
+        "      description: Keep docs/research/** only for a repository artifact; replace it with issue-comment-only for a comment-only artifact.",
+        "      value: |",
+        "        depends-on:",
+        "        touches: docs/research/**",
+        "        parallel-eligible: true",
+        "    validations:",
+        "      required: true",
+    ]) + "\n"
+
+
 def write_templates(target_dir: str, project_ref: Optional[str] = None):
     """Writes issue forms and a PR template.
 
@@ -865,6 +934,7 @@ def write_templates(target_dir: str, project_ref: Optional[str] = None):
              ("gating", "Gating contract"), ("children", "Child issues")],
             project_ref,
         )),
+        ("research.yml", render_research_issue_form(project_ref)),
     ]:
         with open(os.path.join(tpl_dir, filename), "w") as f:
             f.write(body)
@@ -943,7 +1013,24 @@ def initial_commit(target_dir: str, project_name: str) -> bool:
         "Scaffolds directory layout, AGENTS.md governance, CI pipeline, and\n"
         "issue/PR templates. Baseline commit prior to any tracked issue work."
     )
-    code, _, err = run_cmd(["git", "commit", "-m", msg], cwd=target_dir, check=False)
+    # Fresh scaffolds are short-lived in tests and automation. Disable Git's
+    # automatic maintenance for this commit so background object packing
+    # cannot outlive the command and race immediate worktree cleanup. Modern
+    # Git uses maintenance.auto; gc.auto covers older Git versions.
+    code, _, err = run_cmd(
+        [
+            "git",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "commit",
+            "-m",
+            msg,
+        ],
+        cwd=target_dir,
+        check=False,
+    )
     if code == 0:
         print("✅ Initial commit created.")
         return True
@@ -965,7 +1052,16 @@ def commit_project_template_link(target_dir: str, project_ref: str) -> bool:
     if not ensure_git_identity(target_dir):
         return False
     code, _, err = run_cmd(
-        ["git", "commit", "-m", "chore: link issue forms to project board"],
+        [
+            "git",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "commit",
+            "-m",
+            "chore: link issue forms to project board",
+        ],
         cwd=target_dir,
         check=False,
     )
