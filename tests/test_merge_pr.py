@@ -206,6 +206,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         evidence = merge_pr.review_evidence(162)
 
         self.assertTrue(evidence["reviewed_head"])
+        self.assertEqual(evidence["head_oid"], "head123")
         self.assertIn("cursor=review-page-2", gh_json.call_args_list[1].args[0])
         self.assertEqual(gh_json.call_count, 3)
 
@@ -672,7 +673,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         merge_pr,
         "review_evidence",
         return_value={
-            "unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True,
+            "head_oid": "gated-sha", "unresolved": 0, "unfixed": 0,
+            "withdrawn": 0, "reviewed_head": True,
         },
     )
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
@@ -716,7 +718,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         merge_pr,
         "review_evidence",
         return_value={
-            "unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True,
+            "head_oid": "gated-sha", "unresolved": 0, "unfixed": 0,
+            "withdrawn": 0, "reviewed_head": True,
         },
     )
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
@@ -1234,6 +1237,16 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
 
 
 class ExpectedHeadGateTests(unittest.TestCase):
+    @staticmethod
+    def open_pr(head):
+        return {
+            "number": 9, "title": "t", "body": "Closes #7", "state": "OPEN",
+            "headRefOid": head, "labels": [], "reviews": [],
+            "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "additions": 1, "deletions": 1, "author": {"login": "gillella"},
+        }
+
     @patch.object(merge_pr, "fetch_pr")
     def test_expected_head_mismatch_blocks_before_merge(self, fetch_pr):
         pr = {
@@ -1247,6 +1260,37 @@ class ExpectedHeadGateTests(unittest.TestCase):
         with patch("sys.argv", ["merge_pr.py", "--pr", "9", "--expected-head", "reviewed-a"]):
             rc = merge_pr.main()
         self.assertEqual(rc, merge_pr.EXIT_BLOCKED)
+
+    @patch.object(merge_pr, "execute_merge")
+    @patch.object(merge_pr, "evaluate_dod")
+    @patch.object(merge_pr, "review_evidence", return_value={"head_oid": "H2"})
+    @patch.object(merge_pr, "_gh_json", return_value={"body": ""})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_push_before_first_review_page_cannot_mix_gate_snapshots(
+        self, fetch_pr, _issue, _evidence, evaluate, execute
+    ):
+        fetch_pr.return_value = self.open_pr("H1")
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+            rc = merge_pr.main()
+
+        self.assertEqual(rc, merge_pr.EXIT_BLOCKED)
+        evaluate.assert_not_called()
+        execute.assert_not_called()
+
+    @patch.object(merge_pr, "execute_merge")
+    @patch.object(merge_pr, "evaluate_dod", return_value=(True, []))
+    @patch.object(merge_pr, "review_evidence", return_value={"head_oid": "H1"})
+    @patch.object(merge_pr, "_gh_json", return_value={"body": ""})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_push_after_review_pages_cannot_merge_new_head_without_expected_head(
+        self, fetch_pr, _issue, _evidence, _evaluate, execute
+    ):
+        fetch_pr.side_effect = [self.open_pr("H1"), self.open_pr("H2")]
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+            rc = merge_pr.main()
+
+        self.assertEqual(rc, merge_pr.EXIT_BLOCKED)
+        execute.assert_not_called()
 
 
 class CloseoutMarkerTests(unittest.TestCase):
@@ -1803,7 +1847,8 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
         with patch.object(sys, "argv", argv), \
              patch.object(merge_pr, "fetch_pr", return_value=open_pr), \
              patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
-             patch.object(merge_pr, "review_evidence", return_value={}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": "gated-sha"}), \
              patch.object(merge_pr, "evaluate_dod",
                           return_value=(True, list(CHECKPOINT_GATES))), \
              patch.object(merge_pr, "execute_merge",
@@ -1898,7 +1943,9 @@ class DryRunJsonTests(unittest.TestCase):
              patch.object(merge_pr, "fetch_pr", return_value=pr), \
              patch.object(merge_pr, "is_merged", return_value=False), \
              patch.object(merge_pr, "_gh_json", return_value={"body": "- [x] done"}), \
-             patch.object(merge_pr, "review_evidence", return_value={"unresolved": 0, "unfixed": 0, "withdrawn": 0}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": "abc", "unresolved": 0,
+                                        "unfixed": 0, "withdrawn": 0}), \
              patch.object(merge_pr, "evaluate_dod", return_value=(False, gates)), \
              patch.object(merge_pr, "execute_merge") as execute_merge, \
              patch("builtins.print") as printer:

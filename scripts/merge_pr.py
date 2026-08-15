@@ -135,7 +135,7 @@ def _parse_ts(value):
 
 
 def _reviewed_current_head(owner, name, pr_id):
-    """Returns ``(head_oid, reviewed_head)`` after reading every review page.
+    """Returns ``(head_oid, reviewed_head, reviews)`` for every review page.
 
     GitHub caps connection pages at 100 entries.  Review-heavy pull requests
     therefore need an independent cursor from review-thread pagination; using
@@ -149,7 +149,7 @@ def _reviewed_current_head(owner, name, pr_id):
         pullRequest(number:$pr) {
           headRefOid
           reviews(first:100, after:$cursor) {
-            nodes { state author { login } commit { oid } }
+            nodes { id state submittedAt author { login } commit { oid } }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -159,6 +159,7 @@ def _reviewed_current_head(owner, name, pr_id):
     seen_cursors = set()
     expected_head = None
     reviewed_head = False
+    reviews = []
 
     while True:
         args = [
@@ -210,13 +211,14 @@ def _reviewed_current_head(owner, name, pr_id):
                 or oid is not None and not isinstance(oid, str)
             ):
                 return None
+            reviews.append(review)
             if state.upper() == "PENDING" or is_advisory_review_account(login or ""):
                 continue
             if oid == expected_head:
                 reviewed_head = True
 
         if not has_next:
-            return expected_head, reviewed_head
+            return expected_head, reviewed_head, reviews
         next_cursor = page_info.get("endCursor")
         if (
             not isinstance(next_cursor, str) or not next_cursor
@@ -256,7 +258,7 @@ def review_evidence(pr_id):
     review_result = _reviewed_current_head(owner, name, pr_id)
     if review_result is None:
         return None
-    expected_head, reviewed_head = review_result
+    expected_head, reviewed_head, reviews = review_result
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
@@ -357,6 +359,8 @@ def review_evidence(pr_id):
 
         if not has_next:
             return {
+                "head_oid": expected_head,
+                "reviews": reviews,
                 "unresolved": unresolved,
                 "unfixed": unfixed,
                 "outdated_unfixed": outdated_unfixed,
@@ -549,7 +553,15 @@ def _evidence_note(evidence):
 
 
 def check_reviews(pr, evidence):
-    reviews = pr.get("reviews") or []
+    # ``gh pr view`` currently truncates its review history at 100 entries.
+    # Prefer the independently paginated evidence so a later blocking verdict
+    # cannot disappear from the gate. The PR snapshot remains a compatibility
+    # fallback for pure unit-level callers that supply handcrafted evidence.
+    reviews = (
+        evidence.get("reviews")
+        if evidence is not None and "reviews" in evidence
+        else pr.get("reviews")
+    ) or []
     substantive = [r for r in reviews if (r.get("state") or "").upper() != "PENDING"]
     if not substantive:
         return False, "No review on this PR. At least one review is required."
@@ -1576,6 +1588,15 @@ def main():
             issue_bodies[num] = issue.get("body") or ""
 
         evidence = review_evidence(args.pr)
+        evidence_head = evidence.get("head_oid") if evidence else None
+        if not heads_match(gated_head, evidence_head):
+            print(
+                f"[ERROR] Review evidence covers head {evidence_head or 'unknown'}, "
+                f"but the gated PR snapshot is {gated_head}. Refusing to combine "
+                "evidence from different commits.",
+                file=sys.stderr,
+            )
+            return EXIT_BLOCKED
         ok, gates = evaluate_dod(pr, issue_bodies, evidence)
 
         if args.json:
@@ -1601,15 +1622,14 @@ def main():
         if not fresh:
             return EXIT_ERROR
         live = fresh.get("headRefOid") or "unknown"
-        if args.expected_head and not heads_match(live, args.expected_head):
+        if not heads_match(live, gated_head):
             print(
-                f"[ERROR] Head moved to {live} after DoD checks; expected "
-                f"{args.expected_head}. No merge command was run.",
+                f"[ERROR] Head moved to {live} after DoD checks; gated head was "
+                f"{gated_head}. No merge command was run.",
                 file=sys.stderr,
             )
             return EXIT_BLOCKED
         pr = fresh
-        gated_head = live
 
         print("\n=== Merge execution ===")
         final_pr, outcome = execute_merge(args.pr, pr, args.merge_method)
