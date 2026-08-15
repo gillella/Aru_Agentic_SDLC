@@ -1,5 +1,6 @@
 import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -341,16 +342,20 @@ class SplitRecommendationTests(unittest.TestCase):
                 )
 
     def test_directory_spelling_preserves_top_level_areas(self):
-        for declaration in ("scripts/, hooks/", "scripts, hooks"):
+        for declaration in (
+            "scripts/, hooks/",
+            "scripts, hooks",
+            ".github, .devcontainer",
+            ".github, README.md",
+        ):
             with self.subTest(declaration=declaration):
                 body = READY_BODY.replace(
                     "touches: src/thing.py, tests/test_thing.py",
                     f"touches: {declaration}",
                 )
-                self.assertEqual(
-                    tb.split_reasons(issue(29, "type:chore", body=body)),
-                    ["touches span 2 top-level areas: hooks, scripts"],
-                )
+                reasons = tb.split_reasons(issue(29, "type:chore", body=body))
+                self.assertEqual(len(reasons), 1)
+                self.assertIn("touches span 2 top-level areas", reasons[0])
 
     def test_promote_holds_directory_and_slash_free_wildcard_scopes(self):
         bodies = (
@@ -361,6 +366,14 @@ class SplitRecommendationTests(unittest.TestCase):
             READY_BODY.replace(
                 "touches: src/thing.py, tests/test_thing.py",
                 "touches: scripts, hooks",
+            ),
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: .github, .devcontainer",
+            ),
+            READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: .github, README.md",
             ),
             READY_BODY.replace(
                 "touches: src/thing.py, tests/test_thing.py",
@@ -415,6 +428,37 @@ class SplitRecommendationTests(unittest.TestCase):
             tb.split_reasons(issue(27, "type:chore", body=root_and_scripts)),
             ["touches span 2 top-level areas: <root>, scripts"],
         )
+
+    def test_bare_names_use_repository_evidence_and_unknowns_are_conservative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "LICENSE").write_text("license", encoding="utf-8")
+            (root / "Makefile").write_text("all:", encoding="utf-8")
+            (root / ".github").mkdir()
+            root_files = READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: LICENSE, Makefile",
+            )
+            dotted_dir = READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: .github, LICENSE",
+            )
+            unknowns = READY_BODY.replace(
+                "touches: src/thing.py, tests/test_thing.py",
+                "touches: FutureDir, AnotherDir",
+            )
+            with patch("triage_backlog._repository_root", return_value=tmp):
+                self.assertEqual(
+                    tb.split_reasons(issue(32, "type:chore", body=root_files)), []
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(33, "type:chore", body=dotted_dir)),
+                    ["touches span 2 top-level areas: .github, <root>"],
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(34, "type:chore", body=unknowns)),
+                    ["touches span 2 top-level areas: AnotherDir, FutureDir"],
+                )
 
     def test_force_promotes_split_recommended_issue(self):
         wide = issue(12, "type:chore", "status:backlog", body=self.oversized_body())

@@ -26,6 +26,7 @@ Oversized-scope recommendation (either signal is sufficient):
 import argparse
 import os
 import re
+import subprocess
 import sys
 from typing import Any, Optional
 
@@ -317,6 +318,21 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str
     return gaps
 
 
+def _repository_root() -> str:
+    """Returns the checkout root used to classify bare touches entries."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return os.getcwd()
+    return result.stdout.strip() if result.returncode == 0 else os.getcwd()
+
+
 def split_reasons(issue: dict[str, Any]) -> list[str]:
     """Returns concrete reasons a Ready-contract issue should be split.
 
@@ -340,6 +356,7 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
         ]
     area_roots = []
     repository_wide = False
+    repository_root = _repository_root()
     for declared_path in declared_paths:
         path = declared_path.strip()
         while path.startswith("./"):
@@ -351,21 +368,19 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
         if not path or path == ".":
             repository_wide = True
             continue
-        # Root-level files share one repository-root area. Treating each
-        # conventional filename as an area makes README.md + pyproject.toml
-        # look cross-cutting. A bare name without a filename suffix is
-        # ambiguous, though: the touches enforcement grammar accepts it as a
-        # directory prefix (for example ``scripts``). Preserve that name as an
-        # area so triage cannot promote a cross-directory scope by mistaking
-        # both prefixes for root files.
+        # Existing root-level files share one repository-root area. A bare
+        # concrete token can also be a directory prefix in the enforcement
+        # grammar, regardless of dots (for example ``scripts`` or
+        # ``.github``). Use checkout evidence to recognize files; preserve
+        # directories and unknown names conservatively as distinct areas.
         if "/" in path:
             area_roots.append(path.split("/", 1)[0])
         elif any(char in path for char in "*?["):
             area_roots.append(path)
-        elif "." not in path:
-            area_roots.append(path)
-        else:
+        elif os.path.isfile(os.path.join(repository_root, path)):
             area_roots.append("<root>")
+        else:
+            area_roots.append(path)
     wildcard_roots = sorted({
         root for root in area_roots if any(char in root for char in "*?[")
     })
