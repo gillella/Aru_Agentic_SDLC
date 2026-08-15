@@ -59,16 +59,21 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
         return False
 
     source_type, source_path = found
+    src = Path(source_path).resolve()
 
-    # Clean / prepare output directory
+    # If src is already the target output directory, verify index.html exists
+    if src == dest:
+        if (dest / "index.html").is_file():
+            print(f"✅ Preview artifact already present in '{dest.name}/'")
+            return True
+        return False
+
+    # Clean / prepare output directory only when src != dest
     if dest.exists() and dest != source_root:
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
 
     if source_type == "app_dir":
-        src = Path(source_path)
-        if src == dest:
-            return True
         for item in src.iterdir():
             if item.name.startswith(".") or item.name in {"node_modules", "__pycache__"}:
                 continue

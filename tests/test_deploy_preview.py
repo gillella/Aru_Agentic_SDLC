@@ -173,7 +173,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
 
     @patch("deploy_preview.run_cmd")
     def test_file_remediation_issue_attaches_to_board_or_fails_closed(self, mock_run):
-        # Successful creation and attachment
+        # 1. Successful creation and attachment
         mock_run.side_effect = [
             (0, "[]", ""),  # gh issue list (no existing issue)
             (0, "https://github.com/owner/repo/issues/205\n", ""),  # gh issue create
@@ -183,13 +183,38 @@ class DeployPreviewSkillTests(unittest.TestCase):
         new_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
         self.assertEqual(new_id, 205)
 
-        # Creation failure returns None
+        # 2. Board attachment failure on new creation fails closed
+        mock_run.side_effect = [
+            (0, "[]", ""),  # gh issue list
+            (0, "https://github.com/owner/repo/issues/206\n", ""),  # gh issue create
+            (1, "", "Board attachment failed"),  # update_issue_status.py failure
+        ]
+        fail_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
+        self.assertIsNone(fail_id)
+
+        # 3. Retry on existing unattached issue succeeds when board attachment succeeds
+        mock_run.side_effect = [
+            (0, '[{"number": 206, "title": "fix(deploy): preview deployment failed for commit abcdef1", "body": "commit abcdef123456"}]', ""),  # gh issue list finds 206
+            (0, "Attached to board", ""),  # update_issue_status.py on existing issue 206
+        ]
+        retry_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
+        self.assertEqual(retry_id, 206)
+
+        # 4. Retry on existing unattached issue fails closed when board attachment fails
+        mock_run.side_effect = [
+            (0, '[{"number": 206, "title": "fix(deploy): preview deployment failed for commit abcdef1", "body": "commit abcdef123456"}]', ""),  # gh issue list finds 206
+            (1, "", "Board attachment still failing"),  # update_issue_status.py on existing issue 206
+        ]
+        fail_retry_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
+        self.assertIsNone(fail_retry_id)
+
+        # 5. Issue creation command failure returns None
         mock_run.side_effect = [
             (0, "[]", ""),  # gh issue list
             (1, "", "Failed to create issue"),  # gh issue create failure
         ]
-        fail_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
-        self.assertIsNone(fail_id)
+        fail_create_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy timed out")
+        self.assertIsNone(fail_create_id)
 
     def test_get_default_branch_preserves_slash_containing_branches(self):
         with patch("deploy_preview.run_cmd", return_value=(0, "refs/remotes/origin/release/v1.0\n", "")):
@@ -258,9 +283,10 @@ class DeployPreviewSkillTests(unittest.TestCase):
 
     @patch("deploy_preview.run_cmd")
     def test_file_remediation_issue_reuses_existing_issue(self, mock_run):
-        # Existing open remediation issue #199 for commit abcdef1
+        # Existing open remediation issue #199 for commit abcdef1 attached to board
         mock_run.side_effect = [
             (0, json.dumps([{"number": 199, "title": "fix(deploy): preview deployment failed for commit abcdef1", "body": "details"}]), ""),
+            (0, "Attached to board", ""),
         ]
         issue_id = dp.file_remediation_issue(issue_id=109, commit_sha="abcdef123456", error_details="Deploy failed")
         self.assertEqual(issue_id, 199)
@@ -331,6 +357,24 @@ class DeployPreviewSkillTests(unittest.TestCase):
             success = bp.assemble_preview_artifact(str(src), str(out))
             self.assertFalse(success)
             self.assertFalse((out / "index.html").exists())
+
+    def test_build_preview_artifact_preserves_existing_dist_artifact(self):
+        import tempfile
+        import build_preview as bp
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            src = Path(temp_dir) / "project"
+            dist = src / "dist"
+            dist.mkdir(parents=True)
+            (dist / "index.html").write_text("<!DOCTYPE html><html><body>Existing Dist</body></html>")
+            (dist / "styles.css").write_text("body { color: green; }")
+
+            # Source dist == output dist
+            success = bp.assemble_preview_artifact(str(src), str(dist))
+            self.assertTrue(success)
+            self.assertTrue((dist / "index.html").is_file())
+            self.assertTrue((dist / "styles.css").is_file())
+            self.assertEqual((dist / "styles.css").read_text(), "body { color: green; }")
 
 
 if __name__ == "__main__":

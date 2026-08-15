@@ -321,8 +321,21 @@ def file_remediation_issue(
         print(f"[DRY-RUN] Would create or reuse remediation issue for commit {commit_sha[:7]}")
         return 9999
 
+    sdlc_home = os.environ.get("ARU_SDLC_HOME", ".")
     existing_id = find_existing_remediation_issue(commit_sha)
     if existing_id is not None:
+        # Ensure existing remediation issue is attached to the project board as Ready
+        attach_cmd = [
+            sys.executable,
+            str(Path(sdlc_home) / "scripts" / "update_issue_status.py"),
+            "--issue", str(existing_id),
+            "--status", "Ready",
+            "--require-board",
+        ]
+        code, _, err = run_cmd(attach_cmd, check=False)
+        if code != 0:
+            print(f"[ERROR] Failed to attach existing remediation issue #{existing_id} to Project Board: {err}", file=sys.stderr)
+            return None
         print(f"ℹ️ Reusing existing open remediation issue #{existing_id} for commit {commit_sha[:7]}")
         return existing_id
 
@@ -374,8 +387,7 @@ parallel-eligible: true
     new_issue_id = int(match.group(1))
     print(f"✅ Created remediation issue #{new_issue_id}")
 
-    # Attach to project board as Ready; log warning if attachment fails
-    sdlc_home = os.environ.get("ARU_SDLC_HOME", ".")
+    # Attach to project board as Ready; fail closed if attachment fails
     attach_cmd = [
         sys.executable,
         str(Path(sdlc_home) / "scripts" / "update_issue_status.py"),
@@ -385,7 +397,8 @@ parallel-eligible: true
     ]
     code, _, err = run_cmd(attach_cmd, check=False)
     if code != 0:
-        print(f"[WARN] Failed to attach remediation issue #{new_issue_id} to Project Board: {err}", file=sys.stderr)
+        print(f"[ERROR] Failed to attach remediation issue #{new_issue_id} to Project Board: {err}", file=sys.stderr)
+        return None
 
     # Notify originating issue
     notify_body = (
@@ -395,7 +408,7 @@ parallel-eligible: true
     )
     code, _, err = run_cmd(["gh", "issue", "comment", str(issue_id), "--body", notify_body], check=False)
     if code != 0:
-        print(f"[WARN] Created remediation issue #{new_issue_id} but failed to notify originating issue #{issue_id}: {err}", file=sys.stderr)
+        print(f"[WARN] Created remediation issue #{new_issue_id} on board but failed to notify originating issue #{issue_id}: {err}", file=sys.stderr)
 
     return new_issue_id
 
