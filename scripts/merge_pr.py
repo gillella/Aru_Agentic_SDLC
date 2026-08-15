@@ -134,6 +134,14 @@ def _parse_ts(value):
         return None
 
 
+def _parse_review_ts(value):
+    """A submitted GitHub review timestamp, including its timezone."""
+    parsed = _parse_ts(value)
+    if parsed is None or parsed.tzinfo is None:
+        return None
+    return parsed
+
+
 def _reviewed_current_head(owner, name, pr_id):
     """Returns ``(head_oid, reviewed_head, reviews)`` for every review page.
 
@@ -160,6 +168,7 @@ def _reviewed_current_head(owner, name, pr_id):
     expected_head = None
     reviewed_head = False
     reviews = []
+    seen_review_ids = set()
 
     while True:
         args = [
@@ -198,8 +207,15 @@ def _reviewed_current_head(owner, name, pr_id):
             state = review.get("state")
             author = review.get("author")
             commit = review.get("commit")
+            review_id = review.get("id")
+            submitted_at = review.get("submittedAt")
             if (
-                not isinstance(state, str)
+                state not in {
+                    "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED",
+                    "PENDING",
+                }
+                or not isinstance(review_id, str) or not review_id
+                or review_id in seen_review_ids
                 or (author is not None and not isinstance(author, dict))
                 or (commit is not None and not isinstance(commit, dict))
             ):
@@ -207,12 +223,15 @@ def _reviewed_current_head(owner, name, pr_id):
             login = (author or {}).get("login")
             oid = (commit or {}).get("oid")
             if (
-                login is not None and not isinstance(login, str)
-                or oid is not None and not isinstance(oid, str)
+                login is not None and (not isinstance(login, str) or not login)
+                or oid is not None and (not isinstance(oid, str) or not oid)
+                or state == "PENDING" and submitted_at is not None
+                or state != "PENDING" and _parse_review_ts(submitted_at) is None
             ):
                 return None
+            seen_review_ids.add(review_id)
             reviews.append(review)
-            if state.upper() == "PENDING" or is_advisory_review_account(login or ""):
+            if state == "PENDING" or is_advisory_review_account(login or ""):
                 continue
             if oid == expected_head:
                 reviewed_head = True
@@ -521,9 +540,19 @@ def latest_state_per_reviewer(reviews):
             # A comment-only review does not change a prior verdict, and a
             # pending one was never submitted.
             continue
-        who = ((review.get("author") or {}).get("login")
-               or review.get("id") or "unknown")
-        latest[who] = (review.get("submittedAt") or "", state)
+        who = ((review.get("author") or {}).get("login") or review.get("id"))
+        submitted_at = _parse_review_ts(review.get("submittedAt"))
+        if not isinstance(who, str) or not who or submitted_at is None:
+            return None
+        prior = latest.get(who)
+        if prior is not None:
+            if submitted_at == prior[0]:
+                # GitHub IDs distinguish the submissions, but equal timestamps
+                # cannot prove which verdict is newer. Never trust page order.
+                return None
+            if submitted_at < prior[0]:
+                continue
+        latest[who] = (submitted_at, state)
     return {who: state for who, (_, state) in latest.items()}
 
 
@@ -553,10 +582,9 @@ def _evidence_note(evidence):
 
 
 def check_reviews(pr, evidence):
-    # ``gh pr view`` currently truncates its review history at 100 entries.
-    # Prefer the independently paginated evidence so a later blocking verdict
-    # cannot disappear from the gate. The PR snapshot remains a compatibility
-    # fallback for pure unit-level callers that supply handcrafted evidence.
+    # Prefer the same explicitly paginated review history used for current-head
+    # evidence. The PR snapshot remains a compatibility fallback for pure
+    # unit-level callers that supply handcrafted evidence.
     reviews = (
         evidence.get("reviews")
         if evidence is not None and "reviews" in evidence
@@ -566,6 +594,11 @@ def check_reviews(pr, evidence):
     if not substantive:
         return False, "No review on this PR. At least one review is required."
     verdicts = latest_state_per_reviewer(reviews)
+    if verdicts is None:
+        return False, (
+            "Could not establish an unambiguous latest review verdict; "
+            "refusing rather than trusting review page order."
+        )
     blocking = [
         who for who, state in verdicts.items()
         if state == "CHANGES_REQUESTED"

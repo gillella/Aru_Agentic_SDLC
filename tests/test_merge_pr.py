@@ -174,24 +174,32 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
     ):
         stale_reviews = [
             {
+                "id": f"stale-{index}",
                 "state": "COMMENTED",
+                "submittedAt": f"2026-08-13T00:{index % 60:02d}:00Z",
                 "author": {"login": f"reviewer-{index}"},
                 "commit": {"oid": "old-head"},
             }
             for index in range(100)
         ]
         stale_reviews[0] = {
+            "id": "advisory-current",
             "state": "COMMENTED",
+            "submittedAt": "2026-08-14T00:00:00Z",
             "author": {"login": "coderabbitai[bot]"},
             "commit": {"oid": "head123"},
         }
         stale_reviews[1] = {
+            "id": "pending-current",
             "state": "PENDING",
+            "submittedAt": None,
             "author": {"login": "draft-reviewer"},
             "commit": {"oid": "head123"},
         }
         current_review = {
+            "id": "current-substantive",
             "state": "COMMENTED",
+            "submittedAt": "2026-08-15T00:00:00Z",
             "author": {"login": "independent-agent"},
             "commit": {"oid": "head123"},
         }
@@ -270,6 +278,85 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 gh_json.reset_mock(side_effect=True, return_value=True)
                 gh_json.return_value = page
                 self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_review_nodes_require_unique_ids_and_valid_submission_times(
+        self, gh_json, _slug
+    ):
+        valid = {
+            "id": "review-1",
+            "state": "APPROVED",
+            "submittedAt": "2026-08-15T00:00:00Z",
+            "author": None,
+            "commit": {"oid": "head123"},
+        }
+        malformed_pages = [
+            [dict(valid, id=None)],
+            [dict(valid, id="")],
+            [dict(valid, id=7)],
+            [dict(valid, submittedAt=None)],
+            [dict(valid, submittedAt="not-a-time")],
+            [dict(valid, submittedAt="2026-08-15T00:00:00")],
+            [valid, dict(valid)],
+        ]
+        for nodes in malformed_pages:
+            with self.subTest(nodes=nodes):
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.side_effect = [self.review_page(nodes=nodes)]
+                self.assertIsNone(merge_pr.review_evidence(162))
+
+    def test_latest_verdict_uses_timestamp_not_page_order(self):
+        reviews = [
+            {
+                "id": "newer",
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-15T02:00:00Z",
+                "author": {"login": "independent-agent"},
+            },
+            {
+                "id": "older",
+                "state": "APPROVED",
+                "submittedAt": "2026-08-15T01:00:00Z",
+                "author": {"login": "independent-agent"},
+            },
+        ]
+        evidence = {
+            "reviews": reviews, "unresolved": 0, "unfixed": 0,
+            "withdrawn": 0, "reviewed_head": True,
+        }
+
+        ok, message = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2"), evidence
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("independent-agent requested changes", message)
+
+    def test_equal_verdict_timestamps_fail_closed(self):
+        reviews = [
+            {
+                "id": "one", "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-15T02:00:00Z",
+                "author": {"login": "independent-agent"},
+            },
+            {
+                "id": "two", "state": "APPROVED",
+                "submittedAt": "2026-08-15T02:00:00Z",
+                "author": {"login": "independent-agent"},
+            },
+        ]
+        evidence = {
+            "reviews": reviews, "unresolved": 0, "unfixed": 0,
+            "withdrawn": 0, "reviewed_head": True,
+        }
+
+        ok, message = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2"), evidence
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("unambiguous latest review verdict", message)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -364,7 +451,9 @@ class ReviewGateTests(unittest.TestCase):
 
     def test_advisory_bot_changes_requested_does_not_block_after_threads_resolve(self):
         reviews = [{
+            "id": "advisory-change-request",
             "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-01-01T00:00:00Z",
             "author": {"login": "chatgpt-codex-connector"},
         }]
         ok, msg = _gate(
@@ -437,7 +526,12 @@ def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella")
     Same-account is the interesting case: every agent authenticates as one user,
     so only the identity labels distinguish them.
     """
-    default = [{"state": "APPROVED", "author": {"login": review_login}}]
+    default = [{
+        "id": "default-review",
+        "state": "APPROVED",
+        "submittedAt": "2026-01-01T00:00:00Z",
+        "author": {"login": review_login},
+    }]
     return {
         "author": {"login": pr_login},
         "reviews": reviews if reviews is not None else default,
@@ -735,7 +829,11 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "statusCheckRollup": [
                 {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
             ],
-            "reviews": [{"state": "APPROVED", "author": {"login": "peer"}}],
+            "reviews": [{
+                "id": "peer-approval", "state": "APPROVED",
+                "submittedAt": "2026-01-01T00:00:00Z",
+                "author": {"login": "peer"},
+            }],
             "author": {"login": "author"},
             "labels": [{"name": "author:agent-1"}],
             "mergeStateStatus": "CLEAN",
@@ -779,7 +877,11 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "statusCheckRollup": [
                 {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
             ],
-            "reviews": [{"state": "APPROVED", "author": {"login": "peer"}}],
+            "reviews": [{
+                "id": "peer-approval", "state": "APPROVED",
+                "submittedAt": "2026-01-01T00:00:00Z",
+                "author": {"login": "peer"},
+            }],
             "author": {"login": "author"},
             "labels": [{"name": "author:agent-1"}],
             "mergeStateStatus": "CLEAN",
@@ -1516,7 +1618,12 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                     "pullRequest": {
                         "headRefOid": "head123",
                         "reviews": {
-                            "nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}],
+                            "nodes": [{
+                                "id": "review-1", "state": "COMMENTED",
+                                "submittedAt": "2026-08-10T09:00:00Z",
+                                "author": {"login": "agent-2"},
+                                "commit": {"oid": "head123"},
+                            }],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
                         "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
@@ -1545,7 +1652,12 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                     "pullRequest": {
                         "headRefOid": "head123",
                         "reviews": {
-                            "nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}],
+                            "nodes": [{
+                                "id": "review-1", "state": "COMMENTED",
+                                "submittedAt": "2026-08-10T09:00:00Z",
+                                "author": {"login": "agent-2"},
+                                "commit": {"oid": "head123"},
+                            }],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
                         "commits": {
