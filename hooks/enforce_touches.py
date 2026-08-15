@@ -915,7 +915,7 @@ def _canonical_git_root(target, git_dir=None, git_environment=None):
     return os.path.realpath(worktree)
 
 
-def _update_persistent_git_environment(words, git_environment):
+def _update_persistent_git_environment(words, shell_variables, git_environment):
     """Applies shell environment statements that affect later commands.
 
     The hook receives a whole shell command and therefore must retain the
@@ -927,18 +927,59 @@ def _update_persistent_git_environment(words, git_environment):
         for assignment in words:
             name, value = assignment.split("=", 1)
             if name in _GIT_REPOSITORY_ENV:
+                shell_variables[name] = value
                 git_environment[name] = value
         return True
-    if words and words[0] == "export":
-        for assignment in words[1:]:
-            if _ENV_ASSIGNMENT.match(assignment):
-                name, value = assignment.split("=", 1)
-                if name in _GIT_REPOSITORY_ENV:
+    if words and words[0] in {"export", "declare", "typeset"}:
+        builtin = words[0]
+        options = [word for word in words[1:] if word.startswith(('-', '+'))]
+        removes_export = any(
+            option == "-n" if builtin == "export" else option == "+x"
+            for option in options
+        )
+        adds_export = builtin == "export" or any(
+            option == "-x" or (option.startswith("-") and "x" in option[1:])
+            for option in options
+        )
+        for operand in words[1:]:
+            if operand.startswith(("-", "+")):
+                continue
+            if _ENV_ASSIGNMENT.match(operand):
+                name, value = operand.split("=", 1)
+                if name not in _GIT_REPOSITORY_ENV:
+                    continue
+                shell_variables[name] = value
+            else:
+                name = operand
+            if name not in _GIT_REPOSITORY_ENV:
+                continue
+            if removes_export:
+                git_environment.pop(name, None)
+            elif adds_export and name in shell_variables:
+                git_environment[name] = shell_variables[name]
+        return True
+    if words and words[0] == "readonly":
+        exports_value = any(
+            option == "-x" or (option.startswith("-") and "x" in option[1:])
+            for option in words[1:]
+            if option.startswith("-")
+        )
+        for operand in words[1:]:
+            if not _ENV_ASSIGNMENT.match(operand):
+                continue
+            name, value = operand.split("=", 1)
+            if name in _GIT_REPOSITORY_ENV:
+                shell_variables[name] = value
+                if exports_value:
                     git_environment[name] = value
         return True
     if words and words[0] == "unset":
+        function_only = "-f" in words[1:]
         for name in words[1:]:
+            if name.startswith("-") or function_only:
+                continue
             if name in _GIT_REPOSITORY_ENV:
+                shell_variables.pop(name, None)
                 git_environment.pop(name, None)
         return True
     return False
@@ -990,8 +1031,11 @@ def _git_write_violation(command, cwd):
         for name in _GIT_REPOSITORY_ENV
         if name in os.environ
     }
+    shell_git_variables = dict(persistent_git_environment)
     for words in simple_cmds:
-        if _update_persistent_git_environment(words, persistent_git_environment):
+        if _update_persistent_git_environment(
+            words, shell_git_variables, persistent_git_environment
+        ):
             continue
         exe, args, wrapper_chdirs, wrapper_target_unknown, git_environment = (
             _unwrap_simple_command(words, persistent_git_environment)

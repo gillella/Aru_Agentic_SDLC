@@ -1646,6 +1646,52 @@ class GitCommandCheckoutTests(unittest.TestCase):
                     )
                 )
 
+    def test_function_only_unset_preserves_exported_git_dir(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"export GIT_DIR={self.main_root}/.git; "
+                        f"unset -f GIT_DIR; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_declare_and_typeset_export_git_dir(self):
+        for builtin in ("declare", "typeset"):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(builtin=builtin, operation=operation):
+                    self.assertIsNotNone(
+                        self.violation(
+                            f"{builtin} -x GIT_DIR={self.main_root}/.git; "
+                            f"git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
+    def test_readonly_value_can_be_exported_by_name(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"readonly GIT_DIR={self.main_root}/.git; "
+                        f"export GIT_DIR; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_shell_builtins_can_remove_git_dir_export(self):
+        for prefix in ("export -n", "declare +x", "typeset +x"):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(prefix=prefix, operation=operation):
+                    self.assertIsNone(
+                        self.violation(
+                            f"export GIT_DIR={self.main_root}/.git; "
+                            f"{prefix} GIT_DIR; git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
     def test_env_split_string_resolves_relative_git_dir_after_capital_c(self):
         self.assertIsNotNone(
             self.violation(
