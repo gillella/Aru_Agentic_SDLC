@@ -615,7 +615,9 @@ class HookDecisionTests(unittest.TestCase):
         with samefile, \
              patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
              patch.object(et, "repo_root", return_value=root), \
+             patch.object(et, "_canonical_git_root", return_value=root), \
              patch.object(et, "current_branch", return_value=branch), \
+             patch.object(et, "_current_branch_for_git_dir", return_value=branch), \
              patch.object(et, "governed_repo", return_value=governed), \
              patch.object(et, "touches_for", return_value=touches):
             return et.main()
@@ -792,6 +794,10 @@ class HookDecisionTests(unittest.TestCase):
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload_block))), \
              patch.object(et, "repo_root", return_value="/repo/feat"), \
              patch.object(et, "current_branch", side_effect=branch_for), \
+             patch.object(et, "_current_branch_for_git_dir",
+                          side_effect=lambda _git_dir, path, _env: branch_for(path)), \
+             patch.object(et, "_canonical_git_root",
+                          side_effect=lambda path, *_args: path), \
              patch.object(et, "governed_repo", return_value=True):
             rc = et.main()
             self.assertEqual(rc, et.EXIT_BLOCK)
@@ -812,6 +818,10 @@ class HookDecisionTests(unittest.TestCase):
                  }))), \
                  patch.object(et, "repo_root", return_value="/repo/feat"), \
                  patch.object(et, "current_branch", side_effect=branch_for), \
+                 patch.object(et, "_current_branch_for_git_dir",
+                              side_effect=lambda _git_dir, path, _env: branch_for(path)), \
+                 patch.object(et, "_canonical_git_root",
+                              side_effect=lambda path, *_args: path), \
                  patch.object(et, "governed_repo", return_value=True):
                 self.assertEqual(et.main(), et.EXIT_BLOCK)
 
@@ -824,6 +834,10 @@ class HookDecisionTests(unittest.TestCase):
         with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload_allow))), \
              patch.object(et, "repo_root", return_value="/repo/main"), \
              patch.object(et, "current_branch", side_effect=branch_for), \
+             patch.object(et, "_current_branch_for_git_dir",
+                          side_effect=lambda _git_dir, path, _env: branch_for(path)), \
+             patch.object(et, "_canonical_git_root",
+                          side_effect=lambda path, *_args: path), \
              patch.object(et, "governed_repo", return_value=True):
             rc = et.main()
             self.assertEqual(rc, et.EXIT_ALLOW)
@@ -970,7 +984,23 @@ class HookDecisionTests(unittest.TestCase):
     def test_push_to_main_blocked_even_without_a_claim(self):
         rc = self._run(
             {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}, "cwd": "/repo"},
-            "scratch/experiment", None,
+            "scratch/experiment", None, governed=True,
+        )
+        self.assertEqual(rc, et.EXIT_BLOCK)
+
+    def test_push_to_main_in_ungoverned_repo_is_allowed(self):
+        rc = self._run(
+            {"tool_name": "Bash", "tool_input": {"command": "git push origin main"},
+             "cwd": "/repo"},
+            "main", None, governed=False,
+        )
+        self.assertEqual(rc, et.EXIT_ALLOW)
+
+    def test_git_governance_detection_failure_fails_closed(self):
+        rc = self._run(
+            {"tool_name": "Bash", "tool_input": {"command": "git push origin main"},
+             "cwd": "/repo"},
+            "main", None, governed=None,
         )
         self.assertEqual(rc, et.EXIT_BLOCK)
 
@@ -1426,6 +1456,57 @@ class GitCommandCheckoutTests(unittest.TestCase):
         cls.wt = cls.main_root / ".worktrees" / "fix-issue-11"
         git("worktree", "add", "-b", "fix/issue-11-a", str(cls.wt), cwd=cls.main_root)
 
+        cls.ungoverned = base / "ungoverned"
+        cls.ungoverned.mkdir()
+        git("init", "-b", "main", cwd=cls.ungoverned)
+
+        cls.symlinked_git_checkout = base / "symlinked-git-checkout"
+        cls.symlinked_git_checkout.mkdir()
+        (cls.symlinked_git_checkout / ".git").symlink_to(cls.main_root / ".git")
+
+        cls.unrelated_agents = base / "unrelated-agents"
+        cls.unrelated_agents.mkdir()
+        git("init", "-b", "main", cwd=cls.unrelated_agents)
+        (cls.unrelated_agents / "AGENTS.md").write_text(
+            "# Local development notes\n", encoding="utf-8"
+        )
+
+        cls.separate_worktree = base / "separate-worktree"
+        cls.separate_git_dir = base / "separate-metadata" / "repo.git"
+        cls.separate_git_dir.parent.mkdir()
+        subprocess.run(
+            [
+                "git", "init", "-b", "main",
+                "--separate-git-dir", str(cls.separate_git_dir),
+                str(cls.separate_worktree),
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        # Deliberately leave this repository unborn: rev-parse prints HEAD and
+        # fails before the first commit, while the next commit still writes main.
+        (cls.separate_worktree / "AGENTS.md").write_text(
+            cls.AGENTS_MD, encoding="utf-8"
+        )
+
+        cls.ungoverned_separate_worktree = base / "ungoverned-separate-worktree"
+        cls.ungoverned_separate_git_dir = base / "ungoverned-separate-meta" / "repo.git"
+        cls.ungoverned_separate_git_dir.parent.mkdir()
+        subprocess.run(
+            [
+                "git", "init", "-b", "main", "--separate-git-dir",
+                str(cls.ungoverned_separate_git_dir),
+                str(cls.ungoverned_separate_worktree),
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        git("config", "user.email", "t@example.com", cwd=cls.ungoverned_separate_worktree)
+        git("config", "user.name", "t", cwd=cls.ungoverned_separate_worktree)
+        (cls.ungoverned_separate_worktree / "app.py").write_text(
+            "x = 1\n", encoding="utf-8"
+        )
+        git("add", "-A", cwd=cls.ungoverned_separate_worktree)
+        git("commit", "-m", "init", cwd=cls.ungoverned_separate_worktree)
+
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
@@ -1447,6 +1528,16 @@ class GitCommandCheckoutTests(unittest.TestCase):
     def test_explicit_push_to_main_from_a_worktree_is_still_blocked(self):
         self.assertIsNotNone(self.violation("git push origin main", self.wt))
 
+    def test_push_to_main_in_repo_without_agents_file_is_allowed(self):
+        self.assertIsNone(self.violation("git push origin main", self.ungoverned))
+
+    def test_push_to_main_with_unrelated_agents_file_is_allowed(self):
+        self.assertIsNone(self.violation("git push origin main", self.unrelated_agents))
+
+    def test_governance_detection_failure_still_refuses(self):
+        with patch.object(et, "governed_repo", return_value=None):
+            self.assertIsNotNone(self.violation("git push origin main", self.main_root))
+
     # --- the false permissions (shell in a worktree, target is main) ------
 
     def test_dash_capital_c_commit_into_main_is_blocked(self):
@@ -1464,6 +1555,349 @@ class GitCommandCheckoutTests(unittest.TestCase):
             self.violation(
                 f"git --git-dir={self.main_root}/.git "
                 f"--work-tree={self.main_root} commit -m x",
+                self.wt,
+            )
+        )
+
+    def test_governed_git_dir_with_ungoverned_work_tree_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"git --git-dir={self.main_root}/.git "
+                f"--work-tree={self.ungoverned} commit -m x",
+                self.wt,
+            )
+        )
+
+    def test_git_dir_environment_with_ungoverned_work_tree_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"GIT_DIR={self.main_root}/.git "
+                f"GIT_WORK_TREE={self.ungoverned} git commit -m x",
+                self.ungoverned,
+            )
+        )
+
+    def test_env_wrapper_git_dir_with_ungoverned_work_tree_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"env GIT_DIR={self.main_root}/.git "
+                f"GIT_WORK_TREE={self.ungoverned} git commit -m x",
+                self.ungoverned,
+            )
+        )
+
+    def test_git_dir_environment_push_to_governed_main_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"GIT_DIR={self.main_root}/.git git push origin main",
+                self.ungoverned,
+            )
+        )
+
+    def test_git_dir_before_capital_c_keeps_governed_refs_identity(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"git --git-dir={self.main_root}/.git "
+                f"-C {self.ungoverned} commit -m x",
+                self.ungoverned,
+            )
+        )
+
+    def test_symlinked_git_dir_uses_canonical_governed_checkout(self):
+        self.assertIsNotNone(
+            self.violation("git commit -m x", self.symlinked_git_checkout)
+        )
+
+    def test_relative_git_dir_environment_is_resolved_after_capital_c(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"GIT_DIR=.git git -C {self.main_root} commit -m x",
+                self.ungoverned,
+            )
+        )
+
+    def test_git_common_dir_environment_binds_governed_refs(self):
+        for command in (
+            f"GIT_COMMON_DIR={self.main_root}/.git git commit -m x",
+            f"GIT_COMMON_DIR={self.main_root}/.git git push origin main",
+            f"GIT_DIR={self.ungoverned}/.git "
+            f"GIT_COMMON_DIR={self.main_root}/.git git commit -m x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.violation(command, self.ungoverned))
+
+    def test_new_assignment_only_git_dir_is_not_exported(self):
+        for separator in (";", "&&"):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(separator=separator, operation=operation):
+                    self.assertIsNone(
+                        self.violation(
+                            f"GIT_DIR={self.main_root}/.git {separator} git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
+    def test_assignment_preserves_an_existing_export_attribute(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"export GIT_DIR={self.ungoverned}/.git; "
+                        f"GIT_DIR={self.main_root}/.git; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_assignment_value_can_be_exported_later_by_name(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"GIT_DIR={self.main_root}/.git; export GIT_DIR; "
+                        f"git {operation}",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_exported_git_dir_persists_to_commit_and_push(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"export GIT_DIR={self.main_root}/.git; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_function_only_unset_preserves_exported_git_dir(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"export GIT_DIR={self.main_root}/.git; "
+                        f"unset -f GIT_DIR; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_declare_and_typeset_export_git_dir(self):
+        for builtin in ("declare", "typeset"):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(builtin=builtin, operation=operation):
+                    self.assertIsNotNone(
+                        self.violation(
+                            f"{builtin} -x GIT_DIR={self.main_root}/.git; "
+                            f"git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
+    def test_readonly_value_can_be_exported_by_name(self):
+        for operation in ("commit -m x", "push origin main"):
+            with self.subTest(operation=operation):
+                self.assertIsNotNone(
+                    self.violation(
+                        f"readonly GIT_DIR={self.main_root}/.git; "
+                        f"export GIT_DIR; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+
+    def test_builtin_assignment_preserves_existing_export(self):
+        for declaration in ("readonly", "declare", "typeset", "declare -r", "typeset -r"):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(declaration=declaration, operation=operation):
+                    self.assertIsNotNone(
+                        self.violation(
+                            f"export GIT_DIR={self.ungoverned}/.git; "
+                            f"{declaration} GIT_DIR={self.main_root}/.git; "
+                            f"git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
+    def test_shell_builtins_can_remove_git_dir_export(self):
+        for prefix in (
+            "export -n", "declare +x", "typeset +x",
+            "declare +rx", "typeset +rx",
+        ):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(prefix=prefix, operation=operation):
+                    self.assertIsNone(
+                        self.violation(
+                            f"export GIT_DIR={self.main_root}/.git; "
+                            f"{prefix} GIT_DIR; git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
+    def test_conflicting_export_options_honor_removal(self):
+        for builtin in ("declare", "typeset"):
+            commands = (
+                f"export GIT_DIR={self.ungoverned}/.git; {builtin} +x -x "
+                f"GIT_DIR={self.main_root}/.git; git commit -m x",
+                f"export GIT_DIR={self.main_root}/.git; {builtin} -x +x "
+                "GIT_DIR; git push origin main",
+            )
+            for command in commands:
+                with self.subTest(builtin=builtin, command=command):
+                    self.assertIsNone(self.violation(command, self.ungoverned))
+
+    def test_allexport_applies_to_later_selector_assignments(self):
+        prefixes = (
+            "set -a; GIT_DIR=$G/.git;",
+            "set -o allexport; GIT_DIR=$G/.git;",
+            "set -a; GIT_DIR=$G/.git; set +a;",
+            "set -a; readonly GIT_DIR=$G/.git;",
+            "set -a; declare GIT_DIR=$G/.git;",
+            "set -a; typeset GIT_DIR=$G/.git;",
+        )
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            for prefix in prefixes:
+                for operation in ("commit -m x", "push origin main"):
+                    with self.subTest(prefix=prefix, operation=operation):
+                        self.assertIsNotNone(
+                            self.violation(
+                                f"{prefix} git {operation}", self.ungoverned
+                            )
+                        )
+
+    def test_disabled_allexport_leaves_new_assignment_local(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(operation=operation):
+                    self.assertIsNone(
+                        self.violation(
+                            f"set +a; GIT_DIR=$G/.git; git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
+    def test_unquoted_tilde_expands_in_exported_selector_assignments(self):
+        prefixes = (
+            "GIT_DIR=~/repo/.git; export GIT_DIR;",
+            "export GIT_DIR=~/repo/.git;",
+            "declare -x GIT_DIR=~/repo/.git;",
+            "typeset -x GIT_DIR=~/repo/.git;",
+        )
+        with patch.dict(os.environ, {"HOME": str(self.main_root.parent)}):
+            for prefix in prefixes:
+                with self.subTest(prefix=prefix):
+                    self.assertIsNotNone(
+                        self.violation(f"{prefix} git commit -m x", self.ungoverned)
+                    )
+
+    def test_assignment_prefix_on_special_builtin_persists(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            prefixes = (
+                "GIT_DIR=$G/.git export GIT_DIR;",
+                "GIT_DIR=$G/.git readonly GIT_DIR; export GIT_DIR;",
+            )
+            for prefix in prefixes:
+                for operation in ("commit -m x", "push origin main"):
+                    with self.subTest(prefix=prefix, operation=operation):
+                        self.assertIsNotNone(
+                            self.violation(
+                                f"{prefix} git {operation}", self.ungoverned
+                            )
+                        )
+
+    def test_function_only_builtin_options_do_not_mutate_variable_export(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            for operation in ("commit -m x", "push origin main"):
+                self.assertIsNone(
+                    self.violation(
+                        f"GIT_DIR=$G/.git; export -f GIT_DIR; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+                for builtin in ("export -fn", "export -nf", "unset -fv", "unset -vf"):
+                    with self.subTest(builtin=builtin, operation=operation):
+                        self.assertIsNotNone(
+                            self.violation(
+                                f"export GIT_DIR=$G/.git; "
+                                f"{builtin} GIT_DIR; git {operation}",
+                                self.ungoverned,
+                            )
+                        )
+
+    def test_export_print_mode_with_operand_exports_local_selector(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            prefixes = (
+                "GIT_DIR=$G/.git; export -p GIT_DIR;",
+                "export -p GIT_DIR=$G/.git;",
+                "GIT_DIR=$G/.git; export -p -- GIT_DIR;",
+                "export -p -- GIT_DIR=$G/.git;",
+            )
+            for prefix in prefixes:
+                for operation in ("commit -m x", "push origin main"):
+                    with self.subTest(prefix=prefix, operation=operation):
+                        self.assertIsNotNone(
+                            self.violation(
+                                f"{prefix} git {operation}", self.ungoverned
+                            )
+                        )
+
+    def test_export_print_and_remove_keeps_selector_unexported(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            for options in ("-pn", "-np"):
+                for operation in ("commit -m x", "push origin main"):
+                    with self.subTest(options=options, operation=operation):
+                        self.assertIsNone(
+                            self.violation(
+                                f"export {options} GIT_DIR=$G/.git; git {operation}",
+                                self.ungoverned,
+                            )
+                        )
+
+    def test_env_split_string_resolves_relative_git_dir_after_capital_c(self):
+        self.assertIsNotNone(
+            self.violation(
+                f'env -S "GIT_DIR=.git git -C {self.main_root} commit -m x"',
+                self.ungoverned,
+            )
+        )
+
+    def test_env_unset_and_ignore_remove_prefixed_git_dir(self):
+        commands = (
+            f"GIT_DIR={self.main_root}/.git env -u GIT_DIR git commit -m x",
+            f"GIT_DIR={self.main_root}/.git env --unset=GIT_DIR git commit -m x",
+            f'GIT_DIR={self.main_root}/.git env -i PATH="$PATH" git commit -m x',
+            f"GIT_DIR={self.main_root}/.git env -u GIT_DIR git push origin main",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIsNone(self.violation(command, self.ungoverned))
+
+    def test_inherited_git_dir_is_applied_to_later_git_write(self):
+        with patch.dict(os.environ, {"GIT_DIR": str(self.main_root / ".git")}):
+            self.assertIsNotNone(self.violation("git commit -m x", self.ungoverned))
+
+    def test_ungoverned_separate_git_dir_checkout_is_allowed(self):
+        self.assertIsNone(
+            self.violation("git commit -m x", self.ungoverned_separate_worktree)
+        )
+        self.assertIsNone(
+            self.violation(
+                f"git -C {self.ungoverned_separate_worktree} commit -m x",
+                self.main_root,
+            )
+        )
+
+    def test_ungoverned_git_dir_with_governed_work_tree_is_allowed(self):
+        self.assertIsNone(
+            self.violation(
+                f"git --git-dir={self.ungoverned}/.git "
+                f"--work-tree={self.main_root} commit -m x",
+                self.wt,
+            )
+        )
+
+    def test_unborn_separate_git_dir_on_main_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"git --git-dir={self.separate_git_dir} "
+                f"--work-tree={self.separate_worktree} commit -m x",
                 self.wt,
             )
         )

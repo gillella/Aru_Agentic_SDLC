@@ -55,11 +55,17 @@ EXIT_ALLOW = 0
 EXIT_BLOCK = 2
 
 
-def _run(cmd, cwd=None, timeout=15):
+def _run(cmd, cwd=None, timeout=15, env=None):
     """Runs a command, returning (rc, stdout). Never raises."""
     try:
         proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=env,
         )
         return proc.returncode, proc.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -74,7 +80,31 @@ def repo_root(cwd):
 
 
 def current_branch(cwd):
+    """Returns the checked-out branch, including for an unborn repository."""
     rc, out = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
+    if rc == 0 and out and out != "HEAD":
+        return out
+    # rev-parse reports an error (and sometimes prints ``HEAD``) before the
+    # first commit. symbolic-ref still identifies the protected branch that
+    # the pending commit will create.
+    rc, out = _run(["git", "symbolic-ref", "--short", "HEAD"], cwd=cwd)
+    return out if rc == 0 else ""
+
+
+def _current_branch_for_git_dir(git_dir, cwd, git_environment=None):
+    """Returns the branch supplied by the effective Git repository state."""
+    prefix = ["git"]
+    if git_dir:
+        prefix.extend(["--git-dir", git_dir])
+    env = _git_process_environment(git_environment)
+    rc, out = _run(
+        prefix + ["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, env=env
+    )
+    if rc == 0 and out and out != "HEAD":
+        return out
+    rc, out = _run(
+        prefix + ["symbolic-ref", "--short", "HEAD"], cwd=cwd, env=env
+    )
     return out if rc == 0 else ""
 
 
@@ -330,6 +360,15 @@ def path_allowed(rel_path, touches):
 
 
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_GIT_REPOSITORY_ENV = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"})
+
+
+def _assignment_parts(assignment):
+    """Returns a shell assignment with unquoted leading-tilde expansion."""
+    name, value = assignment.split("=", 1)
+    if value.startswith("~") and not getattr(assignment, "shell_quoted", False):
+        value = os.path.expanduser(value)
+    return name, value
 _WRAPPERS = frozenset({"env", "nice", "nohup", "time", "sudo", "exec", "builtin", "command"})
 
 _SUDO_VAL_OPTS = frozenset({
@@ -441,21 +480,43 @@ def _push_state_option(name):
     return matches.pop() if len(matches) == 1 else None
 
 
-def _unwrap_simple_command(words):
+def _unwrap_simple_command(words, inherited_git_environment=None):
     """Strips leading environment variable assignments and command wrappers (env, sudo, etc.).
 
-    Returns (executable, args_list, wrapper_chdirs, wrapper_target_unknown).
+    Returns (executable, args_list, wrapper_chdirs, wrapper_target_unknown,
+    git_environment). The last value retains environment variables that can
+    select Git's refs repository; dropping them would let a command write a
+    governed repository while the guard inspects an unrelated cwd.
     """
     if not words:
-        return None, [], [], False
+        return None, [], [], False, {}
 
     words = list(words)
     i = 0
     wrapper_chdirs = []
     wrapper_target_unknown = False
+    git_environment = dict(inherited_git_environment or {})
+
+    def remember_git_environment(assignment):
+        name, value = _assignment_parts(assignment)
+        if name in _GIT_REPOSITORY_ENV:
+            git_environment[name] = value
+
+    def clear_env_short_flag(token):
+        """Whether a clustered env option clears the inherited environment."""
+        if not token.startswith("-") or token.startswith("--"):
+            return False
+        for char in token[1:]:
+            if char == "i":
+                return True
+            if f"-{char}" in _ENV_VAL_OPTS:
+                break
+        return False
+
     while i < len(words):
         token = words[i]
         if _ENV_ASSIGNMENT.match(token):
+            remember_git_environment(token)
             i += 1
             continue
 
@@ -468,6 +529,7 @@ def _unwrap_simple_command(words):
                     i += 1
                     break
                 if _ENV_ASSIGNMENT.match(w_tok):
+                    remember_git_environment(w_tok)
                     i += 1
                     continue
                 if not w_tok.startswith("-"):
@@ -475,11 +537,15 @@ def _unwrap_simple_command(words):
 
                 name, _, inline = w_tok.partition("=")
                 if wrapper_name == "env":
+                    if name == "--ignore-environment" or clear_env_short_flag(w_tok):
+                        git_environment.clear()
                     short_opt, short_value, consumed = _short_option_value(
                         w_tok, _ENV_VAL_OPTS, words, i
                     )
                     if short_opt:
                         i += consumed
+                        if short_opt == "-u" and short_value in _GIT_REPOSITORY_ENV:
+                            git_environment.pop(short_value, None)
                         if short_opt == "-C":
                             wrapper_chdirs.append(short_value)
                         if short_opt != "-S":
@@ -487,7 +553,7 @@ def _unwrap_simple_command(words):
                         s_arg = short_value or ""
                         inner_tokens = _shell_tokens(s_arg)
                         if inner_tokens is None:
-                            return None, [], wrapper_chdirs, wrapper_target_unknown
+                            return None, [], wrapper_chdirs, wrapper_target_unknown, git_environment
                         inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
                         if inner_words:
                             words = words[:i] + inner_words + words[i:]
@@ -497,18 +563,23 @@ def _unwrap_simple_command(words):
                         i += 1 if inline or i + 1 >= len(words) else 2
                         inner_tokens = _shell_tokens(s_arg)
                         if inner_tokens is None:
-                            return None, [], wrapper_chdirs, wrapper_target_unknown
+                            return None, [], wrapper_chdirs, wrapper_target_unknown, git_environment
                         inner_words = [t[1] for t in inner_tokens if t[0] == "word"]
                         if inner_words:
                             words = words[:i] + inner_words + words[i:]
                         continue
                     elif inline:
+                        if name == "--unset" and inline in _GIT_REPOSITORY_ENV:
+                            git_environment.pop(inline, None)
                         if name in {"-C", "--chdir"}:
                             wrapper_chdirs.append(inline)
                         i += 1
                     elif name in _ENV_VAL_OPTS:
+                        option_value = words[i + 1] if i + 1 < len(words) else None
+                        if name in {"-u", "--unset"} and option_value in _GIT_REPOSITORY_ENV:
+                            git_environment.pop(option_value, None)
                         if name in {"-C", "--chdir"}:
-                            wrapper_chdirs.append(words[i + 1] if i + 1 < len(words) else None)
+                            wrapper_chdirs.append(option_value)
                         i += 2 if i + 1 < len(words) else 1
                     else:
                         i += 1
@@ -579,8 +650,8 @@ def _unwrap_simple_command(words):
         break
 
     if i >= len(words):
-        return None, [], wrapper_chdirs, wrapper_target_unknown
-    return words[i], words[i + 1:], wrapper_chdirs, wrapper_target_unknown
+        return None, [], wrapper_chdirs, wrapper_target_unknown, git_environment
+    return words[i], words[i + 1:], wrapper_chdirs, wrapper_target_unknown, git_environment
 
 
 def _git_write_to_protected(command, branch):
@@ -616,7 +687,9 @@ def _git_write_to_protected(command, branch):
             simple_cmds.append(current)
 
     for words in simple_cmds:
-        exe, args, wrapper_chdirs, wrapper_target_unknown = _unwrap_simple_command(words)
+        exe, args, wrapper_chdirs, wrapper_target_unknown, _git_environment = (
+            _unwrap_simple_command(words)
+        )
         if not _is_git_exe(exe):
             continue
 
@@ -748,8 +821,8 @@ _GIT_WRITE_SUBCOMMANDS = frozenset({"commit", "push"})
 # previous pattern allowed only lowercase `-c <config>`, so `git -C <path>
 # commit` did not read as a commit at all and skipped the guard entirely -
 # the check was narrower than what git accepts.
-_GIT_DIR_OPTS = frozenset({"-C", "--git-dir", "--work-tree"})
-_GIT_VALUE_OPTS = _GIT_DIR_OPTS | {"-c", "--namespace", "--exec-path"}
+_GIT_LOCATION_OPTS = frozenset({"-C", "--git-dir", "--work-tree"})
+_GIT_VALUE_OPTS = _GIT_LOCATION_OPTS | {"-c", "--namespace", "--exec-path"}
 
 
 def _resolve_dir(raw, base):
@@ -758,6 +831,211 @@ def _resolve_dir(raw, base):
     if resolved is None:
         return None
     return os.path.normpath(os.path.join(base, resolved))
+
+
+def _git_process_environment(git_environment=None):
+    """Builds a subprocess environment with repository selectors exact."""
+    env = os.environ.copy()
+    for name in _GIT_REPOSITORY_ENV:
+        env.pop(name, None)
+    env.update(git_environment or {})
+    return env
+
+
+def _gitfile_target(root):
+    """Returns the real gitdir named by a non-symlink worktree gitfile."""
+    marker = os.path.join(root, ".git")
+    if os.path.islink(marker) or not os.path.isfile(marker):
+        return None
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            first_line = fh.readline().strip()
+    except (OSError, UnicodeError):
+        return None
+    prefix = "gitdir: "
+    if not first_line.startswith(prefix):
+        return None
+    value = first_line[len(prefix):]
+    if not os.path.isabs(value):
+        value = os.path.join(root, value)
+    return os.path.realpath(value)
+
+
+def _canonical_git_root(target, git_dir=None, git_environment=None):
+    """Returns the checkout that owns the refs used by a Git invocation.
+
+    ``--show-toplevel`` describes the visible work tree, which is insufficient
+    for explicit ``GIT_DIR``/``--git-dir`` commands and for a work tree whose
+    ``.git`` is a symlink. The canonical common directory identifies the refs
+    repository. A normal repository (and a linked worktree) maps from its real
+    ``.git`` directory back to the primary checkout. Separate git dirs use
+    their configured worktree when one can be proven; otherwise callers fail
+    closed.
+    """
+    prefix = ["git"]
+    if git_dir:
+        prefix.extend(["--git-dir", git_dir])
+    env = _git_process_environment(git_environment)
+    rc, out = _run(
+        prefix + ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=target,
+        env=env,
+    )
+    if rc != 0 or not out:
+        return None
+    common_dir = os.path.realpath(
+        out if os.path.isabs(out) else os.path.join(target, out)
+    )
+
+    rc, absolute_git_dir = _run(
+        prefix + ["rev-parse", "--absolute-git-dir"], cwd=target, env=env
+    )
+    if rc != 0 or not absolute_git_dir:
+        return None
+    absolute_git_dir = os.path.realpath(absolute_git_dir)
+
+    rc, worktree_root = _run(
+        prefix + ["rev-parse", "--show-toplevel"], cwd=target, env=env
+    )
+    if rc == 0 and worktree_root:
+        worktree_root = os.path.realpath(worktree_root)
+        gitfile_target = _gitfile_target(worktree_root)
+        # A normal --separate-git-dir checkout has a gitfile whose target is
+        # also its common dir. That verified mapping is stronger evidence than
+        # the directory's name and preserves the allow path for ungoverned
+        # repositories. Linked worktrees point at a per-worktree git dir, not
+        # the common dir, and therefore continue to bind to the primary root.
+        if gitfile_target == absolute_git_dir == common_dir:
+            return worktree_root
+
+    if os.path.basename(common_dir) == ".git":
+        return os.path.dirname(common_dir)
+
+    rc, worktree = _run(
+        prefix + ["config", "--path", "--get", "core.worktree"],
+        cwd=target,
+        env=env,
+    )
+    if rc != 0 or not worktree:
+        return None
+    if not os.path.isabs(worktree):
+        worktree = os.path.join(common_dir, worktree)
+    return os.path.realpath(worktree)
+
+
+def _update_persistent_git_environment(
+    words, shell_variables, git_environment, allexport=False
+):
+    """Applies shell environment statements that affect later commands.
+
+    The hook receives a whole shell command and therefore must retain the
+    repository selectors established by an assignment-only statement or
+    ``export`` before a later Git write. This intentionally models the safe
+    (blocking) direction when shell export attributes are not observable.
+    """
+    def apply_assignment(assignment):
+        name, value = _assignment_parts(assignment)
+        if name in _GIT_REPOSITORY_ENV:
+            shell_variables[name] = value
+            if allexport or name in git_environment:
+                git_environment[name] = value
+
+    if words and all(_ENV_ASSIGNMENT.match(word) for word in words):
+        for assignment in words:
+            apply_assignment(assignment)
+        return True, allexport
+
+    prefix_count = 0
+    while prefix_count < len(words) and _ENV_ASSIGNMENT.match(words[prefix_count]):
+        prefix_count += 1
+    persistent_builtins = {"set", "export", "declare", "typeset", "readonly", "unset"}
+    if prefix_count and prefix_count < len(words) and words[prefix_count] in persistent_builtins:
+        for assignment in words[:prefix_count]:
+            apply_assignment(assignment)
+        words = words[prefix_count:]
+
+    if words and words[0] == "set":
+        operands = list(words[1:])
+        if operands == ["-a"] or operands == ["-o", "allexport"]:
+            return True, True
+        if operands == ["+a"] or operands == ["+o", "allexport"]:
+            return True, False
+        return True, allexport
+
+    if words and words[0] in {"export", "declare", "typeset"}:
+        builtin = words[0]
+        options = [word for word in words[1:] if word.startswith(('-', '+'))]
+        function_only = builtin == "export" and any(
+            option.startswith("-") and "f" in option[1:] for option in options
+        )
+        if function_only:
+            # `export -f` addresses functions only. Combining it with `-n`
+            # emits a diagnostic and leaves any existing variable export intact.
+            return True, allexport
+        removes_export = any(
+            option.startswith("-") and "n" in option[1:]
+            if builtin == "export"
+            else option.startswith("+") and "x" in option[1:]
+            for option in options
+        )
+        adds_export = builtin == "export" or any(
+            option == "-x" or (option.startswith("-") and "x" in option[1:])
+            for option in options
+        )
+        for operand in words[1:]:
+            if operand.startswith(("-", "+")):
+                continue
+            if _ENV_ASSIGNMENT.match(operand):
+                name, value = _assignment_parts(operand)
+                if name not in _GIT_REPOSITORY_ENV:
+                    continue
+                shell_variables[name] = value
+                if (allexport or name in git_environment) and not removes_export:
+                    git_environment[name] = value
+            else:
+                name = operand
+            if name in _GIT_REPOSITORY_ENV:
+                if removes_export:
+                    git_environment.pop(name, None)
+                elif adds_export and name in shell_variables:
+                    git_environment[name] = shell_variables[name]
+        return True, allexport
+    if words and words[0] == "readonly":
+        function_only = any(
+            option.startswith("-") and "f" in option[1:]
+            for option in words[1:]
+            if option.startswith("-")
+        )
+        if function_only:
+            return True, allexport
+        exports_value = any(
+            option == "-x" or (option.startswith("-") and "x" in option[1:])
+            for option in words[1:]
+            if option.startswith("-")
+        )
+        for operand in words[1:]:
+            if not _ENV_ASSIGNMENT.match(operand):
+                continue
+            name, value = _assignment_parts(operand)
+            if name in _GIT_REPOSITORY_ENV:
+                shell_variables[name] = value
+                if allexport or exports_value or name in git_environment:
+                    git_environment[name] = value
+        return True, allexport
+    if words and words[0] == "unset":
+        function_only = any(
+            option.startswith("-") and "f" in option[1:]
+            for option in words[1:]
+            if option.startswith("-")
+        )
+        for name in words[1:]:
+            if name.startswith("-") or function_only:
+                continue
+            if name in _GIT_REPOSITORY_ENV:
+                shell_variables.pop(name, None)
+                git_environment.pop(name, None)
+        return True, allexport
+    return False, allexport
 
 
 def _git_write_violation(command, cwd):
@@ -801,8 +1079,22 @@ def _git_write_violation(command, cwd):
 
     base = cwd
     base_unknown = False
+    persistent_git_environment = {
+        name: os.environ[name]
+        for name in _GIT_REPOSITORY_ENV
+        if name in os.environ
+    }
+    shell_git_variables = dict(persistent_git_environment)
+    allexport = False
     for words in simple_cmds:
-        exe, args, wrapper_chdirs, wrapper_target_unknown = _unwrap_simple_command(words)
+        handled, allexport = _update_persistent_git_environment(
+            words, shell_git_variables, persistent_git_environment, allexport
+        )
+        if handled:
+            continue
+        exe, args, wrapper_chdirs, wrapper_target_unknown, git_environment = (
+            _unwrap_simple_command(words, persistent_git_environment)
+        )
         if exe in ("cd", "pushd"):
             operand = args[0] if args else None
             if operand is None or operand.startswith("-"):
@@ -825,6 +1117,8 @@ def _git_write_violation(command, cwd):
                 unknown = True
                 break
             target, unknown = moved, False
+        git_dir = None
+        explicit_git_dir = False
         index = 0
         subcommand = None
         while index < len(args):
@@ -843,22 +1137,78 @@ def _git_write_violation(command, cwd):
             else:
                 index += 1
                 continue
-            if name in _GIT_DIR_OPTS and value is not None:
-                # --git-dir names the .git directory; the checkout is its parent.
-                candidate = value[:-len("/.git")] if name == "--git-dir" and value.endswith("/.git") else value
-                moved = _resolve_dir(candidate, base)
-                target, unknown = (base, True) if moved is None else (moved, False)
+            if name == "-C" and value is not None:
+                moved = _resolve_dir(value, target)
+                target, unknown = (target, True) if moved is None else (moved, False)
+            elif name == "--git-dir" and value is not None:
+                # The protected branch and governance marker belong to the
+                # repository supplying HEAD and refs.  ``--work-tree`` only
+                # changes where files are checked out; it must not replace a
+                # repository selected by ``--git-dir`` (or by cwd/``-C``).
+                # Otherwise ``--git-dir=<governed>/.git
+                # --work-tree=<ungoverned>`` can write governed refs while the
+                # marker check incorrectly inspects the ungoverned directory.
+                resolved_git_dir = _resolve_dir(value, target)
+                if resolved_git_dir is None:
+                    unknown = True
+                    continue
+                git_dir = resolved_git_dir
+                explicit_git_dir = True
 
         if subcommand not in _GIT_WRITE_SUBCOMMANDS:
             continue
+
+        resolved_git_environment = dict(git_environment)
+        if explicit_git_dir:
+            # The command-line option overrides GIT_DIR. Removing the shadowed
+            # value also prevents it influencing our read-only Git probes.
+            resolved_git_environment.pop("GIT_DIR", None)
+        elif "GIT_DIR" in resolved_git_environment:
+            raw_git_dir = resolved_git_environment["GIT_DIR"]
+            git_dir = _resolve_dir(raw_git_dir, target) if raw_git_dir else None
+            if git_dir is None:
+                unknown = True
+            else:
+                resolved_git_environment["GIT_DIR"] = git_dir
+
+        for name, path_base in (
+            ("GIT_WORK_TREE", target),
+            ("GIT_COMMON_DIR", git_dir or target),
+        ):
+            if name not in resolved_git_environment:
+                continue
+            raw_value = resolved_git_environment[name]
+            resolved_value = _resolve_dir(raw_value, path_base) if raw_value else None
+            if resolved_value is None:
+                unknown = True
+            else:
+                resolved_git_environment[name] = resolved_value
 
         if unknown:
             return (
                 f"run 'git {subcommand}' in a directory this hook cannot "
                 "resolve, so it cannot prove the target branch is unprotected"
             )
-        violation = _git_write_to_protected(["git"] + list(args), current_branch(target))
+        branch = _current_branch_for_git_dir(
+            git_dir, target, resolved_git_environment
+        )
+        if not branch and (git_dir or resolved_git_environment):
+            return (
+                f"run 'git {subcommand}' with repository-selection state this "
+                "hook cannot resolve, so it cannot prove the target branch is safe"
+            )
+        violation = _git_write_to_protected(["git"] + list(args), branch)
         if violation:
+            # This hook is installed globally. A successfully resolved checkout
+            # that positively lacks the Aru marker never opted into protected-
+            # branch governance, so do not impose this repository's workflow on
+            # it. Resolution or marker-read failures remain fail-closed: only a
+            # definite False releases the guard.
+            target_root = _canonical_git_root(
+                target, git_dir, resolved_git_environment
+            )
+            if target_root and governed_repo(target_root) is False:
+                continue
             return violation
 
     return None
@@ -964,6 +1314,15 @@ _REDIR_OPS = ("&>>", ">>&", "&>", ">>", ">&", ">")
 _CONTROL_OPS = ("&&", "||", ";", "|", "&", "\n")
 
 
+class _ShellWord(str):
+    """A parsed shell word that remembers whether quoting contributed to it."""
+
+    def __new__(cls, value, shell_quoted=False):
+        instance = super().__new__(cls, value)
+        instance.shell_quoted = shell_quoted
+        return instance
+
+
 def _shell_tokens(command):
     """Splits a command into ('word' | 'op' | 'control', text) pairs, or None if malformed.
 
@@ -1000,7 +1359,7 @@ def _shell_tokens(command):
 
     def flush():
         if word or quoted:
-            tokens.append(("word", "".join(word)))
+            tokens.append(("word", _ShellWord("".join(word), quoted)))
         del word[:]
 
     while index < length:
