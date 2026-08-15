@@ -189,7 +189,11 @@ class DeployPreviewSkillTests(unittest.TestCase):
         self, mock_comment, mock_extract, mock_wait, mock_dispatch, mock_existing,
         mock_pages, mock_verify, mock_default, mock_repo,
     ):
-        exit_code = dp.deploy_preview(commit_sha=self.commit_sha, issue_id=109, preview_url=self.preview_url)
+        exit_code = dp.deploy_preview(
+            commit_sha=self.commit_sha,
+            issue_id=109,
+            preview_url=self.preview_url.rstrip("/"),
+        )
         self.assertEqual(exit_code, 0)
         mock_verify.assert_called_once_with(self.commit_sha, default_branch="main")
         mock_dispatch.assert_called_once()
@@ -223,7 +227,16 @@ class DeployPreviewSkillTests(unittest.TestCase):
                 dp.deploy_preview(self.commit_sha, issue_id=109, wait=False),
                 1,
             )
-        mock_default.assert_not_called()
+            mock_default.assert_not_called()
+
+        result = subprocess.run(
+            [sys.executable, str(self.root_dir / "scripts" / "deploy_preview.py"), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Rejected compatibility flag", result.stdout)
 
     @patch("deploy_preview.get_repo_slug", return_value="gillella/Aru_Agentic_SDLC")
     @patch("deploy_preview.get_default_branch", return_value="main")
@@ -800,6 +813,33 @@ class DeployPreviewSkillTests(unittest.TestCase):
             (source / "assets").symlink_to(external, target_is_directory=True)
             self.assertFalse(bp.assemble_preview_artifact(str(source), str(source / "dist")))
             self.assertFalse((source / "dist").exists())
+
+    def test_build_preview_rejects_output_nested_inside_copy_source(self):
+        import tempfile
+        import build_preview as bp
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "project"
+            public = source / "public"
+            public.mkdir(parents=True)
+            (public / "index.html").write_text("safe")
+            nested_output = public / "dist"
+            self.assertFalse(
+                bp.assemble_preview_artifact(str(source), str(nested_output))
+            )
+            self.assertFalse(nested_output.exists())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "project"
+            assets = source / "assets"
+            assets.mkdir(parents=True)
+            (source / "index.html").write_text("safe")
+            (assets / "logo.svg").write_text("<svg></svg>")
+            nested_output = assets / "dist"
+            self.assertFalse(
+                bp.assemble_preview_artifact(str(source), str(nested_output))
+            )
+            self.assertFalse(nested_output.exists())
 
     def test_build_preview_never_publishes_credential_json(self):
         import tempfile

@@ -172,6 +172,31 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
         else:
             print("[ERROR] Preview output cannot contain its own source directory.", file=sys.stderr)
             return False
+        try:
+            dest.relative_to(src)
+        except ValueError:
+            pass
+        else:
+            print("[ERROR] Preview output cannot be inside its source directory.", file=sys.stderr)
+            return False
+
+    public_directories = []
+    if source_type == "root_static":
+        for directory_name in ["docs", "static", "assets", "css", "js", "styles", "img", "images", "media"]:
+            directory = source_root / directory_name
+            if not directory.is_dir() or directory == dest:
+                continue
+            try:
+                dest.relative_to(directory)
+            except ValueError:
+                pass
+            else:
+                print(
+                    f"[ERROR] Preview output cannot be inside public asset directory '{directory_name}'.",
+                    file=sys.stderr,
+                )
+                return False
+            public_directories.append((directory_name, directory))
 
     if dest.exists():
         if _contains_symlink(dest):
@@ -189,14 +214,12 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
         root_files = [item for item in source_root.iterdir() if item.is_file() and _is_public_file(item)]
         for item in root_files:
             shutil.copy2(item, dest / item.name)
-        for directory_name in ["docs", "static", "assets", "css", "js", "styles", "img", "images", "media"]:
-            directory = source_root / directory_name
-            if directory.is_dir() and directory != dest:
-                if _contains_symlink(directory):
-                    print(f"[ERROR] Public asset directory '{directory_name}' contains a symlink.", file=sys.stderr)
-                    shutil.rmtree(dest)
-                    return False
-                _copy_public_tree(directory, dest / directory_name)
+        for directory_name, directory in public_directories:
+            if _contains_symlink(directory):
+                print(f"[ERROR] Public asset directory '{directory_name}' contains a symlink.", file=sys.stderr)
+                shutil.rmtree(dest)
+                return False
+            _copy_public_tree(directory, dest / directory_name)
 
     if not (dest / "index.html").is_file():
         shutil.rmtree(dest)

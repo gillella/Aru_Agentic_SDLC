@@ -888,9 +888,11 @@ def deploy_preview(
             dry_run=dry_run,
         )
 
-    if preview_url and resolved_url and preview_url != resolved_url:
-        print("[ERROR] Supplied preview URL does not match exact-run deployment metadata.", file=sys.stderr)
-        return 1
+    if preview_url and resolved_url:
+        normalized_supplied_url = _normalize_pages_url(preview_url)
+        if not normalized_supplied_url or normalized_supplied_url != resolved_url:
+            print("[ERROR] Supplied preview URL does not match exact-run deployment metadata.", file=sys.stderr)
+            return 1
 
     if not resolved_url and not dry_run:
         print(f"[ERROR] Exact-run preview metadata was unavailable for deployment run {run_id}.", file=sys.stderr)
@@ -942,7 +944,11 @@ def main() -> int:
     parser.add_argument("--issue", type=int, help="Originating issue ID (inferred from commit message if omitted)")
     parser.add_argument("--workflow", default="deploy-preview.yml", help="CD workflow filename (default: deploy-preview.yml)")
     parser.add_argument("--url", help="Preview URL (extracted from workflow run if omitted)")
-    parser.add_argument("--no-wait", action="store_true", help="Do not wait for workflow run completion")
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Rejected compatibility flag; exact-run completion evidence is mandatory",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Simulate execution without mutations")
 
     args = parser.parse_args()
