@@ -1743,6 +1743,95 @@ class GitCommandCheckoutTests(unittest.TestCase):
                 with self.subTest(builtin=builtin, command=command):
                     self.assertIsNone(self.violation(command, self.ungoverned))
 
+    def test_allexport_applies_to_later_selector_assignments(self):
+        prefixes = (
+            "set -a; GIT_DIR=$G/.git;",
+            "set -o allexport; GIT_DIR=$G/.git;",
+            "set -a; GIT_DIR=$G/.git; set +a;",
+            "set -a; readonly GIT_DIR=$G/.git;",
+            "set -a; declare GIT_DIR=$G/.git;",
+            "set -a; typeset GIT_DIR=$G/.git;",
+        )
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            for prefix in prefixes:
+                for operation in ("commit -m x", "push origin main"):
+                    with self.subTest(prefix=prefix, operation=operation):
+                        self.assertIsNotNone(
+                            self.violation(
+                                f"{prefix} git {operation}", self.ungoverned
+                            )
+                        )
+
+    def test_disabled_allexport_leaves_new_assignment_local(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(operation=operation):
+                    self.assertIsNone(
+                        self.violation(
+                            f"set +a; GIT_DIR=$G/.git; git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
+    def test_unquoted_tilde_expands_in_exported_selector_assignments(self):
+        prefixes = (
+            "GIT_DIR=~/repo/.git; export GIT_DIR;",
+            "export GIT_DIR=~/repo/.git;",
+            "declare -x GIT_DIR=~/repo/.git;",
+            "typeset -x GIT_DIR=~/repo/.git;",
+        )
+        with patch.dict(os.environ, {"HOME": str(self.main_root.parent)}):
+            for prefix in prefixes:
+                with self.subTest(prefix=prefix):
+                    self.assertIsNotNone(
+                        self.violation(f"{prefix} git commit -m x", self.ungoverned)
+                    )
+
+    def test_assignment_prefix_on_special_builtin_persists(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            prefixes = (
+                "GIT_DIR=$G/.git export GIT_DIR;",
+                "GIT_DIR=$G/.git readonly GIT_DIR; export GIT_DIR;",
+            )
+            for prefix in prefixes:
+                for operation in ("commit -m x", "push origin main"):
+                    with self.subTest(prefix=prefix, operation=operation):
+                        self.assertIsNotNone(
+                            self.violation(
+                                f"{prefix} git {operation}", self.ungoverned
+                            )
+                        )
+
+    def test_function_only_builtin_options_do_not_mutate_variable_export(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            for operation in ("commit -m x", "push origin main"):
+                self.assertIsNone(
+                    self.violation(
+                        f"GIT_DIR=$G/.git; export -f GIT_DIR; git {operation}",
+                        self.ungoverned,
+                    )
+                )
+                for builtin in ("export -fn", "export -nf", "unset -fv", "unset -vf"):
+                    with self.subTest(builtin=builtin, operation=operation):
+                        self.assertIsNotNone(
+                            self.violation(
+                                f"export GIT_DIR=$G/.git; "
+                                f"{builtin} GIT_DIR; git {operation}",
+                                self.ungoverned,
+                            )
+                        )
+
+    def test_export_print_mode_does_not_export_local_selector(self):
+        with patch.dict(os.environ, {"G": str(self.main_root)}):
+            for operation in ("commit -m x", "push origin main"):
+                with self.subTest(operation=operation):
+                    self.assertIsNone(
+                        self.violation(
+                            f"GIT_DIR=$G/.git; export -p GIT_DIR; git {operation}",
+                            self.ungoverned,
+                        )
+                    )
+
     def test_env_split_string_resolves_relative_git_dir_after_capital_c(self):
         self.assertIsNotNone(
             self.violation(
