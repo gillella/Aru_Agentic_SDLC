@@ -476,6 +476,8 @@ def path_allowed(rel_path, touches):
     rel = norm_path(rel_path)
     for pat in touches:
         pat_norm = norm_path(pat)
+        if pat_norm == "**":
+            return True
         if rel == pat_norm:
             return True
         if "*" in pat_norm or "?" in pat_norm or "[" in pat_norm:
@@ -663,6 +665,116 @@ reviewers:
     google: anthropic
 """
 
+DEPLOY_PREVIEW_WORKFLOW = """name: Deploy Preview
+run-name: "Deploy Preview for ${{ inputs.commit_sha }} (${{ inputs.run_token || 'default' }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Exact merged commit SHA to deploy preview for'
+        required: true
+        type: string
+      run_token:
+        description: 'Correlation token for dispatch matching'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "preview-${{ github.repository }}"
+  cancel-in-progress: false
+
+jobs:
+  build-preview:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted control plane
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: control-plane
+          fetch-depth: 0
+
+      - name: Validate exact merged target
+        working-directory: control-plane
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ ! "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "[ERROR] commit_sha must be an exact 40-character SHA." >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          git merge-base --is-ancestor "${TARGET_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
+          git worktree add --detach ../target "${TARGET_SHA}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build with trusted helper
+        run: |
+          python3 control-plane/scripts/build_preview.py --source target --output target/dist
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'target/dist'
+
+  deploy-preview:
+    needs: build-preview
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Record exact-run preview metadata
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          jq -n \\
+            --arg run_id "${GITHUB_RUN_ID}" \\
+            --arg commit_sha "${TARGET_SHA}" \\
+            --arg repository "${GITHUB_REPOSITORY}" \\
+            --arg preview_url "${PAGE_URL}" \\
+            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url}' \\
+            > preview-metadata.json
+
+      - name: Upload exact-run preview metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-metadata
+          path: preview-metadata.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish preview URL summary
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          echo "Preview URL: ${PAGE_URL}" >> "$GITHUB_STEP_SUMMARY"
+"""
+
 
 def scaffold_directory_structure(target_dir: str):
     """Creates standard directory tree with .gitkeep so empty dirs survive git."""
@@ -688,12 +800,22 @@ def scaffold_directory_structure(target_dir: str):
 
 
 def write_governance_scripts(target_dir: str):
-    """Writes CI check_touches and model-routed reviewer scripts/workflows/config."""
+    """Writes CI check_touches, model-routed reviewer, and deploy-preview workflows."""
+    project_scripts_dir = os.path.join(target_dir, "scripts")
     scripts_dir = os.path.join(target_dir, ".github", "scripts")
     workflows_dir = os.path.join(target_dir, ".github", "workflows")
     github_dir = os.path.join(target_dir, ".github")
     os.makedirs(scripts_dir, exist_ok=True)
     os.makedirs(workflows_dir, exist_ok=True)
+    os.makedirs(project_scripts_dir, exist_ok=True)
+
+    build_preview_source = os.path.join(os.path.dirname(__file__), "build_preview.py")
+    build_preview_target = os.path.join(project_scripts_dir, "build_preview.py")
+    with open(build_preview_source, "r", encoding="utf-8") as source:
+        build_preview_content = source.read()
+    with open(build_preview_target, "w", encoding="utf-8") as target:
+        target.write(build_preview_content)
+    os.chmod(build_preview_target, 0o755)
 
     check_touches_path = os.path.join(scripts_dir, "check_touches.py")
     with open(check_touches_path, "w", encoding="utf-8") as f:
@@ -715,7 +837,11 @@ def write_governance_scripts(target_dir: str):
     with open(reviewers_config_path, "w", encoding="utf-8") as f:
         f.write(REVIEWERS_CONFIG)
 
-    print("✅ Governance scripts (check_touches, review.py, review.yml, reviewers.yml) written.")
+    deploy_preview_wf_path = os.path.join(workflows_dir, "deploy-preview.yml")
+    with open(deploy_preview_wf_path, "w", encoding="utf-8") as f:
+        f.write(DEPLOY_PREVIEW_WORKFLOW)
+
+    print("✅ Governance scripts and trusted preview builder written.")
 
 
 def create_cursor_project_rule(target_dir: str):
