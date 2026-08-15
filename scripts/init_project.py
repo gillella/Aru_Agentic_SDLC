@@ -735,6 +735,28 @@ jobs:
         with:
           path: 'target/dist'
 
+      - name: Record exact-run library skip metadata
+        if: steps.build.outputs.is_library == 'true'
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+        run: |
+          jq -n \\
+            --arg run_id "${GITHUB_RUN_ID}" \\
+            --arg commit_sha "${TARGET_SHA}" \\
+            --arg repository "${GITHUB_REPOSITORY}" \\
+            --arg preview_url "skipped" \\
+            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url, is_library: true, status: "skipped"}' \\
+            > preview-metadata.json
+
+      - name: Upload exact-run library skip metadata
+        if: steps.build.outputs.is_library == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-metadata
+          path: preview-metadata.json
+          if-no-files-found: error
+          retention-days: 30
+
   deploy-preview:
     needs: build-preview
     if: needs.build-preview.outputs.has_preview == 'true'
@@ -814,7 +836,8 @@ jobs:
             --url "${PREVIEW_URL}" \\
             --has-preview "${HAS_PREVIEW}" \\
             --is-library "${IS_LIBRARY}" \\
-            --commit-sha "${COMMIT_SHA}"
+            --commit-sha "${COMMIT_SHA}" \\
+            --scenarios-file control-plane/.github/scenarios/smoke.json
 """
 
 

@@ -90,6 +90,9 @@ def _copy_public_tree(source: Path, destination: Path) -> None:
                 shutil.copy2(source_file, target_dir / name)
 
 
+APP_CANDIDATE_DIRS = ["sdlc_flow_visualizer", "public", "dist", "build", "web", "frontend", "site"]
+
+
 def find_preview_source(root_dir: str) -> Optional[Tuple[str, str]]:
     """Return a non-symlink static source rooted inside ``root_dir``."""
     lexical_root = _absolute_lexical(root_dir)
@@ -97,8 +100,7 @@ def find_preview_source(root_dir: str) -> Optional[Tuple[str, str]]:
         return None
     root = lexical_root.resolve(strict=True)
 
-    candidate_dirs = ["sdlc_flow_visualizer", "public", "dist", "build", "web", "frontend", "site"]
-    for candidate in candidate_dirs:
+    for candidate in APP_CANDIDATE_DIRS:
         candidate_path = root / candidate
         index = candidate_path / "index.html"
         if (
@@ -118,6 +120,37 @@ def find_preview_source(root_dir: str) -> Optional[Tuple[str, str]]:
     if docs.is_dir() and not docs.is_symlink() and docs_index.is_file() and not docs_index.is_symlink():
         return "app_dir", str(docs)
     return None
+
+
+def detect_surface_classification(root_dir: str) -> Tuple[str, Optional[Tuple[str, str]]]:
+    """Distinguish valid runnable products, broken runnable products (missing entrypoint), and libraries."""
+    lexical_root = _absolute_lexical(root_dir)
+    if lexical_root.is_symlink() or not lexical_root.is_dir():
+        return "error", None
+    root = lexical_root.resolve(strict=True)
+
+    found = find_preview_source(str(root))
+    if found:
+        return "runnable_found", found
+
+    # Check for broken runnable app (directory exists but index.html is missing)
+    for candidate in APP_CANDIDATE_DIRS:
+        candidate_path = root / candidate
+        if candidate_path.is_dir() and not candidate_path.is_symlink():
+            return "runnable_missing_entrypoint", ("app_dir", str(candidate_path))
+
+    # Positive signal for library
+    has_library_marker = (
+        (root / "src").is_dir()
+        or (root / "pyproject.toml").is_file()
+        or (root / "setup.py").is_file()
+        or (root / "setup.cfg").is_file()
+        or (root / "requirements.txt").is_file()
+    )
+    if has_library_marker:
+        return "library", None
+
+    return "unknown", None
 
 
 def _set_github_output(name: str, value: str) -> None:
@@ -167,23 +200,42 @@ def assemble_preview_artifact(source_dir: str, output_dir: str, allow_library: b
         _set_github_output("is_library", "false")
         return False
 
-    found = find_preview_source(str(source_root))
-    if not found:
+    classification, found = detect_surface_classification(str(source_root))
+    if classification == "runnable_missing_entrypoint":
+        app_path = found[1] if found else "app"
+        print(
+            f"[ERROR] Runnable application directory '{app_path}' exists but lacks entrypoint index.html.",
+            file=sys.stderr,
+        )
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
+        return False
+
+    if classification == "library":
         if allow_library:
             print(
-                f"[INFO] No deployable static entrypoint (index.html) found in '{source_root}'; "
-                "product is a library with no runnable preview surface.",
+                f"[INFO] Product in '{source_root}' identified as a library with no runnable web surface; "
+                "skipping preview build visibly.",
             )
             _set_github_output("has_preview", "false")
             _set_github_output("is_library", "true")
             return True
+        print(
+            f"[ERROR] Product in '{source_root}' is a library with no deployable preview surface and --allow-library was not set.",
+            file=sys.stderr,
+        )
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "true")
+        return False
+
+    if classification != "runnable_found" or not found:
         print(
             f"[ERROR] No deployable static entrypoint (index.html) found in '{source_root}' "
             "or a supported public subdirectory.",
             file=sys.stderr,
         )
         _set_github_output("has_preview", "false")
-        _set_github_output("is_library", "true")
+        _set_github_output("is_library", "false")
         return False
 
     source_type, source_path = found

@@ -83,6 +83,57 @@ def _write_step_summary(content: str) -> None:
         print(f"[WARN] Could not write to GITHUB_STEP_SUMMARY: {exc}", file=sys.stderr)
 
 
+DEFAULT_SCENARIO_PATHS = [
+    ".github/scenarios/smoke.json",
+    "control-plane/.github/scenarios/smoke.json",
+    "scenarios/smoke.json",
+]
+
+
+def load_and_validate_scenarios(scenarios_file: Optional[str] = None) -> Tuple[bool, Optional[List[Dict[str, Any]]], str]:
+    """Load and validate scenario definitions. Fails closed if file is requested but invalid."""
+    target_file = scenarios_file
+    if not target_file:
+        for default_path in DEFAULT_SCENARIO_PATHS:
+            if Path(default_path).is_file():
+                target_file = default_path
+                break
+
+    if not target_file:
+        return True, None, ""
+
+    path_obj = Path(target_file)
+    if not path_obj.is_file():
+        return False, None, f"Scenarios file '{target_file}' does not exist or is not a file."
+
+    try:
+        with open(path_obj, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        return False, None, f"Failed to parse scenarios JSON from '{target_file}': {exc}"
+
+    if not isinstance(data, list):
+        return False, None, f"Scenarios file '{target_file}' must contain a JSON array of scenario objects."
+
+    for idx, item in enumerate(data):
+        if not isinstance(item, dict):
+            return False, None, f"Scenario at index {idx} in '{target_file}' must be an object."
+        if not item.get("name") or not isinstance(item.get("name"), str):
+            return False, None, f"Scenario at index {idx} in '{target_file}' is missing a valid 'name' string."
+
+        for pattern_key in ("contains", "not_contains"):
+            pat = item.get(pattern_key)
+            if pat is not None:
+                if not isinstance(pat, str):
+                    return False, None, f"Scenario '{item.get('name')}' {pattern_key} pattern must be a string."
+                try:
+                    re.compile(pat)
+                except re.error as exc:
+                    return False, None, f"Scenario '{item.get('name')}' has invalid regex for {pattern_key}: {exc}"
+
+    return True, data, ""
+
+
 def evaluate_html_scenarios(html_content: str, scenarios: Optional[List[Dict[str, Any]]] = None) -> List[ScenarioResult]:
     """Evaluate acceptance criteria scenarios against preview HTML content."""
     results: List[ScenarioResult] = []
@@ -109,7 +160,22 @@ def evaluate_html_scenarios(html_content: str, scenarios: Optional[List[Dict[str
         )
     )
 
-    # 3. Custom acceptance scenario evaluations if provided
+    # 3. Absence of Unhandled Runtime Errors
+    error_match = re.search(
+        r"(Unhandled Runtime Error|Traceback\s+\(most recent call last\)|500\s+Internal\s+Server\s+Error)",
+        html_content,
+        re.IGNORECASE,
+    )
+    no_runtime_errors = not bool(error_match)
+    results.append(
+        ScenarioResult(
+            name="Absence of Runtime Errors",
+            passed=no_runtime_errors,
+            details="No unhandled runtime errors detected" if no_runtime_errors else f"Detected runtime error pattern: '{error_match.group(1)}'",
+        )
+    )
+
+    # 4. Custom acceptance scenario evaluations if provided
     if scenarios:
         for item in scenarios:
             name = str(item.get("name", "Custom Scenario"))
@@ -247,16 +313,28 @@ def run_smoke_check(
             scenario_results=[],
         )
 
-    print(f"[INFO] Executing smoke & E2E verification against deployed preview: {url}")
+    # 3. Load and validate scenario definitions (fail closed if invalid)
+    valid_scenarios, custom_scenarios, scenario_err = load_and_validate_scenarios(scenarios_file)
+    if not valid_scenarios:
+        msg = f"Scenario validation failed: {scenario_err}"
+        print(f"[ERROR] {msg}", file=sys.stderr)
+        summary = (
+            "### ❌ Smoke & E2E Preview Stage: FAILED\n\n"
+            f"- **Error**: {msg}\n"
+            f"- **Commit**: `{commit_sha or 'N/A'}`\n"
+            "- **Status**: Failing smoke stage (blocks promotion due to invalid scenarios configuration)\n"
+        )
+        _write_step_summary(summary)
+        return SmokeOutcome(
+            success=False,
+            skipped=False,
+            status_code=0,
+            url=url or "",
+            message=msg,
+            scenario_results=[],
+        )
 
-    # 3. Load custom scenarios if specified
-    custom_scenarios: Optional[List[Dict[str, Any]]] = None
-    if scenarios_file and Path(scenarios_file).is_file():
-        try:
-            with open(scenarios_file, "r", encoding="utf-8") as sf:
-                custom_scenarios = json.load(sf)
-        except Exception as exc:
-            print(f"[WARN] Failed to parse scenarios file '{scenarios_file}': {exc}", file=sys.stderr)
+    print(f"[INFO] Executing smoke & E2E verification against deployed preview: {url}")
 
     # 4. Fetch preview URL
     status_code, headers, body, err = fetch_preview_with_retry(

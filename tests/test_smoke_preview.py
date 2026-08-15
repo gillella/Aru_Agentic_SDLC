@@ -62,12 +62,14 @@ class TestSmokeScenarioEvaluation(unittest.TestCase):
     def test_evaluate_html_scenarios_valid_page(self):
         html = "<!DOCTYPE html><html><head><title>Aru Visualizer</title></head><body><h1>Welcome</h1></body></html>"
         results = sp.evaluate_html_scenarios(html)
-        self.assertEqual(len(results), 2)
+        self.assertEqual(len(results), 3)
         self.assertTrue(results[0].passed)
         self.assertEqual(results[0].name, "HTML Document Structure")
         self.assertTrue(results[1].passed)
         self.assertEqual(results[1].name, "Page Title Declaration")
         self.assertIn("Aru Visualizer", results[1].details)
+        self.assertTrue(results[2].passed)
+        self.assertEqual(results[2].name, "Absence of Runtime Errors")
 
     def test_evaluate_html_scenarios_missing_structure_and_title(self):
         html = "Just plain text without tags"
@@ -79,27 +81,26 @@ class TestSmokeScenarioEvaluation(unittest.TestCase):
         html = "<!DOCTYPE html><html><head><title>Test App</title></head><body><div id='app'>Live</div></body></html>"
         scenarios = [
             {"name": "Check App Container", "contains": "id=['\"]app['\"]"},
-            {"name": "Check No Error Boundary", "not_contains": "Unhandled Runtime Error"},
+            {"name": "Check Live Text", "contains": "Live"},
             {"name": "Min Content Length", "min_length": 30},
         ]
         results = sp.evaluate_html_scenarios(html, scenarios=scenarios)
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(results), 6)
         for res in results:
             self.assertTrue(res.passed, f"Scenario '{res.name}' should pass")
 
     def test_evaluate_html_scenarios_custom_rule_failure(self):
         html = "<!DOCTYPE html><html><head><title>Test App</title></head><body>Unhandled Runtime Error occurred</body></html>"
         scenarios = [
-            {"name": "Check No Error Boundary", "not_contains": "Unhandled Runtime Error"},
-            {"name": "Expected Missing Element", "contains": "id='footer'"},
+            {"name": "Check Custom Match", "contains": "id='footer'"},
             {"name": "Min Content Length", "min_length": 500},
         ]
         results = sp.evaluate_html_scenarios(html, scenarios=scenarios)
-        # Builtins pass
+        # Builtins: index 0 (HTML), 1 (Title) pass; index 2 (Absence of Runtime Errors) fails
         self.assertTrue(results[0].passed)
         self.assertTrue(results[1].passed)
-        # Custom rules fail
         self.assertFalse(results[2].passed)
+        # Custom rules fail
         self.assertFalse(results[3].passed)
         self.assertFalse(results[4].passed)
 
@@ -207,22 +208,70 @@ class TestRunSmokeCheck(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.status_code, 500)
 
+    def test_missing_scenarios_file_fails_closed(self):
+        outcome = sp.run_smoke_check(
+            url="https://example.github.io/app/",
+            scenarios_file="/path/to/nonexistent/scenarios.json",
+        )
+        self.assertFalse(outcome.success)
+        self.assertIn("does not exist", outcome.message)
+
+    def test_invalid_json_in_scenarios_file_fails_closed(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("{invalid json")
+            path = f.name
+        try:
+            outcome = sp.run_smoke_check(
+                url="https://example.github.io/app/",
+                scenarios_file=path,
+            )
+            self.assertFalse(outcome.success)
+            self.assertIn("Failed to parse", outcome.message)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_non_list_in_scenarios_file_fails_closed(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write('{"name": "not a list"}')
+            path = f.name
+        try:
+            outcome = sp.run_smoke_check(
+                url="https://example.github.io/app/",
+                scenarios_file=path,
+            )
+            self.assertFalse(outcome.success)
+            self.assertIn("must contain a JSON array", outcome.message)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_invalid_regex_in_scenarios_file_fails_closed(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write('[{"name": "Bad Regex", "contains": "[a-z"}]')
+            path = f.name
+        try:
+            outcome = sp.run_smoke_check(
+                url="https://example.github.io/app/",
+                scenarios_file=path,
+            )
+            self.assertFalse(outcome.success)
+            self.assertIn("invalid regex", outcome.message.lower())
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
     @patch("smoke_preview.fetch_preview_with_retry")
-    def test_runnable_preview_scenario_failure_blocks_promotion(self, mock_fetch):
+    def test_runtime_error_pattern_fails_acceptance_scenario(self, mock_fetch):
         mock_fetch.return_value = (
             200,
             {"content-type": "text/html"},
-            "plain text body without html tags",
+            "<!DOCTYPE html><html><head><title>App</title></head><body>500 Internal Server Error</body></html>",
             "",
         )
-        outcome = sp.run_smoke_check(
-            url="https://example.github.io/app/",
-            has_preview="true",
-            is_library="false",
-        )
+        outcome = sp.run_smoke_check(url="https://example.github.io/app/")
         self.assertFalse(outcome.success)
-        self.assertEqual(outcome.status_code, 200)
-        self.assertIn("scenarios failed", outcome.message.lower())
+        self.assertIn("runtime errors", outcome.message.lower())
 
 
 class TestSmokeCli(unittest.TestCase):

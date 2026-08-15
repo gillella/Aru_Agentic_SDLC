@@ -221,6 +221,34 @@ class DeployPreviewSkillTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         mock_remediate.assert_called_once()
 
+    @patch("deploy_preview.get_repo_slug", return_value="gillella/Aru_Agentic_SDLC")
+    @patch("deploy_preview.get_default_branch", return_value="main")
+    @patch("deploy_preview.verify_commit_merged", return_value=(True, "a" * 40))
+    @patch("deploy_preview.ensure_pages_enabled", return_value="https://gillella.github.io/Aru_Agentic_SDLC/")
+    @patch("deploy_preview.get_existing_run_ids", return_value=set())
+    @patch("deploy_preview.dispatch_cd_workflow", return_value=12345)
+    @patch("deploy_preview.wait_for_run", return_value=dp.RunOutcome(True, "success", "https://github.com/gillella/Aru_Agentic_SDLC/actions/runs/12345"))
+    @patch("deploy_preview.extract_preview_url_from_run", return_value="skipped")
+    @patch("deploy_preview.post_preview_comment", return_value=True)
+    def test_deploy_preview_library_skip_workflow(
+        self, mock_comment, mock_extract, mock_wait, mock_dispatch, mock_existing,
+        mock_pages, mock_verify, mock_default, mock_repo,
+    ):
+        exit_code = dp.deploy_preview(
+            commit_sha=self.commit_sha,
+            issue_id=109,
+        )
+        self.assertEqual(exit_code, 0)
+        mock_comment.assert_called_once_with(
+            109, "skipped", self.commit_sha, self.preview_url, dry_run=False,
+        )
+
+    def test_post_preview_comment_library_skip(self):
+        with patch("deploy_preview.run_cmd", return_value=(0, "", "")) as mock_run:
+            res = dp.post_preview_comment(109, "skipped", self.commit_sha, self.preview_url)
+            self.assertTrue(res)
+            self.assertIn("Visibly Skipped (Library)", mock_run.call_args[0][0][5])
+
     def test_deploy_preview_rejects_no_wait_without_any_mutation(self):
         with patch("deploy_preview.get_default_branch") as mock_default:
             self.assertEqual(
