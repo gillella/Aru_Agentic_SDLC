@@ -23,7 +23,7 @@ VERIFICATION_EVIDENCE_END = "<!-- /aru-verification-evidence -->"
 
 _SENSITIVE_ARGUMENT_NAMES = {
     "api-key", "apikey", "auth", "credential", "credentials", "key",
-    "password", "passwd", "secret", "signature", "token",
+    "password", "passwd", "secret", "sig", "signature", "token",
 }
 
 _OPAQUE_VALUE_OPTIONS = {"-c", "--command", "-Command", "-e", "--eval"}
@@ -60,7 +60,9 @@ def _redact_local_path(value: str) -> str:
             return f"{prefix}{separator}{replacement}"
     if value.startswith("-I/"):
         return f"-I<local-path>/{Path(value[2:]).name}"
-    absolute_path = re.compile(r"(?P<prefix>^|[\s@=:(])(?P<path>/(?:[^/\s\"']+/)*[^/\s\"']+)")
+    absolute_path = re.compile(
+        r"(?P<prefix>^|[\s@=:,(\[{\"'])(?P<path>/(?:[^/\s\"']+/)*[^/\s\"']+)"
+    )
 
     def replace_path(match: re.Match) -> str:
         path = match.group("path")
@@ -132,7 +134,7 @@ def sanitize_command(cmd: List[str]) -> List[str]:
             continue
         if redact_header_next:
             name, separator, _value = arg.partition(":")
-            sanitized.append(f"{name}: <redacted>" if separator else arg)
+            sanitized.append(f"{name}: <redacted>" if separator else "<redacted>")
             redact_header_next = False
             continue
         if arg in {"-H", "--header"}:
@@ -141,15 +143,23 @@ def sanitize_command(cmd: List[str]) -> List[str]:
             continue
         if arg.startswith("--header="):
             name, separator, _value = arg[len("--header="):].partition(":")
-            sanitized.append(f"--header={name}: <redacted>" if separator else arg)
+            sanitized.append(f"--header={name}: <redacted>" if separator else "--header=<redacted>")
             continue
         if arg.startswith("-H") and len(arg) > 2:
             name, separator, _value = arg[2:].partition(":")
-            sanitized.append(f"-H{name}: <redacted>" if separator else arg)
+            sanitized.append(f"-H{name}: <redacted>" if separator else "-H<redacted>")
             continue
         if arg in _OPAQUE_VALUE_OPTIONS:
             sanitized.append(arg)
             redact_opaque_next = True
+            continue
+        attached_opaque = next(
+            (option for option in _OPAQUE_VALUE_OPTIONS if arg.startswith(option) and len(arg) > len(option)),
+            None,
+        )
+        if attached_opaque:
+            separator = "=" if arg[len(attached_opaque):].startswith("=") else ""
+            sanitized.append(f"{attached_opaque}{separator}<redacted>")
             continue
         name, separator, _value = arg.partition("=")
         if separator and _looks_sensitive(name):

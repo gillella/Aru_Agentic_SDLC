@@ -219,15 +219,24 @@ class VerificationEvidenceTests(unittest.TestCase):
     def test_command_evidence_redacts_opaque_secrets_and_embedded_paths(self):
         probes = [
             ["curl", "https://example.com?X-Amz-Signature=AWSSECRET"],
+            ["curl", "https://example.com/blob?sig=AZURESECRET"],
             ["sh", "-c", "printf ghp_NESTED /Users/example/private.txt"],
             ["python", "-c", "open('/Users/example/private.txt')"],
+            ["python", "-cprint('ghp_ATTACHED')"],
+            ["node", "-econsole.log('NODESECRET')"],
             ["tool", "@/Users/example/response.txt"],
             ["tool", "prefix=/Users/example/project/config.json"],
+            ["tool", 'quoted="/Users/example/quoted.json"'],
+            ["tool", "paths=[/Users/example/list.json,/Users/example/next.json]"],
+            ["tool", "payload={/Users/example/object.json}"],
+            ["curl", "-H", "@/Users/example/header.txt"],
+            ["curl", "--header=@/Users/example/header-equals.txt"],
+            ["curl", "-H@/Users/example/header-attached.txt"],
         ]
         rendered = " ".join(
             part for probe in probes for part in common.sanitize_command(probe)
         )
-        for secret in ("AWSSECRET", "ghp_NESTED", "/Users/example"):
+        for secret in ("AWSSECRET", "AZURESECRET", "ghp_NESTED", "ghp_ATTACHED", "NODESECRET", "/Users/example"):
             self.assertNotIn(secret, rendered)
         self.assertIn("<redacted>", rendered)
         self.assertIn("<local-path>", rendered)
