@@ -103,6 +103,7 @@ Helper inventory:
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" --issue <ID> --status "<Status>"`
 * `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID> [--dry-run]` — the Definition-of-Done gate; the only sanctioned way to merge
+* `python3 "$ARU_SDLC_HOME/scripts/revert_merge.py" --pr <ID> --agent <AGENT_ID> --family <family> --revert-issue <ID>` — governed reverse gear: creates a revert PR linking Closes #<ID>, reopens affected issues to Ready status, and enforces clean revert checks
 * `"$ARU_SDLC_HOME/scripts/launch_fleet.sh" -n <N>` — prepare N isolated clones + per-agent prompts
 
 Inside this playbook repo itself, `$ARU_SDLC_HOME` may be `.` / the repo root.
