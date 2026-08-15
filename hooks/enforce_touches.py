@@ -748,8 +748,8 @@ _GIT_WRITE_SUBCOMMANDS = frozenset({"commit", "push"})
 # previous pattern allowed only lowercase `-c <config>`, so `git -C <path>
 # commit` did not read as a commit at all and skipped the guard entirely -
 # the check was narrower than what git accepts.
-_GIT_DIR_OPTS = frozenset({"-C", "--git-dir", "--work-tree"})
-_GIT_VALUE_OPTS = _GIT_DIR_OPTS | {"-c", "--namespace", "--exec-path"}
+_GIT_LOCATION_OPTS = frozenset({"-C", "--git-dir", "--work-tree"})
+_GIT_VALUE_OPTS = _GIT_LOCATION_OPTS | {"-c", "--namespace", "--exec-path"}
 
 
 def _resolve_dir(raw, base):
@@ -843,9 +843,19 @@ def _git_write_violation(command, cwd):
             else:
                 index += 1
                 continue
-            if name in _GIT_DIR_OPTS and value is not None:
-                # --git-dir names the .git directory; the checkout is its parent.
-                candidate = value[:-len("/.git")] if name == "--git-dir" and value.endswith("/.git") else value
+            if name in {"-C", "--git-dir"} and value is not None:
+                # The protected branch and governance marker belong to the
+                # repository supplying HEAD and refs.  ``--work-tree`` only
+                # changes where files are checked out; it must not replace a
+                # repository selected by ``--git-dir`` (or by cwd/``-C``).
+                # Otherwise ``--git-dir=<governed>/.git
+                # --work-tree=<ungoverned>`` can write governed refs while the
+                # marker check incorrectly inspects the ungoverned directory.
+                candidate = (
+                    value[:-len("/.git")]
+                    if name == "--git-dir" and value.endswith("/.git")
+                    else value
+                )
                 moved = _resolve_dir(candidate, base)
                 target, unknown = (base, True) if moved is None else (moved, False)
 

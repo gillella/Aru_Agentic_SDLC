@@ -1505,6 +1505,24 @@ class GitCommandCheckoutTests(unittest.TestCase):
             )
         )
 
+    def test_governed_git_dir_with_ungoverned_work_tree_is_blocked(self):
+        self.assertIsNotNone(
+            self.violation(
+                f"git --git-dir={self.main_root}/.git "
+                f"--work-tree={self.ungoverned} commit -m x",
+                self.wt,
+            )
+        )
+
+    def test_ungoverned_git_dir_with_governed_work_tree_is_allowed(self):
+        self.assertIsNone(
+            self.violation(
+                f"git --git-dir={self.ungoverned}/.git "
+                f"--work-tree={self.main_root} commit -m x",
+                self.wt,
+            )
+        )
+
     def test_config_flag_before_capital_c_still_resolves(self):
         self.assertIsNotNone(
             self.violation(
