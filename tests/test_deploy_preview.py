@@ -113,43 +113,49 @@ class DeployPreviewSkillTests(unittest.TestCase):
 
     @patch("deploy_preview.run_cmd")
     def test_dispatch_cd_workflow_correlates_new_run_id(self, mock_run):
-        # Initial call: gh workflow run, gh run list with delayed new run, gh run view for correlation
-        mock_run.side_effect = [
-            (0, "", ""),  # gh workflow run
-            (0, '[{"databaseId": 1001}, {"databaseId": 1002}]', ""),  # gh run list poll
-            (0, json.dumps({"displayTitle": "Deploy Preview for abcdef123456 (tok123)", "name": "Deploy Preview", "headSha": "abcdef123456"}), ""),  # gh run view 1002
-        ]
+        mock_run.return_value = (0, "", "")
         pre_existing = {1001}
-        run_id = dp.dispatch_cd_workflow(
-            self.commit_sha,
-            workflow_name="deploy-preview.yml",
-            pre_existing_run_ids=pre_existing,
-            default_branch="main",
-            run_token="tok123",
-            max_poll_attempts=1,
-        )
+        with patch("deploy_preview._run_bounded") as mock_bounded:
+            mock_bounded.side_effect = [
+                (0, '[{"databaseId": 1001}, {"databaseId": 1002}]', ""),
+                (0, json.dumps({
+                    "displayTitle": f"Deploy Preview for {self.commit_sha} (tok123)",
+                    "name": "Deploy Preview",
+                    "headSha": self.commit_sha,
+                }), ""),
+            ]
+            run_id = dp.dispatch_cd_workflow(
+                self.commit_sha,
+                workflow_name="deploy-preview.yml",
+                pre_existing_run_ids=pre_existing,
+                default_branch="main",
+                run_token="tok123",
+                max_poll_attempts=1,
+            )
         self.assertEqual(run_id, 1002)
 
     @patch("deploy_preview.run_cmd")
     def test_dispatch_cd_workflow_fails_closed_when_run_query_fails_or_times_out(self, mock_run):
         # 1. gh run list fails during pre-existing run discovery
-        mock_run.return_value = (1, "", "API rate limit")
-        run_id = dp.dispatch_cd_workflow(self.commit_sha, workflow_name="deploy-preview.yml", default_branch="main")
+        with patch("deploy_preview._run_bounded", return_value=(1, "", "API rate limit")):
+            run_id = dp.dispatch_cd_workflow(
+                self.commit_sha,
+                workflow_name="deploy-preview.yml",
+                default_branch="main",
+            )
         self.assertIsNone(run_id)
 
         # 2. Polling only sees existing run 1001 without new run appearing -> must NOT return 1001
-        mock_run.side_effect = [
-            (0, "", ""),  # gh workflow run
-            (0, '[{"databaseId": 1001}]', ""),  # poll 1
-        ]
-        run_id = dp.dispatch_cd_workflow(
-            self.commit_sha,
-            workflow_name="deploy-preview.yml",
-            pre_existing_run_ids={1001},
-            default_branch="main",
-            max_poll_attempts=1,
-            poll_interval=0,
-        )
+        mock_run.return_value = (0, "", "")
+        with patch("deploy_preview._run_bounded", return_value=(0, '[{"databaseId": 1001}]', "")):
+            run_id = dp.dispatch_cd_workflow(
+                self.commit_sha,
+                workflow_name="deploy-preview.yml",
+                pre_existing_run_ids={1001},
+                default_branch="main",
+                max_poll_attempts=1,
+                poll_interval=0,
+            )
         self.assertIsNone(run_id)
 
     def test_deploy_preview_workflow_file_exists_and_init_project_renders_it(self):
@@ -265,7 +271,14 @@ class DeployPreviewSkillTests(unittest.TestCase):
 
         # 3. Retry on existing unattached issue succeeds when board attachment succeeds
         mock_run.side_effect = [
-            (0, json.dumps([{"number": 206, "title": "fix(deploy): preview deployment failed", "body": dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha)}]), ""),
+            (0, json.dumps([{
+                "number": 206,
+                "title": "fix(deploy): preview deployment failed",
+                "body": "\n".join([
+                    dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha),
+                    dp._remediation_event_marker(self.commit_sha, "deployment", ""),
+                ]),
+            }]), ""),
             (0, "Attached to board", ""),  # update_issue_status.py on existing issue 206
         ]
         retry_id = dp.file_remediation_issue(issue_id=109, commit_sha=self.commit_sha, error_details="Deploy timed out")
@@ -273,7 +286,14 @@ class DeployPreviewSkillTests(unittest.TestCase):
 
         # 4. Retry on existing unattached issue fails closed when board attachment fails
         mock_run.side_effect = [
-            (0, json.dumps([{"number": 206, "title": "fix(deploy): preview deployment failed", "body": dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha)}]), ""),
+            (0, json.dumps([{
+                "number": 206,
+                "title": "fix(deploy): preview deployment failed",
+                "body": "\n".join([
+                    dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha),
+                    dp._remediation_event_marker(self.commit_sha, "deployment", ""),
+                ]),
+            }]), ""),
             (1, "", "Board attachment still failing"),  # update_issue_status.py on existing issue 206
         ]
         fail_retry_id = dp.file_remediation_issue(issue_id=109, commit_sha=self.commit_sha, error_details="Deploy timed out")
@@ -426,9 +446,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
     def test_dispatch_cd_workflow_correlates_matching_run_under_concurrent_dispatches(self, mock_run):
         # Two new runs appear in poll: 2001 (for commit A / token A) and 2002 (for commit B / token B)
         # Calling for commit A / token A must select 2001, not max(new_runs) (2002)
-        def run_cmd_side_effect(cmd, check=False):
-            if cmd[:3] == ["gh", "workflow", "run"]:
-                return (0, "", "")
+        def bounded_side_effect(cmd, timeout_seconds):
             if cmd[:3] == ["gh", "run", "list"]:
                 return (0, '[{"databaseId": 1000}, {"databaseId": 2001}, {"databaseId": 2002}]', "")
             if cmd[:3] == ["gh", "run", "view"]:
@@ -439,16 +457,17 @@ class DeployPreviewSkillTests(unittest.TestCase):
                     return (0, json.dumps({"displayTitle": f"Deploy Preview for {self.commit_sha} (tokenA)", "name": "Deploy Preview", "headSha": self.commit_sha}), "")
             return (1, "", "unknown cmd")
 
-        mock_run.side_effect = run_cmd_side_effect
+        mock_run.return_value = (0, "", "")
         pre_existing = {1000}
-        run_id = dp.dispatch_cd_workflow(
-            self.commit_sha,
-            workflow_name="deploy-preview.yml",
-            pre_existing_run_ids=pre_existing,
-            default_branch="main",
-            run_token="tokenA",
-            max_poll_attempts=1,
-        )
+        with patch("deploy_preview._run_bounded", side_effect=bounded_side_effect):
+            run_id = dp.dispatch_cd_workflow(
+                self.commit_sha,
+                workflow_name="deploy-preview.yml",
+                pre_existing_run_ids=pre_existing,
+                default_branch="main",
+                run_token="tokenA",
+                max_poll_attempts=1,
+            )
         self.assertEqual(run_id, 2001)
 
     @patch("deploy_preview.run_cmd")
@@ -458,7 +477,10 @@ class DeployPreviewSkillTests(unittest.TestCase):
             (0, json.dumps([{
                 "number": 199,
                 "title": "fix(deploy): preview deployment failed",
-                "body": dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha),
+                "body": "\n".join([
+                    dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha),
+                    dp._remediation_event_marker(self.commit_sha, "deployment", ""),
+                ]),
             }]), ""),
             (0, "Attached to board", ""),
         ]
@@ -471,7 +493,10 @@ class DeployPreviewSkillTests(unittest.TestCase):
             (0, json.dumps([{
                 "number": 199,
                 "title": "fix(deploy): active remediation",
-                "body": dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha),
+                "body": "\n".join([
+                    dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha),
+                    dp._remediation_event_marker(self.commit_sha, "deployment", ""),
+                ]),
                 "labels": [{"name": "status:in-progress"}],
             }]), ""),
             (0, "Attached", ""),
@@ -482,6 +507,100 @@ class DeployPreviewSkillTests(unittest.TestCase):
         )
         attach_cmd = mock_run.call_args_list[1].args[0]
         self.assertEqual(attach_cmd[attach_cmd.index("--status") + 1], "In Progress")
+
+    @patch("deploy_preview.run_cmd")
+    def test_file_remediation_reuse_records_new_stage_and_run_once(self, mock_run):
+        run_url = "https://github.com/gillella/Aru_Agentic_SDLC/actions/runs/12345"
+        original_body = dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha)
+        mock_run.side_effect = [
+            (0, json.dumps([{
+                "number": 199,
+                "title": "fix(deploy): active remediation",
+                "body": original_body,
+                "labels": [{"name": "status:in-review"}],
+            }]), ""),
+            (0, "", ""),
+            (0, "Commented", ""),
+            (0, "Attached", ""),
+        ]
+        self.assertEqual(
+            dp.file_remediation_issue(
+                109,
+                self.commit_sha,
+                "origin comment failed",
+                failure_stage="origin-comment",
+                run_url=run_url,
+            ),
+            199,
+        )
+        comment_cmd = mock_run.call_args_list[2].args[0]
+        comment_body = comment_cmd[comment_cmd.index("--body") + 1]
+        event_marker = dp._remediation_event_marker(
+            self.commit_sha,
+            "origin-comment",
+            run_url,
+        )
+        self.assertIn(event_marker, comment_body)
+        self.assertIn(run_url, comment_body)
+        attach_cmd = mock_run.call_args_list[3].args[0]
+        self.assertEqual(attach_cmd[attach_cmd.index("--status") + 1], "In Review")
+
+        # A retry that finds the same marker in comments does not post it again.
+        mock_run.reset_mock()
+        mock_run.side_effect = [
+            (0, json.dumps([{
+                "number": 199,
+                "title": "fix(deploy): active remediation",
+                "body": original_body,
+                "labels": [{"name": "status:in-review"}],
+            }]), ""),
+            (0, event_marker, ""),
+            (0, "Attached", ""),
+        ]
+        self.assertEqual(
+            dp.file_remediation_issue(
+                109,
+                self.commit_sha,
+                "origin comment failed",
+                failure_stage="origin-comment",
+                run_url=run_url,
+            ),
+            199,
+        )
+        self.assertEqual(mock_run.call_count, 3)
+
+    @patch("deploy_preview.run_cmd")
+    def test_remediation_duplicate_exact_markers_fail_closed(self, mock_run):
+        duplicate = {
+            "title": "fix(deploy): duplicate remediation",
+            "body": dp.REMEDIATION_MARKER.format(commit_sha=self.commit_sha),
+            "labels": [{"name": "status:in-progress"}],
+        }
+        mock_run.return_value = (
+            0,
+            json.dumps([
+                {"number": 199, **duplicate},
+                {"number": 200, **duplicate},
+            ]),
+            "",
+        )
+        self.assertEqual(
+            dp.find_existing_remediation_issue(self.commit_sha),
+            (False, None),
+        )
+        mock_run.reset_mock()
+        mock_run.return_value = (
+            0,
+            json.dumps([
+                {"number": 199, **duplicate},
+                {"number": 200, **duplicate},
+            ]),
+            "",
+        )
+        self.assertIsNone(
+            dp.file_remediation_issue(109, self.commit_sha, "duplicate state")
+        )
+        self.assertEqual(mock_run.call_count, 1)
 
     @patch("deploy_preview.run_cmd")
     def test_file_remediation_issue_returns_created_id_on_notification_warning(self, mock_run):
@@ -607,6 +726,48 @@ class DeployPreviewSkillTests(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertLessEqual(mock_run.call_args.kwargs["timeout"], 0.01)
 
+    @patch("deploy_preview.subprocess.run")
+    def test_wait_for_run_converts_process_start_errors_to_query_failure(self, mock_run):
+        for error in (FileNotFoundError("gh missing"), PermissionError("gh denied")):
+            with self.subTest(error=type(error).__name__):
+                mock_run.side_effect = error
+                outcome = dp.wait_for_run(12345, timeout_seconds=1, poll_interval=0)
+                self.assertEqual(outcome, dp.RunOutcome(False, "query-failed", ""))
+
+    @patch("deploy_preview.run_cmd", return_value=(0, "", ""))
+    @patch("deploy_preview.subprocess.run")
+    def test_dispatch_correlation_bounds_hung_list_and_view_queries(
+        self,
+        mock_subprocess,
+        mock_run,
+    ):
+        for responses in (
+            [subprocess.TimeoutExpired(["gh", "run", "list"], 0.01)],
+            [
+                Mock(
+                    returncode=0,
+                    stdout='[{"databaseId": 1001}]',
+                    stderr="",
+                ),
+                subprocess.TimeoutExpired(["gh", "run", "view"], 0.01),
+            ],
+        ):
+            with self.subTest(response_count=len(responses)):
+                mock_subprocess.reset_mock()
+                mock_subprocess.side_effect = responses
+                run_id = dp.dispatch_cd_workflow(
+                    self.commit_sha,
+                    pre_existing_run_ids=set(),
+                    default_branch="main",
+                    run_token="tokenA",
+                    max_poll_attempts=1,
+                    poll_interval=0,
+                    correlation_timeout_seconds=0.01,
+                )
+                self.assertIsNone(run_id)
+                for call in mock_subprocess.call_args_list:
+                    self.assertLessEqual(call.kwargs["timeout"], 0.01)
+
     def test_build_preview_rejects_output_escape_without_deleting_source(self):
         import tempfile
         import build_preview as bp
@@ -696,6 +857,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
 
     def test_repository_wide_remediation_touch_is_enforced_and_held(self):
         import importlib.util
+        import common
         import triage_backlog
 
         hook_path = self.root_dir / "hooks" / "enforce_touches.py"
@@ -704,6 +866,10 @@ class DeployPreviewSkillTests(unittest.TestCase):
         spec.loader.exec_module(hook)
         self.assertTrue(hook.path_allowed("README.md", ["**"]))
         self.assertTrue(hook.path_allowed("deep/path/app.py", ["**"]))
+        self.assertEqual(
+            common.touches_conflict(["**"], ["deep/path/app.py"]),
+            ("**", "deep/path/app.py"),
+        )
 
         issue = {
             "body": "## Acceptance Criteria\n- [ ] recover\n\ntouches: **\nparallel-eligible: false",

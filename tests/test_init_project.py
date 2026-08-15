@@ -257,6 +257,11 @@ class ProjectBootstrapTests(unittest.TestCase):
             self.assertTrue(mod.path_allowed("src/sub/nested.py", touches_dir))
             self.assertFalse(mod.path_allowed("docs/readme.md", touches_dir))
 
+            # Repository-wide remediation scope covers both root and nested files.
+            touches_repo = ["**"]
+            self.assertTrue(mod.path_allowed("README.md", touches_repo))
+            self.assertTrue(mod.path_allowed("deep/path/app.py", touches_repo))
+
 
 class CiGateTests(unittest.TestCase):
     """The generated CI must fail, not warn.

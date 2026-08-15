@@ -476,6 +476,8 @@ def path_allowed(rel_path, touches):
     rel = norm_path(rel_path)
     for pat in touches:
         pat_norm = norm_path(pat)
+        if pat_norm == "**":
+            return True
         if rel == pat_norm:
             return True
         if "*" in pat_norm or "?" in pat_norm or "[" in pat_norm:

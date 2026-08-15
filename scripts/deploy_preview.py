@@ -25,8 +25,13 @@ from common import run_cmd
 
 FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REMEDIATION_MARKER = "<!-- aru-deploy-remediation commit_sha={commit_sha} -->"
+REMEDIATION_EVENT_MARKER = (
+    "<!-- aru-deploy-remediation-event commit_sha={commit_sha} "
+    "stage={failure_stage} run_url={run_url} -->"
+)
 RUN_POLL_SECONDS = 5.0
 RUN_TIMEOUT_SECONDS = 900.0
+RUN_CORRELATION_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,7 @@ class RunOutcome:
 class RemediationMatch:
     number: int
     status: str
+    body: str
 
 
 def get_default_branch() -> str:
@@ -229,7 +235,30 @@ def verify_commit_merged(commit_sha: str, default_branch: Optional[str] = None) 
     return True, full_sha
 
 
-def get_existing_run_ids(workflow_name: str, branch: Optional[str] = None) -> Optional[Set[int]]:
+def _run_bounded(cmd: list[str], timeout_seconds: float) -> tuple[int, str, str]:
+    """Run a query within the caller's remaining wall-clock budget."""
+    if timeout_seconds <= 0:
+        return 124, "", "deadline exceeded"
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", "deadline exceeded"
+    except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
+        return 1, "", str(exc)
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+def get_existing_run_ids(
+    workflow_name: str,
+    branch: Optional[str] = None,
+    timeout_seconds: Optional[float] = None,
+) -> Optional[Set[int]]:
     """Fetches currently indexed run IDs for workflow_dispatch on target branch.
 
     Returns Set[int] on success, or None on query/parsing failure.
@@ -243,7 +272,10 @@ def get_existing_run_ids(workflow_name: str, branch: Optional[str] = None) -> Op
     ]
     if branch:
         list_cmd.extend(["--branch", branch])
-    code, out, _ = run_cmd(list_cmd, check=False)
+    if timeout_seconds is None:
+        code, out, _ = run_cmd(list_cmd, check=False)
+    else:
+        code, out, _ = _run_bounded(list_cmd, timeout_seconds)
     if code != 0:
         return None
     if not out.strip():
@@ -255,10 +287,18 @@ def get_existing_run_ids(workflow_name: str, branch: Optional[str] = None) -> Op
         return None
 
 
-def verify_run_correlation(run_id: int, commit_sha: str, run_token: Optional[str] = None) -> bool:
+def verify_run_correlation(
+    run_id: int,
+    commit_sha: str,
+    run_token: Optional[str] = None,
+    timeout_seconds: Optional[float] = None,
+) -> bool:
     """Verifies that a candidate workflow run belongs to the specific dispatch (by commit_sha and optional run_token)."""
     cmd = ["gh", "run", "view", str(run_id), "--json", "displayTitle,name,headSha"]
-    code, out, _ = run_cmd(cmd, check=False)
+    if timeout_seconds is None:
+        code, out, _ = run_cmd(cmd, check=False)
+    else:
+        code, out, _ = _run_bounded(cmd, timeout_seconds)
     if code != 0 or not out.strip():
         return False
     try:
@@ -282,6 +322,7 @@ def dispatch_cd_workflow(
     run_token: Optional[str] = None,
     max_poll_attempts: int = 10,
     poll_interval: float = 3.0,
+    correlation_timeout_seconds: float = RUN_CORRELATION_TIMEOUT_SECONDS,
     dry_run: bool = False,
 ) -> Optional[int]:
     """Dispatches preview deployment workflow on default branch with commit_sha and run_token inputs, correlating the exact new run ID."""
@@ -298,8 +339,14 @@ def dispatch_cd_workflow(
     if not run_token:
         run_token = uuid.uuid4().hex
 
+    deadline = time.monotonic() + max(0.0, correlation_timeout_seconds)
+
     if pre_existing_run_ids is None:
-        initial_ids = get_existing_run_ids(workflow_name, branch=default_branch)
+        initial_ids = get_existing_run_ids(
+            workflow_name,
+            branch=default_branch,
+            timeout_seconds=deadline - time.monotonic(),
+        )
         if initial_ids is None:
             print(f"[ERROR] Failed to query existing runs for workflow '{workflow_name}'.", file=sys.stderr)
             return None
@@ -319,13 +366,31 @@ def dispatch_cd_workflow(
     # Poll for the newly created run ID (must be strictly in new_runs and match commit/token)
     for attempt in range(max_poll_attempts):
         if attempt > 0 and poll_interval > 0:
-            time.sleep(poll_interval)
-        current_runs = get_existing_run_ids(workflow_name, branch=default_branch)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(poll_interval, remaining))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        current_runs = get_existing_run_ids(
+            workflow_name,
+            branch=default_branch,
+            timeout_seconds=remaining,
+        )
         if current_runs is not None:
             new_runs = current_runs - pre_existing_run_ids
             if new_runs:
                 for candidate_id in sorted(new_runs, reverse=True):
-                    if verify_run_correlation(candidate_id, commit_sha, run_token):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    if verify_run_correlation(
+                        candidate_id,
+                        commit_sha,
+                        run_token,
+                        timeout_seconds=remaining,
+                    ):
                         return candidate_id
 
     print(f"[ERROR] Timed out waiting for correlated run of workflow '{workflow_name}' on branch '{default_branch}'.", file=sys.stderr)
@@ -359,6 +424,8 @@ def wait_for_run(
             )
         except subprocess.TimeoutExpired:
             return RunOutcome(False, "timed-out", last_url)
+        except (OSError, UnicodeError, subprocess.SubprocessError):
+            return RunOutcome(False, "query-failed", last_url)
         if result.returncode != 0 or not result.stdout.strip():
             return RunOutcome(False, "query-failed", last_url)
         try:
@@ -490,32 +557,84 @@ def find_existing_remediation_issue(commit_sha: str) -> tuple[bool, Optional[Rem
         return False, None
     if not isinstance(issues, list):
         return False, None
+    matches = []
     for issue in issues:
         if not isinstance(issue, dict):
             return False, None
         body = issue.get("body", "")
         number = issue.get("number")
-        if marker in body and isinstance(number, int):
-            labels = issue.get("labels", [])
-            if not isinstance(labels, list):
-                return False, None
-            label_names = {
-                label.get("name", "").lower()
-                for label in labels
-                if isinstance(label, dict) and isinstance(label.get("name"), str)
-            }
-            status_map = {
-                "status:backlog": "Backlog",
-                "status:ready": "Ready",
-                "status:in-progress": "In Progress",
-                "status:in-review": "In Review",
-                "status:done": "Done",
-            }
-            statuses = [status for label, status in status_map.items() if label in label_names]
-            if len(statuses) > 1:
-                return False, None
-            return True, RemediationMatch(number, statuses[0] if statuses else "Ready")
-    return True, None
+        if not isinstance(body, str):
+            return False, None
+        if marker not in body:
+            continue
+        if not isinstance(number, int):
+            return False, None
+        labels = issue.get("labels", [])
+        if not isinstance(labels, list):
+            return False, None
+        label_names = {
+            label.get("name", "").lower()
+            for label in labels
+            if isinstance(label, dict) and isinstance(label.get("name"), str)
+        }
+        status_map = {
+            "status:backlog": "Backlog",
+            "status:ready": "Ready",
+            "status:in-progress": "In Progress",
+            "status:in-review": "In Review",
+            "status:done": "Done",
+        }
+        statuses = [status for label, status in status_map.items() if label in label_names]
+        if len(statuses) > 1:
+            return False, None
+        matches.append(RemediationMatch(number, statuses[0] if statuses else "Ready", body))
+    if len(matches) > 1:
+        return False, None
+    return True, matches[0] if matches else None
+
+
+def _remediation_event_marker(commit_sha: str, failure_stage: str, run_url: str) -> str:
+    return REMEDIATION_EVENT_MARKER.format(
+        commit_sha=commit_sha,
+        failure_stage=failure_stage,
+        run_url=run_url or "none",
+    )
+
+
+def _record_reused_remediation_event(
+    existing: RemediationMatch,
+    commit_sha: str,
+    failure_stage: str,
+    run_url: str,
+    error_details: str,
+) -> bool:
+    """Append one durable, idempotent event when an open remediation is reused."""
+    marker = _remediation_event_marker(commit_sha, failure_stage, run_url)
+    if marker in existing.body:
+        return True
+
+    code, comments, _ = run_cmd(
+        ["gh", "issue", "view", str(existing.number), "--json", "comments", "-q", ".comments[].body"],
+        check=False,
+    )
+    if code != 0:
+        return False
+    if marker in comments:
+        return True
+
+    run_evidence = run_url if run_url else "No workflow run was created."
+    event_body = (
+        "## Preview recovery event\n\n"
+        f"{marker}\n"
+        f"- Stage: `{failure_stage}`\n"
+        f"- Exact workflow run: {run_evidence}\n"
+        f"- Diagnostic summary: {_safe_failure_summary(error_details)}"
+    )
+    code, _, _ = run_cmd(
+        ["gh", "issue", "comment", str(existing.number), "--body", event_body],
+        check=False,
+    )
+    return code == 0
 
 
 def _safe_failure_summary(value: str) -> str:
@@ -572,6 +691,18 @@ def file_remediation_issue(
         print("[ERROR] Could not safely query existing deployment remediation issues.", file=sys.stderr)
         return None
     if existing is not None:
+        if not _record_reused_remediation_event(
+            existing,
+            commit_sha,
+            failure_stage,
+            run_url,
+            error_details,
+        ):
+            print(
+                f"[ERROR] Failed to record recovery evidence on existing issue #{existing.number}.",
+                file=sys.stderr,
+            )
+            return None
         # Re-attach at its current lifecycle state; never regress active work to Ready.
         attach_cmd = [
             sys.executable,
@@ -589,12 +720,14 @@ def file_remediation_issue(
 
     title = f"fix(deploy): preview deployment failed for commit {commit_sha[:7]}"
     marker = REMEDIATION_MARKER.format(commit_sha=commit_sha)
+    event_marker = _remediation_event_marker(commit_sha, failure_stage, run_url)
     run_evidence = run_url if run_url else "No workflow run was created."
     safe_details = _safe_failure_summary(error_details)
     body = f"""## Problem Description
 Preview deployment failed for merged commit `{commit_sha}` (originating from issue #{issue_id}).
 
 {marker}
+{event_marker}
 
 ## Failure Evidence
 - Stage: `{failure_stage}`
@@ -714,11 +847,10 @@ def deploy_preview(
 
     print(f"Deploying preview for commit {commit_sha[:7]} (originating issue #{issue_id})...")
 
-    pre_existing_runs = get_existing_run_ids(workflow_name, branch=default_branch) if not dry_run else set()
     run_id = dispatch_cd_workflow(
         commit_sha,
         workflow_name=workflow_name,
-        pre_existing_run_ids=pre_existing_runs,
+        pre_existing_run_ids=set() if dry_run else None,
         default_branch=default_branch,
         dry_run=dry_run,
     )
