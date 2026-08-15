@@ -1,3 +1,4 @@
+import json
 import sys
 import subprocess
 import tempfile
@@ -145,6 +146,301 @@ class UnresolvedThreadQueryTests(unittest.TestCase):
         self.assertIsNone(merge_pr.unresolved_threads(57))
 
 
+class ReviewEvidencePaginationTests(unittest.TestCase):
+    @staticmethod
+    def review_page(head="head123", nodes=None, has_next=False, cursor=None):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": head,
+            "reviews": {
+                "nodes": [] if nodes is None else nodes,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            },
+        }}}}
+
+    @staticmethod
+    def thread_page(head="head123"):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": head,
+            "commits": {"nodes": []},
+            "reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+        }}}}
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_review_evidence_paginates_reviews_beyond_first_page(
+        self, gh_json, _slug
+    ):
+        stale_reviews = [
+            {
+                "id": f"stale-{index}",
+                "state": "COMMENTED",
+                "submittedAt": f"2026-08-13T00:{index % 60:02d}:00Z",
+                "author": {"login": f"reviewer-{index}"},
+                "commit": {"oid": "old-head"},
+            }
+            for index in range(100)
+        ]
+        stale_reviews[0] = {
+            "id": "advisory-current",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-14T00:00:00Z",
+            "author": {"login": "coderabbitai[bot]"},
+            "commit": {"oid": "head123"},
+        }
+        stale_reviews[1] = {
+            "id": "pending-current",
+            "state": "PENDING",
+            "submittedAt": None,
+            "author": {"login": "draft-reviewer"},
+            "commit": {"oid": "head123"},
+        }
+        current_review = {
+            "id": "current-substantive",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-15T00:00:00Z",
+            "author": {"login": "independent-agent"},
+            "commit": {"oid": "head123"},
+        }
+        gh_json.side_effect = [
+            self.review_page(
+                nodes=stale_reviews, has_next=True, cursor="review-page-2"
+            ),
+            self.review_page(nodes=[current_review]),
+            self.thread_page(),
+        ]
+
+        evidence = merge_pr.review_evidence(162)
+
+        self.assertTrue(evidence["reviewed_head"])
+        self.assertEqual(evidence["head_oid"], "head123")
+        self.assertEqual(len(evidence["reviews"]), 101)
+        self.assertIn("cursor=review-page-2", gh_json.call_args_list[1].args[0])
+        self.assertEqual(gh_json.call_count, 3)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_page_two_changes_requested_blocks_latest_verdict_gate(
+        self, gh_json, _slug
+    ):
+        first_page = [
+            {
+                "id": f"review-{index}",
+                "state": "COMMENTED",
+                "submittedAt": f"2026-08-14T00:{index % 60:02d}:00Z",
+                "author": {"login": f"reviewer-{index}"},
+                "commit": {"oid": "old-head"},
+            }
+            for index in range(100)
+        ]
+        blocker = {
+            "id": "review-101",
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-08-15T00:00:00Z",
+            "author": {"login": "independent-agent"},
+            "commit": {"oid": "head123"},
+        }
+        gh_json.side_effect = [
+            self.review_page(
+                nodes=first_page, has_next=True, cursor="review-page-2"
+            ),
+            self.review_page(nodes=[blocker]),
+            self.thread_page(),
+        ]
+
+        evidence = merge_pr.review_evidence(162)
+        pr = labelled(
+            "author:agent-1", "reviewed-by:agent-2", reviews=first_page
+        )
+
+        ok, message = merge_pr.check_reviews(pr, evidence)
+
+        self.assertFalse(ok)
+        self.assertIn("independent-agent requested changes", message)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_review_pagination_failures_return_unknown(self, gh_json, _slug):
+        malformed_cases = [
+            None,
+            {"errors": [{"message": "rate limited"}]},
+            {"data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "reviews": {"nodes": []},
+            }}}},
+            self.review_page(nodes="not-a-list"),
+            self.review_page(nodes=[None]),
+            self.review_page(has_next=True, cursor=None),
+        ]
+        for page in malformed_cases:
+            with self.subTest(page=page):
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.return_value = page
+                self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_review_nodes_require_unique_ids_and_valid_submission_times(
+        self, gh_json, _slug
+    ):
+        valid = {
+            "id": "review-1",
+            "state": "APPROVED",
+            "submittedAt": "2026-08-15T00:00:00Z",
+            "author": None,
+            "commit": {"oid": "head123"},
+        }
+        malformed_pages = [
+            [dict(valid, id=None)],
+            [dict(valid, id="")],
+            [dict(valid, id=7)],
+            [dict(valid, submittedAt=None)],
+            [dict(valid, submittedAt="not-a-time")],
+            [dict(valid, submittedAt="2026-08-15T00:00:00")],
+            [dict(valid, author={})],
+            [dict(valid, author={"name": "missing-login"})],
+            [dict(valid, commit={})],
+            [dict(valid, commit={"abbreviatedOid": "head123"})],
+            [valid, dict(valid)],
+        ]
+        for nodes in malformed_pages:
+            with self.subTest(nodes=nodes):
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.side_effect = [self.review_page(nodes=nodes)]
+                self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_malformed_later_approval_cannot_clear_change_request(
+        self, gh_json, _slug
+    ):
+        nodes = [
+            {
+                "id": "current-comment", "state": "COMMENTED",
+                "submittedAt": "2026-08-15T00:00:00Z",
+                "author": {"login": "peer"}, "commit": {"oid": "head123"},
+            },
+            {
+                "id": "blocker", "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-15T01:00:00Z",
+                "author": {"login": "bob"}, "commit": {"oid": "head123"},
+            },
+            {
+                "id": "malformed-approval", "state": "APPROVED",
+                "submittedAt": "2026-08-15T02:00:00Z",
+                "author": {"login": "bob"}, "commit": {},
+            },
+        ]
+        gh_json.return_value = self.review_page(nodes=nodes)
+
+        self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_dismissed_review_does_not_attest_to_current_head(
+        self, gh_json, _slug
+    ):
+        dismissed = {
+            "id": "dismissed", "state": "DISMISSED",
+            "submittedAt": "2026-08-15T00:00:00Z",
+            "author": {"login": "peer"}, "commit": {"oid": "head123"},
+        }
+        gh_json.side_effect = [
+            self.review_page(nodes=[dismissed]), self.thread_page()
+        ]
+
+        evidence = merge_pr.review_evidence(162)
+
+        self.assertFalse(evidence["reviewed_head"])
+
+    def test_latest_verdict_uses_timestamp_not_page_order(self):
+        reviews = [
+            {
+                "id": "newer",
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-15T02:00:00Z",
+                "author": {"login": "independent-agent"},
+            },
+            {
+                "id": "older",
+                "state": "APPROVED",
+                "submittedAt": "2026-08-15T01:00:00Z",
+                "author": {"login": "independent-agent"},
+            },
+        ]
+        evidence = {
+            "reviews": reviews, "unresolved": 0, "unfixed": 0,
+            "withdrawn": 0, "reviewed_head": True,
+        }
+
+        ok, message = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2"), evidence
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("independent-agent requested changes", message)
+
+    def test_equal_verdict_timestamps_fail_closed(self):
+        reviews = [
+            {
+                "id": "one", "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-15T02:00:00Z",
+                "author": {"login": "independent-agent"},
+            },
+            {
+                "id": "two", "state": "APPROVED",
+                "submittedAt": "2026-08-15T02:00:00Z",
+                "author": {"login": "independent-agent"},
+            },
+        ]
+        evidence = {
+            "reviews": reviews, "unresolved": 0, "unfixed": 0,
+            "withdrawn": 0, "reviewed_head": True,
+        }
+
+        ok, message = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2"), evidence
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("unambiguous latest review verdict", message)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_repeated_review_cursor_returns_unknown(self, gh_json, _slug):
+        gh_json.side_effect = [
+            self.review_page(has_next=True, cursor="same"),
+            self.review_page(has_next=True, cursor="same"),
+        ]
+
+        self.assertIsNone(merge_pr.review_evidence(162))
+        self.assertEqual(gh_json.call_count, 2)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_review_head_change_returns_unknown(self, gh_json, _slug):
+        gh_json.side_effect = [
+            self.review_page(has_next=True, cursor="next"),
+            self.review_page(head="pushed-head"),
+        ]
+
+        self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_thread_page_head_change_after_review_pagination_returns_unknown(
+        self, gh_json, _slug
+    ):
+        gh_json.side_effect = [
+            self.review_page(),
+            self.thread_page(head="pushed-head"),
+        ]
+
+        self.assertIsNone(merge_pr.review_evidence(162))
+
+
 class CiGateTests(unittest.TestCase):
     def test_all_successful_passes(self):
         pr = {"statusCheckRollup": [
@@ -199,12 +495,20 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn("No review", msg)
 
     def test_changes_requested_blocks(self):
-        ok, _ = _gate({"reviews": [{"state": "CHANGES_REQUESTED"}]}, 0)
+        review = {
+            "id": "blocking-review", "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-01-01T00:00:00Z",
+            "author": {"login": "peer"},
+        }
+        ok, msg = _gate({"reviews": [review]}, 0)
         self.assertFalse(ok)
+        self.assertIn("requested changes", msg)
 
     def test_advisory_bot_changes_requested_does_not_block_after_threads_resolve(self):
         reviews = [{
+            "id": "advisory-change-request",
             "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-01-01T00:00:00Z",
             "author": {"login": "chatgpt-codex-connector"},
         }]
         ok, msg = _gate(
@@ -253,9 +557,14 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn("3 unresolved", msg)
 
     def test_unknown_thread_state_blocks_rather_than_guesses(self):
-        ok, msg = _gate({"reviews": [{"state": "APPROVED"}]}, None)
+        review = {
+            "id": "approval", "state": "APPROVED",
+            "submittedAt": "2026-01-01T00:00:00Z",
+            "author": {"login": "peer"},
+        }
+        ok, msg = _gate({"reviews": [review]}, None)
         self.assertFalse(ok)
-        self.assertIn("refusing", msg)
+        self.assertIn("review-thread state", msg)
 
     def test_approved_and_resolved_passes(self):
         ok, _ = _gate(
@@ -277,7 +586,12 @@ def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella")
     Same-account is the interesting case: every agent authenticates as one user,
     so only the identity labels distinguish them.
     """
-    default = [{"state": "APPROVED", "author": {"login": review_login}}]
+    default = [{
+        "id": "default-review",
+        "state": "APPROVED",
+        "submittedAt": "2026-01-01T00:00:00Z",
+        "author": {"login": review_login},
+    }]
     return {
         "author": {"login": pr_login},
         "reviews": reviews if reviews is not None else default,
@@ -373,10 +687,16 @@ class SelfReviewTests(unittest.TestCase):
 
     def test_self_review_refusal_outranks_nothing_else_being_wrong(self):
         # CI green, threads resolved, criteria ticked - still refused.
-        ok, _ = _gate(
+        approval = {
+            "id": "self-approval", "state": "APPROVED",
+            "submittedAt": "2026-01-01T00:00:00Z",
+            "author": {"login": "gillella"},
+        }
+        ok, msg = _gate(
             labelled("author:solo", "reviewed-by:solo",
-                     reviews=[{"state": "APPROVED"}, {"state": "COMMENTED"}]), 0)
+                     reviews=[approval, {"state": "COMMENTED"}]), 0)
         self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
 
 
 class ClaimIsNotAttestationTests(unittest.TestCase):
@@ -554,7 +874,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         merge_pr,
         "review_evidence",
         return_value={
-            "unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True,
+            "head_oid": "gated-sha", "unresolved": 0, "unfixed": 0,
+            "withdrawn": 0, "reviewed_head": True,
         },
     )
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
@@ -574,7 +895,11 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "statusCheckRollup": [
                 {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
             ],
-            "reviews": [{"state": "APPROVED", "author": {"login": "peer"}}],
+            "reviews": [{
+                "id": "peer-approval", "state": "APPROVED",
+                "submittedAt": "2026-01-01T00:00:00Z",
+                "author": {"login": "peer"},
+            }],
             "author": {"login": "author"},
             "labels": [{"name": "author:agent-1"}],
             "mergeStateStatus": "CLEAN",
@@ -598,7 +923,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         merge_pr,
         "review_evidence",
         return_value={
-            "unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True,
+            "head_oid": "gated-sha", "unresolved": 0, "unfixed": 0,
+            "withdrawn": 0, "reviewed_head": True,
         },
     )
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
@@ -617,7 +943,11 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "statusCheckRollup": [
                 {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
             ],
-            "reviews": [{"state": "APPROVED", "author": {"login": "peer"}}],
+            "reviews": [{
+                "id": "peer-approval", "state": "APPROVED",
+                "submittedAt": "2026-01-01T00:00:00Z",
+                "author": {"login": "peer"},
+            }],
             "author": {"login": "author"},
             "labels": [{"name": "author:agent-1"}],
             "mergeStateStatus": "CLEAN",
@@ -1116,6 +1446,16 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
 
 
 class ExpectedHeadGateTests(unittest.TestCase):
+    @staticmethod
+    def open_pr(head):
+        return {
+            "number": 9, "title": "t", "body": "Closes #7", "state": "OPEN",
+            "headRefOid": head, "labels": [], "reviews": [],
+            "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "additions": 1, "deletions": 1, "author": {"login": "gillella"},
+        }
+
     @patch.object(merge_pr, "fetch_pr")
     def test_expected_head_mismatch_blocks_before_merge(self, fetch_pr):
         pr = {
@@ -1129,6 +1469,55 @@ class ExpectedHeadGateTests(unittest.TestCase):
         with patch("sys.argv", ["merge_pr.py", "--pr", "9", "--expected-head", "reviewed-a"]):
             rc = merge_pr.main()
         self.assertEqual(rc, merge_pr.EXIT_BLOCKED)
+
+    @patch.object(merge_pr, "execute_merge")
+    @patch.object(merge_pr, "evaluate_dod")
+    @patch.object(merge_pr, "review_evidence", return_value={"head_oid": "H2"})
+    @patch.object(merge_pr, "_gh_json", return_value={"body": ""})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_push_before_first_review_page_cannot_mix_gate_snapshots(
+        self, fetch_pr, _issue, _evidence, evaluate, execute
+    ):
+        fetch_pr.return_value = self.open_pr("H1")
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+            rc = merge_pr.main()
+
+        self.assertEqual(rc, merge_pr.EXIT_BLOCKED)
+        evaluate.assert_not_called()
+        execute.assert_not_called()
+
+    @patch.object(merge_pr, "execute_merge")
+    @patch.object(merge_pr, "evaluate_dod", return_value=(True, []))
+    @patch.object(merge_pr, "review_evidence", return_value={"head_oid": "H1"})
+    @patch.object(merge_pr, "_gh_json", return_value={"body": ""})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_push_after_review_pages_cannot_merge_new_head_without_expected_head(
+        self, fetch_pr, _issue, _evidence, _evaluate, execute
+    ):
+        fetch_pr.side_effect = [self.open_pr("H1"), self.open_pr("H2")]
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+            rc = merge_pr.main()
+
+        self.assertEqual(rc, merge_pr.EXIT_BLOCKED)
+        execute.assert_not_called()
+
+
+class DodStatusHeadBindingTests(unittest.TestCase):
+    @patch.object(merge_pr, "evaluate_dod")
+    @patch.object(merge_pr, "review_evidence", return_value={"head_oid": "H2"})
+    @patch.object(merge_pr, "_gh_json", return_value={"body": ""})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_status_refuses_evidence_from_a_different_head(
+        self, fetch_pr, _issue, _evidence, evaluate
+    ):
+        fetch_pr.return_value = ExpectedHeadGateTests.open_pr("H1")
+
+        ok, reason = merge_pr.dod_status(9)
+
+        self.assertFalse(ok)
+        self.assertIn("evidence covers H2", reason)
+        self.assertIn("snapshot is H1", reason)
+        evaluate.assert_not_called()
 
 
 class CloseoutMarkerTests(unittest.TestCase):
@@ -1312,7 +1701,15 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                 "repository": {
                     "pullRequest": {
                         "headRefOid": "head123",
-                        "reviews": {"nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}]},
+                        "reviews": {
+                            "nodes": [{
+                                "id": "review-1", "state": "COMMENTED",
+                                "submittedAt": "2026-08-10T09:00:00Z",
+                                "author": {"login": "agent-2"},
+                                "commit": {"oid": "head123"},
+                            }],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
                         "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
                         "reviewThreads": {
                             "nodes": [
@@ -1338,7 +1735,15 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                 "repository": {
                     "pullRequest": {
                         "headRefOid": "head123",
-                        "reviews": {"nodes": [{"state": "COMMENTED", "author": {"login": "agent-2"}, "commit": {"oid": "head123"}}]},
+                        "reviews": {
+                            "nodes": [{
+                                "id": "review-1", "state": "COMMENTED",
+                                "submittedAt": "2026-08-10T09:00:00Z",
+                                "author": {"login": "agent-2"},
+                                "commit": {"oid": "head123"},
+                            }],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
                         "commits": {
                             "nodes": [
                                 {"commit": {"committedDate": "2026-08-10T10:00:00Z"}},
@@ -1679,7 +2084,8 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
         with patch.object(sys, "argv", argv), \
              patch.object(merge_pr, "fetch_pr", return_value=open_pr), \
              patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
-             patch.object(merge_pr, "review_evidence", return_value={}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": "gated-sha"}), \
              patch.object(merge_pr, "evaluate_dod",
                           return_value=(True, list(CHECKPOINT_GATES))), \
              patch.object(merge_pr, "execute_merge",
@@ -1750,6 +2156,31 @@ class DryRunJsonTests(unittest.TestCase):
         self.assertEqual(code, merge_pr.EXIT_ERROR)
         fetch.assert_not_called()
 
+    def test_evidence_head_mismatch_emits_blocking_json(self):
+        pr = {
+            "number": 9, "title": "feat", "body": "Closes #1",
+            "state": "OPEN", "mergedAt": None, "headRefOid": "H1",
+            "labels": [],
+        }
+        with patch.object(
+            sys, "argv", ["merge_pr.py", "--pr", "9", "--dry-run", "--json"]
+        ), patch.object(
+            merge_pr, "fetch_pr", return_value=pr
+        ), patch.object(
+            merge_pr, "_gh_json", return_value={"body": ""}
+        ), patch.object(
+            merge_pr, "review_evidence", return_value={"head_oid": "H2"}
+        ), patch("builtins.print") as printer:
+            code = merge_pr.main()
+
+        self.assertEqual(code, merge_pr.EXIT_BLOCKED)
+        printed = [str(call.args[0]) for call in printer.call_args_list if call.args]
+        self.assertEqual(len(printed), 1)
+        payload = json.loads(printed[0])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["first_blocking"], "review head")
+        self.assertIn("different commits", payload["gates"][0]["message"])
+
     def test_dry_run_json_prints_payload_and_skips_merge(self):
         pr = {
             "number": 9,
@@ -1774,7 +2205,9 @@ class DryRunJsonTests(unittest.TestCase):
              patch.object(merge_pr, "fetch_pr", return_value=pr), \
              patch.object(merge_pr, "is_merged", return_value=False), \
              patch.object(merge_pr, "_gh_json", return_value={"body": "- [x] done"}), \
-             patch.object(merge_pr, "review_evidence", return_value={"unresolved": 0, "unfixed": 0, "withdrawn": 0}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": "abc", "unresolved": 0,
+                                        "unfixed": 0, "withdrawn": 0}), \
              patch.object(merge_pr, "evaluate_dod", return_value=(False, gates)), \
              patch.object(merge_pr, "execute_merge") as execute_merge, \
              patch("builtins.print") as printer:
