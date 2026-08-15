@@ -62,13 +62,14 @@ MERGER_CLAIM_LABEL = "merger:"
 # Codex connector without one, so both forms must be recognized explicitly.
 ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
 
-# Large diffs remain visible in the audit output. The separate independent-
-# review gate, not a blanket human-review assertion, owns review quality.
-SIZE_SOFT_LIMIT = 400
+# Large diffs must be split unless the reviewed PR body records why a waiver is
+# necessary. Independent review remains a separate, mandatory gate.
+SIZE_LIMIT = 400
 
 PR_FIELDS = (
     "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,author,"
-    "headRefName,headRefOid,additions,deletions,reviews,statusCheckRollup,labels,"
+    "headRefName,headRefOid,additions,deletions,changedFiles,files,reviews,"
+    "statusCheckRollup,labels,"
     "mergedAt,mergeCommit,headRepository,headRepositoryOwner,isCrossRepository"
 )
 
@@ -858,12 +859,51 @@ def check_acceptance(issue_num, issue_body):
 
 def check_size(pr):
     total = (pr.get("additions") or 0) + (pr.get("deletions") or 0)
-    if total > SIZE_SOFT_LIMIT:
+    if total > SIZE_LIMIT:
+        waiver = re.search(
+            r"^\s*size-waiver:\s*(\S.*)$",
+            pr.get("body") or "",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if not waiver:
+            return False, (
+                f"Diff is {total} lines, over the {SIZE_LIMIT}-line limit. "
+                "Split the PR or add 'size-waiver: <rationale>' to its body."
+            )
         return True, (
-            f"Diff is {total} lines, over the {SIZE_SOFT_LIMIT}-line soft limit. "
-            "Independent review remains mandatory through the separate review gate."
+            f"Diff is {total} lines with explicit size waiver: "
+            f"{waiver.group(1).strip()}"
         )
     return True, f"Diff is {total} lines."
+
+
+def check_test_coverage(pr):
+    """Require a changed test whenever production Python roots are changed."""
+    files = pr.get("files") or []
+    changed_files = pr.get("changedFiles")
+    if isinstance(changed_files, int) and changed_files > len(files):
+        return False, (
+            f"Changed-file data is truncated ({len(files)} of {changed_files}); "
+            "split the PR so test coverage can be evaluated completely."
+        )
+    paths = [entry.get("path", "") for entry in files if isinstance(entry, dict)]
+    production = [path for path in paths if path.startswith(("src/", "scripts/"))]
+    if not production:
+        return True, "No src/ or scripts/ changes require test coverage."
+
+    tests = [
+        entry.get("path", "")
+        for entry in files
+        if isinstance(entry, dict)
+        and entry.get("path", "").startswith("tests/")
+        and not ((entry.get("additions") or 0) == 0 and (entry.get("deletions") or 0) > 0)
+    ]
+    if not tests:
+        return False, (
+            "Production changes under src/ or scripts/ require a changed, non-deleted "
+            "test file under tests/."
+        )
+    return True, f"Production changes include test coverage in {len(tests)} test file(s)."
 
 
 def is_merged(pr):
@@ -1246,6 +1286,7 @@ def evaluate_dod(pr, issue_bodies, evidence):
         ("review", *check_reviews(pr, evidence)),
         ("rebased", *check_rebased(pr)),
         ("size", *check_size(pr)),
+        ("tests", *check_test_coverage(pr)),
     ]
     for num in issue_nums:
         gates.append((f"accept #{num}", *check_acceptance(num, issue_bodies.get(num, ""))))
