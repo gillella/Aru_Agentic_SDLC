@@ -1637,7 +1637,9 @@ def main():
             )
             if args.json:
                 print(json.dumps(dry_run_json_payload(
-                    pr, [("review", False, reason.removeprefix("[ERROR] "))], False
+                    pr,
+                    [("review head", False, reason.removeprefix("[ERROR] "))],
+                    False,
                 )))
             else:
                 print(reason, file=sys.stderr)

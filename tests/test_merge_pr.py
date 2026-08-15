@@ -692,10 +692,11 @@ class SelfReviewTests(unittest.TestCase):
             "submittedAt": "2026-01-01T00:00:00Z",
             "author": {"login": "gillella"},
         }
-        ok, _ = _gate(
+        ok, msg = _gate(
             labelled("author:solo", "reviewed-by:solo",
                      reviews=[approval, {"state": "COMMENTED"}]), 0)
         self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
 
 
 class ClaimIsNotAttestationTests(unittest.TestCase):
@@ -2177,7 +2178,7 @@ class DryRunJsonTests(unittest.TestCase):
         self.assertEqual(len(printed), 1)
         payload = json.loads(printed[0])
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["first_blocking"], "review")
+        self.assertEqual(payload["first_blocking"], "review head")
         self.assertIn("different commits", payload["gates"][0]["message"])
 
     def test_dry_run_json_prints_payload_and_skips_merge(self):
