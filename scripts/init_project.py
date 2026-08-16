@@ -693,6 +693,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      has_preview: ${{ steps.build.outputs.has_preview }}
+      is_library: ${{ steps.build.outputs.is_library }}
     steps:
       - name: Checkout trusted control plane
         uses: actions/checkout@v4
@@ -722,16 +725,41 @@ jobs:
           python-version: '3.12'
 
       - name: Build with trusted helper
+        id: build
         run: |
-          python3 control-plane/scripts/build_preview.py --source target --output target/dist
+          python3 control-plane/scripts/build_preview.py --source target --output target/dist --allow-library
 
       - name: Upload Pages artifact
+        if: steps.build.outputs.has_preview == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: 'target/dist'
 
+      - name: Record exact-run library skip metadata
+        if: steps.build.outputs.is_library == 'true'
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+        run: |
+          jq -n \\
+            --arg run_id "${GITHUB_RUN_ID}" \\
+            --arg commit_sha "${TARGET_SHA}" \\
+            --arg repository "${GITHUB_REPOSITORY}" \\
+            --arg preview_url "skipped" \\
+            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url, is_library: true, status: "skipped"}' \\
+            > preview-metadata.json
+
+      - name: Upload exact-run library skip metadata
+        if: steps.build.outputs.is_library == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-metadata
+          path: preview-metadata.json
+          if-no-files-found: error
+          retention-days: 30
+
   deploy-preview:
     needs: build-preview
+    if: needs.build-preview.outputs.has_preview == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -740,6 +768,8 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Configure Pages
         uses: actions/configure-pages@v5
@@ -774,6 +804,40 @@ jobs:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
           echo "Preview URL: ${PAGE_URL}" >> "$GITHUB_STEP_SUMMARY"
+
+  smoke-preview:
+    name: Smoke & E2E Validation
+    needs: [build-preview, deploy-preview]
+    if: always() && !cancelled() && needs.build-preview.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted control plane
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: control-plane
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Execute Smoke & E2E Tests
+        env:
+          HAS_PREVIEW: ${{ needs.build-preview.outputs.has_preview }}
+          IS_LIBRARY: ${{ needs.build-preview.outputs.is_library }}
+          PREVIEW_URL: ${{ needs.deploy-preview.outputs.page_url }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          python3 control-plane/scripts/smoke_preview.py \\
+            --url "${PREVIEW_URL}" \\
+            --has-preview "${HAS_PREVIEW}" \\
+            --is-library "${IS_LIBRARY}" \\
+            --commit-sha "${COMMIT_SHA}" \\
+            --scenarios-file control-plane/.github/scenarios/smoke.json
 """
 
 
@@ -787,6 +851,7 @@ def scaffold_directory_structure(target_dir: str):
         "docs",
         ".github/workflows",
         ".github/scripts",
+        ".github/scenarios",
         ".github/ISSUE_TEMPLATE",
         ".cursor/rules",
     ]
@@ -817,6 +882,26 @@ def write_governance_scripts(target_dir: str):
     with open(build_preview_target, "w", encoding="utf-8") as target:
         target.write(build_preview_content)
     os.chmod(build_preview_target, 0o755)
+
+    smoke_preview_source = os.path.join(os.path.dirname(__file__), "smoke_preview.py")
+    smoke_preview_target = os.path.join(project_scripts_dir, "smoke_preview.py")
+    with open(smoke_preview_source, "r", encoding="utf-8") as source:
+        smoke_preview_content = source.read()
+    with open(smoke_preview_target, "w", encoding="utf-8") as target:
+        target.write(smoke_preview_content)
+    os.chmod(smoke_preview_target, 0o755)
+
+    scenarios_dir = os.path.join(github_dir, "scenarios")
+    os.makedirs(scenarios_dir, exist_ok=True)
+    smoke_scenario_source = os.path.join(
+        os.path.dirname(__file__), "..", ".github", "scenarios", "smoke.json"
+    )
+    smoke_scenario_target = os.path.join(scenarios_dir, "smoke.json")
+    if os.path.isfile(smoke_scenario_source):
+        with open(smoke_scenario_source, "r", encoding="utf-8") as source:
+            smoke_scenario_content = source.read()
+        with open(smoke_scenario_target, "w", encoding="utf-8") as target:
+            target.write(smoke_scenario_content)
 
     check_touches_path = os.path.join(scripts_dir, "check_touches.py")
     with open(check_touches_path, "w", encoding="utf-8") as f:

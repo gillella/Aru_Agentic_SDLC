@@ -1,0 +1,10 @@
+[
+  {
+    "name": "Application Root Element",
+    "contains": "(<body|<main|<div|<section|<p|<h1)"
+  },
+  {
+    "name": "Absence of Unhandled Runtime Errors",
+    "not_contains": "(Unhandled Runtime Error|Traceback \\(most recent call last\\)|500 Internal Server Error)"
+  }
+]

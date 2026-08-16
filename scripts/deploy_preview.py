@@ -498,13 +498,15 @@ def extract_preview_url_from_run(
             data = _strict_json_object(metadata_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError):
             return None
-        if not data or set(data) != {"run_id", "commit_sha", "repository", "preview_url"}:
+        if not data or not {"run_id", "commit_sha", "repository", "preview_url"}.issubset(set(data)):
             return None
         if data.get("run_id") != str(run_id):
             return None
         if data.get("commit_sha") != commit_sha or data.get("repository") != repo_slug:
             return None
         preview_url = data.get("preview_url")
+        if preview_url == "skipped" or data.get("is_library") is True or data.get("status") == "skipped":
+            return "skipped"
         if isinstance(preview_url, str) and is_valid_preview_url(preview_url, pages_url):
             return _normalize_pages_url(preview_url)
     return None
@@ -518,15 +520,22 @@ def post_preview_comment(
     dry_run: bool = False,
 ) -> bool:
     """Posts a preview URL comment to the originating issue."""
-    if not is_valid_preview_url(preview_url, pages_url):
-        print(f"[ERROR] Rejecting invalid/untrusted preview URL: {preview_url}", file=sys.stderr)
-        return False
+    if preview_url == "skipped":
+        body = (
+            f"⏭️ **Preview Deployment: Visibly Skipped (Library)**\n\n"
+            f"- **Commit**: `{commit_sha[:7]}`\n"
+            f"- **Status**: Product is a library with no runnable web preview surface; preview and smoke stages skipped visibly.\n"
+        )
+    else:
+        if not is_valid_preview_url(preview_url, pages_url):
+            print(f"[ERROR] Rejecting invalid/untrusted preview URL: {preview_url}", file=sys.stderr)
+            return False
 
-    body = (
-        f"🚀 **Preview Environment Deployed**\n\n"
-        f"- **Commit**: `{commit_sha[:7]}`\n"
-        f"- **Preview URL**: <{preview_url}>\n"
-    )
+        body = (
+            f"🚀 **Preview Environment Deployed**\n\n"
+            f"- **Commit**: `{commit_sha[:7]}`\n"
+            f"- **Preview URL**: <{preview_url}>\n"
+        )
     if dry_run:
         print(f"[DRY-RUN] Would comment on issue #{issue_id}:\n{body}")
         return True
@@ -913,7 +922,7 @@ def deploy_preview(
         pages_url,
         dry_run=True,
     )
-    if not final_url or not is_valid_preview_url(final_url, pages_url):
+    if final_url != "skipped" and (not final_url or not is_valid_preview_url(final_url, pages_url)):
         print("[ERROR] Preview URL is not the canonical repository Pages URL.", file=sys.stderr)
         return 1
     comment_ok = post_preview_comment(
@@ -934,7 +943,10 @@ def deploy_preview(
         )
         return 1
 
-    print(f"✅ Preview deployed successfully: {final_url}")
+    if final_url == "skipped":
+        print(f"✅ Preview skipped visibly for library commit {commit_sha[:7]}")
+    else:
+        print(f"✅ Preview deployed successfully: {final_url}")
     return 0
 
 

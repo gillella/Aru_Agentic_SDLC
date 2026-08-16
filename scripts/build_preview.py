@@ -90,6 +90,9 @@ def _copy_public_tree(source: Path, destination: Path) -> None:
                 shutil.copy2(source_file, target_dir / name)
 
 
+APP_CANDIDATE_DIRS = ["sdlc_flow_visualizer", "public", "dist", "build", "web", "frontend", "site"]
+
+
 def find_preview_source(root_dir: str) -> Optional[Tuple[str, str]]:
     """Return a non-symlink static source rooted inside ``root_dir``."""
     lexical_root = _absolute_lexical(root_dir)
@@ -97,8 +100,7 @@ def find_preview_source(root_dir: str) -> Optional[Tuple[str, str]]:
         return None
     root = lexical_root.resolve(strict=True)
 
-    candidate_dirs = ["sdlc_flow_visualizer", "public", "dist", "build", "web", "frontend", "site"]
-    for candidate in candidate_dirs:
+    for candidate in APP_CANDIDATE_DIRS:
         candidate_path = root / candidate
         index = candidate_path / "index.html"
         if (
@@ -120,51 +122,144 @@ def find_preview_source(root_dir: str) -> Optional[Tuple[str, str]]:
     return None
 
 
-def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
+def detect_surface_classification(root_dir: str) -> Tuple[str, Optional[Tuple[str, str]]]:
+    """Distinguish valid runnable products, broken runnable products (missing entrypoint), and libraries."""
+    lexical_root = _absolute_lexical(root_dir)
+    if lexical_root.is_symlink() or not lexical_root.is_dir():
+        return "error", None
+    root = lexical_root.resolve(strict=True)
+
+    found = find_preview_source(str(root))
+    if found:
+        return "runnable_found", found
+
+    has_library_marker = (
+        (root / "src").is_dir()
+        or (root / "pyproject.toml").is_file()
+        or (root / "setup.py").is_file()
+        or (root / "setup.cfg").is_file()
+        or (root / "requirements.txt").is_file()
+    )
+
+    explicit_app_dirs = ["sdlc_flow_visualizer", "public", "web", "frontend", "site"]
+    for candidate in explicit_app_dirs:
+        candidate_path = root / candidate
+        if candidate_path.is_dir() and not candidate_path.is_symlink():
+            return "runnable_missing_entrypoint", ("app_dir", str(candidate_path))
+
+    if has_library_marker:
+        return "library", None
+
+    for candidate in ("dist", "build"):
+        candidate_path = root / candidate
+        if candidate_path.is_dir() and not candidate_path.is_symlink():
+            return "runnable_missing_entrypoint", ("app_dir", str(candidate_path))
+
+    return "unknown", None
+
+
+def _set_github_output(name: str, value: str) -> None:
+    """Export step output to GitHub Actions if GITHUB_OUTPUT is defined."""
+    output_file = os.environ.get("GITHUB_OUTPUT")
+    if not output_file:
+        return
+    try:
+        with open(output_file, "a", encoding="utf-8") as f:
+            f.write(f"{name}={value}\n")
+    except OSError:
+        pass
+
+
+def assemble_preview_artifact(source_dir: str, output_dir: str, allow_library: bool = False) -> bool:
     """Copy only public static files into the source checkout's canonical dist/."""
     lexical_source = _absolute_lexical(source_dir)
     if lexical_source.is_symlink() or not lexical_source.is_dir():
         print("[ERROR] Preview source must be a real directory, not a symlink.", file=sys.stderr)
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
         return False
     source_root = lexical_source.resolve(strict=True)
 
     lexical_dest = _absolute_lexical(output_dir)
     if lexical_dest.is_symlink():
         print("[ERROR] Preview output must not be a symlink.", file=sys.stderr)
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
         return False
     dest = lexical_dest.resolve(strict=False)
     try:
         relative_dest = dest.relative_to(source_root)
     except ValueError:
         print("[ERROR] Preview output must be contained inside the source checkout.", file=sys.stderr)
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
         return False
     if relative_dest == Path(".") or _has_symlink_component(dest, source_root):
         print("[ERROR] Preview output must be a non-symlink descendant of the source checkout.", file=sys.stderr)
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
         return False
     if dest != source_root / "dist":
         print("[ERROR] Preview output must be the canonical <source>/dist directory.", file=sys.stderr)
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
         return False
 
-    found = find_preview_source(str(source_root))
-    if not found:
+    classification, found = detect_surface_classification(str(source_root))
+    if classification == "runnable_missing_entrypoint":
+        app_path = found[1] if found else "app"
+        print(
+            f"[ERROR] Runnable application directory '{app_path}' exists but lacks entrypoint index.html.",
+            file=sys.stderr,
+        )
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
+        return False
+
+    if classification == "library":
+        if allow_library:
+            print(
+                f"[INFO] Product in '{source_root}' identified as a library with no runnable web surface; "
+                "skipping preview build visibly.",
+            )
+            _set_github_output("has_preview", "false")
+            _set_github_output("is_library", "true")
+            return True
+        print(
+            f"[ERROR] Product in '{source_root}' is a library with no deployable preview surface and --allow-library was not set.",
+            file=sys.stderr,
+        )
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "true")
+        return False
+
+    if classification != "runnable_found" or not found:
         print(
             f"[ERROR] No deployable static entrypoint (index.html) found in '{source_root}' "
             "or a supported public subdirectory.",
             file=sys.stderr,
         )
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
         return False
 
     source_type, source_path = found
     src = Path(source_path)
     if _contains_symlink(src):
         print("[ERROR] Preview source contains a symlink and cannot be published safely.", file=sys.stderr)
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
         return False
 
     if src == dest:
         if _validate_public_tree(dest):
             print(f"Preview artifact already present in '{dest.name}/'")
+            _set_github_output("has_preview", "true")
+            _set_github_output("is_library", "false")
             return True
         print("[ERROR] Existing preview artifact contains non-public or unsafe files.", file=sys.stderr)
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
         return False
 
     if source_type == "app_dir":
@@ -174,6 +269,8 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
             pass
         else:
             print("[ERROR] Preview output cannot contain its own source directory.", file=sys.stderr)
+            _set_github_output("has_preview", "false")
+            _set_github_output("is_library", "false")
             return False
         try:
             dest.relative_to(src)
@@ -181,6 +278,8 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
             pass
         else:
             print("[ERROR] Preview output cannot be inside its source directory.", file=sys.stderr)
+            _set_github_output("has_preview", "false")
+            _set_github_output("is_library", "false")
             return False
 
     public_directories = []
@@ -198,15 +297,21 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
                     f"[ERROR] Preview output cannot be inside public asset directory '{directory_name}'.",
                     file=sys.stderr,
                 )
+                _set_github_output("has_preview", "false")
+                _set_github_output("is_library", "false")
                 return False
             public_directories.append((directory_name, directory))
 
     if dest.exists():
         if _contains_symlink(dest):
             print("[ERROR] Existing preview output contains a symlink.", file=sys.stderr)
+            _set_github_output("has_preview", "false")
+            _set_github_output("is_library", "false")
             return False
         if not dest.is_dir():
             print("[ERROR] Preview output exists and is not a directory.", file=sys.stderr)
+            _set_github_output("has_preview", "false")
+            _set_github_output("is_library", "false")
             return False
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=False)
@@ -221,14 +326,20 @@ def assemble_preview_artifact(source_dir: str, output_dir: str) -> bool:
             if _contains_symlink(directory):
                 print(f"[ERROR] Public asset directory '{directory_name}' contains a symlink.", file=sys.stderr)
                 shutil.rmtree(dest)
+                _set_github_output("has_preview", "false")
+                _set_github_output("is_library", "false")
                 return False
             _copy_public_tree(directory, dest / directory_name)
 
     if not (dest / "index.html").is_file():
         shutil.rmtree(dest)
         print("[ERROR] Preview artifact does not contain index.html.", file=sys.stderr)
+        _set_github_output("has_preview", "false")
+        _set_github_output("is_library", "false")
         return False
     print(f"Assembled public preview artifact into '{dest.name}/'")
+    _set_github_output("has_preview", "true")
+    _set_github_output("is_library", "false")
     return True
 
 
@@ -239,9 +350,14 @@ def main() -> int:
         "--output",
         help="Canonical <source>/dist output directory (default: <source>/dist)",
     )
+    parser.add_argument(
+        "--allow-library",
+        action="store_true",
+        help="Permit checkouts with no runnable preview surface (library mode)",
+    )
     args = parser.parse_args()
     output = args.output or str(Path(args.source) / "dist")
-    return 0 if assemble_preview_artifact(args.source, output) else 1
+    return 0 if assemble_preview_artifact(args.source, output, allow_library=args.allow_library) else 1
 
 
 if __name__ == "__main__":
