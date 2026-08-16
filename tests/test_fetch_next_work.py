@@ -752,6 +752,21 @@ class StaleAttributionRoutingTests(unittest.TestCase):
         self.assertTrue(v["eligible"])
         self.assertTrue(v["stale_attribution"])
 
+    def test_stale_attribution_reopens_even_when_decision_is_approved(self):
+        # GitHub does not dismiss a stale approval unless branch protection is
+        # configured to, so a distinct-account APPROVED survives a push it never
+        # covered. merge_pr rejects that approval for the same reason it rejects
+        # the stale stamp, so "already approved" would rebuild the deadlock one
+        # branch later.
+        v = self.verdict(reviewed_pr(decision="APPROVED"), stale_evidence())
+        self.assertTrue(v["eligible"])
+        self.assertTrue(v["stale_attribution"])
+
+    def test_approved_with_current_attribution_is_still_suppressed(self):
+        v = self.verdict(reviewed_pr(decision="APPROVED"), bound_evidence())
+        self.assertFalse(v["eligible"])
+        self.assertEqual(v["reason"], COMPLETE)
+
     def test_legacy_evidence_without_attestations_is_unchanged(self):
         # Records predating attestation must not flood the review queue.
         v = self.verdict(reviewed_pr(), {"head_oid": HEAD_SHA})

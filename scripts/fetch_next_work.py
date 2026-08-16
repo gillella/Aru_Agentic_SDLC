@@ -398,10 +398,17 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
         stale_attribution = True
 
     decision = (pr.get("reviewDecision") or "").upper()
-    if decision == "APPROVED":
+    if decision == "APPROVED" and not stale_attribution:
         # An approved PR is waiting on gated mechanical merge. A historical
         # CHANGES_REQUESTED decision with no current feedback instead needs a
         # fresh review so the latest verdict can unblock the merge gate.
+        #
+        # Stale attribution overrides this. GitHub does not dismiss a stale
+        # approval unless branch protection is configured to, so a
+        # distinct-account approval survives a push that it never covered.
+        # merge_pr rejects such an approval for the same reason it rejects the
+        # stale stamp, so suppressing here would restore the exact deadlock
+        # above one branch later.
         return no("already approved")
 
     state = ci_state(pr)
