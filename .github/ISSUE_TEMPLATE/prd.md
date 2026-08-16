@@ -92,6 +92,9 @@ assignees: ''
 
 ### Planning Readiness
 
+<!-- Child issues should put executable checks in Acceptance Criteria as
+     backticked `verify:` commands (see scripts/acceptance_runner.py). -->
+
 <!-- Explain why this artifact is BLOCKED or READY_FOR_PLANNING. -->
 
 - Status:

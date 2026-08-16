@@ -15,8 +15,11 @@ assignees: ''
 - Out of scope:
 
 ## Acceptance Criteria
+<!-- Backticked `verify:` commands are executed at merge by scripts/acceptance_runner.py
+     (allowlisted runners only; shell metacharacters refused). Prose `verify:` lines
+     without backticks stay checkbox-gated. -->
 - [ ] Findings artifact attached to this issue (verify: artifact comment or `docs/research/` path present)
-- [ ] Every citation carries a resolvable identifier (verify: `python3 scripts/verify_citations.py <artifact>`)
+- [ ] Every citation carries a resolvable identifier (verify: `python3 scripts/verify_citations.py docs/research/TOPIC.md`)
 - [ ] Every Findings line is marked `[external]` or `[repo verified: YYYY-MM-DD]` and carries its own citation (verify: verifier exits 0)
 - [ ] Citation resolution passes mechanically (verify: same command exits 0)
 - [ ] Artifact has a `Repo code claims` section containing dated path entries or exactly `none` (verify: verifier repo-claim check)

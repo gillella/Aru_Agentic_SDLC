@@ -24,10 +24,13 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 
+import acceptance_runner
 from common import (
     VERIFICATION_EVIDENCE_END,
     VERIFICATION_EVIDENCE_SCHEMA,
@@ -35,6 +38,7 @@ from common import (
     get_repo_slug,
     run_cmd,
 )
+from create_pr import render_verification_evidence, replace_verification_evidence
 from update_issue_status import update_status
 
 EXIT_OK = 0
@@ -458,21 +462,13 @@ def unticked_criteria(issue_body):
 
     Only counts checkboxes under an 'Acceptance Criteria' heading; a checklist
     elsewhere in the body (a reviewer's notes, say) must not gate the merge.
+    Criteria that carry a `verify:` command are executed by the runner instead
+    of being certified by a tick.
     """
-    if not issue_body:
-        return []
-    section = re.split(
-        r"^\s*#{1,4}\s*acceptance criteria\s*$", issue_body,
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-    if len(section) < 2:
-        return []
-    # Stop at the next heading.
-    tail = re.split(r"^\s*#{1,4}\s+", section[1], flags=re.MULTILINE)[0]
     return [
-        line.strip()
-        for line in tail.splitlines()
-        if re.match(r"^\s*[-*]\s*\[\s\]", line)
+        item.text
+        for item in acceptance_runner.parse_criteria(issue_body)
+        if item.argv is None and not item.ticked
     ]
 
 
@@ -845,14 +841,134 @@ def check_verification(pr):
     return True, f"Local verification passed {len(commands)} recorded command(s)."
 
 
-def check_acceptance(issue_num, issue_body):
-    pending = unticked_criteria(issue_body)
-    if pending:
-        preview = "\n      ".join(pending[:5])
-        more = f"\n      ... and {len(pending) - 5} more" if len(pending) > 5 else ""
+def ensure_pr_head_checkout(pr, repo_root=None):
+    """Materializes a clean detached checkout of the exact PR head SHA.
+
+    Never falls back to the caller's cwd: a merger clone often has only
+    ``main``, and running verify: commands there can false-pass or false-fail.
+    Never shallow-fetches into that clone: worktrees share its Git metadata,
+    and ``--depth=1`` writes ``.git/shallow`` for every worktree.
+    """
+    sha = (pr or {}).get("headRefOid")
+    if not isinstance(sha, str) or not sha:
+        return None, "PR is missing a head SHA"
+    repo_root = repo_root or repository_root() or os.getcwd()
+    dest = tempfile.mkdtemp(prefix=f"aru-accept-{sha[:12]}-")
+    # Never pass --depth=1 here: every worktree shares this clone's Git
+    # metadata, and a shallow fetch writes `.git/shallow`, which breaks
+    # merge-base / rebase / diff for the rest of the factory.
+    fetch_code, _, fetch_err = run_cmd(
+        ["git", "fetch", "--no-tags", "origin", sha],
+        check=False,
+        cwd=repo_root,
+    )
+    if fetch_code != 0:
+        ref = (pr or {}).get("headRefName")
+        if ref:
+            fetch_code, _, fetch_err = run_cmd(
+                ["git", "fetch", "--no-tags", "origin", ref],
+                check=False,
+                cwd=repo_root,
+            )
+    add_code, _, add_err = run_cmd(
+        ["git", "worktree", "add", "--detach", dest, sha],
+        check=False,
+        cwd=repo_root,
+    )
+    if add_code != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        detail = (add_err or fetch_err or "worktree add failed").strip()
+        return None, f"could not materialize PR head {sha}: {detail}"
+    code, head, _ = run_cmd(["git", "rev-parse", "HEAD"], check=False, cwd=dest)
+    if code != 0 or head.strip() != sha:
+        release_pr_head_checkout(dest, repo_root)
+        return None, f"checkout HEAD {head.strip() or 'unknown'} does not match {sha}"
+    code, status, _ = run_cmd(["git", "status", "--porcelain"], check=False, cwd=dest)
+    if code != 0 or status.strip():
+        release_pr_head_checkout(dest, repo_root)
+        return None, "materialized checkout is not clean"
+    return dest, None
+
+
+def release_pr_head_checkout(path, repo_root=None):
+    """Removes a temporary acceptance checkout and its worktree registration."""
+    if not path:
+        return
+    repo_root = repo_root or repository_root() or os.getcwd()
+    run_cmd(["git", "worktree", "remove", "--force", path], check=False, cwd=repo_root)
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def persist_acceptance_evidence(pr_id, pr, records):
+    """Writes live verify: records into the PR's durable evidence block."""
+    if not records:
+        return True, "no acceptance records to persist"
+    sha = pr.get("headRefOid")
+    fresh = _gh_json(["gh", "pr", "view", str(pr_id), "--json", "body,headRefOid"])
+    if not fresh:
+        return False, "could not re-read the PR body to persist acceptance evidence"
+    if fresh.get("headRefOid") != sha:
+        return False, "PR head changed while acceptance commands ran"
+    body = fresh.get("body") or ""
+    existing, error = parse_verification_evidence(body)
+    merged = acceptance_runner.merge_into_evidence(
+        None if error == "missing" else existing,
+        records,
+    )
+    merged["head_sha"] = sha
+    if error == "missing":
+        updated = body + render_verification_evidence(merged)
+    else:
+        if error:
+            return False, f"verification evidence is malformed: {error}"
+        updated = replace_verification_evidence(body, merged)
+        if updated is None:
+            return False, "could not replace the verification evidence block"
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--body", updated],
+        check=False,
+    )
+    if code != 0:
+        return False, f"could not persist acceptance evidence: {err.strip()}"
+    return True, f"persisted {len(records)} acceptance record(s)"
+
+
+def check_acceptance(issue_num, issue_body, cwd=None, execute=False, run_cmd_fn=None, records_out=None):
+    if execute and not cwd:
         return False, (
-            f"Issue #{issue_num} has {len(pending)} unticked acceptance criteria:\n"
-            f"      {preview}{more}"
+            f"Issue #{issue_num}: no verified PR-head checkout; "
+            "refusing to run verify: commands against an unknown tree"
+        )
+    ok, message, result = acceptance_runner.evaluate_issue(
+        issue_body, cwd=cwd, execute=execute, run_cmd_fn=run_cmd_fn
+    )
+    if records_out is not None:
+        records_out.extend(result["records"])
+    if not ok:
+        pending = [
+            item.text
+            for item in result["criteria"]
+            if item.argv is None and not item.ticked
+        ]
+        if pending and "unticked" in message:
+            preview = "\n      ".join(pending[:5])
+            more = (
+                f"\n      ... and {len(pending) - 5} more" if len(pending) > 5 else ""
+            )
+            return False, (
+                f"Issue #{issue_num} has {len(pending)} unticked acceptance criteria:\n"
+                f"      {preview}{more}"
+            )
+        return False, f"Issue #{issue_num}: {message}"
+    ran = sum(1 for item in result["criteria"] if item.argv)
+    if execute and ran:
+        return True, (
+            f"Acceptance criteria on #{issue_num} passed ({ran} verify: command(s))."
+        )
+    if ran:
+        return True, (
+            f"Acceptance criteria on #{issue_num} validated "
+            f"({ran} verify: command(s); execution deferred to merge)."
         )
     return True, f"All acceptance criteria on #{issue_num} are ticked."
 
@@ -1289,7 +1405,9 @@ def evaluate_dod(pr, issue_bodies, evidence):
         ("tests", *check_test_coverage(pr)),
     ]
     for num in issue_nums:
-        gates.append((f"accept #{num}", *check_acceptance(num, issue_bodies.get(num, ""))))
+        gates.append(
+            (f"accept #{num}", *check_acceptance(num, issue_bodies.get(num, ""), execute=False))
+        )
     ok = all(passed for _, passed, _ in gates)
     return ok, gates
 
@@ -1703,6 +1821,34 @@ def main():
         if args.dry_run:
             print("\n✅ Every gate passed. --dry-run, so nothing was merged.")
             return EXIT_OK
+
+        needs_verify = any(
+            item.argv
+            for body in issue_bodies.values()
+            for item in acceptance_runner.parse_criteria(body)
+        )
+        if needs_verify:
+            checkout, checkout_err = ensure_pr_head_checkout(pr)
+            if checkout_err:
+                print(f"\n🚫 Not merged. Unmet: accept. {checkout_err}")
+                return EXIT_BLOCKED
+            try:
+                records = []
+                for num in issue_nums:
+                    passed, message = check_acceptance(
+                        num, issue_bodies.get(num, ""), cwd=checkout, execute=True,
+                        records_out=records,
+                    )
+                    print(f"  {'✅' if passed else '❌'} accept #{num:<4} {message}")
+                    if not passed:
+                        persist_acceptance_evidence(args.pr, pr, records)
+                        return EXIT_BLOCKED
+                persisted, persist_msg = persist_acceptance_evidence(args.pr, pr, records)
+                print(f"  {'✅' if persisted else '❌'} evidence    {persist_msg}")
+                if not persisted:
+                    return EXIT_BLOCKED
+            finally:
+                release_pr_head_checkout(checkout)
 
         # Re-check head immediately before the merge command in case a push
         # landed between DoD evaluation and execution.
