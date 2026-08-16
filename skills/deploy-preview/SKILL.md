@@ -1,12 +1,13 @@
 ---
 name: deploy-preview
-description: Deploys merged commits to a preview environment, records the resulting preview URL on the originating issue, and files a governed remediation issue on the Project Board if deployment fails.
+description: Deploys merged commits to preview and records evidence-backed, audit-only GitHub promotion state with a reversible issue trail.
 triggers:
   - "deploy preview"
   - "preview environment"
   - "deploy merged commit"
-do_not_trigger_for:
-  - "staging or production releases (use release skill instead)"
+  - "promote to staging"
+  - "promote to production"
+  - "reverse promotion"
 ---
 
 # Deploy Preview Skill Procedure
@@ -22,6 +23,26 @@ All preview deployment operations MUST be executed via the governed helper scrip
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <COMMIT_SHA> [--issue <ISSUE_NUMBER>]
 ```
+
+Audit-only promotion state after preview MUST use the governed promotion
+helper. Raw workflow dispatches, deployment API calls, and console environment
+changes are not a sanctioned promotion path:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/promote.py" \
+  --commit <MERGED_COMMIT_SHA> \
+  --checkpoint <ckpt/PR-SHA7> \
+  --issue <INCLUDED_ISSUE> \
+  --from-environment <preview|staging> \
+  --to-environment <staging|production> \
+  --evidence-run <SUCCESSFUL_SOURCE_SMOKE_RUN>
+```
+
+> **Scope boundary:** issue #110 promotion means governed GitHub Environment
+> and Deployment state plus its evidence trail. It does not deploy, copy,
+> rebuild, or prove that a runnable build moved between hosting environments.
+> Real immutable-artifact promotion through authoritative staging and
+> production URLs is tracked by issue #234.
 
 ---
 
@@ -51,13 +72,42 @@ python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <COMMIT_SHA> [--issu
   2. The new issue is immediately attached to the governed Project Board as `Ready` via `update_issue_status.py --require-board`.
   3. A notification comment is posted to the originating issue linking to the remediation issue.
 
+### 5. Record Governed Environment State (Audit-Only)
+
+- Record only adjacent forward states: `preview -> staging`, then
+  `staging -> production`.
+- Supply the published checkpoint tag and every included issue. The helper
+  verifies that the checkpoint resolves to the exact merged commit and that its
+  annotation names every supplied issue.
+- Supply a successful prior-stage Actions run. A green `Deploy Preview` run,
+  including the #111 smoke and E2E job, is required before recording staging.
+  A successful prior audit-only staging record is required before recording
+  production. Later audit-only evidence proves GitHub state and the exact
+  commit; it is not hosted smoke evidence.
+- The helper dispatches `.github/workflows/promote.yml`, correlates the exact
+  new run, waits for terminal success, and only then records the audit-only
+  scope, commit, checkpoint, included issues, prior-stage evidence, promotion
+  run, and GitHub Deployment state on every issue.
+- To reverse state, use the inverse adjacent transition (`production ->
+  staging` or `staging -> preview`) for the previously known-good checkpoint
+  and add `--reverse-of <PRIOR_PROMOTION_RUN>`. The referenced run must be a
+  successful governed promotion into the state being reversed. If source
+  history itself must be rolled back, first use the governed `revert_merge.py`
+  path and record its resulting checkpoint; never rewrite GitHub history.
+- The workflow run URL is an audit log link, not an application environment
+  URL. No successful issue record may claim provider deployment, immutable
+  artifact movement, or staging/production availability.
+
 ---
 ## First-Stack Implementation & Extension Path
 
-### 1. First-Stack Slice (Python / Static HTML / GitHub Pages)
+### 1. First-Stack Preview Slice (Python / Static HTML / GitHub Pages)
 - Default CD pipeline: `.github/workflows/deploy-preview.yml`.
 - Scaffolding: Generated automatically during `init_project.py` bootstrap.
 - Operation: The local governed helper ensures Pages is configured through the operator credential. A read-only job then checks out the trusted default branch, refreshes and validates the exact merged target SHA, and uses the trusted `build_preview.py` to copy only non-symlink public assets into a contained `dist/`. A separate Pages/OIDC job deploys the artifact and uploads exact-run metadata for `deploy_preview.py` to verify before commenting.
+- GitHub Pages is the only runnable target in this slice. The `staging` and
+  `production` names used by `promote.py` are governed GitHub state labels,
+  not additional Pages sites or hosting environments.
 
 ### 2. Extension Path for Additional Stack Packs (Phase 5)
 Different tech stacks (Node/Next.js on Vercel/Cloudflare, Python/FastAPI on Fly.io, Go on AWS ECS, Docker containers) declare their preview deployment configuration in `.github/workflows/deploy-preview.yml`.
