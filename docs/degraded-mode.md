@@ -48,10 +48,10 @@ Once GitHub connectivity and API health are restored:
 2. **Reap Abandoned Claims**:
    If an agent crashed or lost state during the outage, stale leases are automatically reaped or can be released via:
    ```bash
-   python3 scripts/claim_issue.py --reap-after 4
+   python3 scripts/fetch_next_work.py --agent <AGENT_ID> --reap-after 4
    ```
 3. **Resume Normal Factory Loop**:
    Agents resume polling via:
    ```bash
    python3 scripts/fetch_next_work.py --agent <AGENT_ID> --family <FAMILY> --claim
-   ```\n
+   ```

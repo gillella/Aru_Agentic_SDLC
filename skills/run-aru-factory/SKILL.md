@@ -80,7 +80,7 @@ python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" [--json]
 Read-only. Exit codes distinguish complete, waiting, blocked, and error;
 report the state and its reasons rather than acting on them.
 If GitHub is degraded or unreachable, coordination halts gracefully without
-secondary local task queues or ungated merges (see `docs/degraded-mode.md`).
+secondary local task queues or ungated merges (see [docs/degraded-mode.md](../../docs/degraded-mode.md)).
 
 ### next
 
