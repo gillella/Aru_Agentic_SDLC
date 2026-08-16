@@ -314,6 +314,7 @@ class SplitRecommendationTests(unittest.TestCase):
             self.assertEqual(tb.main(), 0)
         update.assert_not_called()
         self.assertIn("SPLIT", output.getvalue())
+        self.assertIn("not a human gate", output.getvalue())
         self.assertIn("9 acceptance criteria exceed the threshold of 8", output.getvalue())
         self.assertIn("3 top-level areas: hooks, scripts, tests", output.getvalue())
 

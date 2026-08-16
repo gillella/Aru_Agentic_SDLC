@@ -21,6 +21,10 @@ The Ready contract (all four required):
 Oversized-scope recommendation (either signal is sufficient):
   * more than 8 acceptance-criteria checkboxes
   * touches: spans more than one top-level area
+
+These SPLIT warnings are the upstream half of review-death-spiral prevention
+(issue #98 / S2.5). They hold automatic Ready promotion unless ``--force`` is
+used. They do not create a human approval gate — they ask for a smaller issue.
 """
 
 import argparse
@@ -540,7 +544,9 @@ def main():
         for issue, _ in qualified:
             print(f"  ✅ #{issue['number']:<4} {issue['title']}")
     if split_recommended:
-        print("\nSPLIT — Ready contract met, but scope looks oversized:")
+        print("\nSPLIT — Ready contract met, but scope looks oversized")
+        print("        (split before Ready to avoid review-round death spirals;")
+        print("         this is automated guidance, not a human gate):")
         for issue, reasons in split_recommended:
             print(f"  ⚠️  #{issue['number']:<4} {issue['title']}")
             for reason in reasons:

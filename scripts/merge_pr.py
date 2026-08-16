@@ -80,6 +80,16 @@ KNOWN_REVIEW_ACTOR_TYPES = {
 # necessary. Independent review remains a separate, mandatory gate.
 SIZE_LIMIT = 400
 
+# Review-round threshold for automated scope-reduction guidance (issue #98).
+# Matches fleet_status.REWORK_ATTN. Crossing it never fails DoD and never
+# creates a human gate — it emits split guidance for the authoring agent.
+REVIEW_ROUND_THRESHOLD = 3
+REVIEW_ROUND_SPLIT_MARKER = "<!-- aru-review-round-split:v1 -->"
+_REWORK_BLOCKING_RE = re.compile(
+    r"changes[\s_-]*requested|(?<![Nn]o )blocking findings?|\*\*blocking:\*\*",
+    re.I,
+)
+
 # One initial close-out attempt plus these bounded retries.  Keeping the policy
 # in the merge authority prevents desktop clients from disagreeing about when
 # a transient cleanup failure becomes exceptional operator intervention.
@@ -1222,6 +1232,321 @@ def check_size(pr):
     return True, f"Diff is {total} lines."
 
 
+def _is_rework_review(review):
+    """Whether a review submission counts as a rework round (issue #98).
+
+    Mirrors ``fleet_status._is_rework_review`` without importing that module
+    (outside this issue's touches declaration).
+    """
+    state = (review.get("state") or "").upper()
+    if state == "CHANGES_REQUESTED":
+        return True
+    if state != "COMMENTED":
+        return False
+    body = review.get("body") or ""
+    return bool(_REWORK_BLOCKING_RE.search(body))
+
+
+def count_review_rounds(pr):
+    """Count rework review rounds visible on a PR snapshot."""
+    return sum(1 for review in (pr.get("reviews") or []) if _is_rework_review(review))
+
+
+def check_review_rounds(pr):
+    """Soft visibility gate: always passes; never escalates to a human.
+
+    Round count raises evidence and triggers automated split guidance via
+    ``--emit-review-split``. It is audit data, not merge authority.
+    """
+    rounds = count_review_rounds(pr)
+    if rounds >= REVIEW_ROUND_THRESHOLD:
+        return True, (
+            f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD}). "
+            "Automated scope-reduction guidance applies — run "
+            "`merge_pr.py --pr <n> --emit-review-split`. Round count alone "
+            "never creates a human gate."
+        )
+    return True, f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD})."
+
+
+def fetch_unresolved_finding_summaries(pr_id, limit=8):
+    """Load short unresolved review-thread summaries for split guidance."""
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    owner, name = slug.split("/", 1)
+    query = """
+    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
+      repository(owner:$owner, name:$name) {
+        pullRequest(number:$pr) {
+          reviewThreads(first:50, after:$cursor) {
+            nodes {
+              isResolved
+              isOutdated
+              path
+              comments(first:1) { nodes { body } }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }"""
+    cursor = None
+    seen = set()
+    summaries = []
+    while True:
+        args = [
+            "gh", "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
+        ]
+        if cursor:
+            args.extend(["-F", f"cursor={cursor}"])
+        data = _gh_json(args)
+        if not data or (isinstance(data, dict) and data.get("errors")):
+            return None
+        try:
+            connection = data["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            has_next = page_info["hasNextPage"]
+        except (KeyError, TypeError):
+            return None
+        if not isinstance(nodes, list) or not isinstance(has_next, bool):
+            return None
+        for node in nodes:
+            if bool(node.get("isResolved")) or bool(node.get("isOutdated")):
+                continue
+            comments = ((node.get("comments") or {}).get("nodes") or [])
+            body = ""
+            if comments and isinstance(comments[0], dict):
+                body = (comments[0].get("body") or "").strip()
+            path = node.get("path") or ""
+            line = " ".join(body.split())
+            if len(line) > 160:
+                line = line[:157] + "..."
+            if path and line:
+                summaries.append(f"{path}: {line}")
+            elif line:
+                summaries.append(line)
+            elif path:
+                summaries.append(path)
+            if len(summaries) >= limit:
+                return summaries
+        if not has_next:
+            return summaries
+        next_cursor = page_info.get("endCursor")
+        if not next_cursor or next_cursor in seen:
+            return None
+        seen.add(next_cursor)
+        cursor = next_cursor
+
+
+def build_review_round_split_plan(pr, findings=None, source_issue=None):
+    """Build idempotent split guidance for a PR that crossed the round threshold.
+
+    Returns a dict describing the comment body and proposed follow-up issues.
+    Does not mutate GitHub. ``findings`` is an optional list of short strings.
+    """
+    rounds = count_review_rounds(pr)
+    findings = list(findings or [])
+    source = source_issue or (linked_issues(pr.get("body") or "")[:1] or [None])[0]
+    follow_ups = []
+    for idx, finding in enumerate(findings, start=1):
+        title = f"Split from PR #{pr.get('number')}: finding {idx}"
+        if len(finding) < 80:
+            title = f"Split from PR #{pr.get('number')}: {finding}"
+        if len(title) > 120:
+            title = title[:117] + "..."
+        body_lines = [
+            "## User Story",
+            "",
+            "As the factory, I want a separable review finding tracked as its "
+            "own issue so the original PR can shrink to the smallest coherent change.",
+            "",
+            "## Background",
+            "",
+            f"Automated split guidance from PR #{pr.get('number')} after "
+            f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD}).",
+            "",
+            f"Finding: {finding}",
+            "",
+            "## Acceptance Criteria",
+            "",
+            "- [ ] The finding is addressed or explicitly withdrawn with evidence.",
+            "",
+            "## Dependencies",
+            "",
+            f"depends-on: #{source}" if source else "depends-on:",
+            "touches: `TBD`  # author must declare paths before Ready",
+            "parallel-eligible: false",
+            "",
+            f"Provenance: automated review-round split from PR #{pr.get('number')}",
+        ]
+        follow_ups.append({"title": title, "body": "\n".join(body_lines)})
+    if not follow_ups and source:
+        follow_ups.append({
+            "title": f"Split remainder from PR #{pr.get('number')}",
+            "body": "\n".join([
+                "## User Story",
+                "",
+                "As the factory, I want remaining out-of-scope work from an "
+                "over-reviewed PR tracked separately so the original PR can shrink.",
+                "",
+                "## Background",
+                "",
+                f"Automated split guidance from PR #{pr.get('number')} after "
+                f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD}). "
+                "No unresolved thread summaries were available; the author should "
+                "narrow the PR and move separable remainder here.",
+                "",
+                "## Acceptance Criteria",
+                "",
+                "- [ ] Remainder scope is defined with acceptance criteria and touches.",
+                "",
+                "## Dependencies",
+                "",
+                f"depends-on: #{source}",
+                "touches: `TBD`",
+                "parallel-eligible: false",
+            ]),
+        })
+    finding_block = "\n".join(f"- {item}" for item in findings) if findings else (
+        "- (no unresolved thread summaries available; author should still shrink scope)"
+    )
+    source_line = (
+        f"(each carries `depends-on: #{source}`)."
+        if source
+        else "."
+    )
+    comment = "\n".join([
+        REVIEW_ROUND_SPLIT_MARKER,
+        f"## Automated review-round split guidance ({rounds} rounds)",
+        "",
+        f"This PR crossed the review-round threshold of {REVIEW_ROUND_THRESHOLD}.",
+        "Round count is audit data — it does **not** create a human approval gate "
+        "and does **not** change merge authority (`merge_pr.py` remains the only merge path).",
+        "",
+        "### Required author action",
+        "1. Shrink this PR to the smallest coherent change that can pass review.",
+        f"2. Leave separable findings on the follow-up issues listed below {source_line}",
+        "3. Continue the agent review loop; do not escalate to a human for round count.",
+        "",
+        "### Unresolved findings considered",
+        finding_block,
+        "",
+        "### Proposed follow-up issues",
+    ])
+    for item in follow_ups:
+        comment += f"\n- {item['title']}"
+    return {
+        "rounds": rounds,
+        "threshold": REVIEW_ROUND_THRESHOLD,
+        "crossed": rounds >= REVIEW_ROUND_THRESHOLD,
+        "source_issue": source,
+        "findings": findings,
+        "follow_ups": follow_ups,
+        "comment": comment,
+        "marker": REVIEW_ROUND_SPLIT_MARKER,
+    }
+
+
+def _pr_comments_bodies(pr_num):
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    data = _gh_json([
+        "gh", "api", f"repos/{slug}/issues/{pr_num}/comments", "--paginate",
+    ])
+    if data is None:
+        return None
+    if isinstance(data, list):
+        return [c.get("body") or "" for c in data if isinstance(c, dict)]
+    return []
+
+
+def emit_review_round_split(pr, findings=None, *, apply=True):
+    """Post split guidance and file follow-up issues when the threshold is crossed.
+
+    Idempotent: if ``REVIEW_ROUND_SPLIT_MARKER`` is already present on the PR,
+    returns without creating duplicate issues. When ``apply`` is False, returns
+    the plan only.
+    """
+    if findings is None and apply:
+        fetched = fetch_unresolved_finding_summaries(pr.get("number"))
+        findings = fetched if fetched is not None else []
+    plan = build_review_round_split_plan(pr, findings=findings)
+    if not plan["crossed"]:
+        return {
+            "emitted": False,
+            "reason": "below threshold",
+            "plan": plan,
+            "created_issues": [],
+        }
+    if not apply:
+        return {
+            "emitted": False,
+            "reason": "dry plan",
+            "plan": plan,
+            "created_issues": [],
+        }
+    pr_num = pr.get("number")
+    bodies = _pr_comments_bodies(pr_num)
+    if bodies is None:
+        return {
+            "emitted": False,
+            "reason": "could not read PR comments",
+            "plan": plan,
+            "created_issues": [],
+        }
+    if any(REVIEW_ROUND_SPLIT_MARKER in body for body in bodies):
+        return {
+            "emitted": False,
+            "reason": "already emitted",
+            "plan": plan,
+            "created_issues": [],
+        }
+    created = []
+    for item in plan["follow_ups"]:
+        code, out, err = run_cmd(
+            [
+                "gh", "issue", "create",
+                "--title", item["title"],
+                "--body", item["body"],
+                "--label", "status:backlog",
+            ],
+            check=False,
+        )
+        if code != 0:
+            return {
+                "emitted": False,
+                "reason": f"issue create failed: {err.strip()}",
+                "plan": plan,
+                "created_issues": created,
+            }
+        created.append(out.strip())
+    comment = plan["comment"]
+    if created:
+        comment += "\n\n### Filed\n" + "\n".join(f"- {url}" for url in created)
+    code, _, err = run_cmd(
+        ["gh", "pr", "comment", str(pr_num), "--body", comment],
+        check=False,
+    )
+    if code != 0:
+        return {
+            "emitted": False,
+            "reason": f"comment failed: {err.strip()}",
+            "plan": plan,
+            "created_issues": created,
+        }
+    return {
+        "emitted": True,
+        "reason": "posted",
+        "plan": plan,
+        "created_issues": created,
+    }
+
+
 def check_test_coverage(pr):
     """Require a changed test whenever production Python roots are changed."""
     files = pr.get("files") or []
@@ -1632,6 +1957,7 @@ def evaluate_dod(pr, issue_bodies, evidence):
         ("rebased", *check_rebased(pr)),
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
+        ("review rounds", *check_review_rounds(pr)),
     ]
     for num in issue_nums:
         gates.append(
@@ -2092,15 +2418,56 @@ def main():
         metavar="SHA",
         help="Head SHA selected by the picker; refuse if the live head differs",
     )
+    parser.add_argument(
+        "--emit-review-split",
+        action="store_true",
+        help=(
+            "When review rounds cross the threshold, post automated split "
+            "guidance and file follow-up issues with depends-on edges. "
+            "Never creates a human gate. Compatible with --dry-run (plan only)."
+        ),
+    )
     args = parser.parse_args()
 
-    if args.json and not args.dry_run:
+    if args.json and not args.dry_run and not args.emit_review_split:
         print("[ERROR] --json requires --dry-run (refusing to emit JSON for a live merge).", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.emit_review_split and args.expected_head:
+        print(
+            "[ERROR] --emit-review-split cannot be combined with --expected-head.",
+            file=sys.stderr,
+        )
         return EXIT_ERROR
 
     pr = fetch_pr(args.pr)
     if not pr:
         return EXIT_ERROR
+
+    if args.emit_review_split:
+        result = emit_review_round_split(pr, apply=not args.dry_run)
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            plan = result["plan"]
+            print(
+                f"=== Review-round split — PR #{args.pr}: "
+                f"{plan['rounds']} round(s), threshold {plan['threshold']} ==="
+            )
+            print(f"  crossed: {plan['crossed']}")
+            print(f"  emitted: {result['emitted']} ({result['reason']})")
+            for url in result.get("created_issues") or []:
+                print(f"  filed: {url}")
+            if args.dry_run or not result["emitted"]:
+                print("\n--- plan comment preview ---")
+                print(plan["comment"])
+        if result["reason"] in {"could not read PR comments"} or str(
+            result["reason"]
+        ).startswith("issue create failed") or str(result["reason"]).startswith(
+            "comment failed"
+        ):
+            return EXIT_ERROR
+        return EXIT_OK
 
     issue_nums = linked_issues(pr.get("body"))
     if not issue_nums:

@@ -129,6 +129,17 @@ merge conflict or merge/close-out failure remains unsafe or impossible for
 agents to resolve through governed remediation; risk category, diff size, and
 review-round count alone never require human participation.
 
+### Review-round scope reduction (issue #98)
+
+`merge_pr.py` counts rework rounds and always surfaces them on `--dry-run`
+(`review rounds` gate). Crossing the threshold (3) never fails Definition of
+Done and never adds a human approval step. Authors run
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --emit-review-split` to
+post automated split guidance and file follow-up Backlog issues that carry
+`depends-on:` edges to the original. Triage oversized-scope SPLIT warnings are
+the upstream half of the same policy. See
+`skills/address-pr-feedback/SKILL.md`.
+
 ### Server-side protection of `main`
 
 `hooks/pre-push` refuses a direct push in any clone that installed it. It is
@@ -198,5 +209,5 @@ python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" [--json]
 |---|---|---|
 | **`complete`** | `0` | Every governed issue is Done/closed, zero open PRs, zero active claims (`agent:*`, `reviewer:*`), no board drift, no orphan worktrees. |
 | **`waiting`** | `2` | Active work in flight, Ready/In Progress/In Review/Backlog issues, pending CI, pending reviews, or worktree cleanup. |
-| **`blocked`** | `3` | Issues/PRs carrying human escalation labels, `needs-design`, unresolvable project board identity, or exhausted review/remediation rounds. |
+| **`blocked`** | `3` | Issues/PRs carrying operator-only labels (`needs-human`), `needs-design` awaiting a product decision, or an unresolvable project board identity. High review-round count is **not** a blocked/human state — it triggers automated scope-reduction guidance (`merge_pr.py --emit-review-split`) while merge authority stays with `merge_pr.py`. |
 | **`error`** | `1` | GitHub API/auth failures; fails closed. |

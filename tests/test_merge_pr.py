@@ -1030,6 +1030,93 @@ class SizeGateTests(unittest.TestCase):
         self.assertTrue(merge_pr.check_size({"additions": 10, "deletions": 2})[0])
 
 
+class ReviewRoundGateTests(unittest.TestCase):
+    def _pr(self, *states, body="Closes #98"):
+        reviews = []
+        for idx, state in enumerate(states):
+            entry = {"state": state, "author": {"login": f"r{idx}"}}
+            if state == "COMMENTED":
+                entry["body"] = "**Blocking:** fix this"
+            reviews.append(entry)
+        return {"number": 42, "body": body, "reviews": reviews}
+
+    def test_rounds_are_visible_and_never_block(self):
+        ok, msg = merge_pr.check_review_rounds(self._pr("CHANGES_REQUESTED", "CHANGES_REQUESTED"))
+        self.assertTrue(ok)
+        self.assertIn("2 review round(s)", msg)
+        self.assertNotIn("escalate", msg.lower())
+
+    def test_threshold_crossing_still_passes_with_split_guidance(self):
+        ok, msg = merge_pr.check_review_rounds(
+            self._pr("CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED")
+        )
+        self.assertTrue(ok)
+        self.assertIn("3 review round(s)", msg)
+        self.assertIn("--emit-review-split", msg)
+        self.assertIn("never creates a human gate", msg)
+
+    def test_commented_blocking_body_counts_as_a_round(self):
+        self.assertEqual(
+            merge_pr.count_review_rounds(self._pr("COMMENTED", "APPROVED")),
+            1,
+        )
+
+    def test_split_plan_follow_ups_carry_depends_on(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        plan = merge_pr.build_review_round_split_plan(
+            pr, findings=["scripts/merge_pr.py: too broad"],
+        )
+        self.assertTrue(plan["crossed"])
+        self.assertEqual(plan["threshold"], 3)
+        self.assertIn(merge_pr.REVIEW_ROUND_SPLIT_MARKER, plan["comment"])
+        self.assertIn("does **not** create a human approval gate", plan["comment"])
+        self.assertTrue(plan["follow_ups"])
+        for item in plan["follow_ups"]:
+            self.assertIn("depends-on: #98", item["body"])
+
+    def test_emit_is_idempotent_when_marker_already_present(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        with patch.object(
+            merge_pr, "_pr_comments_bodies",
+            return_value=[f"{merge_pr.REVIEW_ROUND_SPLIT_MARKER}\nalready done"],
+        ), patch.object(merge_pr, "run_cmd") as run_cmd:
+            result = merge_pr.emit_review_round_split(
+                pr, findings=["scripts/x.py: leftover"], apply=True,
+            )
+        self.assertFalse(result["emitted"])
+        self.assertEqual(result["reason"], "already emitted")
+        run_cmd.assert_not_called()
+
+    def test_evaluate_dod_includes_review_rounds_soft_gate(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        with patch.object(merge_pr, "check_open", return_value=(True, "open")), \
+             patch.object(merge_pr, "check_issue_link", return_value=(True, "linked")), \
+             patch.object(merge_pr, "check_verification", return_value=(True, "ok")), \
+             patch.object(merge_pr, "check_ci", return_value=(True, "green")), \
+             patch.object(merge_pr, "check_reviews", return_value=(True, "reviewed")), \
+             patch.object(merge_pr, "check_rebased", return_value=(True, "current")), \
+             patch.object(merge_pr, "check_size", return_value=(True, "small")), \
+             patch.object(merge_pr, "check_test_coverage", return_value=(True, "tests")), \
+             patch.object(merge_pr, "check_acceptance", return_value=(True, "accept")), \
+             patch.object(merge_pr, "linked_issues", return_value=[98]):
+            ok, gates = merge_pr.evaluate_dod(pr, {98: "- [x] done\n"}, evidence={})
+        names = [name for name, _, _ in gates]
+        self.assertIn("review rounds", names)
+        rounds_gate = next(g for g in gates if g[0] == "review rounds")
+        self.assertTrue(rounds_gate[1])
+        self.assertIn("--emit-review-split", rounds_gate[2])
+        self.assertTrue(ok)
+
+
 class TestCoverageGateTests(unittest.TestCase):
     def test_truncated_changed_file_list_fails_closed(self):
         ok, msg = merge_pr.check_test_coverage({
