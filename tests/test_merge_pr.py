@@ -1030,6 +1030,248 @@ class SizeGateTests(unittest.TestCase):
         self.assertTrue(merge_pr.check_size({"additions": 10, "deletions": 2})[0])
 
 
+class ReviewRoundGateTests(unittest.TestCase):
+    def _pr(self, *states, body="Closes #98"):
+        reviews = []
+        for idx, state in enumerate(states):
+            entry = {"state": state, "author": {"login": f"r{idx}"}}
+            if state == "COMMENTED":
+                entry["body"] = "**Blocking:** fix this"
+            reviews.append(entry)
+        return {"number": 42, "body": body, "reviews": reviews}
+
+    def test_rounds_are_visible_and_never_block(self):
+        ok, msg = merge_pr.check_review_rounds(self._pr("CHANGES_REQUESTED", "CHANGES_REQUESTED"))
+        self.assertTrue(ok)
+        self.assertIn("2 review round(s)", msg)
+        self.assertNotIn("escalate", msg.lower())
+
+    def test_threshold_crossing_still_passes_with_split_guidance(self):
+        ok, msg = merge_pr.check_review_rounds(
+            self._pr("CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED")
+        )
+        self.assertTrue(ok)
+        self.assertIn("3 review round(s)", msg)
+        self.assertIn("--emit-review-split", msg)
+        self.assertIn("never creates a human gate", msg)
+
+    def test_commented_blocking_body_counts_as_a_round(self):
+        self.assertEqual(
+            merge_pr.count_review_rounds(self._pr("COMMENTED", "APPROVED")),
+            1,
+        )
+
+    def test_split_plan_follow_ups_carry_depends_on(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        plan = merge_pr.build_review_round_split_plan(
+            pr, findings=["scripts/merge_pr.py: too broad"],
+        )
+        self.assertTrue(plan["crossed"])
+        self.assertEqual(plan["threshold"], 3)
+        self.assertIn(merge_pr.REVIEW_ROUND_SPLIT_MARKER, plan["comment"])
+        self.assertIn("does **not** create a human approval gate", plan["comment"])
+        self.assertTrue(plan["follow_ups"])
+        for item in plan["follow_ups"]:
+            # depends-on targets the linked Closes issue (picker semantics), not the PR.
+            self.assertIn("depends-on: #98", item["body"])
+            self.assertIn(
+                merge_pr._split_item_marker(42, item["idx"]),
+                item["body"],
+            )
+            self.assertNotIn("depends-on: #42", item["body"])
+
+    def test_flatten_comment_pages_handles_slurp_and_flat(self):
+        flat = merge_pr._flatten_comment_pages([
+            {"body": "a"}, {"body": "b"},
+        ])
+        self.assertEqual(flat, ["a", "b"])
+        slurped = merge_pr._flatten_comment_pages([
+            [{"body": "p1a"}, {"body": "p1b"}],
+            [{"body": "p2"}],
+        ])
+        self.assertEqual(slurped, ["p1a", "p1b", "p2"])
+
+    def test_pr_comments_bodies_uses_paginate_slurp(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "_gh_json") as gh_json:
+            gh_json.return_value = [[{"body": "one"}], [{"body": "two"}]]
+            bodies = merge_pr._pr_comments_bodies(42)
+        self.assertEqual(bodies, ["one", "two"])
+        args = gh_json.call_args[0][0]
+        self.assertIn("--paginate", args)
+        self.assertIn("--slurp", args)
+
+    def test_emit_is_idempotent_when_marker_already_present(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        with patch.object(
+            merge_pr, "_pr_comments_bodies",
+            return_value=[f"{merge_pr.REVIEW_ROUND_SPLIT_MARKER}\nalready done"],
+        ), patch.object(merge_pr, "run_cmd") as run_cmd, \
+             patch.object(merge_pr, "_find_existing_split_follow_ups") as find_existing:
+            result = merge_pr.emit_review_round_split(
+                pr, findings=["scripts/x.py: leftover"], apply=True,
+            )
+        self.assertFalse(result["emitted"])
+        self.assertEqual(result["reason"], "already emitted")
+        run_cmd.assert_not_called()
+        find_existing.assert_not_called()
+
+    def test_emit_attaches_new_issues_to_board(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        with patch.object(merge_pr, "_pr_comments_bodies", return_value=["prior"]), \
+             patch.object(merge_pr, "_find_existing_split_follow_ups", return_value={}), \
+             patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "run_cmd") as run_cmd, \
+             patch.object(merge_pr, "update_status", return_value=True) as update_status:
+            run_cmd.side_effect = [
+                (0, "https://github.com/o/r/issues/501\n", ""),
+                (0, "", ""),
+            ]
+            result = merge_pr.emit_review_round_split(
+                pr, findings=["scripts/x.py: leftover"], apply=True,
+            )
+        self.assertTrue(result["emitted"])
+        self.assertEqual(result["reason"], "posted")
+        update_status.assert_called_once_with(501, "Backlog", require_board=True)
+        create_args = run_cmd.call_args_list[0][0][0]
+        self.assertEqual(create_args[:3], ["gh", "issue", "create"])
+        self.assertIn(
+            merge_pr._split_item_marker(42, 1),
+            create_args[create_args.index("--body") + 1],
+        )
+
+    def test_emit_fails_closed_when_board_attach_fails(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        with patch.object(merge_pr, "_pr_comments_bodies", return_value=[]), \
+             patch.object(merge_pr, "_find_existing_split_follow_ups", return_value={}), \
+             patch.object(
+                 merge_pr, "run_cmd",
+                 return_value=(0, "https://github.com/o/r/issues/502\n", ""),
+             ), \
+             patch.object(merge_pr, "update_status", return_value=False):
+            result = merge_pr.emit_review_round_split(
+                pr, findings=["scripts/x.py: leftover"], apply=True,
+            )
+        self.assertFalse(result["emitted"])
+        self.assertIn("board attach failed", result["reason"])
+
+    def test_emit_reuses_partial_creates_on_retry(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        existing = {
+            1: {"number": 510, "url": "https://github.com/o/r/issues/510"},
+        }
+        with patch.object(merge_pr, "_pr_comments_bodies", return_value=[]), \
+             patch.object(
+                 merge_pr, "_find_existing_split_follow_ups", return_value=existing,
+             ), \
+             patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "run_cmd") as run_cmd, \
+             patch.object(merge_pr, "update_status", return_value=True) as update_status:
+            run_cmd.side_effect = [
+                (0, "https://github.com/o/r/issues/511\n", ""),  # create idx 2
+                (0, "", ""),  # PR comment
+            ]
+            result = merge_pr.emit_review_round_split(
+                pr,
+                findings=["finding one", "finding two"],
+                apply=True,
+            )
+        self.assertTrue(result["emitted"])
+        self.assertEqual(
+            result["created_issues"],
+            [
+                "https://github.com/o/r/issues/510",
+                "https://github.com/o/r/issues/511",
+            ],
+        )
+        # Reused #510 + newly created #511 both get board attach.
+        self.assertEqual(
+            [c.args for c in update_status.call_args_list],
+            [(510, "Backlog",), (511, "Backlog",)],
+        )
+        for call in update_status.call_args_list:
+            self.assertTrue(call.kwargs.get("require_board"))
+        # Only one issue create (idx 2); idx 1 was reused.
+        create_calls = [
+            c for c in run_cmd.call_args_list
+            if c[0][0][:3] == ["gh", "issue", "create"]
+        ]
+        self.assertEqual(len(create_calls), 1)
+
+    def test_emit_retries_comment_after_issues_already_filed(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        existing = {
+            1: {"number": 520, "url": "https://github.com/o/r/issues/520"},
+        }
+        with patch.object(merge_pr, "_pr_comments_bodies", return_value=[]), \
+             patch.object(
+                 merge_pr, "_find_existing_split_follow_ups", return_value=existing,
+             ), \
+             patch.object(merge_pr, "run_cmd") as run_cmd, \
+             patch.object(merge_pr, "update_status", return_value=True):
+            run_cmd.side_effect = [
+                (0, "", ""),  # PR comment succeeds on retry
+            ]
+            result = merge_pr.emit_review_round_split(
+                pr, findings=["only one"], apply=True,
+            )
+        self.assertTrue(result["emitted"])
+        self.assertEqual(
+            result["created_issues"],
+            ["https://github.com/o/r/issues/520"],
+        )
+        create_calls = [
+            c for c in run_cmd.call_args_list
+            if c[0][0][:3] == ["gh", "issue", "create"]
+        ]
+        self.assertEqual(create_calls, [])
+        comment_args = run_cmd.call_args_list[0][0][0]
+        self.assertEqual(comment_args[:3], ["gh", "pr", "comment"])
+        body_idx = comment_args.index("--body") + 1
+        self.assertIn(merge_pr.REVIEW_ROUND_SPLIT_MARKER, comment_args[body_idx])
+
+    def test_evaluate_dod_includes_review_rounds_soft_gate(self):
+        pr = self._pr(
+            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+            body="Closes #98\n",
+        )
+        with patch.object(merge_pr, "check_open", return_value=(True, "open")), \
+             patch.object(merge_pr, "check_issue_link", return_value=(True, "linked")), \
+             patch.object(merge_pr, "check_verification", return_value=(True, "ok")), \
+             patch.object(merge_pr, "check_ci", return_value=(True, "green")), \
+             patch.object(merge_pr, "check_reviews", return_value=(True, "reviewed")), \
+             patch.object(merge_pr, "check_rebased", return_value=(True, "current")), \
+             patch.object(merge_pr, "check_size", return_value=(True, "small")), \
+             patch.object(merge_pr, "check_test_coverage", return_value=(True, "tests")), \
+             patch.object(merge_pr, "check_acceptance", return_value=(True, "accept")), \
+             patch.object(merge_pr, "linked_issues", return_value=[98]):
+            ok, gates = merge_pr.evaluate_dod(pr, {98: "- [x] done\n"}, evidence={})
+        names = [name for name, _, _ in gates]
+        self.assertIn("review rounds", names)
+        rounds_gate = next(g for g in gates if g[0] == "review rounds")
+        self.assertTrue(rounds_gate[1])
+        self.assertIn("--emit-review-split", rounds_gate[2])
+        self.assertTrue(ok)
+
+
 class TestCoverageGateTests(unittest.TestCase):
     def test_truncated_changed_file_list_fails_closed(self):
         ok, msg = merge_pr.check_test_coverage({

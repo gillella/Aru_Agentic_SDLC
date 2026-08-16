@@ -61,11 +61,21 @@ record why on the PR instead of repeating the identical push.
 ### Step 1: Fetch Inline PR Comments & Build Checklist
 1. Fetch all unresolved inline PR comments using `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <PR_ID>`.
 2. Compile a Markdown task checklist mapping each comment to file location, line number, and requested change.
+3. **Review-round threshold (issue #98):** inspect the `review rounds` line from
+   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --dry-run`.
+   When rounds are at or above the threshold (3), run
+   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --emit-review-split`
+   before editing. That posts automated split guidance and files follow-up
+   issues with `depends-on:` edges. Round count is audit data — it does **not**
+   escalate to a human and does **not** change merge authority.
 
 ### Step 2: Implement Fixes in Branch Worktree
 1. Navigate to the branch worktree (`.worktrees/<branch-name>`).
 2. Implement code modifications addressing each item in the review checklist.
-3. Run local unit tests and lint checks to ensure compliance.
+3. When split guidance was emitted, shrink this PR to the **smallest coherent
+   change** that can pass review; leave separable findings on the follow-up
+   issues rather than expanding the PR again.
+4. Run local unit tests and lint checks to ensure compliance.
 
 ### Step 3: Commit & Push Update
 1. Create conventional commit message: `fix(review): address peer feedback for JWT auth`.
