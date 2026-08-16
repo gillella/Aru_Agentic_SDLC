@@ -140,6 +140,9 @@ blocks use `--event blocked`. Idle ticks and heartbeats must **not** notify.
 GitHub remains the work queue; Slack downtime must not halt the loop. Full
 command examples: `prompts/fleet-worker.md` and `docs/slack-control-room.md`.
 Routine helper exits `1` and repeated CI or review rounds do not end the loop.
+Exception: a post-merge exit `1` with durable `## Human intervention required`
+evidence means `merge_pr.py` exhausted its close-out retries; notify Slack with
+`--event hitl` and stop instead of multiplying retries in the desktop task.
 When context is running short, recover through the desktop product's context
 compaction and durable GitHub/worktree state, then continue.
 
