@@ -67,6 +67,13 @@ MERGER_CLAIM_LABEL = "merger:"
 # approval. GitHub exposes some bot logins with a ``[bot]`` suffix and the
 # Codex connector without one, so both forms must be recognized explicitly.
 ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
+# GraphQL's review author is an Actor. Only a User can supply independent
+# review evidence; all other known actor kinds are automation or identities
+# whose human independence cannot be established. An unrecognized kind makes
+# the query unknown rather than silently becoming trusted.
+KNOWN_REVIEW_ACTOR_TYPES = {
+    "App", "Bot", "EnterpriseUserAccount", "Mannequin", "Organization", "User",
+}
 
 # Large diffs must be split unless the reviewed PR body records why a waiver is
 # necessary. Independent review remains a separate, mandatory gate.
@@ -169,7 +176,14 @@ def _reviewed_current_head(owner, name, pr_id):
         pullRequest(number:$pr) {
           headRefOid
           reviews(first:100, after:$cursor) {
-            nodes { id state submittedAt author { login } commit { oid } }
+            nodes {
+              id
+              state
+              submittedAt
+              body
+              author { login __typename }
+              commit { oid }
+            }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -221,6 +235,7 @@ def _reviewed_current_head(owner, name, pr_id):
             commit = review.get("commit")
             review_id = review.get("id")
             submitted_at = review.get("submittedAt")
+            body = review.get("body")
             if (
                 state not in {
                     "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED",
@@ -228,14 +243,17 @@ def _reviewed_current_head(owner, name, pr_id):
                 }
                 or not isinstance(review_id, str) or not review_id
                 or review_id in seen_review_ids
-                or (author is not None and not isinstance(author, dict))
+                or not isinstance(author, dict)
                 or (commit is not None and not isinstance(commit, dict))
+                or not isinstance(body, str)
             ):
                 return None
-            login = (author or {}).get("login")
+            login = author.get("login")
+            actor_type = author.get("__typename")
             oid = (commit or {}).get("oid")
             if (
-                author is not None and (not isinstance(login, str) or not login)
+                not isinstance(login, str) or not login
+                or actor_type not in KNOWN_REVIEW_ACTOR_TYPES
                 or commit is not None and (not isinstance(oid, str) or not oid)
                 or state == "PENDING" and submitted_at is not None
                 or state != "PENDING" and _parse_review_ts(submitted_at) is None
@@ -243,7 +261,17 @@ def _reviewed_current_head(owner, name, pr_id):
                 return None
             seen_review_ids.add(review_id)
             reviews.append(review)
-            if state in {"PENDING", "DISMISSED"} or is_advisory_review_account(login or ""):
+            if state in {"PENDING", "DISMISSED"} or actor_type != "User":
+                continue
+            if is_advisory_review_account(login):
+                continue
+            # In the same-account fleet, a peer's overall review and the PR
+            # author's thread replies share one GitHub login. GitHub preserves
+            # the important semantic distinction: the mandated peer review
+            # has a substantive overall body, while a thread reply is emitted
+            # as an empty COMMENTED review. Verdict reviews are substantive
+            # even when their optional body is empty.
+            if state == "COMMENTED" and not body.strip():
                 continue
             if oid == expected_head:
                 reviewed_head = True
@@ -566,6 +594,42 @@ def is_advisory_review_account(login):
     return normalized.endswith("[bot]") or normalized in ADVISORY_REVIEW_ACCOUNTS
 
 
+def is_advisory_review_actor(review):
+    """Whether a review's GraphQL actor cannot provide human attestation."""
+    author = review.get("author") or {}
+    actor_type = author.get("__typename")
+    login = author.get("login") or ""
+    return (
+        actor_type is not None and actor_type != "User"
+    ) or is_advisory_review_account(login)
+
+
+def _current_head_reviewers(evidence):
+    """Known human accounts with substantive reviews on the evidenced head."""
+    if not evidence:
+        return []
+    head = evidence.get("head_oid")
+    if not isinstance(head, str) or not head:
+        return []
+    reviewers = set()
+    for review in evidence.get("reviews") or []:
+        state = (review.get("state") or "").upper()
+        author = review.get("author") or {}
+        login = author.get("login") or ""
+        actor_type = author.get("__typename")
+        oid = (review.get("commit") or {}).get("oid")
+        body = review.get("body")
+        if (
+            oid == head
+            and actor_type == "User"
+            and not is_advisory_review_actor(review)
+            and state not in {"PENDING", "DISMISSED"}
+            and (state != "COMMENTED" or isinstance(body, str) and body.strip())
+        ):
+            reviewers.add(login)
+    return sorted(reviewers)
+
+
 def _evidence_note(evidence):
     """What actually satisfied the review gate, for the audit line.
 
@@ -573,13 +637,25 @@ def _evidence_note(evidence):
     were withdrawn", because those justify a merge very differently.
     """
     out_addressed = evidence.get("outdated_addressed", 0) if evidence else 0
+    head = evidence.get("head_oid") if evidence else None
+    head_reviewers = _current_head_reviewers(evidence)
+    if head and head_reviewers:
+        head_note = (
+            f"current head {head[:12]} has substantive human review from "
+            f"{', '.join(head_reviewers)}"
+        )
+    else:
+        # Compatibility for pure unit callers whose handcrafted evidence
+        # predates commit/actor details. Live evidence always uses the branch
+        # above, keeping attribution and commit freshness visibly separate.
+        head_note = "reviewed at head"
     if out_addressed > 0:
         parts = [
-            "reviewed at head",
+            head_note,
             f"no blocking unresolved threads ({out_addressed} outdated with commit evidence)",
         ]
     else:
-        parts = ["reviewed at head", "no unresolved threads"]
+        parts = [head_note, "no unresolved threads"]
     if evidence and evidence.get("withdrawn"):
         parts.append(f"{evidence['withdrawn']} finding(s) withdrawn, not fixed")
     return ", ".join(parts) + "."
@@ -603,9 +679,14 @@ def check_reviews(pr, evidence):
             "Could not establish an unambiguous latest review verdict; "
             "refusing rather than trusting review page order."
         )
+    advisory_accounts = {
+        ((r.get("author") or {}).get("login") or "").lower()
+        for r in substantive if is_advisory_review_actor(r)
+    }
     blocking = [
         who for who, state in verdicts.items()
         if state == "CHANGES_REQUESTED"
+        and who.lower() not in advisory_accounts
         and not is_advisory_review_account(who)
     ]
     if blocking:
@@ -639,6 +720,19 @@ def check_reviews(pr, evidence):
     # the attestation covers code that is no longer proposed, which otherwise
     # lets a reviewed PR be force-pushed and merged on the stale verdict.
     if not evidence["reviewed_head"]:
+        attribution = label_values(pr, REVIEWED_BY_LABEL)
+        head = evidence.get("head_oid")
+        if attribution:
+            head_text = (
+                f"current head {head[:12]}"
+                if isinstance(head, str) and head else "the current head"
+            )
+            return False, (
+                f"Completed peer attribution exists for {', '.join(attribution)}, "
+                f"but no substantive human review covers {head_text}. The "
+                "attribution may be stale and every substantive review "
+                "predates the current head; re-review the current commit."
+            )
         return False, (
             "Every review predates the current head, so no reviewer has seen "
             "what would merge. Re-review the current commit."
@@ -667,7 +761,7 @@ def check_reviews(pr, evidence):
     pr_login = ((pr.get("author") or {}).get("login") or "").lower()
     other_accounts = sorted({
         ((r.get("author") or {}).get("login") or "").lower()
-        for r in substantive
+        for r in substantive if not is_advisory_review_actor(r)
     } - {"", pr_login})
 
     # Authorship is required before any approval path can pass. Without the
@@ -710,7 +804,7 @@ def check_reviews(pr, evidence):
         return False, (f"The only review is from '{author}', who wrote this PR. "
                        "A self-review does not satisfy the gate.")
     if not reviewers:
-        advisory = [a for a in other_accounts if is_advisory_review_account(a)]
+        advisory = sorted(a for a in advisory_accounts if a and a != pr_login)
         if advisory:
             return False, (
                 f"Automated review from {', '.join(advisory)} is advisory; no "
@@ -723,7 +817,7 @@ def check_reviews(pr, evidence):
                        f"`claim_issue.py --pr <n> --agent <id> --complete-review`.")
 
     note = (
-        f"{len(substantive)} review(s) from {', '.join(peers)}, "
+        f"Peer attribution: {', '.join(peers)}; "
         f"{_evidence_note(evidence)}"
     )
     if any((lab.get("name") or "") == "same-family-review" for lab in (pr.get("labels") or [])):
