@@ -87,14 +87,35 @@ matches, then ask again. The current desktop task remains the loop owner.
 
 ---
 
-#### A. `feedback` — your own PR has requested changes
+#### A. `feedback` — your own PR needs something from you
 
 Follow `$ARU_SDLC_HOME/skills/address-pr-feedback/SKILL.md`.
 
-Work in the PR's existing worktree. Address **every** thread: fix it, or reply
-saying concretely why you disagree — never resolve a thread silently. Re-run
-the full local verification, push, and reply to each thread with the commit
-hash that addressed it.
+**Read `work.unmet_gates` first.** It decides which of the two shapes this is.
+
+**A1 — absent or empty: unresolved review threads.** Work in the PR's existing
+worktree. Address **every** thread: fix it, or reply saying concretely why you
+disagree — never resolve a thread silently. Re-run the full local verification,
+push, and reply to each thread with the commit hash that addressed it.
+
+**A2 — present: a Definition-of-Done gate only you can clear.** There are **no
+threads to fetch**; the checklist is empty by construction, so do not go looking
+for one. Each named gate has exactly one action:
+
+- `rebased` — `git fetch origin && git rebase origin/main` in the PR's worktree,
+  re-run the full local verification, then push with `--force-with-lease`.
+  **Expect this to invalidate the prior review**: `merge_pr.py` requires a review
+  at the current head, so the PR correctly returns to `review` afterwards. That
+  is the gate working, not a regression — do not try to route around it.
+- `size` — split the PR, or add `size-waiver: <rationale>` to its body stating
+  why splitting would be worse. Never waive silently, and never waive merely to
+  clear the gate.
+
+Then refresh the evidence for the new head with
+`create_pr.py --refresh-pr <PR> --issue <N> --verify-command ...` and return to
+the top of the loop. If the gate still fails after your action, say so on the PR
+rather than repeating the same push — a second identical attempt is the silent
+spin this branch exists to prevent.
 
 Keep the author/reviewer loop going until every concrete finding is resolved.
 Review-round count is audit data, not an escalation or eligibility gate. Do not
