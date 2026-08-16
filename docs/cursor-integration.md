@@ -120,6 +120,23 @@ invoked as:
 python3 "$ARU_SDLC_HOME/scripts/<name>.py" ...
 ```
 
+## Doctor
+
+Verify this machine and a target repo without mutating anything:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py"
+python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py" --json \
+  --project /absolute/path/to/repo
+```
+
+The command checks `$ARU_SDLC_HOME`, Cursor skill links under `~/.cursor/skills/`
+and `~/.agents/skills/`, the `/run-aru-factory` command file, the managed
+governance block, `git`/`gh`, and (with `--project`) `AGENTS.md`, hooks, the
+Project Board, and `.worktrees/`. Exit `0` / `2` / `1` means healthy /
+degraded / invalid. Failed checks print a repair command; the doctor never
+installs or prints credentials.
+
 ## Updating the playbook
 
 Because skills are symlinked, edits in this repository are picked up on the

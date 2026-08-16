@@ -104,15 +104,13 @@ class ModeTests(unittest.TestCase):
         self.assertIn("unrecognised mode is an error", text)
         self.assertIn("never silently fall through", text)
 
-    def test_doctor_admits_what_it_cannot_yet_check(self):
-        """#34 has not landed, so the mode must not imply full diagnosis.
-
-        Claiming a clean setup it never verified is worse than reporting a gap.
-        """
+    def test_doctor_names_the_install_link_command(self):
+        """#34 landed: doctor mode must name the real command and exit contract."""
         text = skill_text()
-        self.assertIn("does not exist yet", text)
-        self.assertIn("#34", text)
-        self.assertIn("not yet diagnosable", text)
+        self.assertIn("doctor_local_agent_integrations.py", text)
+        self.assertIn("Exit `0` healthy", text)
+        self.assertNotIn("does not exist yet", text)
+        self.assertNotIn("not yet diagnosable", text)
 
 
 class ContinuityContractTests(unittest.TestCase):

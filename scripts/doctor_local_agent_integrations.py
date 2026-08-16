@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Read-only continuity diagnosis for local coding-agent integrations.
+"""Read-only diagnosis for local coding-agent integrations.
 
-Full install-link diagnosis is issue #34. This command reports desktop
-continuity adapters, capability levels, explicit-stop state, and version
-probes. It never prints credential values and never mutates configuration.
+Reports desktop continuity adapters plus install-link checks (canonical home,
+skill links, invocation surfaces, governance blocks, git/gh prerequisites,
+and target-repo governance). It never prints credential values and never
+mutates configuration, GitHub state, or agent files.
 """
 
 from __future__ import annotations
@@ -27,6 +28,40 @@ CODEX_STATUS = re.compile(r'^status = "([^"]+)"\s*$', re.M)
 EXIT_OK = 0
 EXIT_INVALID = 1
 EXIT_DEGRADED = 2
+
+GOVERNANCE_BEGIN = "<!-- BEGIN ARU_SDLC_GOVERNANCE -->"
+GOVERNANCE_END = "<!-- END ARU_SDLC_GOVERNANCE -->"
+ISSUE_FIRST = "Issue-First"
+ARU_HOOK_MARK = "Aru_Agentic_SDLC pre-push"
+
+AGENT_LAYOUT = {
+    "codex": {
+        "skill_dirs": [".codex/skills"],
+        "governance": [".codex/instructions.md"],
+        "surfaces": [".codex/instructions.md"],
+    },
+    "claude": {
+        "skill_dirs": [".claude/skills"],
+        "governance": [".claude/CLAUDE.md"],
+        "surfaces": [".claude/commands/run-aru-factory.md"],
+    },
+    "cursor": {
+        "skill_dirs": [".cursor/skills"],
+        "governance": [".cursor/user-rules-aru-agentic-sdlc.md"],
+        "surfaces": [".cursor/commands/run-aru-factory.md"],
+    },
+    "antigravity": {
+        "skill_dirs": [".gemini/antigravity/skills", ".antigravity/skills"],
+        "governance": [
+            ".gemini/antigravity/AGENTS.md",
+            ".antigravity/AGENTS.md",
+        ],
+        "surfaces": [
+            ".gemini/antigravity/workflows/aru-code-loop.md",
+            ".antigravity/workflows/aru-code-loop.md",
+        ],
+    },
+}
 
 
 def load_catalog(aru_home: Path) -> dict:
@@ -221,6 +256,418 @@ def native_wake_state(name: str, spec: dict, target_home: Path,
     }
 
 
+def check(check_id: str, ok: bool, severity: str, repair: str, **extra) -> dict:
+    item = {"id": check_id, "ok": ok, "severity": severity, "repair": repair}
+    item.update(extra)
+    return item
+
+
+def canonical_skill_names(aru_home: Path) -> list[str]:
+    root = aru_home / "skills"
+    if not root.is_dir():
+        return []
+    names = []
+    for child in sorted(root.iterdir()):
+        if child.is_dir() and (child / "SKILL.md").is_file():
+            names.append(child.name)
+    return names
+
+
+def classify_skill_link(dest: Path, expected: Path) -> str:
+    if not dest.exists() and not dest.is_symlink():
+        return "missing"
+    if dest.is_symlink():
+        try:
+            target = Path(os.readlink(dest))
+        except OSError:
+            return "stale"
+        if target == expected:
+            return "ok"
+        return "stale"
+    return "conflict"
+
+
+def inspect_skill_dirs(aru_home: Path, target_home: Path, rel_dirs: list[str],
+                       skills: list[str]) -> list[dict]:
+    rows = []
+    for rel in rel_dirs:
+        if rel.startswith(".antigravity/") and not (target_home / ".antigravity").exists():
+            continue
+        parent = target_home / rel
+        for name in skills:
+            dest = parent / name
+            expected = aru_home / "skills" / name
+            state = classify_skill_link(dest, expected)
+            rows.append({
+                "path": str(dest),
+                "skill": name,
+                "expected": str(expected),
+                "state": state,
+            })
+    return rows
+
+
+def governance_state(path: Path) -> str:
+    if not path.is_file():
+        return "missing"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return "unreadable"
+    if GOVERNANCE_BEGIN not in text or GOVERNANCE_END not in text:
+        return "missing"
+    begin = text.find(GOVERNANCE_BEGIN)
+    end = text.find(GOVERNANCE_END)
+    if begin == -1 or end == -1 or end < begin:
+        return "malformed"
+    block = text[begin:end + len(GOVERNANCE_END)]
+    if "factory-loop.stop" not in block:
+        return "incomplete"
+    return "ok"
+
+
+def surface_ok(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "run-aru-factory" in text
+
+
+def redact_text(text: str) -> str:
+    lines = []
+    for line in (text or "").splitlines():
+        lines.append("redacted" if SECRET_ENV.search(line) else line)
+    return "\n".join(lines)
+
+
+def run_quiet(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "LANG": "C",
+        "GH_CONFIG_DIR": os.environ.get("GH_CONFIG_DIR", ""),
+        "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
+    }
+    env = {key: value for key, value in env.items() if value}
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=8,
+            cwd=cwd, env=env, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+    return proc.returncode, redact_text(proc.stdout or proc.stderr or "")
+
+
+def git_on_path() -> bool:
+    return shutil.which("git") is not None
+
+
+def gh_on_path() -> bool:
+    return shutil.which("gh") is not None
+
+
+def gh_logged_in() -> bool:
+    if not gh_on_path():
+        return False
+    code, text = run_quiet(["gh", "auth", "status"])
+    return code == 0 and "logged in" in text.lower()
+
+
+def _is_git_repo(project: str) -> bool:
+    code, text = run_quiet(["git", "-C", project, "rev-parse", "--is-inside-work-tree"])
+    return code == 0 and "true" in text.lower()
+
+
+def git_remote(project: str) -> str | None:
+    code, text = run_quiet(["git", "-C", project, "remote", "get-url", "origin"])
+    if code != 0:
+        return None
+    line = text.strip().splitlines()
+    return line[0] if line else None
+
+
+def agents_md_ok(project: str) -> bool:
+    path = Path(project) / "AGENTS.md"
+    if not path.is_file():
+        return False
+    try:
+        return ISSUE_FIRST in path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def aru_pre_push_installed(project: str) -> bool:
+    code, git_dir = run_quiet(["git", "-C", project, "rev-parse", "--git-common-dir"])
+    if code != 0 or not git_dir.strip():
+        return False
+    hook_root = Path(git_dir.strip())
+    if not hook_root.is_absolute():
+        hook_root = Path(project) / hook_root
+    hook = hook_root / "hooks" / "pre-push"
+    if not hook.is_file():
+        return False
+    try:
+        return ARU_HOOK_MARK in hook.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def worktree_status(project: str) -> dict:
+    root = Path(project) / ".worktrees"
+    present = root.is_dir()
+    inflight = []
+    if present:
+        inflight = sorted(
+            child.name for child in root.iterdir()
+            if child.is_dir() and child.name != ".retained"
+        )
+    return {"directory": str(root), "present": present, "in_flight": inflight}
+
+
+def repo_slug_from_remote(remote: str | None) -> str | None:
+    if not remote:
+        return None
+    text = remote.strip()
+    if text.endswith(".git"):
+        text = text[:-4]
+    if "github.com" in text:
+        part = text.split("github.com", 1)[1].lstrip(":/")
+        pieces = [p for p in part.split("/") if p]
+        if len(pieces) >= 2:
+            return f"{pieces[0]}/{pieces[1]}"
+    return None
+
+
+def project_board_identity(project: str) -> dict:
+    if not gh_logged_in():
+        return {"ok": False, "state": "unauthenticated", "projects": []}
+    slug = repo_slug_from_remote(git_remote(project))
+    if not slug:
+        code, text = run_quiet(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            cwd=project,
+        )
+        slug = text.strip() if code == 0 and text.strip() else None
+    if not slug:
+        return {"ok": False, "state": "unknown_repo", "projects": []}
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from common import get_repo_projects
+        boards = get_repo_projects(slug)
+    except Exception:
+        return {"ok": False, "state": "unreadable", "projects": [], "repo": slug}
+    if boards is None:
+        return {"ok": False, "state": "unreadable", "projects": [], "repo": slug}
+    titles = [b.get("title") or b.get("id") for b in boards if isinstance(b, dict)]
+    if not titles:
+        return {"ok": False, "state": "absent", "projects": [], "repo": slug}
+    return {"ok": True, "state": "ok", "projects": titles, "repo": slug}
+
+
+def append_link_checks(checks: list[dict], rows: list[dict]) -> None:
+    for row in rows:
+        state = row["state"]
+        if state == "ok":
+            continue
+        if state == "conflict":
+            checks.append(check(
+                f"skill_conflict:{row['path']}", False, "invalid",
+                f"Move or rename {row['path']} then run "
+                "scripts/install_local_agent_integrations.sh --repair",
+                path=row["path"], skill=row["skill"],
+            ))
+        elif state == "stale":
+            checks.append(check(
+                f"skill_stale:{row['path']}", False, "degraded",
+                f"Relink {row['path']} with "
+                "scripts/install_local_agent_integrations.sh --repair",
+                path=row["path"], skill=row["skill"],
+            ))
+        else:
+            checks.append(check(
+                f"skill_missing:{row['path']}", False, "degraded",
+                f"Install the {row['skill']} skill link with "
+                "scripts/install_local_agent_integrations.sh",
+                path=row["path"], skill=row["skill"],
+            ))
+
+
+def diagnose_install(aru_home: Path, target_home: Path, agents: dict) -> dict:
+    skills = canonical_skill_names(aru_home)
+    checks: list[dict] = []
+    catalog_ok = (aru_home / "templates" / "integrations" / "continuity.json").is_file()
+    home_ok = bool(skills) and catalog_ok
+    checks.append(check(
+        "canonical_home", home_ok,
+        "ok" if home_ok else "invalid",
+        "Point ARU_SDLC_HOME at the Aru_Agentic_SDLC checkout "
+        "(must contain skills/ and templates/integrations/continuity.json).",
+        path=str(aru_home),
+    ))
+    detected = [name for name, agent in agents.items() if (
+        agent.get("config_detected") or agent.get("app_path")
+    )]
+    if not detected:
+        checks.append(check(
+            "agents_detected", False, "degraded",
+            "Install at least one supported agent, then run "
+            "scripts/install_local_agent_integrations.sh",
+        ))
+    shared_rows = inspect_skill_dirs(
+        aru_home, target_home, [".agents/skills"], skills
+    ) if detected else []
+    if detected:
+        append_link_checks(checks, shared_rows)
+    per_agent = {}
+    for name in AGENT_LAYOUT:
+        layout = AGENT_LAYOUT[name]
+        present = name in detected
+        rows = inspect_skill_dirs(
+            aru_home, target_home, layout["skill_dirs"], skills
+        ) if present else []
+        if present:
+            append_link_checks(checks, rows)
+        gov_paths = []
+        for rel in layout["governance"]:
+            path = target_home / rel
+            if present and path.parent.exists():
+                state = governance_state(path)
+                gov_paths.append({"path": str(path), "state": state})
+                if state != "ok":
+                    checks.append(check(
+                        f"governance:{path}", False, "degraded",
+                        "Restore the managed ARU_SDLC_GOVERNANCE block with "
+                        "scripts/install_local_agent_integrations.sh "
+                        "(unrelated file content is left alone).",
+                        path=str(path),
+                    ))
+        surfaces = []
+        if present:
+            found = False
+            for rel in layout["surfaces"]:
+                path = target_home / rel
+                ok = surface_ok(path)
+                surfaces.append({"path": str(path), "ok": ok})
+                found = found or ok
+            if not found:
+                checks.append(check(
+                    f"surface:{name}", False, "degraded",
+                    f"Install the run-aru-factory invocation surface for {name} "
+                    "with scripts/install_local_agent_integrations.sh",
+                ))
+        per_agent[name] = {
+            "detected": present,
+            "skills": rows,
+            "governance": gov_paths,
+            "surfaces": surfaces,
+        }
+    git_ok = git_on_path()
+    gh_ok = gh_on_path()
+    auth_ok = gh_logged_in()
+    checks.append(check(
+        "git", git_ok, "ok" if git_ok else "degraded",
+        "Install git and ensure it is on PATH.",
+    ))
+    checks.append(check(
+        "gh", gh_ok, "ok" if gh_ok else "degraded",
+        "Install the GitHub CLI (gh) and keep it on PATH.",
+    ))
+    checks.append(check(
+        "gh_auth", auth_ok,
+        "ok" if auth_ok else "degraded",
+        "Run gh auth login. Doctor never prints token values.",
+        logged_in=auth_ok,
+    ))
+    return {
+        "skills": skills,
+        "shared_skills": shared_rows,
+        "agents": per_agent,
+        "prerequisites": {
+            "git": git_ok,
+            "gh": gh_ok,
+            "gh_logged_in": auth_ok,
+        },
+        "checks": checks,
+    }
+
+
+def diagnose_repo(project: str, auth_ok: bool) -> dict:
+    checks: list[dict] = []
+    remote = git_remote(project)
+    checks.append(check(
+        "git_remote", bool(remote), "degraded" if not remote else "ok",
+        f"Add a GitHub origin remote in {project}.",
+        remote=remote,
+    ))
+    agents_ok = agents_md_ok(project)
+    checks.append(check(
+        "agents_md", agents_ok, "degraded" if not agents_ok else "ok",
+        "Add AGENTS.md carrying the Issue-First Law, or run init-agent-project.",
+    ))
+    hooks_ok = aru_pre_push_installed(project)
+    checks.append(check(
+        "hooks", hooks_ok, "degraded" if not hooks_ok else "ok",
+        "Run scripts/install_hooks.sh in the target repository.",
+    ))
+    trees = worktree_status(project)
+    checks.append(check(
+        "worktrees", trees["present"], "degraded" if not trees["present"] else "ok",
+        "Create .worktrees/ for isolated feature and review checkouts.",
+        in_flight=trees["in_flight"],
+    ))
+    if not auth_ok:
+        board = {"ok": False, "state": "unauthenticated", "projects": []}
+        checks.append(check(
+            "board", False, "invalid",
+            "Authenticate gh (gh auth login) so the doctor can resolve the "
+            "Project Board. Token values are never printed.",
+        ))
+    else:
+        board = project_board_identity(project)
+        if board["state"] == "absent":
+            checks.append(check(
+                "board", False, "degraded",
+                "Link a governed GitHub Project board to this repository.",
+                repo=board.get("repo"),
+            ))
+        elif not board["ok"]:
+            checks.append(check(
+                "board", False, "degraded",
+                "Could not read Project Board identity; check gh access.",
+                repo=board.get("repo"),
+            ))
+        else:
+            checks.append(check(
+                "board", True, "ok", "",
+                repo=board.get("repo"), projects=board.get("projects"),
+            ))
+    return {
+        "remote": remote,
+        "agents_md": agents_ok,
+        "hooks": hooks_ok,
+        "worktrees": trees,
+        "board": board,
+        "checks": checks,
+    }
+
+
+def overall_status(checks: list[dict], payload: dict) -> str:
+    if any(item["severity"] == "invalid" and not item["ok"] for item in checks):
+        return "invalid"
+    if any(item["severity"] == "degraded" and not item["ok"] for item in checks):
+        return "degraded"
+    if payload.get("loop_stopped"):
+        return "degraded"
+    agents = payload.get("agents") or {}
+    if any(a.get("detected") and a.get("capability_gap") for a in agents.values()):
+        return "degraded"
+    return "healthy"
+
+
 def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
     catalog = load_catalog(aru_home)
     stop_doc = load_json(target_home / ".aru" / "factory-loop.stop")
@@ -255,9 +702,17 @@ def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
             **wake,
         }
     stopped = stop_applies(stop_doc, project)
-    return {
-        "install_diagnosis": "not_yet",
-        "issue_34": True,
+    install = diagnose_install(aru_home, target_home, agents)
+    repo = None
+    checks = list(install["checks"])
+    if project and _is_git_repo(project):
+        repo = diagnose_repo(project, install["prerequisites"]["gh_logged_in"])
+        checks.extend(repo["checks"])
+    payload = {
+        "install_diagnosis": "complete",
+        "issue_34": False,
+        "status": "healthy",
+        "canonical_home": str(aru_home),
         "project": project,
         "stop_file": str(target_home / ".aru" / "factory-loop.stop"),
         "loop_stopped": stopped,
@@ -266,12 +721,18 @@ def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
         "non_guarantees": catalog["non_guarantees"],
         "forbidden": catalog["forbidden"],
         "agents": agents,
+        "install": install,
+        "repository": repo,
+        "checks": checks,
     }
+    payload["status"] = overall_status(checks, payload)
+    return payload
 
 
 def render_human(payload: dict) -> str:
     lines = [
-        "Aru continuity doctor (install-link diagnosis is #34 / not yet diagnosable)",
+        f"Aru local-agent doctor  status={payload['status']}",
+        f"canonical_home: {payload['canonical_home']}",
         f"loop_stopped: {payload['loop_stopped']}",
         f"project: {payload['project'] or '(none)'}",
     ]
@@ -288,12 +749,18 @@ def render_human(payload: dict) -> str:
             f"  {name}: {mark} version={agent['version']}{app} "
             f"same_task_wake={agent['same_task_native_wake']}{gap}{wake}"
         )
+    failed = [item for item in payload.get("checks") or [] if not item["ok"]]
+    if failed:
+        lines.append("failed checks:")
+        for item in failed:
+            repair = item.get("repair") or ""
+            lines.append(f"  [{item['severity']}] {item['id']}: {repair}")
     lines.append("Never claims app-quit, sleep, power-off, or credit recovery.")
     return "\n".join(lines) + "\n"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Read-only continuity doctor.")
+    parser = argparse.ArgumentParser(description="Read-only local-agent integration doctor.")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--aru-home")
     parser.add_argument("--target-home")
@@ -313,9 +780,9 @@ def main() -> int:
         sys.stdout.write("\n")
     else:
         sys.stdout.write(render_human(payload))
-    if payload["loop_stopped"] or any(
-        a["detected"] and a["capability_gap"] for a in payload["agents"].values()
-    ):
+    if payload["status"] == "invalid":
+        return EXIT_INVALID
+    if payload["status"] == "degraded":
         return EXIT_DEGRADED
     return EXIT_OK
 
