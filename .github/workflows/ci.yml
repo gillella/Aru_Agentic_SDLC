@@ -13,9 +13,12 @@ on:
 
 # gitleaks-action lists PR commits via the API; without pull-requests:read
 # it fails with "Resource not accessible by integration" before scanning.
+# docs-freshness resolves cited issue state through the REST issues endpoint,
+# which needs issues:read - pull-requests:read does not cover it.
 permissions:
   contents: read
   pull-requests: read
+  issues: read
 
 jobs:
   # Three gates this playbook already ships to new projects via
@@ -95,6 +98,31 @@ jobs:
           else
             echo "No import-linter contracts configured yet; skipping."
           fi
+
+  # Documentation drift here accumulated in days (issue #115). A convention
+  # that docs stay accurate is followed probabilistically; this job is the
+  # mechanism. It runs on every push and pull request - so any documentation
+  # change is covered - and on the weekly schedule above, which is what
+  # catches a document that went stale because the *code* moved under it.
+  docs-freshness:
+    name: Documentation Freshness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # No --offline: an issue whose state cannot be resolved fails the job
+      # rather than silently skipping the check it was added for.
+      - name: Check documentation against the code it describes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/check_docs.py
 
   test-and-lint:
     name: Lint, Verify & Test
