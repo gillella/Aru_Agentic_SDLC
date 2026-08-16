@@ -30,6 +30,7 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
             str(self.target_home),
         ] + list(args)
         merged = dict(os.environ)
+        merged["PATH"] = "/usr/bin:/bin"
         if env:
             merged.update(env)
         return subprocess.run(cmd, capture_output=True, text=True, env=merged)
@@ -199,6 +200,9 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         self._link_skills(".agents/skills")
         self._write_governance(".cursor/user-rules-aru-agentic-sdlc.md")
         self._write_surface(".cursor/commands/run-aru-factory.md")
+        rule = self.target_home / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
+        rule.parent.mkdir(parents=True, exist_ok=True)
+        rule.write_text("alwaysApply: true\n")
 
     def _isolated_path(self, extra_bin=None):
         path = extra_bin or str(self.target_home / "bin")
@@ -290,7 +294,9 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         ).strip()
         hook_root = Path(git_dir) if Path(git_dir).is_absolute() else repo / git_dir
         (hook_root / "hooks").mkdir(parents=True, exist_ok=True)
-        (hook_root / "hooks" / "pre-push").write_text("Aru_Agentic_SDLC pre-push\n")
+        hook = hook_root / "hooks" / "pre-push"
+        hook.write_text("Aru_Agentic_SDLC pre-push\n")
+        hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
         self._fake_bin(
             "gh",
             'if [ "$1" = "auth" ]; then echo "Logged in to github.com"; exit 0; fi\n'
@@ -326,6 +332,60 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertEqual(board[0]["severity"], "invalid")
         self.assertNotIn("TOKEN", res.stdout)
         self.assertNotIn("gho_", res.stdout)
+
+    def test_origin_userinfo_is_stripped_from_remote(self):
+        repo = self.target_home / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            [
+                "git", "remote", "add", "origin",
+                "https://alice:ghp_secretvalue@github.com/acme/demo.git",
+            ],
+            cwd=repo, check=True, capture_output=True,
+        )
+        (repo / "AGENTS.md").write_text("# Issue-First Law\n")
+        self._fake_bin(
+            "gh",
+            'if [ "$1" = "auth" ]; then echo "Logged in to github.com"; exit 0; fi\n'
+            'echo \'{"data":{"repository":{"projectsV2":{"nodes":[]}}}}\'\n',
+        )
+        self._install_healthy_cursor()
+        res = self.run_doctor(
+            "--json", "--project", str(repo),
+            env={"PATH": self._isolated_path(), "GH_CONFIG_DIR": str(self.target_home / "gh")},
+        )
+        self.assertNotIn("ghp_secretvalue", res.stdout)
+        self.assertNotIn("alice:ghp_", res.stdout)
+        payload = json.loads(res.stdout)
+        remote = payload["repository"]["remote"]
+        self.assertIn("github.com/acme/demo", remote)
+        self.assertNotIn("ghp_", remote)
+
+    def test_relative_skill_link_is_ok(self):
+        self._install_healthy_cursor()
+        dest = self.target_home / ".cursor" / "skills" / "run-aru-factory"
+        dest.unlink()
+        expected = (ROOT / "skills" / "run-aru-factory").resolve()
+        dest.symlink_to(os.path.relpath(expected, dest.parent.resolve()))
+        payload = json.loads(self.run_doctor("--json").stdout)
+        stale = [
+            item for item in payload["checks"]
+            if item["id"].startswith("skill_stale:")
+        ]
+        self.assertEqual(stale, [])
+
+    def test_missing_cursor_rule_file_is_degraded(self):
+        self._install_healthy_cursor()
+        rule = self.target_home / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
+        rule.unlink()
+        payload = json.loads(self.run_doctor("--json").stdout)
+        missing = [
+            item for item in payload["checks"]
+            if item["id"].startswith("required_file:")
+        ]
+        self.assertTrue(missing)
+        self.assertEqual(payload["status"], "degraded")
 
 
 if __name__ == "__main__":

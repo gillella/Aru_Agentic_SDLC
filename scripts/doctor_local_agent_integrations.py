@@ -24,6 +24,10 @@ SECRET_ENV = re.compile(r"(TOKEN|SECRET|KEY|PASSWORD|PAT|CREDENTIAL|AUTH)", re.I
 VERSION_SAFE = re.compile(r"^[A-Za-z0-9._+ -]{1,80}$")
 MANAGED_CODEX_ID = re.compile(r'^id = "aru-code-loop(-[0-9a-f]+)?"\s*$', re.M)
 CODEX_STATUS = re.compile(r'^status = "([^"]+)"\s*$', re.M)
+GITHUB_TOKEN_SHAPE = re.compile(r"gh[pousr]_|github_pat_")
+SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -48,6 +52,7 @@ AGENT_LAYOUT = {
     "cursor": {
         "skill_dirs": [".cursor/skills"],
         "governance": [".cursor/user-rules-aru-agentic-sdlc.md"],
+        "required_files": [".cursor/rules/aru-agentic-sdlc.mdc"],
         "surfaces": [".cursor/commands/run-aru-factory.md"],
     },
     "antigravity": {
@@ -278,20 +283,30 @@ def classify_skill_link(dest: Path, expected: Path) -> str:
         return "missing"
     if dest.is_symlink():
         try:
-            target = Path(os.readlink(dest))
+            if dest.exists() and dest.resolve() == expected.resolve():
+                return "ok"
         except OSError:
             return "stale"
-        if target == expected:
-            return "ok"
         return "stale"
     return "conflict"
+
+
+def _skill_dir_active(target_home: Path, rel: str) -> bool:
+    """Skip an antigravity alternate root that is not installed."""
+    ag = target_home / ".antigravity"
+    gemini = target_home / ".gemini" / "antigravity"
+    if rel.startswith(".antigravity/"):
+        return ag.exists()
+    if rel.startswith(".gemini/antigravity/"):
+        return gemini.exists() or not ag.exists()
+    return True
 
 
 def inspect_skill_dirs(aru_home: Path, target_home: Path, rel_dirs: list[str],
                        skills: list[str]) -> list[dict]:
     rows = []
     for rel in rel_dirs:
-        if rel.startswith(".antigravity/") and not (target_home / ".antigravity").exists():
+        if not _skill_dir_active(target_home, rel):
             continue
         parent = target_home / rel
         for name in skills:
@@ -343,13 +358,18 @@ def redact_text(text: str) -> str:
     return "\n".join(lines)
 
 
-def run_quiet(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
+def run_quiet(cmd: list[str], cwd: str | None = None,
+              redact: bool = True) -> tuple[int, str]:
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": os.environ.get("HOME", ""),
         "LANG": "C",
         "GH_CONFIG_DIR": os.environ.get("GH_CONFIG_DIR", ""),
         "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
+        "GH_TOKEN": os.environ.get("GH_TOKEN", ""),
+        "GITHUB_TOKEN": os.environ.get("GITHUB_TOKEN", ""),
+        "GH_ENTERPRISE_TOKEN": os.environ.get("GH_ENTERPRISE_TOKEN", ""),
+        "GITHUB_ENTERPRISE_TOKEN": os.environ.get("GITHUB_ENTERPRISE_TOKEN", ""),
     }
     env = {key: value for key, value in env.items() if value}
     try:
@@ -359,7 +379,8 @@ def run_quiet(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
         )
     except (OSError, subprocess.TimeoutExpired):
         return 1, ""
-    return proc.returncode, redact_text(proc.stdout or proc.stderr or "")
+    text = proc.stdout or proc.stderr or ""
+    return proc.returncode, redact_text(text) if redact else text
 
 
 def git_on_path() -> bool:
@@ -373,8 +394,8 @@ def gh_on_path() -> bool:
 def gh_logged_in() -> bool:
     if not gh_on_path():
         return False
-    code, text = run_quiet(["gh", "auth", "status"])
-    return code == 0 and "logged in" in text.lower()
+    code, _text = run_quiet(["gh", "auth", "status"])
+    return code == 0
 
 
 def _is_git_repo(project: str) -> bool:
@@ -382,12 +403,30 @@ def _is_git_repo(project: str) -> bool:
     return code == 0 and "true" in text.lower()
 
 
+def redact_remote(url: str | None) -> str | None:
+    """Strip URL userinfo so a PAT in origin never reaches doctor output."""
+    if not url:
+        return None
+    text = url.strip()
+    if "://" in text:
+        scheme, rest = text.split("://", 1)
+        if "@" in rest:
+            _creds, hostpart = rest.rsplit("@", 1)
+            text = f"{scheme}://redacted@{hostpart}"
+    if SECRET_ENV.search(text) or GITHUB_TOKEN_SHAPE.search(text):
+        return "redacted"
+    return text
+
+
 def git_remote(project: str) -> str | None:
-    code, text = run_quiet(["git", "-C", project, "remote", "get-url", "origin"])
+    code, text = run_quiet(
+        ["git", "-C", project, "remote", "get-url", "origin"],
+        redact=False,
+    )
     if code != 0:
         return None
     line = text.strip().splitlines()
-    return line[0] if line else None
+    return redact_remote(line[0] if line else None)
 
 
 def agents_md_ok(project: str) -> bool:
@@ -408,7 +447,7 @@ def aru_pre_push_installed(project: str) -> bool:
     if not hook_root.is_absolute():
         hook_root = Path(project) / hook_root
     hook = hook_root / "hooks" / "pre-push"
-    if not hook.is_file():
+    if not hook.is_file() or not os.access(hook, os.X_OK):
         return False
     try:
         return ARU_HOOK_MARK in hook.read_text(encoding="utf-8")
@@ -442,10 +481,10 @@ def repo_slug_from_remote(remote: str | None) -> str | None:
     return None
 
 
-def project_board_identity(project: str) -> dict:
-    if not gh_logged_in():
+def project_board_identity(project: str, auth_ok: bool, remote: str | None) -> dict:
+    if not auth_ok:
         return {"ok": False, "state": "unauthenticated", "projects": []}
-    slug = repo_slug_from_remote(git_remote(project))
+    slug = repo_slug_from_remote(remote)
     if not slug:
         code, text = run_quiet(
             ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
@@ -455,16 +494,18 @@ def project_board_identity(project: str) -> dict:
     if not slug:
         return {"ok": False, "state": "unknown_repo", "projects": []}
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from common import get_repo_projects
+        from common import get_repo_projects, select_governed_projects
         boards = get_repo_projects(slug)
     except Exception:
         return {"ok": False, "state": "unreadable", "projects": [], "repo": slug}
     if boards is None:
         return {"ok": False, "state": "unreadable", "projects": [], "repo": slug}
-    titles = [b.get("title") or b.get("id") for b in boards if isinstance(b, dict)]
-    if not titles:
+    governed = select_governed_projects(boards, slug)
+    if not governed:
         return {"ok": False, "state": "absent", "projects": [], "repo": slug}
+    titles = [
+        b.get("title") or b.get("id") for b in governed if isinstance(b, dict)
+    ]
     return {"ok": True, "state": "ok", "projects": titles, "repo": slug}
 
 
@@ -508,9 +549,7 @@ def diagnose_install(aru_home: Path, target_home: Path, agents: dict) -> dict:
         "(must contain skills/ and templates/integrations/continuity.json).",
         path=str(aru_home),
     ))
-    detected = [name for name, agent in agents.items() if (
-        agent.get("config_detected") or agent.get("app_path")
-    )]
+    detected = [name for name, agent in agents.items() if agent.get("detected")]
     if not detected:
         checks.append(check(
             "agents_detected", False, "degraded",
@@ -532,9 +571,11 @@ def diagnose_install(aru_home: Path, target_home: Path, agents: dict) -> dict:
         if present:
             append_link_checks(checks, rows)
         gov_paths = []
-        for rel in layout["governance"]:
-            path = target_home / rel
-            if present and path.parent.exists():
+        if present:
+            for rel in layout["governance"]:
+                if not _skill_dir_active(target_home, rel):
+                    continue
+                path = target_home / rel
                 state = governance_state(path)
                 gov_paths.append({"path": str(path), "state": state})
                 if state != "ok":
@@ -543,6 +584,15 @@ def diagnose_install(aru_home: Path, target_home: Path, agents: dict) -> dict:
                         "Restore the managed ARU_SDLC_GOVERNANCE block with "
                         "scripts/install_local_agent_integrations.sh "
                         "(unrelated file content is left alone).",
+                        path=str(path),
+                    ))
+            for rel in layout.get("required_files") or []:
+                path = target_home / rel
+                if not path.is_file():
+                    checks.append(check(
+                        f"required_file:{path}", False, "degraded",
+                        f"Install {rel} with "
+                        "scripts/install_local_agent_integrations.sh",
                         path=str(path),
                     ))
         surfaces = []
@@ -627,7 +677,7 @@ def diagnose_repo(project: str, auth_ok: bool) -> dict:
             "Project Board. Token values are never printed.",
         ))
     else:
-        board = project_board_identity(project)
+        board = project_board_identity(project, auth_ok, remote)
         if board["state"] == "absent":
             checks.append(check(
                 "board", False, "degraded",
@@ -708,6 +758,12 @@ def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
     if project and _is_git_repo(project):
         repo = diagnose_repo(project, install["prerequisites"]["gh_logged_in"])
         checks.extend(repo["checks"])
+    elif project:
+        checks.append(check(
+            "project_repo", False, "degraded",
+            f"--project {project} is not a Git work tree; pass a repository root.",
+            path=project,
+        ))
     payload = {
         "install_diagnosis": "complete",
         "issue_34": False,
