@@ -67,6 +67,12 @@ from common import list_open_issues, run_cmd, label_names as issue_label_names
 from fetch_next_issue import build_candidates, reap_stale_claims
 from fetch_pr_feedback import fetch_active_review_feedback
 from merge_pr import closeout_incomplete, dod_status, is_merged
+# _attested_head_peers is private, and importing it across modules is normally a
+# smell. It is imported deliberately: merge_pr is the single source of truth for
+# whether a peer's completion stamp names the current head, and a second
+# implementation of that predicate in the picker is exactly the drift that let
+# reviewed-but-since-pushed PRs reach no agent at all.
+from merge_pr import _attested_head_peers, review_evidence
 
 
 def skill_for_issue(issue: dict[str, Any]) -> str:
@@ -341,7 +347,12 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
     holder = reviewed_by(labels)
 
     def no(reason):
-        return {"eligible": False, "reason": reason, "cross_family": False, "degraded": False}
+        return {"eligible": False, "reason": reason, "cross_family": False,
+                "degraded": False, "stale_attribution": False}
+
+    # Set when a peer's completion stamp no longer names the head, so the report
+    # can explain why an already-reviewed PR reappeared in the review queue.
+    stale_attribution = False
 
     if pr.get("isDraft"):
         return no("draft")
@@ -371,13 +382,33 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
         and name[len("reviewed-by:"):] != author
     ]
     if peer_reviewers:
-        return no("independent review complete; waiting on gated merge")
+        # Attribution alone is not completion. merge_pr requires the stamp to
+        # name the current head, so after a push it demands a re-review that
+        # nothing routed: merge refused the PR, review called it complete, and
+        # `review` is correctly not an author-clearable gate. Ask merge_pr's own
+        # predicate rather than re-deriving it here.
+        evidence = review_evidence(pr["number"])
+        if evidence is None:
+            return no("review attestation state is unavailable")
+        attested = _attested_head_peers(evidence, peer_reviewers)
+        # None means legacy evidence carrying no attestation records; keep the
+        # existing verdict rather than reopening every historical PR.
+        if attested is None or attested:
+            return no("independent review complete; waiting on gated merge")
+        stale_attribution = True
 
     decision = (pr.get("reviewDecision") or "").upper()
-    if decision == "APPROVED":
+    if decision == "APPROVED" and not stale_attribution:
         # An approved PR is waiting on gated mechanical merge. A historical
         # CHANGES_REQUESTED decision with no current feedback instead needs a
         # fresh review so the latest verdict can unblock the merge gate.
+        #
+        # Stale attribution overrides this. GitHub does not dismiss a stale
+        # approval unless branch protection is configured to, so a
+        # distinct-account approval survives a push that it never covered.
+        # merge_pr rejects such an approval for the same reason it rejects the
+        # stale stamp, so suppressing here would restore the exact deadlock
+        # above one branch later.
         return no("already approved")
 
     state = ci_state(pr)
@@ -389,13 +420,15 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
         # Unknown family on either side is treated as cross: there is no
         # evidence of overlap, and blocking on missing metadata would idle the
         # fleet for a labelling gap.
-        return {"eligible": True, "reason": "", "cross_family": True, "degraded": False}
+        return {"eligible": True, "reason": "", "cross_family": True,
+                "degraded": False, "stale_attribution": stale_attribution}
 
     waited = waiting_minutes(pr)
     if waited >= cross_family_wait:
         return {"eligible": True,
                 "reason": f"same family '{family}', waited {waited:.0f}m",
-                "cross_family": False, "degraded": True}
+                "cross_family": False, "degraded": True,
+                "stale_attribution": stale_attribution}
     return no(f"same family '{family}'; waiting {cross_family_wait - waited:.0f}m more "
               "for a cross-family reviewer")
 
@@ -627,6 +660,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         "reviewable_detail": [
             {"pr": p["number"], "title": p["title"],
              "cross_family": v["cross_family"], "degraded": v["degraded"],
+             "stale_attribution": v.get("stale_attribution", False),
              "created_at": p.get("createdAt")}
             for p, v in reviewable
         ],
