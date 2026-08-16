@@ -19,6 +19,45 @@ This skill dictates the procedure for processing human developer or peer agent r
 
 ## Procedure Steps
 
+### Step 0: Which kind of feedback is this?
+
+The picker emits two shapes under `feedback`. Check `work.unmet_gates` before
+Step 1, because only one of them has threads to fetch.
+
+| `work.unmet_gates` | Meaning | Go to |
+|---|---|---|
+| absent or empty | A reviewer left unresolved threads | Step 1 |
+| non-empty | A Definition-of-Done gate only the author can clear | **Step 1G** |
+
+Running Step 1 on a gate-fix item returns an empty checklist, because the picker
+only surfaces these when the thread count is **zero**. Treating that empty
+checklist as "nothing to do" is what makes the item reappear on the next cycle
+forever, so it must be routed to Step 1G instead.
+
+### Step 1G: Clear the author-only gate
+
+No threads exist. Act on each name in `work.unmet_gates`:
+
+- **`rebased`** — in the PR's worktree: `git fetch origin && git rebase
+  origin/main`, re-run the full local verification, then push with
+  `--force-with-lease`. This **invalidates the prior review by design**
+  (`merge_pr.py` requires a review at the current head), so the PR returns to
+  `review` afterwards. That is correct; do not route around it.
+- **`size`** — split the PR, or add `size-waiver: <rationale>` to its body
+  explaining why splitting is worse. Never waive silently, and never waive
+  purely to clear the gate.
+
+Then refresh evidence for the new head:
+
+```
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --refresh-pr <PR_ID> --issue <N> \
+  --verify-command "ruff check ." \
+  --verify-command "python3 -m unittest discover tests"
+```
+
+Skip Steps 1-4 and return to the loop. If the gate still fails afterwards,
+record why on the PR instead of repeating the identical push.
+
 ### Step 1: Fetch Inline PR Comments & Build Checklist
 1. Fetch all unresolved inline PR comments using `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <PR_ID>`.
 2. Compile a Markdown task checklist mapping each comment to file location, line number, and requested change.

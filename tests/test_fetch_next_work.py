@@ -632,3 +632,59 @@ class GateFixSelectionTests(unittest.TestCase):
         res = self.select_with(stranded(threads=3))
         self.assertEqual(res["work"]["type"], "feedback")
         self.assertNotIn("unmet_gates", res["work"])
+
+
+class GateFixRoutingContractTests(unittest.TestCase):
+    """The emitted item must reach a consumer that knows what to do with it.
+
+    Review finding on PR #229: emitting `feedback` with `unmet_gates` is only
+    actionable if the routed loop and skill document each gate name. Without
+    that, the consumer fetches an empty thread checklist, does nothing, and the
+    picker returns the identical item next cycle - turning the original `idle`
+    into a silent spin. These assert the contract end to end: what select()
+    emits, the skill it names, and the actions those documents specify.
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+    CONTRACTS = ("prompts/fleet-worker.md", "skills/address-pr-feedback/SKILL.md")
+
+    def contracts(self):
+        return {rel: (self.ROOT / rel).read_text() for rel in self.CONTRACTS}
+
+    def emitted(self):
+        parts = {"candidates": [], "my_in_flight": None, "blocked": [],
+                 "conflicted": [], "missing_touches": [], "not_ready": []}
+        with patch.object(fnw, "list_work_prs", return_value=[stranded()]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts), \
+             patch.object(fnw, "dod_status", return_value=(False, "unmet: rebased")):
+            return fnw.select("agent-2", "openai", 3, 30)["work"]
+
+    def test_the_named_skill_actually_exists(self):
+        work = self.emitted()
+        skill = self.ROOT / "skills" / work["skill"] / "SKILL.md"
+        self.assertTrue(skill.is_file(),
+                        f"select() routes to '{work['skill']}', which has no SKILL.md")
+
+    def test_both_contracts_document_the_emitted_field(self):
+        work = self.emitted()
+        self.assertIn("unmet_gates", work)
+        for rel, text in self.contracts().items():
+            self.assertIn("unmet_gates", text,
+                          f"{rel} never mentions the field the picker emits")
+
+    def test_every_author_fixable_gate_is_documented(self):
+        for rel, text in self.contracts().items():
+            for gate in fnw.AUTHOR_FIXABLE_GATES:
+                self.assertIn(f"`{gate}`", text,
+                              f"{rel} gives no instruction for the '{gate}' gate")
+
+    def test_each_gate_documents_a_concrete_action(self):
+        # A gate named without its action is still unactionable prose.
+        required = {"rebased": "--force-with-lease", "size": "size-waiver"}
+        self.assertEqual(set(required), set(fnw.AUTHOR_FIXABLE_GATES),
+                         "a gate was added without an action marker to assert on")
+        for rel, text in self.contracts().items():
+            for gate, marker in required.items():
+                self.assertIn(marker, text,
+                              f"{rel} names '{gate}' but not its action ({marker})")
