@@ -922,7 +922,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         execute.assert_not_called()
         closeout.assert_called_once()
 
-    @patch.object(merge_pr, "post_human_intervention", return_value=True)
+    @patch.object(merge_pr, "post_human_intervention", return_value=False)
     @patch.object(merge_pr.time, "sleep")
     @patch.object(merge_pr, "clear_merger_claims")
     @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
@@ -973,7 +973,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "additions": 2,
             "deletions": 1,
         }
-        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch("builtins.print") as printer:
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
 
         execute.assert_called_once_with(9, fetch.return_value, "merge")
@@ -985,6 +986,9 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 15, 45])
         intervention.assert_called_once()
         self.assertEqual(len(intervention.call_args.args[5]), 4)
+        output = " ".join(str(call.args[0]) for call in printer.call_args_list if call.args)
+        self.assertIn("could not be fully recorded", output)
+        self.assertNotIn("evidence was recorded", output)
 
     @patch.object(merge_pr, "run_closeout", return_value=True)
     @patch.object(merge_pr, "repository_root", return_value="/repo")
@@ -1146,6 +1150,19 @@ class HumanInterventionTests(unittest.TestCase):
         self.assertIn("remaining merger claims: `merger:codex-root`", body)
         self.assertIn("attempt 2: remote branch: delete still failed", body)
         self.assertEqual(body.count("### Operator action"), 1)
+
+    def test_pre_closeout_failure_reports_zero_attempts_and_no_retry(self):
+        pr = merged_pr()
+        with patch.object(merge_pr, "fetch_pr", return_value=pr), \
+             patch.object(merge_pr, "surviving_worktree", return_value="unavailable"):
+            body = merge_pr.human_intervention_body(
+                pr, None, "gated-sha", "unknown", [], "command",
+                blocked_before_closeout="merge audit: missing SHA",
+            )
+
+        self.assertIn("attempted remediation: 0 close-out attempts", body)
+        self.assertIn("close-out not attempted: merge audit: missing SHA", body)
+        self.assertNotIn("attempt 1:", body)
 
     def test_evidence_is_posted_to_pr_and_every_linked_issue(self):
         with patch.object(

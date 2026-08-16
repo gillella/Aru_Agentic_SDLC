@@ -1566,7 +1566,8 @@ def surviving_worktree(repo_root, branch):
 
 
 def human_intervention_body(
-    pr, repo_root, gated_head, merged_sha, failed_attempts, command
+    pr, repo_root, gated_head, merged_sha, failed_attempts, command,
+    blocked_before_closeout=None,
 ):
     """Build the durable evidence required when close-out cannot self-heal."""
     live_pr = fetch_pr(pr.get("number")) or pr
@@ -1574,9 +1575,18 @@ def human_intervention_body(
     attempt_lines = []
     for index, failures in enumerate(failed_attempts, start=1):
         attempt_lines.append(f"- attempt {index}: {'; '.join(failures)}")
-    if not attempt_lines:
-        attempt_lines.append("- no close-out retry was safe to run")
+    if blocked_before_closeout:
+        attempt_lines.append(f"- close-out not attempted: {blocked_before_closeout}")
+    elif not attempt_lines:
+        attempt_lines.append("- no close-out attempt evidence was available")
     branch = pr.get("headRefName") or "unknown"
+    if failed_attempts:
+        remediation = (
+            f"{len(failed_attempts)} close-out attempt(s); bounded retry delays "
+            f"were {', '.join(map(str, CLOSEOUT_RETRY_DELAYS))} seconds"
+        )
+    else:
+        remediation = "0 close-out attempts; bounded retries were not run"
     return "\n".join([
         "## Human intervention required",
         "",
@@ -1587,8 +1597,7 @@ def human_intervention_body(
         "",
         f"- command: `{command}`",
         f"- exit code: `{EXIT_ERROR}`",
-        f"- attempted remediation: {len(failed_attempts)} close-out attempt(s); "
-        f"bounded retry delays were {', '.join(map(str, CLOSEOUT_RETRY_DELAYS))} seconds",
+        f"- attempted remediation: {remediation}",
         "",
         "### Preserved artifacts",
         "",
@@ -1611,11 +1620,13 @@ def human_intervention_body(
 
 
 def post_human_intervention(
-    pr, issue_nums, repo_root, gated_head, merged_sha, failed_attempts, command
+    pr, issue_nums, repo_root, gated_head, merged_sha, failed_attempts, command,
+    blocked_before_closeout=None,
 ):
     """Post the same authoritative intervention evidence to PR and issues."""
     body = human_intervention_body(
-        pr, repo_root, gated_head, merged_sha, failed_attempts, command
+        pr, repo_root, gated_head, merged_sha, failed_attempts, command,
+        blocked_before_closeout=blocked_before_closeout,
     )
     targets = [("pr", pr.get("number"))]
     targets.extend(("issue", number) for number in issue_nums)
@@ -1633,6 +1644,12 @@ def post_human_intervention(
                 file=sys.stderr,
             )
             all_ok = False
+    if not all_ok:
+        print(
+            "[ERROR] Human intervention evidence was not durable on every "
+            f"GitHub target. Local evidence follows:\n{body}",
+            file=sys.stderr,
+        )
     return all_ok
 
 
@@ -2007,19 +2024,26 @@ def main():
     command = intervention_command()
     if not root:
         failure = "repository root: could not resolve the primary worktree"
-        post_human_intervention(
-            final_pr, issue_nums, None, gated_head, merged_sha, [[failure]], command
+        evidence_ok = post_human_intervention(
+            final_pr, issue_nums, None, gated_head, merged_sha, [], command,
+            blocked_before_closeout=failure,
         )
         print(
             "[ERROR] Merge succeeded but repository root could not be resolved; "
-            "intervention evidence was attempted.",
+            f"intervention evidence {'was recorded' if evidence_ok else 'could not be fully recorded'}.",
             file=sys.stderr,
         )
         return EXIT_ERROR
     if not audit_ok:
         failure = "merge audit: GitHub supplied no merge commit SHA"
-        post_human_intervention(
-            final_pr, issue_nums, root, gated_head, merged_sha, [[failure]], command
+        evidence_ok = post_human_intervention(
+            final_pr, issue_nums, root, gated_head, merged_sha, [], command,
+            blocked_before_closeout=failure,
+        )
+        print(
+            "[ERROR] Merge audit is incomplete; intervention evidence "
+            f"{'was recorded' if evidence_ok else 'could not be fully recorded'}.",
+            file=sys.stderr,
         )
         return EXIT_ERROR
     # Park the verdicts the moment we hold them, and read them back on a
@@ -2035,13 +2059,14 @@ def main():
         final_pr, issue_nums, root
     )
     if not closeout_ok:
-        post_human_intervention(
+        evidence_ok = post_human_intervention(
             final_pr, issue_nums, root, gated_head, merged_sha,
             failed_attempts, command,
         )
         print(
             "\n❌ Merge is complete, but close-out is incomplete after bounded "
-            "retries. Human intervention evidence was recorded."
+            "retries. Human intervention evidence "
+            f"{'was recorded' if evidence_ok else 'could not be fully recorded'}."
         )
         return EXIT_ERROR
 
