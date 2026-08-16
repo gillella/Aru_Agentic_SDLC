@@ -2208,17 +2208,18 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):
     else:
         print("  ⏳ merger claim      retained so recovery remains discoverable")
     try:
-        ok, message = sweep_leftovers(repo_root)
+        retain = None if all_ok else pr.get("number")
+        ok, message = sweep_leftovers(repo_root, retain_merger_pr=retain)
     except Exception as exc:
         ok, message = True, f"janitor skipped: {exc}"
     print(f"  {'✅' if ok else '❌'} {'janitor':<18} {message}")
     return all_ok
 
 
-def sweep_leftovers(repo_root):
+def sweep_leftovers(repo_root, retain_merger_pr=None):
     """Best-effort leftover sweep; dirty trees are skipped, never a hard fail."""
     from cleanup_worktrees import sweep
-    _ok, message = sweep(repo_root)
+    _ok, message = sweep(repo_root, retain_merger_pr=retain_merger_pr)
     return True, message
 
 

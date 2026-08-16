@@ -83,20 +83,68 @@ def branch_name(fields: dict) -> str:
     return ref[len(prefix):] if ref.startswith(prefix) else ""
 
 
-def gone_or_merged(repo_root: str, branch: str) -> bool:
+def default_base_ref(repo_root: str) -> str:
+    code, out, _ = run_cmd(
+        ["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+        check=False, cwd=repo_root,
+    )
+    if code == 0 and out.strip().startswith("refs/remotes/origin/"):
+        return out.strip()
+    for name in ("main", "master"):
+        verify, _, _ = run_cmd(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{name}"],
+            check=False, cwd=repo_root,
+        )
+        if verify == 0:
+            return f"refs/remotes/origin/{name}"
+    return "refs/remotes/origin/main"
+
+
+def merged_into_default(repo_root: str, branch: str) -> bool:
+    """True only with positive ancestor evidence against the default branch."""
     if not branch:
-        return True
+        return False
+    base = default_base_ref(repo_root)
+    merged, _, _ = run_cmd(
+        ["git", "merge-base", "--is-ancestor", branch, base],
+        check=False, cwd=repo_root,
+    )
+    return merged == 0
+
+
+def remote_branch_absent(repo_root: str, branch: str) -> bool | None:
+    """True if origin lacks the branch, False if present, None if lookup failed."""
     code, out, _ = run_cmd(
         ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch}"],
         check=False, cwd=repo_root,
     )
-    if code != 0 or not out.strip():
-        return True
-    merged, _, _ = run_cmd(
-        ["git", "merge-base", "--is-ancestor", branch, "origin/main"],
+    if code != 0:
+        return None
+    return not out.strip()
+
+
+def branch_has_upstream(repo_root: str, branch: str) -> bool:
+    code, out, _ = run_cmd(
+        ["git", "config", "--get", f"branch.{branch}.remote"],
         check=False, cwd=repo_root,
     )
-    return merged == 0
+    return code == 0 and bool(out.strip())
+
+
+def stale_merged_branch(repo_root: str, branch: str) -> bool:
+    """Prune only when upstream existed, origin deleted it, and it is merged.
+
+    A new unpushed worktree is an ancestor of the default tip, so ancestor
+    checks alone would delete in-flight trees. A failed ``ls-remote`` is not
+    absence. Fast-forward leftovers still match the default SHA, so SHA
+    inequality is not used as a gate.
+    """
+    if not branch or not branch_has_upstream(repo_root, branch):
+        return False
+    absent = remote_branch_absent(repo_root, branch)
+    if absent is not True:
+        return False
+    return merged_into_default(repo_root, branch)
 
 
 def prune_orphan_worktrees(repo_root: str) -> list[str]:
@@ -124,7 +172,7 @@ def prune_orphan_worktrees(repo_root: str) -> list[str]:
             notes.append(f"skipped dirty {path}")
             continue
         branch = branch_name(fields)
-        if not gone_or_merged(repo_root, branch):
+        if not stale_merged_branch(repo_root, branch):
             notes.append(f"kept in-flight {path} ({branch})")
             continue
         rm_code, _, rm_err = run_cmd(
@@ -194,11 +242,7 @@ def delete_merged_local_branches(repo_root: str) -> list[str]:
         name = name.strip()
         if not is_janitor_branch(name) or name in attached:
             continue
-        merged, _, _ = run_cmd(
-            ["git", "merge-base", "--is-ancestor", name, "origin/main"],
-            check=False, cwd=repo_root,
-        )
-        if merged != 0:
+        if not stale_merged_branch(repo_root, name):
             continue
         rm_code, _, rm_err = run_cmd(
             ["git", "branch", "-d", name], check=False, cwd=repo_root
@@ -226,7 +270,56 @@ def _items_with_prefix(kind: str, state: str, prefix: str) -> list[int]:
     return found
 
 
-def clear_stale_claim_labels() -> list[str]:
+def linked_issues_unfinished(pr: dict) -> bool:
+    """True unless every Closes #N issue is closed with status:done."""
+    nums = merge_pr.linked_issues(pr.get("body") or "")
+    if not nums:
+        return False
+    for num in nums:
+        issue = merge_pr._gh_json(
+            ["gh", "issue", "view", str(num), "--json", "state,labels"]
+        )
+        if issue is None:
+            return True
+        if (issue.get("state") or "").upper() == "OPEN":
+            return True
+        labels = {lab.get("name", "") for lab in (issue.get("labels") or [])}
+        if "status:done" not in labels:
+            return True
+    return False
+
+
+def merger_claim_still_needed(repo_root: str, pr_num: int) -> bool:
+    """Keep merger: until issues, worktree, and remote branch are observably done.
+
+    Ignores the merger: label itself so a lingering claim can still be cleared
+    after the rest of close-out finished, without wiping claims on in-flight
+    sibling merges.
+    """
+    pr = merge_pr._gh_json([
+        "gh", "pr", "view", str(pr_num),
+        "--json", "body,headRefName,labels,state,mergedAt",
+    ])
+    if not isinstance(pr, dict) or not merge_pr.is_merged(pr):
+        return True
+    if linked_issues_unfinished(pr):
+        return True
+    branch = pr.get("headRefName") or ""
+    if not branch:
+        return True
+    code, porcelain, _ = run_cmd(
+        ["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root
+    )
+    if code != 0:
+        return True
+    path, _head = merge_pr.find_branch_worktree(porcelain, branch)
+    if path:
+        return True
+    absent = remote_branch_absent(repo_root, branch)
+    return absent is not True
+
+
+def clear_stale_claim_labels(repo_root: str, retain_merger_pr: int | None = None) -> list[str]:
     notes = []
     for number in _items_with_prefix("issue", "closed", "agent:"):
         ok, message = merge_pr.clear_issue_claims(number)
@@ -235,19 +328,28 @@ def clear_stale_claim_labels() -> list[str]:
         ok, message = merge_pr.clear_review_claims(number)
         notes.append(message if ok else f"PR #{number} reviewer: {message}")
     for number in _items_with_prefix("pr", "merged", "merger:"):
+        if retain_merger_pr is not None and int(number) == int(retain_merger_pr):
+            notes.append(f"kept merger claim on PR #{number}: current close-out incomplete")
+            continue
+        if merger_claim_still_needed(repo_root, number):
+            notes.append(f"kept merger claim on PR #{number}: close-out incomplete")
+            continue
         ok, message = merge_pr.clear_merger_claims(number)
         notes.append(message if ok else f"PR #{number} merger: {message}")
     return notes
 
 
-def sweep(repo_root: str, include_labels: bool = True) -> tuple[bool, str]:
+def sweep(repo_root: str, include_labels: bool = True,
+          retain_merger_pr: int | None = None) -> tuple[bool, str]:
     notes = (
         prune_orphan_worktrees(repo_root)
         + prune_retained_copies(repo_root)
         + delete_merged_local_branches(repo_root)
     )
     if include_labels:
-        notes = notes + clear_stale_claim_labels()
+        notes = notes + clear_stale_claim_labels(
+            repo_root, retain_merger_pr=retain_merger_pr
+        )
     if not notes:
         return True, "already clean"
     return True, "; ".join(notes)

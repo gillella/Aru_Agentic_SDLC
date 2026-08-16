@@ -1541,7 +1541,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
         mocks["reconcile_issue_done"].assert_called_once_with(7)
         mocks["clear_review_claims"].assert_called_once_with(9)
         mocks["clear_merger_claims"].assert_not_called()
-        mocks["sweep_leftovers"].assert_called_once_with("/repo")
+        mocks["sweep_leftovers"].assert_called_once_with("/repo", retain_merger_pr=9)
 
     def test_worktree_failure_does_not_skip_branch_or_board_cleanup(self):
         ok, mocks = self._run("prune_worktree")
@@ -1560,7 +1560,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
     def test_closeout_invokes_janitor_even_when_a_prior_step_fails(self):
         ok, mocks = self._run("prune_worktree")
         self.assertFalse(ok)
-        mocks["sweep_leftovers"].assert_called_once_with("/repo")
+        mocks["sweep_leftovers"].assert_called_once_with("/repo", retain_merger_pr=9)
 
     @patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor ok"))
     @patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear"))
