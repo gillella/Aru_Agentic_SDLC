@@ -2,6 +2,7 @@
 """Hermetic unit tests for scripts/smoke_preview.py."""
 
 import io
+import json
 import os
 import sys
 import tempfile
@@ -178,6 +179,7 @@ class TestRunSmokeCheck(unittest.TestCase):
         self.assertFalse(outcome.skipped)
         self.assertIn("Invalid or missing preview URL", outcome.message)
 
+    @patch("smoke_preview.DEFAULT_SCENARIO_PATHS", [])
     @patch("smoke_preview.fetch_preview_with_retry")
     def test_runnable_preview_success(self, mock_fetch):
         mock_fetch.return_value = (
@@ -246,6 +248,56 @@ class TestRunSmokeCheck(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
 
+    def test_name_only_scenario_fails_validation(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write('[{"name": "Name Only"}]')
+            path = f.name
+        try:
+            outcome = sp.run_smoke_check(
+                url="https://example.github.io/app/",
+                scenarios_file=path,
+            )
+            self.assertFalse(outcome.success)
+            self.assertIn("must define at least one valid assertion", outcome.message.lower())
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_empty_pattern_scenario_fails_validation(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write('[{"name": "Empty Pattern", "contains": "   "}]')
+            path = f.name
+        try:
+            outcome = sp.run_smoke_check(
+                url="https://example.github.io/app/",
+                scenarios_file=path,
+            )
+            self.assertFalse(outcome.success)
+            self.assertIn("must be a non-empty string", outcome.message.lower())
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_invalid_min_length_scenarios_fail_validation(self):
+        invalid_values = [True, False, 0, -5, "10", 3.14, None]
+        for val in invalid_values:
+            with tempfile.NamedTemporaryFile("w", delete=False) as f:
+                f.write(json.dumps([{"name": "Bad Length", "min_length": val}]))
+                path = f.name
+            try:
+                outcome = sp.run_smoke_check(
+                    url="https://example.github.io/app/",
+                    scenarios_file=path,
+                )
+                self.assertFalse(outcome.success, f"Expected validation failure for min_length={val}")
+                self.assertTrue(
+                    "positive integer" in outcome.message.lower()
+                    or "at least one valid assertion" in outcome.message.lower()
+                )
+            finally:
+                if os.path.exists(path):
+                    os.unlink(path)
+
     def test_invalid_regex_in_scenarios_file_fails_closed(self):
         with tempfile.NamedTemporaryFile("w", delete=False) as f:
             f.write('[{"name": "Bad Regex", "contains": "[a-z"}]')
@@ -261,6 +313,7 @@ class TestRunSmokeCheck(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
 
+    @patch("smoke_preview.DEFAULT_SCENARIO_PATHS", [])
     @patch("smoke_preview.fetch_preview_with_retry")
     def test_runtime_error_pattern_fails_acceptance_scenario(self, mock_fetch):
         mock_fetch.return_value = (

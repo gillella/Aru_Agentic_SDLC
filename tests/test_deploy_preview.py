@@ -722,6 +722,27 @@ class DeployPreviewSkillTests(unittest.TestCase):
             self.assertFalse(success)
             self.assertFalse((out / "index.html").exists())
 
+    def test_build_preview_classifies_pyproject_with_dist_or_build_as_library(self):
+        import tempfile
+        import build_preview as bp
+
+        for pkg_dir in ("dist", "build"):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                src = Path(temp_dir) / f"pkg_{pkg_dir}"
+                src.mkdir(parents=True)
+                (src / "pyproject.toml").write_text("[project]\nname = 'demo-lib'\n")
+                (src / pkg_dir).mkdir()
+                (src / pkg_dir / "demo.whl").write_text("fake binary")
+
+                classification, source_info = bp.detect_surface_classification(str(src))
+                self.assertEqual(classification, "library")
+                self.assertIsNone(source_info)
+
+                # Assemble with allow_library=True succeeds and sets outputs
+                out = src / "dist"
+                success = bp.assemble_preview_artifact(str(src), str(out), allow_library=True)
+                self.assertTrue(success)
+
     def test_build_preview_artifact_preserves_existing_dist_artifact(self):
         import tempfile
         import build_preview as bp

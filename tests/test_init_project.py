@@ -228,6 +228,13 @@ class ProjectBootstrapTests(unittest.TestCase):
             )
             self.assertTrue(os.access(smoke_preview, os.X_OK))
 
+            smoke_scenario = Path(temp_dir) / ".github" / "scenarios" / "smoke.json"
+            self.assertTrue(smoke_scenario.is_file())
+            self.assertEqual(
+                smoke_scenario.read_text(),
+                (ROOT / ".github" / "scenarios" / "smoke.json").read_text(),
+            )
+
             # Test review.py degrades to notice without API keys
             env = {k: v for k, v in os.environ.items() if not k.endswith("_API_KEY")}
             res = subprocess.run(

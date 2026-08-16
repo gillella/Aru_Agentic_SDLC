@@ -118,18 +118,30 @@ def load_and_validate_scenarios(scenarios_file: Optional[str] = None) -> Tuple[b
     for idx, item in enumerate(data):
         if not isinstance(item, dict):
             return False, None, f"Scenario at index {idx} in '{target_file}' must be an object."
-        if not item.get("name") or not isinstance(item.get("name"), str):
+        name = item.get("name")
+        if not name or not isinstance(name, str) or not name.strip():
             return False, None, f"Scenario at index {idx} in '{target_file}' is missing a valid 'name' string."
 
+        has_assertion = False
         for pattern_key in ("contains", "not_contains"):
             pat = item.get(pattern_key)
             if pat is not None:
-                if not isinstance(pat, str):
-                    return False, None, f"Scenario '{item.get('name')}' {pattern_key} pattern must be a string."
+                if not isinstance(pat, str) or not pat.strip():
+                    return False, None, f"Scenario '{name}' {pattern_key} pattern must be a non-empty string."
                 try:
                     re.compile(pat)
                 except re.error as exc:
-                    return False, None, f"Scenario '{item.get('name')}' has invalid regex for {pattern_key}: {exc}"
+                    return False, None, f"Scenario '{name}' has invalid regex for {pattern_key}: {exc}"
+                has_assertion = True
+
+        if "min_length" in item:
+            val = item["min_length"]
+            if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+                return False, None, f"Scenario '{name}' min_length must be a positive integer."
+            has_assertion = True
+
+        if not has_assertion:
+            return False, None, f"Scenario '{name}' must define at least one valid assertion (contains, not_contains, or positive min_length)."
 
     return True, data, ""
 
@@ -200,7 +212,7 @@ def evaluate_html_scenarios(html_content: str, scenarios: Optional[List[Dict[str
                 else:
                     details_list.append(f"Forbidden pattern '{not_contains_pattern}' absent")
 
-            if min_length > 0:
+            if isinstance(min_length, int) and not isinstance(min_length, bool) and min_length > 0:
                 if len(html_content) >= min_length:
                     details_list.append(f"Body length {len(html_content)} >= {min_length}")
                 else:

@@ -851,6 +851,7 @@ def scaffold_directory_structure(target_dir: str):
         "docs",
         ".github/workflows",
         ".github/scripts",
+        ".github/scenarios",
         ".github/ISSUE_TEMPLATE",
         ".cursor/rules",
     ]
@@ -889,6 +890,18 @@ def write_governance_scripts(target_dir: str):
     with open(smoke_preview_target, "w", encoding="utf-8") as target:
         target.write(smoke_preview_content)
     os.chmod(smoke_preview_target, 0o755)
+
+    scenarios_dir = os.path.join(github_dir, "scenarios")
+    os.makedirs(scenarios_dir, exist_ok=True)
+    smoke_scenario_source = os.path.join(
+        os.path.dirname(__file__), "..", ".github", "scenarios", "smoke.json"
+    )
+    smoke_scenario_target = os.path.join(scenarios_dir, "smoke.json")
+    if os.path.isfile(smoke_scenario_source):
+        with open(smoke_scenario_source, "r", encoding="utf-8") as source:
+            smoke_scenario_content = source.read()
+        with open(smoke_scenario_target, "w", encoding="utf-8") as target:
+            target.write(smoke_scenario_content)
 
     check_touches_path = os.path.join(scripts_dir, "check_touches.py")
     with open(check_touches_path, "w", encoding="utf-8") as f:

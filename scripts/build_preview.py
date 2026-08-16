@@ -133,13 +133,6 @@ def detect_surface_classification(root_dir: str) -> Tuple[str, Optional[Tuple[st
     if found:
         return "runnable_found", found
 
-    # Check for broken runnable app (directory exists but index.html is missing)
-    for candidate in APP_CANDIDATE_DIRS:
-        candidate_path = root / candidate
-        if candidate_path.is_dir() and not candidate_path.is_symlink():
-            return "runnable_missing_entrypoint", ("app_dir", str(candidate_path))
-
-    # Positive signal for library
     has_library_marker = (
         (root / "src").is_dir()
         or (root / "pyproject.toml").is_file()
@@ -147,8 +140,20 @@ def detect_surface_classification(root_dir: str) -> Tuple[str, Optional[Tuple[st
         or (root / "setup.cfg").is_file()
         or (root / "requirements.txt").is_file()
     )
+
+    explicit_app_dirs = ["sdlc_flow_visualizer", "public", "web", "frontend", "site"]
+    for candidate in explicit_app_dirs:
+        candidate_path = root / candidate
+        if candidate_path.is_dir() and not candidate_path.is_symlink():
+            return "runnable_missing_entrypoint", ("app_dir", str(candidate_path))
+
     if has_library_marker:
         return "library", None
+
+    for candidate in ("dist", "build"):
+        candidate_path = root / candidate
+        if candidate_path.is_dir() and not candidate_path.is_symlink():
+            return "runnable_missing_entrypoint", ("app_dir", str(candidate_path))
 
     return "unknown", None
 
