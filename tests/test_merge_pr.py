@@ -1518,6 +1518,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
             "clear_issue_claims": (True, "issue claim clear"),
             "clear_review_claims": (True, "review claim clear"),
             "clear_merger_claims": (True, "merger claim clear"),
+            "sweep_leftovers": (True, "janitor ok"),
         }
         outcomes[failing] = (False, f"{failing} failed")
         patches = {
@@ -1540,6 +1541,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
         mocks["reconcile_issue_done"].assert_called_once_with(7)
         mocks["clear_review_claims"].assert_called_once_with(9)
         mocks["clear_merger_claims"].assert_not_called()
+        mocks["sweep_leftovers"].assert_called_once_with("/repo")
 
     def test_worktree_failure_does_not_skip_branch_or_board_cleanup(self):
         ok, mocks = self._run("prune_worktree")
@@ -1555,6 +1557,12 @@ class CloseOutRecoveryTests(unittest.TestCase):
         mocks["clear_review_claims"].assert_called_once_with(9)
         mocks["clear_merger_claims"].assert_not_called()
 
+    def test_closeout_invokes_janitor_even_when_a_prior_step_fails(self):
+        ok, mocks = self._run("prune_worktree")
+        self.assertFalse(ok)
+        mocks["sweep_leftovers"].assert_called_once_with("/repo")
+
+    @patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor ok"))
     @patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear"))
     @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
     @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
@@ -1565,7 +1573,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree"))
     @patch.object(merge_pr.os, "chdir")
     def test_changes_to_surviving_root_before_pruning_caller_worktree(
-        self, chdir, prune, _local, _remote, _close, _done, _issue, _review, _merger
+        self, chdir, prune, _local, _remote, _close, _done, _issue, _review, _merger, _janitor
     ):
         def after_chdir(*_args):
             chdir.assert_called_once_with("/repo")
