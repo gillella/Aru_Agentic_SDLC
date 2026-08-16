@@ -273,6 +273,61 @@ def needs_my_attention(pr: dict[str, Any], agent: str) -> bool:
     return threads is not None and threads > 0
 
 
+# Definition-of-Done gates a PR's own author can clear alone. Rebasing rewrites
+# branch history and a size waiver is an authorship judgement; neither is a peer
+# action, so work arising from these is offered only to author:<id>.
+AUTHOR_FIXABLE_GATES = frozenset({"rebased", "size"})
+
+
+def _unmet_gates(reason: str) -> set[str]:
+    """Gate names from a ``dod_status`` reason, or empty when it is not one.
+
+    ``dod_status`` reports gate failures as ``unmet: <name>, <name>`` but also
+    returns prose for fetch failures, a missing ``Closes #<issue>``, and review
+    evidence that does not match the head. Those are not gate lists, and
+    treating them as one would invent work from an unknown state.
+    """
+    text = (reason or "").strip()
+    prefix = "unmet:"
+    if not text.lower().startswith(prefix):
+        return set()
+    return {part.strip() for part in text[len(prefix):].split(",") if part.strip()}
+
+
+def author_gate_fix(pr: dict[str, Any], agent: str,
+                    dod_reason: str | None) -> dict[str, Any] | None:
+    """Work item when only author-clearable gates block `agent`'s own PR.
+
+    Without this such a PR reaches no branch of ``select``: ``merge`` refuses it
+    because a gate is unmet, and ``feedback`` refuses it because no review
+    thread is open. It then sits open indefinitely while still holding its
+    issue's ``touches:`` reservation, which blocks every issue declaring an
+    overlapping path.
+
+    ``dod_reason`` is the verdict ``merge_eligibility`` already produced for
+    this PR, so no gate is evaluated twice. It is ``None`` - and this returns
+    ``None`` - when merge eligibility failed a cheap filter before reaching the
+    gates, which is the correct outcome: a PR that has not yet earned an
+    independent review needs that review, not an author gate fix.
+    """
+    if pr.get("isDraft") or is_merged(pr):
+        return None
+    if _label_value(label_names(pr), "author:") != agent:
+        return None
+    threads = review_thread_count(pr)
+    # None means the thread query failed - fail closed. A positive count is
+    # ordinary review feedback, which keeps its higher priority in select().
+    if threads is None or threads > 0:
+        return None
+    gates = _unmet_gates(dod_reason or "")
+    # Every unmet gate must be author-clearable. A PR also missing `review`
+    # needs a peer, so handing it back to its author would only spin.
+    if not gates or not gates <= AUTHOR_FIXABLE_GATES:
+        return None
+    return {"pr": pr["number"], "title": pr.get("title") or "",
+            "unmet_gates": sorted(gates), "reason": dod_reason}
+
+
 def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
                        round_cap: int, cross_family_wait: int) -> dict[str, Any]:
     """Decides whether `agent` may review this PR, and why not if not.
@@ -480,11 +535,15 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
 
     # 2. Merge independently reviewed, gate-green work.
     mergeable, merge_skipped = [], []
+    # Keeps each PR's merge verdict so the gate-fix pass below can read the
+    # already-evaluated gates instead of paying for a second evaluation.
+    dod_reasons: dict[int, str] = {}
     for pr in sorted(prs, key=lambda p: p["number"]):
         verdict = merge_eligibility(pr, agent)
         if verdict["eligible"]:
             mergeable.append(pr)
         else:
+            dod_reasons[pr["number"]] = verdict["reason"]
             # Only surface skips that looked like merge candidates, otherwise
             # every unreviewed PR pollutes the report with "no independent review".
             labels = label_names(pr)
@@ -497,6 +556,16 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
             )
             if has_peer or merge_claimant(labels) == agent:
                 merge_skipped.append({"number": pr["number"], "why": verdict["reason"]})
+
+    # 2b. My own PR blocked only by a gate I can clear alone. It matches neither
+    # merge nor feedback, so without this it reaches nobody and its issue's
+    # touches: reservation blocks the board indefinitely.
+    gate_fix = None
+    for candidate in sorted(prs, key=lambda p: p["number"]):
+        gate_fix = author_gate_fix(candidate, agent,
+                                   dod_reasons.get(candidate["number"]))
+        if gate_fix:
+            break
 
     # 3. Review someone else's work.
     reviewable, skipped = [], []
@@ -521,6 +590,13 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         pr = mergeable[0]
         work = {"type": "merge", "pr": pr["number"], "title": pr["title"],
                 "skill": "merge-pr", "head_sha": pr.get("headRefOid")}
+    elif gate_fix:
+        # Reuses the routed `feedback` type rather than inventing one the loop
+        # contract does not document; unmet_gates tells the agent to rebase or
+        # to split/justify instead of hunting for threads that do not exist.
+        work = {"type": "feedback", "pr": gate_fix["pr"], "title": gate_fix["title"],
+                "skill": "address-pr-feedback",
+                "unmet_gates": gate_fix["unmet_gates"], "reason": gate_fix["reason"]}
     elif reviewable:
         pr, verdict = reviewable[0]
         work = {"type": "review", "pr": pr["number"], "title": pr["title"],

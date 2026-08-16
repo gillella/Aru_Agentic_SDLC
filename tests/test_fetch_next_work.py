@@ -521,3 +521,114 @@ class ResearchRoutingTests(unittest.TestCase):
             res = fnw.select("agent-2", "openai", 3, 30)
         self.assertEqual(res["work"]["skill"], "research")
         self.assertEqual(res["work"]["issue"], 101)
+
+
+def stranded(number=7, author="agent-2", threads=0, peer="agent-9", **kw):
+    """A PR of `author`'s whose only problem is a Definition-of-Done gate.
+
+    Carries a peer `reviewed-by:` attribution because that is the real shape of
+    the bug: PRs #215 and #227 were both independently reviewed and then stuck
+    on a single mechanical gate.
+    """
+    labels = [f"author:{author}", "family:openai"]
+    if peer:
+        labels.append(f"reviewed-by:{peer}")
+    candidate = pr(number, *labels, **kw)
+    candidate["_active_review_feedback"] = (
+        None if threads is None else [{"body": "x"}] * threads
+    )
+    return candidate
+
+
+class UnmetGateParsingTests(unittest.TestCase):
+    def test_parses_a_single_gate(self):
+        self.assertEqual(fnw._unmet_gates("unmet: rebased"), {"rebased"})
+
+    def test_parses_several_gates(self):
+        self.assertEqual(fnw._unmet_gates("unmet: ci, review, size"),
+                         {"ci", "review", "size"})
+
+    def test_a_non_gate_reason_yields_nothing(self):
+        # dod_status also returns prose for fetch failures and missing Closes
+        # lines. Those are not gate lists and must never be mistaken for one.
+        self.assertEqual(fnw._unmet_gates("could not fetch pull request"), set())
+        self.assertEqual(fnw._unmet_gates(""), set())
+
+
+class AuthorGateFixTests(unittest.TestCase):
+    def fix(self, candidate, agent="agent-2", reason="unmet: rebased"):
+        # `reason` is the verdict merge_eligibility already computed, so the
+        # gates are never evaluated twice.
+        return fnw.author_gate_fix(candidate, agent, reason)
+
+    def test_rebased_only_is_offered_to_the_author(self):
+        found = self.fix(stranded(), reason="unmet: rebased")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["unmet_gates"], ["rebased"])
+
+    def test_size_only_is_offered_to_the_author(self):
+        found = self.fix(stranded(), reason="unmet: size")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["unmet_gates"], ["size"])
+
+    def test_non_author_is_never_offered_it(self):
+        self.assertIsNone(self.fix(stranded(author="agent-1"), agent="agent-2"))
+
+    def test_a_peer_gate_alongside_it_is_not_author_fixable(self):
+        # Only the author may rebase, but only a peer may review. A PR needing
+        # both is not the author's to clear alone.
+        self.assertIsNone(self.fix(stranded(), reason="unmet: rebased, review"))
+
+    def test_unresolved_threads_stay_ordinary_feedback(self):
+        self.assertIsNone(self.fix(stranded(threads=2)))
+
+    def test_unreadable_thread_state_fails_closed(self):
+        self.assertIsNone(self.fix(stranded(threads=None)))
+
+    def test_no_recorded_verdict_is_not_work(self):
+        # A mergeable PR records no skip reason, and one that failed a cheap
+        # filter before the gates ran needs that filter cleared first.
+        self.assertIsNone(fnw.author_gate_fix(stranded(), "agent-2", None))
+
+    def test_a_non_gate_verdict_is_not_work(self):
+        self.assertIsNone(
+            self.fix(stranded(), reason="no independent review attribution yet"))
+
+    def test_draft_is_skipped(self):
+        self.assertIsNone(self.fix(stranded(draft=True)))
+
+
+class GateFixSelectionTests(unittest.TestCase):
+    def select_with(self, candidate, reason="unmet: rebased", agent="agent-2"):
+        parts = {"candidates": [], "my_in_flight": None, "blocked": [],
+                 "conflicted": [], "missing_touches": [], "not_ready": []}
+        with patch.object(fnw, "list_work_prs", return_value=[candidate]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts), \
+             patch.object(fnw, "dod_status", return_value=(False, reason)):
+            return fnw.select(agent, "openai", 3, 30)
+
+    def test_author_is_no_longer_told_idle(self):
+        # The whole bug: this returned "idle" while the author's own PR sat one
+        # mechanical step from mergeable, holding its touches: reservation.
+        res = self.select_with(stranded())
+        self.assertNotEqual(res["work"]["type"], "idle")
+        self.assertEqual(res["work"]["pr"], 7)
+
+    def test_work_names_the_gate_so_the_agent_knows_what_to_do(self):
+        res = self.select_with(stranded(), reason="unmet: size")
+        self.assertEqual(res["work"]["unmet_gates"], ["size"])
+
+    def test_routed_to_a_skill_the_loop_contract_already_knows(self):
+        res = self.select_with(stranded())
+        self.assertEqual(res["work"]["type"], "feedback")
+        self.assertEqual(res["work"]["skill"], "address-pr-feedback")
+
+    def test_a_peer_is_never_handed_it_as_feedback(self):
+        res = self.select_with(stranded(author="agent-9"), agent="agent-2")
+        self.assertNotEqual(res["work"]["type"], "feedback")
+
+    def test_unresolved_threads_still_outrank_a_gate_fix(self):
+        res = self.select_with(stranded(threads=3))
+        self.assertEqual(res["work"]["type"], "feedback")
+        self.assertNotIn("unmet_gates", res["work"])
