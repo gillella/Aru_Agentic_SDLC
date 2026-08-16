@@ -135,9 +135,12 @@ review-round count alone never require human participation.
 (`review rounds` gate). Crossing the threshold (3) never fails Definition of
 Done and never adds a human approval step. Authors run
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --emit-review-split` to
-post automated split guidance and file follow-up Backlog issues that carry
-`depends-on:` edges to the original. Triage oversized-scope SPLIT warnings are
-the upstream half of the same policy. See
+post automated split guidance and file follow-up Backlog issues on the
+governed Project Board. Each follow-up carries a `depends-on:` edge to the
+original linked issue (first `Closes #N` in the PR body) — Aru's picker and
+triage resolve depends-on as issue prerequisites, not PR numbers. Emission
+is retry-safe via per-issue provenance markers. Triage oversized-scope SPLIT
+warnings are the upstream half of the same policy. See
 `skills/address-pr-feedback/SKILL.md`.
 
 ### Server-side protection of `main`
