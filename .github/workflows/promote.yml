@@ -16,6 +16,10 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: read
     outputs:
       target_environment: ${{ steps.contract.outputs.target_environment }}
     steps:

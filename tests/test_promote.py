@@ -531,6 +531,11 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("deployments: write", workflow_permissions)
         record_job = content.split("record-environment-state:", 1)[1]
         self.assertIn("deployments: write", record_job)
+        validate_job = content.split("  validate:", 1)[1].split(
+            "  record-environment-state:", 1
+        )[0]
+        self.assertIn("issues: read", validate_job)
+        self.assertNotIn("deployments: write", validate_job)
         self.assertNotIn("issues: write", content)
         self.assertIn("repository_dispatch", content)
         trigger_section = content.split("permissions:", 1)[0]
