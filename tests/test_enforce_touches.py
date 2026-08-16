@@ -11,7 +11,9 @@ from unittest.mock import mock_open, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "hooks"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
+import common
 import enforce_touches as et
 
 
@@ -416,10 +418,28 @@ class RedirectFalsePositiveTests(unittest.TestCase):
             et._redirect_targets(f'git commit -m "msg" -m "{self.TRAILER}"'), []
         )
 
+    def test_agent_trailer_via_m_flag_is_not_a_redirect(self):
+        self.assertEqual(
+            et._redirect_targets('git commit -m "msg" -m "Agent: agent-1"'), []
+        )
+
+    def test_co_authored_by_and_agent_trailers_combined_are_not_a_redirect(self):
+        self.assertEqual(
+            et._redirect_targets(f'git commit -m "msg" -m "{self.TRAILER}" -m "Agent: agent-1"'), []
+        )
+
     def test_co_authored_by_trailer_in_a_heredoc_is_not_a_redirect(self):
         # '\\s*' used to span the newline, so the trailing '>' swallowed the
         # heredoc terminator and the hook reported a write to 'EOF'.
         command = "git commit -F - <<'EOF'\nsubject\n\n" + self.TRAILER + "\nEOF"
+        self.assertEqual(et._redirect_targets(command), [])
+
+    def test_agent_trailer_in_a_heredoc_is_not_a_redirect(self):
+        command = "git commit -F - <<'EOF'\nsubject\n\nAgent: agent-1\nEOF"
+        self.assertEqual(et._redirect_targets(command), [])
+
+    def test_agent_and_co_authored_by_trailers_in_a_heredoc_are_not_a_redirect(self):
+        command = f"git commit -F - <<'EOF'\nsubject\n\n{self.TRAILER}\nAgent: agent-1\nEOF"
         self.assertEqual(et._redirect_targets(command), [])
 
     def test_quoted_argument_beginning_with_the_operator_is_not_a_redirect(self):
@@ -1976,6 +1996,192 @@ class GitCommandCheckoutTests(unittest.TestCase):
         # this function's business.
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(self.violation("cd $SOMEWHERE && ls", self.wt))
+
+
+class AgentCommitTrailerTests(unittest.TestCase):
+    def test_get_agent_id_resolves_environment_variables(self):
+        with patch.dict(os.environ, {"ARU_AGENT_ID": "agent-alpha"}, clear=True):
+            self.assertEqual(common.get_agent_id(), "agent-alpha")
+
+        with patch.dict(os.environ, {"AGENT_ID": "agent-beta"}, clear=True):
+            self.assertEqual(common.get_agent_id(), "agent-beta")
+
+        with patch.dict(os.environ, {"ARU_AGENT": "agent-gamma"}, clear=True):
+            self.assertEqual(common.get_agent_id(), "agent-gamma")
+
+        with patch.dict(os.environ, {"AGENT": "agent-delta"}, clear=True):
+            self.assertEqual(common.get_agent_id(), "agent-delta")
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(common.get_agent_id())
+
+    def test_format_commit_message_appends_agent_trailer(self):
+        msg = common.format_commit_message("feat(core): add feature", agent="agent-1")
+        self.assertEqual(msg, "feat(core): add feature\n\nAgent: agent-1")
+
+    def test_format_commit_message_resolves_from_environment(self):
+        with patch.dict(os.environ, {"ARU_AGENT_ID": "agent-2"}):
+            msg = common.format_commit_message("fix(bug): resolve issue")
+            self.assertEqual(msg, "fix(bug): resolve issue\n\nAgent: agent-2")
+
+    def test_format_commit_message_preserves_existing_trailer_block(self):
+        base = (
+            "feat(auth): support token login\n\n"
+            "Detailed explanation of token login.\n\n"
+            "Co-Authored-By: Peer <peer@example.com>"
+        )
+        msg = common.format_commit_message(base, agent="agent-3")
+        expected = (
+            "feat(auth): support token login\n\n"
+            "Detailed explanation of token login.\n\n"
+            "Co-Authored-By: Peer <peer@example.com>\n"
+            "Agent: agent-3"
+        )
+        self.assertEqual(msg, expected)
+
+    def test_format_commit_message_is_idempotent_when_agent_trailer_present(self):
+        msg_with_trailer = "feat(core): add feature\n\nAgent: agent-1"
+        self.assertEqual(
+            common.format_commit_message(msg_with_trailer, agent="agent-1"),
+            msg_with_trailer,
+        )
+        self.assertEqual(
+            common.format_commit_message(msg_with_trailer, agent="agent-different"),
+            msg_with_trailer,
+        )
+
+    def test_format_commit_message_prose_containing_agent_does_not_suppress_trailer(self):
+        body_with_agent_prose = (
+            "feat(auth): support token login\n\n"
+            "The Agent: service account is configured to handle user tokens.\n"
+            "This was requested by security."
+        )
+        result = common.format_commit_message(body_with_agent_prose, agent="agent-4")
+        expected = (
+            "feat(auth): support token login\n\n"
+            "The Agent: service account is configured to handle user tokens.\n"
+            "This was requested by security.\n\n"
+            "Agent: agent-4"
+        )
+        self.assertEqual(result, expected)
+
+    def test_prepare_commit_msg_hook_stamps_file(self):
+        import importlib.util
+        hook_path = ROOT / "hooks" / "prepare_commit_msg.py"
+        spec = importlib.util.spec_from_file_location("prepare_commit_msg", hook_path)
+        prepare_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prepare_mod)
+
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f:
+            f.write("fix(cli): handle edge case\n")
+            f.flush()
+            temp_path = f.name
+
+        try:
+            stamped = prepare_mod.stamp_commit_message_file(temp_path, agent="agent-test")
+            self.assertTrue(stamped)
+            content = Path(temp_path).read_text()
+            self.assertEqual(content.strip(), "fix(cli): handle edge case\n\nAgent: agent-test")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_end_to_end_git_commit_with_installed_hook_stamps_agent_trailer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir)
+            # Initialize a clean git repo
+            subprocess.run(["git", "init", "-b", "main", str(repo_path)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "Test Agent"], check=True)
+            subprocess.run(["git", "-C", str(repo_path), "config", "user.email", "agent@test.local"], check=True)
+
+            # Install hooks
+            env = dict(os.environ, ARU_SDLC_HOME=str(ROOT))
+            install_script = ROOT / "scripts" / "install_hooks.sh"
+            subprocess.run(["bash", str(install_script), "-r", str(repo_path)], check=True, env=env, capture_output=True)
+
+            # Make a commit with ARU_AGENT_ID set
+            (repo_path / "file.txt").write_text("content")
+            subprocess.run(["git", "-C", str(repo_path), "add", "file.txt"], check=True)
+            commit_env = dict(os.environ, ARU_AGENT_ID="agent-integration-test", ARU_SDLC_HOME=str(ROOT))
+            subprocess.run(["git", "-C", str(repo_path), "commit", "-m", "feat(test): initial commit"], check=True, env=commit_env, capture_output=True)
+
+            # Verify the commit message in git log contains the trailer
+            log_out = subprocess.check_output(["git", "-C", str(repo_path), "log", "-1", "--pretty=%B"]).decode()
+            self.assertIn("Agent: agent-integration-test", log_out)
+
+
+class HookInstallerPathTests(unittest.TestCase):
+    """Regressions for installing into the directory git actually reads."""
+
+    INSTALL = None  # set in setUp so ROOT resolution stays with the class
+
+    def setUp(self):
+        self.install = ROOT / "scripts" / "install_hooks.sh"
+        self.env = dict(os.environ, ARU_SDLC_HOME=str(ROOT))
+
+    def test_relative_repo_argument_installs_where_git_reads_hooks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            subprocess.run(["git", "init", "-b", "main", str(parent / "repo")],
+                           check=True, capture_output=True)
+
+            # -r is relative, and the installer cd's into it before asking git
+            # for --git-path. Composing the old TARGET produced
+            # <repo>/repo/.git/hooks, which git never reads.
+            subprocess.run(["bash", str(self.install), "-r", "repo"],
+                           cwd=str(parent), check=True, env=self.env,
+                           capture_output=True)
+
+            self.assertTrue((parent / "repo" / ".git" / "hooks" / "prepare-commit-msg").exists())
+            self.assertFalse((parent / "repo" / "repo").exists())
+
+
+class ChainedPriorHookTests(unittest.TestCase):
+    """Every displaced prior hook must still run, not just the first."""
+
+    def _user_hook(self, path, marker):
+        path.write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo ran >> {marker}\n"
+            "exit 0\n"
+        )
+        path.chmod(0o755)
+
+    def test_every_displaced_prior_hook_is_chained(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo"
+            subprocess.run(["git", "init", "-b", "main", str(repo_path)],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "T"], check=True)
+            subprocess.run(["git", "-C", str(repo_path), "config", "user.email", "t@t.local"], check=True)
+
+            hooks = repo_path / ".git" / "hooks"
+            hooks.mkdir(parents=True, exist_ok=True)
+            install = ROOT / "scripts" / "install_hooks.sh"
+            env = dict(os.environ, ARU_SDLC_HOME=str(ROOT))
+            first_marker = repo_path / "first.log"
+            second_marker = repo_path / "second.log"
+
+            # A pre-existing user hook, displaced to .pre-aru on install.
+            self._user_hook(hooks / "prepare-commit-msg", first_marker)
+            subprocess.run(["bash", str(install), "-r", str(repo_path)],
+                           check=True, env=env, capture_output=True)
+
+            # A second user hook lands later and is displaced to .pre-aru.1.
+            self._user_hook(hooks / "prepare-commit-msg", second_marker)
+            subprocess.run(["bash", str(install), "-r", str(repo_path)],
+                           check=True, env=env, capture_output=True)
+
+            self.assertTrue((hooks / "prepare-commit-msg.pre-aru.1").exists(),
+                            "installer should have preserved the second hook")
+
+            (repo_path / "f.txt").write_text("x")
+            subprocess.run(["git", "-C", str(repo_path), "add", "f.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo_path), "commit", "-m", "chore: c"],
+                           check=True, env=env, capture_output=True)
+
+            self.assertTrue(first_marker.exists(), "base .pre-aru hook did not run")
+            self.assertTrue(second_marker.exists(), "numbered .pre-aru.1 hook did not run")
 
 
 if __name__ == "__main__":

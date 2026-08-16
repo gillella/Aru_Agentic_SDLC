@@ -206,6 +206,90 @@ def get_current_commit() -> str:
     return stdout.strip() if code == 0 else ""
 
 
+def get_agent_id() -> Optional[str]:
+    """Returns the active agent ID from environment variables, or None if unset."""
+    for var in ("ARU_AGENT_ID", "AGENT_ID", "ARU_AGENT", "AGENT"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            return val
+    return None
+
+
+def _parse_terminal_trailers(message: str) -> Tuple[str, List[str]]:
+    """Splits a commit message into the main content (subject/body) and terminal trailer lines.
+
+    According to Git trailer conventions:
+    - Trailers appear in a contiguous block at the end of the message.
+    - Each trailer line matches `<Token>: <value>`.
+    - The first line (subject) is never a trailer.
+    - If the terminal paragraph contains any non-trailer lines, the entire paragraph is body prose.
+    """
+    raw_lines = message.rstrip().splitlines()
+    if not raw_lines:
+        return "", []
+
+    # Find the last paragraph (separated by blank lines)
+    idx = len(raw_lines) - 1
+    while idx >= 0 and not raw_lines[idx].strip():
+        idx -= 1
+
+    if idx <= 0:
+        # Only 1 line (subject) or empty
+        return "\n".join(raw_lines).rstrip(), []
+
+    paragraph_end = idx
+    while idx >= 0 and raw_lines[idx].strip():
+        idx -= 1
+    paragraph_start = idx + 1
+
+    # If paragraph_start == 0, the entire message is one paragraph (subject + body or subject only).
+    # The first line is the subject, so it cannot be a trailer block unless separated by a blank line.
+    if paragraph_start == 0:
+        return "\n".join(raw_lines).rstrip(), []
+
+    candidate_lines = raw_lines[paragraph_start:paragraph_end + 1]
+    trailer_regex = re.compile(r"^[A-Za-z0-9_-]+:\s*.+$")
+
+    # Every line in the terminal paragraph must match trailer_regex
+    if not all(trailer_regex.match(line.strip()) for line in candidate_lines):
+        return "\n".join(raw_lines).rstrip(), []
+
+    body = "\n".join(raw_lines[:paragraph_start]).rstrip()
+    trailers = [line.strip() for line in candidate_lines]
+    return body, trailers
+
+
+def format_commit_message(message: str, agent: Optional[str] = None) -> str:
+    """Formats a git commit message with standard trailers.
+
+    If an agent ID is provided or resolved from the environment, attaches an
+    'Agent: <id>' trailer if not already present in the terminal trailer block.
+    """
+    msg = message.strip()
+    if not msg:
+        return msg
+
+    agent_id = agent.strip() if agent else (get_agent_id() or "")
+    if not agent_id:
+        return msg
+
+    trailer = f"Agent: {agent_id}"
+    body, trailers = _parse_terminal_trailers(msg)
+
+    # Check if Agent trailer is already present in the terminal trailer block
+    if any(re.match(r"^agent\s*:", t, re.IGNORECASE) for t in trailers):
+        return msg
+
+    if trailers:
+        trailers.append(trailer)
+        return body + "\n\n" + "\n".join(trailers)
+
+    if body:
+        return body + "\n\n" + trailer
+
+    return msg + "\n\n" + trailer
+
+
 def run_gh_json(cmd: List[str]) -> Optional[Any]:
     """Runs a gh CLI command and parses JSON output."""
     code, stdout, stderr = run_cmd(cmd, check=False)
