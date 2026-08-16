@@ -7,6 +7,7 @@
 **Research origin:** #78 (closed; consolidated by #113)
 **Companion artifacts:**
 - Working build plan: [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md)
+- Interactive briefing: [`agentic-software-factory-briefing.html`](agentic-software-factory-briefing.html)
 - Board choice deep-dive: [`PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](PROJECT-BOARD-FOR-AGENTIC-FACTORY.md)
 - Process baseline: [`PROCESS-AUDIT-2026-08.md`](PROCESS-AUDIT-2026-08.md)
 
@@ -16,15 +17,11 @@
 > for roadmap phases, sequencing, implementation status, and non-goals. If an
 > example or historical recommendation here appears to conflict with that
 > plan, the plan wins.
-> **Scope note.** An interactive briefing over this material is **not** part of
-> this change and is tracked in #122. It is referenced by issue rather than by
-> filename, because a document that advertises an artifact which does not exist
-> is a defect in its own right.
->
-> The original plan named a Cursor-specific canvas. #122 reframes it
-> tool-neutrally: this repository commits to being vendor-neutral and
-> tool-agnostic (`AGENTS.md`, `README.md`), so nothing in `docs/` should require
-> a particular editor to read.
+> **Interactive briefing.**
+> [`agentic-software-factory-briefing.html`](agentic-software-factory-briefing.html)
+> provides a self-contained, tool-neutral tour of this evidence. It requires no
+> editor, build, server, or network connection. The briefing summarizes this
+> guide; it does not create a second roadmap, and the plan remains authoritative.
 
 ---
 

@@ -8,7 +8,7 @@ severe merge or close-out failure.
 
 **Companion:** [`PROCESS-AUDIT-2026-08.md`](PROCESS-AUDIT-2026-08.md) — the baseline gap analysis.
 
-**Strategy briefing:** [`AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md) — industry research (OpenAI harness, BCG factory, Spec Kit, Mastra, CodeRabbit) mapped onto this build plan. Board choice: [`PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](PROJECT-BOARD-FOR-AGENTIC-FACTORY.md).
+**Strategy briefing:** [`agentic-software-factory-briefing.html`](agentic-software-factory-briefing.html) is a self-contained, tool-neutral tour of the factory thesis, operating path, maturity, and trust model. [`AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md) provides the supporting industry evidence (OpenAI harness, BCG factory, Spec Kit, Mastra, CodeRabbit). Both explain this plan; this document alone governs roadmap sequence and current status. Board choice: [`PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](PROJECT-BOARD-FOR-AGENTIC-FACTORY.md).
 
 **Interactive flow:** [`../sdlc_flow_visualizer/index.html`](../sdlc_flow_visualizer/index.html) is a no-build explorer of the current lifecycle and remediation loops. Cards for roadmap capabilities are explicitly marked as planned.
 
