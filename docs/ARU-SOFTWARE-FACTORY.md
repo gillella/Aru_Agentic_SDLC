@@ -284,8 +284,8 @@ The binding constraint, per §3.3.
 ## 6. Sequencing
 
 ```
-Done       S0.1-S0.3, S0.5-S0.6, S1.1-S1.4  gate + history spine (verified 2026-08-15)
-Now        S0.4, S0.7-S0.8, S1.5-S1.6       remaining spine polish
+Done       S0.1-S0.3, S0.5-S0.6, S1.1-S1.4, S1.6  gate + history spine (verified 2026-08-15)
+Now        S0.4, S0.7-S0.8, S1.5             remaining spine polish
 Weeks 1-2  S2.*       review constraint
 Weeks 2-3  S3.*       intake
 Weeks 3-6  S4.*       deploy + telemetry
@@ -328,7 +328,7 @@ Added:
 
 ## 9. Appendix — shipped roadmap rows (verified 2026-08-15)
 
-Moved here per §8 instead of deleting. Commit SHAs are merge commits on `main` unless noted.
+Moved here per §8 instead of deleting. Commit SHAs are commits on `main` that landed the work. Only entries with two parents are Git merge commits (for example `6af5efc`, `7ebf667`); single-parent SHAs such as `c68abf2`, `82abd26`, `54086f3`, and `c8defb9` are ordinary commits from the historical squash era, not merge commits.
 
 | ID | Shipped as | Evidence |
 |---|---|---|
