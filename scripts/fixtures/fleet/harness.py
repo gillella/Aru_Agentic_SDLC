@@ -212,6 +212,12 @@ class HermeticFleet:
     def dod_status(self, pr_number: int) -> tuple[bool, str]:
         pr = self.pull_requests[pr_number]
         evidence = {
+            "head_oid": f"head-{pr.head}",
+            "review_attestations": ([{
+                "agent": pr.reviewed_by,
+                "head": f"head-{pr.review_head}",
+                "github_login": "fixture-account",
+            }] if pr.reviewed_by else []),
             "unresolved": 0,
             "unfixed": 0,
             "reviewed_head": bool(pr.reviewed_by and pr.review_head == pr.head),
@@ -243,6 +249,8 @@ class HermeticFleet:
         if len(command) < 4 or command[0] != "gh":
             raise AssertionError(f"unexpected claim transport command: {command}")
         kind, action, number = command[1], command[2], int(command[3])
+        if kind == "pr" and action == "comment":
+            return 0, "", ""
         if action != "edit":
             raise AssertionError(f"unexpected claim transport action: {command}")
         if kind == "issue":
@@ -283,6 +291,10 @@ class HermeticFleet:
             stack.enter_context(patch.object(
                 claim_helpers, "_pr_labels",
                 side_effect=lambda number: self._pr_labels(self.pull_requests[number]),
+            ))
+            stack.enter_context(patch.object(
+                claim_helpers, "_reviewed_head_for_completion",
+                side_effect=lambda number: f"{self.pull_requests[number].head:040x}",
             ))
             yield
 

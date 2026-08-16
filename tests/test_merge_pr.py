@@ -179,6 +179,16 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             },
         }}}}
 
+    @staticmethod
+    def attestation_page(head="head123", nodes=None, has_next=False, cursor=None):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": head,
+            "comments": {
+                "nodes": [] if nodes is None else nodes,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            },
+        }}}}
+
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
     def test_review_evidence_paginates_reviews_beyond_first_page(
@@ -221,6 +231,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 nodes=stale_reviews, has_next=True, cursor="review-page-2"
             ),
             self.review_page(nodes=[current_review]),
+            self.attestation_page(),
             self.thread_page(),
         ]
 
@@ -230,7 +241,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         self.assertEqual(evidence["head_oid"], "head123")
         self.assertEqual(len(evidence["reviews"]), 101)
         self.assertIn("cursor=review-page-2", gh_json.call_args_list[1].args[0])
-        self.assertEqual(gh_json.call_count, 3)
+        self.assertEqual(gh_json.call_count, 4)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -259,6 +270,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 nodes=first_page, has_next=True, cursor="review-page-2"
             ),
             self.review_page(nodes=[blocker]),
+            self.attestation_page(),
             self.thread_page(),
         ]
 
@@ -360,7 +372,8 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             "author": {"login": "peer"}, "commit": {"oid": "head123"},
         }
         gh_json.side_effect = [
-            self.review_page(nodes=[dismissed]), self.thread_page()
+            self.review_page(nodes=[dismissed]), self.attestation_page(),
+            self.thread_page()
         ]
 
         evidence = merge_pr.review_evidence(162)
@@ -391,7 +404,8 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             },
         ]
         gh_json.side_effect = [
-            self.review_page(nodes=reviews), self.thread_page()
+            self.review_page(nodes=reviews), self.attestation_page(),
+            self.thread_page()
         ]
 
         evidence = merge_pr.review_evidence(215)
@@ -413,7 +427,8 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             "commit": {"oid": "head123"},
         }
         gh_json.side_effect = [
-            self.review_page(nodes=[app_review]), self.thread_page()
+            self.review_page(nodes=[app_review]), self.attestation_page(),
+            self.thread_page()
         ]
 
         self.assertFalse(merge_pr.review_evidence(215)["reviewed_head"])
@@ -423,16 +438,22 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
     def test_substantive_same_account_review_attests_to_current_head(
         self, gh_json, _slug
     ):
+        head = "a" * 40
         peer_review = {
             "id": "peer-current",
             "state": "COMMENTED",
             "submittedAt": "2026-08-16T15:20:00Z",
             "body": "Verdict: approved. I verified the current diff and tests.",
             "author": {"login": "gillella", "__typename": "User"},
-            "commit": {"oid": "head123"},
+            "commit": {"oid": head},
         }
         gh_json.side_effect = [
-            self.review_page(nodes=[peer_review]), self.thread_page()
+            self.review_page(head=head, nodes=[peer_review]),
+            self.attestation_page(nodes=[{
+                "body": '<!-- aru-review-head:v1 {"agent":"cursor-1","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} -->',
+                "author": {"login": "gillella", "__typename": "User"},
+            }], head=head),
+            self.thread_page(head=head)
         ]
 
         evidence = merge_pr.review_evidence(215)
@@ -442,7 +463,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         ok, message = merge_pr.check_reviews(pr, evidence)
         self.assertTrue(ok)
         self.assertIn("Peer attribution: cursor-1", message)
-        self.assertIn("current head head123", message)
+        self.assertIn(f"current head {head[:12]}", message)
         self.assertIn("substantive human review from gillella", message)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
@@ -477,15 +498,17 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             "id": "author-current",
             "state": "COMMENTED",
             "submittedAt": "2026-08-16T15:18:51Z",
-            "body": "",
+            "body": "Verdict: approved. Author-authored substantive review.",
             "author": {"login": "gillella", "__typename": "User"},
             "commit": {"oid": "head123"},
         }
         gh_json.side_effect = [
-            self.review_page(nodes=[stale_peer, author_reply]), self.thread_page()
+            self.review_page(nodes=[stale_peer, author_reply]),
+            self.attestation_page(), self.thread_page()
         ]
 
         evidence = merge_pr.review_evidence(215)
+        self.assertTrue(evidence["reviewed_head"])
         ok, message = merge_pr.check_reviews(
             labelled("author:codex-1", "reviewed-by:cursor-1"), evidence
         )
@@ -1998,6 +2021,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                             }],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
+                        "comments": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
                         "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
                         "reviewThreads": {
                             "nodes": [
@@ -2031,6 +2058,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                                 "author": {"login": "agent-2", "__typename": "User"},
                                 "commit": {"oid": "head123"},
                             }],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                        "comments": {
+                            "nodes": [],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
                         "commits": {
