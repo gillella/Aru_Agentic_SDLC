@@ -8,7 +8,6 @@ on:
 permissions:
   actions: read
   contents: read
-  deployments: write
 
 concurrency:
   group: "promotion-${{ github.event.client_payload.to_environment }}-${{ github.repository }}"
@@ -43,6 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]
+          TARGET_SHA="${TARGET_SHA,,}"
           [[ "${CHECKPOINT}" =~ ^ckpt/[1-9][0-9]*-[0-9a-f]{7}$ ]]
           [[ "${CHECKPOINT##*-}" == "${TARGET_SHA:0:7}" ]]
           [[ "${INCLUDED_ISSUES}" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]
@@ -63,12 +63,13 @@ jobs:
 
           git fetch --no-tags origin "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
           git fetch --no-tags origin "refs/tags/${CHECKPOINT}:refs/tags/${CHECKPOINT}"
+          git cat-file -e "refs/tags/${CHECKPOINT}^{tag}"
           git cat-file -e "${TARGET_SHA}^{commit}"
           git merge-base --is-ancestor "${TARGET_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
           [[ "$(git rev-parse "refs/tags/${CHECKPOINT}^{commit}")" == "${TARGET_SHA}" ]]
 
           checkpoint_body="$(git for-each-ref "refs/tags/${CHECKPOINT}" --format='%(contents)')"
-          grep -Fqx "merged as:   ${TARGET_SHA}" <<<"${checkpoint_body}"
+          grep -Eq "^merged as:[[:space:]]+${TARGET_SHA}$" <<<"${checkpoint_body}"
           checkpoint_issue_line="$(grep -E '^issues:[[:space:]]+' <<<"${checkpoint_body}")"
           checkpoint_issues="$(grep -oE '#[1-9][0-9]*' <<<"${checkpoint_issue_line}" | tr -d '#' | sort -n -u | paste -sd, -)"
           requested_issues="$(tr ',' '\n' <<<"${INCLUDED_ISSUES}" | sort -n -u | paste -sd, -)"
@@ -173,3 +174,17 @@ jobs:
             echo "- Issues: ${INCLUDED_ISSUES}"
             echo "- Prior-stage evidence run: ${EVIDENCE_RUN}"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Mark incomplete audit-only deployment record failed
+        if: ${{ (failure() || cancelled()) && steps.deployment.outputs.deployment_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          TARGET_ENV: ${{ github.event.client_payload.to_environment }}
+        run: |
+          set -euo pipefail
+          status="$(jq -n \
+            --arg environment "${TARGET_ENV}" \
+            --arg log_url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:"failure", environment:$environment, log_url:$log_url, description:"Audit-only GitHub state; promotion run did not complete"}')"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses" --input - <<<"${status}"

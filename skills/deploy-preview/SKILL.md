@@ -32,11 +32,15 @@ changes are not a sanctioned promotion path:
 python3 "$ARU_SDLC_HOME/scripts/promote.py" \
   --commit <MERGED_COMMIT_SHA> \
   --checkpoint <ckpt/PR-SHA7> \
-  --issue <INCLUDED_ISSUE> \
+  --issue <INCLUDED_ISSUE> [--issue <ANOTHER_INCLUDED_ISSUE> ...] \
   --from-environment <preview|staging> \
   --to-environment <staging|production> \
-  --evidence-run <SUCCESSFUL_SOURCE_SMOKE_RUN>
+  --evidence-run <SUCCESSFUL_SOURCE_SMOKE_RUN> \
+  [--dry-run]
 ```
+
+Repeat `--issue` for every issue in the checkpoint annotation. Add `--dry-run`
+to validate the complete contract without dispatching the promotion workflow.
 
 > **Scope boundary:** issue #110 promotion means governed GitHub Environment
 > and Deployment state plus its evidence trail. It does not deploy, copy,

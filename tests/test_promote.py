@@ -514,6 +514,8 @@ class RepositoryContractTests(unittest.TestCase):
         content = (ROOT / "skills" / "deploy-preview" / "SKILL.md").read_text()
         self.assertIn('scripts/promote.py"', content)
         self.assertNotRegex(content, r"gh\s+(workflow|api)\s+(run|--method)")
+        self.assertIn("[--issue <ANOTHER_INCLUDED_ISSUE> ...]", content)
+        self.assertIn("[--dry-run]", content)
         self.assertIn("does not deploy, copy", content)
         self.assertIn("issue #234", content)
 
@@ -523,6 +525,12 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("Audit-only promotion", content)
         self.assertIn("Validate governed promotion evidence", content)
         self.assertIn("deployments: write", content)
+        workflow_permissions = content.split("permissions:", 1)[1].split(
+            "concurrency:", 1
+        )[0]
+        self.assertNotIn("deployments: write", workflow_permissions)
+        record_job = content.split("record-environment-state:", 1)[1]
+        self.assertIn("deployments: write", record_job)
         self.assertNotIn("issues: write", content)
         self.assertIn("repository_dispatch", content)
         trigger_section = content.split("permissions:", 1)[0]
@@ -536,12 +544,18 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("environment_url", content)
         self.assertIn("included_issues", content)
         self.assertIn('"${requested_issues}" == "${checkpoint_issues}"', content)
+        self.assertIn('TARGET_SHA="${TARGET_SHA,,}"', content)
+        self.assertIn('refs/tags/${CHECKPOINT}^{tag}', content)
+        self.assertIn('^merged as:[[:space:]]+${TARGET_SHA}$', content)
         self.assertIn(
             "Audit-only promotion ${FROM_ENV} for ${TARGET_SHA} from ${TO_ENV} [forward]",
             content,
         )
         self.assertIn("github-state-only", content)
         self.assertIn("no runnable build movement claimed", content)
+        self.assertIn("Mark incomplete audit-only deployment record failed", content)
+        self.assertIn("failure() || cancelled()", content)
+        self.assertIn("promotion run did not complete", content)
 
     def test_repository_contract_never_claims_hosted_promotion(self):
         workflow = (ROOT / ".github" / "workflows" / "promote.yml").read_text()
