@@ -94,10 +94,17 @@ class EligibilityTests(unittest.TestCase):
         self.assertIn("waiting on author", verdict["reason"])
 
     def test_completed_same_account_review_is_not_offered_again(self):
-        verdict = eligible(pr(
+        # "Completed" now means the attribution names the current head, so this
+        # scenario must supply that evidence to still describe a finished review.
+        candidate = pr(
             1, "author:agent-1", "family:anthropic", "reviewed-by:agent-2",
             reviews=1,
-        ))
+        )
+        evidence = {"head_oid": "FEEDFACE",
+                    "review_attestations": [{"agent": "agent-2",
+                                             "head": "feedface"}]}
+        with patch.object(fnw, "review_evidence", return_value=evidence):
+            verdict = eligible(candidate)
         self.assertFalse(verdict["eligible"])
         self.assertIn("waiting on gated merge", verdict["reason"])
 
@@ -266,9 +273,15 @@ class MergeWorkTests(unittest.TestCase):
             "my_in_flight": None,
             "blocked": [], "conflicted": [], "missing_touches": [], "not_ready": [],
         }
+        # Legacy-shaped evidence: no `review_attestations` key, so the
+        # head-binding check returns None and these PRs keep the pre-#235
+        # "review complete" verdict these cases were written against. Without
+        # the patch, review_eligibility would reach the live GitHub API.
+        legacy_evidence = {"head_oid": "abc123"}
         with patch.object(fnw, "list_work_prs", return_value=list(prs)), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts), \
+             patch.object(fnw, "review_evidence", return_value=legacy_evidence), \
              patch.object(fnw, "dod_status", return_value=(dod_ok, dod_reason)):
             return fnw.select(agent, family, 3, 30)
 
@@ -688,3 +701,97 @@ class GateFixRoutingContractTests(unittest.TestCase):
             for gate, marker in required.items():
                 self.assertIn(marker, text,
                               f"{rel} names '{gate}' but not its action ({marker})")
+
+
+HEAD_SHA = "ABC123DEF456"
+COMPLETE = "independent review complete; waiting on gated merge"
+
+
+def reviewed_pr(number=11, author="agent-1", peer="agent-9", threads=0, **kw):
+    """A PR carrying completed peer attribution, ready for the binding check."""
+    candidate = pr(number, f"author:{author}", "family:anthropic",
+                   f"reviewed-by:{peer}", **kw)
+    candidate["_active_review_feedback"] = (
+        None if threads is None else [{"body": "x"}] * threads
+    )
+    return candidate
+
+
+def bound_evidence(peer="agent-9", head=HEAD_SHA):
+    return {"head_oid": head,
+            "review_attestations": [{"agent": peer, "head": head.lower()}]}
+
+
+def stale_evidence(peer="agent-9"):
+    # Attribution exists, but names a commit that is no longer the head.
+    return {"head_oid": HEAD_SHA,
+            "review_attestations": [{"agent": peer, "head": "0ldc0mm1t"}]}
+
+
+class StaleAttributionRoutingTests(unittest.TestCase):
+    """merge_pr requires attribution bound to the head; the picker must route it.
+
+    Before this, a `reviewed-by:` label alone closed the review queue while the
+    merge gate refused the same PR for stale attribution - so the PR reached
+    neither a reviewer, nor the merger, nor its author (`review` is correctly
+    not an author-clearable gate). It sat holding its issue's touches:
+    reservation.
+    """
+
+    def verdict(self, candidate, evidence, agent="agent-2", family="openai"):
+        with patch.object(fnw, "review_evidence", return_value=evidence):
+            return fnw.review_eligibility(candidate, agent, family, 3, 30)
+
+    def test_attribution_bound_to_head_stays_complete(self):
+        v = self.verdict(reviewed_pr(), bound_evidence())
+        self.assertFalse(v["eligible"])
+        self.assertEqual(v["reason"], COMPLETE)
+
+    def test_stale_attribution_reopens_the_review(self):
+        v = self.verdict(reviewed_pr(), stale_evidence())
+        self.assertTrue(v["eligible"])
+        self.assertTrue(v["stale_attribution"])
+
+    def test_legacy_evidence_without_attestations_is_unchanged(self):
+        # Records predating attestation must not flood the review queue.
+        v = self.verdict(reviewed_pr(), {"head_oid": HEAD_SHA})
+        self.assertFalse(v["eligible"])
+        self.assertEqual(v["reason"], COMPLETE)
+
+    def test_unreadable_evidence_fails_closed(self):
+        v = self.verdict(reviewed_pr(), None)
+        self.assertFalse(v["eligible"])
+        self.assertIn("unavailable", v["reason"])
+
+    def test_author_never_reviews_own_pr_even_when_stale(self):
+        v = self.verdict(reviewed_pr(author="agent-2"), stale_evidence(),
+                         agent="agent-2")
+        self.assertFalse(v["eligible"])
+        self.assertIn("you wrote it", v["reason"])
+
+    def test_unresolved_threads_still_outrank_re_review(self):
+        v = self.verdict(reviewed_pr(threads=2), stale_evidence())
+        self.assertFalse(v["eligible"])
+        self.assertIn("waiting on author", v["reason"])
+
+    def test_a_fresh_review_is_not_marked_stale(self):
+        v = self.verdict(pr(12, "author:agent-1", "family:anthropic"),
+                         bound_evidence())
+        self.assertTrue(v["eligible"])
+        self.assertFalse(v["stale_attribution"])
+
+
+class StaleAttributionReportTests(unittest.TestCase):
+    def test_select_surfaces_stale_attribution_in_the_report(self):
+        candidate = reviewed_pr()
+        parts = {"candidates": [], "my_in_flight": None, "blocked": [],
+                 "conflicted": [], "missing_touches": [], "not_ready": []}
+        with patch.object(fnw, "list_work_prs", return_value=[candidate]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts), \
+             patch.object(fnw, "review_evidence", return_value=stale_evidence()), \
+             patch.object(fnw, "dod_status", return_value=(False, "unmet: review")):
+            res = fnw.select("agent-2", "openai", 3, 30)
+        self.assertEqual(res["work"]["type"], "review")
+        self.assertEqual(res["work"]["pr"], 11)
+        self.assertTrue(res["reviewable_detail"][0]["stale_attribution"])
