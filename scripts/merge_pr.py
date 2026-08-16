@@ -24,10 +24,12 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 
 import acceptance_runner
@@ -69,6 +71,11 @@ ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
 # Large diffs must be split unless the reviewed PR body records why a waiver is
 # necessary. Independent review remains a separate, mandatory gate.
 SIZE_LIMIT = 400
+
+# One initial close-out attempt plus these bounded retries.  Keeping the policy
+# in the merge authority prevents desktop clients from disagreeing about when
+# a transient cleanup failure becomes exceptional operator intervention.
+CLOSEOUT_RETRY_DELAYS = (5, 15, 45)
 
 PR_FIELDS = (
     "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,author,"
@@ -1464,12 +1471,14 @@ def dod_status(pr_id):
     return False, f"unmet: {', '.join(blocked)}"
 
 
-def run_closeout(pr, issue_nums, repo_root):
+def run_closeout(pr, issue_nums, repo_root, failures=None):
     """Runs every idempotent close-out step, even after an earlier failure."""
     try:
         os.chdir(repo_root)
     except OSError as exc:
         print(f"\n=== Post-merge close-out ===\n  ❌ working directory  {exc}")
+        if failures is not None:
+            failures.append(f"working directory: {exc}")
         return False
     branch = pr.get("headRefName") or ""
     expected_sha = pr.get("headRefOid") or ""
@@ -1497,6 +1506,8 @@ def run_closeout(pr, issue_nums, repo_root):
         except Exception as exc:  # Keep later recovery steps running.
             ok, message = False, f"Unexpected close-out error: {exc}"
         print(f"  {'✅' if ok else '❌'} {name:<18} {message}")
+        if not ok and failures is not None:
+            failures.append(f"{name}: {message}")
         all_ok = all_ok and ok
 
     # Keep merger:<id> until every prior step succeeds so the picker can still
@@ -1508,9 +1519,137 @@ def run_closeout(pr, issue_nums, repo_root):
         except Exception as exc:
             ok, message = False, f"Unexpected close-out error: {exc}"
         print(f"  {'✅' if ok else '❌'} {'merger claim':<18} {message}")
+        if not ok and failures is not None:
+            failures.append(f"merger claim: {message}")
         all_ok = all_ok and ok
     else:
         print("  ⏳ merger claim      retained so recovery remains discoverable")
+    return all_ok
+
+
+def run_closeout_with_retries(pr, issue_nums, repo_root, sleep_fn=None):
+    """Retry idempotent close-out before declaring operator intervention."""
+    sleep_fn = sleep_fn or time.sleep
+    failed_attempts = []
+    for attempt in range(len(CLOSEOUT_RETRY_DELAYS) + 1):
+        if attempt:
+            delay = CLOSEOUT_RETRY_DELAYS[attempt - 1]
+            print(f"\n⏳ Close-out retry {attempt}/{len(CLOSEOUT_RETRY_DELAYS)} in {delay}s...")
+            sleep_fn(delay)
+        failures = []
+        if run_closeout(pr, issue_nums, repo_root, failures=failures):
+            return True, failed_attempts
+        failed_attempts.append(
+            failures or ["close-out returned failure without step evidence"]
+        )
+    return False, failed_attempts
+
+
+def intervention_command():
+    """The exact secret-free merge command the operator can safely resume."""
+    return shlex.join([sys.executable, os.path.realpath(__file__), *sys.argv[1:]])
+
+
+def surviving_worktree(repo_root, branch):
+    """Describe the branch worktree without guessing when inspection fails."""
+    if not repo_root:
+        return "unavailable (repository root could not be resolved)"
+    code, out, err = run_cmd(
+        ["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root
+    )
+    if code != 0:
+        return f"unavailable ({err.strip() or 'git worktree list failed'})"
+    path, head = find_branch_worktree(out, branch)
+    if not path:
+        return "absent (already pruned or not registered)"
+    return f"{path} at {head or 'unknown'}"
+
+
+def human_intervention_body(
+    pr, repo_root, gated_head, merged_sha, failed_attempts, command,
+    blocked_before_closeout=None,
+):
+    """Build the durable evidence required when close-out cannot self-heal."""
+    live_pr = fetch_pr(pr.get("number")) or pr
+    claims = label_values(live_pr, MERGER_CLAIM_LABEL)
+    attempt_lines = []
+    for index, failures in enumerate(failed_attempts, start=1):
+        attempt_lines.append(f"- attempt {index}: {'; '.join(failures)}")
+    if blocked_before_closeout:
+        attempt_lines.append(f"- close-out not attempted: {blocked_before_closeout}")
+    elif not attempt_lines:
+        attempt_lines.append("- no close-out attempt evidence was available")
+    branch = pr.get("headRefName") or "unknown"
+    if failed_attempts:
+        remediation = (
+            f"{len(failed_attempts)} close-out attempt(s); bounded retry delays "
+            f"were {', '.join(map(str, CLOSEOUT_RETRY_DELAYS))} seconds"
+        )
+    else:
+        remediation = "0 close-out attempts; bounded retries were not run"
+    return "\n".join([
+        "## Human intervention required",
+        "",
+        "GitHub has accepted the merge, but automated close-out could not "
+        "finish safely. This is not a successful factory completion.",
+        "",
+        "### Failed command",
+        "",
+        f"- command: `{command}`",
+        f"- exit code: `{EXIT_ERROR}`",
+        f"- attempted remediation: {remediation}",
+        "",
+        "### Preserved artifacts",
+        "",
+        f"- gated head SHA: `{gated_head}`",
+        f"- merged SHA: `{merged_sha}`",
+        f"- branch: `{branch}`",
+        f"- worktree: {surviving_worktree(repo_root, branch)}",
+        f"- remaining merger claims: "
+        f"{', '.join(f'`{MERGER_CLAIM_LABEL}{value}`' for value in claims) or 'none visible'}",
+        "",
+        "### Attempt evidence",
+        "",
+        *attempt_lines,
+        "",
+        "### Operator action",
+        "",
+        f"- Correct the final close-out failure above, then run `{command}`.",
+        "",
+    ])
+
+
+def post_human_intervention(
+    pr, issue_nums, repo_root, gated_head, merged_sha, failed_attempts, command,
+    blocked_before_closeout=None,
+):
+    """Post the same authoritative intervention evidence to PR and issues."""
+    body = human_intervention_body(
+        pr, repo_root, gated_head, merged_sha, failed_attempts, command,
+        blocked_before_closeout=blocked_before_closeout,
+    )
+    targets = [("pr", pr.get("number"))]
+    targets.extend(("issue", number) for number in issue_nums)
+    all_ok = True
+    for kind, number in targets:
+        code, _, err = run_cmd(
+            ["gh", kind, "comment", str(number), "--body", body], check=False
+        )
+        if code == 0:
+            print(f"  ✅ intervention       recorded on {kind} #{number}")
+        else:
+            print(
+                f"  ❌ intervention       could not comment on {kind} #{number}: "
+                f"{err.strip()}",
+                file=sys.stderr,
+            )
+            all_ok = False
+    if not all_ok:
+        print(
+            "[ERROR] Human intervention evidence was not durable on every "
+            f"GitHub target. Local evidence follows:\n{body}",
+            file=sys.stderr,
+        )
     return all_ok
 
 
@@ -1882,8 +2021,30 @@ def main():
         print("[ERROR] GitHub reported merged but supplied no merge commit SHA.", file=sys.stderr)
 
     root = repository_root()
+    command = intervention_command()
     if not root:
-        print("[ERROR] Merge succeeded but repository root could not be resolved; rerun close-out.", file=sys.stderr)
+        failure = "repository root: could not resolve the primary worktree"
+        evidence_ok = post_human_intervention(
+            final_pr, issue_nums, None, gated_head, merged_sha, [], command,
+            blocked_before_closeout=failure,
+        )
+        print(
+            "[ERROR] Merge succeeded but repository root could not be resolved; "
+            f"intervention evidence {'was recorded' if evidence_ok else 'could not be fully recorded'}.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    if not audit_ok:
+        failure = "merge audit: GitHub supplied no merge commit SHA"
+        evidence_ok = post_human_intervention(
+            final_pr, issue_nums, root, gated_head, merged_sha, [], command,
+            blocked_before_closeout=failure,
+        )
+        print(
+            "[ERROR] Merge audit is incomplete; intervention evidence "
+            f"{'was recorded' if evidence_ok else 'could not be fully recorded'}.",
+            file=sys.stderr,
+        )
         return EXIT_ERROR
     # Park the verdicts the moment we hold them, and read them back on a
     # resumed close-out. Re-deriving them post-merge is not an option:
@@ -1894,9 +2055,19 @@ def main():
     else:
         gates = load_gate_verdicts(root, args.pr)
 
-    closeout_ok = run_closeout(final_pr, issue_nums, root)
-    if not closeout_ok or not audit_ok:
-        print("\n❌ Merge is complete, but close-out is incomplete. Re-run this command to resume.")
+    closeout_ok, failed_attempts = run_closeout_with_retries(
+        final_pr, issue_nums, root
+    )
+    if not closeout_ok:
+        evidence_ok = post_human_intervention(
+            final_pr, issue_nums, root, gated_head, merged_sha,
+            failed_attempts, command,
+        )
+        print(
+            "\n❌ Merge is complete, but close-out is incomplete after bounded "
+            "retries. Human intervention evidence "
+            f"{'was recorded' if evidence_ok else 'could not be fully recorded'}."
+        )
         return EXIT_ERROR
 
     # Only here: after close-out succeeded, so no checkpoint can ever claim a

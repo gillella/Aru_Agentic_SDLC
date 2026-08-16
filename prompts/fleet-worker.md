@@ -123,12 +123,15 @@ gate. Your claim is `merger:<AGENT_ID>` (already applied when `--claim` ran).
    do not invent a merge attempt. The PR returns to review/feedback/waiting
    naturally.
    `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release`
-5. On exit 1 (transient error / incomplete close-out): retry the **same**
-   `merge_pr.py --pr <N> --expected-head <HEAD_SHA>` command with bounded
-   backoff (5s, 15s, 45s; at most three attempts). If it still fails unsafely,
-   leave the `merger:` claim in place when close-out is incomplete so another
-   cycle can resume it; record the exact error on the linked issue and never
-   report success.
+5. On exit 1 before GitHub accepts the merge, treat the helper or network error
+   as recoverable and return to the loop. After GitHub accepts the merge, the
+   helper itself retries idempotent close-out after 5s, 15s, and 45s. If those
+   retries are exhausted, it leaves the `merger:` claim in place and posts
+   `## Human intervention required` with the command, exit code, SHAs,
+   preserved artifacts, attempted remediation, and operator action to the PR
+   and every linked issue. Verify that evidence, notify Slack with `--event
+   hitl`, and stop; never repeat the retry policy outside the helper or report
+   success.
 
 The PR author may perform this mechanical merge once a distinct peer's
 `reviewed-by:<id>` is present. Self-review remains forbidden.

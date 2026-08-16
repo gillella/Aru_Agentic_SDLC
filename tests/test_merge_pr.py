@@ -922,6 +922,9 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         execute.assert_not_called()
         closeout.assert_called_once()
 
+    @patch.object(merge_pr, "post_human_intervention", return_value=False)
+    @patch.object(merge_pr.time, "sleep")
+    @patch.object(merge_pr, "clear_merger_claims")
     @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
     @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
     @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
@@ -944,7 +947,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "fetch_pr")
     def test_successful_merge_with_branch_delete_failure_is_resumable(
         self, fetch, _json, _threads, execute, _root, _chdir, _prune, _local,
-        _remote, _close, _done, _issue_claim, _review_claim,
+        _remote, _close, _done, _issue_claim, _review_claim, merger_claim,
+        sleep, intervention,
     ):
         fetch.return_value = {
             "number": 9,
@@ -969,14 +973,22 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "additions": 2,
             "deletions": 1,
         }
-        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch("builtins.print") as printer:
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
 
         execute.assert_called_once_with(9, fetch.return_value, "merge")
-        _close.assert_called_once_with(7)
-        _done.assert_called_once_with(7)
-        _issue_claim.assert_called_once_with(7)
-        _review_claim.assert_called_once_with(9)
+        self.assertEqual(_close.call_count, 4)
+        self.assertEqual(_done.call_count, 4)
+        self.assertEqual(_issue_claim.call_count, 4)
+        self.assertEqual(_review_claim.call_count, 4)
+        merger_claim.assert_not_called()
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 15, 45])
+        intervention.assert_called_once()
+        self.assertEqual(len(intervention.call_args.args[5]), 4)
+        output = " ".join(str(call.args[0]) for call in printer.call_args_list if call.args)
+        self.assertIn("could not be fully recorded", output)
+        self.assertNotIn("evidence was recorded", output)
 
     @patch.object(merge_pr, "run_closeout", return_value=True)
     @patch.object(merge_pr, "repository_root", return_value="/repo")
@@ -1090,6 +1102,79 @@ class CloseOutRecoveryTests(unittest.TestCase):
         prune.side_effect = after_chdir
         self.assertTrue(merge_pr.run_closeout(merged_pr(), [7], "/repo"))
         chdir.assert_called_once_with("/repo")
+
+
+class HumanInterventionTests(unittest.TestCase):
+    def test_retry_policy_exhausts_before_returning_failure_evidence(self):
+        def fail(_pr, _issues, _root, failures=None):
+            failures.append("remote branch: delete failed")
+            return False
+
+        with patch.object(merge_pr, "run_closeout", side_effect=fail) as closeout, \
+             patch.object(merge_pr.time, "sleep") as sleep:
+            ok, attempts = merge_pr.run_closeout_with_retries(
+                merged_pr(), [7], "/repo"
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(closeout.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 15, 45])
+        self.assertEqual(
+            attempts,
+            [["remote branch: delete failed"]] * 4,
+        )
+
+    def test_comment_contains_command_artifacts_attempts_and_one_action(self):
+        pr = merged_pr()
+        pr["labels"] = [{"name": "merger:codex-root"}]
+        failures = [
+            ["remote branch: delete failed"],
+            ["remote branch: delete still failed"],
+        ]
+        with patch.object(merge_pr, "fetch_pr", return_value=pr), \
+             patch.object(
+                 merge_pr, "surviving_worktree",
+                 return_value="/repo/.worktrees/fix-7 at gated-sha",
+             ):
+            body = merge_pr.human_intervention_body(
+                pr, "/repo", "gated-sha", "merge-sha", failures,
+                "python3 merge_pr.py --pr 9",
+            )
+
+        self.assertTrue(body.startswith("## Human intervention required"))
+        self.assertIn("command: `python3 merge_pr.py --pr 9`", body)
+        self.assertIn("exit code: `1`", body)
+        self.assertIn("gated head SHA: `gated-sha`", body)
+        self.assertIn("merged SHA: `merge-sha`", body)
+        self.assertIn("worktree: /repo/.worktrees/fix-7 at gated-sha", body)
+        self.assertIn("remaining merger claims: `merger:codex-root`", body)
+        self.assertIn("attempt 2: remote branch: delete still failed", body)
+        self.assertEqual(body.count("### Operator action"), 1)
+
+    def test_pre_closeout_failure_reports_zero_attempts_and_no_retry(self):
+        pr = merged_pr()
+        with patch.object(merge_pr, "fetch_pr", return_value=pr), \
+             patch.object(merge_pr, "surviving_worktree", return_value="unavailable"):
+            body = merge_pr.human_intervention_body(
+                pr, None, "gated-sha", "unknown", [], "command",
+                blocked_before_closeout="merge audit: missing SHA",
+            )
+
+        self.assertIn("attempted remediation: 0 close-out attempts", body)
+        self.assertIn("close-out not attempted: merge audit: missing SHA", body)
+        self.assertNotIn("attempt 1:", body)
+
+    def test_evidence_is_posted_to_pr_and_every_linked_issue(self):
+        with patch.object(
+            merge_pr, "human_intervention_body", return_value="evidence"
+        ), patch.object(merge_pr, "run_cmd", return_value=(0, "", "")) as run:
+            ok = merge_pr.post_human_intervention(
+                merged_pr(), [7, 8], "/repo", "gated", "merged", [[]], "command"
+            )
+
+        self.assertTrue(ok)
+        targets = [(call.args[0][1], call.args[0][3]) for call in run.call_args_list]
+        self.assertEqual(targets, [("pr", "9"), ("issue", "7"), ("issue", "8")])
 
 
 class IdempotentCloseOutStepTests(unittest.TestCase):
@@ -2000,6 +2085,8 @@ class CheckpointCallSiteTests(unittest.TestCase):
              patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
              patch.object(merge_pr, "run_closeout", return_value=closeout_ok), \
+             patch.object(merge_pr.time, "sleep"), \
+             patch.object(merge_pr, "post_human_intervention", return_value=True), \
              patch.object(merge_pr, "write_checkpoint_tag",
                           return_value=(True, "written")) as tag:
             code = merge_pr.main()
@@ -2157,6 +2244,8 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
              patch.object(merge_pr, "load_gate_verdicts", return_value=None), \
              patch.object(merge_pr, "discard_gate_verdicts"), \
              patch.object(merge_pr, "run_closeout", return_value=closeout_ok), \
+             patch.object(merge_pr.time, "sleep"), \
+             patch.object(merge_pr, "post_human_intervention", return_value=True), \
              patch.object(merge_pr, "write_checkpoint_tag",
                           return_value=(True, "written")) as tag:
             code = merge_pr.main()
@@ -2272,10 +2361,12 @@ class DryRunJsonTests(unittest.TestCase):
                                         "unfixed": 0, "withdrawn": 0}), \
              patch.object(merge_pr, "evaluate_dod", return_value=(False, gates)), \
              patch.object(merge_pr, "execute_merge") as execute_merge, \
+             patch.object(merge_pr, "post_human_intervention") as intervention, \
              patch("builtins.print") as printer:
             code = merge_pr.main()
         self.assertEqual(code, merge_pr.EXIT_BLOCKED)
         execute_merge.assert_not_called()
+        intervention.assert_not_called()
         printed = " ".join(str(c.args[0]) for c in printer.call_args_list if c.args)
         self.assertIn('"first_blocking": "review"', printed)
         self.assertIn('"ok": false', printed)
