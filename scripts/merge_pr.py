@@ -293,7 +293,8 @@ def _review_head_attestations(owner, name, pr_id, expected_head):
     """Head-bound agent attestations written by complete_review().
 
     Pull-request comments are paginated independently from reviews and review
-    threads. Any malformed marker fails closed; ordinary comments are ignored.
+    threads. Malformed markers are ignored and therefore cannot create review
+    evidence; the absence of a valid marker still fails the merge gate closed.
     The repeated head check prevents evidence from being combined across a
     concurrent push.
     """
@@ -345,12 +346,12 @@ def _review_head_attestations(owner, name, pr_id, expected_head):
                 continue
             marker, separator, _rest = body.partition(" -->")
             if not separator:
-                return None
+                continue
             raw_payload = marker[len(prefix):]
             try:
                 payload = json.loads(raw_payload)
             except json.JSONDecodeError:
-                return None
+                continue
             author = node.get("author")
             if (
                 not isinstance(author, dict)
@@ -364,7 +365,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):
                 or not isinstance(payload.get("head"), str)
                 or re.fullmatch(r"[0-9a-fA-F]{40,64}", payload["head"]) is None
             ):
-                return None
+                continue
             attestations.append({
                 "agent": payload["agent"],
                 "head": payload["head"].lower(),
@@ -916,9 +917,7 @@ def check_reviews(pr, evidence):
                        f"`claim_issue.py --pr <n> --agent <id> --complete-review`.")
 
     attested_peers = _attested_head_peers(evidence, peers)
-    if attested_peers is not None and (
-        not attested_peers or not evidence.get("reviewed_head")
-    ):
+    if attested_peers is not None and not attested_peers:
         head = evidence.get("head_oid")
         head_text = (
             f"current head {head[:12]}"
@@ -928,6 +927,12 @@ def check_reviews(pr, evidence):
             f"Completed peer attribution exists for {', '.join(peers)}, but "
             f"none is bound to {head_text}. The attribution may be stale; "
             "the peer must re-review and complete the current commit."
+        )
+    if attested_peers and not evidence.get("reviewed_head"):
+        return False, (
+            f"Peer attribution for {', '.join(attested_peers)} names the current "
+            "head, but no substantive review targets that commit. Re-review the "
+            "current commit."
         )
 
     # Compatibility for pure unit callers predating the attestation field.

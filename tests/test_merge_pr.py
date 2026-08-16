@@ -468,6 +468,73 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
+    def test_malformed_attestation_comment_is_ignored(self, gh_json, _slug):
+        head = "a" * 40
+        peer_review = {
+            "id": "peer-current",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-16T15:20:00Z",
+            "body": "Verdict: approved. I verified the current diff and tests.",
+            "author": {"login": "gillella", "__typename": "User"},
+            "commit": {"oid": head},
+        }
+        valid_stamp = (
+            '<!-- aru-review-head:v1 {"agent":"cursor-1",'
+            '"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} -->'
+        )
+        bot_stamp = (
+            '<!-- aru-review-head:v1 {"agent":"bot",'
+            '"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} -->'
+        )
+        gh_json.side_effect = [
+            self.review_page(head=head, nodes=[peer_review]),
+            self.attestation_page(
+                nodes=[
+                    {
+                        "body": '<!-- aru-review-head:v1 {"agent": -->',
+                        "author": {"login": "malicious", "__typename": "User"},
+                    },
+                    {
+                        "body": bot_stamp,
+                        "author": {"login": "review-app", "__typename": "Bot"},
+                    },
+                    {
+                        "body": valid_stamp,
+                        "author": {"login": "gillella", "__typename": "User"},
+                    },
+                ],
+                head=head,
+            ),
+            self.thread_page(head=head),
+        ]
+
+        evidence = merge_pr.review_evidence(215)
+
+        self.assertEqual(
+            evidence["review_attestations"],
+            [{"agent": "cursor-1", "head": head, "github_login": "gillella"}],
+        )
+
+    def test_head_attestation_without_substantive_review_names_actual_gap(self):
+        head = "a" * 40
+        ok, message = merge_pr.check_reviews(
+            labelled("author:codex-1", "reviewed-by:cursor-1"),
+            {
+                "unresolved": 0,
+                "unfixed": 0,
+                "withdrawn": 0,
+                "reviewed_head": False,
+                "head_oid": head,
+                "review_attestations": [{"agent": "cursor-1", "head": head}],
+            },
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("no substantive review targets that commit", message)
+        self.assertNotIn("none is bound", message)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
     def test_unknown_actor_type_fails_closed(self, gh_json, _slug):
         review = {
             "id": "unknown-actor",
