@@ -25,6 +25,10 @@ done
 HOOK_SRC="$ARU_SDLC_HOME/hooks"
 
 cd "$TARGET"
+# Re-anchor TARGET to its physical absolute path. git reports --git-path
+# relative to the *current* directory, so a relative -r composed
+# "<repo>/<repo>/.git/hooks" below and installed where git never looks.
+TARGET="$(pwd -P)"
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "$TARGET is not a git repo" >&2; exit 1; }
 # --git-path hooks derives the effective hooks path (respecting core.hooksPath)
 # across primary checkouts and worktrees.

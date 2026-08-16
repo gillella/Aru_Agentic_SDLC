@@ -2110,5 +2110,79 @@ class AgentCommitTrailerTests(unittest.TestCase):
             self.assertIn("Agent: agent-integration-test", log_out)
 
 
+class HookInstallerPathTests(unittest.TestCase):
+    """Regressions for installing into the directory git actually reads."""
+
+    INSTALL = None  # set in setUp so ROOT resolution stays with the class
+
+    def setUp(self):
+        self.install = ROOT / "scripts" / "install_hooks.sh"
+        self.env = dict(os.environ, ARU_SDLC_HOME=str(ROOT))
+
+    def test_relative_repo_argument_installs_where_git_reads_hooks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            subprocess.run(["git", "init", "-b", "main", str(parent / "repo")],
+                           check=True, capture_output=True)
+
+            # -r is relative, and the installer cd's into it before asking git
+            # for --git-path. Composing the old TARGET produced
+            # <repo>/repo/.git/hooks, which git never reads.
+            subprocess.run(["bash", str(self.install), "-r", "repo"],
+                           cwd=str(parent), check=True, env=self.env,
+                           capture_output=True)
+
+            self.assertTrue((parent / "repo" / ".git" / "hooks" / "prepare-commit-msg").exists())
+            self.assertFalse((parent / "repo" / "repo").exists())
+
+
+class ChainedPriorHookTests(unittest.TestCase):
+    """Every displaced prior hook must still run, not just the first."""
+
+    def _user_hook(self, path, marker):
+        path.write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo ran >> {marker}\n"
+            "exit 0\n"
+        )
+        path.chmod(0o755)
+
+    def test_every_displaced_prior_hook_is_chained(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo"
+            subprocess.run(["git", "init", "-b", "main", str(repo_path)],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "T"], check=True)
+            subprocess.run(["git", "-C", str(repo_path), "config", "user.email", "t@t.local"], check=True)
+
+            hooks = repo_path / ".git" / "hooks"
+            hooks.mkdir(parents=True, exist_ok=True)
+            install = ROOT / "scripts" / "install_hooks.sh"
+            env = dict(os.environ, ARU_SDLC_HOME=str(ROOT))
+            first_marker = repo_path / "first.log"
+            second_marker = repo_path / "second.log"
+
+            # A pre-existing user hook, displaced to .pre-aru on install.
+            self._user_hook(hooks / "prepare-commit-msg", first_marker)
+            subprocess.run(["bash", str(install), "-r", str(repo_path)],
+                           check=True, env=env, capture_output=True)
+
+            # A second user hook lands later and is displaced to .pre-aru.1.
+            self._user_hook(hooks / "prepare-commit-msg", second_marker)
+            subprocess.run(["bash", str(install), "-r", str(repo_path)],
+                           check=True, env=env, capture_output=True)
+
+            self.assertTrue((hooks / "prepare-commit-msg.pre-aru.1").exists(),
+                            "installer should have preserved the second hook")
+
+            (repo_path / "f.txt").write_text("x")
+            subprocess.run(["git", "-C", str(repo_path), "add", "f.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo_path), "commit", "-m", "chore: c"],
+                           check=True, env=env, capture_output=True)
+
+            self.assertTrue(first_marker.exists(), "base .pre-aru hook did not run")
+            self.assertTrue(second_marker.exists(), "numbered .pre-aru.1 hook did not run")
+
+
 if __name__ == "__main__":
     unittest.main()

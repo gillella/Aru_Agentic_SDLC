@@ -10,6 +10,17 @@ if [ -x "$PRIOR" ]; then
   "$PRIOR" "$@" || exit $?
 fi
 
+# A reinstall over an already-installed repo preserves the displaced hook as
+# .pre-aru.1, .pre-aru.2, ... Run those in install order too; chaining only the
+# base name silently orphaned every hook after the first.
+PRIOR_INDEX=1
+while [ -e "${PRIOR}.${PRIOR_INDEX}" ]; do
+  if [ -x "${PRIOR}.${PRIOR_INDEX}" ]; then
+    "${PRIOR}.${PRIOR_INDEX}" "$@" || exit $?
+  fi
+  PRIOR_INDEX=$((PRIOR_INDEX + 1))
+done
+
 if [ -f "${SDLC_HOME}/hooks/prepare_commit_msg.py" ]; then
   python3 "${SDLC_HOME}/hooks/prepare_commit_msg.py" "$@" || true
 elif [ -f "${SCRIPT_DIR}/prepare_commit_msg.py" ]; then
