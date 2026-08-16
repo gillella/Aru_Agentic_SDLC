@@ -387,6 +387,47 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertTrue(missing)
         self.assertEqual(payload["status"], "degraded")
 
+    def test_presence_and_wake_limitations_are_reported_read_only(self):
+        import sys
+
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import agent_presence as ap
+
+        project = self.target_home / "repo-a"
+        project.mkdir()
+        aru = self.target_home / ".aru"
+        aru.mkdir()
+        store = ap.PresenceStore(aru / "agent-presence.json")
+        store.register(
+            agent_id="cursor-cloud-1",
+            family="cursor",
+            project_id=ap.path_derived_project_id(project),
+            checkout_path=str(project.resolve()),
+            availability="busy",
+            wake_evidence_supported=["github-recovery"],
+        )
+        other = self.target_home / "repo-b"
+        other.mkdir()
+        store.register(
+            agent_id="cursor-cloud-2",
+            family="cursor",
+            project_id=ap.path_derived_project_id(other),
+            checkout_path=str(other.resolve()),
+            availability="available",
+        )
+        payload = json.loads(
+            self.run_doctor("--json", "--project", str(project.resolve())).stdout
+        )
+        self.assertIn("presence", payload)
+        tasks = payload["presence"]["tasks"]
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["agent_id"], "cursor-cloud-1")
+        self.assertEqual(payload["agents"]["cursor"].get("last_heartbeat"), tasks[0]["last_heartbeat"])
+        self.assertTrue(payload["presence"]["wake_limitations"])
+        self.assertIn("GitHub claims remain authoritative", payload["presence"]["ownership"])
+        # Doctor must not invent paid wake enablement from presence alone.
+        self.assertFalse(payload["agents"]["cursor"]["native_wake_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

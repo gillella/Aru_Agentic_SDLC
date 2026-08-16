@@ -74,7 +74,8 @@ class RunnerFixture(unittest.TestCase):
         values.update(overrides)
         return rf.RunnerConfig(**values)
 
-    def runner(self, commands, agent_runner=lambda _argv, _cwd: 0, sleeper=lambda _seconds: None):
+    def runner(self, commands, agent_runner=lambda _argv, _cwd: 0, sleeper=lambda _seconds: None,
+               presence_store=None, project_id=None):
         return rf.FleetRunner(
             self.config(),
             command_runner=commands,
@@ -82,6 +83,8 @@ class RunnerFixture(unittest.TestCase):
             sleeper=sleeper,
             random_value=lambda: 0.5,
             clock=lambda: datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc),
+            presence_store=presence_store,
+            project_id=project_id,
         )
 
 
@@ -504,6 +507,38 @@ class LifecycleTests(RunnerFixture):
         self.assertEqual(stop_code, 0)
         self.assertEqual(status_code, 0)
         self.assertTrue(json.loads(output.getvalue())["stop_requested"])
+
+
+class PresenceHookTests(RunnerFixture):
+    def test_runner_registers_and_updates_presence_without_claim_apis(self):
+        import agent_presence as ap
+
+        presence_path = self.root / "presence.json"
+        store = ap.PresenceStore(
+            presence_path,
+            clock=lambda: datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc),
+        )
+        commands = FakeCommands(
+            [fleet("waiting"), fleet("waiting")],
+            [selection("issue", 7), selection("idle")],
+        )
+        runner = self.runner(
+            commands,
+            presence_store=store,
+            project_id="proj_alpha",
+        )
+        first = runner.run_iteration()
+        self.assertEqual(first.phase, "active")
+        record = store.get("codex-1")
+        self.assertIsNotNone(record)
+        self.assertEqual(record.project_id, "proj_alpha")
+        self.assertEqual(record.availability, "available")
+        self.assertEqual(record.family, "openai")
+        parked = runner.run_iteration()
+        self.assertEqual(parked.phase, "waiting")
+        refreshed = store.get("codex-1")
+        self.assertEqual(refreshed.availability, "available")
+        self.assertEqual(refreshed.workload.get("phase"), "waiting")
 
 
 if __name__ == "__main__":

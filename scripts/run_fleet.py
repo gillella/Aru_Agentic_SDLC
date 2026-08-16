@@ -312,6 +312,8 @@ class FleetRunner:
         sleeper: Callable[[float], None] = time.sleep,
         random_value: Callable[[], float] = random.random,
         clock: Callable[[], datetime] = utc_now,
+        presence_store: Any | None = None,
+        project_id: str | None = None,
     ):
         self.config = config
         self.command_runner = command_runner
@@ -321,6 +323,8 @@ class FleetRunner:
         self.clock = clock
         directory = config.state_dir or default_state_dir(config.repo)
         self.store = StateStore(directory, config.agent)
+        self.presence_store = presence_store
+        self.project_id = project_id
         self.stop_signal = False
         self.cycle = 0
         self.retry_count = 0
@@ -377,6 +381,35 @@ class FleetRunner:
                 f"[run_fleet] process metadata unavailable: {type(exc).__name__}",
                 file=sys.stderr,
             )
+        self._sync_presence(phase, delay=delay)
+
+    def _sync_presence(self, phase: str, *, delay: float = 0.0) -> None:
+        """Update project-scoped presence; never affects GitHub claims."""
+        if self.presence_store is None:
+            return
+        try:
+            from agent_presence import sync_runner_presence
+        except ImportError:
+            return
+        cooldown = ""
+        if delay > 0:
+            cooldown = timestamp(self.clock() + timedelta(seconds=delay))
+        sync_runner_presence(
+            self.presence_store,
+            agent_id=self.config.agent,
+            family=self.config.family,
+            checkout_path=self.config.repo,
+            phase=phase,
+            project_id=self.project_id,
+            role="fleet-runner",
+            workload={
+                "cycle": self.cycle,
+                "phase": phase,
+                "retry_count": self.retry_count,
+            },
+            cooldown_until=cooldown or None,
+            wake_evidence_supported=["github-recovery"],
+        )
 
     def _run_fleet_status(self) -> dict[str, Any]:
         argv = [
@@ -666,6 +699,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON argv array for another local CLI; supports {repo} and {prompt} tokens",
     )
     parser.add_argument("--state-dir", default="", help="Override process metadata directory")
+    parser.add_argument(
+        "--presence-path",
+        default="",
+        help="Optional agent-presence.json path (default: ~/.aru/agent-presence.json)",
+    )
+    parser.add_argument(
+        "--project-id",
+        default="",
+        help="Optional governed project_id; otherwise derived from --repo",
+    )
     parser.add_argument("--initial-wait", type=float, default=15.0)
     parser.add_argument("--max-wait", type=float, default=900.0)
     parser.add_argument("--jitter", type=float, default=0.2)
@@ -749,7 +792,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         helper_timeout=helper_timeout,
         state_dir=directory,
     )
-    runner = FleetRunner(config)
+    presence_store = None
+    try:
+        from agent_presence import PresenceStore
+
+        presence_path = (
+            Path(args.presence_path).expanduser().resolve()
+            if args.presence_path
+            else None
+        )
+        presence_store = PresenceStore(presence_path) if presence_path else PresenceStore()
+    except Exception:
+        presence_store = None
+    runner = FleetRunner(
+        config,
+        presence_store=presence_store,
+        project_id=args.project_id or None,
+    )
     return runner.run_loop() if args.mode == "loop" else runner.run_once()
 
 

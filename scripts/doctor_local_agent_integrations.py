@@ -781,6 +781,27 @@ def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
         "repository": repo,
         "checks": checks,
     }
+    try:
+        from agent_presence import PresenceStore, doctor_presence_summary
+
+        presence_path = target_home / ".aru" / "agent-presence.json"
+        payload["presence"] = doctor_presence_summary(
+            project=project,
+            agents=agents,
+            store=PresenceStore(presence_path),
+            catalog_non_guarantees=catalog["non_guarantees"],
+        )
+    except Exception as exc:
+        payload["presence"] = {
+            "schema": "aru.agent-presence/v1",
+            "project": project,
+            "error": type(exc).__name__,
+            "tasks": [],
+            "wake_limitations": list(catalog.get("non_guarantees") or []),
+            "ownership": (
+                "GitHub claims remain authoritative; presence never releases or steals claims."
+            ),
+        }
     payload["status"] = overall_status(checks, payload)
     return payload
 
@@ -801,10 +822,27 @@ def render_human(payload: dict) -> str:
             f" enabled={agent['native_wake_enabled']}"
             f" evidence={agent['native_wake_evidence']}"
         )
+        heartbeat = (
+            f" heartbeat={agent['last_heartbeat']}"
+            if agent.get("last_heartbeat")
+            else ""
+        )
         lines.append(
             f"  {name}: {mark} version={agent['version']}{app} "
-            f"same_task_wake={agent['same_task_native_wake']}{gap}{wake}"
+            f"same_task_wake={agent['same_task_native_wake']}{gap}{wake}{heartbeat}"
         )
+    presence = payload.get("presence") or {}
+    tasks = presence.get("tasks") or []
+    lines.append(f"presence_tasks: {len(tasks)}")
+    for task in tasks[:8]:
+        lines.append(
+            f"  presence {task.get('agent_id')}: "
+            f"availability={task.get('availability')} "
+            f"project={task.get('project_id')} "
+            f"heartbeat={task.get('last_heartbeat') or 'unknown'}"
+        )
+    for note in (presence.get("wake_limitations") or [])[:3]:
+        lines.append(f"wake_limitation: {note}")
     failed = [item for item in payload.get("checks") or [] if not item["ok"]]
     if failed:
         lines.append("failed checks:")
