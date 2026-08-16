@@ -11,7 +11,6 @@
       --ink: #f3f0e8;
       --muted: #aaa9a2;
       --quiet: #171a1f;
-      --panel: #1e2229;
       --line: #343a43;
       --amber: #f3b562;
       --mint: #7bdcb5;
@@ -78,6 +77,8 @@
     }
 
     .stage-nav { display: grid; grid-template-columns: repeat(7, minmax(7rem, 1fr)); gap: .5rem; overflow-x: auto; padding: .25rem .25rem 1rem; }
+    html:not(.js) .stage-nav,
+    html:not(.js) .filter-bar { display: none; }
     .stage-tab {
       min-height: 5.5rem;
       border: 1px solid var(--line);
@@ -224,12 +225,12 @@
     <section id="maturity">
       <div class="wrap">
         <div class="section-head"><div><p class="eyebrow">Honest placement</p><h2>Strong middle. Open ends.</h2></div><p>Aru’s differentiator is already real: any governed agent, one board, mechanical gates. The highest leverage now sits before Ready and after merge—not in adding another coding runtime.</p></div>
-        <div class="filter-bar" aria-label="Filter maturity cards">
+        <div class="filter-bar" role="group" aria-label="Filter maturity cards">
           <button class="filter-button" type="button" data-filter="all" aria-pressed="true">Show all</button>
           <button class="filter-button" type="button" data-filter="strong" aria-pressed="false">Established strengths</button>
           <button class="filter-button" type="button" data-filter="gap" aria-pressed="false">Gaps &amp; constraints</button>
         </div>
-        <div class="maturity-grid" aria-live="polite">
+        <div class="maturity-grid">
           <article class="maturity-card" data-kind="strong"><span class="status strong">Strong</span><h3>Execution middle</h3><p>Claim → worktree → PR → peer review → governed merge has durable orchestration and mechanical gates.</p></article>
           <article class="maturity-card" data-kind="gap"><span class="status gap">Partial</span><h3>Front of factory</h3><p>Intent → research → trustworthy Ready work needs a more complete, repeatable intake bridge.</p></article>
           <article class="maturity-card" data-kind="gap"><span class="status gap">Weak</span><h3>Back of factory</h3><p>Immutable build → real targets → smoke → observe → learn remains the largest product-delivery gap.</p></article>
