@@ -172,23 +172,19 @@ have a day job.
 4. **Cap PR size.** Reported agentic PRs run ~2.6x larger than human ones; #31 was 865
    lines. Add a soft limit (say 400 lines) that requires splitting or an explicit waiver.
 
-### G4 — CI is advisory, so "CI green" certifies almost nothing
+### G4 — CI was advisory — **corrected; verified 2026-08-15**
 
-From `.github/workflows/ci.yml`:
+**Historical finding:** `.github/workflows/ci.yml` once soft-failed lint:
+
 ```yaml
-ruff check . || echo "::warning::ruff reported findings"     # never fails
-# tests: "if no tests present, skip"
-# import-linter: "if no contracts configured, skip"
+ruff check . || echo "::warning::ruff reported findings"     # never fails (historical)
 ```
-All three gates no-op on the current repo. PR #31's green check verified whitespace and
-nothing else — the PR body says so honestly. The framework's stated law is "CI green
-before merge; remediate rather than weaken gates," but the gate shipped pre-weakened.
 
-**Fix:** drop `|| echo`; make ruff blocking. Replace "skip if no tests" with "fail if
-`src/**` has content and `tests/**` does not." Land the import-linter contracts (#25)
-*before* the first feature, as that issue's title already argues — architecture guards are
-worth ten review comments each, and they are the only thing that will stop four parallel
-agents from eroding your schema-per-module boundary.
+At that time tests and import-linter could also no-op, so “CI green” certified almost nothing.
+
+**Current behaviour (verified 2026-08-15):** the playbook CI job runs blocking `ruff check .` (and separate jobs for gitleaks, pip-audit, and import-linter). Soft-fail `|| echo "::warning::"` is gone. See `docs/ARU-SOFTWARE-FACTORY.md` §2.2 and appendix §9 (S0.6).
+
+**Fix (landed):** drop `|| echo`; make ruff blocking; fail when source exists without tests; land import-linter contracts before feature churn.
 
 ### G5 — Definition of Done stops at "In Review"
 

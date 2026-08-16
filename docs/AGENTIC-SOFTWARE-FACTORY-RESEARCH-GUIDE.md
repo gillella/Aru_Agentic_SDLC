@@ -211,9 +211,9 @@ From your own factory docs and audits:
 | Front (idea → Ready) | **Weak / partial** | Roadmap S3; Spec Kit / grill-aru bridge |
 | Back (deploy → observe → learn) | **Missing / weak** | Roadmap S4 |
 | Review throughput | **Binding constraint** | Needs evidence trail + AC runner + identity split |
-| Dogfooding CI | **Gap** | Playbook ships gates it does not run on itself |
+| Dogfooding CI | **Closed (verified 2026-08-15)** | Playbook CI runs the gates it ships (ruff, gitleaks, pip-audit, import-linter, tests) |
 | Unit economics | **Missing** | Tokens, wall time, review rounds per issue |
-| History / versioning | **Fragile** | Squash collapsing narrative; consumer live-tracks `main` |
+| History / versioning | **Hardened (verified 2026-08-15)** | Default merge commits (not squash); `ckpt/*` + SemVer tags; `ARU_SDLC_REF` pinning. Squash-as-default was the historical failure mode. |
 
 **Strategic read:** You are not starting from zero. You are mid-build on the rarest part — a **vendor-neutral governance factory**. Most public “software factories” either (a) lock to one agent runtime (Mastra/TS), (b) stay IDE-prompt-only, or (c) demo Spec→Copilot without durable multi-agent claim protocols. Aru’s differentiator should stay: **any agent, one board, mechanisms over vibes.**
 
