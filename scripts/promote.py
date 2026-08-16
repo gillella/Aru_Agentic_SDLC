@@ -173,26 +173,48 @@ def verify_prior_stage_evidence(
     )
 
 
-def verify_reverse_reference(run_id: int, source: str, repo_slug: str) -> tuple[bool, str]:
+def verify_reverse_reference(
+    run_id: int,
+    source: str,
+    target: str,
+    commit_sha: str,
+    repo_slug: str,
+) -> tuple[bool, str]:
     """Validate the earlier successful promotion that this run reverses."""
-    if run_id <= 0:
+    if (
+        run_id <= 0
+        or not FULL_SHA_RE.fullmatch(commit_sha or "")
+        or (source, target) not in REVERSE_TRANSITIONS
+    ):
         return False, "reverse-of run must be a positive integer"
     data = _read_run(run_id, repo_slug)
     if data is None:
         return False, "reverse-of run could not be read unambiguously"
     title = data.get("displayTitle")
     url = data.get("url")
+    expected_title_prefix = (
+        f"Audit-only promotion {source} for {commit_sha} "
+        f"from {target} [forward] ("
+    )
     valid = (
         data.get("databaseId") == run_id
         and data.get("conclusion") == "success"
         and data.get("workflowName") == WORKFLOW_DISPLAY_NAME
         and data.get("event") == "repository_dispatch"
         and isinstance(title, str)
-        and f"Audit-only promotion {source} for " in title
+        and title.startswith(expected_title_prefix)
+        and title.endswith(")")
         and isinstance(url, str)
         and _valid_run_url(url, repo_slug, run_id)
     )
-    return (True, url) if valid else (False, "reverse-of run is not a matching promotion")
+    return (
+        (True, url)
+        if valid
+        else (
+            False,
+            "reverse-of run does not match the exact commit and inverse transition",
+        )
+    )
 
 
 def _remote_checkpoint_ref(checkpoint: str) -> Optional[tuple[str, str]]:
@@ -289,8 +311,8 @@ def verify_checkpoint(
         return False, "checkpoint annotation has no issue trail"
     recorded = {int(value) for value in re.findall(r"#([1-9]\d*)", issue_match.group(1))}
     requested = set(issues)
-    if not requested or not requested.issubset(recorded):
-        return False, "included issues are not all recorded by the checkpoint"
+    if not requested or requested != recorded:
+        return False, "included issues do not exactly match the checkpoint issue set"
     return True, message
 
 
@@ -311,11 +333,13 @@ def verify_issues(issues: Sequence[int], repo_slug: str) -> tuple[bool, str]:
         except json.JSONDecodeError:
             return False, f"included issue #{issue_id} returned malformed data"
         expected_url = f"https://github.com/{repo_slug}/issues/{issue_id}"
+        state = data.get("state") if isinstance(data, dict) else None
         if (
             not isinstance(data, dict)
             or set(data) != {"number", "state", "url", "is_pr"}
             or data.get("number") != issue_id
-            or data.get("state") not in {"OPEN", "CLOSED"}
+            or not isinstance(state, str)
+            or state.upper() not in {"OPEN", "CLOSED"}
             or data.get("url") != expected_url
             or data.get("is_pr") is not False
         ):
@@ -587,7 +611,13 @@ def promote(
         print(f"[ERROR] {evidence_value}", file=sys.stderr)
         return 1
     if reverse_of is not None:
-        reverse_ok, reverse_reason = verify_reverse_reference(reverse_of, source, repo_slug)
+        reverse_ok, reverse_reason = verify_reverse_reference(
+            reverse_of,
+            source,
+            target,
+            exact_sha,
+            repo_slug,
+        )
         if not reverse_ok:
             print(f"[ERROR] {reverse_reason}", file=sys.stderr)
             return 1

@@ -207,6 +207,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             review_py = Path(temp_dir) / ".github" / "scripts" / "review.py"
             review_wf = Path(temp_dir) / ".github" / "workflows" / "review.yml"
             reviewers_yml = Path(temp_dir) / ".github" / "reviewers.yml"
+            promote_workflow = Path(temp_dir) / ".github" / "workflows" / "promote.yml"
             build_preview = Path(temp_dir) / "scripts" / "build_preview.py"
             smoke_preview = Path(temp_dir) / "scripts" / "smoke_preview.py"
 
@@ -215,6 +216,13 @@ class ProjectBootstrapTests(unittest.TestCase):
             self.assertTrue(review_py.is_file())
             self.assertTrue(review_wf.is_file())
             self.assertTrue(reviewers_yml.is_file())
+            self.assertTrue(promote_workflow.is_file())
+            self.assertEqual(
+                promote_workflow.read_text(),
+                (ROOT / ".github" / "workflows" / "promote.yml").read_text(),
+            )
+            self.assertIn("repository_dispatch", promote_workflow.read_text())
+            self.assertIn("no runnable build movement claimed", promote_workflow.read_text())
             self.assertTrue(build_preview.is_file())
             self.assertEqual(
                 build_preview.read_text(),

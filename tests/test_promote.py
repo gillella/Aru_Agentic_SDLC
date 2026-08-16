@@ -89,17 +89,29 @@ class EvidenceTests(unittest.TestCase):
         )
 
     @patch.object(promote, "_read_run")
-    def test_reverse_reference_must_match_target_environment(self, read_run):
+    def test_reverse_reference_binds_exact_commit_and_inverse_transition(self, read_run):
         read_run.return_value = run_data(
             workflow=promote.WORKFLOW_DISPLAY_NAME,
-            title=f"Audit-only promotion production for {SHA} from staging [forward] (token)",
+            title=(
+                f"Audit-only promotion production for {SHA} from staging "
+                f"[forward] ({'f' * 32})"
+            ),
             event="repository_dispatch",
         )
         self.assertTrue(
-            promote.verify_reverse_reference(41, "production", REPO)[0]
+            promote.verify_reverse_reference(
+                41, "production", "staging", SHA, REPO
+            )[0]
         )
         self.assertFalse(
-            promote.verify_reverse_reference(41, "staging", REPO)[0]
+            promote.verify_reverse_reference(
+                41, "production", "staging", "b" * 40, REPO
+            )[0]
+        )
+        self.assertFalse(
+            promote.verify_reverse_reference(
+                41, "staging", "preview", SHA, REPO
+            )[0]
         )
 
     @patch.object(promote, "_read_run")
@@ -144,6 +156,19 @@ class CheckpointTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("included issues", reason)
 
+    @patch.object(promote, "run_cmd")
+    def test_checkpoint_rejects_partial_issue_set(self, run_cmd):
+        message = f"issues:      #109, #110\nmerged as:   {SHA}\n"
+        run_cmd.side_effect = [
+            (0, f"{TAG_OBJECT}\trefs/tags/{CHECKPOINT}\n{SHA}\trefs/tags/{CHECKPOINT}^{{}}", ""),
+            (0, "commit\n", ""),
+            (0, TAG_OBJECT, ""),
+            (0, message, ""),
+        ]
+        ok, reason = promote.verify_checkpoint(CHECKPOINT, SHA, [109])
+        self.assertFalse(ok)
+        self.assertIn("exactly match", reason)
+
     def test_checkpoint_name_must_match_commit(self):
         ok, reason = promote.verify_checkpoint("ckpt/162-bbbbbbb", SHA, [109])
         self.assertFalse(ok)
@@ -156,13 +181,13 @@ class IssueBindingTests(unittest.TestCase):
         run_cmd.side_effect = [
             (0, json.dumps({
                 "number": 109,
-                "state": "CLOSED",
+                "state": "closed",
                 "url": f"https://github.com/{REPO}/issues/109",
                 "is_pr": False,
             }), ""),
             (0, json.dumps({
                 "number": 110,
-                "state": "OPEN",
+                "state": "open",
                 "url": f"https://github.com/{REPO}/issues/110",
                 "is_pr": False,
             }), ""),
@@ -429,7 +454,9 @@ class PromotionLifecycleTests(unittest.TestCase):
                 ),
                 0,
             )
-        reverse_reference.assert_called_once_with(66, "production", REPO)
+        reverse_reference.assert_called_once_with(
+            66, "production", "staging", SHA, REPO
+        )
         evidence_check.assert_called_once_with(41, "staging", SHA, REPO)
         self.assertEqual(dispatch.call_args.kwargs["reverse_of"], 66)
         self.assertEqual(record.call_args.kwargs["reverse_of"], 66)
@@ -508,6 +535,11 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("log_url", content)
         self.assertNotIn("environment_url", content)
         self.assertIn("included_issues", content)
+        self.assertIn('"${requested_issues}" == "${checkpoint_issues}"', content)
+        self.assertIn(
+            "Audit-only promotion ${FROM_ENV} for ${TARGET_SHA} from ${TO_ENV} [forward]",
+            content,
+        )
         self.assertIn("github-state-only", content)
         self.assertIn("no runnable build movement claimed", content)
 

@@ -69,6 +69,10 @@ jobs:
 
           checkpoint_body="$(git for-each-ref "refs/tags/${CHECKPOINT}" --format='%(contents)')"
           grep -Fqx "merged as:   ${TARGET_SHA}" <<<"${checkpoint_body}"
+          checkpoint_issue_line="$(grep -E '^issues:[[:space:]]+' <<<"${checkpoint_body}")"
+          checkpoint_issues="$(grep -oE '#[1-9][0-9]*' <<<"${checkpoint_issue_line}" | tr -d '#' | sort -n -u | paste -sd, -)"
+          requested_issues="$(tr ',' '\n' <<<"${INCLUDED_ISSUES}" | sort -n -u | paste -sd, -)"
+          [[ -n "${checkpoint_issues}" && "${requested_issues}" == "${checkpoint_issues}" ]]
           IFS=',' read -ra issue_numbers <<<"${INCLUDED_ISSUES}"
           for issue_number in "${issue_numbers[@]}"; do
             grep -Eq "^issues:[[:space:]]+.*#${issue_number}([^0-9]|$)" <<<"${checkpoint_body}"
@@ -96,7 +100,9 @@ jobs:
             [[ "$(jq -r '.conclusion' <<<"${reversed}")" == "success" ]]
             [[ "$(jq -r '.name' <<<"${reversed}")" == "Record Governed Promotion" ]]
             [[ "$(jq -r '.event' <<<"${reversed}")" == "repository_dispatch" ]]
-            [[ "$(jq -r '.display_title' <<<"${reversed}")" == *"Audit-only promotion ${FROM_ENV} for "* ]]
+            reversed_title="$(jq -r '.display_title' <<<"${reversed}")"
+            reverse_title_prefix="Audit-only promotion ${FROM_ENV} for ${TARGET_SHA} from ${TO_ENV} [forward] ("
+            [[ "${reversed_title}" == "${reverse_title_prefix}"*")" ]]
           fi
 
           echo "target_environment=${TO_ENV}" >> "${GITHUB_OUTPUT}"
