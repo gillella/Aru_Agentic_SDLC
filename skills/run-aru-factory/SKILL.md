@@ -158,26 +158,22 @@ Read-only. It must never claim, label, branch, commit, or open anything.
 
 ```
 python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py"
+python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py" --json \
+  --project /absolute/path/to/repo
 ```
 
-When present, that script reports **continuity** adapters (#46): detected apps,
-capability levels, stop-file state, and opt-in wake. **Full install-link
-diagnosis does not exist yet — it is #34.** Until it lands, check what can
-be checked from here and say plainly what you could not:
+The command reports continuity adapters and install-link diagnosis: canonical
+`$ARU_SDLC_HOME`, per-agent skill links, `run-aru-factory` invocation surfaces,
+managed governance blocks, `git`/`gh` presence, and `gh auth status` without
+printing credential values. With `--project`, it also reports the Git remote,
+`AGENTS.md` Issue-First marker, Project Board identity, Aru pre-push hook,
+`.worktrees/`, and local in-flight worktrees.
 
-- `$ARU_SDLC_HOME` resolves to the canonical repository
-- the target repo has `AGENTS.md` with the Issue-First Law
-- `git` and `gh` are present, and `gh auth status` succeeds — never print
-  credential values. **That is the GitHub identity check.** Factory helpers
-  shell out to this `gh`. GitHub MCP (`user-github` or similar) is optional
-  and non-authoritative: do not require it, do not copy a PAT into it, and
-  do not use it for lifecycle mutations.
-- the governed board resolves, via `fleet_status.py`
-- worktrees under `.worktrees/` and any in-flight claims for your agent id
+Exit `0` healthy, `2` degraded, `1` invalid. Each failed check includes a
+repair recommendation. GitHub MCP is optional and non-authoritative.
 
-Report per-agent installation state as **not yet diagnosable**, rather than
-inferring it. A confident wrong answer about setup is worse than an admitted
-gap.
+Do not treat a capability gap (Claude/Cursor same-task wake is session-only)
+as an install failure; it is reported, not repaired by this command.
 
 ## Rules that hold in every mode
 
