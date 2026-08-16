@@ -149,10 +149,21 @@ class UnresolvedThreadQueryTests(unittest.TestCase):
 class ReviewEvidencePaginationTests(unittest.TestCase):
     @staticmethod
     def review_page(head="head123", nodes=None, has_next=False, cursor=None):
+        normalized = []
+        for node in [] if nodes is None else nodes:
+            if not isinstance(node, dict):
+                normalized.append(node)
+                continue
+            node = dict(node)
+            node.setdefault("body", "")
+            if isinstance(node.get("author"), dict):
+                node["author"] = dict(node["author"])
+                node["author"].setdefault("__typename", "User")
+            normalized.append(node)
         return {"data": {"repository": {"pullRequest": {
             "headRefOid": head,
             "reviews": {
-                "nodes": [] if nodes is None else nodes,
+                "nodes": normalized,
                 "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
             },
         }}}}
@@ -165,6 +176,16 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             "reviewThreads": {
                 "nodes": [],
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+        }}}}
+
+    @staticmethod
+    def attestation_page(head="head123", nodes=None, has_next=False, cursor=None):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": head,
+            "comments": {
+                "nodes": [] if nodes is None else nodes,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
             },
         }}}}
 
@@ -201,6 +222,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             "id": "current-substantive",
             "state": "COMMENTED",
             "submittedAt": "2026-08-15T00:00:00Z",
+            "body": "Verdict: approved. The current diff is correct.",
             "author": {"login": "independent-agent"},
             "commit": {"oid": "head123"},
         }
@@ -209,6 +231,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 nodes=stale_reviews, has_next=True, cursor="review-page-2"
             ),
             self.review_page(nodes=[current_review]),
+            self.attestation_page(),
             self.thread_page(),
         ]
 
@@ -218,7 +241,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         self.assertEqual(evidence["head_oid"], "head123")
         self.assertEqual(len(evidence["reviews"]), 101)
         self.assertIn("cursor=review-page-2", gh_json.call_args_list[1].args[0])
-        self.assertEqual(gh_json.call_count, 3)
+        self.assertEqual(gh_json.call_count, 4)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -247,6 +270,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 nodes=first_page, has_next=True, cursor="review-page-2"
             ),
             self.review_page(nodes=[blocker]),
+            self.attestation_page(),
             self.thread_page(),
         ]
 
@@ -348,12 +372,218 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             "author": {"login": "peer"}, "commit": {"oid": "head123"},
         }
         gh_json.side_effect = [
-            self.review_page(nodes=[dismissed]), self.thread_page()
+            self.review_page(nodes=[dismissed]), self.attestation_page(),
+            self.thread_page()
         ]
 
         evidence = merge_pr.review_evidence(162)
 
         self.assertFalse(evidence["reviewed_head"])
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_author_thread_reply_and_graphql_bot_do_not_attest_to_head(
+        self, gh_json, _slug
+    ):
+        reviews = [
+            {
+                "id": "author-thread-reply",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-16T15:18:51Z",
+                "body": "",
+                "author": {"login": "gillella", "__typename": "User"},
+                "commit": {"oid": "head123"},
+            },
+            {
+                "id": "coderabbit-current",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-16T15:19:08Z",
+                "body": "Automated review summary",
+                "author": {"login": "coderabbitai", "__typename": "Bot"},
+                "commit": {"oid": "head123"},
+            },
+        ]
+        gh_json.side_effect = [
+            self.review_page(nodes=reviews), self.attestation_page(),
+            self.thread_page()
+        ]
+
+        evidence = merge_pr.review_evidence(215)
+
+        self.assertFalse(evidence["reviewed_head"])
+        query = " ".join(gh_json.call_args_list[0].args[0])
+        self.assertIn("__typename", query)
+        self.assertIn("body", query)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_app_actor_never_attests_to_current_head(self, gh_json, _slug):
+        app_review = {
+            "id": "app-current",
+            "state": "APPROVED",
+            "submittedAt": "2026-08-16T15:19:08Z",
+            "body": "Looks good",
+            "author": {"login": "review-app", "__typename": "App"},
+            "commit": {"oid": "head123"},
+        }
+        gh_json.side_effect = [
+            self.review_page(nodes=[app_review]), self.attestation_page(),
+            self.thread_page()
+        ]
+
+        self.assertFalse(merge_pr.review_evidence(215)["reviewed_head"])
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_substantive_same_account_review_attests_to_current_head(
+        self, gh_json, _slug
+    ):
+        head = "a" * 40
+        peer_review = {
+            "id": "peer-current",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-16T15:20:00Z",
+            "body": "Verdict: approved. I verified the current diff and tests.",
+            "author": {"login": "gillella", "__typename": "User"},
+            "commit": {"oid": head},
+        }
+        gh_json.side_effect = [
+            self.review_page(head=head, nodes=[peer_review]),
+            self.attestation_page(nodes=[{
+                "body": '<!-- aru-review-head:v1 {"agent":"cursor-1","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} -->',
+                "author": {"login": "gillella", "__typename": "User"},
+            }], head=head),
+            self.thread_page(head=head)
+        ]
+
+        evidence = merge_pr.review_evidence(215)
+
+        self.assertTrue(evidence["reviewed_head"])
+        pr = labelled("author:codex-1", "reviewed-by:cursor-1")
+        ok, message = merge_pr.check_reviews(pr, evidence)
+        self.assertTrue(ok)
+        self.assertIn("Peer attribution: cursor-1", message)
+        self.assertIn(f"current head {head[:12]}", message)
+        self.assertIn("substantive human review from gillella", message)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_malformed_attestation_comment_is_ignored(self, gh_json, _slug):
+        head = "a" * 40
+        peer_review = {
+            "id": "peer-current",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-16T15:20:00Z",
+            "body": "Verdict: approved. I verified the current diff and tests.",
+            "author": {"login": "gillella", "__typename": "User"},
+            "commit": {"oid": head},
+        }
+        valid_stamp = (
+            '<!-- aru-review-head:v1 {"agent":"cursor-1",'
+            '"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} -->'
+        )
+        bot_stamp = (
+            '<!-- aru-review-head:v1 {"agent":"bot",'
+            '"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} -->'
+        )
+        gh_json.side_effect = [
+            self.review_page(head=head, nodes=[peer_review]),
+            self.attestation_page(
+                nodes=[
+                    {
+                        "body": '<!-- aru-review-head:v1 {"agent": -->',
+                        "author": {"login": "malicious", "__typename": "User"},
+                    },
+                    {
+                        "body": bot_stamp,
+                        "author": {"login": "review-app", "__typename": "Bot"},
+                    },
+                    {
+                        "body": valid_stamp,
+                        "author": {"login": "gillella", "__typename": "User"},
+                    },
+                ],
+                head=head,
+            ),
+            self.thread_page(head=head),
+        ]
+
+        evidence = merge_pr.review_evidence(215)
+
+        self.assertEqual(
+            evidence["review_attestations"],
+            [{"agent": "cursor-1", "head": head, "github_login": "gillella"}],
+        )
+
+    def test_head_attestation_without_substantive_review_names_actual_gap(self):
+        head = "a" * 40
+        ok, message = merge_pr.check_reviews(
+            labelled("author:codex-1", "reviewed-by:cursor-1"),
+            {
+                "unresolved": 0,
+                "unfixed": 0,
+                "withdrawn": 0,
+                "reviewed_head": False,
+                "head_oid": head,
+                "review_attestations": [{"agent": "cursor-1", "head": head}],
+            },
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("no substantive review targets that commit", message)
+        self.assertNotIn("none is bound", message)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_unknown_actor_type_fails_closed(self, gh_json, _slug):
+        review = {
+            "id": "unknown-actor",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-16T15:20:00Z",
+            "body": "Verdict: approved.",
+            "author": {"login": "mystery", "__typename": None},
+            "commit": {"oid": "head123"},
+        }
+        gh_json.return_value = self.review_page(nodes=[review])
+
+        self.assertIsNone(merge_pr.review_evidence(215))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_stale_attribution_does_not_replace_current_head_review(
+        self, gh_json, _slug
+    ):
+        stale_peer = {
+            "id": "peer-stale",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-15T10:00:00Z",
+            "body": "Verdict: approved on the old head.",
+            "author": {"login": "gillella", "__typename": "User"},
+            "commit": {"oid": "old-head"},
+        }
+        author_reply = {
+            "id": "author-current",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-16T15:18:51Z",
+            "body": "Verdict: approved. Author-authored substantive review.",
+            "author": {"login": "gillella", "__typename": "User"},
+            "commit": {"oid": "head123"},
+        }
+        gh_json.side_effect = [
+            self.review_page(nodes=[stale_peer, author_reply]),
+            self.attestation_page(), self.thread_page()
+        ]
+
+        evidence = merge_pr.review_evidence(215)
+        self.assertTrue(evidence["reviewed_head"])
+        ok, message = merge_pr.check_reviews(
+            labelled("author:codex-1", "reviewed-by:cursor-1"), evidence
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("peer attribution exists for cursor-1", message.lower())
+        self.assertIn("current head head123", message)
+        self.assertIn("may be stale", message)
 
     def test_latest_verdict_uses_timestamp_not_page_order(self):
         reviews = [
@@ -1852,9 +2082,14 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                             "nodes": [{
                                 "id": "review-1", "state": "COMMENTED",
                                 "submittedAt": "2026-08-10T09:00:00Z",
-                                "author": {"login": "agent-2"},
+                                "body": "Verdict: approved.",
+                                "author": {"login": "agent-2", "__typename": "User"},
                                 "commit": {"oid": "head123"},
                             }],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                        "comments": {
+                            "nodes": [],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
                         "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
@@ -1886,9 +2121,14 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                             "nodes": [{
                                 "id": "review-1", "state": "COMMENTED",
                                 "submittedAt": "2026-08-10T09:00:00Z",
-                                "author": {"login": "agent-2"},
+                                "body": "Verdict: approved.",
+                                "author": {"login": "agent-2", "__typename": "User"},
                                 "commit": {"oid": "head123"},
                             }],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                        "comments": {
+                            "nodes": [],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
                         "commits": {

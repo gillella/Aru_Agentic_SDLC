@@ -60,9 +60,12 @@ This skill defines the declarative code review procedure for evaluating Pull Req
 - If the review has no blocking findings, complete its independent-agent
   attribution and release the claim with
   `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent
-  <AGENT_ID> --complete-review`. The resulting `reviewed-by:<id>` label plus the
-  substantive `COMMENTED` review is the same-account approval-equivalent read
-  by `merge_pr.py`.
+  <AGENT_ID> --complete-review`. The helper verifies that a substantive human
+  review covers the current head, records a machine-readable attestation that
+  binds `<AGENT_ID>` to that exact commit, then writes the `reviewed-by:<id>`
+  label. Those three facts together are the same-account approval-equivalent
+  read by `merge_pr.py`; the durable attribution label alone is never proof
+  that a later head was reviewed.
 - If blocking findings remain, release the reviewer claim with `--release`
   without adding `reviewed-by:`. The author/reviewer loop continues until every
   thread is resolved; review-round count alone is never a human gate.

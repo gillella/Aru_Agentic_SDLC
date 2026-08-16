@@ -54,6 +54,7 @@ CHECKPOINT_PREFIX = "ckpt/"
 # Completed-review attribution, written by claim_issue.py --complete-review.
 # This is the only label that satisfies the gate.
 REVIEWED_BY_LABEL = "reviewed-by:"
+REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
 # The transient claim, written by claim_review. Deliberately NOT accepted here:
 # it records that an agent took the PR off the queue, not that it read anything.
 # Treating it as attestation would let an author's own same-account review plus
@@ -67,6 +68,13 @@ MERGER_CLAIM_LABEL = "merger:"
 # approval. GitHub exposes some bot logins with a ``[bot]`` suffix and the
 # Codex connector without one, so both forms must be recognized explicitly.
 ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
+# GraphQL's review author is an Actor. Only a User can supply independent
+# review evidence; all other known actor kinds are automation or identities
+# whose human independence cannot be established. An unrecognized kind makes
+# the query unknown rather than silently becoming trusted.
+KNOWN_REVIEW_ACTOR_TYPES = {
+    "App", "Bot", "EnterpriseUserAccount", "Mannequin", "Organization", "User",
+}
 
 # Large diffs must be split unless the reviewed PR body records why a waiver is
 # necessary. Independent review remains a separate, mandatory gate.
@@ -169,7 +177,14 @@ def _reviewed_current_head(owner, name, pr_id):
         pullRequest(number:$pr) {
           headRefOid
           reviews(first:100, after:$cursor) {
-            nodes { id state submittedAt author { login } commit { oid } }
+            nodes {
+              id
+              state
+              submittedAt
+              body
+              author { login __typename }
+              commit { oid }
+            }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -221,6 +236,7 @@ def _reviewed_current_head(owner, name, pr_id):
             commit = review.get("commit")
             review_id = review.get("id")
             submitted_at = review.get("submittedAt")
+            body = review.get("body")
             if (
                 state not in {
                     "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED",
@@ -228,14 +244,17 @@ def _reviewed_current_head(owner, name, pr_id):
                 }
                 or not isinstance(review_id, str) or not review_id
                 or review_id in seen_review_ids
-                or (author is not None and not isinstance(author, dict))
+                or not isinstance(author, dict)
                 or (commit is not None and not isinstance(commit, dict))
+                or not isinstance(body, str)
             ):
                 return None
-            login = (author or {}).get("login")
+            login = author.get("login")
+            actor_type = author.get("__typename")
             oid = (commit or {}).get("oid")
             if (
-                author is not None and (not isinstance(login, str) or not login)
+                not isinstance(login, str) or not login
+                or actor_type not in KNOWN_REVIEW_ACTOR_TYPES
                 or commit is not None and (not isinstance(oid, str) or not oid)
                 or state == "PENDING" and submitted_at is not None
                 or state != "PENDING" and _parse_review_ts(submitted_at) is None
@@ -243,13 +262,117 @@ def _reviewed_current_head(owner, name, pr_id):
                 return None
             seen_review_ids.add(review_id)
             reviews.append(review)
-            if state in {"PENDING", "DISMISSED"} or is_advisory_review_account(login or ""):
+            if state in {"PENDING", "DISMISSED"} or actor_type != "User":
+                continue
+            if is_advisory_review_account(login):
+                continue
+            # In the same-account fleet, a peer's overall review and the PR
+            # author's thread replies share one GitHub login. GitHub preserves
+            # the important semantic distinction: the mandated peer review
+            # has a substantive overall body, while a thread reply is emitted
+            # as an empty COMMENTED review. Verdict reviews are substantive
+            # even when their optional body is empty.
+            if state == "COMMENTED" and not body.strip():
                 continue
             if oid == expected_head:
                 reviewed_head = True
 
         if not has_next:
             return expected_head, reviewed_head, reviews
+        next_cursor = page_info.get("endCursor")
+        if (
+            not isinstance(next_cursor, str) or not next_cursor
+            or next_cursor in seen_cursors
+        ):
+            return None
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
+def _review_head_attestations(owner, name, pr_id, expected_head):
+    """Head-bound agent attestations written by complete_review().
+
+    Pull-request comments are paginated independently from reviews and review
+    threads. Malformed markers are ignored and therefore cannot create review
+    evidence; the absence of a valid marker still fails the merge gate closed.
+    The repeated head check prevents evidence from being combined across a
+    concurrent push.
+    """
+    query = """
+    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
+      repository(owner:$owner, name:$name) {
+        pullRequest(number:$pr) {
+          headRefOid
+          comments(first:100, after:$cursor) {
+            nodes { body author { login __typename } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }"""
+    prefix = f"<!-- {REVIEW_HEAD_ATTESTATION_VERSION} "
+    cursor = None
+    seen_cursors = set()
+    attestations = []
+    while True:
+        args = [
+            "gh", "api", "graphql", "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
+        ]
+        if cursor:
+            args.extend(["-F", f"cursor={cursor}"])
+        data = _gh_json(args)
+        if not data or (isinstance(data, dict) and data.get("errors")):
+            return None
+        try:
+            pull = data["data"]["repository"]["pullRequest"]
+            connection = pull["comments"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            has_next = page_info["hasNextPage"]
+        except (KeyError, TypeError):
+            return None
+        if (
+            pull.get("headRefOid") != expected_head
+            or not isinstance(nodes, list)
+            or not isinstance(has_next, bool)
+        ):
+            return None
+        for node in nodes:
+            if not isinstance(node, dict) or not isinstance(node.get("body"), str):
+                return None
+            body = node["body"]
+            if not body.startswith(prefix):
+                continue
+            marker, separator, _rest = body.partition(" -->")
+            if not separator:
+                continue
+            raw_payload = marker[len(prefix):]
+            try:
+                payload = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                continue
+            author = node.get("author")
+            if (
+                not isinstance(author, dict)
+                or author.get("__typename") != "User"
+                or not isinstance(author.get("login"), str)
+                or not author["login"]
+                or not isinstance(payload, dict)
+                or set(payload) != {"agent", "head"}
+                or not isinstance(payload.get("agent"), str)
+                or not payload["agent"]
+                or not isinstance(payload.get("head"), str)
+                or re.fullmatch(r"[0-9a-fA-F]{40,64}", payload["head"]) is None
+            ):
+                continue
+            attestations.append({
+                "agent": payload["agent"],
+                "head": payload["head"].lower(),
+                "github_login": author["login"],
+            })
+        if not has_next:
+            return attestations
         next_cursor = page_info.get("endCursor")
         if (
             not isinstance(next_cursor, str) or not next_cursor
@@ -290,6 +413,11 @@ def review_evidence(pr_id):
     if review_result is None:
         return None
     expected_head, reviewed_head, reviews = review_result
+    review_attestations = _review_head_attestations(
+        owner, name, pr_id, expected_head
+    )
+    if review_attestations is None:
+        return None
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
@@ -392,6 +520,7 @@ def review_evidence(pr_id):
             return {
                 "head_oid": expected_head,
                 "reviews": reviews,
+                "review_attestations": review_attestations,
                 "unresolved": unresolved,
                 "unfixed": unfixed,
                 "outdated_unfixed": outdated_unfixed,
@@ -566,6 +695,58 @@ def is_advisory_review_account(login):
     return normalized.endswith("[bot]") or normalized in ADVISORY_REVIEW_ACCOUNTS
 
 
+def is_advisory_review_actor(review):
+    """Whether a review's GraphQL actor cannot provide human attestation."""
+    author = review.get("author") or {}
+    actor_type = author.get("__typename")
+    login = author.get("login") or ""
+    return (
+        actor_type is not None and actor_type != "User"
+    ) or is_advisory_review_account(login)
+
+
+def _current_head_reviewers(evidence):
+    """Known human accounts with substantive reviews on the evidenced head."""
+    if not evidence:
+        return []
+    head = evidence.get("head_oid")
+    if not isinstance(head, str) or not head:
+        return []
+    reviewers = set()
+    for review in evidence.get("reviews") or []:
+        state = (review.get("state") or "").upper()
+        author = review.get("author") or {}
+        login = author.get("login") or ""
+        actor_type = author.get("__typename")
+        oid = (review.get("commit") or {}).get("oid")
+        body = review.get("body")
+        if (
+            oid == head
+            and actor_type == "User"
+            and not is_advisory_review_actor(review)
+            and state not in {"PENDING", "DISMISSED"}
+            and (state != "COMMENTED" or isinstance(body, str) and body.strip())
+        ):
+            reviewers.add(login)
+    return sorted(reviewers)
+
+
+def _attested_head_peers(evidence, peers):
+    """Attributed peer agents whose completion stamp matches this exact head."""
+    if not evidence or "review_attestations" not in evidence:
+        return None
+    head = evidence.get("head_oid")
+    if not isinstance(head, str) or not head:
+        return []
+    peer_set = set(peers)
+    return sorted({
+        item.get("agent") for item in evidence.get("review_attestations") or []
+        if isinstance(item, dict)
+        and item.get("agent") in peer_set
+        and item.get("head") == head.lower()
+    })
+
+
 def _evidence_note(evidence):
     """What actually satisfied the review gate, for the audit line.
 
@@ -573,13 +754,25 @@ def _evidence_note(evidence):
     were withdrawn", because those justify a merge very differently.
     """
     out_addressed = evidence.get("outdated_addressed", 0) if evidence else 0
+    head = evidence.get("head_oid") if evidence else None
+    head_reviewers = _current_head_reviewers(evidence)
+    if head and head_reviewers:
+        head_note = (
+            f"current head {head[:12]} has substantive human review from "
+            f"{', '.join(head_reviewers)}"
+        )
+    else:
+        # Compatibility for pure unit callers whose handcrafted evidence
+        # predates commit/actor details. Live evidence always uses the branch
+        # above, keeping attribution and commit freshness visibly separate.
+        head_note = "reviewed at head"
     if out_addressed > 0:
         parts = [
-            "reviewed at head",
+            head_note,
             f"no blocking unresolved threads ({out_addressed} outdated with commit evidence)",
         ]
     else:
-        parts = ["reviewed at head", "no unresolved threads"]
+        parts = [head_note, "no unresolved threads"]
     if evidence and evidence.get("withdrawn"):
         parts.append(f"{evidence['withdrawn']} finding(s) withdrawn, not fixed")
     return ", ".join(parts) + "."
@@ -603,9 +796,14 @@ def check_reviews(pr, evidence):
             "Could not establish an unambiguous latest review verdict; "
             "refusing rather than trusting review page order."
         )
+    advisory_accounts = {
+        ((r.get("author") or {}).get("login") or "").lower()
+        for r in substantive if is_advisory_review_actor(r)
+    }
     blocking = [
         who for who, state in verdicts.items()
         if state == "CHANGES_REQUESTED"
+        and who.lower() not in advisory_accounts
         and not is_advisory_review_account(who)
     ]
     if blocking:
@@ -635,15 +833,6 @@ def check_reviews(pr, evidence):
             "starting with 'Withdrawn:' and why."
         )
 
-    # A review attests to the commit it was submitted against. Once head moves
-    # the attestation covers code that is no longer proposed, which otherwise
-    # lets a reviewed PR be force-pushed and merged on the stale verdict.
-    if not evidence["reviewed_head"]:
-        return False, (
-            "Every review predates the current head, so no reviewer has seen "
-            "what would merge. Re-review the current commit."
-        )
-
     # A claim means an independent agent is still reviewing. It must block
     # before any external-account or completed-attribution shortcut, otherwise
     # a bot comment can make the PR mergeable while that reviewer is working.
@@ -667,7 +856,7 @@ def check_reviews(pr, evidence):
     pr_login = ((pr.get("author") or {}).get("login") or "").lower()
     other_accounts = sorted({
         ((r.get("author") or {}).get("login") or "").lower()
-        for r in substantive
+        for r in substantive if not is_advisory_review_actor(r)
     } - {"", pr_login})
 
     # Authorship is required before any approval path can pass. Without the
@@ -684,9 +873,14 @@ def check_reviews(pr, evidence):
         )
     author = authors[0]
 
+    current_head_reviewers = set(_current_head_reviewers(evidence))
+    legacy_head_evidence = (
+        "review_attestations" not in evidence and evidence.get("reviewed_head")
+    )
     external_approvers = sorted(
         who for who, state in verdicts.items()
         if who.lower() in other_accounts
+        and (who in current_head_reviewers or legacy_head_evidence)
         and state == "APPROVED"
         and not is_advisory_review_account(who)
     )
@@ -710,7 +904,7 @@ def check_reviews(pr, evidence):
         return False, (f"The only review is from '{author}', who wrote this PR. "
                        "A self-review does not satisfy the gate.")
     if not reviewers:
-        advisory = [a for a in other_accounts if is_advisory_review_account(a)]
+        advisory = sorted(a for a in advisory_accounts if a and a != pr_login)
         if advisory:
             return False, (
                 f"Automated review from {', '.join(advisory)} is advisory; no "
@@ -722,8 +916,36 @@ def check_reviews(pr, evidence):
                        f"'{author}'. The reviewing agent must finish with "
                        f"`claim_issue.py --pr <n> --agent <id> --complete-review`.")
 
+    attested_peers = _attested_head_peers(evidence, peers)
+    if attested_peers is not None and not attested_peers:
+        head = evidence.get("head_oid")
+        head_text = (
+            f"current head {head[:12]}"
+            if isinstance(head, str) and head else "the current head"
+        )
+        return False, (
+            f"Completed peer attribution exists for {', '.join(peers)}, but "
+            f"none is bound to {head_text}. The attribution may be stale; "
+            "the peer must re-review and complete the current commit."
+        )
+    if attested_peers and not evidence.get("reviewed_head"):
+        return False, (
+            f"Peer attribution for {', '.join(attested_peers)} names the current "
+            "head, but no substantive review targets that commit. Re-review the "
+            "current commit."
+        )
+
+    # Compatibility for pure unit callers predating the attestation field.
+    # Live review_evidence always includes it, so the production merge path
+    # cannot fall back to an unbound reviewed-by label.
+    if attested_peers is None and not evidence["reviewed_head"]:
+        return False, (
+            "Every review predates the current head, so no reviewer has seen "
+            "what would merge. Re-review the current commit."
+        )
+
     note = (
-        f"{len(substantive)} review(s) from {', '.join(peers)}, "
+        f"Peer attribution: {', '.join(attested_peers or peers)}; "
         f"{_evidence_note(evidence)}"
     )
     if any((lab.get("name") or "") == "same-family-review" for lab in (pr.get("labels") or [])):

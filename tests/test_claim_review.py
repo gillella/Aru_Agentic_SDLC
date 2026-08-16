@@ -291,10 +291,11 @@ class ClaimReviewTests(unittest.TestCase):
     @patch.object(claim_issue, "_remove_reviewer_label", return_value=True)
     @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
     @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "_reviewed_head_for_completion", return_value="a" * 40)
     @patch.object(claim_issue, "_pr_labels",
                   return_value=["author:agent-1", "reviewer:agent-2"])
     def test_completing_a_held_review_attributes_and_releases(
-            self, _labels, _ensure, run, remove):
+            self, _labels, _head, _ensure, run, remove):
         """The step that had no command.
 
         fleet-worker.md told the reviewer to label the PR in prose and gave a
@@ -305,7 +306,16 @@ class ClaimReviewTests(unittest.TestCase):
             claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_OK)
         stamped = " ".join(" ".join(c.args[0]) for c in run.call_args_list)
         self.assertIn("reviewed-by:agent-2", stamped)
+        self.assertIn("aru-review-head:v1", stamped)
+        self.assertIn('"head":"' + "a" * 40 + '"', stamped)
         remove.assert_called_once()
+
+    @patch.object(claim_issue, "_reviewed_head_for_completion", return_value=None)
+    @patch.object(claim_issue, "_pr_labels",
+                  return_value=["author:agent-1", "reviewer:agent-2"])
+    def test_completion_refuses_without_current_head_review(self, _labels, _head):
+        self.assertEqual(
+            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
 
     @patch.object(claim_issue, "_pr_labels",
                   return_value=["author:agent-1", "reviewer:agent-9"])
@@ -328,10 +338,11 @@ class ClaimReviewTests(unittest.TestCase):
     @patch.object(claim_issue, "_remove_reviewer_label", return_value=False)
     @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
     @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "_reviewed_head_for_completion", return_value="b" * 40)
     @patch.object(claim_issue, "_pr_labels",
                   return_value=["author:agent-1", "reviewer:agent-2"])
     def test_a_failed_release_is_retryable_and_remains_merge_blocking(
-            self, _labels, _ensure, _run, _remove):
+            self, _labels, _head, _ensure, _run, _remove):
         # A completed attribution and a live claim deliberately leave the gate
         # blocked. Completion must report failure so the reviewer retries the
         # idempotent command instead of unknowingly stranding the PR.

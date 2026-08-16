@@ -26,16 +26,19 @@ Exit codes:
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+import merge_pr
 from common import (
     AGENT_LABEL_PREFIX,
     agent_labels,
     claimed_by,
     ensure_label,
     get_issue,
+    get_repo_slug,
     label_names,
     run_cmd,
 )
@@ -528,10 +531,38 @@ def claim_review(pr_id: int, agent: str) -> int:
 
 
 REVIEWED_BY_LABEL_PREFIX = "reviewed-by:"
+REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
 
 
 def _reviewed_by_label_for(agent: str) -> str:
     return f"{REVIEWED_BY_LABEL_PREFIX}{agent}"
+
+
+def _reviewed_head_for_completion(pr_id: int) -> str | None:
+    """Current head only when a substantive human review covers it."""
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return None
+    owner, name = slug.split("/", 1)
+    result = merge_pr._reviewed_current_head(owner, name, pr_id)
+    if result is None:
+        return None
+    head, reviewed_head, _reviews = result
+    if not reviewed_head or not re.fullmatch(r"[0-9a-fA-F]{40,64}", head):
+        return None
+    return head.lower()
+
+
+def _review_head_attestation(agent: str, head: str) -> str:
+    payload = json.dumps(
+        {"agent": agent, "head": head}, sort_keys=True, separators=(",", ":")
+    )
+    return (
+        f"<!-- {REVIEW_HEAD_ATTESTATION_VERSION} {payload} -->\n"
+        "## Review completion\n\n"
+        f"- reviewed-by: `{agent}`\n"
+        f"- reviewed-head: `{head}`\n"
+    )
 
 
 def complete_review(pr_id: int, agent: str) -> int:
@@ -566,6 +597,24 @@ def complete_review(pr_id: int, agent: str) -> int:
         print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}'. "
               "An agent may not attribute a review of its own PR.", file=sys.stderr)
         return EXIT_CONFLICT
+
+    reviewed_head = _reviewed_head_for_completion(pr_id)
+    if reviewed_head is None:
+        print(
+            f"[CONFLICT] PR #{pr_id} has no substantive human review on its "
+            "current head. Submit the review before completing attribution.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFLICT
+
+    code, _, err = run_cmd(
+        ["gh", "pr", "comment", str(pr_id), "--body",
+         _review_head_attestation(agent, reviewed_head)],
+        check=False,
+    )
+    if code != 0:
+        print(f"[ERROR] Could not stamp reviewed-head evidence: {err}", file=sys.stderr)
+        return EXIT_ERROR
 
     stamp = _reviewed_by_label_for(agent)
     if not ensure_label(stamp, "0e8a16", f"Reviewed by agent '{agent}'"):
