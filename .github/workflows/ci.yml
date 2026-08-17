@@ -251,7 +251,7 @@ jobs:
                           continue
                       with open(path, 'rb') as fh:
                           lines = sum(1 for _ in fh)
-                      if lines >= LINE_CEILING:
+                      if lines > LINE_CEILING:
                           violations.append((path, lines))
           if violations:
               print(f'error: {len(violations)} files exceed line ceiling of {LINE_CEILING}:', file=sys.stderr)
