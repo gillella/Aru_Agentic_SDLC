@@ -536,6 +536,39 @@ class ReviewDecisionTests(unittest.TestCase):
         self.assertTrue(eligible(pr(1, "author:agent-1", "family:anthropic"))["eligible"])
 
 
+class MergedReviewEligibilityTests(unittest.TestCase):
+    def test_merged_pr_is_rejected_before_review_state_queries(self):
+        candidate = pr(
+            71,
+            "author:agent-1",
+            "family:anthropic",
+            "reviewed-by:stale-agent",
+            "reviewer:agent-2",
+            decision="CHANGES_REQUESTED",
+        )
+        candidate["state"] = "MERGED"
+        candidate["mergedAt"] = "2026-08-11T00:00:00Z"
+
+        with patch.object(fnw, "review_thread_count") as thread_count, \
+             patch.object(fnw, "review_evidence") as review_evidence:
+            verdict = eligible(candidate)
+
+        self.assertFalse(verdict["eligible"])
+        self.assertEqual(verdict["reason"], "merged PRs are not reviewable")
+        thread_count.assert_not_called()
+        review_evidence.assert_not_called()
+
+    def test_merged_at_is_authoritative_even_when_state_is_stale(self):
+        candidate = pr(71, "author:agent-1", "family:anthropic")
+        candidate["state"] = "OPEN"
+        candidate["mergedAt"] = "2026-08-11T00:00:00Z"
+
+        verdict = eligible(candidate)
+
+        self.assertFalse(verdict["eligible"])
+        self.assertEqual(verdict["reason"], "merged PRs are not reviewable")
+
+
 class ParkedInReviewTests(unittest.TestCase):
     """Proves Issue #39: handing off to In Review parks the issue and progresses to next work."""
 

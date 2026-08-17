@@ -481,14 +481,20 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
     Returns {eligible, reason, cross_family, degraded}. `degraded` marks a
     same-family review taken only because the wait threshold passed.
     """
+    def no(reason):
+        return {"eligible": False, "reason": reason, "cross_family": False,
+                "degraded": False, "stale_attribution": False}
+
+    # Recovery queries may include merged PRs while close-out state is being
+    # rebuilt. They belong only to merge/close-out recovery; never let stale
+    # reviewer attribution route a closed PR back through review.
+    if is_merged(pr):
+        return no("merged PRs are not reviewable")
+
     labels = label_names(pr)
     author = _label_value(labels, "author:")
     pr_family = _label_value(labels, "family:")
     holder = reviewed_by(labels)
-
-    def no(reason):
-        return {"eligible": False, "reason": reason, "cross_family": False,
-                "degraded": False, "stale_attribution": False}
 
     # Set when a peer's completion stamp no longer names the head, so the report
     # can explain why an already-reviewed PR reappeared in the review queue.
