@@ -583,7 +583,7 @@ class PartitionTests(unittest.TestCase):
         self.assertEqual(cap["concurrent"], [])
         self.assertEqual(cap["deferred"], [(8, "path conflict on src/operator.py")])
 
-    def test_in_review_issue_is_parked_and_conflict_protected(self):
+    def test_in_review_issue_is_parked_and_releases_path_reservation(self):
         issues = [
             issue(39, "status:in-review", "agent:agent-1",
                   body="touches: src/a.py"),
@@ -594,10 +594,10 @@ class PartitionTests(unittest.TestCase):
         cap = tb.capacity(ready, held)
 
         self.assertEqual([i["number"] for i in held], [39])
-        self.assertEqual(cap["concurrent"], [])
-        self.assertEqual([n for n, _ in cap["deferred"]], [40])
+        self.assertEqual(cap["concurrent"], [40])
+        self.assertEqual(cap["deferred"], [])
 
-    def test_in_review_pr_files_unlock_declared_paths_not_in_the_diff(self):
+    def test_in_review_pr_files_cannot_restore_released_reservation(self):
         issues = [
             issue(39, "status:in-review", "agent:agent-1",
                   body="touches: src/a.py, src/unused.py"),
@@ -605,18 +605,18 @@ class PartitionTests(unittest.TestCase):
         ]
 
         _backlog, ready, held = tb.partition(issues)
-        cap = tb.capacity(ready, held, pr_files_by_issue={39: ["src/a.py"]})
+        cap = tb.capacity(ready, held, pr_files_by_issue={39: ["src/unused.py"]})
 
         self.assertEqual(cap["concurrent"], [40])
         self.assertEqual(cap["deferred"], [])
 
-    def test_standard_triage_report_uses_pr_file_mapping(self):
+    def test_standard_triage_report_ignores_in_review_pr_file_mapping(self):
         held = issue(39, "status:in-review", "agent:agent-1",
                      body="touches: src/a.py, src/unused.py")
         ready = issue(40, "status:ready", body="touches: src/unused.py")
         with patch("triage_backlog.list_open_issues", return_value=[held, ready]), \
              patch("triage_backlog.list_open_pr_files_by_issue",
-                   return_value={39: ["src/a.py"]}), \
+                   return_value={39: ["src/unused.py"]}), \
              patch("sys.stdout", new_callable=io.StringIO) as output, \
              patch("sys.argv", ["triage_backlog.py"]):
             self.assertEqual(tb.main(), 0)

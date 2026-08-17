@@ -1,4 +1,6 @@
+from contextlib import nullcontext
 import json
+import os
 import sys
 import subprocess
 import tempfile
@@ -1353,6 +1355,7 @@ def merged_pr():
         "mergeCommit": {"oid": "merge-sha"},
         "headRefName": "fix/issue-7-example",
         "headRefOid": "gated-sha",
+        "baseRefOid": "base-sha",
         "headRepository": {"name": "repo", "nameWithOwner": "owner/repo"},
         "headRepositoryOwner": {"login": "owner"},
     }
@@ -1431,6 +1434,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "isDraft": False,
             "headRefName": "fix/issue-7-example",
             "headRefOid": "gated-sha",
+            "baseRefOid": "base-sha",
             "statusCheckRollup": [
                 {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
             ],
@@ -1447,6 +1451,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "deletions": 1,
         }
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
              patch("builtins.print") as printer:
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
 
@@ -1487,6 +1493,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "isDraft": False,
             "headRefName": "fix/issue-7-example",
             "headRefOid": "gated-sha",
+            "baseRefOid": "base-sha",
             "statusCheckRollup": [
                 {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
             ],
@@ -1502,10 +1509,71 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "additions": 2,
             "deletions": 1,
         }
-        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
 
         execute.assert_called_once_with(9, fetch.return_value, "merge")
+
+
+class SerializedMergeExecutionTests(unittest.TestCase):
+    def test_repository_lock_is_shared_across_callers_for_the_same_slug(self):
+        with tempfile.TemporaryDirectory() as state_home, \
+             patch.dict(os.environ, {"XDG_STATE_HOME": state_home}), \
+             patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"):
+            with merge_pr.repository_merge_lock() as first:
+                with merge_pr.repository_merge_lock() as second:
+                    self.assertTrue(first[0])
+                    self.assertFalse(second[0])
+                    self.assertIn("another merge", second[1])
+
+    def _open_pr(self, base="base-a"):
+        return {
+            "number": 9,
+            "title": "open",
+            "body": "Closes #7",
+            "state": "OPEN",
+            "isDraft": False,
+            "headRefOid": "gated-sha",
+            "baseRefOid": base,
+            "mergeStateStatus": "CLEAN",
+            "mergeable": "MERGEABLE",
+        }
+
+    def test_base_move_inside_serialized_window_blocks_server_merge(self):
+        initial = self._open_pr("base-a")
+        fresh = self._open_pr("base-b")
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr", side_effect=[initial, fresh]), \
+             patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": "gated-sha"}), \
+             patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
+             patch.object(merge_pr, "execute_merge") as execute:
+            code = merge_pr.main()
+
+        self.assertEqual(code, merge_pr.EXIT_BLOCKED)
+        execute.assert_not_called()
+
+    def test_unavailable_repository_lock_fails_closed(self):
+        initial = self._open_pr()
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr", return_value=initial), \
+             patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": "gated-sha"}), \
+             patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
+             patch.object(merge_pr, "repository_merge_lock", return_value=nullcontext(
+                 (False, "another merge is executing for this repository")
+             )), \
+             patch.object(merge_pr, "execute_merge") as execute:
+            code = merge_pr.main()
+
+        self.assertEqual(code, merge_pr.EXIT_BLOCKED)
+        execute.assert_not_called()
 
 
 class CloseOutRecoveryTests(unittest.TestCase):
@@ -2832,6 +2900,8 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
                           return_value={"head_oid": "gated-sha"}), \
              patch.object(merge_pr, "evaluate_dod",
                           return_value=(True, list(CHECKPOINT_GATES))), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
              patch.object(merge_pr, "execute_merge",
                           return_value=(merged_pr(), "merged")), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \

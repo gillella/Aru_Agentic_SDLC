@@ -20,6 +20,9 @@ Exit codes:
 """
 
 import argparse
+from contextlib import contextmanager
+import fcntl
+import hashlib
 import json
 import math
 import os
@@ -31,6 +34,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime
+from pathlib import Path
 
 import acceptance_runner
 from common import (
@@ -102,7 +106,7 @@ _REWORK_BLOCKING_RE = re.compile(
 CLOSEOUT_RETRY_DELAYS = (5, 15, 45)
 
 PR_FIELDS = (
-    "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,author,"
+    "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,baseRefOid,author,"
     "headRefName,headRefOid,additions,deletions,changedFiles,files,reviews,"
     "statusCheckRollup,labels,"
     "mergedAt,mergeCommit,headRepository,headRepositoryOwner,isCrossRepository"
@@ -1774,6 +1778,54 @@ def repository_root():
     return os.path.dirname(common_dir) if os.path.basename(common_dir) == ".git" else None
 
 
+def _acquire_repository_merge_lock():
+    """Acquire this host's cross-clone merge lock for the current repository."""
+    slug = get_repo_slug()
+    if not slug:
+        return None, "could not resolve repository identity for merge serialization"
+    state_root = Path(
+        os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")
+    ).expanduser().resolve()
+    directory = state_root / "aru-factory" / "merge-locks"
+    descriptor = None
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(directory, 0o700)
+        identity = hashlib.sha256(slug.lower().encode("utf-8")).hexdigest()[:24]
+        path = directory / f"{identity}.lock"
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        handle = os.fdopen(descriptor, "a+", encoding="utf-8")
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        return None, f"could not open repository merge lock: {exc}"
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None, "another merge is executing for this repository"
+    except OSError as exc:
+        handle.close()
+        return None, f"could not acquire repository merge lock: {exc}"
+    return handle, "repository merge execution serialized"
+
+
+@contextmanager
+def repository_merge_lock():
+    """Hold the machine-global repository merge lock for one execution window."""
+    handle, message = _acquire_repository_merge_lock()
+    try:
+        yield handle is not None, message
+    finally:
+        if handle is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+
 def execute_merge(pr_id, pr, merge_method):
     """Runs only the server-side merge, then re-reads authoritative PR state.
 
@@ -2668,6 +2720,7 @@ def main():
         return EXIT_ERROR
 
     gated_head = pr.get("headRefOid") or "unknown"
+    gated_base = pr.get("baseRefOid") or "unknown"
     # Stays None on the resume path, where no gate is evaluated. The checkpoint
     # records that gap rather than inventing a verdict set.
     gates = None
@@ -2771,27 +2824,54 @@ def main():
             finally:
                 release_pr_head_checkout(checkout)
 
-        # Re-check head immediately before the merge command in case a push
-        # landed between DoD evaluation and execution.
-        fresh = fetch_pr(args.pr)
-        if not fresh:
-            return EXIT_ERROR
-        live = fresh.get("headRefOid") or "unknown"
-        if not heads_match(live, gated_head):
-            print(
-                f"[ERROR] Head moved to {live} after DoD checks; gated head was "
-                f"{gated_head}. No merge command was run.",
-                file=sys.stderr,
-            )
-            return EXIT_BLOCKED
-        pr = fresh
+        # Serialize the final authoritative reread plus server merge across all
+        # local clones of this repository. Releasing PR-open path reservations
+        # is safe only if another merge cannot change the base between this
+        # check and execution.
+        with repository_merge_lock() as (locked, lock_message):
+            if not locked:
+                print(f"[ERROR] {lock_message}. No merge command was run.", file=sys.stderr)
+                return EXIT_BLOCKED
+            fresh = fetch_pr(args.pr)
+            if not fresh:
+                return EXIT_ERROR
+            live = fresh.get("headRefOid") or "unknown"
+            if not heads_match(live, gated_head):
+                print(
+                    f"[ERROR] Head moved to {live} after DoD checks; gated head was "
+                    f"{gated_head}. No merge command was run.",
+                    file=sys.stderr,
+                )
+                return EXIT_BLOCKED
+            live_base = fresh.get("baseRefOid") or "unknown"
+            if (
+                gated_base == "unknown"
+                or live_base == "unknown"
+                or not heads_match(live_base, gated_base)
+            ):
+                print(
+                    f"[ERROR] Base moved to {live_base} after DoD checks; gated base was "
+                    f"{gated_base}. Rebase and reverify before merging.",
+                    file=sys.stderr,
+                )
+                return EXIT_BLOCKED
+            rebased, rebased_message = check_rebased(fresh)
+            if not rebased:
+                print(
+                    f"[ERROR] Final rebased check failed: {rebased_message}",
+                    file=sys.stderr,
+                )
+                return EXIT_BLOCKED
+            pr = fresh
 
-        print("\n=== Merge execution ===")
-        final_pr, outcome = execute_merge(args.pr, pr, args.merge_method)
-        if not final_pr:
-            print(f"  ❌ not merged          {outcome}", file=sys.stderr)
-            return EXIT_ERROR
-        print(f"  ✅ server merge        {outcome}")
+            print(f"  ✅ merge lock          {lock_message}")
+            print(f"  ✅ final base check    {rebased_message}")
+            print("\n=== Merge execution ===")
+            final_pr, outcome = execute_merge(args.pr, pr, args.merge_method)
+            if not final_pr:
+                print(f"  ❌ not merged          {outcome}", file=sys.stderr)
+                return EXIT_ERROR
+            print(f"  ✅ server merge        {outcome}")
 
     merged_sha = merge_commit_oid(final_pr) or "unknown"
     audit_ok = merged_sha != "unknown"

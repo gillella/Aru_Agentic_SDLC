@@ -449,9 +449,9 @@ def capacity(
 
     Ready count alone overstates it: two Ready issues whose touches overlap
     cannot run at the same time, and neither can one that collides with work
-    already in flight. This walks the list greedily the way the picker would.
-    In Review reservations use open-PR files when known; otherwise declared
-    touches (fail closed).
+    already in pre-PR flight. This walks the list greedily the way the picker
+    would. In Progress work reserves declared touches; In Review work releases
+    that reservation to the repository-serialized merge gate.
     """
     ready = [issue for issue in ready if not needs_human(issue.get("labels", []))]
     in_flight_paths: list[str] = []
