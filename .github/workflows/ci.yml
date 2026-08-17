@@ -178,67 +178,68 @@ jobs:
           ruff check .
 
       # Enforce 400-line maximum file size on all source files. Pre-existing
-      # legacy files over 400 lines are frozen in an explicit allowlist so
-      # newly added or non-exempted files exceeding the ceiling block CI.
+      # legacy files over 400 lines are frozen at their baseline line count
+      # so no legacy file can grow beyond its baseline, and all new files must
+      # be <= 400 lines.
       - name: Enforce File Line Ceilings
         run: |
           python -c "import os, sys
           LINE_CEILING = 400
           EXEMPTIONS = {
-              'hooks/enforce_touches.py',
-              'scripts/agent_presence.py',
-              'scripts/check_docs.py',
-              'scripts/claim_issue.py',
-              'scripts/cleanup_worktrees.py',
-              'scripts/common.py',
-              'scripts/delivery_increments.py',
-              'scripts/deploy_preview.py',
-              'scripts/doctor_local_agent_integrations.py',
-              'scripts/factory_metrics.py',
-              'scripts/fetch_next_issue.py',
-              'scripts/fetch_next_work.py',
-              'scripts/fixtures/fleet/harness.py',
-              'scripts/fleet_status.py',
-              'scripts/incident_intake.py',
-              'scripts/init_project.py',
-              'scripts/install_local_agent_integrations.sh',
-              'scripts/merge_pr.py',
-              'scripts/prd_to_issues.py',
-              'scripts/promote.py',
-              'scripts/revert_merge.py',
-              'scripts/run_fleet.py',
-              'scripts/slack_control_room.py',
-              'scripts/slack_notify.py',
-              'scripts/slack_projects.py',
-              'scripts/smoke_preview.py',
-              'scripts/spawn_ephemeral_worker.py',
-              'scripts/triage_backlog.py',
-              'scripts/verify_citations.py',
-              'sdlc_flow_visualizer/app.js',
-              'sdlc_flow_visualizer/styles.css',
-              'tests/test_acceptance_runner.py',
-              'tests/test_claim_issue.py',
-              'tests/test_claim_review.py',
-              'tests/test_cleanup_worktrees.py',
-              'tests/test_create_pr.py',
-              'tests/test_delivery_increments.py',
-              'tests/test_deploy_preview.py',
-              'tests/test_doc_freshness.py',
-              'tests/test_doctor_local_agent_integrations.py',
-              'tests/test_enforce_touches.py',
-              'tests/test_fetch_next_work.py',
-              'tests/test_fleet_status.py',
-              'tests/test_incident_intake.py',
-              'tests/test_init_project.py',
-              'tests/test_issue_selection.py',
-              'tests/test_merge_pr.py',
-              'tests/test_promote.py',
-              'tests/test_research_skill.py',
-              'tests/test_run_fleet.py',
-              'tests/test_slack_control_room.py',
-              'tests/test_slack_notify.py',
-              'tests/test_spawn_ephemeral_worker.py',
-              'tests/test_triage_backlog.py',
+              'hooks/enforce_touches.py': 1708,
+              'scripts/agent_presence.py': 928,
+              'scripts/check_docs.py': 553,
+              'scripts/claim_issue.py': 1068,
+              'scripts/cleanup_worktrees.py': 887,
+              'scripts/common.py': 914,
+              'scripts/delivery_increments.py': 585,
+              'scripts/deploy_preview.py': 978,
+              'scripts/doctor_local_agent_integrations.py': 951,
+              'scripts/factory_metrics.py': 584,
+              'scripts/fetch_next_issue.py': 683,
+              'scripts/fetch_next_work.py': 981,
+              'scripts/fixtures/fleet/harness.py': 485,
+              'scripts/fleet_status.py': 1673,
+              'scripts/incident_intake.py': 558,
+              'scripts/init_project.py': 1613,
+              'scripts/install_local_agent_integrations.sh': 768,
+              'scripts/merge_pr.py': 2954,
+              'scripts/prd_to_issues.py': 623,
+              'scripts/promote.py': 715,
+              'scripts/revert_merge.py': 497,
+              'scripts/run_fleet.py': 825,
+              'scripts/slack_control_room.py': 1400,
+              'scripts/slack_notify.py': 904,
+              'scripts/slack_projects.py': 784,
+              'scripts/smoke_preview.py': 459,
+              'scripts/spawn_ephemeral_worker.py': 788,
+              'scripts/triage_backlog.py': 613,
+              'scripts/verify_citations.py': 876,
+              'sdlc_flow_visualizer/app.js': 441,
+              'sdlc_flow_visualizer/styles.css': 615,
+              'tests/test_acceptance_runner.py': 417,
+              'tests/test_claim_issue.py': 689,
+              'tests/test_claim_review.py': 604,
+              'tests/test_cleanup_worktrees.py': 909,
+              'tests/test_create_pr.py': 461,
+              'tests/test_delivery_increments.py': 445,
+              'tests/test_deploy_preview.py': 1016,
+              'tests/test_doc_freshness.py': 645,
+              'tests/test_doctor_local_agent_integrations.py': 600,
+              'tests/test_enforce_touches.py': 2188,
+              'tests/test_fetch_next_work.py': 996,
+              'tests/test_fleet_status.py': 1373,
+              'tests/test_incident_intake.py': 413,
+              'tests/test_init_project.py': 598,
+              'tests/test_issue_selection.py': 568,
+              'tests/test_merge_pr.py': 3059,
+              'tests/test_promote.py': 599,
+              'tests/test_research_skill.py': 728,
+              'tests/test_run_fleet.py': 545,
+              'tests/test_slack_control_room.py': 1257,
+              'tests/test_slack_notify.py': 1258,
+              'tests/test_spawn_ephemeral_worker.py': 596,
+              'tests/test_triage_backlog.py': 658,
           }
           violations = []
           skip_dirs = {'.git', '.venv', '.worktrees', 'node_modules', '__pycache__', 'dist'}
@@ -247,16 +248,15 @@ jobs:
               for f in files:
                   if f.endswith(('.py', '.js', '.sh', '.css', '.html')):
                       path = os.path.normpath(os.path.join(root, f))
-                      if path in EXEMPTIONS:
-                          continue
+                      allowed = EXEMPTIONS.get(path, LINE_CEILING)
                       with open(path, 'rb') as fh:
                           lines = sum(1 for _ in fh)
-                      if lines > LINE_CEILING:
-                          violations.append((path, lines))
+                      if lines > allowed:
+                          violations.append((path, lines, allowed))
           if violations:
-              print(f'error: {len(violations)} files exceed line ceiling of {LINE_CEILING}:', file=sys.stderr)
-              for path, lines in sorted(violations):
-                  print(f'  {path}: {lines} lines', file=sys.stderr)
+              print(f'error: {len(violations)} files exceed allowed line ceiling:', file=sys.stderr)
+              for path, lines, allowed in sorted(violations):
+                  print(f'  {path}: {lines} lines (allowed max: {allowed})', file=sys.stderr)
               sys.exit(1)
           print('File line ceiling check passed.')
           "

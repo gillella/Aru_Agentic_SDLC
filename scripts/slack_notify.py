@@ -250,7 +250,7 @@ def config_for_project(config: SlackConfig, project: Any) -> SlackConfig:
     return replace(config, channel_id=project.slack_channel_id)
 
 
-def validate_alert_event(event: Dict[str, Any]) -> None:
+def validate_alert_event(event: Dict[str, Any]) -> None:  # noqa: C901, PLR0912
     """Raise ValueError when an alert event is incomplete or forbidden."""
     kind = str(event.get("type") or "").strip().lower()
     if kind in FORBIDDEN_TYPES:
@@ -759,7 +759,7 @@ def delivery_retry_pending(path: Path, key: str) -> bool:
     return bool(matches and matches[-1].get("retry_state") == "pending_retry")
 
 
-def notify_alert(
+def notify_alert(  # noqa: C901, PLR0912
     config: SlackConfig,
     event: Dict[str, Any],
     *,
@@ -871,7 +871,7 @@ def notify_alert(
     }
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Post one Aru factory Slack event.")
     parser.add_argument("--agent", required=True)
     parser.add_argument("--family", required=True)

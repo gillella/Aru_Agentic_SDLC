@@ -120,7 +120,7 @@ def identity_derived_project_id(github_repo_id: str, project_v2_id: str) -> str:
     return f"proj_repo_{digest}"
 
 
-def resolve_project_id(
+def resolve_project_id(  # noqa: C901, PLR0912
     checkout: Path,
     *,
     projects_path: Optional[Path] = None,
@@ -1013,7 +1013,7 @@ def _print_record(record: PresenceRecord, *, as_json: bool) -> None:
     )
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:  # noqa: C901, PLR0912, PLR0915
     argv_list = list(argv) if argv is not None else list(sys.argv[1:])
     known = {
         "register", "heartbeat", "set-availability", "unregister",

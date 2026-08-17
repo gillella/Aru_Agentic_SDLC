@@ -41,43 +41,6 @@ max-complexity = 12
 # checks are suppressed for test fixtures and assertions.
 "tests/*" = ["E402", "C901", "PLR0912", "PLR0915"]
 
-# Burn-down is tracked in the anti-bloat epic #144.
-"hooks/enforce_touches.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/agent_presence.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/build_preview.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/claim_issue.py" = ["C901", "PLR0912"]
-"scripts/cleanup_worktrees.py" = ["C901", "PLR0912"]
-"scripts/create_branch.py" = ["C901", "PLR0912"]
-"scripts/delivery_increments.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/deploy_preview.py" = ["C901", "PLR0912"]
-"scripts/doctor_local_agent_integrations.py" = ["C901", "PLR0912"]
-"scripts/factory_metrics.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/fetch_next_issue.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/fetch_next_work.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/fetch_pr_feedback.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/fixtures/fleet/harness.py" = ["C901", "PLR0912"]
-"scripts/fleet_status.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/init_project.py" = ["PLR0915"]
-"scripts/merge_pr.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/prd_to_issues.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/promote.py" = ["C901", "PLR0912"]
-"scripts/revert_merge.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/run_fleet.py" = ["C901", "PLR0912"]
-"scripts/slack_control_room.py" = ["C901", "PLR0912"]
-"scripts/slack_notify.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/slack_projects.py" = ["C901", "PLR0912"]
-"scripts/smoke_preview.py" = ["C901", "PLR0912"]
-"scripts/spawn_ephemeral_worker.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/triage_backlog.py" = ["C901", "PLR0912", "PLR0915"]
-"scripts/verify_citations.py" = ["C901", "PLR0912", "PLR0915"]
-
-# Pre-existing findings, frozen per file so the gate bites on new code from
-# today instead of waiting on a tree-wide cleanup. Two reasons they are not
-# fixed in this change: they sit outside this issue's touches: declaration,
-# and several pull requests are editing these same files right now, so a
-# tree-wide autofix would conflict with all of them.
-#
-
 [tool.importlinter]
 root_packages = [
     "hooks",

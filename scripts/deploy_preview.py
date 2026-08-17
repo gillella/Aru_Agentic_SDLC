@@ -314,7 +314,7 @@ def verify_run_correlation(
         return False
 
 
-def dispatch_cd_workflow(
+def dispatch_cd_workflow(  # noqa: C901, PLR0912
     commit_sha: str,
     workflow_name: str = "deploy-preview.yml",
     pre_existing_run_ids: Optional[Set[int]] = None,
@@ -548,7 +548,7 @@ def post_preview_comment(
     return True
 
 
-def find_existing_remediation_issue(commit_sha: str) -> tuple[bool, Optional[RemediationMatch]]:
+def find_existing_remediation_issue(commit_sha: str) -> tuple[bool, Optional[RemediationMatch]]:  # noqa: C901
     """Return query success and an exact-marker remediation issue match."""
     if not FULL_SHA_RE.fullmatch(commit_sha):
         return False, None
@@ -671,7 +671,7 @@ def _valid_run_url(url: str) -> bool:
     )
 
 
-def file_remediation_issue(
+def file_remediation_issue(  # noqa: C901
     issue_id: int,
     commit_sha: str,
     error_details: str,
@@ -808,7 +808,7 @@ parallel-eligible: false
     return new_issue_id
 
 
-def deploy_preview(
+def deploy_preview(  # noqa: C901, PLR0912
     commit_sha: str,
     issue_id: Optional[int] = None,
     workflow_name: str = "deploy-preview.yml",

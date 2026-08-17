@@ -658,7 +658,7 @@ class FleetRunner:
         )
         return IterationResult(phase, delay, work_type, work_number)
 
-    def run_iteration(self) -> IterationResult:
+    def run_iteration(self) -> IterationResult:  # noqa: C901, PLR0912
         if self._stop_requested():
             return IterationResult("stopping", 0.0)
         self.cycle += 1

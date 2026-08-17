@@ -292,7 +292,7 @@ def is_legacy_issue(num: int, repo_slug: Optional[str] = None) -> bool:
     return bool(repo_slug and repo_slug.strip().lower() == ARU_SDLC_REPO_SLUG.lower())
 
 
-def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str] = None) -> list[str]:
+def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str] = None) -> list[str]:  # noqa: C901, PLR0912
     """Returns the list of unmet Ready-contract elements. Empty means ready."""
     body = issue.get("body") or ""
     num = issue.get("number", 0)
@@ -412,7 +412,7 @@ def hub_path_contention(issues: list[dict[str, Any]]) -> list[tuple[str, int]]:
     return hubs
 
 
-def split_reasons(issue: dict[str, Any]) -> list[str]:
+def split_reasons(issue: dict[str, Any]) -> list[str]:  # noqa: C901, PLR0912
     """Returns concrete reasons a Ready-contract issue should be split.
 
     This is deliberately advisory: each visible oversize signal is enough to
@@ -582,7 +582,7 @@ def _print_hub_contention(issues: list[dict[str, Any]]) -> None:
         ))
 
 
-def main():
+def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Verify the Ready contract and promote Backlog issues.")
     parser.add_argument("--promote", action="store_true", help="Promote qualifying issues to Ready")
     parser.add_argument(

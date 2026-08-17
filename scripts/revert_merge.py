@@ -198,7 +198,7 @@ def get_unmerged_files(cwd: str) -> List[str]:
     return sorted(list(unmerged))
 
 
-def revert_merge_pr(
+def revert_merge_pr(  # noqa: C901, PLR0912, PLR0915
     pr_id: int,
     agent: str,
     family: str = "",

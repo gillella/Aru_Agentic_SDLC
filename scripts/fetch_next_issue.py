@@ -357,7 +357,7 @@ def is_parallel_eligible(body: str, labels: List[Dict[str, Any]]) -> bool:
     return bool(body) and "parallel-eligible: true" in body.lower()
 
 
-def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
+def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  # noqa: C901, PLR0912, PLR0915
     """Releases claims that have gone quiet.
 
     An agent that crashes mid-issue leaves it In Progress forever, and once
@@ -475,7 +475,7 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
     return released
 
 
-def build_candidates(
+def build_candidates(  # noqa: C901, PLR0912
     issues: List[Dict[str, Any]],
     agent: Optional[str],
     pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
@@ -564,7 +564,7 @@ def build_candidates(
     }
 
 
-def main():
+def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Fetch the next actionable issue for one agent.")
     parser.add_argument("--json", action="store_true", help="Output result in JSON format")
     parser.add_argument("--agent", type=str, default=None,

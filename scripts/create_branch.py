@@ -85,7 +85,7 @@ def _is_placeholder_content(body: Optional[str]) -> bool:
     return len(cleaned) < 5
 
 
-def validate_plan_depth(text: str, is_risk: bool = False) -> list[str]:
+def validate_plan_depth(text: str, is_risk: bool = False) -> list[str]:  # noqa: C901, PLR0912
     """Validates plan text and returns a list of missing or placeholder-only required sections."""
     if not text:
         return ["no plan content provided"]

@@ -903,7 +903,7 @@ def github_increment_decision(
     return url if url.startswith("https://github.com/") else None
 
 
-def _handle_sprint_decision(
+def _handle_sprint_decision(  # noqa: C901, PLR0912
     parsed: Dict[str, Any], project: ProjectRecord,
     store: Optional[DeliveryIncrementStore] = None,
     recorder: Callable[[int, Dict[str, Any], str], Optional[str]] = github_increment_decision,
@@ -1058,7 +1058,7 @@ def record_seen_id(
     return duplicate["value"]
 
 
-def handle_slack_message(
+def handle_slack_message(  # noqa: C901, PLR0912
     config: SlackConfig, registry: ProjectRegistry, payload: Dict[str, Any], seen_ids: set[str],
     comment: Callable[[str, int, str, str], bool] = github_comment,
     notify: Callable[..., Dict[str, Any]] = post_event,
