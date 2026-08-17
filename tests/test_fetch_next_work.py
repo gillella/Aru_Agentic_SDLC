@@ -733,26 +733,36 @@ class AuthorGateFixTests(unittest.TestCase):
         # both is not the author's to clear alone unless the review failure is
         # the unfixed-thread evidence hole.
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 0}):
+                          return_value={"unresolved": 0, "unfixed": 0, "reviewed_head": True}):
             self.assertIsNone(self.fix(stranded(), reason="unmet: rebased, review"))
 
     def test_unfixed_resolved_threads_are_author_fixable(self):
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 2}):
+                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}):
             found = self.fix(stranded(), reason="unmet: review")
         self.assertIsNotNone(found)
         self.assertEqual(found["unmet_gates"], ["review-evidence"])
 
     def test_unmet_review_without_unfixed_threads_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 0}):
+                          return_value={"unresolved": 0, "unfixed": 0, "reviewed_head": True}):
             self.assertIsNone(self.fix(stranded(), reason="unmet: review"))
 
     def test_unfixed_threads_plus_rebase_are_both_author_work(self):
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 1}):
+                          return_value={"unresolved": 0, "unfixed": 1, "reviewed_head": True}):
             found = self.fix(stranded(), reason="unmet: rebased, review")
         self.assertEqual(found["unmet_gates"], ["rebased", "review-evidence"])
+
+    def test_unfixed_without_current_head_review_stays_a_peer_gate(self):
+        with patch.object(fnw, "review_evidence",
+                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": False}):
+            self.assertIsNone(self.fix(stranded(), reason="unmet: review"))
+
+    def test_unfixed_without_peer_attribution_stays_a_peer_gate(self):
+        with patch.object(fnw, "review_evidence",
+                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}):
+            self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
 
     def test_unresolved_threads_stay_ordinary_feedback(self):
         self.assertIsNone(self.fix(stranded(threads=2)))
@@ -810,7 +820,7 @@ class GateFixSelectionTests(unittest.TestCase):
 
     def test_unfixed_review_is_routed_as_author_feedback(self):
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 2}):
+                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}):
             res = self.select_with(stranded(), reason="unmet: review")
         self.assertEqual(res["work"]["type"], "feedback")
         self.assertEqual(res["work"]["skill"], "address-pr-feedback")

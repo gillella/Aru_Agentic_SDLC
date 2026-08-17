@@ -466,6 +466,89 @@ class PrFileReservationTests(unittest.TestCase):
         mapping = fetch_next_issue.pr_files_by_issue_from_prs([record])
         self.assertEqual(mapping[20], ["src/a.py"])
 
+    def _graphql_page(self, nodes, page_info):
+        return {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "pageInfo": page_info,
+                        "nodes": nodes,
+                    }
+                }
+            }
+        }
+
+    def test_rest_rename_locks_previous_filename(self):
+        node = {
+            "number": 7,
+            "body": "Closes #20",
+            "headRefName": "feat/issue-20-a",
+            "changedFiles": 1,
+            "files": {"nodes": [{"path": "src/new.py", "changeType": "RENAMED"}]},
+        }
+        graphql = self._graphql_page([node], {"hasNextPage": False, "endCursor": None})
+        rest = [{
+            "filename": "src/new.py",
+            "status": "renamed",
+            "previous_filename": "src/old.py",
+        }]
+
+        def fake_gh(cmd):
+            if cmd[:3] == ["gh", "api", "graphql"]:
+                return graphql
+            if "repos/o/r/pulls/7/files" in cmd:
+                return rest
+            return None
+
+        with patch.object(fetch_next_issue, "get_repo_slug", return_value="o/r"), \
+             patch.object(fetch_next_issue, "run_gh_json", side_effect=fake_gh):
+            mapping = fetch_next_issue.list_open_pr_files_by_issue()
+        self.assertEqual(mapping[20], ["src/new.py", "src/old.py"])
+
+    def test_missing_page_info_fails_closed(self):
+        node = {
+            "number": 7,
+            "body": "Closes #20",
+            "headRefName": "feat/issue-20-a",
+            "changedFiles": 1,
+            "files": {"nodes": [{"path": "src/a.py"}]},
+        }
+        graphql = self._graphql_page([node], None)
+        graphql["data"]["repository"]["pullRequests"].pop("pageInfo", None)
+
+        with patch.object(fetch_next_issue, "get_repo_slug", return_value="o/r"), \
+             patch.object(fetch_next_issue, "run_gh_json", return_value=graphql):
+            self.assertIsNone(fetch_next_issue.load_open_pr_file_records())
+            self.assertEqual(fetch_next_issue.list_open_pr_files_by_issue(), {})
+
+    def test_empty_page_info_fails_closed(self):
+        node = {
+            "number": 7,
+            "body": "Closes #20",
+            "headRefName": "feat/issue-20-a",
+            "changedFiles": 1,
+            "files": {"nodes": [{"path": "src/a.py"}]},
+        }
+        graphql = self._graphql_page([node], {})
+
+        with patch.object(fetch_next_issue, "get_repo_slug", return_value="o/r"), \
+             patch.object(fetch_next_issue, "run_gh_json", return_value=graphql):
+            self.assertIsNone(fetch_next_issue.load_open_pr_file_records())
+
+    def test_non_object_page_info_fails_closed(self):
+        node = {
+            "number": 7,
+            "body": "Closes #20",
+            "headRefName": "feat/issue-20-a",
+            "changedFiles": 1,
+            "files": {"nodes": [{"path": "src/a.py"}]},
+        }
+        graphql = self._graphql_page([node], "bad")
+
+        with patch.object(fetch_next_issue, "get_repo_slug", return_value="o/r"), \
+             patch.object(fetch_next_issue, "run_gh_json", return_value=graphql):
+            self.assertIsNone(fetch_next_issue.load_open_pr_file_records())
+
 
 def fetch_next_issue_claim_conflict():
     import claim_issue

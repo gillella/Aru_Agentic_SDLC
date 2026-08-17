@@ -41,6 +41,14 @@ from update_issue_status import update_status
 ISSUE_IN_BRANCH = re.compile(r"issue-(\d+)", re.IGNORECASE)
 CLOSES_ISSUE = re.compile(r"\bcloses\s+#(\d+)\b", re.IGNORECASE)
 RENAME_CHANGE_TYPES = frozenset({"RENAMED"})
+REST_STATUS_TO_CHANGE = {
+    "renamed": "RENAMED",
+    "added": "ADDED",
+    "removed": "DELETED",
+    "modified": "MODIFIED",
+    "copied": "COPIED",
+    "changed": "CHANGED",
+}
 OPEN_PR_FILES_QUERY = """
 query($owner:String!, $repo:String!, $cursor:String) {
   repository(owner:$owner, name:$repo) {
@@ -181,8 +189,38 @@ def _pr_files_page(owner: str, repo: str, cursor: Optional[str]) -> Optional[Dic
         return None
 
 
+def _rest_pr_files(owner: str, repo: str, number: int) -> Optional[List[Dict[str, Any]]]:
+    """REST file list with previous_filename; GraphQL has no rename source path."""
+    if not isinstance(number, int):
+        return None
+    data = run_gh_json([
+        "gh", "api",
+        f"repos/{owner}/{repo}/pulls/{number}/files",
+        "--paginate",
+    ])
+    if not isinstance(data, list):
+        return None
+    files: List[Dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            return None
+        path = entry.get("filename")
+        if not isinstance(path, str) or not path:
+            return None
+        record: Dict[str, Any] = {"path": path}
+        status = str(entry.get("status") or "").lower()
+        change = REST_STATUS_TO_CHANGE.get(status)
+        if change:
+            record["changeType"] = change
+        previous = entry.get("previous_filename")
+        if isinstance(previous, str) and previous:
+            record["previous_filename"] = previous
+        files.append(record)
+    return files
+
+
 def load_open_pr_file_records() -> Optional[List[Dict[str, Any]]]:
-    """GraphQL open-PR file snapshots, or None when the list cannot be trusted."""
+    """Open-PR file snapshots, or None when the list cannot be trusted."""
     slug = get_repo_slug()
     if not slug or "/" not in slug:
         return None
@@ -198,17 +236,26 @@ def load_open_pr_file_records() -> Optional[List[Dict[str, Any]]]:
             if not isinstance(node, dict):
                 return None
             records.append(_normalize_pr_file_record(node))
-        info = page.get("pageInfo") or {}
-        if not info.get("hasNextPage"):
-            return records
+        info = page.get("pageInfo")
+        if not isinstance(info, dict) or not info:
+            return None
+        has_next = info.get("hasNextPage")
+        if not isinstance(has_next, bool):
+            return None
+        if not has_next:
+            break
         cursor = info.get("endCursor")
         if not cursor or cursor in seen:
             return None
         seen.add(cursor)
+    for record in records:
+        files = _rest_pr_files(owner, repo, record["number"])
+        record["files"] = [] if files is None else files
+    return records
 
 
 def attach_open_pr_file_snapshots(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Overlay GraphQL path/changeType/changedFiles onto an existing PR list."""
+    """Overlay REST file paths and GraphQL changedFiles onto an existing PR list."""
     records = load_open_pr_file_records()
     if records is None:
         return prs

@@ -406,6 +406,19 @@ def _author_can_repair_review(pr: dict[str, Any]) -> bool:
     evidence = review_evidence(pr["number"])
     if not evidence:
         return False
+    if not evidence.get("reviewed_head"):
+        return False
+    labels = label_names(pr)
+    author = _label_value(labels, "author:")
+    peers = [
+        name[len("reviewed-by:"):]
+        for name in labels
+        if name.startswith("reviewed-by:")
+        and name[len("reviewed-by:"):]
+        and name[len("reviewed-by:"):] != author
+    ]
+    if not peers:
+        return False
     if int(evidence.get("unresolved") or 0) > 0:
         return False
     return int(evidence.get("unfixed") or 0) > 0
