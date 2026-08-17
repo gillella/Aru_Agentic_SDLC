@@ -897,11 +897,16 @@ def render_human(payload: dict) -> str:
     tasks = presence.get("tasks") or []
     lines.append(f"presence_tasks: {len(tasks)}")
     for task in tasks[:8]:
+        cooldown = ""
+        if task.get("cooldown_reason"):
+            cooldown += f" cooldown_reason={task['cooldown_reason']}"
+        if task.get("cooldown_until"):
+            cooldown += f" cooldown_until={task['cooldown_until']}"
         lines.append(
             f"  presence {task.get('agent_id')}: "
             f"availability={task.get('availability')} "
             f"project={task.get('project_id')} "
-            f"heartbeat={task.get('last_heartbeat') or 'unknown'}"
+            f"heartbeat={task.get('last_heartbeat') or 'unknown'}{cooldown}"
         )
     for note in presence.get("wake_limitations") or []:
         lines.append(f"wake_limitation: {note}")

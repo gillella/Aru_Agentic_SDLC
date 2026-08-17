@@ -32,6 +32,7 @@ from slack_notify import (  # noqa: E402
     sanitize_event,
     secrets_from_config,
     validate_alert_event,
+    validate_availability_event,
     main,
 )
 from slack_projects import ProjectRegistry  # noqa: E402
@@ -1252,6 +1253,79 @@ class SlackNotifyTests(unittest.TestCase):
             self.assertEqual(
                 mocked_notify.call_args.kwargs["repo_dir"], str(checkout.resolve())
             )
+
+    def test_cooling_transition_requires_reason_and_accepts_retry_time(self):
+        event = {
+            "type": "availability",
+            "agent": "codex-1",
+            "family": "openai",
+            "repo": "owner/repo",
+            "project_id": "PVT_test",
+            "state": "cooling-down",
+            "text": "credit-exhausted; eligibility recheck scheduled",
+            "cooldown_reason": "credit-exhausted",
+            "retry_at": "2026-08-17T06:00:00Z",
+        }
+        validate_availability_event(event)
+        invalid = dict(event)
+        invalid.pop("cooldown_reason")
+        with self.assertRaisesRegex(ValueError, "cooldown_reason"):
+            validate_availability_event(invalid)
+
+    def test_availability_transition_format_includes_reason_and_retry(self):
+        event = {
+            "type": "availability",
+            "agent": "codex-1",
+            "family": "openai",
+            "repo": "owner/repo",
+            "project_id": "PVT_test",
+            "state": "cooling-down",
+            "text": "eligibility recheck scheduled",
+            "cooldown_reason": "credit-exhausted",
+            "retry_at": "2026-08-17T06:00:00Z",
+            "issue": 42,
+        }
+        msg = format_event(event)
+        self.assertIn("credit-exhausted", msg)
+        self.assertIn("retry_at=2026-08-17T06:00:00Z", msg)
+
+    def test_repeated_availability_transition_is_deduped(self):
+        event = {
+            "type": "availability",
+            "agent": "codex-1",
+            "family": "openai",
+            "repo": "owner/repo",
+            "project_id": "proj_test",
+            "state": "cooling-down",
+            "text": "credit-exhausted; eligibility recheck scheduled",
+            "cooldown_reason": "credit-exhausted",
+            "dedupe_key": "availability:cycle-1:cooling-down",
+        }
+        delivered = []
+        cache = DedupeCache()
+        first = post_event(
+            sample_config(), event,
+            transport=lambda *_args: delivered.append("posted") or {"ok": True},
+            cache=cache,
+        )
+        second = post_event(
+            sample_config(), event,
+            transport=lambda *_args: delivered.append("posted") or {"ok": True},
+            cache=cache,
+        )
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["deduped"])
+        self.assertEqual(delivered, ["posted"])
+
+        later = dict(event)
+        later["dedupe_key"] = "availability:cycle-2:cooling-down"
+        third = post_event(
+            sample_config(), later,
+            transport=lambda *_args: delivered.append("posted") or {"ok": True},
+            cache=cache,
+        )
+        self.assertTrue(third["ok"])
+        self.assertEqual(delivered, ["posted", "posted"])
 
 
 if __name__ == "__main__":

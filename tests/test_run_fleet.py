@@ -75,7 +75,7 @@ class RunnerFixture(unittest.TestCase):
         return rf.RunnerConfig(**values)
 
     def runner(self, commands, agent_runner=lambda _argv, _cwd: 0, sleeper=lambda _seconds: None,
-               presence_store=None, project_id=None):
+               presence_store=None, project_id=None, transition_notifier=None):
         return rf.FleetRunner(
             self.config(),
             command_runner=commands,
@@ -85,10 +85,36 @@ class RunnerFixture(unittest.TestCase):
             clock=lambda: datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc),
             presence_store=presence_store,
             project_id=project_id,
+            transition_notifier=transition_notifier,
         )
 
 
 class AdapterTests(RunnerFixture):
+    def test_availability_transition_uses_project_routed_slack_helper(self):
+        event = {
+            "state": "cooling-down",
+            "text": "rate-limited; eligibility recheck scheduled",
+            "cooldown_reason": "rate-limited",
+            "retry_at": "2026-08-13T12:05:00Z",
+            "work_type": "issue",
+            "work_number": 194,
+            "dedupe_key": "availability:cycle-1:cooling-down",
+        }
+        with patch.object(
+            rf, "run_command", return_value=rf.CommandResult(0),
+        ) as run:
+            rf.post_availability_transition(
+                self.config(), "proj_alpha", event,
+            )
+        argv = run.call_args.args[0]
+        self.assertIn("slack_notify.py", argv[1])
+        self.assertEqual(argv[argv.index("--project-id") + 1], "proj_alpha")
+        self.assertEqual(argv[argv.index("--issue") + 1], "194")
+        self.assertEqual(
+            argv[argv.index("--dedupe-key") + 1],
+            "availability:cycle-1:cooling-down",
+        )
+
     def test_stuck_helper_becomes_a_retryable_timeout_result(self):
         process = unittest.mock.Mock(pid=9876, returncode=None)
         process.communicate.side_effect = [
@@ -107,16 +133,22 @@ class AdapterTests(RunnerFixture):
 
     def test_child_is_signal_isolated_and_reports_its_pid(self):
         child = unittest.mock.Mock(pid=4321)
-        child.wait.return_value = 0
+        child.communicate.return_value = (None, "429 rate limit\n")
+        child.returncode = 75
         started = []
 
-        with patch.object(rf.subprocess, "Popen", return_value=child) as spawn:
-            code = rf.run_agent(["agent", "one unit"], self.repo, started.append)
+        with (
+            patch.object(rf.subprocess, "Popen", return_value=child) as spawn,
+            redirect_stderr(io.StringIO()),
+        ):
+            result = rf.run_agent(["agent", "one unit"], self.repo, started.append)
 
-        self.assertEqual(code, 0)
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("rate limit", result.stderr)
         self.assertEqual(started, [4321])
         spawn.assert_called_once_with(
-            ["agent", "one unit"], cwd=str(self.repo), start_new_session=True,
+            ["agent", "one unit"], cwd=str(self.repo),
+            stderr=rf.subprocess.PIPE, text=True, start_new_session=True,
         )
 
     def test_custom_adapter_is_argv_only_and_prompt_stays_one_argument(self):
@@ -247,13 +279,99 @@ class IterationTests(RunnerFixture):
             {
                 "version", "pid", "child_pid", "agent", "family", "repository",
                 "phase", "cycle", "retry_count", "fleet_state",
-                "state_fingerprint", "next_retry_at", "terminal_reason", "updated_at",
+                "state_fingerprint", "next_retry_at", "cooldown_reason",
+                "terminal_reason", "updated_at",
             },
         )
         serialized = json.dumps(state).lower()
         self.assertNotIn("prompt", serialized)
         self.assertNotIn("token", serialized)
         self.assertNotIn("title", serialized)
+
+    def test_cooldown_recheck_capped_at_five_minutes(self):
+        """Backoff delay for agent_unavailable_wait is capped at cooldown_recheck_seconds."""
+        commands = FakeCommands([fleet("waiting")], [selection("issue", 1)])
+        cfg = self.config(cooldown_recheck_seconds=300.0)
+        r = rf.FleetRunner(
+            cfg,
+            command_runner=commands,
+            agent_runner=lambda *_: 1,
+            sleeper=lambda _seconds: None,
+            random_value=lambda: 0.5,
+            clock=lambda: datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc),
+        )
+        # Force high retry count to get large backoff
+        r.retry_count = 20
+        result = r.run_iteration()
+        self.assertEqual(result.phase, "agent_unavailable_wait")
+        self.assertLessEqual(result.delay, 300.0)
+
+    def test_child_credit_failure_logs_cooldown_reason(self):
+        """Non-zero child exit classifies failure reason in log."""
+        from run_fleet import classify_child_failure
+        self.assertEqual(classify_child_failure(73), "credit-exhausted")
+        self.assertEqual(classify_child_failure(1, "402 billing error"), "credit-exhausted")
+        self.assertEqual(classify_child_failure(75), "rate-limited")
+        self.assertEqual(classify_child_failure(1, "429 rate limit exceeded"), "rate-limited")
+        self.assertEqual(classify_child_failure(69), "provider-outage")
+        self.assertEqual(classify_child_failure(1, "503 service unavailable"), "provider-outage")
+        self.assertEqual(classify_child_failure(1), "child-crash")
+
+    def test_child_stderr_classifies_provider_failure_in_runner(self):
+        commands = FakeCommands([fleet()], [selection("issue", 1)])
+        notices = []
+        runner = self.runner(
+            commands,
+            agent_runner=lambda *_: rf.CommandResult(
+                1, "", "503 service unavailable",
+            ),
+            transition_notifier=notices.append,
+        )
+
+        result = runner.run_iteration()
+
+        self.assertEqual(result.phase, "agent_unavailable_wait")
+        self.assertEqual(notices[0]["cooldown_reason"], "provider-outage")
+
+    def test_repeated_failure_posts_one_transition_until_successful_requery(self):
+        commands = FakeCommands(
+            [fleet(), fleet(), fleet()],
+            [selection("issue", 1), selection("issue", 1), selection("issue", 2)],
+        )
+        notices = []
+        child_codes = iter((73, 73, 0))
+        runner = self.runner(
+            commands,
+            agent_runner=lambda *_: next(child_codes),
+            transition_notifier=notices.append,
+        )
+
+        runner.run_iteration()
+        runner.run_iteration()
+        runner.run_iteration()
+
+        self.assertEqual([event["state"] for event in notices], ["cooling-down", "returned"])
+        self.assertEqual(notices[0]["cooldown_reason"], "credit-exhausted")
+        self.assertEqual(notices[1]["work_number"], 2)
+
+    def test_transferred_work_is_not_reused_after_cooldown(self):
+        commands = FakeCommands(
+            [fleet(), fleet()],
+            [selection("issue", 1), selection("issue", 2)],
+        )
+        prompts = []
+        child_codes = iter((75, 0))
+        runner = self.runner(
+            commands,
+            agent_runner=lambda argv, _cwd: prompts.append(argv[-1]) or next(child_codes),
+        )
+
+        runner.run_iteration()
+        result = runner.run_iteration()
+
+        self.assertEqual(result.work_number, 2)
+        self.assertIn("#2", prompts[-1])
+        self.assertNotIn("#1", prompts[-1])
 
 
 class LifecycleTests(RunnerFixture):
@@ -431,6 +549,24 @@ class LifecycleTests(RunnerFixture):
             1.0,
         )
 
+    def test_cooldown_recheck_cli_is_capped_at_five_minutes(self):
+        captured = {}
+
+        def capture_runner(config, **_kwargs):
+            captured["seconds"] = config.cooldown_recheck_seconds
+            return unittest.mock.Mock(run_once=lambda: 0)
+
+        with (
+            patch.object(rf, "validate_repo", return_value=self.repo),
+            patch.object(rf, "FleetRunner", side_effect=capture_runner),
+        ):
+            code = rf.main([
+                "once", "--repo", str(self.repo), "--agent", "codex-1",
+                "--family", "openai", "--cooldown-recheck", "600",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(captured["seconds"], 300.0)
+
     def test_complete_loop_exits_only_after_explicit_stop_file(self):
         commands = FakeCommands([fleet("complete", issues=0)])
         runner = self.runner(commands)
@@ -510,6 +646,33 @@ class LifecycleTests(RunnerFixture):
 
 
 class PresenceHookTests(RunnerFixture):
+    def test_failure_records_reason_heartbeat_and_next_probe_in_presence_and_state(self):
+        import agent_presence as ap
+
+        clock = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+        store = ap.PresenceStore(
+            self.root / "presence-cooldown.json",
+            clock=lambda: clock,
+        )
+        commands = FakeCommands([fleet()], [selection("issue", 194)])
+        runner = self.runner(
+            commands,
+            agent_runner=lambda *_: 75,
+            presence_store=store,
+            project_id="proj_alpha",
+        )
+
+        runner.run_iteration()
+
+        record = store.get("codex-1")
+        self.assertEqual(record.availability, "cooling-down")
+        self.assertEqual(record.cooldown_reason, "rate-limited")
+        self.assertEqual(record.last_heartbeat, "2026-08-13T12:00:00Z")
+        self.assertEqual(record.cooldown_until, "2026-08-13T12:00:20Z")
+        state = runner.store.read()
+        self.assertEqual(state["cooldown_reason"], "rate-limited")
+        self.assertEqual(state["next_retry_at"], "2026-08-13T12:00:20Z")
+
     def test_runner_registers_and_updates_presence_without_claim_apis(self):
         import agent_presence as ap
 

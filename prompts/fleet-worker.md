@@ -56,6 +56,22 @@ python3 "$ARU_SDLC_HOME/scripts/agent_presence.py" register \
 python3 "$ARU_SDLC_HOME/scripts/agent_presence.py" heartbeat --agent <AGENT_ID>
 ```
 
+Credit exhaustion, rate limits, provider outages, and failed child sessions are
+temporary, project-scoped capacity reductions. Record `cooling-down` with the
+classified reason and a local next-probe time when one is known. Cooling tasks
+are omitted from new non-claiming role polls; available peers continue. Recheck
+eligibility within five minutes, but do not Slack-post heartbeat or retry ticks.
+Post one concise project-channel `availability` event only when entering
+cooldown or successfully returning.
+
+A claim stays protected during its warning and takeover windows. Staleness is
+not takeover authority: takeover additionally requires affirmative evidence of
+no live process, no recent branch activity, and an explicitly resumable work
+state. Presence remains advisory and never releases the claim. On recovery,
+re-read the picker before launching a child; only a successful child session
+returns the task to available. Never reuse the pre-cooldown work number or
+reclaim work transferred while the task was away.
+
 On an agent that discovers skills, `run-aru-factory` routes loop mode here.
 The GitHub board is the session store — context compaction or an app-native
 wake recovers by asking the picker, not by reading a local handoff file. This
@@ -406,6 +422,10 @@ machine sleep, or power-off may physically stop execution. Report those as
 platform limits if observed; instructions cannot honestly override them.
 When credits are exhausted, post `hitl` once (deduped) before the platform
 stops the task.
+
+If the product cannot wake this same task, it remains unavailable after a
+termination until the operator explicitly reopens it. A new scheduled session
+may recover from GitHub, but it is not evidence that the original task resumed.
 
 ### Slack epic splits
 
