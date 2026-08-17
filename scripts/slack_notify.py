@@ -297,7 +297,7 @@ def validate_alert_event(event: Dict[str, Any]) -> None:  # noqa: C901, PLR0912
     event["type"] = kind
 
 
-def validate_availability_event(event: Dict[str, Any]) -> None:
+def validate_availability_event(event: Dict[str, Any]) -> None:  # noqa: C901, PLR0912
     """Validate one concise project-channel availability transition."""
     kind = str(event.get("type") or "").strip().lower()
     if kind != AVAILABILITY_EVENT:
