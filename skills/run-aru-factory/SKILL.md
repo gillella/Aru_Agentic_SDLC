@@ -173,6 +173,8 @@ printing credential values. With `--project`, it also reports the Git remote,
 
 Exit `0` healthy, `2` degraded, `1` invalid. Each failed check includes a
 repair recommendation. GitHub MCP is optional and non-authoritative.
+When `gh` or GitHub API connectivity fails, coordination halts gracefully without
+secondary local task queues or ungated merges (see [docs/degraded-mode.md](../../docs/degraded-mode.md)).
 
 Do not treat a capability gap (Claude/Cursor same-task wake is session-only)
 as an install failure; it is reported, not repaired by this command.
