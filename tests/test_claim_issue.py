@@ -1,7 +1,7 @@
 import json
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -683,6 +683,90 @@ class ClaimAgeReaperTests(unittest.TestCase):
         self.assertEqual(claim_issue.reap_stale_merges(0), [])
         run_cmd.assert_not_called()
         fetch_timeline.assert_not_called()
+
+
+class DummyPresenceStore:
+    def __init__(self, records=None, error=None, ttl_seconds=300):
+        self.records = records or {}
+        self.error = error
+        self.heartbeat_ttl_seconds = ttl_seconds
+
+    def get(self, agent_id):
+        if self.error:
+            raise self.error
+        return self.records.get(agent_id)
+
+
+class DummyRecord:
+    def __init__(self, agent_id, availability="available", last_heartbeat=""):
+        self.agent_id = agent_id
+        self.availability = availability
+        self.last_heartbeat = last_heartbeat
+
+
+class ClaimIssueTests(unittest.TestCase):
+    def test_absent_agent_reduced_reap_threshold(self):
+        store = DummyPresenceStore(records={})
+        hours, reason = claim_issue._effective_reap_threshold("absent-agent", 4, store=store)
+        self.assertEqual(hours, 2.0)
+        self.assertIn("absent from presence registry", reason)
+
+    def test_live_agent_full_reap_threshold(self):
+        now = datetime.now(timezone.utc)
+        fresh_hb = now.isoformat().replace("+00:00", "Z")
+        store = DummyPresenceStore(records={
+            "live-agent": DummyRecord("live-agent", availability="available", last_heartbeat=fresh_hb)
+        })
+        hours, reason = claim_issue._effective_reap_threshold("live-agent", 4, store=store, now=now)
+        self.assertEqual(hours, 4.0)
+        self.assertEqual(reason, "live agent")
+
+    def test_recent_claim_never_reaped(self):
+        store = DummyPresenceStore(records={})
+        hours, _ = claim_issue._effective_reap_threshold("absent-agent", 4, store=store)
+        # 0.5h claim is younger than the 2.0h reduced threshold
+        self.assertLess(0.5, hours)
+
+    def test_missing_presence_fallback(self):
+        store = DummyPresenceStore(error=RuntimeError("disk unreadable"))
+        import io
+        fake_stderr = io.StringIO()
+        with patch("sys.stderr", fake_stderr):
+            hours, reason = claim_issue._effective_reap_threshold("any-agent", 4, store=store)
+        self.assertEqual(hours, 4.0)
+        self.assertIn("fallback", reason)
+        self.assertIn("[WARN]", fake_stderr.getvalue())
+
+    def test_reduced_threshold_floor_1h(self):
+        store = DummyPresenceStore(records={})
+        # Base 1.5h -> half is 0.75h -> floored at 1.0h
+        hours, _ = claim_issue._effective_reap_threshold("absent-agent", 1.5, store=store)
+        self.assertEqual(hours, 1.0)
+        # Base 1.0h -> half is 0.5h -> floored at 1.0h
+        hours_one, _ = claim_issue._effective_reap_threshold("absent-agent", 1.0, store=store)
+        self.assertEqual(hours_one, 1.0)
+
+    def test_reap_output_explains_threshold(self):
+        import io
+        fake_stderr = io.StringIO()
+        store = DummyPresenceStore(records={})
+        now = datetime.now(timezone.utc)
+        claimed_at = (now - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+
+        with patch("sys.stderr", fake_stderr), \
+             patch.object(claim_issue, "run_cmd") as mock_cmd, \
+             patch.object(claim_issue, "fetch_paginated_gh_api") as mock_timeline:
+            mock_cmd.side_effect = [
+                (0, json.dumps([{"number": 42, "labels": [{"name": "reviewer:absent-agent"}], "reviews": []}]), ""),
+                (0, "", ""),
+            ]
+            mock_timeline.return_value = [{"event": "labeled", "label": {"name": "reviewer:absent-agent"}, "created_at": claimed_at}]
+            released = claim_issue.reap_stale_reviews(4, presence_store=store, now=now)
+            self.assertEqual(released, [42])
+            output = fake_stderr.getvalue()
+            self.assertIn("Released stale review claim on PR #42", output)
+            self.assertIn("absent from presence registry", output)
+            self.assertIn("claim age > 2h", output)
 
 
 if __name__ == "__main__":

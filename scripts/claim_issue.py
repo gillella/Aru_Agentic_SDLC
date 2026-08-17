@@ -30,6 +30,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
 import merge_pr
 from common import (
@@ -897,7 +898,67 @@ def _revalidate_claims(prs: list, prefix: str, claimant, expected: list):
     return refreshed
 
 
-def reap_stale_merges(hours: int = 4) -> list:
+def _effective_reap_threshold(
+    holder: str,
+    base_hours: int | float,
+    store: Any = None,
+    now: Optional[datetime] = None,
+) -> tuple[float, str]:
+    """Computes the effective reap threshold in hours and the explanatory reason.
+
+    - Live agent with a fresh heartbeat -> full base_hours ("live agent")
+    - Agent absent from registry -> reduced threshold max(1.0, base_hours / 2.0) ("agent absent from presence registry")
+    - Agent with expired heartbeat / offline -> reduced threshold max(1.0, base_hours / 2.0) ("agent heartbeat expired" / availability)
+    - Missing or unreadable presence registry -> falls back to full base_hours with a warning ("presence unavailable")
+    - The reduced threshold never drops below 1.0 hour.
+    """
+    base = float(base_hours)
+    if base <= 0:
+        return 0.0, "reaping disabled"
+
+    if store is None:
+        try:
+            from agent_presence import PresenceStore
+            store = PresenceStore()
+        except Exception as exc:
+            print(f"[WARN] Presence registry unavailable: {exc}", file=sys.stderr)
+            return base, "presence registry unavailable (full threshold fallback)"
+
+    current_time = now or datetime.now(timezone.utc)
+    try:
+        record = store.get(holder)
+    except Exception as exc:
+        print(f"[WARN] Could not inspect presence for '{holder}': {exc}", file=sys.stderr)
+        return base, "presence check failed (full threshold fallback)"
+
+    if record is None:
+        reduced = max(1.0, base / 2.0)
+        return reduced, "agent absent from presence registry"
+
+    if record.availability in {"unavailable", "temporarily-offline"}:
+        reduced = max(1.0, base / 2.0)
+        return reduced, f"agent availability is '{record.availability}'"
+
+    if not record.last_heartbeat:
+        reduced = max(1.0, base / 2.0)
+        return reduced, "agent has no recorded heartbeat"
+
+    try:
+        from agent_presence import _parse_iso
+        last_hb = _parse_iso(record.last_heartbeat)
+    except Exception:
+        reduced = max(1.0, base / 2.0)
+        return reduced, "agent has invalid heartbeat timestamp"
+
+    ttl_seconds = getattr(store, "heartbeat_ttl_seconds", 300)
+    if (current_time - last_hb).total_seconds() > ttl_seconds:
+        reduced = max(1.0, base / 2.0)
+        return reduced, "agent heartbeat expired"
+
+    return base, "live agent"
+
+
+def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:
     """Releases merge claims that went quiet without finishing close-out.
 
     Open and merged PRs are both scanned. A crash right after server-side merge
@@ -927,7 +988,6 @@ def reap_stale_merges(hours: int = 4) -> list:
             return []
         prs.extend(batch)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     claims = _claims_with_timestamps(prs, MERGER_LABEL_PREFIX, merge_claimant)
     if claims is None:
         return []
@@ -936,28 +996,45 @@ def reap_stale_merges(hours: int = 4) -> list:
     )
     if claims is None:
         return []
+
+    store = presence_store
+    if store is None:
+        try:
+            from agent_presence import PresenceStore
+            store = PresenceStore()
+        except Exception as exc:
+            print(f"[WARN] Could not initialize presence store: {exc}", file=sys.stderr)
+            store = None
+
+    current_now = now or datetime.now(timezone.utc)
     released = []
     for pr, holder, claimed_at in claims:
         number = pr["number"]
+        eff_hours, reason = _effective_reap_threshold(holder, hours, store, now=current_now)
+        if eff_hours <= 0:
+            continue
+        cutoff = current_now - timedelta(hours=eff_hours)
         if claimed_at >= cutoff:
             continue
         if _remove_merger_label(number, holder):
             released.append(number)
+            eff_str = f"{int(eff_hours)}h" if eff_hours.is_integer() else f"{eff_hours:.1f}h"
             print(f"♻️  Released stale merge claim on PR #{number} "
-                  f"(held by '{holder}', claim age > {hours}h).",
+                  f"(held by '{holder}', {reason}, claim age > {eff_str}).",
                   file=sys.stderr)
     return released
 
 
-def reap_stale_reviews(hours: int = 4) -> list:
+def reap_stale_reviews(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:
     """Releases review claims that have gone quiet.
 
     An agent that dies mid-review leaves the PR claimed forever, and a claimed
     PR is excluded from selection - so without this, one crash removes a PR
     from the review queue permanently and merge_pr.py blocks on it for good.
 
-    A claim is stale when its latest labeled event is older than `hours` and
-    carries no recent submitted review after that claim event.
+    A claim is stale when its latest labeled event is older than `hours` (or reduced
+    threshold for absent/inactive agents) and carries no recent submitted review after
+    that claim event.
     """
     if hours <= 0:
         return []
@@ -976,7 +1053,6 @@ def reap_stale_reviews(hours: int = 4) -> list:
         print("[WARN] Could not parse PR list; no review claims were reaped.", file=sys.stderr)
         return []
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     claims = _claims_with_timestamps(prs, REVIEWER_LABEL_PREFIX, review_claimant)
     if claims is None:
         return []
@@ -985,8 +1061,23 @@ def reap_stale_reviews(hours: int = 4) -> list:
     )
     if claims is None:
         return []
+
+    store = presence_store
+    if store is None:
+        try:
+            from agent_presence import PresenceStore
+            store = PresenceStore()
+        except Exception as exc:
+            print(f"[WARN] Could not initialize presence store: {exc}", file=sys.stderr)
+            store = None
+
+    current_now = now or datetime.now(timezone.utc)
     released = []
     for pr, holder, claimed_at in claims:
+        eff_hours, reason = _effective_reap_threshold(holder, hours, store, now=current_now)
+        if eff_hours <= 0:
+            continue
+        cutoff = current_now - timedelta(hours=eff_hours)
         reviewed_after_claim = False
         for review in pr.get("reviews") or []:
             login = ((review.get("author") or {}).get("login") or "")
@@ -1004,8 +1095,9 @@ def reap_stale_reviews(hours: int = 4) -> list:
             continue
         if _remove_reviewer_label(pr["number"], holder):
             released.append(pr["number"])
+            eff_str = f"{int(eff_hours)}h" if eff_hours.is_integer() else f"{eff_hours:.1f}h"
             print(f"♻️  Released stale review claim on PR #{pr['number']} "
-                  f"(held by '{holder}', claim age > {hours}h, "
+                  f"(held by '{holder}', {reason}, claim age > {eff_str}, "
                   "no recent review submitted after claim).",
                   file=sys.stderr)
     return released
