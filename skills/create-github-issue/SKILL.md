@@ -56,10 +56,11 @@ python3 "$ARU_SDLC_HOME/scripts/slack_control_room.py" file-split \
   --epic <N> --from-file <split.json> --repo-dir "$PWD"
 ```
 
-The helper emits `create-github-issue` bodies (`depends-on`, `touches`,
-`parallel-eligible`, `Epic: #<epic>`) and attaches them with
-`update_issue_status.py --require-board`. Use `--dry-run` first. Then pick
-work only through `fetch_next_work.py`.
+The helper emits `create-github-issue` bodies (`depends-on` for sibling or
+prerequisite issues — never the still-open parent epic — `touches`,
+`parallel-eligible`, `Epic: #<epic>`). Ready requires the same contract as
+triage. Use `--dry-run` first. Then pick work only through
+`fetch_next_work.py`. Pass `--thread-ts` to reply in the Slack thread.
 
 ### 4. Production signals use intake, not a second process
 Do not file production alerts by hand through this skill. Monitoring, health

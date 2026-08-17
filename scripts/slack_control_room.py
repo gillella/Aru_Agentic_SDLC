@@ -475,6 +475,33 @@ def load_split_file(path: Path) -> Any:
         raise SplitError(f"split file is not valid JSON: {exc}") from exc
 
 
+def _string_list(value: Any, title: str, field: str) -> List[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(row, str) for row in value):
+        raise SplitError(f"{title}: {field} must be a list of strings")
+    return [row.strip() for row in value if row.strip()]
+
+
+def _parse_depends_on(raw: Any, epic: int, title: str) -> List[int]:
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise SplitError(f"{title}: depends_on must be a list of issue numbers")
+    deps: List[int] = []
+    for item in raw:
+        try:
+            number = int(item)
+        except (TypeError, ValueError) as exc:
+            raise SplitError(f"{title}: depends_on must be issue numbers") from exc
+        if number == epic:
+            continue
+        if number <= 0:
+            raise SplitError(f"{title}: depends_on must be positive issue numbers")
+        deps.append(number)
+    return deps
+
+
 def validate_split_story(item: Any, epic: int) -> Dict[str, Any]:
     if not isinstance(item, dict):
         raise SplitError("each story must be an object")
@@ -486,21 +513,26 @@ def validate_split_story(item: Any, epic: int) -> Dict[str, Any]:
         isinstance(path, str) and path.strip() for path in touches
     ):
         raise SplitError(f"{title}: touches must be a list of paths")
-    depends_on = item.get("depends_on")
-    if not isinstance(depends_on, list) or epic not in depends_on:
-        raise SplitError(f"{title}: depends_on must include epic #{epic}")
     if "parallel_eligible" not in item:
         raise SplitError(f"{title}: parallel_eligible is required")
     criteria = item.get("acceptance_criteria") or []
     if not isinstance(criteria, list) or not all(isinstance(row, str) for row in criteria):
         raise SplitError(f"{title}: acceptance_criteria must be a list of strings")
+    verification = item.get("verification")
+    if verification is not None and not isinstance(verification, str):
+        raise SplitError(f"{title}: verification must be a string")
     return {
         "title": title,
         "summary": str(item.get("summary") or "").strip(),
         "touches": [path.strip() for path in touches],
-        "depends_on": [int(num) for num in depends_on],
+        "depends_on": _parse_depends_on(item.get("depends_on"), epic, title),
         "parallel_eligible": bool(item.get("parallel_eligible")),
         "acceptance_criteria": [row.strip() for row in criteria if row.strip()],
+        "decision_boundaries": _string_list(
+            item.get("decision_boundaries"), title, "decision_boundaries",
+        ),
+        "non_goals": _string_list(item.get("non_goals"), title, "non_goals"),
+        "verification": str(verification or "").strip(),
         "issue_type": str(item.get("type") or "feat").strip() or "feat",
     }
 
@@ -524,13 +556,18 @@ def parse_split_document(payload: Any, epic: int) -> Dict[str, Any]:
 
 
 def story_board_status(story: Dict[str, Any]) -> str:
-    if story["touches"] and story["acceptance_criteria"] and story["depends_on"]:
-        return "Ready"
-    return "Backlog"
+    from triage_backlog import ready_gaps
+
+    issue = {
+        "number": 10**9,
+        "body": render_split_issue_body(story, 0),
+        "labels": [{"name": f"type:{story['issue_type']}"}],
+    }
+    return "Backlog" if ready_gaps(issue, set()) else "Ready"
 
 
 def render_split_issue_body(story: Dict[str, Any], epic: int) -> str:
-    depends = ", ".join(f"#{num}" for num in story["depends_on"])
+    depends = ", ".join(f"#{num}" for num in story["depends_on"]) or "none"
     touches = ", ".join(story["touches"])
     criteria = story["acceptance_criteria"] or ["- [ ] Define acceptance criteria"]
     lines = [
@@ -540,14 +577,24 @@ def render_split_issue_body(story: Dict[str, Any], epic: int) -> str:
         "",
         *[row if row.startswith("- ") else f"- [ ] {row}" for row in criteria],
         "",
-        "## Dependencies",
-        "",
-        f"depends-on: {depends}",
-        f"touches: {touches}",
-        f"parallel-eligible: {str(story['parallel_eligible']).lower()}",
-        "",
-        f"Epic: #{epic}",
     ]
+    if story.get("decision_boundaries"):
+        lines.extend(["## Decision Boundaries", "", *story["decision_boundaries"], ""])
+    if story.get("non_goals"):
+        lines.extend(["## Non-Goals", "", *story["non_goals"], ""])
+    if story.get("verification"):
+        lines.extend(["## Verification", "", story["verification"], ""])
+    lines.extend(
+        [
+            "## Dependencies",
+            "",
+            f"depends-on: {depends}",
+            f"touches: {touches}",
+            f"parallel-eligible: {str(story['parallel_eligible']).lower()}",
+            "",
+            f"Epic: #{epic}",
+        ]
+    )
     return redact("\n".join(lines))
 
 
@@ -643,15 +690,28 @@ def file_epic_split(
         commenter = comment_fn or github_issue_note
         commenter(plan["epic"], summary, repo_dir)
         ts = thread_ts or plan["thread_ts"]
-        if ts and notify_fn and slack_config is not None:
+        if ts and notify_fn is not None and slack_config is not None:
             notify_fn(
                 slack_config,
                 {
                     "type": "state", "agent": "slack-bridge", "family": "human",
-                    "text": summary, "thread_ts": ts,
+                    "text": summary,
                 },
+                thread_ts=ts,
             )
     return {"epic": plan["epic"], "dry_run": dry_run, "filed": filed, "summary": summary}
+
+
+def _file_split_notify_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
+    """Load Slack credentials for --thread-ts. Missing Slack must not block filing."""
+    if args.dry_run or not args.thread_ts:
+        return {"thread_ts": args.thread_ts, "notify_fn": None, "slack_config": None}
+    try:
+        config = config_from_env(load_slack_env(args.env_file), require_channel=True)
+    except ValueError as exc:
+        print(f"[WARN] Slack thread reply skipped: {exc}", file=sys.stderr)
+        return {"thread_ts": args.thread_ts, "notify_fn": None, "slack_config": None}
+    return {"thread_ts": args.thread_ts, "notify_fn": post_event, "slack_config": config}
 
 
 def github_increment_decision(
@@ -1166,7 +1226,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             payload = load_split_file(args.from_file)
             result = file_epic_split(
                 payload, args.epic, repo_dir,
-                dry_run=args.dry_run, thread_ts=args.thread_ts,
+                dry_run=args.dry_run, **_file_split_notify_kwargs(args),
             )
         except SplitError as exc:
             print(f"[ERROR] {exc}", file=sys.stderr)

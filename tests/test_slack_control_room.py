@@ -850,6 +850,22 @@ class EpicSplitTests(unittest.TestCase):
         story.update(overrides)
         return story
 
+    def _ready_story(self, **overrides):
+        return self._story(
+            depends_on=[],
+            acceptance_criteria=[
+                "- [ ] Helper files one child issue "
+                "(verify: `python3 -m unittest tests.test_slack_control_room`)"
+            ],
+            decision_boundaries=[
+                "- Default: file children with Epic: #N, never depends-on the parent epic",
+                "- Error handling: exit 1 on an invalid split document",
+            ],
+            non_goals=["- Treating Slack as a work queue"],
+            verification="`python3 -m unittest tests.test_slack_control_room` exits 0.",
+            **overrides,
+        )
+
     def _write_split(self, payload, mode=0o600):
         path = self.root / "split.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -894,7 +910,8 @@ class EpicSplitTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertTrue(result["dry_run"])
         self.assertIn("Epic: #178", result["filed"][0]["body"])
-        self.assertEqual(result["filed"][0]["status"], "Ready")
+        self.assertNotIn("depends-on: #178", result["filed"][0]["body"])
+        self.assertEqual(result["filed"][0]["status"], "Backlog")
         self.assertIsNone(result["filed"][0]["number"])
 
     def test_file_split_creates_board_item_and_comments_epic(self):
@@ -921,12 +938,105 @@ class EpicSplitTests(unittest.TestCase):
         self.assertEqual(result["filed"][0]["number"], 310)
         self.assertEqual(comments[0][0], 178)
         self.assertIn("#310", comments[0][1])
-        self.assertIn("depends-on: #178", result["filed"][0]["body"])
+        self.assertIn("Epic: #178", result["filed"][0]["body"])
+        self.assertIn("depends-on: none", result["filed"][0]["body"])
+        self.assertNotIn("depends-on: #178", result["filed"][0]["body"])
 
     def test_incomplete_story_lands_in_backlog(self):
         story = self._story(touches=[], acceptance_criteria=[])
         parsed = scr.validate_split_story(story, 178)
         self.assertEqual(scr.story_board_status(parsed), "Backlog")
+
+    def test_parent_epic_is_stripped_from_depends_on(self):
+        parsed = scr.validate_split_story(self._story(depends_on=[178, 172]), 178)
+        self.assertEqual(parsed["depends_on"], [172])
+        self.assertNotIn("depends-on: #178", scr.render_split_issue_body(parsed, 178))
+
+    def test_fully_specified_story_is_ready(self):
+        parsed = scr.validate_split_story(self._ready_story(), 178)
+        self.assertEqual(scr.story_board_status(parsed), "Ready")
+        body = scr.render_split_issue_body(parsed, 178)
+        self.assertIn("## Decision Boundaries", body)
+        self.assertIn("## Non-Goals", body)
+        self.assertIn("## Verification", body)
+
+    def test_specified_without_ready_contract_stays_backlog(self):
+        parsed = scr.validate_split_story(self._story(), 178)
+        self.assertTrue(parsed["touches"])
+        self.assertTrue(parsed["acceptance_criteria"])
+        self.assertEqual(scr.story_board_status(parsed), "Backlog")
+
+    def test_file_split_notifies_slack_thread(self):
+        notes = []
+
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "OPEN",
+                    "labels": [{"name": "type:epic"}],
+                }), ""
+            if cmd[:3] == ["gh", "issue", "create"]:
+                return 0, "https://github.com/o/r/issues/310\n", ""
+            if any(str(part).endswith("update_issue_status.py") for part in cmd):
+                return 0, "attached", ""
+            raise AssertionError(cmd)
+
+        def notify(config, event, thread_ts=None, **kwargs):
+            notes.append((config.channel_id, event["text"], thread_ts))
+            return {"ok": True}
+
+        result = scr.file_epic_split(
+            {"epic": 178, "stories": [self._story()]},
+            178, str(self.repo),
+            run_cmd_fn=run_cmd,
+            comment_fn=lambda *args: True,
+            notify_fn=notify,
+            slack_config=sample_config(channel_id="C01234567"),
+            thread_ts="123.456",
+        )
+        self.assertEqual(result["filed"][0]["number"], 310)
+        self.assertEqual(notes, [("C01234567", result["summary"], "123.456")])
+        self.assertIn("#310", notes[0][1])
+
+    def test_main_file_split_wires_thread_notify(self):
+        path = self._write_split({"epic": 178, "stories": [self._story()]})
+        captured = {}
+
+        def fake_split(*args, **kwargs):
+            captured.update(kwargs)
+            return {"epic": 178, "dry_run": False, "filed": [], "summary": "ok"}
+
+        cfg = sample_config(channel_id="C01234567")
+        with patch.object(scr, "file_epic_split", fake_split), \
+             patch.object(scr, "config_from_env", return_value=cfg), \
+             patch.object(scr, "load_slack_env", return_value={}):
+            code = scr.main([
+                "file-split", "--epic", "178", "--from-file", str(path),
+                "--repo-dir", str(self.repo), "--thread-ts", "99.1",
+            ])
+        self.assertEqual(code, 0)
+        self.assertIs(captured["notify_fn"], scr.post_event)
+        self.assertEqual(captured["slack_config"], cfg)
+        self.assertEqual(captured["thread_ts"], "99.1")
+
+    def test_main_file_split_skips_notify_when_slack_unconfigured(self):
+        path = self._write_split({"epic": 178, "stories": [self._story()]})
+        captured = {}
+
+        def fake_split(*args, **kwargs):
+            captured.update(kwargs)
+            return {"epic": 178, "dry_run": False, "filed": [], "summary": "ok"}
+
+        with patch.object(scr, "file_epic_split", fake_split), \
+             patch.object(scr, "config_from_env", side_effect=ValueError("no slack")):
+            code = scr.main([
+                "file-split", "--epic", "178", "--from-file", str(path),
+                "--repo-dir", str(self.repo), "--thread-ts", "99.1",
+            ])
+        self.assertEqual(code, 0)
+        self.assertIsNone(captured["notify_fn"])
+        self.assertIsNone(captured["slack_config"])
+        self.assertEqual(captured["thread_ts"], "99.1")
 
     def test_world_readable_split_file_is_rejected(self):
         path = self._write_split({"epic": 178, "stories": [self._story()]}, mode=0o644)

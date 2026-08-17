@@ -415,10 +415,11 @@ resolution, or merge authority. Turn agreed slices into GitHub issues with:
 
 ```
 python3 "$ARU_SDLC_HOME/scripts/slack_control_room.py" file-split \
-  --epic <N> --from-file <0600-json> --repo-dir "$PWD" [--dry-run]
+  --epic <N> --from-file <0600-json> --repo-dir "$PWD" [--dry-run] [--thread-ts <ts>]
 ```
 
-Then pick work only through `fetch_next_work.py`. If the epic lacks a product
+Children link the parent with `Epic: #<N>`, not `depends-on: #<N>`. Then pick
+work only through `fetch_next_work.py`. If the epic lacks a product
 decision required to write acceptance criteria, `@` the operator (`hitl`) and
 stop.
 

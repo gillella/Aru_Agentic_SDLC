@@ -232,11 +232,15 @@ python3 scripts/slack_control_room.py file-split \
   --dry-run
 ```
 
-Omit `--dry-run` to create GitHub issues. Each child must declare `depends-on`
-(including the epic), `touches`, and `parallel-eligible`. The helper attaches
-them with `update_issue_status.py --require-board` (Ready when those fields plus
-acceptance criteria are present, otherwise Backlog), comments the issue URLs on
-the epic, and optionally posts them back to the Slack thread via `--thread-ts`.
+Omit `--dry-run` to create GitHub issues. Each child must declare `touches`,
+`parallel-eligible`, and `depends-on` for **other** issues only — never the
+still-open parent epic (that deadlocks the picker). Link the parent with
+`Epic: #<epic>`. The helper attaches them with
+`update_issue_status.py --require-board` (Ready only when the rendered body
+meets the Ready contract: machine-checkable criteria plus Verification,
+Decision Boundaries, and Non-Goals; otherwise Backlog), comments the issue
+URLs on the epic, and posts them back to the Slack thread when `--thread-ts`
+is set.
 
 Brainstorm in Slack when the epic still needs slicing or a missing product
 decision. If the decision cannot be derived from the epic, `@` the operator
