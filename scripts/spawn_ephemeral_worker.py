@@ -39,6 +39,7 @@ from run_fleet import (
 REGISTRY_VERSION = 1
 MAX_EPHEMERAL_WORKERS = 2
 DEFAULT_TIMEOUT_SECONDS = 300.0
+AUTHORITY_TIMEOUT_SECONDS = 30.0
 MAX_TIMEOUT_SECONDS = 3_600.0
 TASK_REVIEW = "code-review"
 TASK_FEEDBACK = "address-pr-feedback"
@@ -121,7 +122,10 @@ def run_authority_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            timeout=AUTHORITY_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired:
+        return 124, "", "command timed out"
     except OSError as exc:
         return 127, "", type(exc).__name__
     return result.returncode, result.stdout.strip(), result.stderr.strip()
@@ -420,7 +424,11 @@ def cleanup_worktree(repo: Path, path: Path | None, branch: str = "") -> bool:
             ["git", "worktree", "list", "--porcelain"],
             repo,
         )
-        if listing_code != 0 or f"worktree {path}" in listing:
+        resolved = str(path.resolve())
+        still_listed = any(
+            line.strip() == f"worktree {resolved}" for line in listing.splitlines()
+        )
+        if listing_code != 0 or still_listed:
             print(
                 f"[ERROR] Ephemeral worktree {path.name} is dirty, locked, or "
                 "uncertain; retained for inspection.",
@@ -557,6 +565,18 @@ def release_review(config: LauncherConfig) -> int:
     return code
 
 
+def release_review_or_report(config: LauncherConfig) -> bool:
+    code = release_review(config)
+    if code != 0:
+        print(
+            f"[ERROR] Could not release review claim for "
+            f"'{config.worker_agent}' on PR #{config.pr} (exit {code}).",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def execute(config: LauncherConfig) -> int:
     if os.environ.get("ARU_CAN_SPAWN", "1") != "1":
         raise LauncherError("recursive ephemeral spawning is disabled (ARU_CAN_SPAWN != 1)")
@@ -612,19 +632,19 @@ def execute(config: LauncherConfig) -> int:
 
         if claim_active:
             if result_code != 0:
-                release_review(config)
-                claim_active = False
+                if release_review_or_report(config):
+                    claim_active = False
             else:
                 try:
                     fresh = load_pr_metadata(config.repo, config.pr)
                 except LauncherError:
-                    release_review(config)
-                    claim_active = False
+                    if release_review_or_report(config):
+                        claim_active = False
                     result_code = 1
                 else:
                     if config.worker_agent in fresh.reviewer_agents:
-                        release_review(config)
-                        claim_active = False
+                        if release_review_or_report(config):
+                            claim_active = False
                         print(
                             "[ERROR] Worker exited without completing or releasing its review claim.",
                             file=sys.stderr,
@@ -634,14 +654,15 @@ def execute(config: LauncherConfig) -> int:
                         claim_active = False
     except (LauncherError, ValueError) as exc:
         print(f"[ERROR] Ephemeral worker failed closed: {exc}", file=sys.stderr)
-        if claim_active:
-            release_review(config)
+        if claim_active and release_review_or_report(config):
             claim_active = False
         result_code = 1
     finally:
         if claim_active:
-            release_review(config)
-            claim_active = False
+            if release_review_or_report(config):
+                claim_active = False
+            else:
+                cleanup_ok = False
         cleanup_ok = cleanup_worktree(config.repo, worktree, branch)
         try:
             registry.unregister(token)

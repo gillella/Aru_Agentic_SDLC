@@ -237,6 +237,16 @@ class EphemeralWorkerTests(unittest.TestCase):
         repo_index = command.call_args.args[0].index("--repo")
         self.assertEqual(command.call_args.args[0][repo_index + 1], "owner/repo")
 
+    def test_authority_command_timeout_fails_closed(self):
+        with patch.object(
+            sew.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["gh", "pr", "view"], 30),
+        ):
+            result = sew.run_authority_command(["gh", "pr", "view"], self.repo)
+
+        self.assertEqual(result, (124, "", "command timed out"))
+
     def test_timeout_terminates_then_kills_worker_process_group(self):
         process = Mock(pid=4321)
         process.wait.side_effect = [
@@ -302,6 +312,26 @@ class EphemeralWorkerTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         release.assert_called_once_with(self.config())
+
+    def test_failed_claim_release_is_reported_and_retried(self):
+        claimed = sew.PRMetadata(
+            **{**self.metadata.__dict__, "reviewer_agents": ("codex-ephemeral-1",)}
+        )
+        worktree = self.repo / ".worktrees" / f"ephemeral-review-{os.getpid()}"
+        with (
+            patch.object(sew, "load_pr_metadata", side_effect=[self.metadata, claimed]),
+            patch.object(sew, "claim_review", return_value=0),
+            patch.object(sew, "prepare_worktree", return_value=(worktree, "")),
+            patch.object(sew, "build_agent_argv", return_value=["agent"]),
+            patch.object(sew.shutil, "which", return_value="/bin/agent"),
+            patch.object(sew, "run_worker", return_value=sew.WorkerResult(0)),
+            patch.object(sew, "release_review", side_effect=[1, 1]) as release,
+            patch.object(sew, "cleanup_worktree", return_value=True),
+        ):
+            code = sew.execute(self.config())
+
+        self.assertEqual(code, 1)
+        self.assertEqual(release.call_count, 2)
 
     def test_clean_exit_unregisters_and_cleans_owned_worktree(self):
         worktree = self.repo / ".worktrees" / f"ephemeral-review-{os.getpid()}"
@@ -378,6 +408,21 @@ class EphemeralWorkerTests(unittest.TestCase):
 
         self.assertFalse(ok)
         command.assert_not_called()
+
+    def test_failed_removal_matches_resolved_porcelain_path(self):
+        path = self.repo / ".worktrees" / "ephemeral-review-123"
+        resolved = str(path.resolve())
+        with patch.object(
+            sew,
+            "run_authority_command",
+            side_effect=[
+                (1, "", "remove failed"),
+                (0, f"worktree {resolved}\nHEAD {'a' * 40}", ""),
+            ],
+        ):
+            ok = sew.cleanup_worktree(self.repo, path)
+
+        self.assertFalse(ok)
 
     def test_review_worktree_is_pinned_to_pull_head_and_removed(self):
         repo, metadata = self.repo_with_pull_ref()
