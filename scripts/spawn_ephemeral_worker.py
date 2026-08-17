@@ -307,6 +307,8 @@ def validate_task(config: LauncherConfig, metadata: PRMetadata) -> None:
             f"adapter '{config.adapter}' does not attest worker family "
             f"'{config.worker_family}'"
         )
+    if metadata.cross_repository:
+        raise LauncherError("cross-repository ephemeral workers are not supported")
     if config.skill == TASK_REVIEW:
         if config.worker_agent == config.parent_agent:
             raise LauncherError("peer review requires a worker identity distinct from the parent")
@@ -325,8 +327,6 @@ def validate_task(config: LauncherConfig, metadata: PRMetadata) -> None:
             raise LauncherError(
                 f"feedback worker must use stamped author family '{metadata.author_family}'"
             )
-        if metadata.cross_repository:
-            raise LauncherError("cross-repository feedback pushes are not supported")
     else:
         raise LauncherError(f"unsupported ephemeral skill '{config.skill}'")
 
@@ -507,6 +507,7 @@ def build_ephemeral_agent_argv(
     if adapter == "gemini":
         return [
             "gemini",
+            "--sandbox",
             "--approval-mode",
             "yolo",
             "--output-format",

@@ -137,11 +137,14 @@ python3 "$ARU_SDLC_HOME/scripts/spawn_ephemeral_worker.py" \
   --adapter gemini
 ```
 
-The `gemini` adapter invokes the headless Gemini CLI in non-interactive
-auto-approval mode inside the isolated review worktree. Cursor and Antigravity
-remain governed desktop participants, but this launcher does not drive their
-UI or infer the model family selected inside Cursor. Antigravity review
-capacity uses the independently identifiable Google-family Gemini CLI path.
+The `gemini` adapter invokes the headless Gemini CLI in sandboxed,
+non-interactive auto-approval mode inside the isolated review worktree. The
+ephemeral launcher accepts only same-repository PRs; fork PRs require a
+persistent or manual review path because their heads are not trusted with the
+worker's GitHub authority. Cursor and Antigravity remain governed desktop
+participants, but this launcher does not drive their UI or infer the model
+family selected inside Cursor. Antigravity review capacity uses the
+independently identifiable Google-family Gemini CLI path.
 
 An author-feedback task uses the PR's existing author stamps instead. The
 worker id and family must exactly match `author:<id>` and `family:<family>`:

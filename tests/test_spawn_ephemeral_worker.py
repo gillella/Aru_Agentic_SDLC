@@ -181,6 +181,19 @@ class EphemeralWorkerTests(unittest.TestCase):
 
         sew.validate_task(config, self.metadata)
 
+    def test_cross_repository_review_is_rejected_before_launch(self):
+        config = self.config(
+            worker_agent="gemini-ephemeral-42",
+            worker_family="google",
+            adapter="gemini",
+        )
+        metadata = sew.PRMetadata(
+            **{**self.metadata.__dict__, "cross_repository": True}
+        )
+
+        with self.assertRaisesRegex(sew.LauncherError, "cross-repository"):
+            sew.validate_task(config, metadata)
+
     def test_auto_google_builds_noninteractive_gemini_argv(self):
         config = self.config(
             worker_agent="gemini-ephemeral-42",
@@ -194,6 +207,7 @@ class EphemeralWorkerTests(unittest.TestCase):
             argv,
             [
                 "gemini",
+                "--sandbox",
                 "--approval-mode",
                 "yolo",
                 "--output-format",
@@ -221,14 +235,18 @@ class EphemeralWorkerTests(unittest.TestCase):
         factory_skill = (
             ROOT / "skills" / "run-aru-factory" / "SKILL.md"
         ).read_text(encoding="utf-8")
+        normalized_fleet_docs = " ".join(fleet_docs.split())
 
         for fragment in (
             "--worker-agent gemini-ephemeral-<PR> --worker-family google",
             "--adapter gemini",
-            "does not drive their",
-            "UI or infer the model family selected inside Cursor",
         ):
             self.assertIn(fragment, fleet_docs)
+        for fragment in (
+            "does not drive their UI or infer the model family selected inside Cursor",
+            "same-repository",
+        ):
+            self.assertIn(fragment, normalized_fleet_docs)
         self.assertIn("Gemini/Google", factory_skill)
         self.assertIn("never a Cursor-selected model or desktop UI", factory_skill)
 
