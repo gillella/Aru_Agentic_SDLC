@@ -158,6 +158,111 @@ class RetainManifestWalkTests(unittest.TestCase):
             )
 
 
+class VerifiedRemoveTests(unittest.TestCase):
+    """The validation-to-delete boundary must fail closed, not just be re-checked.
+
+    Reproduces the reported P1: a worker holding a directory handle opened before
+    the claim renames writes into the tree after the final cleanliness check.
+    `shutil.rmtree` destroyed that write; entry-level verification must not.
+    """
+
+    def _snapshot(self, tree):
+        return cleanup_worktrees.retain_manifest_payload(str(tree))["entries"]
+
+    def test_write_after_final_validation_survives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "retained"
+            tree.mkdir()
+            (tree / "keep.txt").write_text("recorded\n")
+            (tree / "nested").mkdir()
+            (tree / "nested" / "inner.txt").write_text("recorded\n")
+            expected = self._snapshot(tree)
+
+            # The post-validation write the reviewer reproduced on this head.
+            (tree / "late-after-final-check.txt").write_text("unsaved agent output\n")
+
+            ok, note = cleanup_worktrees._remove_claimed_retained(str(tree), expected)
+            self.assertFalse(ok)
+            self.assertIn("after validation", note)
+            self.assertTrue(tree.exists())
+            self.assertTrue((tree / "late-after-final-check.txt").exists())
+            self.assertEqual(
+                (tree / "late-after-final-check.txt").read_text(),
+                "unsaved agent output\n",
+            )
+
+    def test_modified_file_after_final_validation_survives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "retained"
+            tree.mkdir()
+            (tree / "keep.txt").write_text("recorded\n")
+            expected = self._snapshot(tree)
+            (tree / "keep.txt").write_text("edited after validation\n")
+
+            ok, note = cleanup_worktrees._remove_claimed_retained(str(tree), expected)
+            self.assertFalse(ok)
+            self.assertTrue((tree / "keep.txt").exists())
+            self.assertEqual(
+                (tree / "keep.txt").read_text(), "edited after validation\n"
+            )
+
+    def test_late_write_in_subdirectory_keeps_its_parents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "retained"
+            (tree / "a" / "b").mkdir(parents=True)
+            (tree / "a" / "b" / "recorded.txt").write_text("ok\n")
+            expected = self._snapshot(tree)
+            (tree / "a" / "b" / "late.txt").write_text("late\n")
+
+            ok, _ = cleanup_worktrees._remove_claimed_retained(str(tree), expected)
+            self.assertFalse(ok)
+            # Every directory above the surprise must survive with it.
+            self.assertTrue((tree / "a" / "b" / "late.txt").exists())
+            self.assertTrue((tree / "a" / "b").is_dir())
+            self.assertTrue((tree / "a").is_dir())
+            self.assertTrue(tree.is_dir())
+
+    def test_unchanged_tree_is_fully_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "retained"
+            (tree / "a" / "b").mkdir(parents=True)
+            (tree / "a" / "b" / "recorded.txt").write_text("ok\n")
+            (tree / "empty").mkdir()
+            (tree / "top.txt").write_text("ok\n")
+            expected = self._snapshot(tree)
+
+            ok, note = cleanup_worktrees._remove_claimed_retained(str(tree), expected)
+            self.assertTrue(ok, note)
+            self.assertFalse(tree.exists())
+
+    def test_manifest_file_is_not_treated_as_a_surprise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "retained"
+            tree.mkdir()
+            (tree / "keep.txt").write_text("ok\n")
+            expected = self._snapshot(tree)
+            cleanup_worktrees.write_retain_manifest(str(tree))
+
+            ok, note = cleanup_worktrees._remove_claimed_retained(str(tree), expected)
+            self.assertTrue(ok, note)
+            self.assertFalse(tree.exists())
+
+    def test_git_metadata_directory_does_not_block_removal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "retained"
+            tree.mkdir()
+            (tree / "keep.txt").write_text("ok\n")
+            expected = self._snapshot(tree)
+            # .git is excluded from the snapshot by design, so it must not read
+            # as an unexpected entry.
+            (tree / ".git" / "objects").mkdir(parents=True)
+            (tree / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+            ok, note = cleanup_worktrees._remove_claimed_retained(str(tree), expected)
+            self.assertTrue(ok, note)
+            self.assertFalse(tree.exists())
+
+
 class CleanupWorktreesTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -420,7 +420,12 @@ def _retained_child_deletable(path: str, retained: str, repo_root: str) -> bool:
 
 
 def claim_retained_directory(path: str, retained: str) -> str | None:
-    """Rename ``path`` to a unique sibling so later writes miss this inode."""
+    """Rename ``path`` to a unique sibling so a second janitor cannot claim it.
+
+    Rename does not revoke an already-open cwd or directory handle on the
+    same inode. Exclusive deletion is ``_remove_claimed_retained``, which
+    verifies each entry against the snapshot and leaves surprises in place.
+    """
     if not _physically_contained(path, retained):
         return None
     claimed = os.path.join(retained, f".deleting-{uuid.uuid4().hex}")
@@ -454,12 +459,89 @@ def _retained_still_clean(path: str, deregistered: bool) -> tuple[bool | None, s
     return True, ""
 
 
-def _remove_claimed_retained(path: str) -> tuple[bool, str]:
+def _verified_unlink(full: str, rel: str, expected: dict) -> bool:
+    """Remove one entry only if it still matches what the snapshot recorded.
+
+    The check and the unlink are adjacent here, so the only writable window is
+    per-entry rather than the whole tree walk. A file created or modified after
+    the snapshot has no matching record and is left in place.
+    """
+    recorded = expected.get(rel)
+    if recorded is None:
+        return False
     try:
-        shutil.rmtree(path)
-        return True, f"removed retained {path}"
+        actual = _record_retain_entry(full, rel)
+    except OSError:
+        return False
+    if actual != recorded:
+        return False
+    try:
+        if actual["type"] == "dir":
+            os.rmdir(full)
+        else:
+            os.unlink(full)
+    except OSError:
+        return False
+    return True
+
+
+def _remove_claimed_retained(path: str, expected: dict) -> tuple[bool, str]:
+    """Delete a validated retained tree, verifying each entry as it is removed.
+
+    ``shutil.rmtree`` separates validation from deletion by an entire tree walk,
+    so a write landing in that window is destroyed silently — the race reported
+    on this PR. Verifying immediately before each unlink makes such a write fail
+    closed instead: the unexpected entry matches no record, it is left alone,
+    every directory above it survives with it, and the tree is reported as kept.
+    Re-checking the whole tree and then calling ``rmtree`` cannot achieve this,
+    however many times it is repeated.
+
+    ``expected`` is required rather than optional: an unverified deletion path
+    left available is one call away from reinstating the race.
+    """
+    # Git metadata is never agent output and is deliberately absent from the
+    # snapshot (retain_manifest_payload does not descend into .git), so it is
+    # removed wholesale rather than entry-verified.
+    git_dir = os.path.join(path, ".git")
+    try:
+        if os.path.isdir(git_dir) and not os.path.islink(git_dir):
+            shutil.rmtree(git_dir)
     except OSError as exc:
         return False, f"could not remove retained {path}: {exc}"
+
+    survivors: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(path, topdown=False, followlinks=False):
+        rel_dir = _retain_rel(path, dirpath)
+        if rel_dir == ".git" or rel_dir.startswith(".git/"):
+            continue
+        for name in sorted(filenames):
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            full = os.path.join(dirpath, name)
+            if name in {RETAIN_MANIFEST, RETAIN_MANIFEST + ".tmp"}:
+                try:
+                    os.unlink(full)
+                except OSError:
+                    survivors.append(rel)
+                continue
+            if not _verified_unlink(full, rel, expected):
+                survivors.append(rel)
+        for name in sorted(dirnames):
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            if rel == ".git":
+                continue
+            if not _verified_unlink(os.path.join(dirpath, name), rel, expected):
+                survivors.append(rel)
+    if survivors:
+        return False, (
+            f"kept retained {path}: {len(survivors)} entr"
+            f"{'y' if len(survivors) == 1 else 'ies'} appeared or changed after "
+            f"validation ({', '.join(survivors[:3])}); not deleted"
+        )
+    try:
+        os.rmdir(path)
+    except OSError as exc:
+        return False, f"could not remove retained {path}: {exc}"
+    return True, f"removed retained {path}"
 
 
 def _prune_claimed_retained(
@@ -481,7 +563,15 @@ def _prune_claimed_retained(
     clean, note = _retained_still_clean(claimed2, deregistered)
     if clean is not True:
         return False, note
-    return _remove_claimed_retained(claimed2)
+    # Snapshot at the last possible moment, then verify each entry against it as
+    # it is unlinked. Renaming again would only move the validation-to-delete
+    # window; entry-level verification is what closes it, because a write that
+    # lands after this point cannot match a record that predates it.
+    try:
+        expected = retain_manifest_payload(claimed2)["entries"]
+    except OSError as exc:
+        return False, f"kept retained {claimed2}: could not snapshot for verified delete: {exc}"
+    return _remove_claimed_retained(claimed2, expected)
 
 
 def prune_retained_copies(repo_root: str) -> tuple[bool, list[str]]:
