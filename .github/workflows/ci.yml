@@ -177,6 +177,90 @@ jobs:
         run: |
           ruff check .
 
+      # Enforce 400-line maximum file size on all source files. Pre-existing
+      # legacy files over 400 lines are frozen in an explicit allowlist so
+      # newly added or non-exempted files exceeding the ceiling block CI.
+      - name: Enforce File Line Ceilings
+        run: |
+          python -c "import os, sys
+          LINE_CEILING = 400
+          EXEMPTIONS = {
+              'hooks/enforce_touches.py',
+              'scripts/agent_presence.py',
+              'scripts/check_docs.py',
+              'scripts/claim_issue.py',
+              'scripts/cleanup_worktrees.py',
+              'scripts/common.py',
+              'scripts/delivery_increments.py',
+              'scripts/deploy_preview.py',
+              'scripts/doctor_local_agent_integrations.py',
+              'scripts/factory_metrics.py',
+              'scripts/fetch_next_issue.py',
+              'scripts/fetch_next_work.py',
+              'scripts/fixtures/fleet/harness.py',
+              'scripts/fleet_status.py',
+              'scripts/incident_intake.py',
+              'scripts/init_project.py',
+              'scripts/install_local_agent_integrations.sh',
+              'scripts/merge_pr.py',
+              'scripts/prd_to_issues.py',
+              'scripts/promote.py',
+              'scripts/revert_merge.py',
+              'scripts/run_fleet.py',
+              'scripts/slack_control_room.py',
+              'scripts/slack_notify.py',
+              'scripts/slack_projects.py',
+              'scripts/smoke_preview.py',
+              'scripts/spawn_ephemeral_worker.py',
+              'scripts/triage_backlog.py',
+              'scripts/verify_citations.py',
+              'sdlc_flow_visualizer/app.js',
+              'sdlc_flow_visualizer/styles.css',
+              'tests/test_acceptance_runner.py',
+              'tests/test_claim_issue.py',
+              'tests/test_claim_review.py',
+              'tests/test_cleanup_worktrees.py',
+              'tests/test_create_pr.py',
+              'tests/test_delivery_increments.py',
+              'tests/test_deploy_preview.py',
+              'tests/test_doc_freshness.py',
+              'tests/test_doctor_local_agent_integrations.py',
+              'tests/test_enforce_touches.py',
+              'tests/test_fetch_next_work.py',
+              'tests/test_fleet_status.py',
+              'tests/test_incident_intake.py',
+              'tests/test_init_project.py',
+              'tests/test_issue_selection.py',
+              'tests/test_merge_pr.py',
+              'tests/test_promote.py',
+              'tests/test_research_skill.py',
+              'tests/test_run_fleet.py',
+              'tests/test_slack_control_room.py',
+              'tests/test_slack_notify.py',
+              'tests/test_spawn_ephemeral_worker.py',
+              'tests/test_triage_backlog.py',
+          }
+          violations = []
+          skip_dirs = {'.git', '.venv', '.worktrees', 'node_modules', '__pycache__', 'dist'}
+          for root, dirs, files in os.walk('.'):
+              dirs[:] = [d for d in dirs if d not in skip_dirs]
+              for f in files:
+                  if f.endswith(('.py', '.js', '.sh', '.css', '.html')):
+                      path = os.path.normpath(os.path.join(root, f))
+                      if path in EXEMPTIONS:
+                          continue
+                      with open(path, 'rb') as fh:
+                          lines = sum(1 for _ in fh)
+                      if lines >= LINE_CEILING:
+                          violations.append((path, lines))
+          if violations:
+              print(f'error: {len(violations)} files exceed line ceiling of {LINE_CEILING}:', file=sys.stderr)
+              for path, lines in sorted(violations):
+                  print(f'  {path}: {lines} lines', file=sys.stderr)
+              sys.exit(1)
+          print('File line ceiling check passed.')
+          "
+
       # Covers hooks/ and tests/ as well as scripts/. hooks/enforce_touches.py
       # is the write-time enforcement gate and was previously reached only
       # because an unrelated test imports it - coverage by accident, not by a
