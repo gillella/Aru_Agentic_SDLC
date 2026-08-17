@@ -45,3 +45,24 @@ This skill defines the declarative workflow for creating clear, actionable GitHu
 - If attachment fails, the issue still exists. Treat the warning as incomplete
   coordination and run the printed `gh project item-add` manual remedy before
   considering the issue ready for pickup.
+
+### 4. Production signals use intake, not a second process
+Do not file production alerts by hand through this skill. Monitoring, health
+checks, and error-rate thresholds invoke:
+
+```
+python3 "$ARU_SDLC_HOME/scripts/incident_intake.py" \
+  --signal firing|resolved \
+  --source <monitor> \
+  --component <component> \
+  --alert-name <alert> \
+  --severity p0|p1|p2|p3 \
+  --evidence "<summary>"
+```
+
+Intake opens a skill-shaped issue on the same Project Board (`Backlog`, labels
+`type:fix`, `origin:incident`, `priority:<severity>`). Recurring alerts comment
+on that open issue. Resolved alerts close unclaimed Backlog/Ready issues and
+prune leftover `issue-<N>` worktrees when Done. Triage replaces
+`touches: pending-ops-triage` before promoting to Ready. There is no second
+incident process.
