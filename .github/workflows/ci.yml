@@ -107,9 +107,15 @@ jobs:
   docs-freshness:
     name: Documentation Freshness
     runs-on: ubuntu-latest
+    # The checker reads documentation that a pull request controls. Bound the
+    # job so a stalled lookup cannot hold a runner, and keep the checkout
+    # credential out of .git/config so no excerpt can quote it into the log.
+    timeout-minutes: 10
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5

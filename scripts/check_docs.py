@@ -42,8 +42,15 @@ LINE_CITATION_RE = re.compile(r":(\d+)(?:-(\d+))?$")
 PLACEHOLDER_CHARS = frozenset("<>*?{}|\\\"'$ \t")
 
 # `.git` contents differ between a normal clone and a linked worktree (there
-# `.git` is a file), so a reference into it is not verifiable from the tree.
+# `.git` is a file), so a reference into it is not verifiable from the tree -
+# and `.git/config` carries the checkout's authentication material, which
+# this checker must never quote into a job log.
 UNVERIFIABLE_TOP_LEVEL = frozenset({".git"})
+
+# `gh` talks to the network. Without a bound, a stall hangs the job until the
+# workflow timeout instead of producing a finding the fail-closed design can
+# report.
+GH_TIMEOUT_SECONDS = 30
 
 # Paths are commonly written relative to the framework home rather than the
 # repo root; both spellings mean the same file.
@@ -80,6 +87,31 @@ class Fence:
     open_line: int  # 1-indexed line of the opening fence
     info: str
     body: List[str]
+
+
+def resolve_within_root(root: Path, relative: str) -> Optional[Path]:
+    """Resolve ``relative`` under ``root``; ``None`` if it leaves the tree.
+
+    On a ``pull_request`` run the documentation being checked is
+    attacker-controlled, and this checker prints source lines into the job
+    log. Three ways out of the tree are refused here: an absolute operand
+    (joining one discards ``root`` entirely), a ``..`` climb, and a symlink
+    that points outward - which is why the comparison is made after
+    ``resolve()``. Anything under ``.git`` is refused for the same reason,
+    its config holding the checkout credential.
+    """
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        return None
+    resolved_root = root.resolve()
+    target = (resolved_root / candidate).resolve()
+    try:
+        inside = target.relative_to(resolved_root)
+    except ValueError:
+        return None
+    if inside.parts and inside.parts[0] in UNVERIFIABLE_TOP_LEVEL:
+        return None
+    return target
 
 
 def iter_markdown(root: Path, subdir: str = "docs") -> List[Path]:
@@ -183,7 +215,12 @@ def check_paths(root: Path, doc: Path, prose: Sequence[Tuple[int, str]]) -> List
             if parsed is None:
                 continue
             path, start, end = parsed
-            target = root / path.rstrip("/")
+            target = resolve_within_root(root, path.rstrip("/"))
+            if target is None:
+                findings.append(
+                    Finding(rel, lineno, f"references `{path}`, which is outside the repository")
+                )
+                continue
             if path.endswith("/"):
                 if not target.is_dir():
                     findings.append(
@@ -198,16 +235,16 @@ def check_paths(root: Path, doc: Path, prose: Sequence[Tuple[int, str]]) -> List
             if start is None:
                 continue
             total = len(target.read_text(encoding="utf-8", errors="replace").splitlines())
-            cited = end or start
-            if cited > total:
+            cited = f"{path}:{start}" + (f"-{end}" if end else "")
+            # A reversed or zero-based citation names no source range at all;
+            # comparing only the upper bound would let `:900-1` through.
+            if start < 1 or (end is not None and end < start):
                 findings.append(
-                    Finding(
-                        rel,
-                        lineno,
-                        f"cites `{path}:{start}"
-                        + (f"-{end}" if end else "")
-                        + f"`, but that file has {total} lines",
-                    )
+                    Finding(rel, lineno, f"cites `{cited}`, which is not a valid line range")
+                )
+            elif max(start, end or start) > total:
+                findings.append(
+                    Finding(rel, lineno, f"cites `{cited}`, but that file has {total} lines")
                 )
     return findings
 
@@ -231,9 +268,20 @@ class IssueStateResolver:
         self._cache: Dict[int, Tuple[Optional[str], Optional[str]]] = {}
 
     def _run(self, args: Sequence[str]) -> Tuple[int, str, str]:
-        proc = subprocess.run(
-            list(args), cwd=str(self.root), capture_output=True, text=True
-        )
+        # A missing or stalled `gh` becomes a reportable failure rather than a
+        # traceback or an indefinite hang.
+        try:
+            proc = subprocess.run(
+                list(args),
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                timeout=GH_TIMEOUT_SECONDS,
+            )
+        except FileNotFoundError:
+            return 127, "", "gh is not installed"
+        except subprocess.TimeoutExpired:
+            return 124, "", f"gh timed out after {GH_TIMEOUT_SECONDS}s"
         return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
     def repo(self) -> Tuple[Optional[str], Optional[str]]:
@@ -378,7 +426,11 @@ def _next_fence(
 
 def _compare_excerpt(root: Path, rel: str, match: re.Match, fence: Fence) -> List[Finding]:
     path = match.group("path").strip("`")
-    source = root / path
+    source = resolve_within_root(root, path)
+    if source is None:
+        return [
+            Finding(rel, fence.open_line, f"quotes `{path}`, which is outside the repository")
+        ]
     if not source.is_file():
         return [Finding(rel, fence.open_line, f"quotes `{path}`, which does not exist")]
 

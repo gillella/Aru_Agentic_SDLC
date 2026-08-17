@@ -124,6 +124,27 @@ class PathReferenceTests(DocFreshnessTestCase):
         self.fixture.doc("range.md", "See `scripts/sample.py:1-6`.\n")
         self.assertEqual(self.messages(), [])
 
+    def test_reversed_line_range_is_rejected(self):
+        # Comparing only the upper bound would let `:900-1` through because
+        # line 1 exists.
+        self.fixture.doc("range.md", "See `scripts/sample.py:900-1`.\n")
+        messages = self.messages()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("not a valid line range", messages[0])
+
+    def test_zero_line_citation_is_rejected(self):
+        self.fixture.doc("range.md", "See `scripts/sample.py:0`.\n")
+        self.assertIn("not a valid line range", self.messages()[0])
+
+    def test_traversal_out_of_the_repository_is_rejected(self):
+        outside = self.fixture.root.parent / "outside.conf"
+        outside.write_text("secret\n", encoding="utf-8")
+        self.addCleanup(outside.unlink)
+        self.fixture.doc("escape.md", "See `scripts/../../outside.conf`.\n")
+        messages = self.messages()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("outside the repository", messages[0])
+
     def test_missing_directory_reference_is_reported(self):
         self.fixture.doc("dir.md", "Worktrees live under `scripts/nowhere/`.\n")
         messages = self.messages()
@@ -227,6 +248,50 @@ class IssueStateTests(DocFreshnessTestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_gh_is_a_finding_not_a_traceback(self):
+        self.fixture.doc("state.md", "Tracked in #404 (open).\n")
+        empty_bin = self.fixture.root / "emptybin"
+        empty_bin.mkdir()
+        env = dict(os.environ)
+        env["PATH"] = str(empty_bin)
+        result = subprocess.run(
+            [sys.executable, str(CHECKER), "--root", str(self.fixture.root), "--repo", "owner/repo"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("gh is not installed", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_stalled_gh_is_bounded_and_reported(self):
+        self.fixture.doc("state.md", "Tracked in #404 (open).\n")
+        bin_dir = self.fixture.root / "slowbin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        gh.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+        gh.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; sys.path.insert(0, %r); import check_docs;"
+                    " check_docs.GH_TIMEOUT_SECONDS = 1;"
+                    " sys.exit(check_docs.main(['--root', %r, '--repo', 'owner/repo']))"
+                )
+                % (str(ROOT / "scripts"), str(self.fixture.root)),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("timed out after 1s", result.stderr)
 
     def test_prose_that_only_mentions_an_issue_is_not_a_claim(self):
         # Both spellings appear in this repo's docs and mean something other
@@ -337,6 +402,84 @@ class ExcerptTests(DocFreshnessTestCase):
             """,
         )
         self.assertIn("not followed by a fenced code block", self.messages()[0])
+
+    def test_absolute_excerpt_path_is_refused_without_disclosing_content(self):
+        # Joining an absolute operand would discard the root entirely, and a
+        # mismatch prints the source line into the job log.
+        secret = self.fixture.root.parent / "absolute-secret.conf"
+        secret.write_text("AUTHORIZATION: basic SECRET_TOKEN\n", encoding="utf-8")
+        self.addCleanup(secret.unlink)
+        self.fixture.doc(
+            "quote.md",
+            f"""
+            <!-- doc-check: excerpt {secret} L1 -->
+            ```text
+            altered
+            ```
+            """,
+        )
+        messages = self.messages()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("outside the repository", messages[0])
+        self.assertNotIn("SECRET_TOKEN", messages[0])
+
+    def test_traversal_excerpt_path_is_refused(self):
+        secret = self.fixture.root.parent / "traversal-secret.conf"
+        secret.write_text("AUTHORIZATION: basic SECRET_TOKEN\n", encoding="utf-8")
+        self.addCleanup(secret.unlink)
+        self.fixture.doc(
+            "quote.md",
+            f"""
+            <!-- doc-check: excerpt ../{secret.name} L1 -->
+            ```text
+            altered
+            ```
+            """,
+        )
+        messages = self.messages()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("outside the repository", messages[0])
+        self.assertNotIn("SECRET_TOKEN", messages[0])
+
+    def test_git_config_is_refused_as_an_excerpt_source(self):
+        # .git/config holds the checkout credential when persist-credentials
+        # is left on anywhere.
+        self.fixture.write(
+            ".git/config", "[http]\n\textraheader = AUTHORIZATION: basic SECRET_TOKEN\n"
+        )
+        self.fixture.doc(
+            "quote.md",
+            """
+            <!-- doc-check: excerpt .git/config L2 -->
+            ```text
+            altered
+            ```
+            """,
+        )
+        messages = self.messages()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("outside the repository", messages[0])
+        self.assertNotIn("SECRET_TOKEN", messages[0])
+
+    def test_symlink_pointing_out_of_the_repository_is_refused(self):
+        secret = self.fixture.root.parent / "symlink-secret.conf"
+        secret.write_text("AUTHORIZATION: basic SECRET_TOKEN\n", encoding="utf-8")
+        self.addCleanup(secret.unlink)
+        link = self.fixture.root / "scripts" / "linked.conf"
+        link.symlink_to(secret)
+        self.fixture.doc(
+            "quote.md",
+            """
+            <!-- doc-check: excerpt scripts/linked.conf L1 -->
+            ```text
+            altered
+            ```
+            """,
+        )
+        messages = self.messages()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("outside the repository", messages[0])
+        self.assertNotIn("SECRET_TOKEN", messages[0])
 
     def test_marker_shown_inside_a_fenced_block_is_documentation_not_a_claim(self):
         self.fixture.doc(
