@@ -1960,24 +1960,28 @@ def check_test_coverage(pr):
 
 
 def check_spec_sync(pr, repo_dir=None):
-    """Require specifications and CLI arguments to remain synchronized with implementation."""
-    sync_script = os.path.join(repo_dir or ".", "scripts", "sync_spec.py")
-    if not os.path.exists(sync_script):
-        return True, "No sync_spec.py present; skipping spec-sync check."
-    try:
-        from sync_spec import check_spec_synchronization
-        clean, details = check_spec_synchronization(repo_dir or ".")
-        if clean:
-            return True, "Specifications and code are synchronized."
-        return False, f"Specification drift detected: {details}"
-    except Exception:
-        cmd = [sys.executable, sync_script, "--check"]
-        if repo_dir:
-            cmd.extend(["--repo-dir", repo_dir])
-        code, out, err = run_cmd(cmd, check=False)
-        if code == 0:
-            return True, "Specifications and code are synchronized."
-        return False, f"Specification drift detected: {out or err}"
+    """Require specifications and CLI arguments to remain synchronized with implementation on PR head."""
+    merge_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(merge_dir, "sync_spec.py"),
+        os.path.join(os.environ.get("ARU_SDLC_HOME", ""), "scripts", "sync_spec.py"),
+        os.path.join(repo_dir or ".", "scripts", "sync_spec.py"),
+    ]
+    sync_script = next((c for c in candidates if c and os.path.exists(c)), None)
+    if not sync_script:
+        return False, "Required sync_spec.py engine is missing; cannot audit specification synchronization."
+
+    head_sha = (pr or {}).get("headRefOid") if isinstance(pr, dict) else None
+    cmd = [sys.executable, sync_script, "--check"]
+    if repo_dir:
+        cmd.extend(["--repo-dir", repo_dir])
+    if head_sha:
+        cmd.extend(["--head", head_sha])
+
+    code, out, err = run_cmd(cmd, check=False)
+    if code == 0:
+        return True, "Specifications and code are synchronized."
+    return False, f"Specification drift detected: {out or err}"
 
 
 def is_merged(pr):
