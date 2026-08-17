@@ -13,6 +13,8 @@ on:
 
 # gitleaks-action lists PR commits via the API; without pull-requests:read
 # it fails with "Resource not accessible by integration" before scanning.
+# issues:read is deliberately NOT granted here: only docs-freshness needs it,
+# and a workflow-level grant would widen every job's token for no reason.
 permissions:
   contents: read
   pull-requests: read
@@ -95,6 +97,59 @@ jobs:
           else
             echo "No import-linter contracts configured yet; skipping."
           fi
+
+  # Documentation drift here accumulated in days (issue #115). A convention
+  # that docs stay accurate is followed probabilistically; this job is the
+  # mechanism. It runs on every push and pull request - so any documentation
+  # change is covered - and on the weekly schedule above, which is what
+  # catches a document that went stale because the *code* moved under it.
+  docs-freshness:
+    name: Documentation Freshness
+    runs-on: ubuntu-latest
+    # The checker reads documentation that a pull request controls. Bound the
+    # job so a stalled lookup cannot hold a runner, and keep the checkout
+    # credential out of .git/config so no excerpt can quote it into the log.
+    timeout-minutes: 10
+    # issues:read is scoped to this job alone, because only the issue-state
+    # lookup needs it. The trusted step below is the only place it is usable.
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # scripts/check_docs.py is taken from the pull request, so on this event
+      # it is attacker-controlled code. Handing it GH_TOKEN would give a PR the
+      # workflow's read authority over contents, issues, and pull requests --
+      # persist-credentials: false does not close that, because it only removes
+      # the credential from .git/config, not from the process environment.
+      # This path therefore runs with no credential at all. The cost is the
+      # issue-state check, which --offline skips; the drift checks that do not
+      # need the network still run and still fail the build.
+      - name: Check documentation against the code it describes (untrusted PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 scripts/check_docs.py --offline
+
+      # push / schedule / workflow_dispatch run code that is already merged or
+      # operator-triggered, so the full check runs here with the token. No
+      # --offline: an issue whose state cannot be resolved fails the job rather
+      # than silently skipping the check it was added for. This is the path
+      # that catches a document gone stale because the code moved under it.
+      - name: Check documentation against the code it describes (trusted)
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/check_docs.py
 
   test-and-lint:
     name: Lint, Verify & Test
