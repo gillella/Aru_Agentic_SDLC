@@ -464,7 +464,13 @@ class CleanupWorktreesTests(unittest.TestCase):
 
         gh_json.side_effect = fake_gh
         cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
-        self.assertTrue(any(cmd[:3] == ["gh", "api", "--paginate"] for cmd in seen))
+        paths = [
+            cmd[3] for cmd in seen
+            if cmd[:3] == ["gh", "api", "--paginate"]
+        ]
+        self.assertEqual(len(paths), 3)
+        self.assertEqual(sum("/issues?" in path for path in paths), 1)
+        self.assertEqual(sum("/pulls?" in path for path in paths), 2)
 
     @patch.object(merge_pr, "_gh_json", return_value=None)
     def test_unreadable_claim_list_is_recorded(self, _gh):
