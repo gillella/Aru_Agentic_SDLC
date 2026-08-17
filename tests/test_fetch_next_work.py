@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import fetch_next_work as fnw
+import merge_pr
 
 
 def ts(minutes_ago):
@@ -735,18 +736,53 @@ class UnmetGateParsingTests(unittest.TestCase):
         self.assertEqual(fnw._unmet_gates("unmet: ci, review, size"),
                          {"ci", "review", "size"})
 
+    def test_normalizes_parameterized_acceptance_gate(self):
+        self.assertEqual(
+            fnw._unmet_gates("unmet: accept #254"), {"accept"},
+        )
+
     def test_a_non_gate_reason_yields_nothing(self):
         # dod_status also returns prose for fetch failures and missing Closes
         # lines. Those are not gate lists and must never be mistaken for one.
         self.assertEqual(fnw._unmet_gates("could not fetch pull request"), set())
         self.assertEqual(fnw._unmet_gates(""), set())
 
+    def test_reads_failed_gate_messages_from_dry_run_json(self):
+        payload = {
+            "pr": 7,
+            "gates": [
+                {"name": "tests", "passed": False,
+                 "message": "Changed-file data is truncated; split the PR."},
+                {"name": "accept #254", "passed": False,
+                 "message": "Two criteria remain unticked."},
+                {"name": "ci", "passed": True, "message": "green"},
+            ],
+        }
+        with patch.object(
+            fnw, "run_cmd", return_value=(1, json.dumps(payload), ""),
+        ):
+            details = fnw._dod_gate_details(7)
+        self.assertEqual(details, {
+            "tests": "Changed-file data is truncated; split the PR.",
+            "accept": "Two criteria remain unticked.",
+        })
+
+    def test_malformed_gate_detail_payload_fails_closed(self):
+        with patch.object(fnw, "run_cmd", return_value=(1, "not json", "")):
+            self.assertIsNone(fnw._dod_gate_details(7))
+
 
 class AuthorGateFixTests(unittest.TestCase):
     def fix(self, candidate, agent="agent-2", reason="unmet: rebased"):
         # `reason` is the verdict merge_eligibility already computed, so the
-        # gates are never evaluated twice.
-        return fnw.author_gate_fix(candidate, agent, reason)
+        # full gate is reevaluated only when its action depends on the failure
+        # subtype; the dry-run JSON then preserves that detail for the agent.
+        details = {
+            "tests": "Changed-file data is truncated; split the PR.",
+            "verification": "Verification evidence markers are malformed.",
+        }
+        with patch.object(fnw, "_dod_gate_details", return_value=details):
+            return fnw.author_gate_fix(candidate, agent, reason)
 
     def test_rebased_only_is_offered_to_the_author(self):
         found = self.fix(stranded(), reason="unmet: rebased")
@@ -758,6 +794,29 @@ class AuthorGateFixTests(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found["unmet_gates"], ["size"])
 
+    def test_accept_only_is_offered_to_the_author(self):
+        found = self.fix(stranded(), reason="unmet: accept #254")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["unmet_gates"], ["accept"])
+
+    def test_accept_and_other_author_gates_are_offered_together(self):
+        found = self.fix(
+            stranded(), reason="unmet: accept #254, size, verification",
+        )
+        self.assertEqual(
+            found["unmet_gates"], ["accept", "size", "verification"],
+        )
+        self.assertEqual(found["gate_details"], {
+            "verification": "Verification evidence markers are malformed.",
+        })
+
+    def test_subtype_sensitive_gate_messages_are_preserved(self):
+        found = self.fix(stranded(), reason="unmet: tests, verification")
+        self.assertEqual(found["gate_details"], {
+            "tests": "Changed-file data is truncated; split the PR.",
+            "verification": "Verification evidence markers are malformed.",
+        })
+
     def test_non_author_is_never_offered_it(self):
         self.assertIsNone(self.fix(stranded(author="agent-1"), agent="agent-2"))
 
@@ -768,6 +827,14 @@ class AuthorGateFixTests(unittest.TestCase):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 0, "reviewed_head": True}):
             self.assertIsNone(self.fix(stranded(), reason="unmet: rebased, review"))
+
+    def test_accept_with_peer_review_needed_stays_away_from_author(self):
+        with patch.object(fnw, "review_evidence", return_value={
+            "unresolved": 0, "unfixed": 0, "reviewed_head": True,
+        }):
+            self.assertIsNone(
+                self.fix(stranded(), reason="unmet: accept #254, review"),
+            )
 
     def test_unfixed_resolved_threads_are_author_fixable(self):
         with patch.object(fnw, "review_evidence",
@@ -837,6 +904,16 @@ class GateFixSelectionTests(unittest.TestCase):
         res = self.select_with(stranded(), reason="unmet: size")
         self.assertEqual(res["work"]["unmet_gates"], ["size"])
 
+    def test_acceptance_gate_is_routed_as_author_feedback(self):
+        res = self.select_with(stranded(), reason="unmet: accept #254")
+        self.assertEqual(res["work"]["type"], "feedback")
+        self.assertEqual(res["work"]["unmet_gates"], ["accept"])
+
+    def test_red_ci_is_routed_even_before_full_dod_evaluation(self):
+        res = self.select_with(stranded(checks="red", peer=None))
+        self.assertEqual(res["work"]["type"], "feedback")
+        self.assertEqual(res["work"]["unmet_gates"], ["ci"])
+
     def test_routed_to_a_skill_the_loop_contract_already_knows(self):
         res = self.select_with(stranded())
         self.assertEqual(res["work"]["type"], "feedback")
@@ -905,12 +982,42 @@ class GateFixRoutingContractTests(unittest.TestCase):
                 self.assertIn(f"`{gate}`", text,
                               f"{rel} gives no instruction for the '{gate}' gate")
 
+    def test_every_dod_gate_has_an_explicit_owner_or_exception(self):
+        passing = (True, "ok")
+        check_names = (
+            "check_open", "check_issue_link", "check_verification", "check_ci",
+            "check_reviews", "check_rebased", "check_size",
+            "check_test_coverage", "check_review_rounds", "check_acceptance",
+        )
+        patches = [patch.object(merge_pr, name, return_value=passing)
+                   for name in check_names]
+        for mocked in patches:
+            mocked.start()
+            self.addCleanup(mocked.stop)
+        with patch.object(merge_pr, "linked_issues", return_value=[254]):
+            _, gates = merge_pr.evaluate_dod({}, {254: ""}, {})
+
+        emitted = {fnw._routable_gate_name(name) for name, _, _ in gates}
+        owned = (
+            fnw.AUTHOR_FIXABLE_GATES
+            | fnw.PEER_ROUTABLE_GATES
+            | fnw.DOD_NON_ROUTABLE_GATES
+        )
+        self.assertEqual(
+            emitted - owned, set(),
+            "evaluate_dod emitted a gate with no author, peer, or explicit exception",
+        )
+
     def test_each_gate_documents_a_concrete_action(self):
         # A gate named without its action is still unactionable prose.
         required = {
+            "accept": "tick the boxes",
+            "ci": "remediate-ci-failure",
             "rebased": "--force-with-lease",
             "size": "size-waiver",
             "review-evidence": "Withdrawn:",
+            "tests": "test coverage",
+            "verification": "--refresh-pr",
         }
         self.assertEqual(set(required), set(fnw.AUTHOR_FIXABLE_GATES),
                          "a gate was added without an action marker to assert on")

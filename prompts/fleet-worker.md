@@ -138,7 +138,8 @@ push, and reply to each thread with the commit hash that addressed it.
 **A2 — present: a Definition-of-Done gate only you can clear.** There are **no
 unresolved threads to fetch**; the checklist is empty by construction, so do
 not run Step 1 looking for open comments. Each named gate has exactly one
-action:
+action. For `tests` and `verification`, read the corresponding
+`work.gate_details` failure message before acting:
 
 - `rebased` — `git fetch origin && git rebase origin/main` in the PR's worktree,
   re-run the full local verification, then push with `--force-with-lease`.
@@ -154,6 +155,18 @@ action:
   (GraphQL `reviewThreads` with `isResolved: true`, or the PR Conversation
   tab) and either push a fix commit or reply on it starting with
   `Withdrawn:` and why. Do not treat this as a missing peer review.
+- `accept` — verify every acceptance criterion on the linked issue against the
+  implementation and evidence, then tick the boxes that are satisfied. Leave
+  any genuinely unmet box unticked and record why on the issue.
+- `ci` — invoke `remediate-ci-failure` and diagnose from the complete hosted
+  logs before changing code or retrying.
+- `tests` — if `work.gate_details.tests` reports truncated changed-file data,
+  split the PR; otherwise add or update test coverage for the changed
+  production files and run the relevant verification before pushing.
+- `verification` — refresh stale current-head evidence with
+  `create_pr.py --refresh-pr`. If `work.gate_details.verification` reports
+  malformed or duplicate markers that block the helper, repair the marker
+  structure first and then rerun the helper; never fabricate its JSON.
 
 Then refresh the evidence for the new head with
 `create_pr.py --refresh-pr <PR> --issue <N> --verify-command ...` and return to

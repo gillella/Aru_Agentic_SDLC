@@ -51,6 +51,7 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from claim_issue import (
@@ -377,13 +378,32 @@ def needs_my_attention(pr: dict[str, Any], agent: str) -> bool:
     return threads is not None and threads > 0
 
 
-# Definition-of-Done gates a PR's own author can clear alone. Rebasing rewrites
-# branch history and a size waiver is an authorship judgement; neither is a peer
-# action, so work arising from these is offered only to author:<id>.
+# Definition-of-Done gates a PR's own author can clear alone. Work arising from
+# these is offered only to author:<id>; the routed skill documents the concrete
+# action for every name in this set.
 # `review-evidence` is the unfixed-resolved-thread case: a peer already
 # reviewed, threads are resolved, but no follow-up commit or `Withdrawn:`
 # reply exists. Generic `review` (needs a peer) is never author-fixable.
-AUTHOR_FIXABLE_GATES = frozenset({"rebased", "size", "review-evidence"})
+AUTHOR_FIXABLE_GATES = frozenset({
+    "accept", "ci", "rebased", "review-evidence", "size", "tests",
+    "verification",
+})
+PEER_ROUTABLE_GATES = frozenset({"review"})
+
+# These evaluate_dod names cannot create author work: open and issue-link
+# failures are intercepted before gate evaluation, while review rounds is a
+# visibility-only check that always passes. The exhaustiveness test requires a
+# comment-backed entry here when evaluate_dod gains another deliberate non-route.
+DOD_NON_ROUTABLE_GATES = frozenset({"open", "issue link", "review rounds"})
+DETAIL_REQUIRED_GATES = frozenset({"tests", "verification"})
+
+
+def _routable_gate_name(name: str) -> str:
+    """Normalize parameterized DoD names to the action the author can take."""
+    cleaned = name.strip()
+    if re.fullmatch(r"accept\s+#\d+", cleaned, re.IGNORECASE):
+        return "accept"
+    return cleaned
 
 
 def _unmet_gates(reason: str) -> set[str]:
@@ -398,7 +418,42 @@ def _unmet_gates(reason: str) -> set[str]:
     prefix = "unmet:"
     if not text.lower().startswith(prefix):
         return set()
-    return {part.strip() for part in text[len(prefix):].split(",") if part.strip()}
+    return {
+        _routable_gate_name(part)
+        for part in text[len(prefix):].split(",")
+        if part.strip()
+    }
+
+
+def _dod_gate_details(pr_number: int) -> dict[str, str] | None:
+    """Failed DoD messages from the authoritative dry-run JSON payload."""
+    script = Path(__file__).with_name("merge_pr.py")
+    code, out, _ = run_cmd(
+        [sys.executable, str(script), "--pr", str(pr_number), "--dry-run", "--json"],
+        check=False,
+    )
+    try:
+        payload = json.loads(out or "")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("pr") != pr_number
+        or not isinstance(payload.get("gates"), list)
+    ):
+        return None
+    details = {}
+    for gate in payload["gates"]:
+        if not isinstance(gate, dict) or gate.get("passed") is not False:
+            continue
+        name = gate.get("name")
+        message = gate.get("message")
+        if not isinstance(name, str) or not isinstance(message, str) or not message:
+            return None
+        details[_routable_gate_name(name)] = message
+    if code == 0 and details:
+        return None
+    return details
 
 
 def _author_can_repair_review(pr: dict[str, Any]) -> bool:
@@ -431,9 +486,9 @@ def _author_fixable_from_unmet(
     gates = _unmet_gates(dod_reason or "")
     if not gates:
         return None
-    if gates - {"rebased", "size", "review"}:
+    if gates - AUTHOR_FIXABLE_GATES - PEER_ROUTABLE_GATES:
         return None
-    fixable = set(gates & {"rebased", "size"})
+    fixable = set(gates & AUTHOR_FIXABLE_GATES)
     if "review" in gates:
         if not _author_can_repair_review(pr):
             return None
@@ -452,10 +507,10 @@ def author_gate_fix(pr: dict[str, Any], agent: str,
     overlapping path.
 
     ``dod_reason`` is the verdict ``merge_eligibility`` already produced for
-    this PR, so no gate is evaluated twice. It is ``None`` - and this returns
-    ``None`` - when merge eligibility failed a cheap filter before reaching the
-    gates, which is the correct outcome: a PR that has not yet earned an
-    independent review needs that review, not an author gate fix.
+    this PR. Subtype-sensitive gates perform one JSON dry run so the action is
+    based on the real failure message rather than a lossy gate name. A ``None``
+    verdict still returns ``None`` when merge eligibility failed a cheap filter
+    before reaching any author-routable gate.
     """
     if pr.get("isDraft") or is_merged(pr):
         return None
@@ -469,8 +524,21 @@ def author_gate_fix(pr: dict[str, Any], agent: str,
     fixable = _author_fixable_from_unmet(pr, dod_reason)
     if not fixable:
         return None
-    return {"pr": pr["number"], "title": pr.get("title") or "",
+    gate_details = {}
+    if DETAIL_REQUIRED_GATES.intersection(fixable):
+        all_details = _dod_gate_details(pr["number"])
+        if all_details is None:
+            return None
+        for gate in DETAIL_REQUIRED_GATES.intersection(fixable):
+            detail = all_details.get(gate)
+            if not detail:
+                return None
+            gate_details[gate] = detail
+    work = {"pr": pr["number"], "title": pr.get("title") or "",
             "unmet_gates": fixable, "reason": dod_reason}
+    if gate_details:
+        work["gate_details"] = gate_details
+    return work
 
 
 def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
@@ -630,6 +698,13 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:
     if threads:
         return no(f"{threads} active review feedback item(s); waiting on author")
 
+    state = ci_state(pr)
+    if state != "green":
+        if state == "red":
+            return no("unmet: ci")
+        if state != "none":
+            return no(f"CI is {state}")
+
     peers = [
         name[len("reviewed-by:"):]
         for name in labels
@@ -642,11 +717,6 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:
 
     if author and author == agent and not peers:
         return no("author cannot merge without a distinct peer reviewer")
-
-    state = ci_state(pr)
-    if state != "green":
-        if state != "none":
-            return no(f"CI is {state}")
 
     ok, reason = dod_status(pr["number"])
     if not ok:
@@ -793,11 +863,13 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
                 "skill": "merge-pr", "head_sha": pr.get("headRefOid")}
     elif gate_fix:
         # Reuses the routed `feedback` type rather than inventing one the loop
-        # contract does not document; unmet_gates tells the agent to rebase or
-        # to split/justify instead of hunting for threads that do not exist.
+        # contract does not document; unmet_gates names the documented author
+        # action instead of sending the agent hunting for nonexistent threads.
         work = {"type": "feedback", "pr": gate_fix["pr"], "title": gate_fix["title"],
                 "skill": "address-pr-feedback",
                 "unmet_gates": gate_fix["unmet_gates"], "reason": gate_fix["reason"]}
+        if gate_fix.get("gate_details"):
+            work["gate_details"] = gate_fix["gate_details"]
     elif reviewable:
         pr, verdict = reviewable[0]
         work = {"type": "review", "pr": pr["number"], "title": pr["title"],
