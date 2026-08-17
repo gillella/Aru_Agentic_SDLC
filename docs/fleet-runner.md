@@ -126,6 +126,26 @@ python3 "$ARU_SDLC_HOME/scripts/spawn_ephemeral_worker.py" \
   --adapter claude
 ```
 
+If Claude is unavailable, an OpenAI parent can use the installed Gemini CLI as
+independently attested Google-family review capacity:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/spawn_ephemeral_worker.py" \
+  --repo . --pr <PR> --skill code-review \
+  --parent-agent codex-1 --parent-family openai \
+  --worker-agent gemini-ephemeral-<PR> --worker-family google \
+  --adapter gemini
+```
+
+The `gemini` adapter invokes the headless Gemini CLI in sandboxed,
+non-interactive auto-approval mode inside the isolated review worktree. The
+ephemeral launcher accepts only same-repository PRs; fork PRs require a
+persistent or manual review path because their heads are not trusted with the
+worker's GitHub authority. Cursor and Antigravity remain governed desktop
+participants, but this launcher does not drive their UI or infer the model
+family selected inside Cursor. Antigravity review capacity uses the
+independently identifiable Google-family Gemini CLI path.
+
 An author-feedback task uses the PR's existing author stamps instead. The
 worker id and family must exactly match `author:<id>` and `family:<family>`:
 

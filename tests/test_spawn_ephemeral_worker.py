@@ -172,6 +172,84 @@ class EphemeralWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(sew.LauncherError, "does not attest worker family"):
             sew.validate_task(config, self.metadata)
 
+    def test_gemini_adapter_attests_google_family(self):
+        config = self.config(
+            worker_agent="gemini-ephemeral-42",
+            worker_family="google",
+            adapter="gemini",
+        )
+
+        sew.validate_task(config, self.metadata)
+
+    def test_cross_repository_review_is_rejected_before_launch(self):
+        config = self.config(
+            worker_agent="gemini-ephemeral-42",
+            worker_family="google",
+            adapter="gemini",
+        )
+        metadata = sew.PRMetadata(
+            **{**self.metadata.__dict__, "cross_repository": True}
+        )
+
+        with self.assertRaisesRegex(sew.LauncherError, "cross-repository"):
+            sew.validate_task(config, metadata)
+
+    def test_auto_google_builds_positional_one_shot_gemini_argv(self):
+        config = self.config(
+            worker_agent="gemini-ephemeral-42",
+            worker_family="google",
+            adapter="auto",
+        )
+
+        argv = sew.build_ephemeral_agent_argv(config, "review one PR", self.repo)
+
+        self.assertEqual(
+            argv,
+            [
+                "gemini",
+                "--sandbox",
+                "--approval-mode",
+                "yolo",
+                "--output-format",
+                "stream-json",
+                "review one PR",
+            ],
+        )
+
+    def test_parser_accepts_explicit_gemini_adapter(self):
+        args = sew.build_parser().parse_args([
+            "--repo", str(self.repo),
+            "--pr", "42",
+            "--skill", sew.TASK_REVIEW,
+            "--parent-agent", "codex-1",
+            "--parent-family", "openai",
+            "--worker-agent", "gemini-ephemeral-42",
+            "--worker-family", "google",
+            "--adapter", "gemini",
+        ])
+
+        self.assertEqual(args.adapter, "gemini")
+
+    def test_docs_describe_gemini_review_and_desktop_ui_boundary(self):
+        fleet_docs = (ROOT / "docs" / "fleet-runner.md").read_text(encoding="utf-8")
+        factory_skill = (
+            ROOT / "skills" / "run-aru-factory" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        normalized_fleet_docs = " ".join(fleet_docs.split())
+
+        for fragment in (
+            "--worker-agent gemini-ephemeral-<PR> --worker-family google",
+            "--adapter gemini",
+        ):
+            self.assertIn(fragment, fleet_docs)
+        for fragment in (
+            "does not drive their UI or infer the model family selected inside Cursor",
+            "same-repository",
+        ):
+            self.assertIn(fragment, normalized_fleet_docs)
+        self.assertIn("Gemini/Google", factory_skill)
+        self.assertIn("never a Cursor-selected model or desktop UI", factory_skill)
+
     def test_custom_adapter_is_rejected_without_trusted_family_attestation(self):
         config = self.config(adapter_command_json='["custom-agent"]')
 
@@ -292,6 +370,30 @@ class EphemeralWorkerTests(unittest.TestCase):
         cleanup.assert_called_once_with(self.repo, worktree, "")
         registry = json.loads((self.state_dir / "ephemeral-workers.json").read_text())
         self.assertEqual(registry["workers"], [])
+
+    def test_nonzero_gemini_worker_releases_claim_and_cleans_worktree(self):
+        config = self.config(
+            worker_agent="gemini-ephemeral-42",
+            worker_family="google",
+            adapter="gemini",
+        )
+        worktree = self.repo / ".worktrees" / f"ephemeral-review-{os.getpid()}"
+        with (
+            patch.object(sew, "load_pr_metadata", return_value=self.metadata),
+            patch.object(sew, "claim_review", return_value=0),
+            patch.object(sew, "prepare_worktree", return_value=(worktree, "")),
+            patch.object(sew.shutil, "which", return_value="/bin/gemini"),
+            patch.object(sew, "run_worker", return_value=sew.WorkerResult(9)) as run,
+            patch.object(sew, "release_review", return_value=0) as release,
+            patch.object(sew, "cleanup_worktree", return_value=True) as cleanup,
+        ):
+            code = sew.execute(config)
+
+        self.assertEqual(code, 9)
+        self.assertEqual(run.call_args.args[0][0], "gemini")
+        self.assertEqual(run.call_args.args[2]["ARU_MODEL_FAMILY"], "google")
+        release.assert_called_once_with(config)
+        cleanup.assert_called_once_with(self.repo, worktree, "")
 
     def test_clean_review_exit_requires_worker_to_release_claim(self):
         claimed = sew.PRMetadata(
