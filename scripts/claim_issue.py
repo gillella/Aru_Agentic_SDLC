@@ -868,6 +868,35 @@ def _claims_with_timestamps(prs: list, prefix: str, claimant):
     return claims
 
 
+def _revalidate_claims(prs: list, prefix: str, claimant, expected: list):
+    """Fail closed if any live claim changed during the reaper preflight.
+
+    GitHub does not offer an atomic compare-and-remove operation for labels.
+    A second complete timeline snapshot immediately before the removal pass
+    prevents an old event observed by the first pass from authorizing removal
+    of a claim that was released and reacquired while the sweep was running.
+    """
+    refreshed = _claims_with_timestamps(prs, prefix, claimant)
+    if refreshed is None:
+        return None
+    expected_state = {
+        (pr["number"], holder): claimed_at
+        for pr, holder, claimed_at in expected
+    }
+    refreshed_state = {
+        (pr["number"], holder): claimed_at
+        for pr, holder, claimed_at in refreshed
+    }
+    if refreshed_state != expected_state:
+        print(
+            "[WARN] Claim state changed during reaper preflight; "
+            "no claims were reaped.",
+            file=sys.stderr,
+        )
+        return None
+    return refreshed
+
+
 def reap_stale_merges(hours: int = 4) -> list:
     """Releases merge claims that went quiet without finishing close-out.
 
@@ -902,6 +931,11 @@ def reap_stale_merges(hours: int = 4) -> list:
     claims = _claims_with_timestamps(prs, MERGER_LABEL_PREFIX, merge_claimant)
     if claims is None:
         return []
+    claims = _revalidate_claims(
+        prs, MERGER_LABEL_PREFIX, merge_claimant, claims
+    )
+    if claims is None:
+        return []
     released = []
     for pr, holder, claimed_at in claims:
         number = pr["number"]
@@ -923,7 +957,7 @@ def reap_stale_reviews(hours: int = 4) -> list:
     from the review queue permanently and merge_pr.py blocks on it for good.
 
     A claim is stale when its latest labeled event is older than `hours` and
-    carries no submitted review after that claim event.
+    carries no recent submitted review after that claim event.
     """
     if hours <= 0:
         return []
@@ -946,6 +980,11 @@ def reap_stale_reviews(hours: int = 4) -> list:
     claims = _claims_with_timestamps(prs, REVIEWER_LABEL_PREFIX, review_claimant)
     if claims is None:
         return []
+    claims = _revalidate_claims(
+        prs, REVIEWER_LABEL_PREFIX, review_claimant, claims
+    )
+    if claims is None:
+        return []
     released = []
     for pr, holder, claimed_at in claims:
         reviewed_after_claim = False
@@ -953,7 +992,7 @@ def reap_stale_reviews(hours: int = 4) -> list:
             when = parse_iso(review.get("submittedAt") or "")
             if when is None or when.tzinfo is None:
                 continue
-            if when > claimed_at:
+            if when > claimed_at and when >= cutoff:
                 reviewed_after_claim = True
                 break
         if reviewed_after_claim:
@@ -964,7 +1003,7 @@ def reap_stale_reviews(hours: int = 4) -> list:
             released.append(pr["number"])
             print(f"♻️  Released stale review claim on PR #{pr['number']} "
                   f"(held by '{holder}', claim age > {hours}h, "
-                  "no review submitted after claim).",
+                  "no recent review submitted after claim).",
                   file=sys.stderr)
     return released
 

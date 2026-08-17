@@ -457,20 +457,42 @@ class ClaimAgeReaperTests(unittest.TestCase):
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
-    def test_review_after_claim_exempts_even_when_both_are_old(
+    def test_recent_review_after_old_claim_exempts(
         self, run_cmd, fetch_timeline
     ):
         claim_time = "2020-01-02T00:00:00Z"
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         run_cmd.return_value = self._list_result([
             self._pr(
                 9,
                 "reviewer:done",
-                reviews=[{"submittedAt": "2020-01-03T00:00:00Z"}],
+                reviews=[{"submittedAt": recent}],
             ),
         ])
         fetch_timeline.return_value = self._timeline("reviewer:done", claim_time)
 
         self.assertEqual(claim_issue.reap_stale_reviews(4), [])
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_old_post_claim_review_does_not_preserve_claim_forever(
+        self, run_cmd, fetch_timeline
+    ):
+        run_cmd.side_effect = [
+            self._list_result([
+                self._pr(
+                    18,
+                    "reviewer:crashed-after-review",
+                    reviews=[{"submittedAt": "2020-01-03T00:00:00Z"}],
+                ),
+            ]),
+            (0, "", ""),
+        ]
+        fetch_timeline.return_value = self._timeline(
+            "reviewer:crashed-after-review", "2020-01-02T00:00:00Z"
+        )
+
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [18])
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
@@ -546,6 +568,30 @@ class ClaimAgeReaperTests(unittest.TestCase):
 
         self.assertEqual(claim_issue.reap_stale_reviews(4), [])
         self.assertEqual(run_cmd.call_count, 1)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_reacquired_claim_is_not_removed_from_old_snapshot(
+        self, run_cmd, fetch_timeline
+    ):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.return_value = self._list_result([
+            self._pr(19, "reviewer:renewed"),
+        ])
+        fetch_timeline.side_effect = [
+            self._timeline("reviewer:renewed", self.OLD),
+            [
+                *self._timeline("reviewer:renewed", self.OLD),
+                *self._timeline("reviewer:renewed", recent),
+            ],
+        ]
+
+        with patch("sys.stderr") as stderr:
+            result = claim_issue.reap_stale_reviews(4)
+
+        self.assertEqual(result, [])
+        self.assertEqual(run_cmd.call_count, 1)
+        self.assertTrue(stderr.write.called)
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
