@@ -57,8 +57,44 @@ depends-on: #2, #4
 
         result = build_candidates(issues, "agent-a")
 
-        # Issue 20 (in-review) is not a candidate, and its touches block candidate 21
+        # Issue 20 (in-review) is not a candidate, and with no PR-file map the
+        # declared touches still block candidate 21 (fail closed).
         self.assertEqual([item["number"] for item in result["candidates"]], [22])
+        self.assertEqual(result["conflicted"][0]["number"], 21)
+
+    def test_in_review_pr_files_not_declared_path_do_not_block(self):
+        issues = [
+            issue(
+                20,
+                "touches: src/auth.py, src/unused.py\n",
+                labels=("status:in-review",),
+            ),
+            issue(21, "touches: src/unused.py\n", labels=("status:ready",)),
+            issue(22, "touches: src/auth.py\n", labels=("status:ready",)),
+        ]
+
+        result = build_candidates(
+            issues, "agent-a", pr_files_by_issue={20: ["src/auth.py"]},
+        )
+
+        self.assertEqual([item["number"] for item in result["candidates"]], [21])
+        self.assertEqual(result["conflicted"][0]["number"], 22)
+
+    def test_in_progress_declared_touches_ignore_pr_file_map(self):
+        issues = [
+            issue(
+                20,
+                "touches: src/auth.py, src/unused.py\n",
+                labels=("agent:agent-a", "status:in-progress"),
+            ),
+            issue(21, "touches: src/unused.py\n", labels=("status:ready",)),
+        ]
+
+        result = build_candidates(
+            issues, "agent-b", pr_files_by_issue={20: ["src/auth.py"]},
+        )
+
+        self.assertEqual(result["candidates"], [])
         self.assertEqual(result["conflicted"][0]["number"], 21)
 
     def test_backlog_and_missing_touches_are_not_claimable(self):
@@ -204,9 +240,10 @@ depends-on: #2, #4
 class ClaimWalkTests(unittest.TestCase):
     @patch("claim_issue.claim_issue")
     @patch.object(fetch_next_issue, "get_current_branch", return_value="main")
+    @patch.object(fetch_next_issue, "list_open_pr_files_by_issue", return_value={})
     @patch.object(fetch_next_issue, "list_open_issues")
     def test_claim_rebuilds_candidates_after_conflict(
-        self, list_open_issues, _branch, claim_issue_fn
+        self, list_open_issues, _pr_files, _branch, claim_issue_fn
     ):
         """After losing #10, rebuild so #11 overlapping touches is deferred."""
         initial = [
@@ -243,8 +280,9 @@ class ClaimWalkTests(unittest.TestCase):
         self.assertEqual(list_open_issues.call_count, 2)
 
     @patch.object(fetch_next_issue, "get_current_branch", return_value="feat/issue-99-stale")
+    @patch.object(fetch_next_issue, "list_open_pr_files_by_issue", return_value={})
     @patch.object(fetch_next_issue, "list_open_issues")
-    def test_stale_branch_resume_is_ignored(self, list_open_issues, _branch):
+    def test_stale_branch_resume_is_ignored(self, list_open_issues, _pr_files, _branch):
         list_open_issues.return_value = [
             issue(12, "touches: docs/**\n", labels=("status:ready",)),
         ]
@@ -260,8 +298,9 @@ class ClaimWalkTests(unittest.TestCase):
         self.assertIn("ignoring stale resume", err.getvalue())
 
     @patch.object(fetch_next_issue, "get_current_branch", return_value="feat/issue-9-wip")
+    @patch.object(fetch_next_issue, "list_open_pr_files_by_issue", return_value={})
     @patch.object(fetch_next_issue, "list_open_issues")
-    def test_active_branch_resume_is_honored(self, list_open_issues, _branch):
+    def test_active_branch_resume_is_honored(self, list_open_issues, _pr_files, _branch):
         list_open_issues.return_value = [
             issue(
                 9,
@@ -280,8 +319,9 @@ class ClaimWalkTests(unittest.TestCase):
         self.assertIn('"resumable_in_flight_issue": 9', output)
 
     @patch.object(fetch_next_issue, "get_current_branch", return_value="feat/issue-9-operator")
+    @patch.object(fetch_next_issue, "list_open_pr_files_by_issue", return_value={})
     @patch.object(fetch_next_issue, "list_open_issues")
-    def test_needs_human_branch_resume_is_ignored(self, list_open_issues, _branch):
+    def test_needs_human_branch_resume_is_ignored(self, list_open_issues, _pr_files, _branch):
         list_open_issues.return_value = [
             issue(
                 9,
@@ -300,6 +340,44 @@ class ClaimWalkTests(unittest.TestCase):
         self.assertIn('"resumable_in_flight_issue": null', buf.getvalue())
         self.assertIn('"next_progressive_issue": 12', buf.getvalue())
         self.assertIn("operator-only (needs-human)", err.getvalue())
+
+
+class PrFileReservationTests(unittest.TestCase):
+    def test_closes_line_beats_branch_name(self):
+        pr = {
+            "body": "Closes #20\n",
+            "headRefName": "feat/issue-99-other",
+            "files": [{"path": "src/a.py"}],
+        }
+        self.assertEqual(fetch_next_issue.linked_issue_numbers_from_pr(pr), [20])
+
+    def test_branch_name_used_when_body_has_no_closes(self):
+        pr = {
+            "body": "no closure",
+            "headRefName": "fix/issue-21-hotfix",
+            "files": [{"path": "src/b.py"}],
+        }
+        self.assertEqual(fetch_next_issue.linked_issue_numbers_from_pr(pr), [21])
+
+    def test_maps_union_of_files_per_issue(self):
+        prs = [
+            {
+                "body": "Closes #20",
+                "headRefName": "feat/issue-20-a",
+                "files": [{"path": "src/a.py"}, {"path": "src/b.py"}],
+            },
+            {
+                "body": "Closes #20",
+                "headRefName": "feat/issue-20-followup",
+                "files": [{"path": "src/b.py"}, {"path": "src/c.py"}],
+            },
+        ]
+        mapping = fetch_next_issue.pr_files_by_issue_from_prs(prs)
+        self.assertEqual(mapping[20], ["src/a.py", "src/b.py", "src/c.py"])
+
+    def test_lookup_failure_returns_empty_map(self):
+        with patch.object(fetch_next_issue, "run_cmd", return_value=(1, "", "boom")):
+            self.assertEqual(fetch_next_issue.list_open_pr_files_by_issue(), {})
 
 
 def fetch_next_issue_claim_conflict():

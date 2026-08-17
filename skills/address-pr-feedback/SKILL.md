@@ -46,6 +46,10 @@ No threads exist. Act on each name in `work.unmet_gates`:
 - **`size`** — split the PR, or add `size-waiver: <rationale>` to its body
   explaining why splitting is worse. Never waive silently, and never waive
   purely to clear the gate.
+- **`review-evidence`** — a peer already reviewed and threads are resolved, but
+  Definition of Done still fails `review` because a resolved thread has no
+  commit after the finding. Push a fix, or reply on the thread starting with
+  `Withdrawn:` and why. This is not a request to self-review.
 
 Then refresh evidence for the new head:
 

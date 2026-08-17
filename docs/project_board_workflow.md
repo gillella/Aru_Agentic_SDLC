@@ -104,7 +104,7 @@ the options and block for clarification rather than inventing requirements.
 ## ⚡ Parallel Multi-Agent Execution Rules
 
 1. **Parallel Eligibility**:
-   Issues marked with `parallel-eligible: true` can be worked on concurrently only when their required `touches:` path declarations do not overlap in-flight work.
+   Issues marked with `parallel-eligible: true` can be worked on concurrently only when their required `touches:` path declarations do not overlap in-flight work. **In Progress** reserves the issue's declared `touches:` list. **In Review** reserves the open PR's actual files when that list can be read; if it cannot, the declared list is kept (fail closed). A declared path that the parked PR did not change does not block Ready work.
 2. **Subagent Worktree Isolation**:
    Each parallel subagent MUST execute in its own isolated worktree (`.worktrees/issue-<ID>-<slug>`).
 3. **Merge Conflict Resolution**:

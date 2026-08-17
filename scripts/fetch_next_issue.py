@@ -8,8 +8,10 @@ Multi-agent safe. Three things make it so:
     handed the same work. (The previous version filtered only on --state open,
     so a claimed, in-progress issue was still returned as "next".)
   * Candidates whose `touches:` paths overlap work already in flight are
-    excluded. `parallel-eligible` only means "no unresolved depends-on"; it
-    says nothing about two agents editing the same file.
+    excluded. In Progress reserves the issue's declared `touches:`. In Review
+    reserves the open PR's actual files when they can be read, otherwise the
+    declared list (fail closed). `parallel-eligible` only means "no unresolved
+    depends-on"; it says nothing about two agents editing the same file.
   * --claim walks the candidate list and takes the first issue it can claim,
     so a lost race costs one retry rather than duplicated work.
 """
@@ -32,6 +34,85 @@ from common import (
     touches_conflict,
 )
 from update_issue_status import update_status
+
+
+ISSUE_IN_BRANCH = re.compile(r"issue-(\d+)", re.IGNORECASE)
+CLOSES_ISSUE = re.compile(r"\bcloses\s+#(\d+)\b", re.IGNORECASE)
+
+
+def linked_issue_numbers_from_pr(pr: Dict[str, Any]) -> List[int]:
+    """Issue numbers this PR closes, from body then branch name."""
+    seen: set[int] = set()
+    out: List[int] = []
+    for match in CLOSES_ISSUE.finditer(pr.get("body") or ""):
+        num = int(match.group(1))
+        if num not in seen:
+            seen.add(num)
+            out.append(num)
+    if out:
+        return out
+    match = ISSUE_IN_BRANCH.search(pr.get("headRefName") or "")
+    if match:
+        return [int(match.group(1))]
+    return []
+
+
+def pr_files_by_issue_from_prs(prs: List[Dict[str, Any]]) -> Dict[int, List[str]]:
+    """Map each linked issue to the union of PR file paths."""
+    mapping: Dict[int, List[str]] = {}
+    for pr in prs:
+        paths: List[str] = []
+        for entry in pr.get("files") or []:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if path and path not in paths:
+                paths.append(path)
+        if not paths:
+            continue
+        for num in linked_issue_numbers_from_pr(pr):
+            current = mapping.setdefault(num, [])
+            for path in paths:
+                if path not in current:
+                    current.append(path)
+    return mapping
+
+
+def list_open_pr_files_by_issue() -> Dict[int, List[str]]:
+    """Live map of issue → open-PR files. Empty on lookup failure."""
+    code, out, _err = run_cmd(
+        [
+            "gh", "pr", "list", "--state", "open", "--limit", "200",
+            "--json", "number,body,headRefName,files",
+        ],
+        check=False,
+    )
+    if code != 0:
+        return {}
+    try:
+        prs = json.loads(out) if out else []
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(prs, list):
+        return {}
+    return pr_files_by_issue_from_prs(prs)
+
+
+def reservation_paths(
+    issue: Dict[str, Any],
+    pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
+) -> List[str]:
+    """Paths this in-flight issue currently locks.
+
+    In Progress uses declared touches. In Review uses the open PR's files when
+    that list is non-empty; otherwise the declared list so a lookup miss cannot
+    unlock a path still in flight.
+    """
+    declared = parse_touches(issue.get("body") or "")
+    names = {label.get("name", "").lower() for label in issue.get("labels", [])}
+    if "status:in-review" in names:
+        actual = (pr_files_by_issue or {}).get(issue["number"]) or []
+        if actual:
+            return actual
+    return declared
 
 
 def parse_dependencies(body: str) -> List[int]:
@@ -189,7 +270,11 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
     return released
 
 
-def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict[str, Any]:
+def build_candidates(
+    issues: List[Dict[str, Any]],
+    agent: Optional[str],
+    pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
+) -> Dict[str, Any]:
     """Partitions open issues into in-flight, blocked, and claimable."""
     open_numbers = {i["number"] for i in issues}
 
@@ -201,7 +286,7 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
         names = {label.get("name", "").lower() for label in labels}
         holder = claimed_by(issue)
         if holder or "status:in-progress" in names or "status:in-review" in names:
-            in_flight_paths.extend(parse_touches(issue.get("body") or ""))
+            in_flight_paths.extend(reservation_paths(issue, pr_files_by_issue))
         if needs_human(labels):
             continue
         if holder:
@@ -278,7 +363,8 @@ def main():
         if reap_stale_claims(issues, args.reap_after):
             issues = list_open_issues()
 
-    parts = build_candidates(issues, args.agent)
+    pr_files = list_open_pr_files_by_issue()
+    parts = build_candidates(issues, args.agent, pr_files_by_issue=pr_files)
     candidates = parts["candidates"]
     my_in_flight = parts["my_in_flight"]
 
@@ -328,7 +414,9 @@ def main():
             # each retry so overlapping work is not claimed from stale data.
             attempted = set()
             while True:
-                parts = build_candidates(issues, args.agent)
+                parts = build_candidates(
+                    issues, args.agent, pr_files_by_issue=pr_files
+                )
                 candidates = parts["candidates"]
                 remaining = [c for c in candidates if c["number"] not in attempted]
                 if not remaining:

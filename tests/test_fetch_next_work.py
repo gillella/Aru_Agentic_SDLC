@@ -730,8 +730,29 @@ class AuthorGateFixTests(unittest.TestCase):
 
     def test_a_peer_gate_alongside_it_is_not_author_fixable(self):
         # Only the author may rebase, but only a peer may review. A PR needing
-        # both is not the author's to clear alone.
-        self.assertIsNone(self.fix(stranded(), reason="unmet: rebased, review"))
+        # both is not the author's to clear alone unless the review failure is
+        # the unfixed-thread evidence hole.
+        with patch.object(fnw, "review_evidence",
+                          return_value={"unresolved": 0, "unfixed": 0}):
+            self.assertIsNone(self.fix(stranded(), reason="unmet: rebased, review"))
+
+    def test_unfixed_resolved_threads_are_author_fixable(self):
+        with patch.object(fnw, "review_evidence",
+                          return_value={"unresolved": 0, "unfixed": 2}):
+            found = self.fix(stranded(), reason="unmet: review")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["unmet_gates"], ["review-evidence"])
+
+    def test_unmet_review_without_unfixed_threads_stays_a_peer_gate(self):
+        with patch.object(fnw, "review_evidence",
+                          return_value={"unresolved": 0, "unfixed": 0}):
+            self.assertIsNone(self.fix(stranded(), reason="unmet: review"))
+
+    def test_unfixed_threads_plus_rebase_are_both_author_work(self):
+        with patch.object(fnw, "review_evidence",
+                          return_value={"unresolved": 0, "unfixed": 1}):
+            found = self.fix(stranded(), reason="unmet: rebased, review")
+        self.assertEqual(found["unmet_gates"], ["rebased", "review-evidence"])
 
     def test_unresolved_threads_stay_ordinary_feedback(self):
         self.assertIsNone(self.fix(stranded(threads=2)))
@@ -787,6 +808,14 @@ class GateFixSelectionTests(unittest.TestCase):
         self.assertEqual(res["work"]["type"], "feedback")
         self.assertNotIn("unmet_gates", res["work"])
 
+    def test_unfixed_review_is_routed_as_author_feedback(self):
+        with patch.object(fnw, "review_evidence",
+                          return_value={"unresolved": 0, "unfixed": 2}):
+            res = self.select_with(stranded(), reason="unmet: review")
+        self.assertEqual(res["work"]["type"], "feedback")
+        self.assertEqual(res["work"]["skill"], "address-pr-feedback")
+        self.assertEqual(res["work"]["unmet_gates"], ["review-evidence"])
+
 
 class GateFixRoutingContractTests(unittest.TestCase):
     """The emitted item must reach a consumer that knows what to do with it.
@@ -835,7 +864,11 @@ class GateFixRoutingContractTests(unittest.TestCase):
 
     def test_each_gate_documents_a_concrete_action(self):
         # A gate named without its action is still unactionable prose.
-        required = {"rebased": "--force-with-lease", "size": "size-waiver"}
+        required = {
+            "rebased": "--force-with-lease",
+            "size": "size-waiver",
+            "review-evidence": "Withdrawn:",
+        }
         self.assertEqual(set(required), set(fnw.AUTHOR_FIXABLE_GATES),
                          "a gate was added without an action marker to assert on")
         for rel, text in self.contracts().items():

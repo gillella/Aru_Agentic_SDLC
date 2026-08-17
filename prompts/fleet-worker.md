@@ -128,6 +128,11 @@ for one. Each named gate has exactly one action:
 - `size` — split the PR, or add `size-waiver: <rationale>` to its body stating
   why splitting would be worse. Never waive silently, and never waive merely to
   clear the gate.
+- `review-evidence` — a peer already reviewed and the threads are resolved, but
+  `merge_pr.py` still fails `review` because a resolved thread has no commit
+  after the finding and was not withdrawn. Push a fix commit, or reply on the
+  thread starting with `Withdrawn:` and why. Do not treat this as a missing
+  peer review.
 
 Then refresh the evidence for the new head with
 `create_pr.py --refresh-pr <PR> --issue <N> --verify-command ...` and return to

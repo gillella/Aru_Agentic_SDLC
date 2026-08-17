@@ -540,6 +540,7 @@ class PartitionTests(unittest.TestCase):
         })
 
         with patch("triage_backlog.list_open_issues", return_value=[operator_issue]), \
+             patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
              patch("sys.stdout", new_callable=io.StringIO) as output, \
              patch("sys.argv", ["triage_backlog.py", "--capacity"]):
             self.assertEqual(tb.main(), 0)
@@ -588,6 +589,19 @@ class PartitionTests(unittest.TestCase):
         self.assertEqual([i["number"] for i in held], [39])
         self.assertEqual(cap["concurrent"], [])
         self.assertEqual([n for n, _ in cap["deferred"]], [40])
+
+    def test_in_review_pr_files_unlock_declared_paths_not_in_the_diff(self):
+        issues = [
+            issue(39, "status:in-review", "agent:agent-1",
+                  body="touches: src/a.py, src/unused.py"),
+            issue(40, "status:ready", body="touches: src/unused.py"),
+        ]
+
+        _backlog, ready, held = tb.partition(issues)
+        cap = tb.capacity(ready, held, pr_files_by_issue={39: ["src/a.py"]})
+
+        self.assertEqual(cap["concurrent"], [40])
+        self.assertEqual(cap["deferred"], [])
 
 
 class CapacityTests(unittest.TestCase):
