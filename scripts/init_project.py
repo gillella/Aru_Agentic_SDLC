@@ -672,7 +672,7 @@ reviewers:
     google: anthropic
 """
 
-DEPLOY_PREVIEW_WORKFLOW = """name: Deploy Preview
+DEPLOY_PREVIEW_WORKFLOW = r"""name: Deploy Preview
 run-name: "Deploy Preview for ${{ inputs.commit_sha }} (${{ inputs.run_token || 'default' }})"
 
 on:

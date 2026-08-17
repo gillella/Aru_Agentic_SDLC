@@ -51,6 +51,15 @@ jobs:
           git merge-base --is-ancestor "${TARGET_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
           git worktree add --detach ../target "${TARGET_SHA}"
 
+      - name: Validate deployment credentials
+        env:
+          DEPLOY_CREDENTIALS: ${{ secrets.PREVIEW_DEPLOY_TOKEN || secrets.DEPLOY_TOKEN }}
+        run: |
+          if [ -z "${DEPLOY_CREDENTIALS}" ] && [ "${ALLOW_ANONYMOUS_PREVIEW:-false}" != "true" ]; then
+            echo "[ERROR] Deploy credentials absent. Set PREVIEW_DEPLOY_TOKEN in repository secrets." >&2
+            exit 1
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
