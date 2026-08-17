@@ -16,7 +16,7 @@ import time
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from delivery_increments import (
     DeliveryIncrementStore,
@@ -448,7 +448,17 @@ def github_issue_note(number: int, body: str, repo_dir: str) -> bool:
 
 
 class SplitError(ValueError):
-    """A Slack-split document is invalid or is a Slack event, not a filing source."""
+    """A Slack-split document is invalid or is a Slack event, not a filing source.
+
+    ``filed`` carries the children already created when the failure interrupted a
+    multi-story run. ``gh issue create`` is not transactional, so those issues
+    exist on GitHub whatever happens next; dropping their numbers would leave the
+    operator unable to enumerate them and a re-run would file duplicates.
+    """
+
+    def __init__(self, message: str, filed: Optional[List[Dict[str, Any]]] = None):
+        super().__init__(message)
+        self.filed: List[Dict[str, Any]] = list(filed or [])
 
 
 def looks_like_slack_event(payload: Any) -> bool:
@@ -543,8 +553,16 @@ def parse_split_document(payload: Any, epic: int) -> Dict[str, Any]:
     if not isinstance(payload, dict) or not isinstance(payload.get("stories"), list):
         raise SplitError("split document must be an object with a stories list")
     listed = payload.get("epic")
-    if listed is not None and int(listed) != int(epic):
-        raise SplitError(f"document epic #{listed} does not match --epic {epic}")
+    if listed is not None:
+        # The document is authored from a summarised Slack thread, so a non-numeric
+        # or structured `epic` is routine input rather than an impossible state. Let
+        # it surface as a SplitError instead of a traceback out of main().
+        try:
+            listed_number = int(listed)
+        except (TypeError, ValueError) as exc:
+            raise SplitError(f"document epic must be an issue number, got {listed!r}") from exc
+        if listed_number != int(epic):
+            raise SplitError(f"document epic #{listed} does not match --epic {epic}")
     stories = [validate_split_story(item, epic) for item in payload["stories"]]
     if not stories:
         raise SplitError("split document has no stories")
@@ -555,7 +573,42 @@ def parse_split_document(payload: Any, epic: int) -> Dict[str, Any]:
     }
 
 
-def story_board_status(story: Dict[str, Any]) -> str:
+def open_issue_numbers(repo_dir: str, run_cmd_fn: Callable) -> Set[int]:
+    """The live open-issue set, so a story's depends-on is judged against reality.
+
+    ``ready_gaps`` reports a dependency as unresolved only when it appears in the
+    set handed to it. An empty set therefore reads every ``depends-on`` as already
+    satisfied and files blocked stories straight into Ready, where the picker
+    serves them to an agent whose prerequisite has not merged. Fetch fails closed:
+    guessing here is exactly the failure this exists to prevent.
+    """
+    code, out, err = run_cmd_fn(
+        ["gh", "issue", "list", "--state", "open", "--limit", "1000", "--json", "number"],
+        check=False, cwd=repo_dir,
+    )
+    if code != 0:
+        raise SplitError(f"could not list open issues to resolve depends-on: {err or out}")
+    try:
+        rows = json.loads(out or "[]")
+    except json.JSONDecodeError as exc:
+        raise SplitError("open issue list returned invalid JSON") from exc
+    if not isinstance(rows, list):
+        raise SplitError("open issue list returned an unexpected shape")
+    numbers: Set[int] = set()
+    for row in rows:
+        try:
+            numbers.add(int(row["number"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return numbers
+
+
+def story_board_status(story: Dict[str, Any], open_numbers: Set[int]) -> str:
+    """Ready only when the Ready contract holds *and* no depends-on is still open.
+
+    ``open_numbers`` is required rather than defaulted: a silent empty default is
+    what let dependency-blocked stories reach Ready in the first place.
+    """
     from triage_backlog import ready_gaps
 
     issue = {
@@ -563,7 +616,7 @@ def story_board_status(story: Dict[str, Any]) -> str:
         "body": render_split_issue_body(story, 0),
         "labels": [{"name": f"type:{story['issue_type']}"}],
     }
-    return "Backlog" if ready_gaps(issue, set()) else "Ready"
+    return "Backlog" if ready_gaps(issue, set(open_numbers)) else "Ready"
 
 
 def render_split_issue_body(story: Dict[str, Any], epic: int) -> str:
@@ -669,17 +722,31 @@ def file_epic_split(
     plan = parse_split_document(payload, epic)
     if not dry_run:
         _require_open_epic(plan["epic"], repo_dir, runner)
-    filed = []
+    # Resolved once for the whole run: a dry-run must classify identically to the
+    # real filing, otherwise the preview an operator approves is not what lands.
+    open_numbers = open_issue_numbers(repo_dir, runner)
+    filed: List[Dict[str, Any]] = []
     for story in plan["stories"]:
-        status = story_board_status(story)
+        status = story_board_status(story, open_numbers)
         body = render_split_issue_body(story, plan["epic"])
         labels = f"type:{story['issue_type']},status:backlog"
         if dry_run:
             filed.append({"title": story["title"], "status": status, "body": body, "number": None})
             continue
-        number = _create_child_issue(story["title"], body, labels, repo_dir, runner)
-        _attach_child(number, status, repo_dir, runner)
+        # Re-raise carrying the children already created. `gh issue create` has no
+        # rollback, so a failure part-way through a multi-story run must still
+        # report what exists or the operator cannot find or reconcile it.
+        try:
+            number = _create_child_issue(story["title"], body, labels, repo_dir, runner)
+        except SplitError as exc:
+            raise SplitError(str(exc), filed=filed) from exc
+        # Recorded before attachment: an issue that was created but failed to reach
+        # the board is the case most likely to be orphaned, so it must be reported.
         filed.append({"title": story["title"], "status": status, "body": body, "number": number})
+        try:
+            _attach_child(number, status, repo_dir, runner)
+        except SplitError as exc:
+            raise SplitError(str(exc), filed=filed) from exc
     urls = [f"#{item['number']}" for item in filed if item["number"]]
     summary = (
         f"Slack split of epic #{plan['epic']} filed: " + ", ".join(urls)
@@ -1230,6 +1297,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         except SplitError as exc:
             print(f"[ERROR] {exc}", file=sys.stderr)
+            # Children created before the failure are already on GitHub and are not
+            # rolled back. Print them so the run is recoverable and a retry does not
+            # silently duplicate them.
+            partial = [row for row in getattr(exc, "filed", []) if row.get("number")]
+            if partial:
+                numbers = ", ".join(f"#{row['number']}" for row in partial)
+                print(
+                    f"[ERROR] Already filed and NOT rolled back: {numbers}. "
+                    "Reconcile these before re-running to avoid duplicates.",
+                    file=sys.stderr,
+                )
+                print(json.dumps(
+                    {
+                        "epic": args.epic, "dry_run": args.dry_run,
+                        "filed": partial, "summary": f"partial failure: {exc}",
+                    },
+                    indent=2, sort_keys=True,
+                ))
             return 1
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
