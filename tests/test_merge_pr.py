@@ -2402,6 +2402,60 @@ class BodyEditEvidenceTests(unittest.TestCase):
         self.assertEqual(events["size-waiver"], [])
 
     @patch.object(merge_pr, "_gh_json")
+    def test_removed_remedies_do_not_leave_historical_evidence(self, gh_json):
+        before = "Closes #115\n"
+        compliant = (
+            before + "size-waiver: cohesive change\n"
+            + self.verification_body(self.HEAD)
+        )
+        gh_json.return_value = self.page([
+            self.edit("old", "2026-08-17T00:30:00Z", before),
+            self.edit("added", "2026-08-17T00:34:00Z", compliant),
+            self.edit("removed", "2026-08-17T00:35:00Z", before),
+        ], before)
+
+        events = merge_pr._body_edit_events(
+            "owner", "repo", 248, self.HEAD,
+        )
+
+        self.assertEqual(events, {"size-waiver": [], "verification": []})
+
+    def test_inverted_verification_markers_fail_closed(self):
+        inverted = (
+            f"{merge_pr.VERIFICATION_EVIDENCE_END}\n"
+            f"{merge_pr.VERIFICATION_EVIDENCE_START}\n"
+        )
+        self.assertIsNone(merge_pr._verification_region(inverted))
+
+    def test_body_remedy_classifier_rejects_parser_findings(self):
+        self.assertIsNone(merge_pr._finding_body_region(
+            "The `size-waiver:` parser accepts blank input; fix the code.",
+        ))
+        self.assertIsNone(merge_pr._finding_body_region(
+            "The `--refresh-pr` parser overwrites reviewer text; fix it.",
+        ))
+        self.assertEqual(
+            merge_pr._finding_body_region(
+                "Add `size-waiver:` to the PR body.",
+            ),
+            "size-waiver",
+        )
+        self.assertEqual(
+            merge_pr._finding_body_region(
+                "Verification is stale. Run `--refresh-pr`.",
+            ),
+            "verification",
+        )
+        self.assertEqual(
+            merge_pr._finding_body_region(
+                "Verification is stale. Refresh with:\n```\n"
+                "python3 \"$ARU_SDLC_HOME/scripts/create_pr.py\" "
+                "--refresh-pr 248 --issue 115\n```",
+            ),
+            "verification",
+        )
+
+    @patch.object(merge_pr, "_gh_json")
     def test_unrelated_or_non_author_edit_is_not_evidence(self, gh_json):
         before = "Notes: first\n"
         after = "Notes: second\nsize-waiver: added by bot\n"
@@ -2530,7 +2584,7 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
 
     def test_body_edit_never_clears_unrelated_code_finding(self):
         evidence = self.evidence(
-            ["Validate head_sha parsing before reading the file."],
+            ["The `size-waiver:` parser accepts blank input; fix the code."],
             {"size-waiver": True, "verification": True},
         )
         self.assertEqual(evidence["unfixed"], 1)

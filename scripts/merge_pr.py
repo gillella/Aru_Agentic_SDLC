@@ -165,10 +165,21 @@ WITHDRAWN_MARKER = re.compile(r"^(?:\*\*)?withdrawn:(?:\*\*)?(?:\s|$)", re.IGNOR
 SIZE_WAIVER_REGION_RE = re.compile(
     r"^\s*size-waiver:\s*(\S.*)$", re.IGNORECASE | re.MULTILINE,
 )
-SIZE_WAIVER_FINDING_RE = re.compile(r"\bsize-waiver:\s*", re.IGNORECASE)
-VERIFICATION_FINDING_RE = re.compile(
-    r"(?:aru-verification-evidence:v1|--refresh-pr)",
+BODY_REMEDY_MARKER_RE = re.compile(
+    r"\bbody-remedy:\s*(size-waiver|verification)\b", re.IGNORECASE,
+)
+SIZE_WAIVER_REQUEST_RE = re.compile(
+    r"\b(?:add|include|put|record)\b[^\n]{0,160}`?size-waiver:\s*`?"
+    r"[^\n]{0,120}\b(?:to|in)\s+(?:the\s+)?(?:(?:pull request|pr)\s+)?body\b",
     re.IGNORECASE,
+)
+VERIFICATION_REQUEST_RE = re.compile(
+    r"(?:"
+    r"(?:^|\n)\s*(?:```[^\n]*\n\s*)?(?:\S+/)?python(?:3)?\s+[^\n]*"
+    r"create_pr\.py[\"'`]?\s+[^\n]*--refresh-pr\b"
+    r"|\b(?:run|rerun|use|invoke)\b[^\n]{0,120}`?--refresh-pr\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -204,17 +215,22 @@ def _verification_region(body):
         or text.count(VERIFICATION_EVIDENCE_END) != 1
     ):
         return None
-    start = text.index(VERIFICATION_EVIDENCE_START)
-    end = text.index(VERIFICATION_EVIDENCE_END, start)
+    start = text.find(VERIFICATION_EVIDENCE_START)
+    end = text.find(VERIFICATION_EVIDENCE_END)
+    if start < 0 or end < start:
+        return None
     return text[start:end + len(VERIFICATION_EVIDENCE_END)]
 
 
 def _finding_body_region(body):
     """Which body-only gate remedy, if any, the finding explicitly names."""
     text = body or ""
-    if SIZE_WAIVER_FINDING_RE.search(text):
+    marker = BODY_REMEDY_MARKER_RE.search(text)
+    if marker:
+        return marker.group(1).lower()
+    if SIZE_WAIVER_REQUEST_RE.search(text):
         return "size-waiver"
-    if VERIFICATION_FINDING_RE.search(text):
+    if VERIFICATION_REQUEST_RE.search(text):
         return "verification"
     return None
 
@@ -372,6 +388,17 @@ def _body_edit_events(owner, name, pr_id, expected_head):
             ):
                 events["verification"].append(edit["at"])
         previous = snapshot
+
+    # The requested remedy must still exist in the final body. Historical
+    # compliance followed by removal is not evidence at merge time.
+    if _size_waiver_region(current_body) is None:
+        events["size-waiver"] = []
+    current_evidence, _ = parse_verification_evidence(current_body)
+    if (
+        current_evidence is None
+        or current_evidence.get("head_sha") != expected_head
+    ):
+        events["verification"] = []
     return events
 
 
