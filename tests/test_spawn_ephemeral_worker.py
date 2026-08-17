@@ -139,13 +139,15 @@ class EphemeralWorkerTests(unittest.TestCase):
             registry.register(self.registry_record(11, "worker-1"))
 
     def test_same_family_peer_review_is_rejected(self):
-        config = self.config(worker_family="anthropic")
+        config = self.config(worker_family="anthropic", adapter="claude")
 
         with self.assertRaisesRegex(sew.LauncherError, "worker_family != parent_family"):
             sew.validate_task(config, self.metadata)
 
     def test_review_worker_cannot_share_author_family(self):
-        config = self.config(parent_family="google", worker_family="anthropic")
+        config = self.config(
+            parent_family="google", worker_family="anthropic", adapter="claude"
+        )
 
         with self.assertRaisesRegex(sew.LauncherError, "distinct from the PR author"):
             sew.validate_task(config, self.metadata)
@@ -158,6 +160,22 @@ class EphemeralWorkerTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(sew.LauncherError, "stamped author identity"):
+            sew.validate_task(config, self.metadata)
+
+    def test_builtin_adapter_must_match_worker_family(self):
+        config = self.config(
+            parent_family="anthropic",
+            worker_family="google",
+            adapter="codex",
+        )
+
+        with self.assertRaisesRegex(sew.LauncherError, "does not attest worker family"):
+            sew.validate_task(config, self.metadata)
+
+    def test_custom_adapter_is_rejected_without_trusted_family_attestation(self):
+        config = self.config(adapter_command_json='["custom-agent"]')
+
+        with self.assertRaisesRegex(sew.LauncherError, "no trusted model-family"):
             sew.validate_task(config, self.metadata)
 
     def test_recursive_spawn_fails_before_github_lookup(self):
@@ -322,6 +340,38 @@ class EphemeralWorkerTests(unittest.TestCase):
         release.assert_called_once_with(self.config())
         cleanup.assert_called_once_with(self.repo, worktree, "")
 
+    def test_preexisting_worktree_collision_is_never_treated_as_owned(self):
+        with (
+            patch.object(sew, "load_pr_metadata", return_value=self.metadata),
+            patch.object(sew, "claim_review", return_value=0),
+            patch.object(
+                sew,
+                "prepare_worktree",
+                side_effect=sew.LauncherError("ephemeral worktree already exists"),
+            ),
+            patch.object(sew, "release_review", return_value=0) as release,
+            patch.object(sew, "cleanup_worktree", return_value=True) as cleanup,
+        ):
+            code = sew.execute(self.config())
+
+        self.assertEqual(code, 1)
+        release.assert_called_once_with(self.config())
+        cleanup.assert_called_once_with(self.repo, None, "")
+
+    def test_interrupt_after_claim_releases_review_in_finally(self):
+        with (
+            patch.object(sew, "load_pr_metadata", return_value=self.metadata),
+            patch.object(sew, "claim_review", return_value=0),
+            patch.object(sew, "prepare_worktree", side_effect=KeyboardInterrupt),
+            patch.object(sew, "release_review", return_value=0) as release,
+            patch.object(sew, "cleanup_worktree", return_value=True) as cleanup,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                sew.execute(self.config())
+
+        release.assert_called_once_with(self.config())
+        cleanup.assert_called_once_with(self.repo, None, "")
+
     def test_cleanup_refuses_non_ephemeral_path(self):
         with patch.object(sew, "run_authority_command") as command:
             ok = sew.cleanup_worktree(self.repo, self.repo / "important", "")
@@ -361,6 +411,38 @@ class EphemeralWorkerTests(unittest.TestCase):
             capture_output=True,
         )
         self.assertNotEqual(branch_check.returncode, 0)
+
+    def test_dirty_worktree_is_retained_without_force(self):
+        repo, metadata = self.repo_with_pull_ref()
+        path, branch = sew.prepare_worktree(
+            repo, metadata, sew.TASK_REVIEW, 12347
+        )
+        (path / "diagnostic.txt").write_text("retain me\n", encoding="utf-8")
+
+        self.assertFalse(sew.cleanup_worktree(repo, path, branch))
+        self.assertTrue(path.exists())
+
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "remove", "--force", str(path)],
+            check=True,
+        )
+
+    def test_feedback_prompt_preserves_guarded_rebase_push(self):
+        config = self.config(
+            skill=sew.TASK_FEEDBACK,
+            worker_agent="claude-1",
+            worker_family="anthropic",
+            adapter="claude",
+        )
+
+        prompt = sew.build_task_prompt(config, self.metadata, self.repo)
+
+        self.assertIn("If and only if the unmet gate is rebased", prompt)
+        self.assertIn(
+            f"--force-with-lease=refs/heads/{self.metadata.head_name}:"
+            f"{self.metadata.head_sha}",
+            prompt,
+        )
 
 
 if __name__ == "__main__":

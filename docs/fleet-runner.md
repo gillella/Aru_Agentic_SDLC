@@ -150,8 +150,10 @@ feedback worktrees use a launcher-owned temporary branch and push
 fast-forward to the existing PR branch. The default hard timeout is 300
 seconds (override with `--timeout`), after which the whole child process group
 is terminated. Non-zero exits, missing binaries, unavailable provider
-credentials, and setup errors fail closed, release a held review claim, remove
-the launcher-owned worktree/temporary branch, unregister, and return non-zero.
+credentials, and setup errors fail closed, release a held review claim, clean
+an unchanged launcher-owned worktree/temporary branch, unregister, and return
+non-zero. Dirty or uncertain worktrees are never force-removed; they are
+retained visibly for diagnosis and make the launcher return non-zero.
 
 The child still follows `code-review` or `address-pr-feedback` in full. It must
 submit the review or feedback evidence, complete/release the normal GitHub

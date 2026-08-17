@@ -43,6 +43,7 @@ MAX_TIMEOUT_SECONDS = 3_600.0
 TASK_REVIEW = "code-review"
 TASK_FEEDBACK = "address-pr-feedback"
 TASKS = (TASK_REVIEW, TASK_FEEDBACK)
+ADAPTER_FAMILIES = {"codex": "openai", "claude": "anthropic"}
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 EPHEMERAL_PATH_RE = re.compile(r"^ephemeral-(review|feedback)-[0-9]+$")
 
@@ -279,6 +280,25 @@ def validate_task(config: LauncherConfig, metadata: PRMetadata) -> None:
         raise LauncherError("recursive ephemeral spawning is disabled (ARU_CAN_SPAWN != 1)")
     if metadata.state != "OPEN":
         raise LauncherError(f"PR #{metadata.number} is not open")
+    if config.adapter_command_json:
+        raise LauncherError(
+            "custom adapter commands have no trusted model-family attestation"
+        )
+    adapter = config.adapter
+    if adapter == "auto":
+        adapter = next(
+            (
+                name
+                for name, family in ADAPTER_FAMILIES.items()
+                if family == config.worker_family
+            ),
+            "",
+        )
+    if not adapter or ADAPTER_FAMILIES.get(adapter) != config.worker_family:
+        raise LauncherError(
+            f"adapter '{config.adapter}' does not attest worker family "
+            f"'{config.worker_family}'"
+        )
     if config.skill == TASK_REVIEW:
         if config.worker_agent == config.parent_agent:
             raise LauncherError("peer review requires a worker identity distinct from the parent")
@@ -379,8 +399,20 @@ def cleanup_worktree(repo: Path, path: Path | None, branch: str = "") -> bool:
         print("[ERROR] Refusing cleanup outside the owned ephemeral worktree path.", file=sys.stderr)
         return False
 
+    if path.exists():
+        status_code, status, _ = run_authority_command(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"], path
+        )
+        if status_code != 0 or status:
+            print(
+                f"[ERROR] Ephemeral worktree {path.name} contains modified, "
+                "untracked, or unreadable material; retained for inspection.",
+                file=sys.stderr,
+            )
+            return False
+
     code, _, _ = run_authority_command(
-        ["git", "worktree", "remove", "--force", str(path)],
+        ["git", "worktree", "remove", str(path)],
         repo,
     )
     if code != 0:
@@ -389,7 +421,11 @@ def cleanup_worktree(repo: Path, path: Path | None, branch: str = "") -> bool:
             repo,
         )
         if listing_code != 0 or f"worktree {path}" in listing:
-            print(f"[ERROR] Could not remove ephemeral worktree {path.name}.", file=sys.stderr)
+            print(
+                f"[ERROR] Ephemeral worktree {path.name} is dirty, locked, or "
+                "uncertain; retained for inspection.",
+                file=sys.stderr,
+            )
             return False
     if branch:
         exists, _, _ = run_authority_command(
@@ -432,9 +468,11 @@ def build_task_prompt(
     return common + (
         f"You are the stamped PR author. Follow address-pr-feedback for every current "
         f"thread or author-only gate, test the result, commit on the temporary branch, "
-        f"and push fast-forward to origin {metadata.head_name} with "
-        f"git push origin HEAD:{metadata.head_name}. Resolve/reply through the governed "
-        "workflow; do not touch unrelated author worktrees."
+        f"and ordinarily push fast-forward with git push origin HEAD:{metadata.head_name}. "
+        f"If and only if the unmet gate is rebased, follow the skill and use "
+        f"git push --force-with-lease=refs/heads/{metadata.head_name}:{metadata.head_sha} "
+        f"origin HEAD:refs/heads/{metadata.head_name}. Resolve/reply through the "
+        "governed workflow; do not touch unrelated author worktrees."
     )
 
 
@@ -548,10 +586,9 @@ def execute(config: LauncherConfig) -> int:
                 raise LauncherError(f"could not claim review of PR #{config.pr}")
             claim_active = True
 
-        worktree, branch = ephemeral_worktree_spec(
+        worktree, branch = prepare_worktree(
             config.repo, metadata, config.skill, os.getpid()
         )
-        prepare_worktree(config.repo, metadata, config.skill, os.getpid())
         prompt = build_task_prompt(config, metadata, worktree)
         runner_config = RunnerConfig(
             repo=worktree,
@@ -602,6 +639,9 @@ def execute(config: LauncherConfig) -> int:
             claim_active = False
         result_code = 1
     finally:
+        if claim_active:
+            release_review(config)
+            claim_active = False
         cleanup_ok = cleanup_worktree(config.repo, worktree, branch)
         try:
             registry.unregister(token)
