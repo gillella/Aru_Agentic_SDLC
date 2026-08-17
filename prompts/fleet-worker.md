@@ -480,13 +480,11 @@ BOARD:        <what the picker last reported>
 
 ---
 
-## Designated janitor
+## Autonomous claim reaping
 
-Give exactly **one** agent (conventionally `agent-1`) this extra line. Every
-agent reaping concurrently produces racing label writes.
-
-> Add `--reap-after 4` to your picker command each cycle, to release issue and
-> review claims abandoned by crashed sessions.
+All agents autonomously reap abandoned issue, review, and merge claims with a
+default 4-hour threshold (`--reap-after 4`). Concurrent reaping is safe and
+idempotent across agents. To disable reaping explicitly, pass `--reap-after 0`.
 
 ## Board preflight (run once, before launching)
 

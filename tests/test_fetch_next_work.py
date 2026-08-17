@@ -1233,6 +1233,66 @@ class AgentResolutionTests(unittest.TestCase):
         args, _kwargs = select_mock.call_args
         self.assertEqual(args[0], "claude-1")
 
+class WorkPickerTests(unittest.TestCase):
+    def _dummy_select(self):
+        return {
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [],
+            "merge_skipped": [],
+            "claimable_issues": [],
+            "blocked_by_dependencies": [],
+            "blocked_by_file_conflict": [],
+            "missing_touches": [],
+            "operator_only_issues": [],
+        }
+
+    def test_default_reap_threshold(self):
+        with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1"]), \
+             patch.object(fnw, "reap_stale_reviews") as mock_reviews, \
+             patch.object(fnw, "reap_stale_merges") as mock_merges, \
+             patch.object(fnw, "reap_stale_claims") as mock_claims, \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "select", return_value=self._dummy_select()):
+            fnw.main()
+            mock_reviews.assert_called_once_with(4)
+            mock_merges.assert_called_once_with(4)
+            mock_claims.assert_called_once_with([], 4)
+
+    def test_reap_disabled_by_zero(self):
+        with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--reap-after", "0"]), \
+             patch.object(fnw, "reap_stale_reviews") as mock_reviews, \
+             patch.object(fnw, "reap_stale_merges") as mock_merges, \
+             patch.object(fnw, "reap_stale_claims") as mock_claims, \
+             patch.object(fnw, "select", return_value=self._dummy_select()):
+            fnw.main()
+            mock_reviews.assert_not_called()
+            mock_merges.assert_not_called()
+            mock_claims.assert_not_called()
+
+    def test_reaped_claim_reported_to_stderr(self):
+        import io
+        fake_stderr = io.StringIO()
+        with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--reap-after", "4"]), \
+             patch("sys.stderr", fake_stderr), \
+             patch.object(fnw, "reap_stale_reviews", side_effect=lambda h: print(f"♻️  Released stale review claim on PR #12 (held by 'agent-old', claim age > {h}h).", file=sys.stderr)), \
+             patch.object(fnw, "reap_stale_merges"), \
+             patch.object(fnw, "reap_stale_claims"), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "select", return_value=self._dummy_select()):
+            fnw.main()
+            self.assertIn("Released stale review claim on PR #12", fake_stderr.getvalue())
+            self.assertIn("held by 'agent-old'", fake_stderr.getvalue())
+
+    def test_reap_exception_handled_gracefully(self):
+        import io
+        fake_stderr = io.StringIO()
+        with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1"]), \
+             patch("sys.stderr", fake_stderr), \
+             patch.object(fnw, "reap_stale_reviews", side_effect=RuntimeError("transient network failure")), \
+             patch.object(fnw, "select", return_value=self._dummy_select()):
+            fnw.main()
+            self.assertIn("[WARN] Autonomous claim reap encountered error: transient network failure", fake_stderr.getvalue())
 
 if __name__ == "__main__":
     unittest.main()
+
