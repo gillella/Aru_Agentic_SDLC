@@ -38,6 +38,24 @@ actually supported and configured.
    this loop manually.
 4. Preflight the board once (see **Board preflight** at the bottom).
 
+### Presence and availability
+
+Register the current desktop (or optional headless) task against **this**
+project only via `scripts/agent_presence.py` / `run_fleet.py` presence hooks.
+Heartbeat locally so peers can see `available` / `busy` / `cooling-down` /
+`temporarily-offline` / `unavailable` / `returned`. Heartbeat expiry never
+releases a GitHub claim. One agent id cannot be rebound to another project while
+its registration exists (`unregister` first, or use a distinct id for a second
+project). Never Slack-post heartbeats.
+
+Desktop tasks advertise presence with:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/agent_presence.py" register \
+  --agent <AGENT_ID> --family <FAMILY> --checkout "$PWD"
+python3 "$ARU_SDLC_HOME/scripts/agent_presence.py" heartbeat --agent <AGENT_ID>
+```
+
 On an agent that discovers skills, `run-aru-factory` routes loop mode here.
 The GitHub board is the session store — context compaction or an app-native
 wake recovers by asking the picker, not by reading a local handoff file. This

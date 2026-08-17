@@ -79,3 +79,32 @@ configured/active vendor state (Codex `automation.toml` with
 `status = "ACTIVE"`). Prompt-only preparation, a paused heartbeat, or an
 Antigravity JSON flag without a bound `/goal` or `/schedule` is not
 enabled. Full install-link diagnosis remains issue #34.
+
+## Project-scoped presence (issue #191)
+
+`scripts/agent_presence.py` records which agent **tasks** are present for a
+project (`~/.aru/agent-presence.json`). Each registration binds one `--agent`
+identity to exactly one project identity, with availability
+(`available` / `busy` / `cooling-down` / `temporarily-offline` /
+`unavailable` / `returned`), heartbeat, cooldown, capabilities, workload, and
+supported wake evidence.
+
+Presence is not ownership:
+
+- GitHub `agent:` / claim labels remain authoritative.
+- Heartbeat expiry moves availability to `temporarily-offline` without
+  deleting the registration and without releasing or stealing a claim.
+- The same desktop product may register separate tasks for different projects
+  only by using **different** agent ids.
+- Doctor reports presence and truthful vendor wake limitations read-only; it
+  never launches agents or consumes paid wake usage.
+- Presence falls back to a clone-independent `proj_repo_<hash>` derived from
+  the GitHub repository node id and ProjectV2 board id when the checkout path
+  is not yet listed in `projects.json`.
+- Explicit `unregister` (or a distinct agent id) is required before the same
+  agent id may bind to another project.
+- Desktop tasks register and heartbeat via `scripts/agent_presence.py`
+  (`register` / `heartbeat` / `set-availability`); `run_fleet.py` is optional
+  headless only.
+- Never post presence heartbeats to Slack.
+

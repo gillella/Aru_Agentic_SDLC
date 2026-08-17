@@ -387,6 +387,110 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertTrue(missing)
         self.assertEqual(payload["status"], "degraded")
 
+    def test_presence_and_wake_limitations_are_reported_read_only(self):
+        import sys
+
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import agent_presence as ap
+
+        project = self.target_home / "repo-a"
+        project.mkdir()
+        aru = self.target_home / ".aru"
+        aru.mkdir()
+        store = ap.PresenceStore(aru / "agent-presence.json")
+        store.register(
+            agent_id="cursor-cloud-1",
+            family="cursor",
+            project_id=ap.path_derived_project_id(project),
+            checkout_path=str(project.resolve()),
+            availability="busy",
+            wake_evidence_supported=["github-recovery"],
+        )
+        other = self.target_home / "repo-b"
+        other.mkdir()
+        store.register(
+            agent_id="cursor-cloud-2",
+            family="cursor",
+            project_id=ap.path_derived_project_id(other),
+            checkout_path=str(other.resolve()),
+            availability="available",
+        )
+        presence_file = aru / "agent-presence.json"
+        before = presence_file.read_text(encoding="utf-8")
+        payload = json.loads(
+            self.run_doctor("--json", "--project", str(project.resolve())).stdout
+        )
+        self.assertIn("presence", payload)
+        tasks = payload["presence"]["tasks"]
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["agent_id"], "cursor-cloud-1")
+        self.assertEqual(payload["agents"]["cursor"].get("last_heartbeat"), tasks[0]["last_heartbeat"])
+        self.assertTrue(payload["presence"]["wake_limitations"])
+        self.assertIn("GitHub claims remain authoritative", payload["presence"]["ownership"])
+        # Doctor must not invent paid wake enablement from presence alone.
+        self.assertFalse(payload["agents"]["cursor"]["native_wake_enabled"])
+        joined = " ".join(payload["presence"]["wake_limitations"])
+        self.assertIn("Presence never launches agents", joined)
+        self.assertIn("by_product", payload["presence"])
+        # Read-only: presence file unchanged after the first doctor run.
+        after = presence_file.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
+
+    def test_presence_project_id_uses_target_home_registry(self):
+        import sys
+
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import agent_presence as ap
+
+        project = self.target_home / "repo-reg"
+        project.mkdir()
+        aru = self.target_home / ".aru"
+        aru.mkdir(mode=0o700, exist_ok=True)
+        projects_path = aru / "projects.json"
+        record = {
+            "project_id": "proj_from_target_home",
+            "github_repo_id": "R_kgDOreg",
+            "github_repo_database_id": 1,
+            "project_v2_id": "PVT_kwDOreg",
+            "repo_slug": "acme/reg",
+            "local_path": str(project.resolve()),
+            "slack_team_id": "T123",
+            "slack_channel_id": "C123",
+            "lifecycle": "active",
+            "created_at": "2026-08-16T00:00:00Z",
+            "updated_at": "2026-08-16T00:00:00Z",
+            "updated_by": "test",
+            "closed_at": None,
+        }
+        projects_path.write_text(
+            json.dumps({"schema_version": 1, "projects": {
+                "proj_from_target_home": record,
+            }, "migrations": {}}) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(projects_path, 0o600)
+        store = ap.PresenceStore(aru / "agent-presence.json")
+        store.register(
+            agent_id="cursor-cloud-1",
+            family="cursor",
+            project_id="proj_from_target_home",
+            checkout_path=str(project.resolve()),
+        )
+        payload = json.loads(
+            self.run_doctor("--json", "--project", str(project.resolve())).stdout
+        )
+        self.assertEqual(payload["presence"]["project_id"], "proj_from_target_home")
+        self.assertEqual(len(payload["presence"]["tasks"]), 1)
+        # Prove the target-home registry supplied the project_id (not a path hash).
+        self.assertNotEqual(
+            payload["presence"]["project_id"],
+            ap.path_derived_project_id(project),
+        )
+        self.assertEqual(
+            ap.resolve_project_id(project, projects_path=projects_path),
+            "proj_from_target_home",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
