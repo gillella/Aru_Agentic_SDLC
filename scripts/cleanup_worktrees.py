@@ -262,6 +262,26 @@ def prune_retained_copies(repo_root: str) -> list[str]:
     return notes
 
 
+def local_ref_exists(repo_root: str, branch: str) -> bool:
+    if not branch:
+        return False
+    code, _, _ = run_cmd(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        check=False, cwd=repo_root,
+    )
+    return code == 0
+
+
+def _is_failure_note(note: str) -> bool:
+    lowered = note.lower()
+    return (
+        lowered.startswith("fetch failed")
+        or lowered.startswith("could not ")
+        or "claim scan failed" in lowered
+        or "hit the page limit" in lowered
+    )
+
+
 def attached_branches(repo_root: str) -> set[str]:
     code, porcelain, _ = run_cmd(
         ["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root
@@ -298,7 +318,7 @@ def delete_merged_local_branches(repo_root: str) -> list[str]:
         if not stale_merged_branch(repo_root, name):
             continue
         rm_code, _, rm_err = run_cmd(
-            ["git", "branch", "-d", name], check=False, cwd=repo_root
+            ["git", "branch", "-D", name], check=False, cwd=repo_root
         )
         if rm_code == 0:
             notes.append(f"deleted local branch {name}")
@@ -307,28 +327,53 @@ def delete_merged_local_branches(repo_root: str) -> list[str]:
     return notes
 
 
-CLAIM_LIST_LIMIT = 1000
+def _paginated_items(path: str, repo_root: str):
+    return merge_pr._gh_json(
+        ["gh", "api", "--paginate", path], cwd=repo_root
+    )
+
+
+def _repo_slug(repo_root: str) -> str | None:
+    data = merge_pr._gh_json(
+        ["gh", "repo", "view", "--json", "nameWithOwner"], cwd=repo_root
+    )
+    if not isinstance(data, dict):
+        return None
+    slug = data.get("nameWithOwner")
+    if isinstance(slug, str) and "/" in slug:
+        return slug
+    return None
 
 
 def _items_with_prefix(
     kind: str, state: str, prefix: str, repo_root: str,
 ) -> tuple[list[int], str | None]:
-    cmd = [
-        "gh", kind, "list", "--state", state,
-        "--limit", str(CLAIM_LIST_LIMIT), "--json", "number,labels",
-    ]
-    data = merge_pr._gh_json(cmd, cwd=repo_root)
+    slug = _repo_slug(repo_root)
+    if not slug:
+        return [], "unreadable"
+    rest_state = "closed" if state == "merged" else state
+    collection = "issues" if kind == "issue" else "pulls"
+    path = f"repos/{slug}/{collection}?state={rest_state}&per_page=100"
+    data = _paginated_items(path, repo_root)
     if not isinstance(data, list):
         return [], "unreadable"
     found = []
     for item in data:
-        labels = [
-            label.get("name", "") for label in (item.get("labels") or [])
-        ]
-        if any(name.startswith(prefix) for name in labels):
+        if not isinstance(item, dict):
+            return [], "unreadable"
+        if kind == "issue" and item.get("pull_request"):
+            continue
+        if kind == "pr" and state == "merged" and not item.get("merged_at"):
+            continue
+        labels = item.get("labels") or []
+        names = []
+        for label in labels:
+            if isinstance(label, dict):
+                names.append(label.get("name") or "")
+            elif isinstance(label, str):
+                names.append(label)
+        if any(name.startswith(prefix) for name in names):
             found.append(int(item["number"]))
-    if len(data) >= CLAIM_LIST_LIMIT:
-        return found, "truncated"
     return found, None
 
 
@@ -377,6 +422,8 @@ def merger_claim_still_needed(repo_root: str, pr_num: int) -> bool:
         return True
     path, _head = merge_pr.find_branch_worktree(porcelain, branch)
     if path:
+        return True
+    if local_ref_exists(repo_root, branch):
         return True
     absent = remote_branch_absent(repo_root, branch)
     return absent is not True
@@ -427,7 +474,7 @@ def sweep(repo_root: str, include_labels: bool = True,
             notes = notes + clear_stale_claim_labels(
                 repo_root, retain_merger_pr=retain_merger_pr
             )
-        return True, "; ".join(notes)
+        return False, "; ".join(notes)
     notes = (
         prune_orphan_worktrees(repo_root)
         + prune_retained_copies(repo_root)
@@ -439,7 +486,8 @@ def sweep(repo_root: str, include_labels: bool = True,
         )
     if not notes:
         return True, "already clean"
-    return True, "; ".join(notes)
+    failed = any(_is_failure_note(note) for note in notes)
+    return (not failed), "; ".join(notes)
 
 
 def main() -> int:

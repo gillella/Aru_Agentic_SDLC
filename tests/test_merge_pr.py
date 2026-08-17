@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import merge_pr
+import cleanup_worktrees
 
 
 def _gate(pr, threads=0, **overrides):
@@ -1527,7 +1528,8 @@ class CloseOutRecoveryTests(unittest.TestCase):
         }
         mocks = {name: item.start() for name, item in patches.items()}
         try:
-            with patch.object(merge_pr.os, "chdir"):
+            with patch.object(merge_pr.os, "chdir"), \
+                 patch.object(cleanup_worktrees, "local_ref_exists", return_value=False):
                 ok = merge_pr.run_closeout(merged_pr(), [7], "/repo")
         finally:
             for item in patches.values():
@@ -1580,7 +1582,8 @@ class CloseOutRecoveryTests(unittest.TestCase):
             return True, "worktree"
 
         prune.side_effect = after_chdir
-        self.assertTrue(merge_pr.run_closeout(merged_pr(), [7], "/repo"))
+        with patch.object(cleanup_worktrees, "local_ref_exists", return_value=False):
+            self.assertTrue(merge_pr.run_closeout(merged_pr(), [7], "/repo"))
         chdir.assert_called_once_with("/repo")
 
 

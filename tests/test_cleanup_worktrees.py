@@ -38,6 +38,20 @@ def _init_clone(root: Path, default_branch: str = "main") -> Path:
     return clone
 
 
+def _claim_gh(cmd, cwd=None, *, issues=None, pulls=None, extra=None):
+    if cmd[:3] == ["gh", "repo", "view"]:
+        return {"nameWithOwner": "o/r"}
+    if cmd[:3] == ["gh", "api", "--paginate"]:
+        path = cmd[3] if len(cmd) > 3 else ""
+        if "/issues?" in path:
+            return issues if issues is not None else []
+        if "/pulls?" in path:
+            return pulls if pulls is not None else []
+    if extra:
+        return extra(cmd)
+    return []
+
+
 def _add_worktree(clone: Path, branch: str) -> Path:
     path = clone / ".worktrees" / branch.replace("/", "-")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -348,14 +362,15 @@ class CleanupWorktreesTests(unittest.TestCase):
         self, gh_json, issue_clear, review_clear, merger_clear, _needed
     ):
         def fake_gh(cmd, cwd=None):
-            if cmd[:3] == ["gh", "issue", "list"]:
-                return [{"number": 2, "labels": [{"name": "agent:cursor-1"}]}]
-            if cmd[:3] == ["gh", "pr", "list"]:
-                return [{
+            return _claim_gh(
+                cmd, cwd,
+                issues=[{"number": 2, "labels": [{"name": "agent:cursor-1"}]}],
+                pulls=[{
                     "number": 3,
                     "labels": [{"name": "reviewer:agent-2"}, {"name": "merger:agent-3"}],
-                }]
-            return []
+                    "merged_at": "2026-01-01T00:00:00Z",
+                }],
+            )
 
         gh_json.side_effect = fake_gh
         notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
@@ -373,14 +388,15 @@ class CleanupWorktreesTests(unittest.TestCase):
         self, gh_json, issue_clear, review_clear, merger_clear, _needed
     ):
         def fake_gh(cmd, cwd=None):
-            if cmd[:3] == ["gh", "issue", "list"]:
-                return [{"number": 2, "labels": [{"name": "agent:cursor-1"}]}]
-            if cmd[:3] == ["gh", "pr", "list"]:
-                return [{
+            return _claim_gh(
+                cmd, cwd,
+                issues=[{"number": 2, "labels": [{"name": "agent:cursor-1"}]}],
+                pulls=[{
                     "number": 3,
                     "labels": [{"name": "reviewer:agent-2"}, {"name": "merger:agent-3"}],
-                }]
-            return []
+                    "merged_at": "2026-01-01T00:00:00Z",
+                }],
+            )
 
         gh_json.side_effect = fake_gh
         notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
@@ -393,8 +409,6 @@ class CleanupWorktreesTests(unittest.TestCase):
     @patch.object(merge_pr, "_gh_json")
     def test_merger_claim_kept_when_linked_issue_open(self, gh_json, merger_clear):
         def fake_gh(cmd, cwd=None):
-            if cmd[:3] == ["gh", "pr", "list"]:
-                return [{"number": 3, "labels": [{"name": "merger:agent-3"}]}]
             if cmd[:3] == ["gh", "pr", "view"]:
                 return {
                     "number": 3,
@@ -405,7 +419,14 @@ class CleanupWorktreesTests(unittest.TestCase):
                 }
             if cmd[:3] == ["gh", "issue", "view"]:
                 return {"state": "OPEN", "labels": []}
-            return []
+            return _claim_gh(
+                cmd, cwd,
+                pulls=[{
+                    "number": 3,
+                    "labels": [{"name": "merger:agent-3"}],
+                    "merged_at": "2026-01-01T00:00:00Z",
+                }],
+            )
 
         gh_json.side_effect = fake_gh
         notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
@@ -416,9 +437,14 @@ class CleanupWorktreesTests(unittest.TestCase):
     @patch.object(merge_pr, "_gh_json")
     def test_retain_merger_pr_skips_current_closeout(self, gh_json, merger_clear):
         def fake_gh(cmd, cwd=None):
-            if cmd[:3] == ["gh", "pr", "list"]:
-                return [{"number": 9, "labels": [{"name": "merger:agent-3"}]}]
-            return []
+            return _claim_gh(
+                cmd, cwd,
+                pulls=[{
+                    "number": 9,
+                    "labels": [{"name": "merger:agent-3"}],
+                    "merged_at": "2026-01-01T00:00:00Z",
+                }],
+            )
 
         gh_json.side_effect = fake_gh
         notes = cleanup_worktrees.clear_stale_claim_labels(
@@ -429,36 +455,36 @@ class CleanupWorktreesTests(unittest.TestCase):
 
     @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "cleared"))
     @patch.object(merge_pr, "_gh_json")
-    def test_claim_scan_records_page_limit(self, gh_json, _clear):
-        full = [
-            {"number": i, "labels": [{"name": "agent:x"}]}
-            for i in range(1, cleanup_worktrees.CLAIM_LIST_LIMIT + 1)
-        ]
+    def test_claim_scan_paginates_github_lists(self, gh_json, _clear):
+        seen = []
 
         def fake_gh(cmd, cwd=None):
-            if cmd[:3] == ["gh", "issue", "list"]:
-                self.assertIn(str(cleanup_worktrees.CLAIM_LIST_LIMIT), cmd)
-                return full
-            return []
+            seen.append(cmd)
+            return _claim_gh(cmd, cwd)
 
         gh_json.side_effect = fake_gh
-        notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
-        self.assertTrue(
-            any("closed-issue claim scan hit the page limit" in item for item in notes)
-        )
+        cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
+        self.assertTrue(any(cmd[:3] == ["gh", "api", "--paginate"] for cmd in seen))
 
     @patch.object(merge_pr, "_gh_json", return_value=None)
     def test_unreadable_claim_list_is_recorded(self, _gh):
         notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
         self.assertTrue(any("claim scan failed" in item for item in notes))
 
-    @patch.object(merge_pr, "_gh_json", return_value=[])
+    @patch.object(merge_pr, "_gh_json")
     def test_claim_scan_runs_gh_in_repo_root(self, gh_json):
+        gh_json.side_effect = lambda cmd, cwd=None: _claim_gh(cmd, cwd)
         notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
         self.assertTrue(gh_json.call_args_list)
         for call in gh_json.call_args_list:
             self.assertEqual(call.kwargs.get("cwd"), str(self.clone))
         self.assertEqual(notes, [])
+
+    def test_fetch_failure_is_not_success(self):
+        with patch.object(cleanup_worktrees, "refresh_origin", return_value=False):
+            ok, message = cleanup_worktrees.sweep(str(self.clone), include_labels=False)
+        self.assertFalse(ok)
+        self.assertIn("fetch failed", message)
 
 
 class CloseoutJanitorHookTests(unittest.TestCase):
@@ -471,8 +497,9 @@ class CloseoutJanitorHookTests(unittest.TestCase):
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
              patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
-             patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")), \
-             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor:
+             patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")) as merger, \
+             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor, \
+             patch.object(cleanup_worktrees, "local_ref_exists", return_value=False):
             pr = {
                 "number": 9,
                 "headRefName": "feat/x",
@@ -481,6 +508,7 @@ class CloseoutJanitorHookTests(unittest.TestCase):
             }
             self.assertTrue(merge_pr.run_closeout(pr, [7], "/repo"))
             janitor.assert_called_once_with("/repo", retain_merger_pr=None)
+            merger.assert_called_once()
 
     def test_failed_closeout_retains_current_merger_claim(self):
         with patch.object(merge_pr.os, "chdir"), \
@@ -491,8 +519,9 @@ class CloseoutJanitorHookTests(unittest.TestCase):
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
              patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
-             patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")), \
-             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor:
+             patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")) as merger, \
+             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor, \
+             patch.object(cleanup_worktrees, "local_ref_exists", return_value=False):
             pr = {
                 "number": 9,
                 "headRefName": "feat/x",
@@ -501,6 +530,28 @@ class CloseoutJanitorHookTests(unittest.TestCase):
             }
             self.assertFalse(merge_pr.run_closeout(pr, [7], "/repo"))
             janitor.assert_called_once_with("/repo", retain_merger_pr=9)
+            merger.assert_not_called()
+
+    def test_closeout_retains_merger_when_local_branch_remains(self):
+        with patch.object(merge_pr.os, "chdir"), \
+             patch.object(merge_pr, "prune_worktree", return_value=(True, "w")), \
+             patch.object(merge_pr, "retain_local_branch", return_value=(True, "l")), \
+             patch.object(merge_pr, "delete_remote_branch", return_value=(True, "r")), \
+             patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
+             patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
+             patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
+             patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
+             patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")) as merger, \
+             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")), \
+             patch.object(cleanup_worktrees, "local_ref_exists", return_value=True):
+            pr = {
+                "number": 9,
+                "headRefName": "feat/x",
+                "headRefOid": "abc",
+                "headRepository": {"owner": {"login": "o"}, "name": "r"},
+            }
+            self.assertFalse(merge_pr.run_closeout(pr, [7], "/repo"))
+            merger.assert_not_called()
 
 
 if __name__ == "__main__":

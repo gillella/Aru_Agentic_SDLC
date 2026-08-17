@@ -2195,9 +2195,20 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):
             failures.append(f"{name}: {message}")
         all_ok = all_ok and ok
 
-    # Keep merger:<id> until every prior step succeeds so the picker can still
-    # rediscover incomplete close-out. Clearing it after a board/Done failure
-    # would make recovery invisible once the linked issue is CLOSED.
+    # Keep merger:<id> until the current PR's leftovers are observably gone so
+    # the picker can rediscover incomplete close-out. Clearing it before the
+    # janitor runs made a leftover local branch invisible to recovery.
+    try:
+        retain = None if all_ok else pr.get("number")
+        ok, message = sweep_leftovers(repo_root, retain_merger_pr=retain)
+    except Exception as exc:
+        ok, message = False, f"janitor skipped: {exc}"
+    print(f"  {'✅' if ok else '❌'} {'janitor':<18} {message}")
+    all_ok = all_ok and ok
+    from cleanup_worktrees import local_ref_exists
+    if local_ref_exists(repo_root, branch):
+        all_ok = False
+        print("  ⏳ merger claim      retained; local branch still present")
     if all_ok:
         try:
             ok, message = clear_merger_claims(pr.get("number"))
@@ -2209,20 +2220,13 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):
         all_ok = all_ok and ok
     else:
         print("  ⏳ merger claim      retained so recovery remains discoverable")
-    try:
-        retain = None if all_ok else pr.get("number")
-        ok, message = sweep_leftovers(repo_root, retain_merger_pr=retain)
-    except Exception as exc:
-        ok, message = True, f"janitor skipped: {exc}"
-    print(f"  {'✅' if ok else '❌'} {'janitor':<18} {message}")
     return all_ok
 
 
 def sweep_leftovers(repo_root, retain_merger_pr=None):
-    """Best-effort leftover sweep; dirty trees are skipped, never a hard fail."""
+    """Leftover sweep. Operational failures are returned to close-out."""
     from cleanup_worktrees import sweep
-    _ok, message = sweep(repo_root, retain_merger_pr=retain_merger_pr)
-    return True, message
+    return sweep(repo_root, retain_merger_pr=retain_merger_pr)
 
 
 def run_closeout_with_retries(pr, issue_nums, repo_root, sleep_fn=None):
