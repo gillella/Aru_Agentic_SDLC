@@ -475,6 +475,51 @@ class ClaimAgeReaperTests(unittest.TestCase):
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
+    def test_recent_advisory_review_does_not_exempt_old_claim(
+        self, run_cmd, fetch_timeline
+    ):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.side_effect = [
+            self._list_result([
+                self._pr(
+                    17,
+                    "reviewer:abandoned",
+                    reviews=[{
+                        "author": {"login": "coderabbitai[bot]"},
+                        "submittedAt": recent,
+                    }],
+                ),
+            ]),
+            (0, "", ""),
+        ]
+        fetch_timeline.return_value = self._timeline(
+            "reviewer:abandoned", self.OLD
+        )
+
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [17])
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_recent_non_advisory_review_still_exempts_old_claim(
+        self, run_cmd, fetch_timeline
+    ):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.return_value = self._list_result([
+            self._pr(
+                20,
+                "reviewer:done",
+                reviews=[{
+                    "author": {"login": "peer-reviewer"},
+                    "submittedAt": recent,
+                }],
+            ),
+        ])
+        fetch_timeline.return_value = self._timeline("reviewer:done", self.OLD)
+
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
     def test_old_post_claim_review_does_not_preserve_claim_forever(
         self, run_cmd, fetch_timeline
     ):

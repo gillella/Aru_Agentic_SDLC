@@ -989,6 +989,9 @@ def reap_stale_reviews(hours: int = 4) -> list:
     for pr, holder, claimed_at in claims:
         reviewed_after_claim = False
         for review in pr.get("reviews") or []:
+            login = ((review.get("author") or {}).get("login") or "")
+            if merge_pr.is_advisory_review_account(login):
+                continue
             when = parse_iso(review.get("submittedAt") or "")
             if when is None or when.tzinfo is None:
                 continue
