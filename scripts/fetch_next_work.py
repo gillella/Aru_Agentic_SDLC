@@ -472,6 +472,14 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
         and name[len("reviewed-by:"):] != author
     ]
     if peer_reviewers:
+        if not author:
+            # Another review cannot repair missing authorship: merge_pr cannot
+            # prove that any reviewed-by stamp is independent until the PR is
+            # bound to its verified author. Reassigning the review would spin
+            # forever while leaving the actual gate unchanged.
+            return no(
+                "independent review exists, but the PR has no author stamp"
+            )
         gates = _unmet_gates(merge_reason or "")
         if merge_reason == "every Definition-of-Done gate passed" or (
             gates and "review" not in gates

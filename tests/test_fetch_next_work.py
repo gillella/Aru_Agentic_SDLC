@@ -224,7 +224,7 @@ class EligibilityTests(unittest.TestCase):
     def test_merge_gate_stale_review_skips_duplicate_evidence_query(self):
         candidate = pr(
             1, "author:agent-1", "family:anthropic", "reviewed-by:agent-2",
-            reviews=1,
+            reviews=1, decision="APPROVED",
         )
         with patch.object(fnw, "review_evidence") as evidence:
             verdict = fnw.review_eligibility(
@@ -233,6 +233,20 @@ class EligibilityTests(unittest.TestCase):
 
         self.assertTrue(verdict["eligible"])
         self.assertTrue(verdict["stale_attribution"])
+        evidence.assert_not_called()
+
+    def test_merge_gate_missing_author_does_not_request_another_review(self):
+        candidate = pr(
+            1, "family:anthropic", "reviewed-by:agent-2", reviews=1,
+        )
+        with patch.object(fnw, "review_evidence") as evidence:
+            verdict = fnw.review_eligibility(
+                candidate, "agent-3", "openai", 3, 30, "unmet: review"
+            )
+
+        self.assertFalse(verdict["eligible"])
+        self.assertFalse(verdict["stale_attribution"])
+        self.assertIn("no author stamp", verdict["reason"])
         evidence.assert_not_called()
 
     def test_self_attribution_does_not_hide_pr_from_a_real_peer(self):
