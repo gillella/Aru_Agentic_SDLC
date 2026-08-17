@@ -69,7 +69,12 @@ from common import (
     run_cmd,
     label_names as issue_label_names,
 )
-from fetch_next_issue import build_candidates, reap_stale_claims
+from fetch_next_issue import (
+    attach_open_pr_file_snapshots,
+    build_candidates,
+    pr_files_by_issue_from_prs,
+    reap_stale_claims,
+)
 from fetch_pr_feedback import fetch_active_review_feedback
 from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # _attested_head_peers is private, and importing it across modules is normally a
@@ -98,7 +103,8 @@ DEFAULT_ROUND_CAP = 3
 DEFAULT_CROSS_FAMILY_WAIT_MIN = 30
 
 PR_FIELDS = ("number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
-             "createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt")
+             "createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt,"
+             "files,changedFiles")
 
 
 def _label_value(labels: list[str], prefix: str) -> str | None:
@@ -117,10 +123,13 @@ def list_open_prs() -> list[dict[str, Any]] | None:
         print(f"[WARN] Could not list PRs: {err.strip()}", file=sys.stderr)
         return None
     try:
-        return json.loads(out) if out else []
+        prs = json.loads(out) if out else []
     except json.JSONDecodeError:
         print("[WARN] Could not parse the PR list.", file=sys.stderr)
         return None
+    if not isinstance(prs, list):
+        return None
+    return attach_open_pr_file_snapshots(prs)
 
 
 def _issue_closeout_snapshot(slug: str) -> dict[int, dict[str, Any]] | None:
@@ -371,7 +380,10 @@ def needs_my_attention(pr: dict[str, Any], agent: str) -> bool:
 # Definition-of-Done gates a PR's own author can clear alone. Rebasing rewrites
 # branch history and a size waiver is an authorship judgement; neither is a peer
 # action, so work arising from these is offered only to author:<id>.
-AUTHOR_FIXABLE_GATES = frozenset({"rebased", "size"})
+# `review-evidence` is the unfixed-resolved-thread case: a peer already
+# reviewed, threads are resolved, but no follow-up commit or `Withdrawn:`
+# reply exists. Generic `review` (needs a peer) is never author-fixable.
+AUTHOR_FIXABLE_GATES = frozenset({"rebased", "size", "review-evidence"})
 
 
 def _unmet_gates(reason: str) -> set[str]:
@@ -387,6 +399,46 @@ def _unmet_gates(reason: str) -> set[str]:
     if not text.lower().startswith(prefix):
         return set()
     return {part.strip() for part in text[len(prefix):].split(",") if part.strip()}
+
+
+def _author_can_repair_review(pr: dict[str, Any]) -> bool:
+    """True when DoD `review` fails only because resolved threads lack evidence."""
+    evidence = review_evidence(pr["number"])
+    if not evidence:
+        return False
+    if not evidence.get("reviewed_head"):
+        return False
+    labels = label_names(pr)
+    author = _label_value(labels, "author:")
+    peers = [
+        name[len("reviewed-by:"):]
+        for name in labels
+        if name.startswith("reviewed-by:")
+        and name[len("reviewed-by:"):]
+        and name[len("reviewed-by:"):] != author
+    ]
+    if not peers:
+        return False
+    if int(evidence.get("unresolved") or 0) > 0:
+        return False
+    return int(evidence.get("unfixed") or 0) > 0
+
+
+def _author_fixable_from_unmet(
+    pr: dict[str, Any], dod_reason: str | None,
+) -> list[str] | None:
+    """Author-clearable gate names, or None when a peer still has to act."""
+    gates = _unmet_gates(dod_reason or "")
+    if not gates:
+        return None
+    if gates - {"rebased", "size", "review"}:
+        return None
+    fixable = set(gates & {"rebased", "size"})
+    if "review" in gates:
+        if not _author_can_repair_review(pr):
+            return None
+        fixable.add("review-evidence")
+    return sorted(fixable) if fixable else None
 
 
 def author_gate_fix(pr: dict[str, Any], agent: str,
@@ -414,13 +466,11 @@ def author_gate_fix(pr: dict[str, Any], agent: str,
     # ordinary review feedback, which keeps its higher priority in select().
     if threads is None or threads > 0:
         return None
-    gates = _unmet_gates(dod_reason or "")
-    # Every unmet gate must be author-clearable. A PR also missing `review`
-    # needs a peer, so handing it back to its author would only spin.
-    if not gates or not gates <= AUTHOR_FIXABLE_GATES:
+    fixable = _author_fixable_from_unmet(pr, dod_reason)
+    if not fixable:
         return None
     return {"pr": pr["number"], "title": pr.get("title") or "",
-            "unmet_gates": sorted(gates), "reason": dod_reason}
+            "unmet_gates": fixable, "reason": dod_reason}
 
 
 def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
@@ -724,7 +774,9 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
 
     # 4. Otherwise start something new - unchanged issue selection.
     issues = list_open_issues()
-    parts = build_candidates(issues, agent)
+    parts = build_candidates(
+        issues, agent, pr_files_by_issue=pr_files_by_issue_from_prs(prs),
+    )
 
     if feedback is not None:
         work = {"type": "feedback", "pr": feedback["number"], "title": feedback["title"],

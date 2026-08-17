@@ -8,8 +8,10 @@ Multi-agent safe. Three things make it so:
     handed the same work. (The previous version filtered only on --state open,
     so a claimed, in-progress issue was still returned as "next".)
   * Candidates whose `touches:` paths overlap work already in flight are
-    excluded. `parallel-eligible` only means "no unresolved depends-on"; it
-    says nothing about two agents editing the same file.
+    excluded. In Progress reserves the issue's declared `touches:`. In Review
+    reserves the open PR's actual files when they can be read, otherwise the
+    declared list (fail closed). `parallel-eligible` only means "no unresolved
+    depends-on"; it says nothing about two agents editing the same file.
   * --claim walks the candidate list and takes the first issue it can claim,
     so a lost race costs one retry rather than duplicated work.
 """
@@ -26,12 +28,279 @@ from common import (
     claimed_by,
     get_current_branch,
     get_issue,
+    get_repo_slug,
     list_open_issues,
     parse_touches,
     run_cmd,
+    run_gh_json,
     touches_conflict,
 )
 from update_issue_status import update_status
+
+
+ISSUE_IN_BRANCH = re.compile(r"issue-(\d+)", re.IGNORECASE)
+CLOSES_ISSUE = re.compile(r"\bcloses\s+#(\d+)\b", re.IGNORECASE)
+RENAME_CHANGE_TYPES = frozenset({"RENAMED"})
+REST_STATUS_TO_CHANGE = {
+    "renamed": "RENAMED",
+    "added": "ADDED",
+    "removed": "DELETED",
+    "modified": "MODIFIED",
+    "copied": "COPIED",
+    "changed": "CHANGED",
+}
+OPEN_PR_FILES_QUERY = """
+query($owner:String!, $repo:String!, $cursor:String) {
+  repository(owner:$owner, name:$repo) {
+    pullRequests(states: OPEN, first: 50, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        body
+        headRefName
+        changedFiles
+        files(first: 100) {
+          nodes { path changeType }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+class InvalidPrFiles(ValueError):
+    """PR file snapshot cannot be used as an authoritative lock."""
+
+
+def linked_issue_numbers_from_pr(pr: Dict[str, Any]) -> List[int]:
+    """Issue numbers this PR closes, from body then branch name."""
+    seen: set[int] = set()
+    out: List[int] = []
+    for match in CLOSES_ISSUE.finditer(pr.get("body") or ""):
+        num = int(match.group(1))
+        if num not in seen:
+            seen.add(num)
+            out.append(num)
+    if out:
+        return out
+    match = ISSUE_IN_BRANCH.search(pr.get("headRefName") or "")
+    if match:
+        return [int(match.group(1))]
+    return []
+
+
+def _append_unique(paths: List[str], path: str) -> None:
+    if path not in paths:
+        paths.append(path)
+
+
+def reserved_paths_from_pr(pr: Dict[str, Any]) -> List[str]:
+    """Return this PR's lock paths, or raise if the snapshot is unusable."""
+    if not isinstance(pr, dict) or not isinstance(pr.get("files"), list):
+        raise InvalidPrFiles("invalid PR file response")
+    files = pr["files"]
+    changed = pr.get("changedFiles")
+    if isinstance(changed, int) and changed > len(files):
+        raise InvalidPrFiles("truncated PR file snapshot")
+    if not files:
+        raise InvalidPrFiles("empty PR file list")
+    paths: List[str] = []
+    for entry in files:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(path, str) or not path:
+            raise InvalidPrFiles("invalid PR file entry")
+        previous = entry.get("previousFileName") or entry.get("previous_filename")
+        renamed = str(entry.get("changeType") or "").upper() in RENAME_CHANGE_TYPES
+        if renamed or previous:
+            if not isinstance(previous, str) or not previous:
+                raise InvalidPrFiles("rename without previous path")
+            _append_unique(paths, path)
+            _append_unique(paths, previous)
+            continue
+        _append_unique(paths, path)
+    return paths
+
+
+def pr_files_by_issue_from_prs(prs: List[Dict[str, Any]]) -> Dict[int, List[str]]:
+    """Map each linked issue to the union of usable PR file paths.
+
+    An issue is omitted when any linked PR snapshot is empty, truncated,
+    renamed without a source path, or malformed, so reservation_paths falls
+    back to declared touches. A non-dict record poisons the whole map.
+    """
+    if not isinstance(prs, list):
+        return {}
+    mapping: Dict[int, List[str]] = {}
+    invalid: set[int] = set()
+    for pr in prs:
+        if not isinstance(pr, dict):
+            return {}
+        issue_nums = linked_issue_numbers_from_pr(pr)
+        try:
+            paths = reserved_paths_from_pr(pr)
+        except InvalidPrFiles:
+            invalid.update(issue_nums)
+            continue
+        for num in issue_nums:
+            if num in invalid:
+                continue
+            current = mapping.setdefault(num, [])
+            for path in paths:
+                _append_unique(current, path)
+    for num in invalid:
+        mapping.pop(num, None)
+    return mapping
+
+
+def _normalize_pr_file_record(node: Dict[str, Any]) -> Dict[str, Any]:
+    files_conn = node.get("files")
+    if isinstance(files_conn, dict):
+        nodes = files_conn.get("nodes")
+        files = nodes if isinstance(nodes, list) else []
+    elif isinstance(files_conn, list):
+        files = files_conn
+    else:
+        files = []
+    return {
+        "number": node.get("number"),
+        "body": node.get("body") or "",
+        "headRefName": node.get("headRefName") or "",
+        "changedFiles": node.get("changedFiles"),
+        "files": files,
+    }
+
+
+def _pr_files_page(owner: str, repo: str, cursor: Optional[str]) -> Optional[Dict[str, Any]]:
+    cmd = [
+        "gh", "api", "graphql",
+        "-f", f"query={OPEN_PR_FILES_QUERY}",
+        "-F", f"owner={owner}",
+        "-F", f"repo={repo}",
+    ]
+    if cursor:
+        cmd.extend(["-F", f"cursor={cursor}"])
+    res = run_gh_json(cmd)
+    if not isinstance(res, dict) or res.get("errors"):
+        return None
+    try:
+        return res["data"]["repository"]["pullRequests"]
+    except (KeyError, TypeError):
+        return None
+
+
+def _rest_pr_files(owner: str, repo: str, number: int) -> Optional[List[Dict[str, Any]]]:
+    """REST file list with previous_filename; GraphQL has no rename source path."""
+    if not isinstance(number, int):
+        return None
+    data = run_gh_json([
+        "gh", "api",
+        f"repos/{owner}/{repo}/pulls/{number}/files",
+        "--paginate",
+    ])
+    if not isinstance(data, list):
+        return None
+    files: List[Dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            return None
+        path = entry.get("filename")
+        if not isinstance(path, str) or not path:
+            return None
+        record: Dict[str, Any] = {"path": path}
+        status = str(entry.get("status") or "").lower()
+        change = REST_STATUS_TO_CHANGE.get(status)
+        if change:
+            record["changeType"] = change
+        previous = entry.get("previous_filename")
+        if isinstance(previous, str) and previous:
+            record["previous_filename"] = previous
+        files.append(record)
+    return files
+
+
+def load_open_pr_file_records() -> Optional[List[Dict[str, Any]]]:
+    """Open-PR file snapshots, or None when the list cannot be trusted."""
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return None
+    owner, repo = slug.split("/", 1)
+    records: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+    seen: set[str] = set()
+    while True:
+        page = _pr_files_page(owner, repo, cursor)
+        if not isinstance(page, dict) or not isinstance(page.get("nodes"), list):
+            return None
+        for node in page["nodes"]:
+            if not isinstance(node, dict):
+                return None
+            records.append(_normalize_pr_file_record(node))
+        info = page.get("pageInfo")
+        if not isinstance(info, dict) or not info:
+            return None
+        has_next = info.get("hasNextPage")
+        if not isinstance(has_next, bool):
+            return None
+        if not has_next:
+            break
+        cursor = info.get("endCursor")
+        if not cursor or cursor in seen:
+            return None
+        seen.add(cursor)
+    for record in records:
+        files = _rest_pr_files(owner, repo, record["number"])
+        record["files"] = [] if files is None else files
+    return records
+
+
+def attach_open_pr_file_snapshots(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Overlay REST file paths and GraphQL changedFiles onto an existing PR list."""
+    records = load_open_pr_file_records()
+    if records is None:
+        return prs
+    by_number = {
+        record["number"]: record
+        for record in records
+        if isinstance(record.get("number"), int)
+    }
+    for pr in prs:
+        extra = by_number.get(pr.get("number"))
+        if extra is None:
+            continue
+        pr["files"] = extra["files"]
+        pr["changedFiles"] = extra["changedFiles"]
+    return prs
+
+
+def list_open_pr_files_by_issue() -> Dict[int, List[str]]:
+    """Live map of issue → open-PR files. Empty on lookup failure."""
+    records = load_open_pr_file_records()
+    if records is None:
+        return {}
+    try:
+        return pr_files_by_issue_from_prs(records)
+    except (AttributeError, TypeError, ValueError):
+        return {}
+
+
+def reservation_paths(
+    issue: Dict[str, Any],
+    pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
+) -> List[str]:
+    """Paths this in-flight issue currently locks.
+
+    In Progress uses declared touches. In Review uses the open PR's files when
+    that list is non-empty; otherwise the declared list so a lookup miss cannot
+    unlock a path still in flight.
+    """
+    declared = parse_touches(issue.get("body") or "")
+    names = {label.get("name", "").lower() for label in issue.get("labels", [])}
+    if "status:in-review" in names:
+        actual = (pr_files_by_issue or {}).get(issue["number"]) or []
+        if actual:
+            return actual
+    return declared
 
 
 def parse_dependencies(body: str) -> List[int]:
@@ -189,7 +458,11 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
     return released
 
 
-def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict[str, Any]:
+def build_candidates(
+    issues: List[Dict[str, Any]],
+    agent: Optional[str],
+    pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
+) -> Dict[str, Any]:
     """Partitions open issues into in-flight, blocked, and claimable."""
     open_numbers = {i["number"] for i in issues}
 
@@ -201,7 +474,7 @@ def build_candidates(issues: List[Dict[str, Any]], agent: Optional[str]) -> Dict
         names = {label.get("name", "").lower() for label in labels}
         holder = claimed_by(issue)
         if holder or "status:in-progress" in names or "status:in-review" in names:
-            in_flight_paths.extend(parse_touches(issue.get("body") or ""))
+            in_flight_paths.extend(reservation_paths(issue, pr_files_by_issue))
         if needs_human(labels):
             continue
         if holder:
@@ -278,7 +551,8 @@ def main():
         if reap_stale_claims(issues, args.reap_after):
             issues = list_open_issues()
 
-    parts = build_candidates(issues, args.agent)
+    pr_files = list_open_pr_files_by_issue()
+    parts = build_candidates(issues, args.agent, pr_files_by_issue=pr_files)
     candidates = parts["candidates"]
     my_in_flight = parts["my_in_flight"]
 
@@ -328,7 +602,9 @@ def main():
             # each retry so overlapping work is not claimed from stale data.
             attempted = set()
             while True:
-                parts = build_candidates(issues, args.agent)
+                parts = build_candidates(
+                    issues, args.agent, pr_files_by_issue=pr_files
+                )
                 candidates = parts["candidates"]
                 remaining = [c for c in candidates if c["number"] not in attempted]
                 if not remaining:

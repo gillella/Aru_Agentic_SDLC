@@ -42,7 +42,13 @@ from common import (
     parse_touches,
     touches_conflict,
 )
-from fetch_next_issue import is_epic, needs_human, parse_dependencies
+from fetch_next_issue import (
+    is_epic,
+    needs_human,
+    parse_dependencies,
+    list_open_pr_files_by_issue,
+    reservation_paths,
+)
 from update_issue_status import update_status
 
 
@@ -434,17 +440,23 @@ def partition(issues: list[dict[str, Any]]) -> tuple[list, list, list]:
     return backlog, ready, held
 
 
-def capacity(ready: list[dict[str, Any]], held: list[dict[str, Any]]) -> dict[str, Any]:
+def capacity(
+    ready: list[dict[str, Any]],
+    held: list[dict[str, Any]],
+    pr_files_by_issue: dict[int, list[str]] | None = None,
+) -> dict[str, Any]:
     """How many agents this board can actually keep busy right now.
 
     Ready count alone overstates it: two Ready issues whose touches overlap
     cannot run at the same time, and neither can one that collides with work
     already in flight. This walks the list greedily the way the picker would.
+    In Review reservations use open-PR files when known; otherwise declared
+    touches (fail closed).
     """
     ready = [issue for issue in ready if not needs_human(issue.get("labels", []))]
     in_flight_paths: list[str] = []
     for issue in held:
-        in_flight_paths.extend(parse_touches(issue.get("body") or ""))
+        in_flight_paths.extend(reservation_paths(issue, pr_files_by_issue))
 
     concurrent, deferred = [], []
     for issue in sorted(ready, key=lambda i: i["number"]):
@@ -521,8 +533,13 @@ def main():
             except ValueError:
                 pass
 
+    pr_files = list_open_pr_files_by_issue()
     if args.capacity:
-        print_capacity(capacity(ready, held), held, ready_target=target)
+        print_capacity(
+            capacity(ready, held, pr_files_by_issue=pr_files),
+            held,
+            ready_target=target,
+        )
         return 0
 
     if args.issue:
@@ -584,7 +601,11 @@ def main():
             "Use --promote --force to override the recommendation."
         )
 
-    print_capacity(capacity(ready, held), held, ready_target=target)
+    print_capacity(
+        capacity(ready, held, pr_files_by_issue=pr_files),
+        held,
+        ready_target=target,
+    )
     return 0
 
 
