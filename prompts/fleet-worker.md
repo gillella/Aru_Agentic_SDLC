@@ -154,6 +154,15 @@ action:
   (GraphQL `reviewThreads` with `isResolved: true`, or the PR Conversation
   tab) and either push a fix commit or reply on it starting with
   `Withdrawn:` and why. Do not treat this as a missing peer review.
+- `accept` — verify every acceptance criterion on the linked issue against the
+  implementation and evidence, then tick the boxes that are satisfied. Leave
+  any genuinely unmet box unticked and record why on the issue.
+- `ci` — invoke `remediate-ci-failure` and diagnose from the complete hosted
+  logs before changing code or retrying.
+- `tests` — add or update test coverage for the changed production files and
+  run the relevant verification before pushing.
+- `verification` — run `create_pr.py --refresh-pr` for the current head; never
+  hand-edit the evidence block.
 
 Then refresh the evidence for the new head with
 `create_pr.py --refresh-pr <PR> --issue <N> --verify-command ...` and return to

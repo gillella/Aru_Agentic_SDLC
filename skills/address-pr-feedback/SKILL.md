@@ -38,6 +38,11 @@ forever, so it must be routed to Step 1G instead.
 
 No unresolved threads exist. Act on each name in `work.unmet_gates`:
 
+- **`accept`** — read the linked issue and verify each acceptance criterion
+  against the implementation and evidence. If satisfied, tick the boxes. If a
+  criterion is genuinely unmet, leave it unticked and record why on the issue.
+- **`ci`** — follow `remediate-ci-failure` with the complete hosted logs; do
+  not retry or guess from the check title alone.
 - **`rebased`** — in the PR's worktree: `git fetch origin && git rebase
   origin/main`, re-run the full local verification, then push with
   `--force-with-lease`. This **invalidates the prior review by design**
@@ -51,6 +56,11 @@ No unresolved threads exist. Act on each name in `work.unmet_gates`:
   commit after the finding. Locate that resolved thread (not the unresolved
   checklist) and push a fix, or reply on it starting with `Withdrawn:` and
   why. This is not a request to self-review.
+- **`tests`** — add or update test coverage for the changed production files,
+  then run the relevant verification before pushing.
+- **`verification`** — refresh the PR's current-head evidence with
+  `create_pr.py --refresh-pr`; stale or malformed evidence must not be edited
+  by hand.
 
 Then refresh evidence for the new head:
 
