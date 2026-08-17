@@ -1441,10 +1441,11 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "withdrawn": 0, "reviewed_head": True,
         },
     )
+    @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
     def test_successful_merge_with_branch_delete_failure_is_resumable(
-        self, fetch, _json, _threads, execute, _root, _chdir, _prune, _local,
+        self, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
         _remote, _close, _done, _issue_claim, _review_claim, merger_claim,
         sleep, intervention,
     ):
@@ -1502,10 +1503,11 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "withdrawn": 0, "reviewed_head": True,
         },
     )
+    @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
     def test_default_merge_method_is_merge(
-        self, fetch, _json, _threads, execute, _root, closeout
+        self, fetch, _json, _sync, _threads, execute, _root, closeout
     ):
         fetch.return_value = {
             "number": 9,
