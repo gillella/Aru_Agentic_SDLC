@@ -86,7 +86,13 @@ jobs:
         env:
           TARGET_SHA: ${{ inputs.commit_sha }}
         run: |
-          jq -n             --arg run_id "${GITHUB_RUN_ID}"             --arg commit_sha "${TARGET_SHA}"             --arg repository "${GITHUB_REPOSITORY}"             --arg preview_url "skipped"             '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url, is_library: true, status: "skipped"}'             > preview-metadata.json
+          jq -n \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg commit_sha "${TARGET_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg preview_url "skipped" \
+            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url, is_library: true, status: "skipped"}' \
+            > preview-metadata.json
 
       - name: Upload exact-run library skip metadata
         if: steps.build.outputs.is_library == 'true'
@@ -118,23 +124,68 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
+      - name: Record exact-run preview metadata
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          jq -n \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg commit_sha "${TARGET_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg preview_url "${PAGE_URL}" \
+            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url}' \
+            > preview-metadata.json
+
+      - name: Upload exact-run preview metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-metadata
+          path: preview-metadata.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish preview URL summary
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          echo "Preview URL: ${PAGE_URL}" >> "$GITHUB_STEP_SUMMARY"
+
   smoke-preview:
-    needs: deploy-preview
-    if: needs.build-preview.outputs.has_preview == 'true'
+    name: Smoke & E2E Validation
+    needs: [build-preview, deploy-preview]
+    if: always() && !cancelled() && needs.build-preview.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout trusted control plane
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           path: control-plane
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Set up Python
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Set up Python for build helper
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Run preview smoke tests
+      - name: Execute Smoke & E2E Tests
+        env:
+          HAS_PREVIEW: ${{ needs.build-preview.outputs.has_preview }}
+          IS_LIBRARY: ${{ needs.build-preview.outputs.is_library }}
+          PREVIEW_URL: ${{ needs.deploy-preview.outputs.page_url }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
         run: |
-          python3 control-plane/scripts/smoke_preview.py --preview-url "${{ needs.deploy-preview.outputs.page_url }}"
+          python3 control-plane/scripts/smoke_preview.py \
+            --url "${PREVIEW_URL}" \
+            --has-preview "${HAS_PREVIEW}" \
+            --is-library "${IS_LIBRARY}" \
+            --commit-sha "${COMMIT_SHA}" \
+            --scenarios-file control-plane/.github/scenarios/smoke.json
