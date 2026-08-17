@@ -145,6 +145,8 @@ task**. Pace dynamically: after progress, ask the picker again immediately;
 for unchanged, idle, Complete, review/CI/dependency wait, rate limit, exhausted
 credits, helper failure, or GitHub/network error, use the app's supported wait
 or background primitive with a long fallback heartbeat, not a fixed interval.
+Whenever entering a wait state or heartbeat, emit the standard **Status Card**
+defined in `prompts/fleet-worker.md` before sleeping.
 Do not emit a final response for a recoverable state.
 
 Loop mode ends intentionally only when the operator explicitly stops it or a
