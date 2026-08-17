@@ -2333,8 +2333,208 @@ class CloseoutMarkerTests(unittest.TestCase):
             self.assertTrue(merge_pr.closeout_incomplete(pr))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class BodyEditEvidenceTests(unittest.TestCase):
+    HEAD = "a" * 40
+
+    @classmethod
+    def verification_body(cls, head):
+        payload = json.dumps({
+            "schema": merge_pr.VERIFICATION_EVIDENCE_SCHEMA,
+            "head_sha": head,
+        }, sort_keys=True)
+        return (
+            f"{merge_pr.VERIFICATION_EVIDENCE_START}\n"
+            f"```json\n{payload}\n```\n"
+            f"{merge_pr.VERIFICATION_EVIDENCE_END}"
+        )
+
+    @staticmethod
+    def edit(edit_id, edited_at, snapshot, editor="author"):
+        return {
+            "id": edit_id,
+            "editedAt": edited_at,
+            "diff": snapshot,
+            "editor": {"login": editor, "__typename": "User"},
+        }
+
+    @classmethod
+    def page(cls, nodes, body, *, has_next=False, cursor=None):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": cls.HEAD,
+            "body": body,
+            "author": {"login": "author", "__typename": "User"},
+            "userContentEdits": {
+                "nodes": nodes,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            },
+        }}}}
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_size_waiver_transition_is_author_body_evidence(self, gh_json):
+        before = "Closes #115\n"
+        after = before + "size-waiver: cohesive checker and tests\n"
+        gh_json.return_value = self.page([
+            self.edit("old", "2026-08-17T00:30:00Z", before),
+            self.edit("new", "2026-08-17T00:34:00Z", after),
+        ], after)
+
+        events = merge_pr._body_edit_events(
+            "owner", "repo", 248, self.HEAD,
+        )
+
+        self.assertEqual(len(events["size-waiver"]), 1)
+        self.assertEqual(events["verification"], [])
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_refresh_pr_transition_requires_current_head_evidence(self, gh_json):
+        old = self.verification_body("b" * 40)
+        current = self.verification_body(self.HEAD)
+        gh_json.return_value = self.page([
+            self.edit("old", "2026-08-17T00:30:00Z", old),
+            self.edit("new", "2026-08-17T00:34:00Z", current),
+        ], current)
+
+        events = merge_pr._body_edit_events(
+            "owner", "repo", 248, self.HEAD,
+        )
+
+        self.assertEqual(len(events["verification"]), 1)
+        self.assertEqual(events["size-waiver"], [])
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_unrelated_or_non_author_edit_is_not_evidence(self, gh_json):
+        before = "Notes: first\n"
+        after = "Notes: second\nsize-waiver: added by bot\n"
+        gh_json.return_value = self.page([
+            self.edit("old", "2026-08-17T00:30:00Z", before),
+            self.edit("new", "2026-08-17T00:34:00Z", after, editor="bot"),
+        ], after)
+
+        events = merge_pr._body_edit_events(
+            "owner", "repo", 248, self.HEAD,
+        )
+
+        self.assertEqual(events, {"size-waiver": [], "verification": []})
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_edit_history_paginates_and_fails_closed_on_head_change(self, gh_json):
+        before = "Closes #115\n"
+        after = before + "size-waiver: justified\n"
+        gh_json.side_effect = [
+            self.page(
+                [self.edit("new", "2026-08-17T00:34:00Z", after)],
+                after,
+                has_next=True,
+                cursor="older",
+            ),
+            self.page(
+                [self.edit("old", "2026-08-17T00:30:00Z", before)],
+                after,
+            ),
+        ]
+        events = merge_pr._body_edit_events(
+            "owner", "repo", 248, self.HEAD,
+        )
+        self.assertEqual(len(events["size-waiver"]), 1)
+        self.assertIn("cursor=older", gh_json.call_args_list[1].args[0])
+
+        changed = self.page([], after)
+        changed["data"]["repository"]["pullRequest"]["headRefOid"] = "moved"
+        gh_json.side_effect = None
+        gh_json.return_value = changed
+        self.assertIsNone(
+            merge_pr._body_edit_events("owner", "repo", 248, self.HEAD)
+        )
+
+
+class ReviewBodyEditIntegrationTests(unittest.TestCase):
+    HEAD = "a" * 40
+    REVIEW = {
+        "id": "peer-review",
+        "state": "COMMENTED",
+        "submittedAt": "2026-08-17T00:20:00Z",
+        "body": "Verdict: approved after fixes.",
+        "author": {"login": "gillella", "__typename": "User"},
+        "commit": {"oid": HEAD},
+    }
+
+    @staticmethod
+    def thread_page(comments):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": ReviewBodyEditIntegrationTests.HEAD,
+            "commits": {"nodes": []},
+            "reviewThreads": {
+                "nodes": [
+                    {
+                        "isResolved": True,
+                        "isOutdated": False,
+                        "comments": {"nodes": [{
+                            "createdAt": "2026-08-17T00:23:58Z",
+                            "body": body,
+                        }]},
+                    }
+                    for body in comments
+                ],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+        }}}}
+
+    def evidence(self, comments, events):
+        after = merge_pr._parse_ts("2026-08-17T00:34:00Z")
+        def event_times(name):
+            value = events.get(name)
+            if isinstance(value, list):
+                return value
+            return [after] if value else []
+
+        normalized = {
+            "size-waiver": event_times("size-waiver"),
+            "verification": event_times("verification"),
+        }
+        with (
+            patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"),
+            patch.object(
+                merge_pr, "_reviewed_current_head",
+                return_value=(self.HEAD, True, [self.REVIEW]),
+            ),
+            patch.object(
+                merge_pr, "_review_head_attestations",
+                return_value=[{"agent": "agent-2", "head": self.HEAD}],
+            ),
+            patch.object(merge_pr, "_gh_json", return_value=self.thread_page(comments)),
+            patch.object(merge_pr, "_body_edit_events", return_value=normalized),
+        ):
+            return merge_pr.review_evidence(248)
+
+    def test_pr_248_two_body_only_remedies_pass_review_gate(self):
+        evidence = self.evidence([
+            "P1 — size waiver or split required. Add `size-waiver:` to the body.",
+            "P1 — verification evidence is stale. Run `--refresh-pr`.",
+        ], {"size-waiver": True, "verification": True})
+
+        self.assertEqual(evidence["unfixed"], 0)
+        self.assertEqual(evidence["body_addressed"], 2)
+        ok, message = merge_pr.check_reviews(
+            labelled("author:agent-1", "reviewed-by:agent-2"), evidence,
+        )
+        self.assertTrue(ok)
+        self.assertIn("2 finding(s) addressed by relevant PR body edit", message)
+
+    def test_relevant_edit_before_finding_does_not_clear_thread(self):
+        before = merge_pr._parse_ts("2026-08-17T00:10:00Z")
+        evidence = self.evidence(
+            ["size-waiver required"],
+            {"size-waiver": [before], "verification": []},
+        )
+        self.assertEqual(evidence["unfixed"], 1)
+
+    def test_body_edit_never_clears_unrelated_code_finding(self):
+        evidence = self.evidence(
+            ["Validate head_sha parsing before reading the file."],
+            {"size-waiver": True, "verification": True},
+        )
+        self.assertEqual(evidence["unfixed"], 1)
+        self.assertEqual(evidence["body_addressed"], 0)
 
 
 class ResolutionIsNotProofTests(unittest.TestCase):
@@ -2358,13 +2558,15 @@ class ResolutionIsNotProofTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("no commit after the finding", msg)
 
-    def test_the_refusal_names_both_remedies(self):
+    def test_the_refusal_names_all_three_evidence_forms(self):
         """A refusal an agent cannot act on becomes a workaround."""
         _, msg = merge_pr.check_reviews(
             labelled(*self.PASSING),
             {"unresolved": 0, "unfixed": 2, "withdrawn": 0, "reviewed_head": True},
         )
         self.assertIn("Push the fix", msg)
+        self.assertIn("size-waiver", msg)
+        self.assertIn("verification-evidence", msg)
         self.assertIn("Withdrawn:", msg)
 
     def test_a_resolved_finding_followed_by_a_commit_passes(self):
@@ -3057,3 +3259,7 @@ class DryRunJsonTests(unittest.TestCase):
         payload = __import__("json").loads(printed[0])
         self.assertTrue(payload["already_merged"])
         self.assertTrue(payload["ok"])
+
+
+if __name__ == "__main__":
+    unittest.main()

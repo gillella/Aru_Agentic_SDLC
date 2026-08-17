@@ -162,6 +162,14 @@ def linked_issue(body):
 # legitimately argued down - an audit trail that actively lies is worse than
 # the gap this closes.
 WITHDRAWN_MARKER = re.compile(r"^(?:\*\*)?withdrawn:(?:\*\*)?(?:\s|$)", re.IGNORECASE)
+SIZE_WAIVER_REGION_RE = re.compile(
+    r"^\s*size-waiver:\s*(\S.*)$", re.IGNORECASE | re.MULTILINE,
+)
+SIZE_WAIVER_FINDING_RE = re.compile(r"\bsize-waiver:\s*", re.IGNORECASE)
+VERIFICATION_FINDING_RE = re.compile(
+    r"(?:aru-verification-evidence:v1|--refresh-pr)",
+    re.IGNORECASE,
+)
 
 
 def _parse_ts(value):
@@ -180,6 +188,191 @@ def _parse_review_ts(value):
     if parsed is None or parsed.tzinfo is None:
         return None
     return parsed
+
+
+def _size_waiver_region(body):
+    """The exact body region accepted by the existing size gate."""
+    match = SIZE_WAIVER_REGION_RE.search(body or "")
+    return match.group(1).strip() if match else None
+
+
+def _verification_region(body):
+    """The marker-delimited verification block, or None when absent/ambiguous."""
+    text = body or ""
+    if (
+        text.count(VERIFICATION_EVIDENCE_START) != 1
+        or text.count(VERIFICATION_EVIDENCE_END) != 1
+    ):
+        return None
+    start = text.index(VERIFICATION_EVIDENCE_START)
+    end = text.index(VERIFICATION_EVIDENCE_END, start)
+    return text[start:end + len(VERIFICATION_EVIDENCE_END)]
+
+
+def _finding_body_region(body):
+    """Which body-only gate remedy, if any, the finding explicitly names."""
+    text = body or ""
+    if SIZE_WAIVER_FINDING_RE.search(text):
+        return "size-waiver"
+    if VERIFICATION_FINDING_RE.search(text):
+        return "verification"
+    return None
+
+
+def _body_edit_events(owner, name, pr_id, expected_head):
+    """Verified author body-region changes, sourced from GitHub edit history.
+
+    A bare pull-request ``updatedAt`` cannot distinguish body edits from reviews,
+    labels, or comments. ``userContentEdits`` supplies immutable edit timestamps,
+    editor identity, and the body snapshot after each edit. Unknown, truncated,
+    or internally inconsistent history fails closed with ``None``.
+    """
+    query = """
+    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
+      repository(owner:$owner, name:$name) {
+        pullRequest(number:$pr) {
+          headRefOid
+          body
+          author { login __typename }
+          userContentEdits(first:100, after:$cursor) {
+            nodes {
+              id
+              editedAt
+              diff
+              editor { login __typename }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }"""
+    cursor = None
+    seen_cursors = set()
+    seen_ids = set()
+    edits = []
+    current_body = None
+    author_login = None
+
+    while True:
+        args = [
+            "gh", "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
+        ]
+        if cursor:
+            args.extend(["-F", f"cursor={cursor}"])
+        data = _gh_json(args)
+        if not data or (isinstance(data, dict) and data.get("errors")):
+            return None
+        try:
+            pull = data["data"]["repository"]["pullRequest"]
+            connection = pull["userContentEdits"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            has_next = page_info["hasNextPage"]
+        except (KeyError, TypeError):
+            return None
+        if pull.get("headRefOid") != expected_head:
+            return None
+        body = pull.get("body")
+        author = pull.get("author") or {}
+        if (
+            not isinstance(body, str)
+            or author.get("__typename") != "User"
+            or not isinstance(author.get("login"), str)
+            or not author["login"]
+            or not isinstance(nodes, list)
+            or not isinstance(has_next, bool)
+        ):
+            return None
+        if current_body is None:
+            current_body = body
+            author_login = author["login"]
+        elif current_body != body or author_login != author["login"]:
+            return None
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                return None
+            edit_id = node.get("id")
+            edited_at = _parse_ts(node.get("editedAt"))
+            snapshot = node.get("diff")
+            editor = node.get("editor") or {}
+            if (
+                not isinstance(edit_id, str) or not edit_id or edit_id in seen_ids
+                or edited_at is None or edited_at.tzinfo is None
+                or not isinstance(snapshot, str)
+                or not isinstance(editor.get("__typename"), str)
+                or not isinstance(editor.get("login"), str)
+                or not editor["login"]
+            ):
+                return None
+            seen_ids.add(edit_id)
+            edits.append({
+                "at": edited_at,
+                "snapshot": snapshot,
+                "by_author": (
+                    editor["__typename"] == "User"
+                    and editor["login"] == author_login
+                ),
+            })
+
+        if not has_next:
+            break
+        next_cursor = page_info.get("endCursor")
+        if (
+            not isinstance(next_cursor, str) or not next_cursor
+            or next_cursor in seen_cursors
+        ):
+            return None
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+    if not edits:
+        return {"size-waiver": [], "verification": []}
+
+    groups = {}
+    for edit in edits:
+        group = groups.setdefault(
+            edit["at"], {"snapshots": set(), "author_edited": False},
+        )
+        group["snapshots"].add(edit["snapshot"])
+        group["author_edited"] = group["author_edited"] or edit["by_author"]
+    ordered = []
+    for edited_at in sorted(groups):
+        group = groups[edited_at]
+        if len(group["snapshots"]) != 1:
+            return None
+        ordered.append({
+            "at": edited_at,
+            "snapshot": next(iter(group["snapshots"])),
+            "author_edited": group["author_edited"],
+        })
+    if ordered[-1]["snapshot"] != current_body:
+        return None
+
+    events = {"size-waiver": [], "verification": []}
+    previous = ordered[0]["snapshot"]
+    for edit in ordered[1:]:
+        snapshot = edit["snapshot"]
+        if edit["author_edited"]:
+            prior_waiver = _size_waiver_region(previous)
+            next_waiver = _size_waiver_region(snapshot)
+            if next_waiver and next_waiver != prior_waiver:
+                events["size-waiver"].append(edit["at"])
+
+            prior_verification = _verification_region(previous)
+            next_verification = _verification_region(snapshot)
+            evidence, _ = parse_verification_evidence(snapshot)
+            if (
+                next_verification
+                and next_verification != prior_verification
+                and evidence is not None
+                and evidence.get("head_sha") == expected_head
+            ):
+                events["verification"].append(edit["at"])
+        previous = snapshot
+    return events
 
 
 def _reviewed_current_head(owner, name, pr_id):
@@ -415,6 +608,8 @@ def review_evidence(pr_id):
                       let PR #62 merge with five blocking findings intact:
                       resolving a thread is a UI toggle and proves nothing
                       about the code.
+      ``body_addressed`` threads resolved after an author edit changed the
+                      exact size-waiver or current-head verification region.
       ``withdrawn``   threads whose resolution was declared a withdrawal.
       ``reviewed_head``  True when at least one substantive, non-advisory
                       review was submitted against the current head. A review
@@ -465,6 +660,8 @@ def review_evidence(pr_id):
     outdated_unfixed = 0
     outdated_addressed = 0
     withdrawn = 0
+    body_addressed = 0
+    body_edit_events = None
     commit_times = None
 
     while True:
@@ -533,7 +730,24 @@ def review_evidence(pr_id):
                 continue
 
             if resolved:
-                if not has_commit_after:
+                if has_commit_after:
+                    continue
+                region = _finding_body_region(comments[0].get("body") or "")
+                has_body_edit_after = False
+                if region is not None and raised is not None:
+                    if body_edit_events is None:
+                        body_edit_events = _body_edit_events(
+                            owner, name, pr_id, expected_head,
+                        )
+                        if body_edit_events is None:
+                            return None
+                    has_body_edit_after = any(
+                        edited_at > raised
+                        for edited_at in body_edit_events.get(region, [])
+                    )
+                if has_body_edit_after:
+                    body_addressed += 1
+                else:
                     unfixed += 1
 
         if not has_next:
@@ -545,6 +759,7 @@ def review_evidence(pr_id):
                 "unfixed": unfixed,
                 "outdated_unfixed": outdated_unfixed,
                 "outdated_addressed": outdated_addressed,
+                "body_addressed": body_addressed,
                 "withdrawn": withdrawn,
                 "reviewed_head": reviewed_head,
             }
@@ -793,6 +1008,10 @@ def _evidence_note(evidence):
         ]
     else:
         parts = [head_note, "no unresolved threads"]
+    if evidence and evidence.get("body_addressed"):
+        parts.append(
+            f"{evidence['body_addressed']} finding(s) addressed by relevant PR body edit"
+        )
     if evidence and evidence.get("withdrawn"):
         parts.append(f"{evidence['withdrawn']} finding(s) withdrawn, not fixed")
     return ", ".join(parts) + "."
@@ -847,10 +1066,12 @@ def check_reviews(pr, evidence):
     # been fixed - some commit followed it - or explicitly withdrawn.
     if evidence["unfixed"] > 0:
         return False, (
-            f"{evidence['unfixed']} resolved thread(s) have no commit after the "
-            "finding was raised and were not withdrawn, so nothing shows the "
-            "finding was addressed. Push the fix, or reply to the thread "
-            "starting with 'Withdrawn:' and why."
+            f"{evidence['unfixed']} resolved thread(s) have no evidence that the "
+            "finding was addressed: no commit after the finding was raised, no relevant "
+            "size-waiver or verification-evidence body edit after it was raised, "
+            "and no reply starting with 'Withdrawn:'. Push the fix, apply the "
+            "documented body-only gate remedy when it matches the finding, or "
+            "withdraw the finding with a reason."
         )
 
     # A claim means an independent agent is still reviewing. It must block
@@ -1225,11 +1446,7 @@ def check_acceptance(issue_num, issue_body, cwd=None, execute=False, run_cmd_fn=
 def check_size(pr):
     total = (pr.get("additions") or 0) + (pr.get("deletions") or 0)
     if total > SIZE_LIMIT:
-        waiver = re.search(
-            r"^\s*size-waiver:\s*(\S.*)$",
-            pr.get("body") or "",
-            re.IGNORECASE | re.MULTILINE,
-        )
+        waiver = SIZE_WAIVER_REGION_RE.search(pr.get("body") or "")
         if not waiver:
             return False, (
                 f"Diff is {total} lines, over the {SIZE_LIMIT}-line limit. "
