@@ -64,10 +64,11 @@ python3 "$ARU_SDLC_HOME/scripts/incident_intake.py" \
 
 Intake opens a skill-shaped issue on the same Project Board (`Backlog`, labels
 `type:fix`, `origin:incident`, `priority:<severity>`). Recurring alerts comment
-on that open issue. Resolved alerts close unclaimed Backlog/Ready issues and
-prune leftover `issue-<N>` worktrees when Done. `--severity` applies only to
-firing signals. `--dry-run` validates identity without writing to GitHub.
-`--evidence-file` reads a bounded diagnostic excerpt from a file. Triage
-replaces `touches: pending-ops-triage` before promoting to Ready. There is no
-second incident process. Post-merge janitor cleanup for arbitrary leftovers is
-issue #126, not this intake door.
+on that open issue. Resolved alerts comment on claimed or in-flight issues,
+close unclaimed Backlog/Ready issues, and prune leftover `issue-<N>` worktrees
+when Done — only clean worktrees, never with `--force`. `--severity` applies
+only to firing signals. `--dry-run` validates identity without writing to
+GitHub. `--evidence-file` reads a bounded diagnostic excerpt from a file.
+Triage replaces `touches: pending-ops-triage` before promoting to Ready. There
+is no second incident process. Post-merge janitor cleanup for arbitrary
+leftovers is issue #126, not this intake door.
