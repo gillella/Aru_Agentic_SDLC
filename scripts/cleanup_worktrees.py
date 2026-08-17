@@ -9,6 +9,8 @@ that is not a git worktree of this repository. Dirty trees are left untouched.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -23,6 +25,7 @@ import merge_pr  # noqa: E402
 ISSUE_BRANCH_PREFIXES = ("feat/", "fix/", "chore/", "docs/")
 REVIEW_BRANCH_PREFIX = "review-pr-"
 RETAINED_DIR = os.path.join(".worktrees", ".retained")
+RETAIN_MANIFEST = ".aru-retained-clean"
 KNOWN_CACHE_NAMES = frozenset({
     "__pycache__",
     ".pytest_cache",
@@ -57,6 +60,56 @@ def gitdir_target(path: str) -> str | None:
     if not os.path.isabs(target):
         target = os.path.join(os.path.dirname(marker), target)
     return os.path.realpath(target)
+
+
+def _iter_retain_files(path: str):
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = sorted(name for name in dirnames if name != ".git")
+        for name in sorted(filenames):
+            if name in {RETAIN_MANIFEST, RETAIN_MANIFEST + ".tmp"}:
+                continue
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, path).replace(os.sep, "/")
+            yield rel, full
+
+
+def retain_manifest_payload(path: str) -> dict:
+    files = {}
+    for rel, full in _iter_retain_files(path):
+        digest = hashlib.sha256()
+        with open(full, "rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        files[rel] = digest.hexdigest()
+    return {"files": files}
+
+
+def write_retain_manifest(path: str) -> None:
+    payload = retain_manifest_payload(path)
+    dest = os.path.join(path, RETAIN_MANIFEST)
+    tmp = dest + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+    os.replace(tmp, dest)
+
+
+def retain_manifest_allows_prune(path: str) -> bool | None:
+    dest = os.path.join(path, RETAIN_MANIFEST)
+    try:
+        with open(dest, encoding="utf-8") as handle:
+            recorded = json.load(handle)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("files"), dict):
+        return None
+    try:
+        current = retain_manifest_payload(path)["files"]
+    except OSError:
+        return None
+    expected = recorded["files"]
+    if set(current) != set(expected):
+        return False
+    return all(current[key] == expected[key] for key in expected)
 
 
 def owned_worktree(path: str, repo_root: str) -> bool:
@@ -255,6 +308,15 @@ def prune_retained_copies(repo_root: str) -> tuple[bool, list[str]]:
             continue
         admin_dir = gitdir_target(path)
         if admin_dir and not os.path.isdir(admin_dir):
+            allowed = retain_manifest_allows_prune(path)
+            if allowed is not True:
+                reason = (
+                    "cleanliness unverifiable" if allowed is None
+                    else "dirty after retention"
+                )
+                notes.append(f"skipped retained {path}: {reason}")
+                failed = True
+                continue
             try:
                 shutil.rmtree(path)
                 notes.append(f"removed retained {path}")

@@ -1926,11 +1926,15 @@ def prune_worktree(repo_root, branch, expected_sha):
         )
         if status_code != 0:
             return False, f"Could not inspect worktree {path}: {status_err.strip()}"
-        from cleanup_worktrees import porcelain_blocks_prune
+        from cleanup_worktrees import porcelain_blocks_prune, write_retain_manifest
         if porcelain_blocks_prune(status):
             return False, (
                 f"Worktree {path} has tracked or untracked files; left untouched."
             )
+        try:
+            write_retain_manifest(path)
+        except OSError as exc:
+            return False, f"Could not snapshot worktree {path} for retention: {exc}"
         if os.path.exists(retained_path):
             return False, f"Retention destination already exists: {retained_path}"
         try:
