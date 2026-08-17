@@ -633,5 +633,17 @@ class WorkflowCredentialBoundaryTests(unittest.TestCase):
     def test_issues_read_is_granted_to_the_docs_job(self):
         self.assertIn("issues: read", self._docs_job())
 
+    def test_secret_scan_keeps_its_issues_read_grant(self):
+        """gitleaks-action needs issues:read, not just pull-requests:read.
+
+        Without it, ScanPullRequest fails 403 "Resource not accessible by
+        integration" before scanning. Narrowing the workflow-level grant broke
+        this job once already; this test is why it will not break silently.
+        """
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        job = text[text.index("\n  secret-scan:"): text.index("\n  dependency-audit:")]
+        self.assertIn("issues: read", job)
+        self.assertIn("pull-requests: read", job)
+
     def test_checkout_does_not_persist_credentials(self):
         self.assertIn("persist-credentials: false", self._docs_job())
