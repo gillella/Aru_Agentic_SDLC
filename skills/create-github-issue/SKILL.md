@@ -46,6 +46,21 @@ This skill defines the declarative workflow for creating clear, actionable GitHu
   coordination and run the printed `gh project item-add` manual remedy before
   considering the issue ready for pickup.
 
+### Slack epic splits
+
+When an epic is sliced in Slack, do **not** treat the thread or a thumbs-up as
+a filed issue. Write a mode-`0600` JSON split document (no secrets) and run:
+
+```
+python3 "$ARU_SDLC_HOME/scripts/slack_control_room.py" file-split \
+  --epic <N> --from-file <split.json> --repo-dir "$PWD"
+```
+
+The helper emits `create-github-issue` bodies (`depends-on`, `touches`,
+`parallel-eligible`, `Epic: #<epic>`) and attaches them with
+`update_issue_status.py --require-board`. Use `--dry-run` first. Then pick
+work only through `fetch_next_work.py`.
+
 ### 4. Production signals use intake, not a second process
 Do not file production alerts by hand through this skill. Monitoring, health
 checks, and error-rate thresholds invoke:

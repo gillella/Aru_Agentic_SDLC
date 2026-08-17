@@ -407,6 +407,21 @@ platform limits if observed; instructions cannot honestly override them.
 When credits are exhausted, post `hitl` once (deduped) before the platform
 stops the task.
 
+### Slack epic splits
+
+Brainstorm an epic split in Slack only when the slices are not already obvious.
+A Slack thread, including a thumbs-up, is never a claim, a `depends-on`
+resolution, or merge authority. Turn agreed slices into GitHub issues with:
+
+```
+python3 "$ARU_SDLC_HOME/scripts/slack_control_room.py" file-split \
+  --epic <N> --from-file <0600-json> --repo-dir "$PWD" [--dry-run]
+```
+
+Then pick work only through `fetch_next_work.py`. If the epic lacks a product
+decision required to write acceptance criteria, `@` the operator (`hitl`) and
+stop.
+
 ### Final report (only on intentional stop/intervention)
 
 ```

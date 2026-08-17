@@ -214,6 +214,37 @@ contract is preserved for local operator control, and Slack cannot clear it. A
 degraded project permits status only; use local `verify`, `recover`, or `close`
 for recovery.
 
+## Epic splits and Slack brainstorms
+
+Slack is the conversation. The Project Board is the resulting work. Any factory
+agent may start a thread on an open `type:epic` to propose a split. That thread
+is **not** a claim, a `depends-on` resolution, or merge authority — including a
+thumbs-up.
+
+File agreed slices only through a structured 0600 JSON document and the helper.
+Do not paste secrets into the document or into Slack.
+
+```bash
+python3 scripts/slack_control_room.py file-split \
+  --epic 178 \
+  --from-file /path/to/split.json \
+  --repo-dir /absolute/path/to/repo \
+  --dry-run
+```
+
+Omit `--dry-run` to create GitHub issues. Each child must declare `depends-on`
+(including the epic), `touches`, and `parallel-eligible`. The helper attaches
+them with `update_issue_status.py --require-board` (Ready when those fields plus
+acceptance criteria are present, otherwise Backlog), comments the issue URLs on
+the epic, and optionally posts them back to the Slack thread via `--thread-ts`.
+
+Brainstorm in Slack when the epic still needs slicing or a missing product
+decision. If the decision cannot be derived from the epic, `@` the operator
+(`hitl`) and stop. If the slices are already obvious, skip Slack and file with
+`create-github-issue` / this helper.
+
+Agents still pick work only through `fetch_next_work.py`.
+
 ## Setup and security
 
 1. Create the app from `templates/slack/manifest.yaml` and enable Socket Mode.
