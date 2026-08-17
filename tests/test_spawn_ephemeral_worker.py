@@ -212,6 +212,7 @@ class EphemeralWorkerTests(unittest.TestCase):
                 "yolo",
                 "--output-format",
                 "stream-json",
+                "--prompt",
                 "review one PR",
             ],
         )

@@ -512,6 +512,7 @@ def build_ephemeral_agent_argv(
             "yolo",
             "--output-format",
             "stream-json",
+            "--prompt",
             prompt,
         ]
 
