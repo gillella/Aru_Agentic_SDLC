@@ -28,16 +28,11 @@ jobs:
   secret-scan:
     name: Secret Scan
     runs-on: ubuntu-latest
-    # gitleaks-action needs issues:read as well as pull-requests:read on a
-    # pull_request event: without it, ScanPullRequest fails 403 "Resource not
-    # accessible by integration" before it scans anything. Verified the hard
-    # way -- dropping the workflow-level issues:read grant broke this job.
-    # It is declared here rather than workflow-wide so only the two jobs that
-    # need the issues endpoint can reach it.
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
+    # Deliberately no job-level permissions block: this job inherits the
+    # workflow default above. Adding one here -- even a superset containing
+    # contents/pull-requests/issues read -- made gitleaks-action's
+    # ScanPullRequest fail 403 on GET /pulls/<n>/commits. Inheriting works;
+    # re-declaring does not. Leave it alone.
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
