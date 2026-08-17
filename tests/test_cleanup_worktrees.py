@@ -153,6 +153,64 @@ class WorktreeCleanupTests(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_legacy_retained_copy_handling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy_dir = Path(tmp) / "legacy_wt"
+            legacy_dir.mkdir()
+            clean, note = cleanup_worktrees._retained_still_clean(str(legacy_dir), deregistered=True)
+            self.assertFalse(clean)
+            self.assertIn("cleanliness unverifiable", note)
+
+    def test_legacy_retained_copies_do_not_fail_sweep(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_clone(Path(tmp))
+            retained = repo / ".worktrees" / ".retained"
+            retained.mkdir(parents=True)
+            legacy_wt = retained / "12345678-feat-old"
+            legacy_wt.mkdir()
+            (legacy_wt / "README").write_text("old\n")
+            (legacy_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+            ok, notes = cleanup_worktrees.prune_retained_copies(str(repo))
+            self.assertTrue(ok)
+            self.assertTrue(any("cleanliness unverifiable" in n for n in notes))
+
+    def test_report_retained_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_clone(Path(tmp))
+            retained = repo / ".worktrees" / ".retained"
+            retained.mkdir(parents=True)
+            legacy_wt = retained / "12345678-feat-old"
+            legacy_wt.mkdir()
+            (legacy_wt / "README").write_text("hello\n")
+            (legacy_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+            stats, summary = cleanup_worktrees.report_retained(str(repo))
+            self.assertEqual(stats["total_count"], 1)
+            self.assertEqual(stats["legacy_count"], 1)
+            self.assertEqual(stats["manifest_count"], 0)
+            self.assertIn("Retained worktrees: 1 total", summary)
+
+    def test_legacy_copy_with_modifications_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_clone(Path(tmp))
+            retained = repo / ".worktrees" / ".retained"
+            retained.mkdir(parents=True)
+            dirty_wt = retained / "12345678-feat-dirty"
+            dirty_wt.mkdir()
+            (dirty_wt / "uncommitted.txt").write_text("dirty work\n")
+            (dirty_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+
+            clean_wt = retained / "abcdef12-feat-clean"
+            clean_wt.mkdir()
+            (clean_wt / "README").write_text("main\n")
+            (clean_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+
+            ok, notes = cleanup_worktrees.purge_legacy_retained(str(repo))
+            self.assertTrue(ok)
+            self.assertTrue(dirty_wt.exists())
+            self.assertFalse(clean_wt.exists())
+
+
+
 
 class RetainManifestWalkTests(unittest.TestCase):
     def test_symlink_to_device_is_recorded_without_following(self):

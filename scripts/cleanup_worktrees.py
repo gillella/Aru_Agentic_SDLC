@@ -606,6 +606,146 @@ def _prune_claimed_retained(
     return _remove_claimed_retained(claimed2, expected)
 
 
+def retained_directory_size(path: str) -> int:
+    """Calculates total disk usage in bytes for a directory."""
+    total = 0
+    try:
+        for dirpath, _, filenames in os.walk(path, followlinks=False):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                try:
+                    if not os.path.islink(fp):
+                        total += os.path.getsize(fp)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _legacy_copy_is_clean(path: str, repo_root: str) -> bool:
+    """Checks if a legacy retained copy has no uncommitted changes or dirt."""
+    code, status, _ = run_cmd(
+        [
+            "git", f"--git-dir={os.path.join(repo_root, '.git')}",
+            f"--work-tree={path}", "status", "--porcelain",
+            "--untracked-files=all", "--ignored=matching",
+        ],
+        check=False,
+    )
+    if code != 0:
+        return False
+    blocked = porcelain_blocks_prune(status, base_path=path)
+    return blocked is False
+
+
+def report_retained(repo_root: str) -> tuple[dict, str]:
+    """Inspects .worktrees/.retained/ and returns (stats_dict, formatted_summary_string)."""
+    retained, err = inspect_retained_root(repo_root)
+    if err:
+        return {"error": err}, f"error: {err}"
+    if retained is None or not os.path.isdir(retained):
+        return {
+            "total_count": 0,
+            "manifest_count": 0,
+            "legacy_count": 0,
+            "reclaimable_bytes": 0,
+            "total_bytes": 0,
+        }, "No retained worktrees found."
+
+    total_count = 0
+    manifest_count = 0
+    legacy_count = 0
+    reclaimable_bytes = 0
+    total_bytes = 0
+
+    for name in sorted(os.listdir(retained)):
+        path = os.path.join(retained, name)
+        if not os.path.isdir(path) or os.path.islink(path):
+            continue
+        if not owned_worktree(path, repo_root):
+            continue
+        total_count += 1
+        size = retained_directory_size(path)
+        total_bytes += size
+
+        manifest_file = os.path.join(path, RETAIN_MANIFEST)
+        if os.path.isfile(manifest_file):
+            manifest_count += 1
+            if retain_manifest_allows_prune(path) is True:
+                reclaimable_bytes += size
+        else:
+            legacy_count += 1
+            if _legacy_copy_is_clean(path, repo_root):
+                reclaimable_bytes += size
+
+    stats = {
+        "total_count": total_count,
+        "manifest_count": manifest_count,
+        "legacy_count": legacy_count,
+        "reclaimable_bytes": reclaimable_bytes,
+        "total_bytes": total_bytes,
+    }
+    summary = (
+        f"Retained worktrees: {total_count} total "
+        f"({manifest_count} with manifest, {legacy_count} legacy), "
+        f"total size: {total_bytes} bytes, reclaimable: {reclaimable_bytes} bytes"
+    )
+    return stats, summary
+
+
+def purge_legacy_retained(repo_root: str) -> tuple[bool, list[str]]:  # noqa: C901
+    """Operator-invoked cleanup for clean legacy retained copies lacking manifests."""
+    notes = []
+    failed = False
+    retained, err = inspect_retained_root(repo_root)
+    if err:
+        return False, [err]
+    if retained is None:
+        return True, notes
+
+    for name in sorted(os.listdir(retained)):
+        path = os.path.join(retained, name)
+        if not os.path.isdir(path) or os.path.islink(path):
+            continue
+        if not owned_worktree(path, repo_root):
+            continue
+        manifest_file = os.path.join(path, RETAIN_MANIFEST)
+        if os.path.isfile(manifest_file):
+            continue
+
+        if not _legacy_copy_is_clean(path, repo_root):
+            notes.append(f"skipped legacy retained {path}: contains uncommitted modifications")
+            continue
+
+        claimed = claim_retained_directory(path, retained)
+        if claimed is None:
+            notes.append(f"skipped legacy retained {path}: could not claim exclusive ownership")
+            failed = True
+            continue
+        if not _retained_child_deletable(claimed, retained, repo_root):
+            notes.append(f"skipped legacy retained {claimed}: not physically contained")
+            failed = True
+            continue
+        if not _legacy_copy_is_clean(claimed, repo_root):
+            notes.append(f"kept legacy retained {claimed}: modified after claim")
+            continue
+
+        try:
+            expected = retain_manifest_payload(claimed)["entries"]
+        except OSError as exc:
+            notes.append(f"kept legacy retained {claimed}: snapshot failed: {exc}")
+            failed = True
+            continue
+
+        ok, note = _remove_claimed_retained(claimed, expected)
+        notes.append(note)
+        if not ok:
+            failed = True
+
+    return (not failed), notes
+
+
 def prune_retained_copies(repo_root: str) -> tuple[bool, list[str]]:
     notes = []
     failed = False
@@ -634,7 +774,7 @@ def prune_retained_copies(repo_root: str) -> tuple[bool, list[str]]:
         clean, note = _retained_still_clean(path, deregistered)
         if clean is not True:
             notes.append(note)
-            if (not deregistered) and note.endswith(": dirty"):
+            if (not deregistered and note.endswith(": dirty")) or "cleanliness unverifiable" in note:
                 continue
             failed = True
             continue
@@ -908,8 +1048,29 @@ def main() -> int:
         description="Prune leftover worktrees, merged local branches, and stale claims."
     )
     parser.add_argument("--repo", help="Repository root (default: this clone)")
+    parser.add_argument(
+        "--report-retained",
+        action="store_true",
+        help="Report total retained worktree copies and reclaimable bytes.",
+    )
+    parser.add_argument(
+        "--purge-legacy-retained",
+        action="store_true",
+        help="Purge verified clean legacy retained copies lacking manifests.",
+    )
     args = parser.parse_args()
     repo_root = args.repo or merge_pr.repository_root() or os.getcwd()
+
+    if args.report_retained:
+        _, summary = report_retained(repo_root)
+        print(summary)
+        return 0
+
+    if args.purge_legacy_retained:
+        ok, notes = purge_legacy_retained(repo_root)
+        print("; ".join(notes) if notes else "no legacy copies found")
+        return 0 if ok else 1
+
     ok, message = sweep(repo_root)
     print(message)
     return 0 if ok else 1
