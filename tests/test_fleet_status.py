@@ -1,4 +1,5 @@
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -9,10 +10,12 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import fleet_status  # noqa: E402
 from fleet_status import (  # noqa: E402
     EXIT_BLOCKED,
     EXIT_COMPLETE,
     EXIT_ERROR,
+    EXIT_STALLED,
     EXIT_WAITING,
     LINE_CEILING,
     apply_ci_failure_rate,
@@ -20,6 +23,11 @@ from fleet_status import (  # noqa: E402
     build_merge_queue,
     build_operator_screen,
     collect_codebase_health,
+    detect_stall,
+    most_recent_merge_history,
+    most_recent_merge_time,
+    notify_stall,
+    stall_alert_text,
     discover_fleet_size,
     evaluate_fleet_status,
     evaluate_queue_row,
@@ -92,10 +100,21 @@ def mock_project_item(status="Ready", repo_slug="octocat/widgets"):
 
 
 class FleetStatusTests(unittest.TestCase):
-    def evaluate_fixture(self, issues=None, prs=None, items=None, fleet_size=None, ready_target=None):
+    def evaluate_fixture(
+        self,
+        issues=None,
+        prs=None,
+        items=None,
+        fleet_size=None,
+        ready_target=None,
+        merge_history=None,
+        agent_count=0,
+    ):
         issues = [] if issues is None else issues
         prs = [] if prs is None else prs
         item_map = {} if items is None else items
+        if merge_history is None:
+            merge_history = (datetime.now(timezone.utc), True)
         with (
             patch("fleet_status.get_repo_slug", return_value="octocat/widgets"),
             patch("fleet_status.get_repo_projects", return_value=[mock_project()]),
@@ -106,6 +125,8 @@ class FleetStatusTests(unittest.TestCase):
                 "fleet_status.query_issue_project_items",
                 side_effect=lambda number: item_map.get(number, [mock_project_item()]),
             ),
+            patch("fleet_status.most_recent_merge_history", return_value=merge_history),
+            patch("fleet_status.registered_agent_count", return_value=agent_count),
         ):
             return evaluate_fleet_status(".", fleet_size=fleet_size, ready_target=ready_target)
 
@@ -494,6 +515,27 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(asked["review_rounds"]["severity"], "warn")
         self.assertEqual(asked["review_rounds"]["max_review_rounds"], 2)
         self.assertEqual(asked["ci_failure_rate"]["availability"], "unavailable")
+
+    def test_old_merge_with_open_prs_and_agents_evaluates_stalled(self):
+        old = datetime.now(timezone.utc) - timedelta(hours=9)
+        status = self.evaluate_fixture(
+            prs=[mock_pr(30)],
+            merge_history=(old, True),
+            agent_count=2,
+        )
+        self.assertEqual(status["state"], "stalled")
+        self.assertEqual(status["exit_code"], EXIT_STALLED)
+        self.assertEqual(status["open_pr_numbers"], [30])
+        self.assertTrue(status["stall"]["stalled"])
+
+    def test_merge_lookup_failure_does_not_evaluate_stalled(self):
+        status = self.evaluate_fixture(
+            prs=[mock_pr(30)],
+            merge_history=(None, False),
+            agent_count=2,
+        )
+        self.assertEqual(status["state"], "waiting")
+        self.assertFalse(status["stall"]["stalled"])
 
     def test_review_age_ignores_drafts_and_completed_reviews(self):
         status = self.evaluate_fixture(
@@ -1068,3 +1110,264 @@ class MergeQueueViewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DetectStallTests(unittest.TestCase):
+    """All three conditions are required; any one missing means no stall."""
+
+    def test_old_merge_with_open_prs_and_agents_is_a_stall(self):
+        self.assertTrue(detect_stall(7.0, open_pr_count=5, agent_count=3, stall_hours=4.0))
+
+    def test_recent_merge_is_not_a_stall(self):
+        self.assertFalse(detect_stall(0.5, open_pr_count=5, agent_count=3, stall_hours=4.0))
+
+    def test_no_open_prs_is_never_a_stall(self):
+        # A quiet board with nothing open is idle, not stalled, however old the
+        # last merge is.
+        self.assertFalse(detect_stall(99.0, open_pr_count=0, agent_count=3, stall_hours=4.0))
+
+    def test_no_registered_agents_is_never_a_stall(self):
+        # Nobody is running; zero throughput is expected, not a fault.
+        self.assertFalse(detect_stall(99.0, open_pr_count=5, agent_count=0, stall_hours=4.0))
+
+    def test_failed_merge_lookup_is_not_a_stall(self):
+        self.assertFalse(
+            detect_stall(
+                None, open_pr_count=2, agent_count=1, stall_hours=4.0,
+                merge_lookup_ok=False,
+            )
+        )
+
+    def test_no_merge_at_all_with_work_and_agents_is_a_stall(self):
+        self.assertTrue(detect_stall(None, open_pr_count=2, agent_count=1, stall_hours=4.0))
+
+    def test_no_merge_at_all_without_agents_is_not_a_stall(self):
+        self.assertFalse(detect_stall(None, open_pr_count=2, agent_count=0, stall_hours=4.0))
+
+    def test_zero_stall_hours_disables_detection(self):
+        self.assertFalse(detect_stall(99.0, open_pr_count=5, agent_count=3, stall_hours=0))
+
+    def test_threshold_is_inclusive_at_the_boundary(self):
+        self.assertTrue(detect_stall(4.0, open_pr_count=1, agent_count=1, stall_hours=4.0))
+        self.assertFalse(detect_stall(3.99, open_pr_count=1, agent_count=1, stall_hours=4.0))
+
+
+class StallExitCodeTests(unittest.TestCase):
+    def test_stalled_exit_code_is_distinct_from_every_other_state(self):
+        codes = {EXIT_COMPLETE, EXIT_ERROR, EXIT_WAITING, EXIT_BLOCKED}
+        self.assertNotIn(EXIT_STALLED, codes)
+        self.assertEqual(EXIT_STALLED, 4)
+
+
+class StallQuestionTests(unittest.TestCase):
+    def _screen(self, **kwargs):
+        return fleet_status._stall_question(**kwargs)
+
+    def test_json_payload_carries_hours_and_verdict(self):
+        stall = self._screen(
+            hours_since_last_merge=7.5, open_pr_count=5,
+            agent_count=3, stall_hours=4.0,
+        )
+        self.assertTrue(stall["stalled"])
+        self.assertEqual(stall["hours_since_last_merge"], 7.5)
+        self.assertEqual(stall["open_pr_count"], 5)
+        self.assertEqual(stall["registered_agents"], 3)
+        self.assertEqual(stall["severity"], "attn")
+
+    def test_healthy_board_reports_ok(self):
+        stall = self._screen(
+            hours_since_last_merge=0.2, open_pr_count=2,
+            agent_count=2, stall_hours=4.0,
+        )
+        self.assertFalse(stall["stalled"])
+        self.assertEqual(stall["severity"], "ok")
+
+    def test_failed_merge_lookup_is_ok_not_stalled(self):
+        stall = self._screen(
+            hours_since_last_merge=None, open_pr_count=5,
+            agent_count=3, stall_hours=4.0, merge_lookup_ok=False,
+        )
+        self.assertFalse(stall["stalled"])
+        self.assertEqual(stall["severity"], "ok")
+        self.assertIn("unavailable", stall["summary"])
+
+    def test_stall_is_not_a_seventh_operator_question(self):
+        # The operator screen is the documented six-question contract.
+        screen = build_operator_screen([], [])
+        self.assertNotIn("stall", [q["key"] for q in screen["questions"]])
+        self.assertEqual(len(screen["questions"]), 6)
+
+
+class MostRecentMergeTests(unittest.TestCase):
+    def test_returns_newest_merged_at_not_first_row(self):
+        # gh returns newest-created first, which is not newest-merged.
+        rows = [
+            {"mergedAt": "2026-08-17T01:00:00Z"},
+            {"mergedAt": "2026-08-17T09:00:00Z"},
+            {"mergedAt": "2026-08-17T03:00:00Z"},
+        ]
+        with patch.object(fleet_status, "run_gh_json", return_value=rows):
+            newest = most_recent_merge_time()
+        self.assertEqual(newest, datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc))
+
+    def test_lookup_uses_merge_date_search_not_creation_order(self):
+        captured = []
+
+        def fake_gh(argv, **kwargs):
+            captured.append(argv)
+            return []
+
+        with patch.object(fleet_status, "run_gh_json", side_effect=fake_gh):
+            most_recent_merge_history()
+        self.assertEqual(len(captured), 1)
+        argv = captured[0]
+        self.assertIn("--search", argv)
+        search = argv[argv.index("--search") + 1]
+        self.assertIn("is:merged", search)
+        self.assertIn("merged:>=", search)
+        self.assertNotIn("--state", argv)
+
+    def test_lookup_failure_returns_unavailable(self):
+        with patch.object(fleet_status, "run_gh_json", return_value=None):
+            newest, ok = most_recent_merge_history()
+        self.assertIsNone(newest)
+        self.assertFalse(ok)
+        with patch.object(fleet_status, "run_gh_json", return_value=None):
+            self.assertIsNone(most_recent_merge_time())
+
+    def test_empty_successful_history_is_available(self):
+        with patch.object(fleet_status, "run_gh_json", return_value=[]):
+            newest, ok = most_recent_merge_history()
+        self.assertIsNone(newest)
+        self.assertTrue(ok)
+
+    def test_malformed_rows_are_skipped(self):
+        rows = ["nonsense", {"mergedAt": None}, {"mergedAt": "2026-08-17T05:00:00Z"}]
+        with patch.object(fleet_status, "run_gh_json", return_value=rows):
+            newest = most_recent_merge_time()
+        self.assertEqual(newest, datetime(2026, 8, 17, 5, 0, tzinfo=timezone.utc))
+
+
+class StallAlertTests(unittest.TestCase):
+    def _question(self):
+        return fleet_status._stall_question(9.0, 5, 3, 4.0)
+
+    def test_alert_body_carries_no_secrets_or_logs(self):
+        text = stall_alert_text(self._question(), ["PR #1 unmet: review"])
+        self.assertIn("stopped merging", text)
+        self.assertIn("PR #1 unmet: review", text)
+        self.assertIn("No merge within 4h", text)
+        self.assertNotIn("9.0h", text)
+        self.assertNotIn(self._question()["summary"], text)
+        for forbidden in ("diff --git", "Traceback", "ghp_", "gho_", "token"):
+            self.assertNotIn(forbidden, text)
+
+    def test_slack_invoked_once_with_hitl_and_a_file(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(fleet_status, "get_repo_slug", return_value="o/r"), \
+             patch.dict(os.environ, {"ARU_PROJECT_ID": "proj_1"}), \
+             patch.object(fleet_status, "run_cmd", side_effect=fake_run):
+            ok = notify_stall(self._question(), ["PR #1 unmet: review"],
+                              tmp, "claude-1", "anthropic", pr=12)
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--event", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--event") + 1], "hitl")
+        self.assertIn("--decision-file", calls[0])
+        self.assertIn("--pr", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--pr") + 1], "12")
+
+    def test_alert_file_is_0600_and_removed_afterwards(self):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            path = cmd[cmd.index("--decision-file") + 1]
+            seen["path"] = path
+            seen["mode"] = stat.S_IMODE(os.stat(path).st_mode)
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(fleet_status, "get_repo_slug", return_value="o/r"), \
+             patch.dict(os.environ, {"ARU_PROJECT_ID": "proj_1"}), \
+             patch.object(fleet_status, "run_cmd", side_effect=fake_run):
+            notify_stall(self._question(), [], tmp, "claude-1", "anthropic", pr=12)
+        self.assertEqual(seen["mode"], 0o600)
+        self.assertFalse(os.path.exists(seen["path"]))
+
+    def test_slack_failure_is_reported_without_raising(self):
+        # Slack downtime must never halt the GitHub loop.
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(fleet_status, "get_repo_slug", return_value="o/r"), \
+             patch.dict(os.environ, {"ARU_PROJECT_ID": "proj_1"}), \
+             patch.object(fleet_status, "run_cmd", return_value=(1, "", "boom")):
+            self.assertFalse(
+                notify_stall(self._question(), [], tmp, "a", "anthropic", pr=12)
+            )
+
+    def test_missing_pr_skips_notification(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(fleet_status, "get_repo_slug", return_value="o/r"), \
+             patch.dict(os.environ, {"ARU_PROJECT_ID": "proj_1"}), \
+             patch.object(fleet_status, "run_cmd") as run:
+            self.assertFalse(notify_stall(self._question(), [], tmp, "a", "anthropic"))
+        run.assert_not_called()
+
+    def test_missing_project_id_skips_notification(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(fleet_status, "get_repo_slug", return_value="o/r"), \
+             patch.dict(os.environ, {"ARU_PROJECT_ID": ""}), \
+             patch.object(fleet_status, "run_cmd") as run:
+            self.assertFalse(
+                notify_stall(self._question(), [], tmp, "a", "anthropic", pr=12)
+            )
+        run.assert_not_called()
+
+    def test_main_reads_top_level_stall_and_filters_pr_reasons(self):
+        question = fleet_status._stall_question(9.0, 5, 3, 4.0)
+        status = {
+            "state": "stalled",
+            "exit_code": EXIT_STALLED,
+            "summary": f"STALLED: {question['summary']}",
+            "reasons": [
+                question["summary"],
+                "PR #12 is open and pending review.",
+                "Issue #9 is Ready for implementation.",
+            ],
+            "stall": question,
+            "operator_screen": {"questions": []},
+            "open_pr_numbers": [12],
+        }
+        captured = {}
+
+        def fake_notify(q, blocked, repo_dir, agent, family, pr=None):
+            captured["question"] = q
+            captured["blocked"] = blocked
+            captured["pr"] = pr
+            return True
+
+        import io
+        with patch.object(fleet_status, "evaluate_fleet_status", return_value=status), \
+             patch.object(fleet_status, "notify_stall", side_effect=fake_notify), \
+             patch.object(fleet_status, "fetch_ci_history", return_value=[]), \
+             patch.object(sys, "argv", ["fleet_status.py", "--json"]), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as raised:
+                fleet_status.main()
+        self.assertEqual(raised.exception.code, EXIT_STALLED)
+        self.assertIs(captured["question"], question)
+        self.assertEqual(captured["blocked"], ["PR #12 is open and pending review."])
+        self.assertEqual(captured["pr"], 12)
+
+
+class RegisteredAgentCountTests(unittest.TestCase):
+    def test_unreadable_presence_registry_reports_zero(self):
+        # Absence of evidence must not manufacture a stall.
+        with patch.object(fleet_status, "registered_agent_count", wraps=fleet_status.registered_agent_count):
+            with tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(fleet_status.registered_agent_count(tmp), 0)
