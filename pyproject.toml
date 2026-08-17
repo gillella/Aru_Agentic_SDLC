@@ -50,13 +50,14 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Contract 2: hooks must not import scripts"
+name = "Contract 2: hooks must not import scripts or common"
 type = "forbidden"
 source_modules = [
     "hooks",
 ]
 forbidden_modules = [
     "scripts",
+    "common",
 ]
 
 [[tool.importlinter.contracts]]
@@ -66,24 +67,41 @@ source_modules = [
     "scripts.common",
 ]
 forbidden_modules = [
+    "scripts.acceptance_runner",
+    "scripts.agent_presence",
+    "scripts.build_preview",
+    "scripts.check_ci",
+    "scripts.check_docs",
     "scripts.claim_issue",
-    "scripts.fetch_next_work",
-    "scripts.fetch_next_issue",
+    "scripts.cleanup_worktrees",
     "scripts.create_branch",
     "scripts.create_pr",
-    "scripts.merge_pr",
-    "scripts.check_ci",
-    "scripts.triage_backlog",
-    "scripts.fleet_status",
-    "scripts.slack_notify",
-    "scripts.slack_control_room",
-    "scripts.slack_projects",
-    "scripts.agent_presence",
-    "scripts.run_fleet",
-    "scripts.init_project",
-    "scripts.promote",
+    "scripts.delivery_increments",
     "scripts.deploy_preview",
-    "scripts.revert_merge",
+    "scripts.doctor_local_agent_integrations",
+    "scripts.enable_main_ruleset",
+    "scripts.factory_metrics",
+    "scripts.fetch_next_issue",
+    "scripts.fetch_next_work",
+    "scripts.fetch_pr_feedback",
+    "scripts.fixtures",
+    "scripts.fleet_status",
     "scripts.incident_intake",
+    "scripts.init_project",
+    "scripts.merge_pr",
+    "scripts.prd_to_issues",
+    "scripts.promote",
+    "scripts.prune_codebase",
+    "scripts.release",
+    "scripts.revert_merge",
+    "scripts.run_fleet",
+    "scripts.slack_control_room",
+    "scripts.slack_notify",
+    "scripts.slack_projects",
+    "scripts.smoke_preview",
+    "scripts.spawn_ephemeral_worker",
+    "scripts.sync_spec",
+    "scripts.triage_backlog",
+    "scripts.update_issue_status",
     "scripts.verify_citations",
 ]

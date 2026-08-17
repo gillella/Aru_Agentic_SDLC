@@ -91,7 +91,7 @@ jobs:
 
       - name: Enforce module boundaries
         run: |
-          pip install import-linter
+          pip install -r requirements-dev.txt
           lint-imports
 
   # Documentation drift here accumulated in days (issue #115). A convention

@@ -9,25 +9,21 @@ Git passes:
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
-# Search candidate locations for common.py across canonical home and consumer repos
-SCRIPT_DIR = Path(__file__).resolve().parent
-candidates = [
-    Path(os.environ.get("ARU_SDLC_HOME", "")) / "scripts",
-    SCRIPT_DIR.parent / "scripts",
-    SCRIPT_DIR.parents[1] / "scripts" if len(SCRIPT_DIR.parents) > 1 else None,
-    SCRIPT_DIR / "scripts",
-]
-for candidate in candidates:
-    if candidate and candidate.is_dir() and str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
 
-try:
-    import common
-except ImportError:
-    common = None
+def _format_commit_message(content: str, agent_id: str) -> str:
+    """Formats a git commit message with standard Agent trailer."""
+    msg = content.strip()
+    if not msg:
+        return msg
+    trailer = f"Agent: {agent_id}"
+    lines = msg.splitlines()
+    if any(re.match(r"^agent\s*:", line, re.IGNORECASE) for line in lines):
+        return msg
+    return msg + "\n\n" + trailer
 
 
 def stamp_commit_message_file(msg_file_path: str, agent: str = None) -> bool:
@@ -44,7 +40,7 @@ def stamp_commit_message_file(msg_file_path: str, agent: str = None) -> bool:
     if not content.strip():
         return False
 
-    agent_id = agent or (common.get_agent_id() if common else None)
+    agent_id = agent
     if not agent_id:
         for var in ("ARU_AGENT_ID", "AGENT_ID", "ARU_AGENT", "AGENT"):
             val = os.environ.get(var, "").strip()
@@ -55,10 +51,7 @@ def stamp_commit_message_file(msg_file_path: str, agent: str = None) -> bool:
     if not agent_id:
         return False
 
-    if not common:
-        return False
-
-    formatted = common.format_commit_message(content, agent=agent_id)
+    formatted = _format_commit_message(content, agent_id=agent_id)
 
     if formatted.rstrip() != content.rstrip():
         try:
