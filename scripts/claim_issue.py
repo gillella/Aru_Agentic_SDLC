@@ -42,6 +42,7 @@ from common import (
     label_names,
     run_cmd,
 )
+from factory_metrics import fetch_paginated_gh_api, parse_iso
 from update_issue_status import update_status
 
 EXIT_OK = 0
@@ -796,6 +797,106 @@ def release_merge(pr_id: int, agent: str) -> int:
     return EXIT_OK
 
 
+def _claim_labeled_at(pr_number: int, label_name: str):
+    """Return the latest exact-label claim event, or None when unprovable."""
+    events = fetch_paginated_gh_api(
+        f"repos/{{owner}}/{{repo}}/issues/{pr_number}/timeline"
+    )
+    if events is None:
+        print(
+            f"[WARN] Could not read claim timeline for PR #{pr_number}; "
+            "no claims were reaped.",
+            file=sys.stderr,
+        )
+        return None
+
+    matches = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("event") != "labeled":
+            continue
+        label = event.get("label")
+        if not isinstance(label, dict) or label.get("name") != label_name:
+            continue
+        when = parse_iso(event.get("created_at") or "")
+        if when is None or when.tzinfo is None:
+            print(
+                f"[WARN] Claim timeline for PR #{pr_number} has an invalid "
+                f"timestamp for {label_name}; no claims were reaped.",
+                file=sys.stderr,
+            )
+            return None
+        matches.append(when)
+
+    if not matches:
+        print(
+            f"[WARN] Claim timeline for PR #{pr_number} has no labeled event "
+            f"for {label_name}; no claims were reaped.",
+            file=sys.stderr,
+        )
+        return None
+    return max(matches)
+
+
+def _claims_with_timestamps(prs: list, prefix: str, claimant):
+    """Resolve every live claim before callers perform any label mutation."""
+    claims = []
+    seen = set()
+    for pr in prs:
+        names = [
+            lab.get("name", "")
+            for lab in pr.get("labels", [])
+            if isinstance(lab, dict)
+        ]
+        holder = claimant(names)
+        if not holder:
+            continue
+        number = pr.get("number")
+        if not isinstance(number, int):
+            print(
+                "[WARN] Claimed PR is missing a valid number; no claims were reaped.",
+                file=sys.stderr,
+            )
+            return None
+        if number in seen:
+            continue
+        seen.add(number)
+        label_name = f"{prefix}{holder}"
+        claimed_at = _claim_labeled_at(number, label_name)
+        if claimed_at is None:
+            return None
+        claims.append((pr, holder, claimed_at))
+    return claims
+
+
+def _revalidate_claims(prs: list, prefix: str, claimant, expected: list):
+    """Fail closed if any live claim changed during the reaper preflight.
+
+    GitHub does not offer an atomic compare-and-remove operation for labels.
+    A second complete timeline snapshot immediately before the removal pass
+    prevents an old event observed by the first pass from authorizing removal
+    of a claim that was released and reacquired while the sweep was running.
+    """
+    refreshed = _claims_with_timestamps(prs, prefix, claimant)
+    if refreshed is None:
+        return None
+    expected_state = {
+        (pr["number"], holder): claimed_at
+        for pr, holder, claimed_at in expected
+    }
+    refreshed_state = {
+        (pr["number"], holder): claimed_at
+        for pr, holder, claimed_at in refreshed
+    }
+    if refreshed_state != expected_state:
+        print(
+            "[WARN] Claim state changed during reaper preflight; "
+            "no claims were reaped.",
+            file=sys.stderr,
+        )
+        return None
+    return refreshed
+
+
 def reap_stale_merges(hours: int = 4) -> list:
     """Releases merge claims that went quiet without finishing close-out.
 
@@ -811,7 +912,7 @@ def reap_stale_merges(hours: int = 4) -> list:
     for state in ("open", "merged"):
         code, out, _ = run_cmd(
             ["gh", "pr", "list", "--state", state, "--limit", "200",
-             "--json", "number,labels,updatedAt,state,mergedAt"],
+             "--json", "number,labels,state,mergedAt"],
             check=False,
         )
         if code != 0:
@@ -827,27 +928,23 @@ def reap_stale_merges(hours: int = 4) -> list:
         prs.extend(batch)
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    claims = _claims_with_timestamps(prs, MERGER_LABEL_PREFIX, merge_claimant)
+    if claims is None:
+        return []
+    claims = _revalidate_claims(
+        prs, MERGER_LABEL_PREFIX, merge_claimant, claims
+    )
+    if claims is None:
+        return []
     released = []
-    seen = set()
-    for pr in prs:
-        number = pr.get("number")
-        if number in seen:
-            continue
-        seen.add(number)
-        names = [lab.get("name", "") for lab in pr.get("labels", [])]
-        holder = merge_claimant(names)
-        if not holder:
-            continue
-        try:
-            ts = datetime.fromisoformat((pr.get("updatedAt") or "").replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if ts > cutoff:
+    for pr, holder, claimed_at in claims:
+        number = pr["number"]
+        if claimed_at >= cutoff:
             continue
         if _remove_merger_label(number, holder):
             released.append(number)
             print(f"♻️  Released stale merge claim on PR #{number} "
-                  f"(held by '{holder}', idle > {hours}h).",
+                  f"(held by '{holder}', claim age > {hours}h).",
                   file=sys.stderr)
     return released
 
@@ -859,17 +956,15 @@ def reap_stale_reviews(hours: int = 4) -> list:
     PR is excluded from selection - so without this, one crash removes a PR
     from the review queue permanently and merge_pr.py blocks on it for good.
 
-    A claim is stale when the PR has not been updated for `hours` and carries no
-    submitted review from this round. Deliberately conservative: a PR that has
-    been reviewed is left alone even if the label lingers, because the label is
-    then harmless and removing it could invite a duplicate review.
+    A claim is stale when its latest labeled event is older than `hours` and
+    carries no recent submitted review after that claim event.
     """
     if hours <= 0:
         return []
 
     code, out, _ = run_cmd(
         ["gh", "pr", "list", "--state", "open", "--limit", "200",
-         "--json", "number,labels,updatedAt,reviews"],
+         "--json", "number,labels,reviews"],
         check=False,
     )
     if code != 0:
@@ -882,39 +977,36 @@ def reap_stale_reviews(hours: int = 4) -> list:
         return []
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    claims = _claims_with_timestamps(prs, REVIEWER_LABEL_PREFIX, review_claimant)
+    if claims is None:
+        return []
+    claims = _revalidate_claims(
+        prs, REVIEWER_LABEL_PREFIX, review_claimant, claims
+    )
+    if claims is None:
+        return []
     released = []
-    for pr in prs:
-        names = [lab.get("name", "") for lab in pr.get("labels", [])]
-        holder = reviewed_by(names)
-        if not holder:
-            continue
-        # Only a review submitted since the idle cutoff proves this claim did
-        # its job. Any historical review used to make `reviews` permanently
-        # non-empty, so a claim taken after an earlier review round and then
-        # abandoned could never be reaped - the label excluded the PR from
-        # every future picker run, forever.
-        recent = False
+    for pr, holder, claimed_at in claims:
+        reviewed_after_claim = False
         for review in pr.get("reviews") or []:
-            try:
-                when = datetime.fromisoformat(
-                    (review.get("submittedAt") or "").replace("Z", "+00:00"))
-            except ValueError:
+            login = ((review.get("author") or {}).get("login") or "")
+            if merge_pr.is_advisory_review_account(login):
                 continue
-            if when > cutoff:
-                recent = True
+            when = parse_iso(review.get("submittedAt") or "")
+            if when is None or when.tzinfo is None:
+                continue
+            if when > claimed_at and when >= cutoff:
+                reviewed_after_claim = True
                 break
-        if recent:
-            continue  # A review landed in this window; the claim is spent.
-        try:
-            ts = datetime.fromisoformat((pr.get("updatedAt") or "").replace("Z", "+00:00"))
-        except ValueError:
+        if reviewed_after_claim:
             continue
-        if ts > cutoff:
+        if claimed_at >= cutoff:
             continue
         if _remove_reviewer_label(pr["number"], holder):
             released.append(pr["number"])
             print(f"♻️  Released stale review claim on PR #{pr['number']} "
-                  f"(held by '{holder}', idle > {hours}h, no review submitted).",
+                  f"(held by '{holder}', claim age > {hours}h, "
+                  "no recent review submitted after claim).",
                   file=sys.stderr)
     return released
 
