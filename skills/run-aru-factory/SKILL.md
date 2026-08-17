@@ -157,7 +157,7 @@ money semantics, security posture, or hard rules can require intervention; expla
 the exact decision needed on the linked GitHub issue/PR, then notify Slack with
 `--event hitl` (operator mention) via `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py"`.
 Every invocation requires `--project-id <PROJECT_ID> --agent <AGENT_ID> --family <FAMILY>
---event <blocked|waiting-on|hitl> --repo <OWNER/REPO>` plus linked issue/PR and repo details.
+--event <blocked|waiting-on|hitl> --repo <OWNER/REPO> --repo-dir <CONSUMER_REPO_ROOT>` plus linked issue/PR.
 For dependency/claim waits use `--event waiting-on`; for other blocks use `--event blocked`.
 Idle ticks and heartbeats must not notify. Full examples: `prompts/fleet-worker.md`.
 Routine helper exits `1` and repeated CI/review rounds do not end the loop. Exception:
