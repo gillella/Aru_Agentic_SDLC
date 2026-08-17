@@ -2118,7 +2118,7 @@ class AgentCommitTrailerTests(unittest.TestCase):
         spec.loader.exec_module(prepare_mod)
 
         with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f:
-            f.write("fix(cli): update agent docs\n\nAgent: this is prose explanation in the body\n")
+            f.write("fix(cli): update agent docs\n\nAgent: this is prose explanation in the body\nfollowed by more explanation\n")
             f.flush()
             temp_path = f.name
 
@@ -2128,7 +2128,7 @@ class AgentCommitTrailerTests(unittest.TestCase):
             content = Path(temp_path).read_text()
             self.assertEqual(
                 content.strip(),
-                "fix(cli): update agent docs\n\nAgent: this is prose explanation in the body\n\nAgent: agent-test",
+                "fix(cli): update agent docs\n\nAgent: this is prose explanation in the body\nfollowed by more explanation\n\nAgent: agent-test",
             )
         finally:
             if os.path.exists(temp_path):
