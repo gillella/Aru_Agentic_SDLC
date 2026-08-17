@@ -512,10 +512,10 @@ def build_ephemeral_agent_argv(
             "yolo",
             "--output-format",
             "stream-json",
-            "--prompt",
             prompt,
         ]
 
+    # validate_task rejects custom adapter commands before this trusted path.
     runner_config = RunnerConfig(
         repo=worktree,
         aru_home=config.aru_home,

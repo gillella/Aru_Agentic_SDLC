@@ -194,7 +194,7 @@ class EphemeralWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(sew.LauncherError, "cross-repository"):
             sew.validate_task(config, metadata)
 
-    def test_auto_google_builds_noninteractive_gemini_argv(self):
+    def test_auto_google_builds_positional_one_shot_gemini_argv(self):
         config = self.config(
             worker_agent="gemini-ephemeral-42",
             worker_family="google",
@@ -212,7 +212,6 @@ class EphemeralWorkerTests(unittest.TestCase):
                 "yolo",
                 "--output-format",
                 "stream-json",
-                "--prompt",
                 "review one PR",
             ],
         )
