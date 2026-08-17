@@ -1451,6 +1451,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "deletions": 1,
         }
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
              patch("builtins.print") as printer:
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
 
@@ -1507,7 +1509,9 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "additions": 2,
             "deletions": 1,
         }
-        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
 
         execute.assert_called_once_with(9, fetch.return_value, "merge")
@@ -2896,6 +2900,8 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
                           return_value={"head_oid": "gated-sha"}), \
              patch.object(merge_pr, "evaluate_dod",
                           return_value=(True, list(CHECKPOINT_GATES))), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
              patch.object(merge_pr, "execute_merge",
                           return_value=(merged_pr(), "merged")), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
