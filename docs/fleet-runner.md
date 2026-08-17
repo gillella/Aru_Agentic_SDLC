@@ -106,6 +106,60 @@ from runner stop signals, retries recoverable failures with bounded backoff,
 and stores process metadata—but not prompts, transcripts, tokens, credentials,
 or a second work queue—under the platform state directory.
 
+## Governed single-shot ephemeral workers
+
+When a known PR is waiting only for a cross-family peer review or for its
+stamped author to address review feedback, the active factory task may add
+short-lived capacity with `scripts/spawn_ephemeral_worker.py`. This is an
+opt-in CLI subprocess launcher, not an MCP call, daemon, picker, desktop-task
+replacement, or alternate coordinator. It sends one task-scoped prompt to an
+installed headless agent binary and exits with that process.
+
+For example, an OpenAI parent can ask an installed Claude Code CLI to review
+one PR:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/spawn_ephemeral_worker.py" \
+  --repo . --pr <PR> --skill code-review \
+  --parent-agent codex-1 --parent-family openai \
+  --worker-agent claude-ephemeral-<PR> --worker-family anthropic \
+  --adapter claude
+```
+
+An author-feedback task uses the PR's existing author stamps instead. The
+worker id and family must exactly match `author:<id>` and `family:<family>`:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/spawn_ephemeral_worker.py" \
+  --repo . --pr <PR> --skill address-pr-feedback \
+  --parent-agent codex-1 --parent-family openai \
+  --worker-agent <AUTHOR_ID> --worker-family <AUTHOR_FAMILY> \
+  --adapter claude
+```
+
+The command validates live PR identity before launch. Review workers must
+differ from both the parent family and the PR author's family; feedback workers
+must be the stamped author. A machine-global locked registry permits at most
+two ephemeral workers, rejects a duplicate worker identity, and reaps dead
+launcher PIDs. Every child receives `ARU_CAN_SPAWN=0`, so it cannot recursively
+spawn more workers.
+
+Each invocation fetches the exact live PR head into
+`.worktrees/ephemeral-<review|feedback>-<pid>`. Review worktrees are detached;
+feedback worktrees use a launcher-owned temporary branch and push
+fast-forward to the existing PR branch. The default hard timeout is 300
+seconds (override with `--timeout`), after which the whole child process group
+is terminated. Non-zero exits, missing binaries, unavailable provider
+credentials, and setup errors fail closed, release a held review claim, remove
+the launcher-owned worktree/temporary branch, unregister, and return non-zero.
+
+The child still follows `code-review` or `address-pr-feedback` in full. It must
+submit the review or feedback evidence, complete/release the normal GitHub
+claim, and never merge. The parent returns to the canonical picker after the
+single-shot command exits. Do not use this command for general idle capacity,
+to impersonate an unrelated author, or when a suitable persistent agent is
+already handling the same PR.
+
 ## Follow-on desktop adapters
 
 Issue #46 installs and verifies the thinnest supported native continuity

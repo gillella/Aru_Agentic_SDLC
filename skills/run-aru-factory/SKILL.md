@@ -148,9 +148,9 @@ evidence means `merge_pr.py` exhausted its close-out retries; notify Slack with
 When context is running short, recover through the desktop product's context
 compaction and durable GitHub/worktree state, then continue.
 
-`scripts/run_fleet.py` is an **optional headless CLI mode** for an operator who
-explicitly requests it. It starts new CLI sessions; it cannot resume or control
-the desktop conversation the operator selected. Never use UI scripting to
+`scripts/run_fleet.py` is an **optional headless CLI mode**; its runner doc also
+defines one-PR JIT workers for unavailable review/feedback capacity. Both start
+new CLI sessions and cannot resume the desktop conversation. Never use UI scripting to
 click or type into a desktop coding application. Per-app wake limits:
 `$ARU_SDLC_HOME/docs/desktop-agent-continuity.md`.
 
