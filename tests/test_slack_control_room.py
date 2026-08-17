@@ -908,6 +908,10 @@ class EpicSplitTests(unittest.TestCase):
             calls.append(list(cmd))
             if cmd[:3] == ["gh", "issue", "list"]:
                 return 0, "[]", ""
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "OPEN", "labels": [{"name": "type:epic"}],
+                }), ""
             return 0, "", ""
 
         result = scr.file_epic_split(
@@ -917,7 +921,11 @@ class EpicSplitTests(unittest.TestCase):
         )
         # A dry run may read (it must resolve depends-on against the live board to
         # preview the same status the real run would file) but must never mutate.
-        self.assertTrue(all(cmd[:3] == ["gh", "issue", "list"] for cmd in calls), calls)
+        self.assertTrue(
+            all(cmd[:3] in (["gh", "issue", "list"], ["gh", "issue", "view"])
+                for cmd in calls),
+            calls,
+        )
         self.assertTrue(result["dry_run"])
         self.assertIn("Epic: #178", result["filed"][0]["body"])
         self.assertNotIn("depends-on: #178", result["filed"][0]["body"])
@@ -1071,6 +1079,63 @@ class EpicSplitTests(unittest.TestCase):
         # operator cannot reconcile the run and a retry duplicates them.
         self.assertEqual(filed, [312, 313])
 
+    def test_truncated_open_issue_page_fails_closed(self):
+        """A full page is indistinguishable from a complete set, so refuse it.
+
+        Every omitted issue would read as a satisfied dependency, which is the
+        same failure as classifying against an empty set.
+        """
+        rows = [{"number": n} for n in range(1, scr.OPEN_ISSUE_PAGE_LIMIT + 1)]
+
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, json.dumps(rows), ""
+            raise AssertionError(cmd)
+
+        with self.assertRaisesRegex(scr.SplitError, "page limit"):
+            scr.open_issue_numbers(str(self.repo), run_cmd)
+
+    def test_unknown_issue_type_is_rejected(self):
+        for bad in ("epic", "security", "feat; rm -rf /"):
+            with self.assertRaisesRegex(scr.SplitError, "not a governance issue type"):
+                scr.validate_split_story(self._story(type=bad), 178)
+
+    def test_known_issue_types_are_accepted(self):
+        for good in sorted(scr.SPLIT_ISSUE_TYPES):
+            parsed = scr.validate_split_story(self._story(type=good), 178)
+            self.assertEqual(parsed["issue_type"], good)
+
+    def test_dry_run_validates_the_epic(self):
+        """A preview against a closed epic must fail here, not at filing time."""
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "CLOSED", "labels": [{"name": "type:epic"}],
+                }), ""
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, "[]", ""
+            raise AssertionError(cmd)
+
+        with self.assertRaisesRegex(scr.SplitError, "is not open"):
+            scr.file_epic_split(
+                {"epic": 178, "stories": [self._story()]},
+                178, str(self.repo), dry_run=True, run_cmd_fn=run_cmd,
+            )
+
+    def test_split_file_symlink_is_refused_at_open(self):
+        target = self.root / "real.json"
+        target.write_text(json.dumps({"epic": 178, "stories": []}), encoding="utf-8")
+        os.chmod(target, 0o600)
+        link = self.root / "link.json"
+        link.symlink_to(target)
+        with self.assertRaises(scr.SplitError):
+            scr.load_split_file(link)
+
+    def test_owner_only_executable_mode_is_accepted(self):
+        path = self._write_split({"epic": 178, "stories": [self._story()]}, mode=0o700)
+        # 0700 grants nothing to group or others; only those bits are the risk.
+        self.assertIsInstance(scr.load_split_file(path), dict)
+
     def test_non_numeric_document_epic_is_a_split_error(self):
         with self.assertRaisesRegex(scr.SplitError, "must be an issue number"):
             scr.parse_split_document(
@@ -1153,14 +1218,15 @@ class EpicSplitTests(unittest.TestCase):
 
     def test_world_readable_split_file_is_rejected(self):
         path = self._write_split({"epic": 178, "stories": [self._story()]}, mode=0o644)
-        with self.assertRaisesRegex(scr.SplitError, "0600"):
+        with self.assertRaisesRegex(scr.SplitError, "group or others"):
             scr.load_split_file(path)
 
     def test_cli_dry_run_reads_secure_file(self):
         path = self._write_split({"epic": 178, "stories": [self._story()]})
         # The board lookup is stubbed, not skipped: a dry run resolves depends-on
         # so its preview matches what a real run would file.
-        with patch.object(scr, "open_issue_numbers", return_value=set()):
+        with patch.object(scr, "open_issue_numbers", return_value=set()), \
+                patch.object(scr, "_require_open_epic", return_value=None):
             code = scr.main([
                 "file-split", "--epic", "178", "--from-file", str(path),
                 "--repo-dir", str(self.repo), "--dry-run",

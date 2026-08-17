@@ -51,7 +51,7 @@ This skill defines the declarative workflow for creating clear, actionable GitHu
 When an epic is sliced in Slack, do **not** treat the thread or a thumbs-up as
 a filed issue. Write a mode-`0600` JSON split document (no secrets) and run:
 
-```
+```bash
 python3 "$ARU_SDLC_HOME/scripts/slack_control_room.py" file-split \
   --epic <N> --from-file <split.json> --repo-dir "$PWD"
 ```

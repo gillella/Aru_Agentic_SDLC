@@ -225,7 +225,7 @@ File agreed slices only through a structured 0600 JSON document and the helper.
 Do not paste secrets into the document or into Slack.
 
 ```bash
-python3 scripts/slack_control_room.py file-split \
+python3 "$ARU_SDLC_HOME/scripts/slack_control_room.py" file-split \
   --epic 178 \
   --from-file /path/to/split.json \
   --repo-dir /absolute/path/to/repo \

@@ -447,6 +447,16 @@ def github_issue_note(number: int, body: str, repo_dir: str) -> bool:
     return code == 0
 
 
+# Governance issue types a split child may carry. `epic` is excluded on
+# purpose: an epic is never directly implementable, so filing one as a child
+# would create work the picker can never serve.
+SPLIT_ISSUE_TYPES = frozenset({"feat", "fix", "chore", "docs", "research"})
+
+# `gh issue list` truncates at --limit without signalling it, so the limit is
+# also the point at which the open-issue view stops being provably complete.
+OPEN_ISSUE_PAGE_LIMIT = 1000
+
+
 class SplitError(ValueError):
     """A Slack-split document is invalid or is a Slack event, not a filing source.
 
@@ -471,18 +481,35 @@ def looks_like_slack_event(payload: Any) -> bool:
 
 
 def load_split_file(path: Path) -> Any:
+    """Read a split document, validating the descriptor actually opened.
+
+    Validating by path and then re-opening by path leaves a window in which the
+    directory entry can be swapped for another file, so every check here is made
+    against the open descriptor: O_NOFOLLOW refuses a symlink at open time, and
+    fstat proves the bytes read came from the inode that passed validation.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        info = path.lstat()
+        fd = os.open(path, flags)
     except OSError as exc:
         raise SplitError(f"cannot read split file: {exc}") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise SplitError(f"unsafe split file: {path}")
-    if info.st_mode & 0o077:
-        raise SplitError(f"split file must be mode 0600: {path}")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SplitError(f"unsafe split file: {path}")
+        # Group and other bits only: 0700 is a legitimate owner-only mode.
+        if info.st_mode & 0o077:
+            raise SplitError(
+                f"split file must not be readable by group or others: {path}"
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = None
+            return json.loads(handle.read())
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise SplitError(f"split file is not valid JSON: {exc}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _string_list(value: Any, title: str, field: str) -> List[str]:
@@ -531,6 +558,14 @@ def validate_split_story(item: Any, epic: int) -> Dict[str, Any]:
     verification = item.get("verification")
     if verification is not None and not isinstance(verification, str):
         raise SplitError(f"{title}: verification must be a string")
+    # The type drives the child's labels and its Ready classification, so free
+    # text here would let a summarised thread invent a governance category.
+    issue_type = str(item.get("type") or "feat").strip() or "feat"
+    if issue_type not in SPLIT_ISSUE_TYPES:
+        raise SplitError(
+            f"{title}: type {issue_type!r} is not a governance issue type "
+            f"({', '.join(sorted(SPLIT_ISSUE_TYPES))})"
+        )
     return {
         "title": title,
         "summary": str(item.get("summary") or "").strip(),
@@ -543,7 +578,7 @@ def validate_split_story(item: Any, epic: int) -> Dict[str, Any]:
         ),
         "non_goals": _string_list(item.get("non_goals"), title, "non_goals"),
         "verification": str(verification or "").strip(),
-        "issue_type": str(item.get("type") or "feat").strip() or "feat",
+        "issue_type": issue_type,
     }
 
 
@@ -583,7 +618,10 @@ def open_issue_numbers(repo_dir: str, run_cmd_fn: Callable) -> Set[int]:
     guessing here is exactly the failure this exists to prevent.
     """
     code, out, err = run_cmd_fn(
-        ["gh", "issue", "list", "--state", "open", "--limit", "1000", "--json", "number"],
+        [
+            "gh", "issue", "list", "--state", "open",
+            "--limit", str(OPEN_ISSUE_PAGE_LIMIT), "--json", "number",
+        ],
         check=False, cwd=repo_dir,
     )
     if code != 0:
@@ -594,6 +632,15 @@ def open_issue_numbers(repo_dir: str, run_cmd_fn: Callable) -> Set[int]:
         raise SplitError("open issue list returned invalid JSON") from exc
     if not isinstance(rows, list):
         raise SplitError("open issue list returned an unexpected shape")
+    # `gh issue list` truncates at --limit silently. A truncated set is
+    # indistinguishable from a complete one, and every omitted issue reads as a
+    # satisfied dependency, so refuse rather than classify against a partial view.
+    if len(rows) >= OPEN_ISSUE_PAGE_LIMIT:
+        raise SplitError(
+            f"open issue list hit the {OPEN_ISSUE_PAGE_LIMIT}-issue page limit, so "
+            "depends-on cannot be resolved against a complete set; raise "
+            "OPEN_ISSUE_PAGE_LIMIT or file this split with a paginating helper"
+        )
     numbers: Set[int] = set()
     for row in rows:
         try:
@@ -720,8 +767,9 @@ def file_epic_split(
 
     runner = run_cmd_fn or default_run
     plan = parse_split_document(payload, epic)
-    if not dry_run:
-        _require_open_epic(plan["epic"], repo_dir, runner)
+    # Read-only, so it runs in dry-run too: previewing a split against a closed
+    # or non-epic issue would print a clean plan that the real run then rejects.
+    _require_open_epic(plan["epic"], repo_dir, runner)
     # Resolved once for the whole run: a dry-run must classify identically to the
     # real filing, otherwise the preview an operator approves is not what lands.
     open_numbers = open_issue_numbers(repo_dir, runner)
@@ -775,7 +823,10 @@ def _file_split_notify_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
         return {"thread_ts": args.thread_ts, "notify_fn": None, "slack_config": None}
     try:
         config = config_from_env(load_slack_env(args.env_file), require_channel=True)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
+        # OSError included deliberately: load_slack_env reads the file when it
+        # exists, so an existing-but-unreadable env file must degrade to "no
+        # Slack reply" rather than abort a filing run that GitHub already owns.
         print(f"[WARN] Slack thread reply skipped: {exc}", file=sys.stderr)
         return {"thread_ts": args.thread_ts, "notify_fn": None, "slack_config": None}
     return {"thread_ts": args.thread_ts, "notify_fn": post_event, "slack_config": config}
