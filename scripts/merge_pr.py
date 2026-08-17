@@ -201,7 +201,6 @@ def _parse_review_ts(value):
     return parsed
 
 
-<<<<<<< HEAD
 def _size_waiver_region(body):
     """The exact body region accepted by the existing size gate."""
     match = SIZE_WAIVER_REGION_RE.search(body or "")
@@ -236,7 +235,7 @@ def _finding_body_region(body):
     return None
 
 
-def _body_edit_events(owner, name, pr_id, expected_head):
+def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912, PLR0915
     """Verified author body-region changes, sourced from GitHub edit history.
 
     A bare pull-request ``updatedAt`` cannot distinguish body edits from reviews,
