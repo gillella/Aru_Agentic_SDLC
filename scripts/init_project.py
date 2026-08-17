@@ -866,7 +866,7 @@ def scaffold_directory_structure(target_dir: str):
 
 
 def write_governance_scripts(target_dir: str):
-    """Writes CI check_touches, model-routed reviewer, and deploy-preview workflows."""
+    """Write governed review, preview, and audit-only promotion workflows."""
     project_scripts_dir = os.path.join(target_dir, "scripts")
     scripts_dir = os.path.join(target_dir, ".github", "scripts")
     workflows_dir = os.path.join(target_dir, ".github", "workflows")
@@ -927,7 +927,16 @@ def write_governance_scripts(target_dir: str):
     with open(deploy_preview_wf_path, "w", encoding="utf-8") as f:
         f.write(DEPLOY_PREVIEW_WORKFLOW)
 
-    print("✅ Governance scripts and trusted preview builder written.")
+    promote_wf_source = os.path.join(
+        os.path.dirname(__file__), "..", ".github", "workflows", "promote.yml"
+    )
+    promote_wf_path = os.path.join(workflows_dir, "promote.yml")
+    with open(promote_wf_source, "r", encoding="utf-8") as source:
+        promote_wf_content = source.read()
+    with open(promote_wf_path, "w", encoding="utf-8") as target:
+        target.write(promote_wf_content)
+
+    print("✅ Governance scripts and trusted preview/promotion workflows written.")
 
 
 def create_cursor_project_rule(target_dir: str):

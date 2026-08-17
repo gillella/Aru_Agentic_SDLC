@@ -1,0 +1,194 @@
+name: Record Governed Promotion
+run-name: "Audit-only promotion ${{ github.event.client_payload.to_environment }} for ${{ github.event.client_payload.commit_sha }} from ${{ github.event.client_payload.from_environment }} [${{ github.event.client_payload.direction }}] (${{ github.event.client_payload.run_token }})"
+
+on:
+  repository_dispatch:
+    types: [aru-promotion]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: "promotion-${{ github.event.client_payload.to_environment }}-${{ github.repository }}"
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+    outputs:
+      target_environment: ${{ steps.contract.outputs.target_environment }}
+    steps:
+      - name: Checkout trusted control plane
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Validate governed promotion evidence
+        id: contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.client_payload.commit_sha }}
+          CHECKPOINT: ${{ github.event.client_payload.checkpoint }}
+          INCLUDED_ISSUES: ${{ github.event.client_payload.issues }}
+          FROM_ENV: ${{ github.event.client_payload.from_environment }}
+          TO_ENV: ${{ github.event.client_payload.to_environment }}
+          EVIDENCE_RUN: ${{ github.event.client_payload.evidence_run }}
+          DIRECTION: ${{ github.event.client_payload.direction }}
+          REVERSE_OF_RUN: ${{ github.event.client_payload.reverse_of_run }}
+          RUN_TOKEN: ${{ github.event.client_payload.run_token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          [[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]
+          TARGET_SHA="${TARGET_SHA,,}"
+          [[ "${CHECKPOINT}" =~ ^ckpt/[1-9][0-9]*-[0-9a-f]{7}$ ]]
+          [[ "${CHECKPOINT##*-}" == "${TARGET_SHA:0:7}" ]]
+          [[ "${INCLUDED_ISSUES}" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]
+          [[ "${EVIDENCE_RUN}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${RUN_TOKEN}" =~ ^[0-9a-f]{32}$ ]]
+          if [[ "${DIRECTION}" == "forward" ]]; then
+            [[ "${FROM_ENV}:${TO_ENV}" == "preview:staging" || "${FROM_ENV}:${TO_ENV}" == "staging:production" ]]
+            [[ -z "${REVERSE_OF_RUN}" ]]
+            EVIDENCE_ENV="${FROM_ENV}"
+          elif [[ "${DIRECTION}" == "reverse" ]]; then
+            [[ "${FROM_ENV}:${TO_ENV}" == "production:staging" || "${FROM_ENV}:${TO_ENV}" == "staging:preview" ]]
+            [[ "${REVERSE_OF_RUN}" =~ ^[1-9][0-9]*$ ]]
+            EVIDENCE_ENV="${TO_ENV}"
+          else
+            echo "[ERROR] direction must be forward or reverse." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          git fetch --no-tags origin "refs/tags/${CHECKPOINT}:refs/tags/${CHECKPOINT}"
+          git cat-file -e "refs/tags/${CHECKPOINT}^{tag}"
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          git merge-base --is-ancestor "${TARGET_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
+          [[ "$(git rev-parse "refs/tags/${CHECKPOINT}^{commit}")" == "${TARGET_SHA}" ]]
+
+          checkpoint_body="$(git for-each-ref "refs/tags/${CHECKPOINT}" --format='%(contents)')"
+          grep -Eq "^merged as:[[:space:]]+${TARGET_SHA}$" <<<"${checkpoint_body}"
+          checkpoint_issue_line="$(grep -E '^issues:[[:space:]]+' <<<"${checkpoint_body}")"
+          checkpoint_issues="$(grep -oE '#[1-9][0-9]*' <<<"${checkpoint_issue_line}" | tr -d '#' | sort -n -u | paste -sd, -)"
+          requested_issues="$(tr ',' '\n' <<<"${INCLUDED_ISSUES}" | sort -n -u | paste -sd, -)"
+          [[ -n "${checkpoint_issues}" && "${requested_issues}" == "${checkpoint_issues}" ]]
+          IFS=',' read -ra issue_numbers <<<"${INCLUDED_ISSUES}"
+          for issue_number in "${issue_numbers[@]}"; do
+            grep -Eq "^issues:[[:space:]]+.*#${issue_number}([^0-9]|$)" <<<"${checkpoint_body}"
+            issue="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${issue_number}")"
+            [[ "$(jq -r '.number' <<<"${issue}")" == "${issue_number}" ]]
+            [[ "$(jq -r 'has("pull_request")' <<<"${issue}")" == "false" ]]
+          done
+
+          evidence="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${EVIDENCE_RUN}")"
+          [[ "$(jq -r '.conclusion' <<<"${evidence}")" == "success" ]]
+          evidence_name="$(jq -r '.name' <<<"${evidence}")"
+          evidence_title="$(jq -r '.display_title' <<<"${evidence}")"
+          evidence_event="$(jq -r '.event' <<<"${evidence}")"
+          if [[ "${EVIDENCE_ENV}" == "preview" ]]; then
+            [[ "${evidence_name}" == "Deploy Preview" && "${evidence_title}" == *"${TARGET_SHA}"* ]]
+            [[ "${evidence_event}" == "workflow_dispatch" ]]
+          else
+            [[ "${evidence_name}" == "Record Governed Promotion" ]]
+            [[ "${evidence_event}" == "repository_dispatch" ]]
+            [[ "${evidence_title}" == *"Audit-only promotion ${EVIDENCE_ENV} for ${TARGET_SHA}"* ]]
+          fi
+
+          if [[ -n "${REVERSE_OF_RUN}" ]]; then
+            reversed="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${REVERSE_OF_RUN}")"
+            [[ "$(jq -r '.conclusion' <<<"${reversed}")" == "success" ]]
+            [[ "$(jq -r '.name' <<<"${reversed}")" == "Record Governed Promotion" ]]
+            [[ "$(jq -r '.event' <<<"${reversed}")" == "repository_dispatch" ]]
+            reversed_title="$(jq -r '.display_title' <<<"${reversed}")"
+            reverse_title_prefix="Audit-only promotion ${FROM_ENV} for ${TARGET_SHA} from ${TO_ENV} [forward] ("
+            [[ "${reversed_title}" == "${reverse_title_prefix}"*")" ]]
+          fi
+
+          echo "target_environment=${TO_ENV}" >> "${GITHUB_OUTPUT}"
+
+  record-environment-state:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ needs.validate.outputs.target_environment }}
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+
+      - name: Create governed audit-only deployment record
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.client_payload.commit_sha }}
+          TARGET_ENV: ${{ github.event.client_payload.to_environment }}
+          CHECKPOINT: ${{ github.event.client_payload.checkpoint }}
+          INCLUDED_ISSUES: ${{ github.event.client_payload.issues }}
+          DIRECTION: ${{ github.event.client_payload.direction }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -n \
+            --arg ref "${TARGET_SHA}" \
+            --arg environment "${TARGET_ENV}" \
+            --arg checkpoint "${CHECKPOINT}" \
+            --arg issues "${INCLUDED_ISSUES}" \
+            --arg direction "${DIRECTION}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg description "Aru audit-only ${DIRECTION} promotion ${CHECKPOINT}; run ${GITHUB_RUN_ID}" \
+            '{ref:$ref, environment:$environment, description:$description, payload:{audit_only:true, checkpoint:$checkpoint, included_issues:($issues|split(",")|map(tonumber)), direction:$direction, workflow_run:($run_id|tonumber), scope:"github-state-only"}, auto_merge:false, required_contexts:[], transient_environment:($environment=="staging"), production_environment:($environment=="production")}')"
+          deployment_id="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input - <<<"${payload}" | jq -r '.id')"
+          [[ "${deployment_id}" =~ ^[1-9][0-9]*$ ]]
+          echo "deployment_id=${deployment_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Mark audit-only deployment record successful
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          TARGET_ENV: ${{ github.event.client_payload.to_environment }}
+        run: |
+          set -euo pipefail
+          status="$(jq -n \
+            --arg environment "${TARGET_ENV}" \
+            --arg log_url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:"success", environment:$environment, log_url:$log_url, auto_inactive:true, description:"Audit-only GitHub state; no runnable build movement claimed"}')"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses" --input - <<<"${status}"
+
+      - name: Record promotion summary
+        env:
+          TARGET_SHA: ${{ github.event.client_payload.commit_sha }}
+          CHECKPOINT: ${{ github.event.client_payload.checkpoint }}
+          INCLUDED_ISSUES: ${{ github.event.client_payload.issues }}
+          FROM_ENV: ${{ github.event.client_payload.from_environment }}
+          TO_ENV: ${{ github.event.client_payload.to_environment }}
+          DIRECTION: ${{ github.event.client_payload.direction }}
+          EVIDENCE_RUN: ${{ github.event.client_payload.evidence_run }}
+        run: |
+          {
+            echo "### Governed promotion record (audit-only)"
+            echo "- Scope: GitHub Environment/Deployment state only; no runnable build or hosting environment movement is claimed."
+            echo "- Direction: ${DIRECTION}"
+            echo "- Transition: ${FROM_ENV} -> ${TO_ENV}"
+            echo "- Commit: ${TARGET_SHA}"
+            echo "- Checkpoint: ${CHECKPOINT}"
+            echo "- Issues: ${INCLUDED_ISSUES}"
+            echo "- Prior-stage evidence run: ${EVIDENCE_RUN}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Mark incomplete audit-only deployment record failed
+        if: ${{ (failure() || cancelled()) && steps.deployment.outputs.deployment_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          TARGET_ENV: ${{ github.event.client_payload.to_environment }}
+        run: |
+          set -euo pipefail
+          status="$(jq -n \
+            --arg environment "${TARGET_ENV}" \
+            --arg log_url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:"failure", environment:$environment, log_url:$log_url, description:"Audit-only GitHub state; promotion run did not complete"}')"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses" --input - <<<"${status}"
