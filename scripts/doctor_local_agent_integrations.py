@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 SECRET_ENV = re.compile(r"(TOKEN|SECRET|KEY|PASSWORD|PAT|CREDENTIAL|AUTH)", re.I)
@@ -498,6 +499,39 @@ def repo_slug_from_remote(remote: str | None) -> str | None:
     return None
 
 
+@contextmanager
+def isolated_github_env(home: Path | None):
+    if home is None:
+        yield
+        return
+    import common as common_mod
+    previous = common_mod.run_cmd
+
+    def run_cmd_isolated(cmd, check=True, cwd=None, evidence=None):
+        del check, evidence
+        env = {
+            key: value for key, value in os.environ.items()
+            if key not in GITHUB_CREDENTIAL_ENV
+        }
+        env["HOME"] = str(home)
+        env.setdefault("PATH", os.environ.get("PATH", ""))
+        env.setdefault("LANG", "C")
+        try:
+            res = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, cwd=cwd, env=env, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 1, "", str(exc)
+        return res.returncode, (res.stdout or "").strip(), (res.stderr or "").strip()
+
+    common_mod.run_cmd = run_cmd_isolated
+    try:
+        yield
+    finally:
+        common_mod.run_cmd = previous
+
+
 def project_board_identity(
     project: str, auth_ok: bool, remote: str | None,
     home: Path | None = None,
@@ -515,7 +549,8 @@ def project_board_identity(
         return {"ok": False, "state": "unknown_repo", "projects": []}
     try:
         from common import get_repo_projects, select_governed_projects
-        boards = get_repo_projects(slug)
+        with isolated_github_env(home):
+            boards = get_repo_projects(slug)
     except Exception:
         return {"ok": False, "state": "unreadable", "projects": [], "repo": slug}
     if boards is None:

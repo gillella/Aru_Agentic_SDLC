@@ -502,7 +502,11 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         env_file = self.target_home / "gh-auth-env.txt"
         self._fake_bin(
             "gh",
-            'if [ "$1" = "auth" ]; then env > "$HOME/gh-auth-env.txt"; exit 1; fi\n'
+            'if [ "$1" = "auth" ]; then '
+            'printf "HOME=%s\\n" "$HOME" > "$HOME/gh-auth-env.txt"; '
+            'printf "GH_TOKEN=%s\\n" "${GH_TOKEN-}" >> "$HOME/gh-auth-env.txt"; '
+            'printf "GH_CONFIG_DIR=%s\\n" "${GH_CONFIG_DIR-}" >> "$HOME/gh-auth-env.txt"; '
+            "exit 1; fi\n"
             "exit 1\n",
         )
         operator_config = "/tmp/operator-gh-config-not-target"
@@ -522,9 +526,47 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertNotIn("ghp_operatorTokenValue", recorded)
         self.assertNotIn("github_pat_operator", recorded)
         self.assertNotIn(operator_config, recorded)
-        self.assertNotIn("GH_TOKEN=", recorded)
-        self.assertNotIn("GITHUB_TOKEN=", recorded)
-        self.assertNotIn("GH_CONFIG_DIR=", recorded)
+        self.assertIn("GH_TOKEN=\n", recorded)
+        self.assertIn("GH_CONFIG_DIR=\n", recorded)
+
+    def test_board_lookup_uses_isolated_env(self):
+        env_file = self.target_home / "gh-board-env.txt"
+        repo = self.target_home / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/acme/demo.git"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        (repo / "AGENTS.md").write_text("# Issue-First Law\n")
+        (repo / ".worktrees").mkdir()
+        self._fake_bin(
+            "gh",
+            "if [ \"$1\" = \"auth\" ]; then exit 0; fi\n"
+            "if [ \"$1\" = \"api\" ]; then\n"
+            "  printf 'HOME=%s\\n' \"$HOME\" > \"$HOME/gh-board-env.txt\"\n"
+            "  printf 'GH_TOKEN=%s\\n' \"${GH_TOKEN-}\" >> \"$HOME/gh-board-env.txt\"\n"
+            "  printf 'GH_CONFIG_DIR=%s\\n' \"${GH_CONFIG_DIR-}\" >> \"$HOME/gh-board-env.txt\"\n"
+            "fi\n"
+            "echo '{\"data\":{\"repository\":{\"projectsV2\":{\"nodes\":[]}}}}'\n",
+        )
+        self._install_healthy_cursor()
+        operator_config = "/tmp/operator-gh-config-board"
+        res = self.run_doctor(
+            "--json", "--project", str(repo),
+            env={
+                "PATH": self._isolated_path(),
+                "GH_TOKEN": "ghp_operatorBoardToken",
+                "GH_CONFIG_DIR": operator_config,
+            },
+        )
+        self.assertTrue(env_file.is_file(), res.stderr or res.stdout)
+        recorded = env_file.read_text()
+        self.assertIn(f"HOME={self.target_home}", recorded)
+        self.assertNotIn("ghp_operatorBoardToken", recorded)
+        self.assertNotIn(operator_config, recorded)
+        self.assertIn("GH_TOKEN=\n", recorded)
+        self.assertIn("GH_CONFIG_DIR=\n", recorded)
 
     def test_redact_text_redacts_bare_github_token_shape(self):
         self.assertEqual(
