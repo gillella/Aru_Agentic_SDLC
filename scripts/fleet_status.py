@@ -22,7 +22,7 @@ import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from common import (
     claimed_by,
@@ -239,19 +239,18 @@ def _question(key: str, title: str, severity: str, summary: str, **payload: Any)
     return {"key": key, "title": title, "severity": severity, "summary": summary, **payload}
 
 
-def most_recent_merge_time() -> Optional[datetime]:
-    """Newest mergedAt across a bounded window of merged PRs, or None.
+def most_recent_merge_history() -> Tuple[Optional[datetime], bool]:
+    """Newest mergedAt in the stall window, plus whether the lookup succeeded.
 
-    Returns None both when nothing has ever merged and when the lookup fails.
-    Callers must not treat None as "stalled" on its own -- detect_stall()
-    requires open PRs and registered agents before it reports anything.
+    A failed ``gh`` call is not the same as an empty merge history. Callers
+    must not report a stall when this returns ``(None, False)``.
     """
     res = run_gh_json([
         "gh", "pr", "list", "--state", "merged",
         "--limit", str(STALL_MERGE_WINDOW), "--json", "mergedAt",
     ])
     if not isinstance(res, list):
-        return None
+        return None, False
     stamps = []
     for row in res:
         if not isinstance(row, dict):
@@ -259,7 +258,13 @@ def most_recent_merge_time() -> Optional[datetime]:
         parsed = _parse_ts(row.get("mergedAt"))
         if parsed is not None:
             stamps.append(parsed)
-    return max(stamps) if stamps else None
+    return (max(stamps) if stamps else None), True
+
+
+def most_recent_merge_time() -> Optional[datetime]:
+    """Newest mergedAt across a bounded window, or None if empty or unreadable."""
+    newest, ok = most_recent_merge_history()
+    return newest if ok else None
 
 
 def registered_agent_count(repo_dir: str = ".") -> int:
@@ -291,14 +296,16 @@ def detect_stall(
     open_pr_count: int,
     agent_count: int,
     stall_hours: float = DEFAULT_STALL_HOURS,
+    merge_lookup_ok: bool = True,
 ) -> bool:
     """True only when throughput is zero AND there is work AND agents to do it.
 
     All three conditions are required. A quiet board with nothing open is not
     a stall, and neither is a board with no agents running -- alerting on
-    either trains operators to ignore the alarm.
+    either trains operators to ignore the alarm. A failed merge-history
+    lookup is also not a stall: absence of evidence must not page anyone.
     """
-    if stall_hours <= 0:
+    if not merge_lookup_ok or stall_hours <= 0:
         return False
     if open_pr_count <= 0 or agent_count <= 0:
         return False
@@ -313,18 +320,26 @@ def _stall_question(
     open_pr_count: int,
     agent_count: int,
     stall_hours: float = DEFAULT_STALL_HOURS,
+    merge_lookup_ok: bool = True,
 ) -> Dict[str, Any]:
     stalled = detect_stall(
         hours_since_last_merge, open_pr_count, agent_count, stall_hours,
+        merge_lookup_ok=merge_lookup_ok,
     )
-    age = "never" if hours_since_last_merge is None else f"{hours_since_last_merge:.1f}h ago"
-    if stalled:
+    if not merge_lookup_ok:
         summary = (
-            f"No merge in {stall_hours:g}h (last: {age}) with "
-            f"{open_pr_count} open PR(s) and {agent_count} registered agent(s)."
+            f"Merge history unavailable; stall detection skipped. "
+            f"{open_pr_count} open PR(s), {agent_count} agent(s)."
         )
     else:
-        summary = f"Last merge {age}; {open_pr_count} open PR(s), {agent_count} agent(s)."
+        age = "never" if hours_since_last_merge is None else f"{hours_since_last_merge:.1f}h ago"
+        if stalled:
+            summary = (
+                f"No merge in {stall_hours:g}h (last: {age}) with "
+                f"{open_pr_count} open PR(s) and {agent_count} registered agent(s)."
+            )
+        else:
+            summary = f"Last merge {age}; {open_pr_count} open PR(s), {agent_count} agent(s)."
     return _question(
         "stall", "Is the fleet still merging?", "attn" if stalled else "ok", summary,
         stalled=stalled,
@@ -332,6 +347,7 @@ def _stall_question(
         stall_hours=stall_hours,
         open_pr_count=open_pr_count,
         registered_agents=agent_count,
+        merge_lookup_ok=merge_lookup_ok,
     )
 
 
@@ -824,15 +840,51 @@ def _write_alert_file(directory: str, text: str) -> str:
 
 
 def stall_alert_text(question: Dict[str, Any], blocked: List[str]) -> str:
-    """Secret-safe alert body: counts and gate names only, never logs or diffs."""
+    """Secret-safe alert body: stable counts and gate names, never logs or diffs.
+
+    The changing merge-age must not appear here. slack_notify.py hashes the
+    full text for dedupe, so an elapsed-age that ticks every 0.1h would page
+    operators once per cache window for the same stall.
+    """
+    hours = question.get("stall_hours")
+    window = f"{hours:g}h" if isinstance(hours, (int, float)) else "the stall window"
     lines = [
         "Fleet has stopped merging.",
-        question.get("summary") or "",
+        (
+            f"No merge within {window} with "
+            f"{question.get('open_pr_count', 0)} open PR(s) and "
+            f"{question.get('registered_agents', 0)} registered agent(s)."
+        ),
     ]
     if blocked:
         lines.append("Open PRs and their blocking gate:")
         lines.extend(f"- {item}" for item in blocked)
     return "\n".join(line for line in lines if line)
+
+
+def _stall_pr_reasons(reasons: Optional[List[Any]]) -> List[str]:
+    """PR-level waiting reasons only; drop the stall summary and issue rows."""
+    return [
+        str(reason)
+        for reason in (reasons or [])
+        if str(reason).startswith("PR #")
+    ]
+
+
+def _stall_github_pr(status: Dict[str, Any], blocked: List[str]) -> Optional[int]:
+    """Durable GitHub target for a fleet-level stall alert."""
+    for value in status.get("open_pr_numbers") or []:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    for item in blocked:
+        match = re.search(r"PR #(\d+)", item)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def notify_stall(
@@ -841,17 +893,21 @@ def notify_stall(
     repo_dir: str,
     agent: str,
     family: str,
+    pr: Optional[int] = None,
 ) -> bool:
     """Best-effort Slack alert. Never changes the caller's exit code.
 
     slack_notify.py owns deduplication; this must not re-alert per tick or add
     a second dedup layer. Slack downtime must never halt the GitHub loop.
+    hitl delivery requires a durable GitHub issue/PR target.
     """
     slug = get_repo_slug()
     if not slug:
         return False
     project_id = os.environ.get("ARU_PROJECT_ID") or ""
     if not project_id:
+        return False
+    if pr is None:
         return False
     path = None
     try:
@@ -861,6 +917,7 @@ def notify_stall(
             "--project-id", project_id,
             "--agent", agent, "--family", family,
             "--event", "hitl", "--repo", slug,
+            "--pr", str(int(pr)),
             "--repo-dir", repo_dir,
             "--decision-file", path,
         ], check=False)
@@ -1365,13 +1422,18 @@ def _evaluate_current_repo(
 
     # Stall is a fleet-level condition: no per-agent branch can observe zero
     # global throughput, because every waiting agent is locally in a valid state.
-    hours_since_last_merge = _hours_ago(most_recent_merge_time(), datetime.now(timezone.utc))
+    newest_merge, merge_lookup_ok = most_recent_merge_history()
+    hours_since_last_merge = (
+        _hours_ago(newest_merge, datetime.now(timezone.utc)) if merge_lookup_ok else None
+    )
     stall = _stall_question(
         hours_since_last_merge,
         len(prs),
         registered_agent_count(repo_dir),
         stall_hours,
+        merge_lookup_ok=merge_lookup_ok,
     )
+    open_pr_numbers = [int(pr["number"]) for pr in prs if pr.get("number") is not None]
 
     # Calculate overall state
     if blocked_reasons:
@@ -1386,6 +1448,7 @@ def _evaluate_current_repo(
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
+            "open_pr_numbers": open_pr_numbers,
         }, issues, prs, fleet_size=fleet_size, ready_target=ready_target, stall=stall)
 
     if stall.get("stalled"):
@@ -1401,6 +1464,7 @@ def _evaluate_current_repo(
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
+            "open_pr_numbers": open_pr_numbers,
         }, issues, prs, fleet_size=fleet_size, ready_target=ready_target, stall=stall)
 
     if waiting_reasons or issues or prs:
@@ -1416,6 +1480,7 @@ def _evaluate_current_repo(
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
+            "open_pr_numbers": open_pr_numbers,
         }, issues, prs, fleet_size=fleet_size, ready_target=ready_target, stall=stall)
 
     return _with_operator_screen({
@@ -1511,16 +1576,15 @@ def main():
     if status.get("state") == "stalled":
         # GitHub first, Slack second, and a Slack failure never changes the
         # exit code -- the loop must not halt because the control room is down.
-        question = next(
-            (q for q in (status.get("operator_screen") or {}).get("questions") or []
-             if q.get("key") == "stall"),
-            None,
-        )
+        # Stall lives at status["stall"], not on the six-question operator screen.
+        question = status.get("stall")
         if question:
+            blocked = _stall_pr_reasons(status.get("reasons"))
             notify_stall(
                 question,
-                [str(reason) for reason in status.get("reasons") or []],
+                blocked,
                 args.repo_dir, args.stall_agent, args.stall_family,
+                pr=_stall_github_pr(status, blocked),
             )
     if status.get("operator_screen") and status.get("state") != "error":
         ci_error = None
