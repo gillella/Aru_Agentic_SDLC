@@ -383,6 +383,76 @@ class CleanupWorktreesTests(unittest.TestCase):
         self.assertIn(os.path.realpath(path), self._worktree_paths())
         self.assertIn("dirty", message)
 
+    def test_late_file_after_manifest_check_is_not_deleted(self):
+        path = _add_worktree(self.clone, "feat/issue-8-retain-race")
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=path, text=True
+        ).strip()
+        ok, message = merge_pr.prune_worktree(
+            str(self.clone), "feat/issue-8-retain-race", sha
+        )
+        self.assertTrue(ok, message)
+        real = cleanup_worktrees.retain_manifest_allows_prune
+        calls = {"n": 0}
+
+        def inject(tree):
+            result = real(tree)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                (Path(tree) / "late.txt").write_text("injected\n")
+            return result
+
+        with patch.object(cleanup_worktrees, "retain_manifest_allows_prune", inject):
+            sweep_ok, sweep_msg = cleanup_worktrees.sweep(
+                str(self.clone), include_labels=False
+            )
+        leftovers = list((self.clone / ".worktrees" / ".retained").rglob("late.txt"))
+        self.assertTrue(leftovers, sweep_msg)
+        self.assertEqual(leftovers[0].read_text(), "injected\n")
+        self.assertFalse(sweep_ok)
+        self.assertIn("dirty after retention", sweep_msg)
+
+    def test_symlinked_retained_root_does_not_delete_external_worktree(self):
+        outside = self.root / "external-retained"
+        outside.mkdir()
+        victim = outside / "feat-issue-8-external"
+        _git(
+            self.clone, "worktree", "add", "-b",
+            "feat/issue-8-external", str(victim),
+        )
+        retained = self.clone / ".worktrees" / ".retained"
+        retained.parent.mkdir(parents=True, exist_ok=True)
+        retained.symlink_to(outside)
+        ok, message = cleanup_worktrees.sweep(str(self.clone), include_labels=False)
+        self.assertTrue(victim.exists())
+        self.assertTrue((victim / ".git").is_file())
+        self.assertFalse(ok)
+        self.assertIn("symlink", message)
+
+    def test_manifest_temp_symlink_does_not_clobber_outside_file(self):
+        path = _add_worktree(self.clone, "feat/issue-8-manifest-tmp")
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=path, text=True
+        ).strip()
+        victim = self.root / "outside-victim.txt"
+        victim.write_text("secret\n")
+        real_open = cleanup_worktrees.os.open
+
+        def injecting_open(name, flags, *args, **kwargs):
+            target = str(name)
+            suffix = cleanup_worktrees.RETAIN_MANIFEST + ".tmp"
+            if target.endswith(suffix) and not os.path.lexists(target):
+                os.symlink(str(victim), target)
+            return real_open(name, flags, *args, **kwargs)
+
+        with patch.object(cleanup_worktrees.os, "open", injecting_open):
+            ok, message = merge_pr.prune_worktree(
+                str(self.clone), "feat/issue-8-manifest-tmp", sha
+            )
+        self.assertEqual(victim.read_text(), "secret\n")
+        self.assertFalse(ok)
+        self.assertIn("Could not snapshot", message)
+
     def test_already_clean_is_noop(self):
         first = cleanup_worktrees.sweep(str(self.clone), include_labels=False)
         second = cleanup_worktrees.sweep(str(self.clone), include_labels=False)

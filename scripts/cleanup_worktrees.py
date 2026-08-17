@@ -15,6 +15,7 @@ import os
 import shutil
 import stat
 import sys
+import uuid
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPTS_DIR not in sys.path:
@@ -111,13 +112,60 @@ def retain_manifest_payload(path: str) -> dict:
     return {"entries": entries}
 
 
+def _is_plain_dir(path: str) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode)
+
+
+def _physically_contained(path: str, parent: str) -> bool:
+    """True when ``path`` is a real directory inside a non-symlinked parent."""
+    if not _is_plain_dir(parent) or not _is_plain_dir(path):
+        return False
+    real_parent = os.path.realpath(parent)
+    real_path = os.path.realpath(path)
+    try:
+        return os.path.commonpath([real_path, real_parent]) == real_parent
+    except ValueError:
+        return False
+
+
+def _unlink_exact_inode(path: str, info: os.stat_result) -> None:
+    try:
+        current = os.lstat(path)
+    except OSError:
+        return
+    if (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino):
+        os.unlink(path)
+
+
 def write_retain_manifest(path: str) -> None:
     payload = retain_manifest_payload(path)
     dest = os.path.join(path, RETAIN_MANIFEST)
     tmp = dest + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, sort_keys=True)
-    os.replace(tmp, dest)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
+    info = os.fstat(fd)
+    try:
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("retain manifest temp is not a regular file")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            json.dump(payload, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        current = os.lstat(tmp)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise OSError("retain manifest temp was replaced")
+        os.replace(tmp, dest)
+        tmp = None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp is not None:
+            _unlink_exact_inode(tmp, info)
 
 
 def remove_retain_manifest(path: str) -> None:
@@ -343,50 +391,138 @@ def prune_orphan_worktrees(repo_root: str) -> tuple[bool, list[str]]:
     return (not failed), notes
 
 
+def inspect_retained_root(repo_root: str) -> tuple[str | None, str | None]:
+    """Return ``(root, error)``. Absent is ``(None, None)``; unsafe is an error."""
+    retained = os.path.join(repo_root, RETAINED_DIR)
+    try:
+        info = os.lstat(retained)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, f"could not inspect retained root {retained}: {exc}"
+    if stat.S_ISLNK(info.st_mode):
+        return None, f"skipped retained root {retained}: symlink"
+    if not stat.S_ISDIR(info.st_mode):
+        return None, None
+    worktrees = os.path.join(repo_root, ".worktrees")
+    if not _physically_contained(retained, worktrees):
+        return None, f"skipped retained root {retained}: not physically contained"
+    return retained, None
+
+
+def _retained_child_deletable(path: str, retained: str, repo_root: str) -> bool:
+    worktrees = os.path.join(repo_root, ".worktrees")
+    return (
+        _physically_contained(path, retained)
+        and _physically_contained(retained, worktrees)
+        and under_worktrees(path, repo_root)
+    )
+
+
+def claim_retained_directory(path: str, retained: str) -> str | None:
+    """Rename ``path`` to a unique sibling so later writes miss this inode."""
+    if not _physically_contained(path, retained):
+        return None
+    claimed = os.path.join(retained, f".deleting-{uuid.uuid4().hex}")
+    try:
+        os.rename(path, claimed)
+    except OSError:
+        return None
+    if not _physically_contained(claimed, retained):
+        try:
+            os.rename(claimed, path)
+        except OSError:
+            pass
+        return None
+    return claimed
+
+
+def _retained_still_clean(path: str, deregistered: bool) -> tuple[bool | None, str]:
+    if deregistered:
+        allowed = retain_manifest_allows_prune(path)
+        if allowed is True:
+            return True, ""
+        reason = (
+            "cleanliness unverifiable" if allowed is None else "dirty after retention"
+        )
+        return False, f"skipped retained {path}: {reason}"
+    blocked = porcelain_blocks_prune(dirty_status(path))
+    if blocked is None:
+        return None, f"skipped retained {path}: status unreadable"
+    if blocked:
+        return False, f"skipped retained {path}: dirty"
+    return True, ""
+
+
+def _remove_claimed_retained(path: str) -> tuple[bool, str]:
+    try:
+        shutil.rmtree(path)
+        return True, f"removed retained {path}"
+    except OSError as exc:
+        return False, f"could not remove retained {path}: {exc}"
+
+
+def _prune_claimed_retained(
+    path: str, retained: str, repo_root: str, deregistered: bool,
+) -> tuple[bool, str]:
+    claimed = claim_retained_directory(path, retained)
+    if claimed is None:
+        return False, f"skipped retained {path}: could not claim exclusive ownership"
+    if not _retained_child_deletable(claimed, retained, repo_root):
+        return False, f"skipped retained {claimed}: not physically contained"
+    clean, note = _retained_still_clean(claimed, deregistered)
+    if clean is not True:
+        return False, note
+    claimed2 = claim_retained_directory(claimed, retained)
+    if claimed2 is None:
+        return False, f"kept retained {claimed}: could not re-claim after validation"
+    if not _retained_child_deletable(claimed2, retained, repo_root):
+        return False, f"skipped retained {claimed2}: not physically contained"
+    clean, note = _retained_still_clean(claimed2, deregistered)
+    if clean is not True:
+        return False, note
+    return _remove_claimed_retained(claimed2)
+
+
 def prune_retained_copies(repo_root: str) -> tuple[bool, list[str]]:
     notes = []
     failed = False
-    retained = os.path.join(repo_root, RETAINED_DIR)
-    if not os.path.isdir(retained):
+    retained, err = inspect_retained_root(repo_root)
+    if err:
+        return False, [err]
+    if retained is None:
         return True, notes
     for name in sorted(os.listdir(retained)):
         path = os.path.join(retained, name)
-        if not os.path.isdir(path):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            notes.append(f"skipped retained {path}: symlink")
+            failed = True
+            continue
+        if not stat.S_ISDIR(info.st_mode):
             continue
         if not owned_worktree(path, repo_root):
             notes.append(f"skipped retained {path}: not a worktree of this repo")
             continue
         admin_dir = gitdir_target(path)
-        if admin_dir and not os.path.isdir(admin_dir):
-            allowed = retain_manifest_allows_prune(path)
-            if allowed is not True:
-                reason = (
-                    "cleanliness unverifiable" if allowed is None
-                    else "dirty after retention"
-                )
-                notes.append(f"skipped retained {path}: {reason}")
-                failed = True
+        deregistered = bool(admin_dir) and not os.path.isdir(admin_dir)
+        clean, note = _retained_still_clean(path, deregistered)
+        if clean is not True:
+            notes.append(note)
+            if (not deregistered) and note.endswith(": dirty"):
                 continue
-            try:
-                shutil.rmtree(path)
-                notes.append(f"removed retained {path}")
-            except OSError as exc:
-                notes.append(f"could not remove retained {path}: {exc}")
-                failed = True
-            continue
-        blocked = porcelain_blocks_prune(dirty_status(path))
-        if blocked is None:
-            notes.append(f"skipped retained {path}: status unreadable")
             failed = True
             continue
-        if blocked:
-            notes.append(f"skipped retained {path}: dirty")
+        if not _retained_child_deletable(path, retained, repo_root):
+            notes.append(f"skipped retained {path}: not physically contained")
+            failed = True
             continue
-        try:
-            shutil.rmtree(path)
-            notes.append(f"removed retained {path}")
-        except OSError as exc:
-            notes.append(f"could not remove retained {path}: {exc}")
+        ok, note = _prune_claimed_retained(path, retained, repo_root, deregistered)
+        notes.append(note)
+        if not ok:
             failed = True
     return (not failed), notes
 
