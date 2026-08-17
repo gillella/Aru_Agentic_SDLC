@@ -32,6 +32,9 @@ the Definition-of-Done gate.
   not workflow owners or merge authorities.
 - If lifecycle instructions conflict, follow Aru. Higher-priority explicit
   system, developer, or user instructions still take precedence.
+- During GitHub outages, coordination stops gracefully; agents may continue local
+  work in claimed worktrees but must never create fallback task queues or bypass
+  gates (see [docs/degraded-mode.md](docs/degraded-mode.md)).
 
 Routine merge execution is mechanical and may be performed by any factory
 agent, including the implementation author, only through
