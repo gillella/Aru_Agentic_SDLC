@@ -410,7 +410,9 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
             family="cursor",
             project_id=ap.path_derived_project_id(project),
             checkout_path=str(project.resolve()),
-            availability="busy",
+            availability="cooling-down",
+            cooldown_reason="rate-limited",
+            cooldown_until="2026-08-17T22:00:00Z",
             wake_evidence_supported=["github-recovery"],
         )
         other = self.target_home / "repo-b"
@@ -431,6 +433,8 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         tasks = payload["presence"]["tasks"]
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0]["agent_id"], "cursor-cloud-1")
+        self.assertEqual(tasks[0]["cooldown_reason"], "rate-limited")
+        self.assertEqual(tasks[0]["cooldown_until"], "2026-08-17T22:00:00Z")
         self.assertEqual(payload["agents"]["cursor"].get("last_heartbeat"), tasks[0]["last_heartbeat"])
         self.assertTrue(payload["presence"]["wake_limitations"])
         self.assertIn("GitHub claims remain authoritative", payload["presence"]["ownership"])
@@ -439,6 +443,9 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         joined = " ".join(payload["presence"]["wake_limitations"])
         self.assertIn("Presence never launches agents", joined)
         self.assertIn("by_product", payload["presence"])
+        human = self.run_doctor("--project", str(project.resolve())).stdout
+        self.assertIn("cooldown_reason=rate-limited", human)
+        self.assertIn("cooldown_until=2026-08-17T22:00:00Z", human)
         # Read-only: presence file unchanged after the first doctor run.
         after = presence_file.read_text(encoding="utf-8")
         self.assertEqual(before, after)

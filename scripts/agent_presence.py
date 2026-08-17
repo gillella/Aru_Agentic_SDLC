@@ -43,6 +43,13 @@ AVAILABILITY_STATES = frozenset({
     "returned",
 })
 
+COOLDOWN_REASONS = frozenset({
+    "credit-exhausted",
+    "rate-limited",
+    "provider-outage",
+    "child-crash",
+})
+
 # Map runner / product family hints onto doctor product keys.
 FAMILY_TO_PRODUCT = {
     "openai": "codex",
@@ -226,6 +233,7 @@ class PresenceRecord:
     availability: str = "available"
     last_heartbeat: str = ""
     cooldown_until: Optional[str] = None
+    cooldown_reason: Optional[str] = None
     wake_evidence_supported: List[str] = field(default_factory=list)
     registered_at: str = ""
     updated_at: str = ""
@@ -246,6 +254,7 @@ class PresenceRecord:
                 availability=str(value.get("availability") or "available"),
                 last_heartbeat=str(value.get("last_heartbeat") or ""),
                 cooldown_until=value.get("cooldown_until"),
+                cooldown_reason=value.get("cooldown_reason"),
                 wake_evidence_supported=list(
                     value.get("wake_evidence_supported") or []
                 ),
@@ -277,12 +286,24 @@ class PresenceRecord:
             if not isinstance(self.cooldown_until, str):
                 raise PresenceError("cooldown_until must be a string or null")
             _parse_iso(self.cooldown_until)
+        if self.cooldown_reason is not None:
+            if self.cooldown_reason not in COOLDOWN_REASONS:
+                raise PresenceError(f"invalid cooldown_reason: {self.cooldown_reason}")
         if self.last_heartbeat:
             _parse_iso(self.last_heartbeat)
         if self.registered_at:
             _parse_iso(self.registered_at)
         if self.updated_at:
             _parse_iso(self.updated_at)
+
+    def is_cooldown_expired(self, now: datetime) -> bool:
+        if self.cooldown_until is None:
+            return False
+        try:
+            deadline = _parse_iso(self.cooldown_until)
+        except PresenceError:
+            return False
+        return now >= deadline
 
     def public_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -372,6 +393,7 @@ class PresenceStore:
         availability: str = "available",
         wake_evidence_supported: Optional[Sequence[str]] = None,
         cooldown_until: Optional[str] = None,
+        cooldown_reason: Optional[str] = None,
     ) -> PresenceRecord:
         """Bind one agent task to exactly one project identity."""
         agent_id = _validate_agent_id(agent_id)
@@ -400,7 +422,10 @@ class PresenceStore:
                 )),
                 availability=availability,
                 last_heartbeat=now,
-                cooldown_until=cooldown_until,
+                cooldown_until=(
+                    cooldown_until if availability == "cooling-down" else None
+                ),
+                cooldown_reason=cooldown_reason if availability == "cooling-down" else None,
                 wake_evidence_supported=list(
                     wake_evidence_supported
                     or (existing.wake_evidence_supported if existing else [])
@@ -425,6 +450,7 @@ class PresenceStore:
         role: Optional[str] = None,
         workload: Optional[Dict[str, Any]] = None,
         cooldown_until: Optional[str] = None,
+        cooldown_reason: Optional[str] = None,
     ) -> PresenceRecord:
         agent_id = _validate_agent_id(agent_id)
         now = _iso(self.clock())
@@ -435,7 +461,12 @@ class PresenceStore:
             if existing is None:
                 raise PresenceError(f"unknown agent_id: {agent_id}")
             next_availability = existing.availability
-            if availability is not None:
+            if (
+                existing.availability in {"cooling-down", "temporarily-offline"}
+                and availability == "available"
+            ):
+                next_availability = "returned"
+            elif availability is not None:
                 next_availability = _validate_availability(availability)
             elif existing.availability == "temporarily-offline":
                 next_availability = "returned"
@@ -451,7 +482,11 @@ class PresenceStore:
                 last_heartbeat=now,
                 cooldown_until=(
                     existing.cooldown_until if cooldown_until is None else cooldown_until
-                ),
+                ) if next_availability == "cooling-down" else None,
+                cooldown_reason=(
+                    cooldown_reason if cooldown_reason is not None
+                    else existing.cooldown_reason
+                ) if next_availability == "cooling-down" else None,
                 wake_evidence_supported=list(existing.wake_evidence_supported),
                 registered_at=existing.registered_at,
                 updated_at=now,
@@ -471,6 +506,7 @@ class PresenceStore:
         availability: str,
         *,
         cooldown_until: Optional[str] = None,
+        cooldown_reason: Optional[str] = None,
         role: Optional[str] = None,
         workload: Optional[Dict[str, Any]] = None,
         touch_heartbeat: bool = True,
@@ -496,7 +532,10 @@ class PresenceStore:
                 last_heartbeat=now if touch_heartbeat else existing.last_heartbeat,
                 cooldown_until=(
                     existing.cooldown_until if cooldown_until is None else cooldown_until
-                ),
+                ) if availability == "cooling-down" else None,
+                cooldown_reason=(
+                    cooldown_reason if cooldown_reason is not None else existing.cooldown_reason
+                ) if availability == "cooling-down" else None,
                 wake_evidence_supported=list(existing.wake_evidence_supported),
                 registered_at=existing.registered_at,
                 updated_at=now,
@@ -596,7 +635,8 @@ class PresenceStore:
                     workload=dict(record.workload),
                     availability="temporarily-offline",
                     last_heartbeat=record.last_heartbeat,
-                    cooldown_until=record.cooldown_until,
+                    cooldown_until=None,
+                    cooldown_reason=None,
                     wake_evidence_supported=list(record.wake_evidence_supported),
                     registered_at=record.registered_at,
                     updated_at=updated_at,
@@ -610,6 +650,90 @@ class PresenceStore:
             return list(local_changed)
 
         return self._mutate(apply)
+
+
+def evaluate_claim_protection(
+    record: PresenceRecord,
+    *,
+    now: datetime,
+    warning_seconds: int = 600,
+    takeover_seconds: int = 1800,
+    live_process: Optional[bool] = None,
+    recent_branch_activity: Optional[bool] = None,
+    resumable: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Advisory, fail-closed claim protection evaluation.
+
+    A stale presence record is not enough to permit takeover. The caller must
+    also supply affirmative evidence that no process is alive, no branch was
+    recently active, and the work is explicitly resumable. This function never
+    releases or transfers a GitHub claim.
+    """
+    if warning_seconds < 0 or takeover_seconds < warning_seconds:
+        return {
+            "protected": True,
+            "phase": "warning",
+            "reason": "invalid warning/takeover window configuration",
+        }
+    if not record.last_heartbeat:
+        return {"protected": True, "phase": "warning", "reason": "no heartbeat evidence"}
+    try:
+        last = _parse_iso(record.last_heartbeat)
+    except PresenceError:
+        return {"protected": True, "phase": "warning", "reason": "invalid heartbeat evidence"}
+    stale_seconds = (now - last).total_seconds()
+    if stale_seconds < 0:
+        stale_seconds = 0
+    if stale_seconds <= warning_seconds:
+        return {"protected": True, "phase": "active", "reason": "heartbeat fresh"}
+    if stale_seconds <= takeover_seconds:
+        return {"protected": True, "phase": "warning", "reason": f"stale {stale_seconds:.0f}s"}
+    if record.availability not in {"cooling-down", "temporarily-offline"}:
+        return {"protected": True, "phase": "warning", "reason": f"availability is {record.availability}"}
+    missing = []
+    if live_process is not False:
+        missing.append("no-live-process evidence")
+    if recent_branch_activity is not False:
+        missing.append("no-recent-branch-activity evidence")
+    if resumable is not True:
+        missing.append("explicitly-resumable evidence")
+    if missing:
+        return {
+            "protected": True,
+            "phase": "warning",
+            "reason": "takeover blocked: " + ", ".join(missing),
+        }
+    return {"protected": False, "phase": "takeover", "reason": f"stale {stale_seconds:.0f}s, {record.availability}"}
+
+
+def query_cooling_agents(
+    store: PresenceStore,
+    *,
+    project_id: Optional[str] = None,
+    checkout_path: Optional[str] = None,
+) -> List[PresenceRecord]:
+    """Return agents in cooling-down state for a project."""
+    all_records = store.query_project(
+        project_id=project_id,
+        checkout_path=checkout_path,
+        expire=False,
+    )
+    return [r for r in all_records if r.availability == "cooling-down"]
+
+
+def query_role_poll_agents(
+    store: PresenceStore,
+    *,
+    project_id: Optional[str] = None,
+    checkout_path: Optional[str] = None,
+) -> List[PresenceRecord]:
+    """Return project agents eligible for a new, non-claiming role poll."""
+    all_records = store.query_project(
+        project_id=project_id,
+        checkout_path=checkout_path,
+        expire=False,
+    )
+    return [r for r in all_records if r.availability in {"available", "returned"}]
 
 
 def availability_for_phase(phase: str) -> str:
@@ -694,6 +818,7 @@ def sync_runner_presence(
     role: str = "",
     workload: Optional[Dict[str, Any]] = None,
     cooldown_until: Optional[str] = None,
+    cooldown_reason: Optional[str] = None,
     wake_evidence_supported: Optional[Sequence[str]] = None,
 ) -> Optional[PresenceRecord]:
     """Best-effort presence update for run_fleet; never raises into the runner."""
@@ -714,6 +839,7 @@ def sync_runner_presence(
                 availability=availability,
                 wake_evidence_supported=wake_evidence_supported or [],
                 cooldown_until=cooldown_until,
+                cooldown_reason=cooldown_reason,
             )
         return store.heartbeat(
             agent_id,
@@ -721,6 +847,7 @@ def sync_runner_presence(
             role=role if role else None,
             workload=workload,
             cooldown_until=cooldown_until,
+            cooldown_reason=cooldown_reason,
         )
     except (PresenceError, OSError, ValueError):
         return None
@@ -752,6 +879,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     register.add_argument("--capability", action="append", default=[])
     register.add_argument("--wake-evidence", action="append", default=[])
+    register.add_argument("--cooldown-until", default=None)
+    register.add_argument("--cooldown-reason", choices=sorted(COOLDOWN_REASONS))
 
     heartbeat = sub.add_parser("heartbeat", help="Refresh heartbeat / availability")
     heartbeat.add_argument("--agent", required=True)
@@ -761,6 +890,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(AVAILABILITY_STATES),
     )
     heartbeat.add_argument("--role", default=None)
+    heartbeat.add_argument("--cooldown-until", default=None)
+    heartbeat.add_argument("--cooldown-reason", choices=sorted(COOLDOWN_REASONS))
 
     availability = sub.add_parser(
         "set-availability", help="Set availability without changing project binding",
@@ -771,6 +902,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=sorted(AVAILABILITY_STATES),
     )
+    availability.add_argument("--cooldown-until", default=None)
+    availability.add_argument("--cooldown-reason", choices=sorted(COOLDOWN_REASONS))
 
     unregister = sub.add_parser(
         "unregister",
@@ -837,6 +970,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 role=args.role,
                 availability=args.availability,
                 wake_evidence_supported=args.wake_evidence or ["github-recovery"],
+                cooldown_until=args.cooldown_until,
+                cooldown_reason=args.cooldown_reason,
             )
             _print_record(record, as_json=args.json)
             return 0
@@ -846,12 +981,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.agent,
                 availability=args.availability,
                 role=args.role,
+                cooldown_until=args.cooldown_until,
+                cooldown_reason=args.cooldown_reason,
             )
             _print_record(record, as_json=args.json)
             return 0
 
         if command == "set-availability":
-            record = store.set_availability(args.agent, args.availability)
+            record = store.set_availability(
+                args.agent,
+                args.availability,
+                cooldown_until=args.cooldown_until,
+                cooldown_reason=args.cooldown_reason,
+            )
             _print_record(record, as_json=args.json)
             return 0
 

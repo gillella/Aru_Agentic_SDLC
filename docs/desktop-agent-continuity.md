@@ -108,3 +108,34 @@ Presence is not ownership:
   headless only.
 - Never post presence heartbeats to Slack.
 
+## Credit cooldown, takeover, and return
+
+Credit exhaustion, provider rate limits, provider outages, and failed child
+sessions reduce only that task's project capacity. The task records
+`cooling-down`, a classified `cooldown_reason`, its last heartbeat, and a local
+next-probe time when known. `query_role_poll_agents()` excludes cooling tasks
+from new non-claiming role polls, while available peers continue. The optional
+headless runner caps a cooldown eligibility probe at five minutes.
+
+Retry ticks and presence heartbeats stay local. A cooldown entry and a
+successful return each produce at most one concise project-channel
+`availability` transition; Slack remains discussion, not a task queue. Doctor
+shows the cooldown reason and retry time from the same presence record.
+
+Claim protection is configurable through the advisory warning and takeover
+windows. Passing the takeover time is necessary but insufficient. A caller
+must also provide affirmative evidence that no process is live, no branch has
+recent activity, and the work is explicitly resumable. Missing or unknown
+evidence fails closed. The evaluator never releases, transfers, or reclaims a
+GitHub claim.
+
+After a cooldown, the runner queries GitHub again before launching any child.
+Only a successful child session marks the task returned; it cannot reuse the
+old work number or reclaim work transferred while it was cooling. A provider's
+unknown reset time remains unknown—the local five-minute probe is not a claim
+that credits will recover then.
+
+Unsupported same-task wake remains unavailable until the operator explicitly
+reopens that task. A new scheduled session may recover board state, but must
+not be presented as the original task returning. Aru does not purchase credits,
+bypass provider limits, or guarantee recovery across app or machine restarts.

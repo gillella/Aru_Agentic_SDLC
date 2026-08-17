@@ -210,6 +210,40 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(store.get("cursor-1").availability, "busy")
 
+    def test_cli_wires_cooldown_metadata_for_all_presence_mutations(self):
+        presence_path = self.root / "cli-cooldown-presence.json"
+        first_retry = "2026-08-16T12:05:00Z"
+        code = ap.main([
+            "--path", str(presence_path), "register",
+            "--agent", "cursor-1", "--family", "cursor",
+            "--checkout", str(self.project_a), "--project-id", "proj_alpha",
+            "--availability", "cooling-down",
+            "--cooldown-reason", "rate-limited",
+            "--cooldown-until", first_retry,
+        ])
+        self.assertEqual(code, 0)
+        store = ap.PresenceStore(presence_path)
+        self.assertEqual(store.get("cursor-1").cooldown_reason, "rate-limited")
+        self.assertEqual(store.get("cursor-1").cooldown_until, first_retry)
+
+        code = ap.main([
+            "--path", str(presence_path), "heartbeat", "--agent", "cursor-1",
+            "--availability", "cooling-down",
+            "--cooldown-reason", "provider-outage",
+            "--cooldown-until", "2026-08-16T12:10:00Z",
+        ])
+        self.assertEqual(code, 0)
+        self.assertEqual(store.get("cursor-1").cooldown_reason, "provider-outage")
+
+        code = ap.main([
+            "--path", str(presence_path), "set-availability",
+            "--agent", "cursor-1", "--availability", "cooling-down",
+            "--cooldown-reason", "credit-exhausted",
+            "--cooldown-until", "2026-08-16T12:15:00Z",
+        ])
+        self.assertEqual(code, 0)
+        self.assertEqual(store.get("cursor-1").cooldown_reason, "credit-exhausted")
+
     def test_doctor_summary_is_read_only(self):
         aru = self.root / "aru-isolated"
         aru.mkdir(mode=0o700)
@@ -335,6 +369,233 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertEqual(raw["schema"], ap.SCHEMA_NAME)
         self.assertIn("codex-1", raw["agents"])
         self.assertIsInstance(raw["agents"], dict)
+
+    def test_cooldown_reason_recorded_on_register(self):
+        """Register with cooldown_reason stores it on the record."""
+        record = self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="credit-exhausted",
+            cooldown_until=ap._iso(self.clock["now"] + timedelta(minutes=30)),
+        )
+        self.assertEqual(record.cooldown_reason, "credit-exhausted")
+        self.assertEqual(record.availability, "cooling-down")
+
+    def test_cooldown_reason_recorded_on_heartbeat(self):
+        """Heartbeat with cooldown_reason updates the record."""
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+        )
+        record = self.store.heartbeat(
+            "agent-1", availability="cooling-down",
+            cooldown_reason="rate-limited",
+            cooldown_until=ap._iso(self.clock["now"] + timedelta(minutes=5)),
+        )
+        self.assertEqual(record.cooldown_reason, "rate-limited")
+
+    def test_cooldown_reason_cleared_on_availability_change(self):
+        """Transitioning away from cooling-down clears cooldown_reason."""
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="credit-exhausted",
+        )
+        record = self.store.set_availability(
+            "agent-1", availability="available",
+        )
+        self.assertIsNone(record.cooldown_reason)
+
+    def test_is_cooldown_expired_known_time(self):
+        """is_cooldown_expired returns True when past cooldown_until."""
+        now = self.clock["now"]
+        record = self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_until=ap._iso(now - timedelta(minutes=1)),
+        )
+        self.assertTrue(record.is_cooldown_expired(now))
+
+    def test_is_cooldown_expired_unknown_time(self):
+        """is_cooldown_expired returns False when cooldown_until is None."""
+        record = self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+        )
+        self.assertFalse(record.is_cooldown_expired(self.clock["now"]))
+
+    def test_evaluate_claim_protection_active(self):
+        """Fresh heartbeat means claim is protected."""
+        now = self.clock["now"]
+        record = self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+        )
+        result = ap.evaluate_claim_protection(record, now=now)
+        self.assertTrue(result["protected"])
+        self.assertEqual(result["phase"], "active")
+
+    def test_evaluate_claim_protection_warning(self):
+        """Stale heartbeat past warning but before takeover is protected+warning."""
+        now = self.clock["now"]
+        record = self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+        )
+        # Simulate stale heartbeat by evaluating at now + 15 minutes
+        future = now + timedelta(minutes=15)
+        result = ap.evaluate_claim_protection(record, now=future)
+        self.assertTrue(result["protected"])
+        self.assertEqual(result["phase"], "warning")
+
+    def test_evaluate_claim_protection_takeover(self):
+        """Takeover requires all three explicit safety signals."""
+        now = self.clock["now"]
+        record = self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+        )
+        future = now + timedelta(minutes=45)
+        result = ap.evaluate_claim_protection(
+            record,
+            now=future,
+            live_process=False,
+            recent_branch_activity=False,
+            resumable=True,
+        )
+        self.assertFalse(result["protected"])
+        self.assertEqual(result["phase"], "takeover")
+
+    def test_evaluate_claim_protection_fails_closed_without_each_signal(self):
+        now = self.clock["now"]
+        record = self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+        )
+        future = now + timedelta(minutes=45)
+        cases = (
+            {"live_process": None, "recent_branch_activity": False, "resumable": True},
+            {"live_process": False, "recent_branch_activity": None, "resumable": True},
+            {"live_process": False, "recent_branch_activity": False, "resumable": None},
+            {"live_process": True, "recent_branch_activity": False, "resumable": True},
+            {"live_process": False, "recent_branch_activity": True, "resumable": True},
+            {"live_process": False, "recent_branch_activity": False, "resumable": False},
+        )
+        for evidence in cases:
+            with self.subTest(evidence=evidence):
+                result = ap.evaluate_claim_protection(record, now=future, **evidence)
+                self.assertTrue(result["protected"])
+                self.assertEqual(result["phase"], "warning")
+
+    def test_evaluate_claim_protection_fails_closed_on_invalid_windows(self):
+        record = self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+        )
+        result = ap.evaluate_claim_protection(
+            record,
+            now=self.clock["now"] + timedelta(hours=1),
+            warning_seconds=900,
+            takeover_seconds=300,
+            live_process=False,
+            recent_branch_activity=False,
+            resumable=True,
+        )
+        self.assertTrue(result["protected"])
+        self.assertIn("invalid", result["reason"])
+
+    def test_return_clears_cooldown(self):
+        """Successful heartbeat after cooling-down transitions to returned and clears cooldown."""
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="rate-limited",
+            cooldown_until=ap._iso(self.clock["now"] + timedelta(minutes=5)),
+        )
+        record = self.store.heartbeat(
+            "agent-1", availability="available",
+        )
+        self.assertEqual(record.availability, "returned")
+        self.assertIsNone(record.cooldown_reason)
+        self.assertIsNone(record.cooldown_until)
+
+    def test_explicit_unavailable_heartbeat_stays_unavailable(self):
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="rate-limited",
+        )
+        record = self.store.heartbeat("agent-1", availability="unavailable")
+        self.assertEqual(record.availability, "unavailable")
+        self.assertIsNone(record.cooldown_reason)
+        eligible = ap.query_role_poll_agents(self.store, project_id="proj_test")
+        self.assertEqual(eligible, [])
+
+    def test_explicit_busy_heartbeat_stays_busy(self):
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="rate-limited",
+        )
+        record = self.store.heartbeat("agent-1", availability="busy")
+        self.assertEqual(record.availability, "busy")
+        self.assertIsNone(record.cooldown_reason)
+        eligible = ap.query_role_poll_agents(self.store, project_id="proj_test")
+        self.assertEqual(eligible, [])
+
+    def test_query_cooling_agents(self):
+        """query_cooling_agents returns only cooling-down agents."""
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="credit-exhausted",
+        )
+        self.store.register(
+            agent_id="agent-2", family="anthropic",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="available",
+        )
+        cooling = ap.query_cooling_agents(self.store, project_id="proj_test")
+        self.assertEqual(len(cooling), 1)
+        self.assertEqual(cooling[0].agent_id, "agent-1")
+
+    def test_role_poll_excludes_cooling_agent_and_keeps_available_peer(self):
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="credit-exhausted",
+        )
+        self.store.register(
+            agent_id="agent-2", family="anthropic",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="available",
+        )
+        eligible = ap.query_role_poll_agents(self.store, project_id="proj_test")
+        self.assertEqual([record.agent_id for record in eligible], ["agent-2"])
+
+    def test_project_isolation_cooldown(self):
+        """Cooldown in Project A does not appear in Project B queries."""
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_alpha", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="credit-exhausted",
+        )
+        cooling_b = ap.query_cooling_agents(self.store, project_id="proj_beta")
+        self.assertEqual(len(cooling_b), 0)
 
 
 if __name__ == "__main__":

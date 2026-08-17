@@ -26,6 +26,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -33,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 RECOVERABLE_PHASES = {
     "waiting",
@@ -44,6 +45,26 @@ RECOVERABLE_PHASES = {
 }
 MAX_WAIT_SECONDS = 86_400.0
 MAX_HELPER_TIMEOUT_SECONDS = 3_600.0
+MAX_CHILD_STDERR_CHARS = 65_536
+RATE_LIMIT_RE = re.compile(
+    r"\b(?:rate[ _-]?limit(?:ed)?|too many requests"
+    r"|(?:http(?: status)?|status(?: code)?|response|error)\s*[:=]?\s*429"
+    r"|429\s+(?:too many requests|rate[ _-]?limit(?:ed)?))\b",
+    re.IGNORECASE,
+)
+CREDIT_RE = re.compile(
+    r"\b(?:credits?\s+exhausted|insufficient\s+credits?"
+    r"|billing\s+(?:error|failure|required)|quota\s+(?:exceeded|exhausted)"
+    r"|(?:http(?: status)?|status(?: code)?|response|error)\s*[:=]?\s*402"
+    r"|402\s+(?:payment required|billing error))\b",
+    re.IGNORECASE,
+)
+OUTAGE_RE = re.compile(
+    r"\b(?:service\s+unavailable|upstream\s+unavailable|provider\s+outage"
+    r"|(?:http(?: status)?|status(?: code)?|response|error)\s*[:=]?\s*50[234]"
+    r"|50[234]\s+(?:service|upstream)\s+unavailable)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -74,7 +95,54 @@ class RunnerConfig:
     max_wait: float = 900.0
     jitter: float = 0.2
     helper_timeout: float = 120.0
+    cooldown_recheck_seconds: float = 300.0
     state_dir: Path | None = None
+
+
+def classify_child_failure(returncode: int, stderr: str = "") -> str:
+    if returncode == 75 or RATE_LIMIT_RE.search(stderr):
+        return "rate-limited"
+    if returncode == 73 or CREDIT_RE.search(stderr):
+        return "credit-exhausted"
+    if returncode == 69 or OUTAGE_RE.search(stderr):
+        return "provider-outage"
+    return "child-crash"
+
+
+def post_availability_transition(
+    config: RunnerConfig,
+    project_id: str,
+    event: dict[str, Any],
+) -> None:
+    """Best-effort project-channel transition; GitHub remains authoritative."""
+    if not project_id:
+        return
+    argv = [
+        sys.executable,
+        str(config.aru_home / "scripts" / "slack_notify.py"),
+        "--agent", config.agent,
+        "--family", config.family,
+        "--event", "availability",
+        "--project-id", project_id,
+        "--state", str(event.get("state") or ""),
+        "--text", str(event.get("text") or ""),
+    ]
+    reason = str(event.get("cooldown_reason") or "")
+    retry_at = str(event.get("retry_at") or "")
+    if reason:
+        argv.extend(("--cooldown-reason", reason))
+    if retry_at:
+        argv.extend(("--retry-at", retry_at))
+    work_type = str(event.get("work_type") or "")
+    work_number = event.get("work_number")
+    if isinstance(work_number, int):
+        argv.extend(("--issue" if work_type == "issue" else "--pr", str(work_number)))
+    dedupe_key = str(event.get("dedupe_key") or "")
+    if dedupe_key:
+        argv.extend(("--dedupe-key", dedupe_key))
+    result = run_command(argv, config.repo, config.helper_timeout)
+    if result.returncode != 0:
+        raise RuntimeError("availability transition helper rejected the event")
 
 
 def utc_now() -> datetime:
@@ -135,16 +203,53 @@ def run_agent(
     argv: Sequence[str],
     cwd: Path,
     on_start: Callable[[int], None] | None = None,
-) -> int:
-    """Run a signal-isolated child without storing its inherited transcript."""
+) -> CommandResult:
+    """Run a signal-isolated child and retain stderr only for classification."""
     try:
-        child = subprocess.Popen(list(argv), cwd=str(cwd), start_new_session=True)
+        child = subprocess.Popen(
+            list(argv),
+            cwd=str(cwd),
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
     except OSError as exc:
         print(f"[run_fleet] agent launch failed: {type(exc).__name__}", file=sys.stderr)
-        return 127
+        return CommandResult(127, "", str(exc))
     if on_start is not None:
         on_start(child.pid)
-    return child.wait()
+    stderr_tail = [""]
+
+    def drain_stderr() -> None:
+        tail = ""
+        stream = child.stderr
+        if stream is None:
+            return
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            sys.stderr.write(chunk)
+            sys.stderr.flush()
+            tail = (tail + chunk)[-MAX_CHILD_STDERR_CHARS:]
+        stderr_tail[0] = tail
+
+    stderr_thread = threading.Thread(
+        target=drain_stderr,
+        name=f"{configurable_thread_name(argv)}-stderr",
+        daemon=True,
+    )
+    stderr_thread.start()
+    returncode = child.wait()
+    stderr_thread.join()
+    return CommandResult(returncode, "", stderr_tail[0])
+
+
+def configurable_thread_name(argv: Sequence[str]) -> str:
+    """Return a non-sensitive diagnostic name without embedding arguments."""
+    executable = Path(argv[0]).name if argv else "agent"
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "-", executable)
+    return cleaned[:32] or "agent"
 
 
 def parse_json_result(result: CommandResult) -> dict[str, Any] | None:
@@ -308,12 +413,13 @@ class FleetRunner:
         config: RunnerConfig,
         *,
         command_runner: Callable[[Sequence[str], Path], CommandResult] = run_command,
-        agent_runner: Callable[[Sequence[str], Path], int] | None = None,
+        agent_runner: Callable[[Sequence[str], Path], int | CommandResult] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         random_value: Callable[[], float] = random.random,
         clock: Callable[[], datetime] = utc_now,
         presence_store: Any | None = None,
         project_id: str | None = None,
+        transition_notifier: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.config = config
         self.command_runner = command_runner
@@ -325,11 +431,24 @@ class FleetRunner:
         self.store = StateStore(directory, config.agent)
         self.presence_store = presence_store
         self.project_id = project_id
+        self.transition_notifier = transition_notifier
         self.stop_signal = False
         self.cycle = 0
         self.retry_count = 0
         self.last_fingerprint = ""
         self.last_child_fingerprint = ""
+        self.active_cooldown_reason: str | None = None
+        self.active_cooldown_id: str | None = None
+        if self.presence_store is not None:
+            try:
+                existing = self.presence_store.get(config.agent)
+            except (OSError, RuntimeError, ValueError):
+                existing = None
+            if existing is not None and existing.availability == "cooling-down":
+                self.active_cooldown_reason = existing.cooldown_reason or ""
+                self.active_cooldown_id = (
+                    f"recovered:{existing.updated_at or existing.cooldown_until or 'unknown'}"
+                )
 
     def _log(self, event: str, **fields: Any) -> None:
         record = {
@@ -355,7 +474,13 @@ class FleetRunner:
         delay: float = 0.0,
         terminal_reason: str = "",
         child_pid: int | None = None,
+        cooldown_reason: str | None = None,
     ) -> None:
+        effective_cooldown_reason = (
+            cooldown_reason
+            if cooldown_reason is not None
+            else self.active_cooldown_reason
+        )
         retry_at = ""
         if delay > 0:
             retry_at = timestamp(self.clock() + timedelta(seconds=delay))
@@ -373,6 +498,7 @@ class FleetRunner:
                 "fleet_state": fleet_state,
                 "state_fingerprint": self.last_fingerprint,
                 "next_retry_at": retry_at,
+                "cooldown_reason": effective_cooldown_reason or "",
                 "terminal_reason": terminal_reason,
                 "updated_at": timestamp(self.clock()),
             })
@@ -381,9 +507,44 @@ class FleetRunner:
                 f"[run_fleet] process metadata unavailable: {type(exc).__name__}",
                 file=sys.stderr,
             )
-        self._sync_presence(phase, delay=delay)
+        self._sync_presence(
+            phase,
+            delay=delay,
+            cooldown_reason=effective_cooldown_reason,
+        )
 
-    def _sync_presence(self, phase: str, *, delay: float = 0.0) -> None:
+    def _notify_transition(self, event: dict[str, Any]) -> None:
+        if self.transition_notifier is None:
+            return
+        try:
+            self.transition_notifier(event)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            self._log("availability_notice_failed", error=type(exc).__name__)
+
+    def _exit_cooldown(self, work: dict[str, Any]) -> None:
+        """Re-admit only after a successful fresh GitHub picker response."""
+        if self.active_cooldown_reason is None:
+            return
+        previous_reason = self.active_cooldown_reason
+        cooldown_id = self.active_cooldown_id or f"cycle:{self.cycle}:recovered"
+        work_type, work_number = work_identity(work)
+        self.active_cooldown_reason = None
+        self.active_cooldown_id = None
+        self._log(
+            "cooldown_exit",
+            previous_reason=previous_reason or "unknown",
+            work_type=work_type,
+            work_number=work_number,
+        )
+        self._notify_transition({
+            "state": "returned",
+            "text": "agent returned after a fresh GitHub eligibility query",
+            "work_type": work_type,
+            "work_number": work_number,
+            "dedupe_key": f"availability:{cooldown_id}:returned",
+        })
+
+    def _sync_presence(self, phase: str, *, delay: float = 0.0, cooldown_reason: str | None = None) -> None:
         """Update project-scoped presence; never affects GitHub claims."""
         if self.presence_store is None:
             return
@@ -394,12 +555,18 @@ class FleetRunner:
         cooldown = ""
         if delay > 0:
             cooldown = timestamp(self.clock() + timedelta(seconds=delay))
+        presence_phase = phase
+        if (
+            self.active_cooldown_reason is not None
+            and phase not in {"stopped", "stopping"}
+        ):
+            presence_phase = "agent_unavailable_wait"
         sync_runner_presence(
             self.presence_store,
             agent_id=self.config.agent,
             family=self.config.family,
             checkout_path=self.config.repo,
-            phase=phase,
+            phase=presence_phase,
             project_id=self.project_id,
             role="fleet-runner",
             workload={
@@ -408,6 +575,7 @@ class FleetRunner:
                 "retry_count": self.retry_count,
             },
             cooldown_until=cooldown or None,
+            cooldown_reason=cooldown_reason,
             wake_evidence_supported=["github-recovery"],
         )
 
@@ -470,15 +638,19 @@ class FleetRunner:
         phase: str,
         fleet: dict[str, Any],
         work: dict[str, Any],
+        cooldown_reason: str | None = None,
     ) -> IterationResult:
         delay = self._observe(fleet, work)
+        if phase == "agent_unavailable_wait" and delay > self.config.cooldown_recheck_seconds:
+            delay = self.config.cooldown_recheck_seconds
         work_type, work_number = work_identity(work)
         fleet_state = str(fleet.get("state") or "unknown")
-        self._write_state(phase, fleet_state=fleet_state, delay=delay)
+        self._write_state(phase, fleet_state=fleet_state, delay=delay, cooldown_reason=cooldown_reason)
         self._log(
             "park",
             phase=phase,
             fleet_state=fleet_state,
+            cooldown_reason=cooldown_reason,
             work_type=work_type,
             work_number=work_number,
             retry=self.retry_count,
@@ -547,9 +719,17 @@ class FleetRunner:
         if self._stop_requested():
             return IterationResult("stopping", 0.0, work_type, work_number)
         if self.agent_runner is None:
-            child_code = run_agent(argv, self.config.repo, record_child)
+            child_result: int | CommandResult = run_agent(
+                argv, self.config.repo, record_child,
+            )
         else:
-            child_code = self.agent_runner(argv, self.config.repo)
+            child_result = self.agent_runner(argv, self.config.repo)
+        if isinstance(child_result, CommandResult):
+            child_code = child_result.returncode
+            child_stderr = child_result.stderr
+        else:
+            child_code = child_result
+            child_stderr = ""
         self._log(
             "child_exit",
             work_type=work_type,
@@ -557,12 +737,44 @@ class FleetRunner:
             returncode=child_code,
         )
         if child_code == 0:
+            self._exit_cooldown(work)
             self.retry_count = 0
             self.last_child_fingerprint = current_fingerprint
             self._write_state("starting", fleet_state=fleet_state)
             return IterationResult("active", 0.0, work_type, work_number, child_code)
 
-        result = self._park("agent_unavailable_wait", fleet, work)
+        reason = classify_child_failure(child_code, child_stderr)
+        entering_cooldown = self.active_cooldown_reason is None
+        previous_reason = self.active_cooldown_reason
+        self.active_cooldown_reason = reason
+        result = self._park("agent_unavailable_wait", fleet, work, cooldown_reason=reason)
+        if entering_cooldown:
+            retry_at = timestamp(self.clock() + timedelta(seconds=result.delay))
+            self.active_cooldown_id = f"cycle:{self.cycle}:{retry_at}:{reason}"
+            self._log(
+                "cooldown_enter",
+                cooldown_reason=reason,
+                retry_at=retry_at,
+                retry_count=self.retry_count,
+            )
+            self._notify_transition({
+                "state": "cooling-down",
+                "text": f"{reason}; eligibility recheck scheduled",
+                "cooldown_reason": reason,
+                "retry_at": retry_at,
+                "work_type": work_type,
+                "work_number": work_number,
+                "dedupe_key": (
+                    f"availability:{self.active_cooldown_id}:cooling-down"
+                ),
+            })
+        elif previous_reason != reason:
+            self._log(
+                "cooldown_reason_updated",
+                previous_reason=previous_reason or "unknown",
+                cooldown_reason=reason,
+                retry_count=self.retry_count,
+            )
         return IterationResult(
             result.phase, result.delay, work_type, work_number, child_code,
         )
@@ -716,6 +928,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--helper-timeout", type=float, default=120.0,
         help="Seconds before a stuck status or picker command becomes a retryable error",
     )
+    parser.add_argument(
+        "--cooldown-recheck", type=float, default=300.0,
+        help="Seconds between cooldown probes (capped at 300)",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
@@ -751,6 +967,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--helper-timeout",
             minimum=1.0,
             maximum=MAX_HELPER_TIMEOUT_SECONDS,
+        )
+        cooldown_recheck = normalize_timing(
+            args.cooldown_recheck,
+            "--cooldown-recheck",
+            minimum=0.1,
+            maximum=300.0,
+            cap_upper=True,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -799,11 +1022,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_wait=max_wait,
         jitter=jitter,
         helper_timeout=helper_timeout,
+        cooldown_recheck_seconds=cooldown_recheck,
         state_dir=directory,
     )
     presence_store = None
     try:
-        from agent_presence import PresenceStore
+        from agent_presence import PresenceStore, resolve_project_id
 
         presence_path = (
             Path(args.presence_path).expanduser().resolve()
@@ -811,12 +1035,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             else None
         )
         presence_store = PresenceStore(presence_path) if presence_path else PresenceStore()
+        if not project_id:
+            project_id = resolve_project_id(repo)
     except Exception:
         presence_store = None
     runner = FleetRunner(
         config,
         presence_store=presence_store,
         project_id=project_id or None,
+        transition_notifier=(
+            lambda event: post_availability_transition(config, project_id, event)
+        ),
     )
     return runner.run_loop() if args.mode == "loop" else runner.run_once()
 

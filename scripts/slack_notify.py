@@ -112,6 +112,14 @@ ENV_KEYS = (
     "SLACK_CHANNEL_NAME",
 )
 ALERT_TYPES = frozenset({"blocked", "waiting-on", "hitl"})
+AVAILABILITY_EVENT = "availability"
+AVAILABILITY_STATES = frozenset({"cooling-down", "returned"})
+COOLDOWN_REASONS = frozenset({
+    "credit-exhausted",
+    "rate-limited",
+    "provider-outage",
+    "child-crash",
+})
 MAX_ALERT_TEXT_CHARS = 1000
 MAX_ALERT_TEXT_LINES = 12
 FORBIDDEN_TYPES = frozenset(
@@ -289,6 +297,56 @@ def validate_alert_event(event: Dict[str, Any]) -> None:
     event["type"] = kind
 
 
+def validate_availability_event(event: Dict[str, Any]) -> None:
+    """Validate one concise project-channel availability transition."""
+    kind = str(event.get("type") or "").strip().lower()
+    if kind != AVAILABILITY_EVENT:
+        raise ValueError(f"availability event type must be {AVAILABILITY_EVENT!r}")
+    for field in (
+        "agent", "family", "repo", "state", "text", "project_id",
+        "cooldown_reason", "retry_at", "dedupe_key",
+    ):
+        if field in event and event[field] is not None and not isinstance(event[field], str):
+            raise ValueError(f"availability field {field} must be a string")
+    for field in ("issue", "pr"):
+        value = event.get(field)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise ValueError(f"availability field {field} must be a positive integer")
+    if not str(event.get("agent") or "").strip():
+        raise ValueError("availability transition requires agent")
+    repo = str(event.get("repo") or "").strip()
+    if not REPO_SLUG_RE.fullmatch(repo):
+        raise ValueError("availability transition requires authoritative repo as owner/name")
+    state = str(event.get("state") or "").strip().lower()
+    if state not in AVAILABILITY_STATES:
+        raise ValueError(f"availability state must be one of {sorted(AVAILABILITY_STATES)}")
+    reason = str(event.get("cooldown_reason") or "").strip().lower()
+    if state == "cooling-down" and reason not in COOLDOWN_REASONS:
+        raise ValueError("cooling-down transition requires a valid cooldown_reason")
+    if state == "returned" and reason:
+        raise ValueError("returned transition must not carry cooldown_reason")
+    retry_at = str(event.get("retry_at") or "").strip()
+    if retry_at:
+        try:
+            parsed_retry = datetime.fromisoformat(retry_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("retry_at must be an ISO-8601 timestamp") from exc
+        if parsed_retry.tzinfo is None:
+            raise ValueError("retry_at must include a timezone")
+    text = str(event.get("text") or "")
+    if len(text) > MAX_ALERT_TEXT_CHARS or len(text.splitlines()) > MAX_ALERT_TEXT_LINES:
+        raise ValueError("availability summary exceeds concise message limits")
+    forbidden_field = _forbidden_content_field(event)
+    if forbidden_field:
+        raise ValueError(f"forbidden availability content in {forbidden_field}")
+    event["type"] = kind
+    event["state"] = state
+    if reason:
+        event["cooldown_reason"] = reason
+
+
 def _peer_ref(event: Dict[str, Any]) -> str:
     parts = []
     if event.get("waiting_on_issue"):
@@ -333,6 +391,15 @@ def format_event(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> 
             f"waiting on agent=`{peer}` holding {_peer_ref(event) or 'unknown ref'} "
             "(claim not stolen)"
         )
+    if kind == AVAILABILITY_EVENT:
+        transition = f"availability={state}"
+        reason = str(event.get("cooldown_reason") or "").strip()
+        retry_at = str(event.get("retry_at") or "").strip()
+        if reason:
+            transition += f" reason={reason}"
+        if retry_at:
+            transition += f" retry_at={retry_at}"
+        lines.append(transition)
     if body:
         lines.append(body)
     return "\n".join(lines)
@@ -581,6 +648,15 @@ def post_event(
             validate_alert_event(stamped)
         except ValueError as exc:
             return {"ok": False, "error": "invalid_alert", "detail": str(exc)}
+    elif kind == AVAILABILITY_EVENT:
+        try:
+            validate_availability_event(stamped)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "error": "invalid_availability",
+                "detail": str(exc),
+            }
     if kind == "hitl":
         operator = str(config.operator_user_id or "").strip()
         if not SLACK_USER_RE.fullmatch(operator):
@@ -810,6 +886,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--waiting-on-agent", default="")
     parser.add_argument("--waiting-on-issue", type=int)
     parser.add_argument("--waiting-on-pr", type=int)
+    parser.add_argument("--cooldown-reason", default="")
+    parser.add_argument("--retry-at", default="")
+    parser.add_argument("--dedupe-key", default="")
     payload.add_argument("--decision", default="", help="HITL decision text (alias for --text)")
     payload.add_argument("--decision-file", default="", help="read HITL decision text from a file")
     parser.add_argument("--repo-dir", default=".")
@@ -862,6 +941,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         event["waiting_on_issue"] = args.waiting_on_issue
     if args.waiting_on_pr:
         event["waiting_on_pr"] = args.waiting_on_pr
+    if args.cooldown_reason:
+        event["cooldown_reason"] = args.cooldown_reason
+    if args.retry_at:
+        event["retry_at"] = args.retry_at
+    if args.dedupe_key:
+        event["dedupe_key"] = args.dedupe_key
 
     if str(args.type).lower() in ALERT_TYPES:
         result = notify_alert(
@@ -889,9 +974,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("posted")
         return 0
 
-    result = post_event(config, event)
+    result = post_event(config, event, cache=FileDedupeCache())
     if not result.get("ok"):
         print(f"[WARN] Slack notify failed: {result.get('error')}", file=sys.stderr)
+        if result.get("error") == "invalid_availability":
+            return 2
         return 0
     if result.get("deduped"):
         print("deduped")
