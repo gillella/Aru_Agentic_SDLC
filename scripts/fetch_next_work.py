@@ -63,10 +63,15 @@ from claim_issue import (
     reap_stale_reviews,
     reviewed_by,
 )
-from common import list_open_issues, run_cmd, label_names as issue_label_names
+from common import (
+    get_repo_slug,
+    list_open_issues,
+    run_cmd,
+    label_names as issue_label_names,
+)
 from fetch_next_issue import build_candidates, reap_stale_claims
 from fetch_pr_feedback import fetch_active_review_feedback
-from merge_pr import closeout_incomplete, dod_status, is_merged
+from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # _attested_head_peers is private, and importing it across modules is normally a
 # smell. It is imported deliberately: merge_pr is the single source of truth for
 # whether a peer's completion stamp names the current head, and a second
@@ -118,6 +123,79 @@ def list_open_prs() -> list[dict[str, Any]] | None:
         return None
 
 
+def _issue_closeout_snapshot(slug: str) -> dict[int, dict[str, Any]] | None:
+    """Return all issue state needed for one merged-PR recovery scan.
+
+    The old path called ``closeout_incomplete`` for every historical merge,
+    which issued one ``gh issue view`` per linked issue.  A single paginated
+    REST snapshot keeps the same authority while making picker cost depend on
+    API pages rather than repository history.  Any malformed or ambiguous page
+    fails closed so the picker cannot start work from a partial view.
+    """
+    code, out, err = run_cmd(
+        [
+            "gh", "api", "--paginate",
+            f"repos/{slug}/issues?state=all&per_page=100",
+            "--jq", ".[] | select(.pull_request == null) | {number,state,labels}",
+        ],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not snapshot issue close-out state: {err.strip()}",
+              file=sys.stderr)
+        return None
+
+    snapshot: dict[int, dict[str, Any]] = {}
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            issue = json.loads(line)
+        except json.JSONDecodeError:
+            print("[WARN] Could not parse issue close-out snapshot.", file=sys.stderr)
+            return None
+        if not isinstance(issue, dict):
+            return None
+        number = issue.get("number")
+        state = issue.get("state")
+        labels = issue.get("labels")
+        if (not isinstance(number, int)
+                or not isinstance(state, str)
+                or state.upper() not in {"OPEN", "CLOSED"}
+                or not isinstance(labels, list)
+                or any(
+                    not isinstance(label, dict)
+                    or not isinstance(label.get("name"), str)
+                    for label in labels
+                )
+                or number in snapshot):
+            print("[WARN] Issue close-out snapshot has invalid or duplicate data.",
+                  file=sys.stderr)
+            return None
+        snapshot[number] = {"state": state.upper(), "labels": labels}
+    return snapshot
+
+
+def _snapshot_closeout_incomplete(
+    pr: dict[str, Any], issue_snapshot: dict[int, dict[str, Any]]
+) -> bool | None:
+    """Mirror ``merge_pr.closeout_incomplete`` against a cycle snapshot."""
+    labels = label_names(pr)
+    if any(name.startswith("merger:") for name in labels):
+        return True
+    for number in linked_issues(pr.get("body")):
+        issue = issue_snapshot.get(number)
+        if issue is None:
+            return None
+        if issue["state"] == "OPEN":
+            return True
+        issue_labels = {label["name"] for label in issue["labels"]}
+        if "status:done" not in issue_labels:
+            return True
+    return False
+
+
 def list_merged_needing_closeout() -> list[dict[str, Any]] | None:
     """Merged PRs whose close-out still needs ``merge_pr.py``.
 
@@ -125,8 +203,6 @@ def list_merged_needing_closeout() -> list[dict[str, Any]] | None:
     fifty merges remains discoverable. Fail closed when any page cannot be
     read: otherwise a crashed close-out becomes invisible.
     """
-    from common import get_repo_slug
-
     slug = get_repo_slug()
     if not slug:
         print("[WARN] Could not resolve repo slug for merged PR recovery.", file=sys.stderr)
@@ -153,10 +229,15 @@ def list_merged_needing_closeout() -> list[dict[str, Any]] | None:
             print("[WARN] Could not parse closed PR list.", file=sys.stderr)
             return None
 
+    merged = [item for item in closed if item.get("merged_at")]
+    if not merged:
+        return []
+    issue_snapshot = _issue_closeout_snapshot(slug)
+    if issue_snapshot is None:
+        return None
+
     recovery = []
-    for item in closed:
-        if not item.get("merged_at"):
-            continue
+    for item in merged:
         labels = [{"name": lab.get("name", "")} for lab in (item.get("labels") or [])]
         pr = {
             "number": item.get("number"),
@@ -175,7 +256,15 @@ def list_merged_needing_closeout() -> list[dict[str, Any]] | None:
             "mergedAt": item.get("merged_at"),
             "_active_review_feedback": [],
         }
-        if closeout_incomplete(pr):
+        incomplete = _snapshot_closeout_incomplete(pr, issue_snapshot)
+        if incomplete is None:
+            print(
+                f"[WARN] Linked issue state for merged PR #{pr['number']} "
+                "is absent from the authoritative snapshot.",
+                file=sys.stderr,
+            )
+            return None
+        if incomplete:
             recovery.append(pr)
     return recovery
 
@@ -335,7 +424,8 @@ def author_gate_fix(pr: dict[str, Any], agent: str,
 
 
 def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
-                       round_cap: int, cross_family_wait: int) -> dict[str, Any]:
+                       round_cap: int, cross_family_wait: int,
+                       merge_reason: str | None = None) -> dict[str, Any]:
     """Decides whether `agent` may review this PR, and why not if not.
 
     Returns {eligible, reason, cross_family, degraded}. `degraded` marks a
@@ -382,20 +472,33 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
         and name[len("reviewed-by:"):] != author
     ]
     if peer_reviewers:
-        # Attribution alone is not completion. merge_pr requires the stamp to
-        # name the current head, so after a push it demands a re-review that
-        # nothing routed: merge refused the PR, review called it complete, and
-        # `review` is correctly not an author-clearable gate. Ask merge_pr's own
-        # predicate rather than re-deriving it here.
-        evidence = review_evidence(pr["number"])
-        if evidence is None:
-            return no("review attestation state is unavailable")
-        attested = _attested_head_peers(evidence, peer_reviewers)
-        # None means legacy evidence carrying no attestation records; keep the
-        # existing verdict rather than reopening every historical PR.
-        if attested is None or attested:
+        if not author:
+            # Another review cannot repair missing authorship: merge_pr cannot
+            # prove that any reviewed-by stamp is independent until the PR is
+            # bound to its verified author. Reassigning the review would spin
+            # forever while leaving the actual gate unchanged.
+            return no(
+                "independent review exists, but the PR has no author stamp"
+            )
+        gates = _unmet_gates(merge_reason or "")
+        if merge_reason == "every Definition-of-Done gate passed" or (
+            gates and "review" not in gates
+        ):
             return no("independent review complete; waiting on gated merge")
-        stale_attribution = True
+        if "review" in gates:
+            stale_attribution = True
+        else:
+            # Direct callers and cheap merge filters have no current-head DoD
+            # verdict to reuse, so retain the authoritative fallback query.
+            evidence = review_evidence(pr["number"])
+            if evidence is None:
+                return no("review attestation state is unavailable")
+            attested = _attested_head_peers(evidence, peer_reviewers)
+            # None means legacy evidence carrying no attestation records; keep the
+            # existing verdict rather than reopening every historical PR.
+            if attested is None or attested:
+                return no("independent review complete; waiting on gated merge")
+            stale_attribution = True
 
     decision = (pr.get("reviewDecision") or "").upper()
     if decision == "APPROVED" and not stale_attribution:
@@ -573,10 +676,10 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     dod_reasons: dict[int, str] = {}
     for pr in sorted(prs, key=lambda p: p["number"]):
         verdict = merge_eligibility(pr, agent)
+        dod_reasons[pr["number"]] = verdict["reason"]
         if verdict["eligible"]:
             mergeable.append(pr)
         else:
-            dod_reasons[pr["number"]] = verdict["reason"]
             # Only surface skips that looked like merge candidates, otherwise
             # every unreviewed PR pollutes the report with "no independent review".
             labels = label_names(pr)
@@ -603,7 +706,14 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     # 3. Review someone else's work.
     reviewable, skipped = [], []
     for pr in sorted(prs, key=lambda p: p["number"]):
-        verdict = review_eligibility(pr, agent, family, round_cap, cross_family_wait)
+        verdict = review_eligibility(
+            pr,
+            agent,
+            family,
+            round_cap,
+            cross_family_wait,
+            dod_reasons.get(pr["number"]),
+        )
         if verdict["eligible"]:
             reviewable.append((pr, verdict))
         else:

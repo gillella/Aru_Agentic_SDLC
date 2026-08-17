@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,104 @@ def pr(number, *labels, draft=False, checks="green", reviews=0, minutes_old=5,
 
 def eligible(p, agent="agent-2", family="openai", cap=3, wait=30):
     return fnw.review_eligibility(p, agent, family, cap, wait)
+
+
+def merged_api_pr(number, issue_number, *labels):
+    return {
+        "number": number,
+        "title": f"merged {number}",
+        "merged_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "draft": False,
+        "labels": [{"name": name} for name in labels],
+        "head": {"ref": f"feat/issue-{issue_number}-x", "sha": f"sha-{number}"},
+        "body": f"Closes #{issue_number}",
+    }
+
+
+def issue_api_state(number, state="closed", *labels):
+    return {
+        "number": number,
+        "state": state,
+        "labels": [{"name": name} for name in labels],
+    }
+
+
+class MergedCloseoutSnapshotTests(unittest.TestCase):
+    def run_scan(self, merged_prs, issues, *, issue_code=0, issue_output=None):
+        closed_output = "\n".join(json.dumps(item) for item in merged_prs)
+        if issue_output is None:
+            issue_output = "\n".join(json.dumps(item) for item in issues)
+        with patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(
+                 fnw,
+                 "run_cmd",
+                 side_effect=[
+                     (0, closed_output, ""),
+                     (issue_code, issue_output, "snapshot failed"),
+                 ],
+             ) as run:
+            result = fnw.list_merged_needing_closeout()
+        return result, run
+
+    def test_one_issue_snapshot_handles_one_hundred_completed_merges(self):
+        prs = [merged_api_pr(number, number) for number in range(1, 101)]
+        issues = [
+            issue_api_state(number, "closed", "status:done")
+            for number in range(1, 101)
+        ]
+
+        result, run = self.run_scan(prs, issues)
+
+        self.assertEqual(result, [])
+        self.assertEqual(run.call_count, 2)
+        snapshot_cmd = run.call_args_list[1].args[0]
+        self.assertIn("--paginate", snapshot_cmd)
+        self.assertIn("state=all&per_page=100", " ".join(snapshot_cmd))
+
+    def test_snapshot_preserves_each_incomplete_closeout_signal(self):
+        prs = [
+            merged_api_pr(1, 11),
+            merged_api_pr(2, 12),
+            merged_api_pr(3, 13),
+            merged_api_pr(4, 14, "merger:agent-1"),
+        ]
+        issues = [
+            issue_api_state(11, "closed", "status:done"),
+            issue_api_state(12, "open", "status:in-review"),
+            issue_api_state(13, "closed", "status:in-review"),
+            issue_api_state(14, "closed", "status:done"),
+        ]
+
+        result, _ = self.run_scan(prs, issues)
+
+        self.assertEqual([item["number"] for item in result], [2, 3, 4])
+
+    def test_snapshot_command_failure_fails_closed(self):
+        result, _ = self.run_scan(
+            [merged_api_pr(1, 11)], [], issue_code=1, issue_output=""
+        )
+        self.assertIsNone(result)
+
+    def test_snapshot_json_and_schema_failures_fail_closed(self):
+        for bad_output in (
+            "not-json",
+            json.dumps({"number": "11", "state": "closed", "labels": []}),
+            "\n".join(
+                json.dumps(issue_api_state(11, "closed", "status:done"))
+                for _ in range(2)
+            ),
+        ):
+            with self.subTest(output=bad_output):
+                result, _ = self.run_scan(
+                    [merged_api_pr(1, 11)], [], issue_output=bad_output
+                )
+                self.assertIsNone(result)
+
+    def test_missing_linked_issue_fails_closed(self):
+        result, _ = self.run_scan([merged_api_pr(1, 11)], [])
+        self.assertIsNone(result)
 
 
 class CiStateTests(unittest.TestCase):
@@ -107,6 +206,48 @@ class EligibilityTests(unittest.TestCase):
             verdict = eligible(candidate)
         self.assertFalse(verdict["eligible"])
         self.assertIn("waiting on gated merge", verdict["reason"])
+
+    def test_merge_gate_current_review_skips_duplicate_evidence_query(self):
+        candidate = pr(
+            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-2",
+            reviews=1,
+        )
+        with patch.object(fnw, "review_evidence") as evidence:
+            verdict = fnw.review_eligibility(
+                candidate, "agent-3", "openai", 3, 30, "unmet: rebased"
+            )
+
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("waiting on gated merge", verdict["reason"])
+        evidence.assert_not_called()
+
+    def test_merge_gate_stale_review_skips_duplicate_evidence_query(self):
+        candidate = pr(
+            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-2",
+            reviews=1, decision="APPROVED",
+        )
+        with patch.object(fnw, "review_evidence") as evidence:
+            verdict = fnw.review_eligibility(
+                candidate, "agent-3", "openai", 3, 30, "unmet: review"
+            )
+
+        self.assertTrue(verdict["eligible"])
+        self.assertTrue(verdict["stale_attribution"])
+        evidence.assert_not_called()
+
+    def test_merge_gate_missing_author_does_not_request_another_review(self):
+        candidate = pr(
+            1, "family:anthropic", "reviewed-by:agent-2", reviews=1,
+        )
+        with patch.object(fnw, "review_evidence") as evidence:
+            verdict = fnw.review_eligibility(
+                candidate, "agent-3", "openai", 3, 30, "unmet: review"
+            )
+
+        self.assertFalse(verdict["eligible"])
+        self.assertFalse(verdict["stale_attribution"])
+        self.assertIn("no author stamp", verdict["reason"])
+        evidence.assert_not_called()
 
     def test_self_attribution_does_not_hide_pr_from_a_real_peer(self):
         verdict = eligible(pr(
