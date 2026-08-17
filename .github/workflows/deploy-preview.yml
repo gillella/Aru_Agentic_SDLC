@@ -54,6 +54,7 @@ jobs:
       - name: Validate deployment credentials
         env:
           DEPLOY_CREDENTIALS: ${{ secrets.PREVIEW_DEPLOY_TOKEN || secrets.DEPLOY_TOKEN }}
+          ALLOW_ANONYMOUS_PREVIEW: ${{ vars.ALLOW_ANONYMOUS_PREVIEW }}
         run: |
           if [ -z "${DEPLOY_CREDENTIALS}" ] && [ "${ALLOW_ANONYMOUS_PREVIEW:-false}" != "true" ]; then
             echo "[ERROR] Deploy credentials absent. Set PREVIEW_DEPLOY_TOKEN in repository secrets." >&2
@@ -81,9 +82,10 @@ jobs:
         env:
           TARGET_SHA: ${{ inputs.commit_sha }}
         run: |
+          TARGET_SHA_CANONICAL="$(printf '%s' "${TARGET_SHA}" | tr '[:upper:]' '[:lower:]')"
           jq -n \
             --arg run_id "${GITHUB_RUN_ID}" \
-            --arg commit_sha "${TARGET_SHA}" \
+            --arg commit_sha "${TARGET_SHA_CANONICAL}" \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg preview_url "skipped" \
             '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url, is_library: true, status: "skipped"}' \
@@ -124,9 +126,10 @@ jobs:
           TARGET_SHA: ${{ inputs.commit_sha }}
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
+          TARGET_SHA_CANONICAL="$(printf '%s' "${TARGET_SHA}" | tr '[:upper:]' '[:lower:]')"
           jq -n \
             --arg run_id "${GITHUB_RUN_ID}" \
-            --arg commit_sha "${TARGET_SHA}" \
+            --arg commit_sha "${TARGET_SHA_CANONICAL}" \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg preview_url "${PAGE_URL}" \
             '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url}' \
