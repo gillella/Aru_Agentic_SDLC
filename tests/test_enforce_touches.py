@@ -2086,6 +2086,54 @@ class AgentCommitTrailerTests(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_prepare_commit_msg_preserves_existing_trailer_block(self):
+        import importlib.util
+        hook_path = ROOT / "hooks" / "prepare_commit_msg.py"
+        spec = importlib.util.spec_from_file_location("prepare_commit_msg", hook_path)
+        prepare_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prepare_mod)
+
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f:
+            f.write("fix(cli): handle edge case\n\nCo-Authored-By: Peer <peer@example.com>\n")
+            f.flush()
+            temp_path = f.name
+
+        try:
+            stamped = prepare_mod.stamp_commit_message_file(temp_path, agent="agent-test")
+            self.assertTrue(stamped)
+            content = Path(temp_path).read_text()
+            self.assertEqual(
+                content.strip(),
+                "fix(cli): handle edge case\n\nCo-Authored-By: Peer <peer@example.com>\nAgent: agent-test",
+            )
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_prepare_commit_msg_handles_prose_agent_lines(self):
+        import importlib.util
+        hook_path = ROOT / "hooks" / "prepare_commit_msg.py"
+        spec = importlib.util.spec_from_file_location("prepare_commit_msg", hook_path)
+        prepare_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prepare_mod)
+
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f:
+            f.write("fix(cli): update agent docs\n\nAgent: this is prose explanation in the body\n")
+            f.flush()
+            temp_path = f.name
+
+        try:
+            stamped = prepare_mod.stamp_commit_message_file(temp_path, agent="agent-test")
+            self.assertTrue(stamped)
+            content = Path(temp_path).read_text()
+            self.assertEqual(
+                content.strip(),
+                "fix(cli): update agent docs\n\nAgent: this is prose explanation in the body\n\nAgent: agent-test",
+            )
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
     def test_end_to_end_git_commit_with_installed_hook_stamps_agent_trailer(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path = Path(temp_dir)
