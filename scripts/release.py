@@ -25,6 +25,7 @@ CONSUMED_CLI_SURFACE = [
     "scripts/install_local_agent_integrations.sh",
     "scripts/install_cursor_integration.sh",
     "scripts/release.py",
+    "scripts/increment_release.py",
 ]
 
 
