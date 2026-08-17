@@ -1976,7 +1976,14 @@ def check_spec_sync(pr, repo_dir=None):
     if repo_dir:
         cmd.extend(["--repo-dir", repo_dir])
     if head_sha:
-        cmd.extend(["--head", head_sha])
+        check_proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{head_sha}^{{commit}}"],
+            cwd=repo_dir or ".",
+            capture_output=True,
+            check=False,
+        )
+        if check_proc.returncode == 0:
+            cmd.extend(["--head", head_sha])
 
     code, out, err = run_cmd(cmd, check=False)
     if code == 0:
