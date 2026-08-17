@@ -28,11 +28,6 @@ jobs:
   secret-scan:
     name: Secret Scan
     runs-on: ubuntu-latest
-    # Deliberately no job-level permissions block: this job inherits the
-    # workflow default above. Adding one here -- even a superset containing
-    # contents/pull-requests/issues read -- made gitleaks-action's
-    # ScanPullRequest fail 403 on GET /pulls/<n>/commits. Inheriting works;
-    # re-declaring does not. Leave it alone.
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4

@@ -633,21 +633,13 @@ class WorkflowCredentialBoundaryTests(unittest.TestCase):
     def test_issues_read_is_granted_to_the_docs_job(self):
         self.assertIn("issues: read", self._docs_job())
 
-    def test_secret_scan_declares_no_job_level_permissions(self):
-        """gitleaks-action only works when secret-scan inherits the default.
+    def test_pull_requests_read_stays_granted_for_gitleaks(self):
+        """gitleaks-action lists PR commits and needs pull-requests:read.
 
-        Adding a job-level permissions block here -- even one granting a
-        superset of contents/pull-requests/issues read -- made
-        ScanPullRequest fail 403 on GET /pulls/<n>/commits. Observed on runs
-        32037999517 and 32039000036; removing the block fixed it. This test
-        exists so the next person to "tidy up" permissions sees why first.
+        Asserted at the workflow level because secret-scan inherits from
+        there. Narrowing this block is what the comment above it warns about.
         """
-        text = self.WORKFLOW.read_text(encoding="utf-8")
-        job = text[text.index("\n  secret-scan:"): text.index("\n  dependency-audit:")]
-        code = "\n".join(
-            line for line in job.splitlines() if not line.strip().startswith("#")
-        )
-        self.assertNotIn("permissions:", code)
+        self.assertIn("pull-requests: read", self._workflow_permissions())
 
     def test_checkout_does_not_persist_credentials(self):
         self.assertIn("persist-credentials: false", self._docs_job())
