@@ -44,7 +44,7 @@ depends-on: #2, #4
         self.assertEqual([item["number"] for item in result["candidates"]], [3])
         self.assertEqual(result["conflicted"][0]["number"], 2)
 
-    def test_in_review_issue_contributes_touches_and_is_not_candidate(self):
+    def test_in_review_issue_releases_touches_and_is_not_candidate(self):
         issues = [
             issue(
                 20,
@@ -57,12 +57,14 @@ depends-on: #2, #4
 
         result = build_candidates(issues, "agent-a")
 
-        # Issue 20 (in-review) is not a candidate, and with no PR-file map the
-        # declared touches still block candidate 21 (fail closed).
-        self.assertEqual([item["number"] for item in result["candidates"]], [22])
-        self.assertEqual(result["conflicted"][0]["number"], 21)
+        # Issue 20 remains parked, but its open PR releases the implementation
+        # reservation so both Ready issues can start.
+        self.assertEqual(
+            [item["number"] for item in result["candidates"]], [21, 22]
+        )
+        self.assertEqual(result["conflicted"], [])
 
-    def test_in_review_pr_files_not_declared_path_do_not_block(self):
+    def test_in_review_pr_files_do_not_restore_released_reservation(self):
         issues = [
             issue(
                 20,
@@ -77,8 +79,10 @@ depends-on: #2, #4
             issues, "agent-a", pr_files_by_issue={20: ["src/auth.py"]},
         )
 
-        self.assertEqual([item["number"] for item in result["candidates"]], [21])
-        self.assertEqual(result["conflicted"][0]["number"], 22)
+        self.assertEqual(
+            [item["number"] for item in result["candidates"]], [21, 22]
+        )
+        self.assertEqual(result["conflicted"], [])
 
     def test_in_progress_declared_touches_ignore_pr_file_map(self):
         issues = [

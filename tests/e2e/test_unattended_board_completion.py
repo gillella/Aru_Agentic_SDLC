@@ -100,31 +100,45 @@ class UnattendedBoardCompletionTests(unittest.TestCase):
         self.assertEqual(self.fleet.issues[1].implementations, 1)
 
         continued = self.cycle("codex-1")
-        self.assertEqual((continued.work_type, continued.work_number), ("issue", 6))
+        self.assertEqual((continued.work_type, continued.work_number), ("issue", 4))
 
-        temporary_idle = self.cycle("codex-1")
-        self.assertEqual(temporary_idle.phase, "waiting")
-        self.assertEqual(self.runners["codex-1"].store.read()["phase"], "waiting")
+        third_implementation = self.cycle("codex-1")
+        self.assertEqual(
+            (third_implementation.work_type, third_implementation.work_number),
+            ("issue", 6),
+        )
 
         reviewed_followup = self.cycle("claude-1")
         merged_followup = self.cycle("codex-1")
+        reviewed_overlap = self.cycle("claude-1")
+        merged_overlap = self.cycle("codex-1")
         requested = self.cycle("claude-1")
-        no_work_for_reviewer = self.cycle("claude-1")
         fixed = self.cycle("codex-1")
         review_retry_wait = self.cycle("claude-1")
         reviewed = self.cycle("claude-1")
         merged = self.cycle("codex-1")
+        self.assertEqual(reviewed_followup.work_type, "review")
+        self.assertEqual(reviewed_overlap.work_type, "review")
+        self.assertEqual(merged_followup.work_type, "merge")
+        self.assertEqual(merged_overlap.work_type, "merge")
         self.assertEqual(
-            (reviewed_followup.work_type, reviewed_followup.work_number),
-            ("review", 103),
+            {
+                event["issue"]
+                for event in self.fleet.events
+                if event["event"] == "review_completed" and event["issue"] in {4, 6}
+            },
+            {4, 6},
         )
         self.assertEqual(
-            (merged_followup.work_type, merged_followup.work_number),
-            ("merge", 103),
+            {
+                event["issue"]
+                for event in self.fleet.events
+                if event["event"] == "merged" and event["issue"] in {4, 6}
+            },
+            {4, 6},
         )
         self.assertEqual(requested.work_type, "review")
         self.assertEqual(requested.work_number, 102)
-        self.assertEqual(no_work_for_reviewer.phase, "waiting")
         self.assertEqual(fixed.work_type, "feedback")
         self.assertEqual(review_retry_wait.phase, "waiting")
         self.assertEqual(reviewed.work_type, "review")
@@ -135,10 +149,10 @@ class UnattendedBoardCompletionTests(unittest.TestCase):
         self.assertTrue(alpha_pr.merged)
         self.assertLess(
             self.event_index("handed_off", issue=1),
-            self.event_index("implemented", issue=6),
+            self.event_index("implemented", issue=4),
         )
         self.assertLess(
-            self.event_index("implemented", issue=6),
+            self.event_index("implemented", issue=4),
             self.event_index("review_claimed", issue=1),
         )
 
@@ -146,9 +160,6 @@ class UnattendedBoardCompletionTests(unittest.TestCase):
         self.assertEqual((dependency_work.work_type, dependency_work.work_number), ("issue", 3))
 
         expected_work = [
-            ("claude-1", "review", 104),
-            ("codex-1", "merge", 104),
-            ("codex-1", "issue", 4),
             ("claude-1", "review", 105),
             ("codex-1", "merge", 105),
         ]

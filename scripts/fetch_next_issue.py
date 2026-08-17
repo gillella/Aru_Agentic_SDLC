@@ -7,10 +7,10 @@ Multi-agent safe. Three things make it so:
   * Issues already held by another agent are excluded, so two agents are never
     handed the same work. (The previous version filtered only on --state open,
     so a claimed, in-progress issue was still returned as "next".)
-  * Candidates whose `touches:` paths overlap work already in flight are
+  * Candidates whose `touches:` paths overlap pre-PR work already in flight are
     excluded. In Progress reserves the issue's declared `touches:`. In Review
-    reserves the open PR's actual files when they can be read, otherwise the
-    declared list (fail closed). `parallel-eligible` only means "no unresolved
+    releases that implementation reservation because the open PR and merge
+    gates now arbitrate conflicts. `parallel-eligible` only means "no unresolved
     depends-on"; it says nothing about two agents editing the same file.
   * --claim walks the candidate list and takes the first issue it can claim,
     so a lost race costs one retry rather than duplicated work.
@@ -290,17 +290,15 @@ def reservation_paths(
 ) -> List[str]:
     """Paths this in-flight issue currently locks.
 
-    In Progress uses declared touches. In Review uses the open PR's files when
-    that list is non-empty; otherwise the declared list so a lookup miss cannot
-    unlock a path still in flight.
+    In Progress uses declared touches. In Review releases the implementation
+    lock because the branch has an open PR and merge-time conflict gates are
+    authoritative. ``pr_files_by_issue`` remains accepted for caller
+    compatibility but cannot extend the pre-PR reservation window.
     """
-    declared = parse_touches(issue.get("body") or "")
     names = {label.get("name", "").lower() for label in issue.get("labels", [])}
     if "status:in-review" in names:
-        actual = (pr_files_by_issue or {}).get(issue["number"]) or []
-        if actual:
-            return actual
-    return declared
+        return []
+    return parse_touches(issue.get("body") or "")
 
 
 def parse_dependencies(body: str) -> List[int]:
