@@ -1926,21 +1926,46 @@ def prune_worktree(repo_root, branch, expected_sha):
         )
         if status_code != 0:
             return False, f"Could not inspect worktree {path}: {status_err.strip()}"
-        from cleanup_worktrees import porcelain_blocks_prune, write_retain_manifest
+        from cleanup_worktrees import (
+            porcelain_blocks_prune,
+            porcelain_dirty_except_manifest,
+            remove_retain_manifest,
+            write_retain_manifest,
+        )
         if porcelain_blocks_prune(status):
             return False, (
                 f"Worktree {path} has tracked or untracked files; left untouched."
             )
+        if os.path.lexists(retained_path):
+            return False, f"Retention destination already exists: {retained_path}"
         try:
             write_retain_manifest(path)
         except OSError as exc:
             return False, f"Could not snapshot worktree {path} for retention: {exc}"
-        if os.path.exists(retained_path):
-            return False, f"Retention destination already exists: {retained_path}"
+        status_code, status, status_err = run_cmd(
+            [
+                "git", "status", "--porcelain", "--untracked-files=all",
+                "--ignored=matching",
+            ],
+            check=False,
+            cwd=path,
+        )
+        if status_code != 0:
+            remove_retain_manifest(path)
+            return False, f"Could not inspect worktree {path}: {status_err.strip()}"
+        blocked = porcelain_dirty_except_manifest(status)
+        if blocked is not False:
+            remove_retain_manifest(path)
+            if blocked is None:
+                return False, f"Could not inspect worktree {path} after snapshot."
+            return False, (
+                f"Worktree {path} has tracked or untracked files; left untouched."
+            )
         try:
             os.makedirs(retained_root, exist_ok=True)
             os.rename(path, retained_path)
         except OSError as exc:
+            remove_retain_manifest(path)
             return False, f"Could not atomically retain worktree {path}: {exc}"
         code, _, err = run_cmd(
             ["git", "worktree", "remove", path], check=False, cwd=repo_root

@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -62,26 +63,52 @@ def gitdir_target(path: str) -> str | None:
     return os.path.realpath(target)
 
 
-def _iter_retain_files(path: str):
-    for dirpath, dirnames, filenames in os.walk(path):
+def _retain_rel(path: str, full: str) -> str:
+    rel = os.path.relpath(full, path).replace(os.sep, "/")
+    return "" if rel == "." else rel
+
+
+def _record_retain_entry(full: str, rel: str) -> dict:
+    info = os.lstat(full)
+    mode = info.st_mode
+    if stat.S_ISLNK(mode):
+        return {"type": "symlink", "target": os.readlink(full)}
+    if stat.S_ISDIR(mode):
+        return {"type": "dir", "mode": stat.S_IMODE(mode)}
+    if not stat.S_ISREG(mode):
+        raise OSError(f"unsupported retain path type: {rel}")
+    digest = hashlib.sha256()
+    fd = os.open(full, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return {"type": "file", "sha256": digest.hexdigest(), "mode": stat.S_IMODE(mode)}
+
+
+def retain_manifest_payload(path: str) -> dict:
+    entries = {}
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
         dirnames[:] = sorted(name for name in dirnames if name != ".git")
+        rel_dir = _retain_rel(path, dirpath)
+        for name in list(dirnames):
+            full = os.path.join(dirpath, name)
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            entry = _record_retain_entry(full, rel)
+            if entry["type"] == "symlink":
+                dirnames.remove(name)
+            entries[rel] = entry
         for name in sorted(filenames):
             if name in {RETAIN_MANIFEST, RETAIN_MANIFEST + ".tmp"}:
                 continue
             full = os.path.join(dirpath, name)
-            rel = os.path.relpath(full, path).replace(os.sep, "/")
-            yield rel, full
-
-
-def retain_manifest_payload(path: str) -> dict:
-    files = {}
-    for rel, full in _iter_retain_files(path):
-        digest = hashlib.sha256()
-        with open(full, "rb") as handle:
-            for chunk in iter(lambda: handle.read(65536), b""):
-                digest.update(chunk)
-        files[rel] = digest.hexdigest()
-    return {"files": files}
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            entries[rel] = _record_retain_entry(full, rel)
+    return {"entries": entries}
 
 
 def write_retain_manifest(path: str) -> None:
@@ -93,6 +120,32 @@ def write_retain_manifest(path: str) -> None:
     os.replace(tmp, dest)
 
 
+def remove_retain_manifest(path: str) -> None:
+    dest = os.path.join(path, RETAIN_MANIFEST)
+    if os.path.lexists(dest):
+        os.unlink(dest)
+
+
+def _is_retain_manifest_path(path: str) -> bool:
+    rel = path.replace("\\", "/").lstrip("/")
+    if rel.endswith("/"):
+        rel = rel[:-1]
+    names = {RETAIN_MANIFEST, RETAIN_MANIFEST + ".tmp"}
+    return rel in names or any(rel.endswith("/" + name) for name in names)
+
+
+def porcelain_dirty_except_manifest(status: str | None) -> bool | None:
+    if status is None:
+        return None
+    filtered = []
+    for line in status.splitlines():
+        path = line[3:] if len(line) > 2 else ""
+        if _is_retain_manifest_path(path):
+            continue
+        filtered.append(line)
+    return porcelain_blocks_prune("\n".join(filtered))
+
+
 def retain_manifest_allows_prune(path: str) -> bool | None:
     dest = os.path.join(path, RETAIN_MANIFEST)
     try:
@@ -100,16 +153,13 @@ def retain_manifest_allows_prune(path: str) -> bool | None:
             recorded = json.load(handle)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
-    if not isinstance(recorded, dict) or not isinstance(recorded.get("files"), dict):
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("entries"), dict):
         return None
     try:
-        current = retain_manifest_payload(path)["files"]
+        current = retain_manifest_payload(path)["entries"]
     except OSError:
         return None
-    expected = recorded["files"]
-    if set(current) != set(expected):
-        return False
-    return all(current[key] == expected[key] for key in expected)
+    return current == recorded["entries"]
 
 
 def owned_worktree(path: str, repo_root: str) -> bool:

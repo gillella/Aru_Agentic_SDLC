@@ -1937,6 +1937,10 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
             worktree.parent.mkdir()
             self._git(repo, "worktree", "add", "-b", branch, str(worktree))
             expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            origin = root / "origin.git"
+            self._git(root, "clone", "--bare", str(repo), str(origin))
+            self._git(repo, "remote", "add", "origin", str(origin))
+            self._git(repo, "push", "origin", "HEAD:main")
             secret = worktree / "secret.txt"
             retained = (
                 repo / ".worktrees" / ".retained" /
@@ -1944,13 +1948,16 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
             )
             real_run_cmd = merge_pr.run_cmd
             raced = False
+            status_hits = 0
 
             def inject_secret_after_preflight(command, **kwargs):
-                nonlocal raced
+                nonlocal raced, status_hits
                 result = real_run_cmd(command, **kwargs)
                 if command[:3] == ["git", "status", "--porcelain"]:
-                    secret.write_text("late secret\n")
-                    raced = True
+                    status_hits += 1
+                    if status_hits == 1:
+                        secret.write_text("late secret\n")
+                        raced = True
                 return result
 
             with patch.object(
@@ -1961,12 +1968,107 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
                 )
 
             self.assertTrue(raced)
+            self.assertFalse(pruned)
+            self.assertIn("tracked or untracked files", message)
+            self.assertTrue(worktree.exists())
+            self.assertFalse((worktree / ".aru-retained-clean").exists())
+            self.assertEqual(secret.read_text(), "late secret\n")
+            self.assertFalse(retained.exists())
+            sweep_ok, sweep_msg = cleanup_worktrees.sweep(
+                str(repo), include_labels=False
+            )
+            self.assertTrue(sweep_ok)
+            self.assertTrue(secret.exists())
+            self.assertEqual(secret.read_text(), "late secret\n")
+            self.assertIn("dirty", sweep_msg)
+
+    def test_ignored_file_created_after_snapshot_survives_retained_sweep(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "late-secret"
+            branch = "fix/late-secret"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            (repo / ".gitignore").write_text("secret.txt\n")
+            self._git(repo, "add", ".gitignore")
+            self._git(repo, "commit", "-m", "ignore local secret")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            origin = root / "origin.git"
+            self._git(root, "clone", "--bare", str(repo), str(origin))
+            self._git(repo, "remote", "add", "origin", str(origin))
+            self._git(repo, "push", "origin", "HEAD:main")
+            secret = worktree / "secret.txt"
+            retained = (
+                repo / ".worktrees" / ".retained" /
+                f"{expected_sha[:12]}-{worktree.name}"
+            )
+            real_run_cmd = merge_pr.run_cmd
+            raced = False
+            status_hits = 0
+
+            def inject_secret_after_snapshot(command, **kwargs):
+                nonlocal raced, status_hits
+                result = real_run_cmd(command, **kwargs)
+                if command[:3] == ["git", "status", "--porcelain"]:
+                    status_hits += 1
+                    if status_hits >= 2:
+                        secret.write_text("late secret\n")
+                        raced = True
+                return result
+
+            with patch.object(
+                merge_pr, "run_cmd", side_effect=inject_secret_after_snapshot
+            ):
+                pruned, message = merge_pr.prune_worktree(
+                    repo, branch, expected_sha
+                )
+
+            self.assertTrue(raced)
             self.assertTrue(pruned)
             self.assertIn("Retained worktree", message)
             self.assertFalse(worktree.exists())
             self.assertEqual((retained / "secret.txt").read_text(), "late secret\n")
-            listed = self._git(repo, "worktree", "list", "--porcelain")
-            self.assertNotIn(f"refs/heads/{branch}", listed)
+            sweep_ok, sweep_msg = cleanup_worktrees.sweep(
+                str(repo), include_labels=False
+            )
+            self.assertFalse(sweep_ok)
+            self.assertTrue((retained / "secret.txt").exists())
+            self.assertEqual((retained / "secret.txt").read_text(), "late secret\n")
+            self.assertIn("dirty after retention", sweep_msg)
+
+    def test_existing_retention_destination_does_not_write_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            worktree = repo / ".worktrees" / "collision"
+            branch = "fix/collision"
+            self._git(root, "init", "--initial-branch=main", str(repo))
+            self._git(repo, "config", "user.name", "Aru Test")
+            self._git(repo, "config", "user.email", "aru@example.invalid")
+            self._git(repo, "commit", "--allow-empty", "-m", "seed")
+            worktree.parent.mkdir()
+            self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+            expected_sha = self._git(worktree, "rev-parse", "HEAD")
+            retained = (
+                repo / ".worktrees" / ".retained" /
+                f"{expected_sha[:12]}-{worktree.name}"
+            )
+            retained.mkdir(parents=True)
+            (retained / "already.txt").write_text("keep\n")
+
+            pruned, message = merge_pr.prune_worktree(
+                repo, branch, expected_sha
+            )
+
+            self.assertFalse(pruned)
+            self.assertIn("already exists", message)
+            self.assertTrue(worktree.exists())
+            self.assertFalse((worktree / ".aru-retained-clean").exists())
+            self.assertEqual((retained / "already.txt").read_text(), "keep\n")
 
     def test_branch_switch_after_discovery_is_revalidated_under_head_lock(self):
         with tempfile.TemporaryDirectory() as directory:

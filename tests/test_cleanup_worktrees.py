@@ -93,6 +93,70 @@ class PorcelainPruneTests(unittest.TestCase):
     def test_ignored_non_cache_path_blocks(self):
         self.assertTrue(cleanup_worktrees.porcelain_blocks_prune("!! .env\n"))
 
+    def test_retain_manifest_lines_are_ignored(self):
+        status = "?? .aru-retained-clean\n!! .aru-retained-clean.tmp\n"
+        self.assertFalse(cleanup_worktrees.porcelain_dirty_except_manifest(status))
+        self.assertTrue(
+            cleanup_worktrees.porcelain_dirty_except_manifest("?? secret.txt\n")
+        )
+        self.assertIsNone(cleanup_worktrees.porcelain_dirty_except_manifest(None))
+
+
+class RetainManifestWalkTests(unittest.TestCase):
+    def test_symlink_to_device_is_recorded_without_following(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "zero").symlink_to("/dev/zero")
+            payload = cleanup_worktrees.retain_manifest_payload(str(root))
+            self.assertEqual(
+                payload["entries"]["zero"],
+                {"type": "symlink", "target": "/dev/zero"},
+            )
+
+    def test_external_symlink_and_empty_dir_are_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside.txt"
+            outside.write_text("secret\n")
+            tree = Path(tmp) / "tree"
+            tree.mkdir()
+            (tree / "alias").symlink_to(outside)
+            (tree / "empty").mkdir()
+            hidden = Path(tmp) / "realdir"
+            hidden.mkdir()
+            (hidden / "nested.txt").write_text("hidden\n")
+            (tree / "dirlink").symlink_to(hidden)
+            payload = cleanup_worktrees.retain_manifest_payload(str(tree))
+            entries = payload["entries"]
+            self.assertEqual(entries["alias"]["type"], "symlink")
+            self.assertEqual(entries["alias"]["target"], str(outside))
+            self.assertEqual(entries["empty"]["type"], "dir")
+            self.assertEqual(entries["dirlink"]["type"], "symlink")
+            self.assertNotIn("dirlink/nested.txt", entries)
+            outside.write_text("changed\n")
+            (hidden / "nested.txt").write_text("changed\n")
+            self.assertTrue(
+                cleanup_worktrees.retain_manifest_payload(str(tree))["entries"]
+                == entries
+            )
+
+    def test_special_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            os.mkfifo(tree / "pipe")
+            with self.assertRaises(OSError):
+                cleanup_worktrees.retain_manifest_payload(str(tree))
+
+    def test_added_empty_dir_blocks_retained_prune(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            (tree / "keep.txt").write_text("ok\n")
+            cleanup_worktrees.write_retain_manifest(str(tree))
+            (tree / "later").mkdir()
+            self.assertIs(
+                cleanup_worktrees.retain_manifest_allows_prune(str(tree)),
+                False,
+            )
+
 
 class CleanupWorktreesTests(unittest.TestCase):
     def setUp(self):
