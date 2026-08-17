@@ -505,7 +505,7 @@ def parse_touches(body: str) -> List[str]:
     )
     if not match:
         return []
-    raw = match.group(1).strip().strip("*_").strip()
+    raw = _unwrap_declared_touches_value(match.group(1))
     # "(github settings only)" and similar prose mean the issue changes nothing
     # in the tree - not that it declared a directory called "(github".
     if raw.startswith("("):
@@ -517,6 +517,21 @@ def parse_touches(body: str) -> List[str]:
         for p in raw.split(",")
         if p.strip() and declared_path_is_safe(p.strip().strip("`"))
     ]
+
+
+def _unwrap_declared_touches_value(raw: str) -> str:
+    """Strip wrapping markdown without destroying a repo-wide ``**`` glob."""
+    value = (raw or "").strip()
+    if value in {"*", "**"}:
+        return value
+    if len(value) >= 2 and value[0] == "`" and value[-1] == "`" and "`" not in value[1:-1]:
+        inner = value[1:-1].strip()
+        return inner if inner else value
+    if value.startswith("**") and value.endswith("**") and len(value) > 4:
+        return value[2:-2].strip()
+    if value.startswith("**"):
+        return value[2:].strip()
+    return value
 
 
 def _norm_path(p: str) -> str:

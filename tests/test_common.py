@@ -175,6 +175,8 @@ class BlankTouchesRegressionTests(unittest.TestCase):
         self.assertEqual(parse_touches("touches: scripts/*, tests/test_common.py"), [
             "scripts/*", "tests/test_common.py",
         ])
+        self.assertEqual(parse_touches("touches: **"), ["**"])
+        self.assertEqual(parse_touches("touches: `**`"), ["**"])
 
     def test_traversal_and_absolute_paths_are_rejected(self):
         self.assertEqual(parse_touches("touches: ../etc/passwd, scripts/common.py"), [
