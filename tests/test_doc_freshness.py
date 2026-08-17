@@ -558,3 +558,80 @@ class RepositoryDocumentationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkflowCredentialBoundaryTests(unittest.TestCase):
+    """The checker is PR-controlled code; it must never be handed a token.
+
+    Parsed as text rather than YAML on purpose: pyyaml is not a declared
+    dependency of this repo, and adding one so a test can read CI config
+    would be a worse trade than string matching.
+    """
+
+    WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+
+    def _docs_job(self) -> str:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        start = text.index("\n  docs-freshness:")
+        rest = text[start + 1:]
+        # The job ends at the next job key at the same indent level.
+        end = rest.find("\n  test-and-lint:")
+        return rest if end == -1 else rest[:end]
+
+    def _steps(self):
+        return self._docs_job().split("\n      - name:")[1:]
+
+    def _step_running_checker(self, *, on_pull_request: bool) -> str:
+        wanted = "== 'pull_request'" if on_pull_request else "!= 'pull_request'"
+        for step in self._steps():
+            if "check_docs.py" in step and wanted in step:
+                return step
+        self.fail(
+            f"no docs-freshness step running check_docs.py guarded by {wanted}"
+        )
+
+    def test_pull_request_path_receives_no_token(self):
+        step = self._step_running_checker(on_pull_request=True)
+        self.assertNotIn("GH_TOKEN", step)
+        self.assertNotIn("GITHUB_TOKEN", step)
+        self.assertNotIn("secrets.", step)
+
+    def test_pull_request_path_runs_offline(self):
+        # Without a token the issue-state lookup cannot succeed, so the PR
+        # path must skip it explicitly rather than fail the build on every PR.
+        step = self._step_running_checker(on_pull_request=True)
+        self.assertIn("--offline", step)
+
+    def test_trusted_path_keeps_the_full_check(self):
+        step = self._step_running_checker(on_pull_request=False)
+        self.assertIn("GH_TOKEN", step)
+        self.assertNotIn("--offline", step)
+
+    def _workflow_permissions(self) -> list:
+        """Grant lines from the top-level permissions block, comments excluded.
+
+        Scoped to the block rather than the whole header: the header prose
+        legitimately mentions 'issues:' when explaining why it is absent.
+        """
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        block = text[text.index("\npermissions:") + 1: text.index("\njobs:")]
+        grants = []
+        for line in block.splitlines()[1:]:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not line.startswith("  "):
+                break
+            grants.append(stripped)
+        return grants
+
+    def test_issues_read_is_not_granted_workflow_wide(self):
+        grants = self._workflow_permissions()
+        self.assertNotIn("issues: read", grants)
+        self.assertIn("contents: read", grants)
+
+    def test_issues_read_is_granted_to_the_docs_job(self):
+        self.assertIn("issues: read", self._docs_job())
+
+    def test_checkout_does_not_persist_credentials(self):
+        self.assertIn("persist-credentials: false", self._docs_job())
