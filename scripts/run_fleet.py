@@ -755,6 +755,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
+    project_id = args.project_id.strip() if args.project_id else ""
+    if project_id:
+        try:
+            from agent_presence import PROJECT_ID_RE
+        except ImportError:
+            PROJECT_ID_RE = None
+        if PROJECT_ID_RE is not None and not PROJECT_ID_RE.fullmatch(project_id):
+            parser.error(f"invalid project_id: {project_id}")
+
     directory = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir(repo)
     store = StateStore(directory, agent)
     if args.mode == "status":
@@ -807,7 +816,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     runner = FleetRunner(
         config,
         presence_store=presence_store,
-        project_id=args.project_id or None,
+        project_id=project_id or None,
     )
     return runner.run_loop() if args.mode == "loop" else runner.run_once()
 

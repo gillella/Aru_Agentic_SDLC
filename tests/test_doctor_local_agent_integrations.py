@@ -427,6 +427,63 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertIn("GitHub claims remain authoritative", payload["presence"]["ownership"])
         # Doctor must not invent paid wake enablement from presence alone.
         self.assertFalse(payload["agents"]["cursor"]["native_wake_enabled"])
+        joined = " ".join(payload["presence"]["wake_limitations"])
+        self.assertIn("Presence never launches agents", joined)
+        self.assertIn("by_product", payload["presence"])
+        # Read-only: presence file unchanged after doctor.
+        before = (self.target_home / ".aru" / "agent-presence.json").read_text(encoding="utf-8")
+        self.run_doctor("--json", "--project", str(project.resolve()))
+        after = (self.target_home / ".aru" / "agent-presence.json").read_text(encoding="utf-8")
+        self.assertEqual(before, after)
+
+    def test_presence_project_id_uses_target_home_registry(self):
+        import sys
+
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import agent_presence as ap
+        import slack_projects as sp
+
+        project = self.target_home / "repo-reg"
+        project.mkdir()
+        aru = self.target_home / ".aru"
+        aru.mkdir(mode=0o700, exist_ok=True)
+        projects_path = aru / "projects.json"
+        record = {
+            "project_id": "proj_from_target_home",
+            "github_repo_id": "R_kgDOreg",
+            "github_repo_database_id": 1,
+            "project_v2_id": "PVT_kwDOreg",
+            "repo_slug": "acme/reg",
+            "local_path": str(project.resolve()),
+            "slack_team_id": "T123",
+            "slack_channel_id": "C123",
+            "lifecycle": "active",
+            "created_at": "2026-08-16T00:00:00Z",
+            "updated_at": "2026-08-16T00:00:00Z",
+            "updated_by": "test",
+            "closed_at": None,
+        }
+        projects_path.write_text(
+            json.dumps({"schema_version": 1, "projects": {
+                "proj_from_target_home": record,
+            }, "migrations": {}}) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(projects_path, 0o600)
+        store = ap.PresenceStore(aru / "agent-presence.json")
+        store.register(
+            agent_id="cursor-cloud-1",
+            family="cursor",
+            project_id="proj_from_target_home",
+            checkout_path=str(project.resolve()),
+        )
+        payload = json.loads(
+            self.run_doctor("--json", "--project", str(project.resolve())).stdout
+        )
+        self.assertEqual(payload["presence"]["project_id"], "proj_from_target_home")
+        self.assertEqual(len(payload["presence"]["tasks"]), 1)
+        # Ensure we did not accidentally import the real home registry path.
+        self.assertNotEqual(str(sp.DEFAULT_REGISTRY_PATH), str(projects_path))
 
 
 if __name__ == "__main__":

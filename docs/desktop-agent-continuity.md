@@ -98,5 +98,13 @@ Presence is not ownership:
   only by using **different** agent ids.
 - Doctor reports presence and truthful vendor wake limitations read-only; it
   never launches agents or consumes paid wake usage.
+- Presence falls back to a clone-independent `proj_repo_<hash>` derived from
+  the GitHub repository node id and ProjectV2 board id when the checkout path
+  is not yet listed in `projects.json`.
+- Explicit `unregister` (or a distinct agent id) is required before the same
+  agent id may bind to another project.
+- Desktop tasks register and heartbeat via `scripts/agent_presence.py`
+  (`register` / `heartbeat` / `set-availability`); `run_fleet.py` is optional
+  headless only.
 - Never post presence heartbeats to Slack.
 

@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -139,6 +140,99 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertNotEqual(first, other)
         self.assertTrue(ap.PROJECT_ID_RE.fullmatch(first))
 
+    def test_identity_derived_id_is_clone_independent(self):
+        identity = {
+            "github_repo_id": "R_kgDOtest",
+            "project_v2_id": "PVT_kwDOboard",
+            "repo_slug": "acme/demo",
+        }
+        clone_a = self.root / "clones" / "agent-a"
+        clone_b = self.root / "clones" / "agent-b"
+        clone_a.mkdir(parents=True)
+        clone_b.mkdir(parents=True)
+        aru = self.root / "aru-home"
+        aru.mkdir(mode=0o700)
+        projects_path = aru / "projects.json"
+        projects_path.write_text(
+            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(projects_path, 0o600)
+        first = ap.resolve_project_id(
+            clone_a,
+            projects_path=projects_path,
+            identity_provider=lambda _path: identity,
+        )
+        second = ap.resolve_project_id(
+            clone_b,
+            projects_path=projects_path,
+            identity_provider=lambda _path: identity,
+        )
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("proj_repo_"))
+        self.assertNotEqual(first, ap.path_derived_project_id(clone_a))
+
+    def test_unregister_allows_rebind(self):
+        self.store.register(
+            agent_id="cursor-1",
+            family="cursor",
+            project_id="proj_alpha",
+            checkout_path=str(self.project_a),
+        )
+        self.store.unregister("cursor-1")
+        rebound = self.store.register(
+            agent_id="cursor-1",
+            family="cursor",
+            project_id="proj_beta",
+            checkout_path=str(self.project_b),
+        )
+        self.assertEqual(rebound.project_id, "proj_beta")
+
+    def test_cli_register_and_heartbeat(self):
+        presence_path = self.root / "cli-presence.json"
+        code = ap.main([
+            "--path", str(presence_path),
+            "register",
+            "--agent", "cursor-1",
+            "--family", "cursor",
+            "--checkout", str(self.project_a),
+            "--project-id", "proj_alpha",
+        ])
+        self.assertEqual(code, 0)
+        store = ap.PresenceStore(presence_path)
+        self.assertEqual(store.get("cursor-1").availability, "available")
+        code = ap.main([
+            "--path", str(presence_path),
+            "heartbeat",
+            "--agent", "cursor-1",
+            "--availability", "busy",
+        ])
+        self.assertEqual(code, 0)
+        self.assertEqual(store.get("cursor-1").availability, "busy")
+
+    def test_doctor_summary_is_read_only(self):
+        self.store.register(
+            agent_id="cursor-cloud-1",
+            family="cursor",
+            project_id=ap.path_derived_project_id(self.project_a),
+            checkout_path=str(self.project_a),
+            availability="available",
+        )
+        self.advance(120)
+        before = json.loads(self.path.read_text(encoding="utf-8"))
+        agents = {"cursor": {}, "codex": {}, "claude": {}, "antigravity": {}}
+        summary = ap.doctor_presence_summary(
+            project=str(self.project_a),
+            agents=agents,
+            store=self.store,
+            catalog_non_guarantees=["app quit"],
+        )
+        after = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(before, after)
+        self.assertEqual(self.store.get("cursor-cloud-1").availability, "available")
+        self.assertIn("Presence never launches agents", " ".join(summary["wake_limitations"]))
+        self.assertIn("app quit", " ".join(summary["wake_limitations"]))
+
     def test_doctor_summary_is_project_scoped(self):
         self.store.register(
             agent_id="cursor-cloud-1",
@@ -169,7 +263,7 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertEqual(len(summary["tasks"]), 1)
         self.assertEqual(summary["tasks"][0]["agent_id"], "cursor-cloud-1")
         self.assertEqual(agents["cursor"]["last_heartbeat"], summary["tasks"][0]["last_heartbeat"])
-        self.assertIn("app quit", summary["wake_limitations"][0])
+        self.assertIn("app quit", " ".join(summary["wake_limitations"]))
         self.assertIn("GitHub claims remain authoritative", summary["ownership"])
 
     def test_persisted_document_is_json_object(self):

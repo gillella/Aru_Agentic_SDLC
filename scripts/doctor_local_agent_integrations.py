@@ -785,18 +785,22 @@ def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
         from agent_presence import PresenceStore, doctor_presence_summary
 
         presence_path = target_home / ".aru" / "agent-presence.json"
+        projects_path = target_home / ".aru" / "projects.json"
         payload["presence"] = doctor_presence_summary(
             project=project,
             agents=agents,
             store=PresenceStore(presence_path),
             catalog_non_guarantees=catalog["non_guarantees"],
+            projects_path=projects_path,
         )
     except Exception as exc:
         payload["presence"] = {
             "schema": "aru.agent-presence/v1",
             "project": project,
+            "project_id": None,
             "error": type(exc).__name__,
             "tasks": [],
+            "by_product": {name: [] for name in agents},
             "wake_limitations": list(catalog.get("non_guarantees") or []),
             "ownership": (
                 "GitHub claims remain authoritative; presence never releases or steals claims."
@@ -841,8 +845,11 @@ def render_human(payload: dict) -> str:
             f"project={task.get('project_id')} "
             f"heartbeat={task.get('last_heartbeat') or 'unknown'}"
         )
-    for note in (presence.get("wake_limitations") or [])[:3]:
+    for note in presence.get("wake_limitations") or []:
         lines.append(f"wake_limitation: {note}")
+    ownership = presence.get("ownership")
+    if ownership:
+        lines.append(f"presence_ownership: {ownership}")
     failed = [item for item in payload.get("checks") or [] if not item["ok"]]
     if failed:
         lines.append("failed checks:")

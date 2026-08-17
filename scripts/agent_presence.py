@@ -93,33 +93,81 @@ def _parse_iso(value: str) -> datetime:
 
 
 def path_derived_project_id(checkout: Path) -> str:
-    """Stable project_id when the Slack registry has no mapping yet."""
+    """Last-resort project_id when GitHub identity cannot be resolved."""
     resolved = checkout.expanduser().resolve()
     digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:12]
     return f"proj_path_{digest}"
+
+
+def identity_derived_project_id(github_repo_id: str, project_v2_id: str) -> str:
+    """Clone-independent project_id from durable GitHub repo + board ids."""
+    repo = (github_repo_id or "").strip()
+    board = (project_v2_id or "").strip()
+    if not repo or not board:
+        raise PresenceError("identity-derived project_id requires repo and board ids")
+    digest = hashlib.sha256(f"{repo}|{board}".encode("utf-8")).hexdigest()[:20]
+    return f"proj_repo_{digest}"
 
 
 def resolve_project_id(
     checkout: Path,
     *,
     projects_path: Optional[Path] = None,
+    identity_provider: Optional[Callable[[Path], Dict[str, Any]]] = None,
 ) -> str:
-    """Prefer the #187 registry mapping; otherwise derive from checkout path."""
-    resolved = checkout.expanduser().resolve()
-    try:
-        from slack_projects import ProjectRegistry
+    """Resolve a shared project identity for presence.
 
+    Preference order:
+    1. Active #187 registry row whose ``local_path`` matches this checkout.
+    2. Active registry row matching durable GitHub repo + ProjectV2 ids.
+    3. Deterministic ``proj_repo_<hash>`` from those durable ids (clone-independent).
+    4. Path hash only when GitHub identity cannot be discovered (offline/hermetic).
+    """
+    resolved = checkout.expanduser().resolve()
+    identity: Optional[Dict[str, Any]] = None
+    provider = identity_provider
+    try:
+        from slack_projects import ProjectRegistry, discover_checkout_identity
+
+        if provider is None:
+            provider = discover_checkout_identity
         registry = ProjectRegistry(projects_path) if projects_path else ProjectRegistry()
-        for record in registry.list(include_closed=False):
+        records = registry.list(include_closed=False)
+        for record in records:
             try:
                 if Path(record.local_path).expanduser().resolve() == resolved:
                     return record.project_id
             except OSError:
                 continue
+        try:
+            identity = provider(resolved)
+        except (RegistryError, OSError, ValueError, TypeError):
+            identity = None
+        if identity:
+            repo_id = str(identity.get("github_repo_id") or "")
+            board_id = str(identity.get("project_v2_id") or "")
+            for record in records:
+                if (
+                    record.github_repo_id == repo_id
+                    and record.project_v2_id == board_id
+                ):
+                    return record.project_id
+            if repo_id and board_id:
+                return identity_derived_project_id(repo_id, board_id)
     except RegistryError:
         pass
     except OSError:
         pass
+    if identity is None and provider is not None:
+        try:
+            identity = provider(resolved)
+        except (RegistryError, OSError, ValueError, TypeError, PresenceError):
+            identity = None
+    if identity:
+        repo_id = str(identity.get("github_repo_id") or "")
+        board_id = str(identity.get("project_v2_id") or "")
+        if repo_id and board_id:
+            return identity_derived_project_id(repo_id, board_id)
     return path_derived_project_id(resolved)
 
 
@@ -462,6 +510,24 @@ class PresenceStore:
 
         return self._mutate(apply)
 
+    def unregister(self, agent_id: str) -> PresenceRecord:
+        """Remove a registration so the agent id may bind to another project."""
+        agent_id = _validate_agent_id(agent_id)
+
+        def apply(document: Dict[str, Any]) -> PresenceRecord:
+            validated = self._validate_document(document)
+            existing = validated["_records"].get(agent_id)
+            if existing is None:
+                raise PresenceError(f"unknown agent_id: {agent_id}")
+            agents = dict(validated["agents"])
+            del agents[agent_id]
+            document["schema"] = SCHEMA_NAME
+            document["version"] = SCHEMA_VERSION
+            document["agents"] = agents
+            return existing
+
+        return self._mutate(apply)
+
     def query_project(
         self,
         *,
@@ -556,6 +622,7 @@ def doctor_presence_summary(
     agents: Dict[str, Dict[str, Any]],
     store: Optional[PresenceStore] = None,
     catalog_non_guarantees: Optional[Sequence[str]] = None,
+    projects_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Read-only presence + wake-limitation summary for the doctor payload."""
     store = store or PresenceStore()
@@ -564,8 +631,13 @@ def doctor_presence_summary(
     error = None
     if project:
         try:
-            project_id = resolve_project_id(Path(project))
-            records = store.query_project(checkout_path=project, project_id=project_id)
+            project_id = resolve_project_id(Path(project), projects_path=projects_path)
+            # Never expire/mutate on doctor: diagnosis must stay read-only.
+            records = store.query_project(
+                checkout_path=project,
+                project_id=project_id,
+                expire=False,
+            )
         except (PresenceError, OSError) as exc:
             error = type(exc).__name__
             records = []
@@ -586,17 +658,15 @@ def doctor_presence_summary(
             if not existing or record.last_heartbeat > str(existing):
                 agents[product]["last_heartbeat"] = record.last_heartbeat
             agents[product]["presence_availability"] = record.availability
-        # Always expose tasks under presence even when product mapping fails.
     wake_limitations = [
         "App quit, logout, sleep, power loss, credits, and vendor termination "
         "are non-guarantees.",
         "Presence never launches agents or consumes paid wake usage.",
         "Same-task native wake remains vendor-specific; doctor reports evidence only.",
+        "Presence heartbeats expire availability without transferring GitHub ownership.",
     ]
     if catalog_non_guarantees:
-        wake_limitations = list(catalog_non_guarantees) + [
-            "Presence heartbeats expire availability without transferring GitHub ownership.",
-        ]
+        wake_limitations = wake_limitations + list(catalog_non_guarantees)
     return {
         "schema": SCHEMA_NAME,
         "project": project,
@@ -654,44 +724,201 @@ def sync_runner_presence(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Inspect project-scoped agent presence.")
-    parser.add_argument("--path", type=Path, default=DEFAULT_PRESENCE_PATH)
-    parser.add_argument("--project-id")
-    parser.add_argument("--checkout", type=Path)
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--expire", action="store_true", help="Apply heartbeat TTL first")
+    parser = argparse.ArgumentParser(
+        description="Project-scoped agent presence for desktop and headless tasks.",
+    )
+    parser.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_PRESENCE_PATH,
+        help="Presence registry path (default: ~/.aru/agent-presence.json)",
+    )
+    parser.add_argument("--json", action="store_true", help="Machine-readable output")
+    sub = parser.add_subparsers(dest="command")
+
+    register = sub.add_parser("register", help="Register or refresh this task's presence")
+    register.add_argument("--agent", required=True)
+    register.add_argument("--family", required=True)
+    register.add_argument("--checkout", type=Path, required=True)
+    register.add_argument("--project-id", default="")
+    register.add_argument("--role", default="")
+    register.add_argument(
+        "--availability",
+        default="available",
+        choices=sorted(AVAILABILITY_STATES),
+    )
+    register.add_argument("--capability", action="append", default=[])
+    register.add_argument("--wake-evidence", action="append", default=[])
+
+    heartbeat = sub.add_parser("heartbeat", help="Refresh heartbeat / availability")
+    heartbeat.add_argument("--agent", required=True)
+    heartbeat.add_argument(
+        "--availability",
+        default=None,
+        choices=sorted(AVAILABILITY_STATES),
+    )
+    heartbeat.add_argument("--role", default=None)
+
+    availability = sub.add_parser(
+        "set-availability", help="Set availability without changing project binding",
+    )
+    availability.add_argument("--agent", required=True)
+    availability.add_argument(
+        "--availability",
+        required=True,
+        choices=sorted(AVAILABILITY_STATES),
+    )
+
+    unregister = sub.add_parser(
+        "unregister",
+        help="Remove registration so this agent id may bind to another project",
+    )
+    unregister.add_argument("--agent", required=True)
+
+    listing = sub.add_parser("list", help="List presence tasks (default command)")
+    listing.add_argument("--project-id", default="")
+    listing.add_argument("--checkout", type=Path)
+    listing.add_argument(
+        "--expire",
+        action="store_true",
+        help="Apply heartbeat TTL mutations before listing",
+    )
+
+    expire = sub.add_parser("expire", help="Mark stale heartbeats temporarily-offline")
+    _ = expire
+
+    resolve = sub.add_parser(
+        "resolve-project-id",
+        help="Print the clone-independent project_id for a checkout",
+    )
+    resolve.add_argument("--checkout", type=Path, required=True)
+    resolve.add_argument("--projects-path", type=Path)
+
     return parser
 
 
+def _print_record(record: PresenceRecord, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(record.public_dict(), indent=2, sort_keys=True))
+        return
+    print(
+        f"{record.agent_id} project={record.project_id} "
+        f"availability={record.availability} "
+        f"heartbeat={record.last_heartbeat or 'unknown'}"
+    )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
-    store = PresenceStore(args.path)
-    if args.expire:
-        store.expire_stale()
-    if args.project_id or args.checkout:
-        records = store.query_project(
-            project_id=args.project_id,
-            checkout_path=str(args.checkout.resolve()) if args.checkout else None,
-            expire=False,
-        )
-    else:
-        records = list(store._read()["_records"].values())
-    payload = {
-        "schema": SCHEMA_NAME,
-        "path": str(args.path),
-        "tasks": [record.public_dict() for record in records],
+    argv_list = list(argv) if argv is not None else list(sys.argv[1:])
+    known = {
+        "register", "heartbeat", "set-availability", "unregister",
+        "list", "expire", "resolve-project-id",
     }
-    if args.json:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"presence tasks={len(records)} path={args.path}")
-        for record in records:
-            print(
-                f"  {record.agent_id} project={record.project_id} "
-                f"availability={record.availability} "
-                f"heartbeat={record.last_heartbeat or 'unknown'}"
+    if not any(token in known for token in argv_list):
+        argv_list = ["list", *argv_list]
+
+    args = build_parser().parse_args(argv_list)
+    store = PresenceStore(args.path)
+    command = args.command or "list"
+
+    try:
+        if command == "register":
+            checkout = args.checkout.expanduser().resolve()
+            project_id = args.project_id or resolve_project_id(checkout)
+            record = store.register(
+                agent_id=args.agent,
+                family=args.family,
+                project_id=project_id,
+                checkout_path=str(checkout),
+                capabilities=args.capability or ["factory-loop"],
+                role=args.role,
+                availability=args.availability,
+                wake_evidence_supported=args.wake_evidence or ["github-recovery"],
             )
-    return 0
+            _print_record(record, as_json=args.json)
+            return 0
+
+        if command == "heartbeat":
+            record = store.heartbeat(
+                args.agent,
+                availability=args.availability,
+                role=args.role,
+            )
+            _print_record(record, as_json=args.json)
+            return 0
+
+        if command == "set-availability":
+            record = store.set_availability(args.agent, args.availability)
+            _print_record(record, as_json=args.json)
+            return 0
+
+        if command == "unregister":
+            record = store.unregister(args.agent)
+            if args.json:
+                print(json.dumps({"unregistered": record.public_dict()}, indent=2, sort_keys=True))
+            else:
+                print(f"unregistered {record.agent_id} from {record.project_id}")
+            return 0
+
+        if command == "expire":
+            changed = store.expire_stale()
+            payload = {
+                "schema": SCHEMA_NAME,
+                "changed": [item.public_dict() for item in changed],
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(f"expired {len(changed)} stale presence task(s)")
+            return 0
+
+        if command == "resolve-project-id":
+            checkout = args.checkout.expanduser().resolve()
+            project_id = resolve_project_id(
+                checkout,
+                projects_path=args.projects_path,
+            )
+            if args.json:
+                print(json.dumps({
+                    "checkout": str(checkout),
+                    "project_id": project_id,
+                }, indent=2, sort_keys=True))
+            else:
+                print(project_id)
+            return 0
+
+        # list
+        if getattr(args, "expire", False):
+            store.expire_stale()
+        project_id = getattr(args, "project_id", "") or None
+        checkout = getattr(args, "checkout", None)
+        if project_id or checkout:
+            records = store.query_project(
+                project_id=project_id or None,
+                checkout_path=str(checkout.resolve()) if checkout else None,
+                expire=False,
+            )
+        else:
+            records = list(store._read()["_records"].values())
+        payload = {
+            "schema": SCHEMA_NAME,
+            "path": str(args.path),
+            "tasks": [record.public_dict() for record in records],
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"presence tasks={len(records)} path={args.path}")
+            for record in records:
+                print(
+                    f"  {record.agent_id} project={record.project_id} "
+                    f"availability={record.availability} "
+                    f"heartbeat={record.last_heartbeat or 'unknown'}"
+                )
+        return 0
+    except PresenceError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
