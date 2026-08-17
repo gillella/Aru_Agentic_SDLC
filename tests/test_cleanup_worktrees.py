@@ -45,6 +45,26 @@ def _add_worktree(clone: Path, branch: str) -> Path:
     return path
 
 
+class PorcelainPruneTests(unittest.TestCase):
+    def test_empty_status_is_clean(self):
+        self.assertFalse(cleanup_worktrees.porcelain_blocks_prune(""))
+
+    def test_untracked_and_tracked_changes_block(self):
+        self.assertTrue(cleanup_worktrees.porcelain_blocks_prune("?? scratch.txt\n"))
+        self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(" M scripts/tool.py\n"))
+
+    def test_known_cache_ignored_paths_do_not_block(self):
+        status = (
+            "!! tests/__pycache__/mod.cpython-314.pyc\n"
+            "!! .pytest_cache/\n"
+            "!! .ruff_cache/CACHEDIR.TAG\n"
+        )
+        self.assertFalse(cleanup_worktrees.porcelain_blocks_prune(status))
+
+    def test_ignored_non_cache_path_blocks(self):
+        self.assertTrue(cleanup_worktrees.porcelain_blocks_prune("!! .env\n"))
+
+
 class CleanupWorktreesTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -148,6 +168,53 @@ class CleanupWorktreesTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(path.exists())
         self.assertIn("dirty", message)
+
+    def test_ignored_cache_on_merged_worktree_is_pruned(self):
+        path = _add_worktree(self.clone, "feat/issue-8-cache")
+        (path / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n.ruff_cache/\n")
+        _git(path, "add", ".gitignore")
+        _git(path, "commit", "-m", "ignore caches")
+        self._commit_on(path, "feature.txt")
+        _git(self.clone, "push", "-u", "origin", "feat/issue-8-cache")
+        _git(self.clone, "merge", "--no-ff", "-m", "merge feature", "feat/issue-8-cache")
+        _git(self.clone, "push", "origin", "main")
+        _git(self.clone, "push", "origin", "--delete", "feat/issue-8-cache")
+        cache = path / "tests" / "__pycache__"
+        cache.mkdir(parents=True)
+        (cache / "test.cpython-314.pyc").write_bytes(b"\0")
+        ok, message = cleanup_worktrees.sweep(str(self.clone), include_labels=False)
+        self.assertTrue(ok)
+        self.assertNotIn(os.path.realpath(path), self._worktree_paths())
+        self.assertFalse(path.exists())
+        self.assertIn("removed", message)
+
+    def test_stale_origin_main_is_fetched_before_ancestor_check(self):
+        path = _add_worktree(self.clone, "feat/issue-8-github-merge")
+        self._commit_on(path, "feature.txt")
+        _git(self.clone, "push", "-u", "origin", "feat/issue-8-github-merge")
+        origin = self.root / "origin.git"
+        subprocess.run(
+            [
+                "git", "--git-dir", str(origin),
+                "fetch", str(self.clone),
+                "feat/issue-8-github-merge:main",
+            ],
+            check=True, capture_output=True, text=True,
+        )
+        _git(self.clone, "push", "origin", "--delete", "feat/issue-8-github-merge")
+        before = subprocess.check_output(
+            ["git", "rev-parse", "refs/remotes/origin/main"],
+            cwd=self.clone, text=True,
+        ).strip()
+        merged = subprocess.check_output(
+            ["git", "--git-dir", str(origin), "rev-parse", "main"],
+            text=True,
+        ).strip()
+        self.assertNotEqual(before, merged)
+        ok, message = cleanup_worktrees.sweep(str(self.clone), include_labels=False)
+        self.assertTrue(ok)
+        self.assertNotIn(os.path.realpath(path), self._worktree_paths())
+        self.assertIn("removed", message)
 
     def test_already_clean_is_noop(self):
         first = cleanup_worktrees.sweep(str(self.clone), include_labels=False)

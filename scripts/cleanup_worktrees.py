@@ -23,6 +23,12 @@ import merge_pr  # noqa: E402
 ISSUE_BRANCH_PREFIXES = ("feat/", "fix/", "chore/", "docs/")
 REVIEW_BRANCH_PREFIX = "review-pr-"
 RETAINED_DIR = os.path.join(".worktrees", ".retained")
+KNOWN_CACHE_NAMES = frozenset({
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+})
 
 
 def parse_worktrees(porcelain: str) -> list[dict]:
@@ -66,6 +72,36 @@ def dirty_status(path: str) -> str | None:
     if code != 0:
         return None
     return status
+
+
+def _known_cache_path(path: str) -> bool:
+    normalized = path.strip().replace("\\", "/").strip("/")
+    if normalized.endswith(".pyc"):
+        return True
+    return any(part in KNOWN_CACHE_NAMES for part in normalized.split("/"))
+
+
+def porcelain_blocks_prune(status: str | None) -> bool | None:
+    """None if unreadable, True if real dirt, False if clean or cache-only."""
+    if status is None:
+        return None
+    for line in status.splitlines():
+        if not line:
+            continue
+        xy = line[:2]
+        path = line[3:] if len(line) > 2 else ""
+        if xy == "!!" and _known_cache_path(path):
+            continue
+        return True
+    return False
+
+
+def refresh_origin(repo_root: str) -> bool:
+    code, _, _ = run_cmd(
+        ["git", "fetch", "origin", "--prune"],
+        check=False, cwd=repo_root,
+    )
+    return code == 0
 
 
 def under_worktrees(path: str, repo_root: str) -> bool:
@@ -164,11 +200,11 @@ def prune_orphan_worktrees(repo_root: str) -> list[str]:
         if not owned_worktree(path, repo_root):
             notes.append(f"skipped {path}: not a worktree of this repo")
             continue
-        status = dirty_status(path)
-        if status is None:
+        blocked = porcelain_blocks_prune(dirty_status(path))
+        if blocked is None:
             notes.append(f"skipped {path}: status unreadable")
             continue
-        if status:
+        if blocked:
             notes.append(f"skipped dirty {path}")
             continue
         branch = branch_name(fields)
@@ -197,8 +233,8 @@ def prune_retained_copies(repo_root: str) -> list[str]:
         if not owned_worktree(path, repo_root):
             notes.append(f"skipped retained {path}: not a worktree of this repo")
             continue
-        status = dirty_status(path)
-        if status is None or status:
+        blocked = porcelain_blocks_prune(dirty_status(path))
+        if blocked is None or blocked:
             notes.append(f"skipped retained {path}: dirty or unreadable")
             continue
         try:
@@ -341,6 +377,13 @@ def clear_stale_claim_labels(repo_root: str, retain_merger_pr: int | None = None
 
 def sweep(repo_root: str, include_labels: bool = True,
           retain_merger_pr: int | None = None) -> tuple[bool, str]:
+    if not refresh_origin(repo_root):
+        notes = ["fetch failed; keeping worktrees and local branches"]
+        if include_labels:
+            notes = notes + clear_stale_claim_labels(
+                repo_root, retain_merger_pr=retain_merger_pr
+            )
+        return True, "; ".join(notes)
     notes = (
         prune_orphan_worktrees(repo_root)
         + prune_retained_copies(repo_root)
