@@ -44,16 +44,22 @@ def parse_worktrees(porcelain: str) -> list[dict]:
     return rows
 
 
-def owned_worktree(path: str, repo_root: str) -> bool:
+def gitdir_target(path: str) -> str | None:
     marker = os.path.join(path, ".git")
     try:
         with open(marker, encoding="utf-8") as handle:
             text = handle.read().strip()
     except OSError:
-        return False
+        return None
     if not text.startswith("gitdir: "):
+        return None
+    return os.path.realpath(text.split(": ", 1)[1])
+
+
+def owned_worktree(path: str, repo_root: str) -> bool:
+    admin_dir = gitdir_target(path)
+    if not admin_dir:
         return False
-    admin_dir = os.path.realpath(text.split(": ", 1)[1])
     allowed = os.path.realpath(os.path.join(repo_root, ".git", "worktrees"))
     try:
         return os.path.commonpath([admin_dir, allowed]) == allowed
@@ -233,6 +239,14 @@ def prune_retained_copies(repo_root: str) -> list[str]:
         if not owned_worktree(path, repo_root):
             notes.append(f"skipped retained {path}: not a worktree of this repo")
             continue
+        admin_dir = gitdir_target(path)
+        if admin_dir and not os.path.isdir(admin_dir):
+            try:
+                shutil.rmtree(path)
+                notes.append(f"removed retained {path}")
+            except OSError as exc:
+                notes.append(f"could not remove retained {path}: {exc}")
+            continue
         blocked = porcelain_blocks_prune(dirty_status(path))
         if blocked is None or blocked:
             notes.append(f"skipped retained {path}: dirty or unreadable")
@@ -290,12 +304,17 @@ def delete_merged_local_branches(repo_root: str) -> list[str]:
     return notes
 
 
-def _items_with_prefix(kind: str, state: str, prefix: str) -> list[int]:
-    flag = "--state"
-    cmd = ["gh", kind, "list", flag, state, "--limit", "200", "--json", "number,labels"]
+CLAIM_LIST_LIMIT = 1000
+
+
+def _items_with_prefix(kind: str, state: str, prefix: str) -> tuple[list[int], str | None]:
+    cmd = [
+        "gh", kind, "list", "--state", state,
+        "--limit", str(CLAIM_LIST_LIMIT), "--json", "number,labels",
+    ]
     data = merge_pr._gh_json(cmd)
     if not isinstance(data, list):
-        return []
+        return [], "unreadable"
     found = []
     for item in data:
         labels = [
@@ -303,7 +322,9 @@ def _items_with_prefix(kind: str, state: str, prefix: str) -> list[int]:
         ]
         if any(name.startswith(prefix) for name in labels):
             found.append(int(item["number"]))
-    return found
+    if len(data) >= CLAIM_LIST_LIMIT:
+        return found, "truncated"
+    return found, None
 
 
 def linked_issues_unfinished(pr: dict) -> bool:
@@ -355,15 +376,32 @@ def merger_claim_still_needed(repo_root: str, pr_num: int) -> bool:
     return absent is not True
 
 
+def _record_claim_scan(notes: list[str], scan: str | None, kind: str, prefix: str) -> None:
+    if scan == "truncated":
+        notes.append(
+            f"{kind} claim scan hit the page limit; older {prefix} labels may remain"
+        )
+    elif scan == "unreadable":
+        notes.append(
+            f"{kind} claim scan failed; older {prefix} labels may remain"
+        )
+
+
 def clear_stale_claim_labels(repo_root: str, retain_merger_pr: int | None = None) -> list[str]:
     notes = []
-    for number in _items_with_prefix("issue", "closed", "agent:"):
+    issues, issue_scan = _items_with_prefix("issue", "closed", "agent:")
+    _record_claim_scan(notes, issue_scan, "closed-issue", "agent:")
+    for number in issues:
         ok, message = merge_pr.clear_issue_claims(number)
         notes.append(message if ok else f"issue #{number}: {message}")
-    for number in _items_with_prefix("pr", "merged", "reviewer:"):
+    reviewers, review_scan = _items_with_prefix("pr", "merged", "reviewer:")
+    _record_claim_scan(notes, review_scan, "merged-PR reviewer", "reviewer:")
+    for number in reviewers:
         ok, message = merge_pr.clear_review_claims(number)
         notes.append(message if ok else f"PR #{number} reviewer: {message}")
-    for number in _items_with_prefix("pr", "merged", "merger:"):
+    mergers, merge_scan = _items_with_prefix("pr", "merged", "merger:")
+    _record_claim_scan(notes, merge_scan, "merged-PR merger", "merger:")
+    for number in mergers:
         if retain_merger_pr is not None and int(number) == int(retain_merger_pr):
             notes.append(f"kept merger claim on PR #{number}: current close-out incomplete")
             continue

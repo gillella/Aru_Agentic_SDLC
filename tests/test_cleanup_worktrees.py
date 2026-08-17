@@ -161,12 +161,15 @@ class CleanupWorktreesTests(unittest.TestCase):
     def test_dirty_merged_worktree_is_refused(self):
         path = _add_worktree(self.clone, "feat/issue-8-merged-dirty")
         self._commit_on(path, "feature.txt")
+        _git(self.clone, "push", "-u", "origin", "feat/issue-8-merged-dirty")
         _git(self.clone, "merge", "--no-ff", "-m", "merge feature", "feat/issue-8-merged-dirty")
         _git(self.clone, "push", "origin", "main")
+        _git(self.clone, "push", "origin", "--delete", "feat/issue-8-merged-dirty")
         (path / "scratch.txt").write_text("keep me\n")
         ok, message = cleanup_worktrees.sweep(str(self.clone), include_labels=False)
         self.assertTrue(ok)
         self.assertTrue(path.exists())
+        self.assertEqual((path / "scratch.txt").read_text(), "keep me\n")
         self.assertIn("dirty", message)
 
     def test_ignored_cache_on_merged_worktree_is_pruned(self):
@@ -215,6 +218,46 @@ class CleanupWorktreesTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertNotIn(os.path.realpath(path), self._worktree_paths())
         self.assertIn("removed", message)
+
+    def test_retained_copy_after_prune_worktree_is_swept(self):
+        path = _add_worktree(self.clone, "feat/issue-8-retain")
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=path, text=True
+        ).strip()
+        ok, message = merge_pr.prune_worktree(
+            str(self.clone), "feat/issue-8-retain", sha
+        )
+        self.assertTrue(ok, message)
+        self.assertNotIn(os.path.realpath(path), self._worktree_paths())
+        retained_root = self.clone / ".worktrees" / ".retained"
+        leftovers = [item for item in retained_root.iterdir() if item.is_dir()]
+        self.assertTrue(leftovers)
+        sweep_ok, sweep_msg = cleanup_worktrees.sweep(
+            str(self.clone), include_labels=False
+        )
+        self.assertTrue(sweep_ok)
+        remaining = (
+            [item for item in retained_root.iterdir() if item.is_dir()]
+            if retained_root.is_dir() else []
+        )
+        self.assertFalse(remaining)
+        self.assertIn("removed retained", sweep_msg)
+
+    def test_dirty_registered_retained_worktree_survives(self):
+        retained = self.clone / ".worktrees" / ".retained"
+        retained.mkdir(parents=True)
+        path = retained / "feat-issue-8-dirty-retained"
+        _git(
+            self.clone, "worktree", "add", "-b",
+            "feat/issue-8-dirty-retained", str(path),
+        )
+        (path / "scratch.txt").write_text("keep me\n")
+        ok, message = cleanup_worktrees.sweep(str(self.clone), include_labels=False)
+        self.assertTrue(ok)
+        self.assertTrue(path.exists())
+        self.assertEqual((path / "scratch.txt").read_text(), "keep me\n")
+        self.assertIn(os.path.realpath(path), self._worktree_paths())
+        self.assertIn("dirty", message)
 
     def test_already_clean_is_noop(self):
         first = cleanup_worktrees.sweep(str(self.clone), include_labels=False)
@@ -368,6 +411,31 @@ class CleanupWorktreesTests(unittest.TestCase):
         )
         merger_clear.assert_not_called()
         self.assertTrue(any("current close-out incomplete" in item for item in notes))
+
+    @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "cleared"))
+    @patch.object(merge_pr, "_gh_json")
+    def test_claim_scan_records_page_limit(self, gh_json, _clear):
+        full = [
+            {"number": i, "labels": [{"name": "agent:x"}]}
+            for i in range(1, cleanup_worktrees.CLAIM_LIST_LIMIT + 1)
+        ]
+
+        def fake_gh(cmd):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                self.assertIn(str(cleanup_worktrees.CLAIM_LIST_LIMIT), cmd)
+                return full
+            return []
+
+        gh_json.side_effect = fake_gh
+        notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
+        self.assertTrue(
+            any("closed-issue claim scan hit the page limit" in item for item in notes)
+        )
+
+    @patch.object(merge_pr, "_gh_json", return_value=None)
+    def test_unreadable_claim_list_is_recorded(self, _gh):
+        notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
+        self.assertTrue(any("claim scan failed" in item for item in notes))
 
 
 class CloseoutJanitorHookTests(unittest.TestCase):
