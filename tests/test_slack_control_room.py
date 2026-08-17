@@ -826,5 +826,432 @@ class SlackControlRoomTests(unittest.TestCase):
         self.assertEqual(code, 1)
 
 
+class EpicSplitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        os.chmod(self.root, 0o700)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _story(self, **overrides):
+        story = {
+            "title": "feat(ops): slice the epic",
+            "summary": "Do the slice.",
+            "depends_on": [178],
+            "touches": ["scripts/slack_control_room.py"],
+            "parallel_eligible": False,
+            "acceptance_criteria": ["- [ ] Helper files one child issue"],
+            "type": "feat",
+        }
+        story.update(overrides)
+        return story
+
+    def _ready_story(self, **overrides):
+        ready = {
+            "depends_on": [],
+            "acceptance_criteria": [
+                "- [ ] Helper files one child issue "
+                "(verify: `python3 -m unittest tests.test_slack_control_room`)"
+            ],
+            "decision_boundaries": [
+                "- Default: file children with Epic: #N, never depends-on the parent epic",
+                "- Error handling: exit 1 on an invalid split document",
+            ],
+            "non_goals": ["- Treating Slack as a work queue"],
+            "verification": "`python3 -m unittest tests.test_slack_control_room` exits 0.",
+        }
+        ready.update(overrides)
+        return self._story(**ready)
+
+    def _write_split(self, payload, mode=0o600):
+        path = self.root / "split.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        os.chmod(path, mode)
+        return path
+
+    def test_slack_event_payload_is_not_a_filing_source(self):
+        payload = {
+            "type": "message",
+            "text": ":+1: file these issues",
+            "client_msg_id": "evt-9",
+            "channel": "C01234567",
+        }
+        calls = []
+        with self.assertRaisesRegex(scr.SplitError, "conversation"):
+            scr.file_epic_split(
+                payload, 178, str(self.repo),
+                run_cmd_fn=lambda *args, **kwargs: calls.append(args) or (0, "", ""),
+            )
+        self.assertEqual(calls, [])
+
+    def test_thumbs_up_slack_message_does_not_claim_or_merge(self):
+        self.assertIsNone(scr.parse_command(":+1: looks good, file children of #178"))
+        self.assertIsNone(scr.parse_command("file-split --epic 178"))
+        comments = []
+        reply = scr.handle_command(
+            sample_config(),
+            {"verb": "refused-queue", "refused": "merge"},
+            type("P", (), {"project_id": "proj_x", "healthy": True})(),
+            comment=lambda *args: comments.append(args) or True,
+        )
+        self.assertIn("not a work queue", reply)
+        self.assertEqual(comments, [])
+
+    def test_dry_run_validates_without_github_mutations(self):
+        calls = []
+
+        def run_cmd(cmd, check=False, cwd=None):
+            calls.append(list(cmd))
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, "[]", ""
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "OPEN", "labels": [{"name": "type:epic"}],
+                }), ""
+            return 0, "", ""
+
+        result = scr.file_epic_split(
+            {"epic": 178, "stories": [self._story()]},
+            178, str(self.repo), dry_run=True,
+            run_cmd_fn=run_cmd,
+        )
+        # A dry run may read (it must resolve depends-on against the live board to
+        # preview the same status the real run would file) but must never mutate.
+        self.assertTrue(
+            all(cmd[:3] in (["gh", "issue", "list"], ["gh", "issue", "view"])
+                for cmd in calls),
+            calls,
+        )
+        self.assertTrue(result["dry_run"])
+        self.assertIn("Epic: #178", result["filed"][0]["body"])
+        self.assertNotIn("depends-on: #178", result["filed"][0]["body"])
+        self.assertEqual(result["filed"][0]["status"], "Backlog")
+        self.assertIsNone(result["filed"][0]["number"])
+
+    def test_file_split_creates_board_item_and_comments_epic(self):
+        comments = []
+
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, "[]", ""
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "OPEN",
+                    "labels": [{"name": "type:epic"}],
+                }), ""
+            if cmd[:3] == ["gh", "issue", "create"]:
+                return 0, "https://github.com/o/r/issues/310\n", ""
+            if any(str(part).endswith("update_issue_status.py") for part in cmd):
+                return 0, "attached", ""
+            raise AssertionError(cmd)
+
+        result = scr.file_epic_split(
+            {"epic": 178, "stories": [self._story()]},
+            178, str(self.repo),
+            run_cmd_fn=run_cmd,
+            comment_fn=lambda number, body, root: comments.append((number, body, root)) or True,
+        )
+        self.assertEqual(result["filed"][0]["number"], 310)
+        self.assertEqual(comments[0][0], 178)
+        self.assertIn("#310", comments[0][1])
+        self.assertIn("Epic: #178", result["filed"][0]["body"])
+        self.assertIn("depends-on: none", result["filed"][0]["body"])
+        self.assertNotIn("depends-on: #178", result["filed"][0]["body"])
+
+    def test_incomplete_story_lands_in_backlog(self):
+        story = self._story(touches=[], acceptance_criteria=[])
+        parsed = scr.validate_split_story(story, 178)
+        self.assertEqual(scr.story_board_status(parsed, set()), "Backlog")
+
+    def test_parent_epic_is_stripped_from_depends_on(self):
+        parsed = scr.validate_split_story(self._story(depends_on=[178, 172]), 178)
+        self.assertEqual(parsed["depends_on"], [172])
+        self.assertNotIn("depends-on: #178", scr.render_split_issue_body(parsed, 178))
+
+    def test_fully_specified_story_is_ready(self):
+        parsed = scr.validate_split_story(self._ready_story(), 178)
+        self.assertEqual(scr.story_board_status(parsed, set()), "Ready")
+        body = scr.render_split_issue_body(parsed, 178)
+        self.assertIn("## Decision Boundaries", body)
+        self.assertIn("## Non-Goals", body)
+        self.assertIn("## Verification", body)
+
+    def test_specified_without_ready_contract_stays_backlog(self):
+        parsed = scr.validate_split_story(self._story(), 178)
+        self.assertTrue(parsed["touches"])
+        self.assertTrue(parsed["acceptance_criteria"])
+        self.assertEqual(scr.story_board_status(parsed, set()), "Backlog")
+
+    def test_story_with_open_dependency_is_held_in_backlog(self):
+        """A Ready-contract story blocked by an open issue must not reach Ready.
+
+        Regression: classifying against an empty open-issue set read every
+        depends-on as satisfied, so the picker served work whose prerequisite
+        had not merged.
+        """
+        parsed = scr.validate_split_story(self._ready_story(depends_on=[172]), 178)
+        self.assertEqual(parsed["depends_on"], [172])
+        self.assertEqual(scr.story_board_status(parsed, {172}), "Backlog")
+        # Same story once the dependency has closed.
+        self.assertEqual(scr.story_board_status(parsed, {999}), "Ready")
+
+    def test_file_split_holds_dependency_blocked_story_in_backlog(self):
+        statuses = []
+
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, json.dumps([{"number": 172}]), ""
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "OPEN", "labels": [{"name": "type:epic"}],
+                }), ""
+            if cmd[:3] == ["gh", "issue", "create"]:
+                return 0, "https://github.com/o/r/issues/311\n", ""
+            if any(str(part).endswith("update_issue_status.py") for part in cmd):
+                statuses.append(cmd[cmd.index("--status") + 1])
+                return 0, "attached", ""
+            raise AssertionError(cmd)
+
+        result = scr.file_epic_split(
+            {"epic": 178, "stories": [self._ready_story(depends_on=[172])]},
+            178, str(self.repo),
+            run_cmd_fn=run_cmd,
+            comment_fn=lambda *args: True,
+        )
+        self.assertEqual(result["filed"][0]["status"], "Backlog")
+        self.assertEqual(statuses, ["Backlog"])
+
+    def test_unreadable_open_issue_list_fails_closed(self):
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 1, "", "gh: API rate limit exceeded"
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "OPEN", "labels": [{"name": "type:epic"}],
+                }), ""
+            raise AssertionError(cmd)
+
+        with self.assertRaisesRegex(scr.SplitError, "could not list open issues"):
+            scr.file_epic_split(
+                {"epic": 178, "stories": [self._ready_story()]},
+                178, str(self.repo), run_cmd_fn=run_cmd,
+            )
+
+    def test_partial_failure_reports_issues_already_created(self):
+        """A mid-run failure must still name the children that reached GitHub."""
+        created = iter(["312", "313"])
+
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, "[]", ""
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "OPEN", "labels": [{"name": "type:epic"}],
+                }), ""
+            if cmd[:3] == ["gh", "issue", "create"]:
+                return 0, f"https://github.com/o/r/issues/{next(created)}\n", ""
+            if any(str(part).endswith("update_issue_status.py") for part in cmd):
+                # The second child reaches GitHub but never reaches the board.
+                if "313" in cmd:
+                    return 1, "", "board attach failed"
+                return 0, "attached", ""
+            raise AssertionError(cmd)
+
+        with self.assertRaises(scr.SplitError) as caught:
+            scr.file_epic_split(
+                {
+                    "epic": 178,
+                    "stories": [
+                        self._ready_story(title="First child"),
+                        self._ready_story(title="Second child"),
+                    ],
+                },
+                178, str(self.repo),
+                run_cmd_fn=run_cmd,
+                comment_fn=lambda *args: True,
+            )
+        filed = [row["number"] for row in caught.exception.filed]
+        # Both the fully-filed child and the created-but-unattached one, or the
+        # operator cannot reconcile the run and a retry duplicates them.
+        self.assertEqual(filed, [312, 313])
+
+    def test_truncated_open_issue_page_fails_closed(self):
+        """A full page is indistinguishable from a complete set, so refuse it.
+
+        Every omitted issue would read as a satisfied dependency, which is the
+        same failure as classifying against an empty set.
+        """
+        rows = [{"number": n} for n in range(1, scr.OPEN_ISSUE_PAGE_LIMIT + 1)]
+
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, json.dumps(rows), ""
+            raise AssertionError(cmd)
+
+        with self.assertRaisesRegex(scr.SplitError, "page limit"):
+            scr.open_issue_numbers(str(self.repo), run_cmd)
+
+    def test_unknown_issue_type_is_rejected(self):
+        for bad in ("epic", "security", "feat; rm -rf /"):
+            with self.assertRaisesRegex(scr.SplitError, "not a governance issue type"):
+                scr.validate_split_story(self._story(type=bad), 178)
+
+    def test_known_issue_types_are_accepted(self):
+        for good in sorted(scr.SPLIT_ISSUE_TYPES):
+            parsed = scr.validate_split_story(self._story(type=good), 178)
+            self.assertEqual(parsed["issue_type"], good)
+
+    def test_dry_run_validates_the_epic(self):
+        """A preview against a closed epic must fail here, not at filing time."""
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "CLOSED", "labels": [{"name": "type:epic"}],
+                }), ""
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, "[]", ""
+            raise AssertionError(cmd)
+
+        with self.assertRaisesRegex(scr.SplitError, "is not open"):
+            scr.file_epic_split(
+                {"epic": 178, "stories": [self._story()]},
+                178, str(self.repo), dry_run=True, run_cmd_fn=run_cmd,
+            )
+
+    def test_split_file_symlink_is_refused_at_open(self):
+        target = self.root / "real.json"
+        target.write_text(json.dumps({"epic": 178, "stories": []}), encoding="utf-8")
+        os.chmod(target, 0o600)
+        link = self.root / "link.json"
+        link.symlink_to(target)
+        with self.assertRaises(scr.SplitError):
+            scr.load_split_file(link)
+
+    def test_owner_only_executable_mode_is_accepted(self):
+        path = self._write_split({"epic": 178, "stories": [self._story()]}, mode=0o700)
+        # 0700 grants nothing to group or others; only those bits are the risk.
+        self.assertIsInstance(scr.load_split_file(path), dict)
+
+    def test_non_numeric_document_epic_is_a_split_error(self):
+        with self.assertRaisesRegex(scr.SplitError, "must be an issue number"):
+            scr.parse_split_document(
+                {"epic": {"number": 178}, "stories": [self._story()]}, 178,
+            )
+
+    def test_file_split_notifies_slack_thread(self):
+        notes = []
+
+        def run_cmd(cmd, check=False, cwd=None):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, "[]", ""
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps({
+                    "state": "OPEN",
+                    "labels": [{"name": "type:epic"}],
+                }), ""
+            if cmd[:3] == ["gh", "issue", "create"]:
+                return 0, "https://github.com/o/r/issues/310\n", ""
+            if any(str(part).endswith("update_issue_status.py") for part in cmd):
+                return 0, "attached", ""
+            raise AssertionError(cmd)
+
+        def notify(config, event, thread_ts=None, **kwargs):
+            notes.append((config.channel_id, event["text"], thread_ts))
+            return {"ok": True}
+
+        result = scr.file_epic_split(
+            {"epic": 178, "stories": [self._story()]},
+            178, str(self.repo),
+            run_cmd_fn=run_cmd,
+            comment_fn=lambda *args: True,
+            notify_fn=notify,
+            slack_config=sample_config(channel_id="C01234567"),
+            thread_ts="123.456",
+        )
+        self.assertEqual(result["filed"][0]["number"], 310)
+        self.assertEqual(notes, [("C01234567", result["summary"], "123.456")])
+        self.assertIn("#310", notes[0][1])
+
+    def test_main_file_split_wires_thread_notify(self):
+        path = self._write_split({"epic": 178, "stories": [self._story()]})
+        captured = {}
+
+        def fake_split(*args, **kwargs):
+            captured.update(kwargs)
+            return {"epic": 178, "dry_run": False, "filed": [], "summary": "ok"}
+
+        cfg = sample_config(channel_id="C01234567")
+        with patch.object(scr, "file_epic_split", fake_split), \
+             patch.object(scr, "config_from_env", return_value=cfg), \
+             patch.object(scr, "load_slack_env", return_value={}):
+            code = scr.main([
+                "file-split", "--epic", "178", "--from-file", str(path),
+                "--repo-dir", str(self.repo), "--thread-ts", "99.1",
+            ])
+        self.assertEqual(code, 0)
+        self.assertIs(captured["notify_fn"], scr.post_event)
+        self.assertEqual(captured["slack_config"], cfg)
+        self.assertEqual(captured["thread_ts"], "99.1")
+
+    def test_main_file_split_skips_notify_when_slack_unconfigured(self):
+        path = self._write_split({"epic": 178, "stories": [self._story()]})
+        captured = {}
+
+        def fake_split(*args, **kwargs):
+            captured.update(kwargs)
+            return {"epic": 178, "dry_run": False, "filed": [], "summary": "ok"}
+
+        with patch.object(scr, "file_epic_split", fake_split), \
+             patch.object(scr, "config_from_env", side_effect=ValueError("no slack")):
+            code = scr.main([
+                "file-split", "--epic", "178", "--from-file", str(path),
+                "--repo-dir", str(self.repo), "--thread-ts", "99.1",
+            ])
+        self.assertEqual(code, 0)
+        self.assertIsNone(captured["notify_fn"])
+        self.assertIsNone(captured["slack_config"])
+        self.assertEqual(captured["thread_ts"], "99.1")
+
+    def test_world_readable_split_file_is_rejected(self):
+        path = self._write_split({"epic": 178, "stories": [self._story()]}, mode=0o644)
+        with self.assertRaisesRegex(scr.SplitError, "group or others"):
+            scr.load_split_file(path)
+
+    def test_cli_dry_run_reads_secure_file(self):
+        path = self._write_split({"epic": 178, "stories": [self._story()]})
+        # The board lookup is stubbed, not skipped: a dry run resolves depends-on
+        # so its preview matches what a real run would file.
+        with patch.object(scr, "open_issue_numbers", return_value=set()), \
+                patch.object(scr, "_require_open_epic", return_value=None):
+            code = scr.main([
+                "file-split", "--epic", "178", "--from-file", str(path),
+                "--repo-dir", str(self.repo), "--dry-run",
+            ])
+        self.assertEqual(code, 0)
+
+    def test_cli_reports_partial_filing_on_failure(self):
+        path = self._write_split({
+            "epic": 178,
+            "stories": [self._ready_story(title="A"), self._ready_story(title="B")],
+        })
+
+        def boom(*args, **kwargs):
+            raise scr.SplitError(
+                "issue #313 was created but board attachment failed",
+                filed=[{"title": "A", "status": "Ready", "body": "", "number": 312}],
+            )
+
+        with patch.object(scr, "file_epic_split", boom):
+            code = scr.main([
+                "file-split", "--epic", "178", "--from-file", str(path),
+                "--repo-dir", str(self.repo),
+            ])
+        self.assertEqual(code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

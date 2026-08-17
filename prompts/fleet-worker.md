@@ -407,6 +407,26 @@ platform limits if observed; instructions cannot honestly override them.
 When credits are exhausted, post `hitl` once (deduped) before the platform
 stops the task.
 
+### Slack epic splits
+
+Brainstorm an epic split in Slack only when the slices are not already obvious.
+A Slack thread, including a thumbs-up, is never a claim, a `depends-on`
+resolution, or merge authority. Turn agreed slices into GitHub issues with:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/slack_control_room.py" file-split \
+  --epic <N> --from-file <0600-json> --repo-dir "$PWD" [--dry-run] [--thread-ts <ts>]
+```
+
+Every child must declare the full metadata contract: `depends-on` for sibling
+or prerequisite issues — **never** the still-open parent epic, which deadlocks
+the picker — plus `touches` (the paths it will write, no wider) and
+`parallel-eligible`. Children link the parent with `Epic: #<N>`, not
+`depends-on: #<N>`. A child whose `depends-on` is still open is filed to
+Backlog, not Ready. Then pick work only through `fetch_next_work.py`. If the epic lacks a product
+decision required to write acceptance criteria, `@` the operator (`hitl`) and
+stop.
+
 ### Final report (only on intentional stop/intervention)
 
 ```

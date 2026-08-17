@@ -16,7 +16,7 @@ import time
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from delivery_increments import (
     DeliveryIncrementStore,
@@ -435,6 +435,401 @@ def github_comment(kind: str, number: int, decision: str, repo_dir: str) -> bool
         check=False, cwd=repo_dir,
     )
     return code == 0
+
+
+def github_issue_note(number: int, body: str, repo_dir: str) -> bool:
+    from common import run_cmd
+
+    code, _, _ = run_cmd(
+        ["gh", "issue", "comment", str(number), "--body", body],
+        check=False, cwd=repo_dir,
+    )
+    return code == 0
+
+
+# Governance issue types a split child may carry. `epic` is excluded on
+# purpose: an epic is never directly implementable, so filing one as a child
+# would create work the picker can never serve.
+SPLIT_ISSUE_TYPES = frozenset({"feat", "fix", "chore", "docs", "research"})
+
+# `gh issue list` truncates at --limit without signalling it, so the limit is
+# also the point at which the open-issue view stops being provably complete.
+OPEN_ISSUE_PAGE_LIMIT = 1000
+
+
+class SplitError(ValueError):
+    """A Slack-split document is invalid or is a Slack event, not a filing source.
+
+    ``filed`` carries the children already created when the failure interrupted a
+    multi-story run. ``gh issue create`` is not transactional, so those issues
+    exist on GitHub whatever happens next; dropping their numbers would leave the
+    operator unable to enumerate them and a re-run would file duplicates.
+    """
+
+    def __init__(self, message: str, filed: Optional[List[Dict[str, Any]]] = None):
+        super().__init__(message)
+        self.filed: List[Dict[str, Any]] = list(filed or [])
+
+
+def looks_like_slack_event(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("type") in {"message", "event_callback", "reaction_added"}:
+        return True
+    markers = {"client_msg_id", "event_ts", "reaction", "item_user"}
+    return bool(markers & set(payload)) and "stories" not in payload
+
+
+def load_split_file(path: Path) -> Any:
+    """Read a split document, validating the descriptor actually opened.
+
+    Validating by path and then re-opening by path leaves a window in which the
+    directory entry can be swapped for another file, so every check here is made
+    against the open descriptor: O_NOFOLLOW refuses a symlink at open time, and
+    fstat proves the bytes read came from the inode that passed validation.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise SplitError(f"cannot read split file: {exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SplitError(f"unsafe split file: {path}")
+        # Group and other bits only: 0700 is a legitimate owner-only mode.
+        if info.st_mode & 0o077:
+            raise SplitError(
+                f"split file must not be readable by group or others: {path}"
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = None
+            return json.loads(handle.read())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise SplitError(f"split file is not valid JSON: {exc}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _string_list(value: Any, title: str, field: str) -> List[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(row, str) for row in value):
+        raise SplitError(f"{title}: {field} must be a list of strings")
+    return [row.strip() for row in value if row.strip()]
+
+
+def _parse_depends_on(raw: Any, epic: int, title: str) -> List[int]:
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise SplitError(f"{title}: depends_on must be a list of issue numbers")
+    deps: List[int] = []
+    for item in raw:
+        try:
+            number = int(item)
+        except (TypeError, ValueError) as exc:
+            raise SplitError(f"{title}: depends_on must be issue numbers") from exc
+        if number == epic:
+            continue
+        if number <= 0:
+            raise SplitError(f"{title}: depends_on must be positive issue numbers")
+        deps.append(number)
+    return deps
+
+
+def validate_split_story(item: Any, epic: int) -> Dict[str, Any]:
+    if not isinstance(item, dict):
+        raise SplitError("each story must be an object")
+    title = str(item.get("title") or "").strip()
+    if not title:
+        raise SplitError("each story needs a title")
+    touches = item.get("touches")
+    if not isinstance(touches, list) or not all(
+        isinstance(path, str) and path.strip() for path in touches
+    ):
+        raise SplitError(f"{title}: touches must be a list of paths")
+    if "parallel_eligible" not in item:
+        raise SplitError(f"{title}: parallel_eligible is required")
+    criteria = item.get("acceptance_criteria") or []
+    if not isinstance(criteria, list) or not all(isinstance(row, str) for row in criteria):
+        raise SplitError(f"{title}: acceptance_criteria must be a list of strings")
+    verification = item.get("verification")
+    if verification is not None and not isinstance(verification, str):
+        raise SplitError(f"{title}: verification must be a string")
+    # The type drives the child's labels and its Ready classification, so free
+    # text here would let a summarised thread invent a governance category.
+    issue_type = str(item.get("type") or "feat").strip() or "feat"
+    if issue_type not in SPLIT_ISSUE_TYPES:
+        raise SplitError(
+            f"{title}: type {issue_type!r} is not a governance issue type "
+            f"({', '.join(sorted(SPLIT_ISSUE_TYPES))})"
+        )
+    return {
+        "title": title,
+        "summary": str(item.get("summary") or "").strip(),
+        "touches": [path.strip() for path in touches],
+        "depends_on": _parse_depends_on(item.get("depends_on"), epic, title),
+        "parallel_eligible": bool(item.get("parallel_eligible")),
+        "acceptance_criteria": [row.strip() for row in criteria if row.strip()],
+        "decision_boundaries": _string_list(
+            item.get("decision_boundaries"), title, "decision_boundaries",
+        ),
+        "non_goals": _string_list(item.get("non_goals"), title, "non_goals"),
+        "verification": str(verification or "").strip(),
+        "issue_type": issue_type,
+    }
+
+
+def parse_split_document(payload: Any, epic: int) -> Dict[str, Any]:
+    if looks_like_slack_event(payload):
+        raise SplitError("Slack events are conversation, not a filing source")
+    if not isinstance(payload, dict) or not isinstance(payload.get("stories"), list):
+        raise SplitError("split document must be an object with a stories list")
+    listed = payload.get("epic")
+    if listed is not None:
+        # The document is authored from a summarised Slack thread, so a non-numeric
+        # or structured `epic` is routine input rather than an impossible state. Let
+        # it surface as a SplitError instead of a traceback out of main().
+        try:
+            listed_number = int(listed)
+        except (TypeError, ValueError) as exc:
+            raise SplitError(f"document epic must be an issue number, got {listed!r}") from exc
+        if listed_number != int(epic):
+            raise SplitError(f"document epic #{listed} does not match --epic {epic}")
+    stories = [validate_split_story(item, epic) for item in payload["stories"]]
+    if not stories:
+        raise SplitError("split document has no stories")
+    return {
+        "epic": int(epic),
+        "stories": stories,
+        "thread_ts": str(payload.get("thread_ts") or ""),
+    }
+
+
+def open_issue_numbers(repo_dir: str, run_cmd_fn: Callable) -> Set[int]:
+    """The live open-issue set, so a story's depends-on is judged against reality.
+
+    ``ready_gaps`` reports a dependency as unresolved only when it appears in the
+    set handed to it. An empty set therefore reads every ``depends-on`` as already
+    satisfied and files blocked stories straight into Ready, where the picker
+    serves them to an agent whose prerequisite has not merged. Fetch fails closed:
+    guessing here is exactly the failure this exists to prevent.
+    """
+    code, out, err = run_cmd_fn(
+        [
+            "gh", "issue", "list", "--state", "open",
+            "--limit", str(OPEN_ISSUE_PAGE_LIMIT), "--json", "number",
+        ],
+        check=False, cwd=repo_dir,
+    )
+    if code != 0:
+        raise SplitError(f"could not list open issues to resolve depends-on: {err or out}")
+    try:
+        rows = json.loads(out or "[]")
+    except json.JSONDecodeError as exc:
+        raise SplitError("open issue list returned invalid JSON") from exc
+    if not isinstance(rows, list):
+        raise SplitError("open issue list returned an unexpected shape")
+    # `gh issue list` truncates at --limit silently. A truncated set is
+    # indistinguishable from a complete one, and every omitted issue reads as a
+    # satisfied dependency, so refuse rather than classify against a partial view.
+    if len(rows) >= OPEN_ISSUE_PAGE_LIMIT:
+        raise SplitError(
+            f"open issue list hit the {OPEN_ISSUE_PAGE_LIMIT}-issue page limit, so "
+            "depends-on cannot be resolved against a complete set; raise "
+            "OPEN_ISSUE_PAGE_LIMIT or file this split with a paginating helper"
+        )
+    numbers: Set[int] = set()
+    for row in rows:
+        try:
+            numbers.add(int(row["number"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return numbers
+
+
+def story_board_status(story: Dict[str, Any], open_numbers: Set[int]) -> str:
+    """Ready only when the Ready contract holds *and* no depends-on is still open.
+
+    ``open_numbers`` is required rather than defaulted: a silent empty default is
+    what let dependency-blocked stories reach Ready in the first place.
+    """
+    from triage_backlog import ready_gaps
+
+    issue = {
+        "number": 10**9,
+        "body": render_split_issue_body(story, 0),
+        "labels": [{"name": f"type:{story['issue_type']}"}],
+    }
+    return "Backlog" if ready_gaps(issue, set(open_numbers)) else "Ready"
+
+
+def render_split_issue_body(story: Dict[str, Any], epic: int) -> str:
+    depends = ", ".join(f"#{num}" for num in story["depends_on"]) or "none"
+    touches = ", ".join(story["touches"])
+    criteria = story["acceptance_criteria"] or ["- [ ] Define acceptance criteria"]
+    lines = [
+        story["summary"] or story["title"],
+        "",
+        "## Acceptance Criteria",
+        "",
+        *[row if row.startswith("- ") else f"- [ ] {row}" for row in criteria],
+        "",
+    ]
+    if story.get("decision_boundaries"):
+        lines.extend(["## Decision Boundaries", "", *story["decision_boundaries"], ""])
+    if story.get("non_goals"):
+        lines.extend(["## Non-Goals", "", *story["non_goals"], ""])
+    if story.get("verification"):
+        lines.extend(["## Verification", "", story["verification"], ""])
+    lines.extend(
+        [
+            "## Dependencies",
+            "",
+            f"depends-on: {depends}",
+            f"touches: {touches}",
+            f"parallel-eligible: {str(story['parallel_eligible']).lower()}",
+            "",
+            f"Epic: #{epic}",
+        ]
+    )
+    return redact("\n".join(lines))
+
+
+def _require_open_epic(epic: int, repo_dir: str, run_cmd_fn: Callable) -> None:
+    code, out, err = run_cmd_fn(
+        ["gh", "issue", "view", str(epic), "--json", "state,labels"],
+        check=False, cwd=repo_dir,
+    )
+    if code != 0:
+        raise SplitError(f"could not read epic #{epic}: {err or out}")
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise SplitError(f"epic #{epic} view returned invalid JSON") from exc
+    if str(data.get("state") or "").upper() != "OPEN":
+        raise SplitError(f"epic #{epic} is not open")
+    names = {
+        (label.get("name") if isinstance(label, dict) else str(label))
+        for label in (data.get("labels") or [])
+    }
+    if "type:epic" not in names:
+        raise SplitError(f"issue #{epic} is not labelled type:epic")
+
+
+def _create_child_issue(
+    title: str, body: str, labels: str, repo_dir: str, run_cmd_fn: Callable,
+) -> int:
+    code, out, err = run_cmd_fn(
+        ["gh", "issue", "create", "--title", title, "--body", body, "--label", labels],
+        check=False, cwd=repo_dir,
+    )
+    if code != 0:
+        raise SplitError(f"issue creation failed: {err or out}")
+    match = re.search(r"/issues/(\d+)", out or "")
+    if not match:
+        raise SplitError(f"could not parse created issue number from: {out!r}")
+    return int(match.group(1))
+
+
+def _attach_child(number: int, status: str, repo_dir: str, run_cmd_fn: Callable) -> None:
+    home = Path(os.environ.get("ARU_SDLC_HOME", Path(__file__).resolve().parents[1]))
+    helper = home / "scripts" / "update_issue_status.py"
+    code, out, err = run_cmd_fn(
+        [
+            sys.executable, str(helper),
+            "--issue", str(number), "--status", status, "--require-board",
+        ],
+        check=False, cwd=repo_dir,
+    )
+    if code != 0:
+        raise SplitError(
+            f"issue #{number} was created but board attachment failed: {err or out}"
+        )
+
+
+def file_epic_split(
+    payload: Any,
+    epic: int,
+    repo_dir: str,
+    *,
+    dry_run: bool = False,
+    run_cmd_fn: Optional[Callable] = None,
+    comment_fn: Optional[Callable[[int, str, str], bool]] = None,
+    notify_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+    thread_ts: str = "",
+    slack_config: Optional[SlackConfig] = None,
+) -> Dict[str, Any]:
+    """File GitHub issues from a structured split document. Slack events never file."""
+    from common import run_cmd as default_run
+
+    runner = run_cmd_fn or default_run
+    plan = parse_split_document(payload, epic)
+    # Read-only, so it runs in dry-run too: previewing a split against a closed
+    # or non-epic issue would print a clean plan that the real run then rejects.
+    _require_open_epic(plan["epic"], repo_dir, runner)
+    # Resolved once for the whole run: a dry-run must classify identically to the
+    # real filing, otherwise the preview an operator approves is not what lands.
+    open_numbers = open_issue_numbers(repo_dir, runner)
+    filed: List[Dict[str, Any]] = []
+    for story in plan["stories"]:
+        status = story_board_status(story, open_numbers)
+        body = render_split_issue_body(story, plan["epic"])
+        labels = f"type:{story['issue_type']},status:backlog"
+        if dry_run:
+            filed.append({"title": story["title"], "status": status, "body": body, "number": None})
+            continue
+        # Re-raise carrying the children already created. `gh issue create` has no
+        # rollback, so a failure part-way through a multi-story run must still
+        # report what exists or the operator cannot find or reconcile it.
+        try:
+            number = _create_child_issue(story["title"], body, labels, repo_dir, runner)
+        except SplitError as exc:
+            raise SplitError(str(exc), filed=filed) from exc
+        # Recorded before attachment: an issue that was created but failed to reach
+        # the board is the case most likely to be orphaned, so it must be reported.
+        filed.append({"title": story["title"], "status": status, "body": body, "number": number})
+        try:
+            _attach_child(number, status, repo_dir, runner)
+        except SplitError as exc:
+            raise SplitError(str(exc), filed=filed) from exc
+    urls = [f"#{item['number']}" for item in filed if item["number"]]
+    summary = (
+        f"Slack split of epic #{plan['epic']} filed: " + ", ".join(urls)
+        if urls else
+        f"dry-run: {len(filed)} stories validated for epic #{plan['epic']}"
+    )
+    if not dry_run and urls:
+        commenter = comment_fn or github_issue_note
+        commenter(plan["epic"], summary, repo_dir)
+        ts = thread_ts or plan["thread_ts"]
+        if ts and notify_fn is not None and slack_config is not None:
+            notify_fn(
+                slack_config,
+                {
+                    "type": "state", "agent": "slack-bridge", "family": "human",
+                    "text": summary,
+                },
+                thread_ts=ts,
+            )
+    return {"epic": plan["epic"], "dry_run": dry_run, "filed": filed, "summary": summary}
+
+
+def _file_split_notify_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
+    """Load Slack credentials for --thread-ts. Missing Slack must not block filing."""
+    if args.dry_run or not args.thread_ts:
+        return {"thread_ts": args.thread_ts, "notify_fn": None, "slack_config": None}
+    try:
+        config = config_from_env(load_slack_env(args.env_file), require_channel=True)
+    except (ValueError, OSError) as exc:
+        # OSError included deliberately: load_slack_env reads the file when it
+        # exists, so an existing-but-unreadable env file must degrade to "no
+        # Slack reply" rather than abort a filing run that GitHub already owns.
+        print(f"[WARN] Slack thread reply skipped: {exc}", file=sys.stderr)
+        return {"thread_ts": args.thread_ts, "notify_fn": None, "slack_config": None}
+    return {"thread_ts": args.thread_ts, "notify_fn": post_event, "slack_config": config}
 
 
 def github_increment_decision(
@@ -928,12 +1323,52 @@ def start_bridge(config: SlackConfig, registry: ProjectRegistry) -> int:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["start", "status", "doctor", "stop"])
+    parser.add_argument(
+        "command", choices=["start", "status", "doctor", "stop", "file-split"],
+    )
     parser.add_argument("--project-id")
     parser.add_argument("--registry-file", type=Path, default=DEFAULT_REGISTRY_PATH)
     parser.add_argument("--audit-file", type=Path, default=DEFAULT_AUDIT_PATH)
     parser.add_argument("--env-file", type=Path, default=ENV_PATH)
+    parser.add_argument("--epic", type=int)
+    parser.add_argument("--from-file", type=Path)
+    parser.add_argument("--repo-dir", type=Path)
+    parser.add_argument("--thread-ts", default="")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "file-split":
+        if not args.epic or not args.from_file:
+            parser.error("file-split requires --epic and --from-file")
+        repo_dir = str((args.repo_dir or Path.cwd()).resolve())
+        try:
+            payload = load_split_file(args.from_file)
+            result = file_epic_split(
+                payload, args.epic, repo_dir,
+                dry_run=args.dry_run, **_file_split_notify_kwargs(args),
+            )
+        except SplitError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            # Children created before the failure are already on GitHub and are not
+            # rolled back. Print them so the run is recoverable and a retry does not
+            # silently duplicate them.
+            partial = [row for row in getattr(exc, "filed", []) if row.get("number")]
+            if partial:
+                numbers = ", ".join(f"#{row['number']}" for row in partial)
+                print(
+                    f"[ERROR] Already filed and NOT rolled back: {numbers}. "
+                    "Reconcile these before re-running to avoid duplicates.",
+                    file=sys.stderr,
+                )
+                print(json.dumps(
+                    {
+                        "epic": args.epic, "dry_run": args.dry_run,
+                        "filed": partial, "summary": f"partial failure: {exc}",
+                    },
+                    indent=2, sort_keys=True,
+                ))
+            return 1
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
     registry = ProjectRegistry(args.registry_file, args.audit_file)
     if args.command == "doctor":
         report = doctor(args.env_file, args.registry_file, args.audit_file)

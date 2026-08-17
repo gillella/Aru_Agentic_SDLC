@@ -187,7 +187,7 @@ each has been broken before. The authority is `AGENTS.md`.
 1. **Issue-First.** No code change without a claimed, open, tracked issue.
 2. **GitHub is `gh` plus helpers, not MCP.** Lifecycle mutations go through
    `$ARU_SDLC_HOME/scripts/*.py`. `gh auth status` is the identity check.
-   Direct `gh` only when no helper exists (`gh issue comment` for plans).
+   Slack is not a queue; direct `gh` only when no helper exists (`gh issue comment`).
 3. **Worktree isolation.** Feature work and reviews happen under
    `.worktrees/`. Run helper scripts by absolute path so they act on the right
    repo, and `cd` into the worktree before editing.
