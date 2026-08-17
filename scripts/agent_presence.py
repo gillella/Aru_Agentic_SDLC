@@ -655,7 +655,10 @@ def doctor_presence_summary(
         if product and product in by_product:
             by_product[product].append(payload)
             existing = agents[product].get("last_heartbeat")
-            if not existing or record.last_heartbeat > str(existing):
+            if (
+                not existing
+                or _parse_iso(record.last_heartbeat) > _parse_iso(str(existing))
+            ):
                 agents[product]["last_heartbeat"] = record.last_heartbeat
             agents[product]["presence_availability"] = record.availability
     wake_limitations = [

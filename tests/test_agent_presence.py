@@ -211,6 +211,14 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertEqual(store.get("cursor-1").availability, "busy")
 
     def test_doctor_summary_is_read_only(self):
+        aru = self.root / "aru-isolated"
+        aru.mkdir(mode=0o700)
+        projects_path = aru / "projects.json"
+        projects_path.write_text(
+            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(projects_path, 0o600)
         self.store.register(
             agent_id="cursor-cloud-1",
             family="cursor",
@@ -226,6 +234,7 @@ class AgentPresenceTests(unittest.TestCase):
             agents=agents,
             store=self.store,
             catalog_non_guarantees=["app quit"],
+            projects_path=projects_path,
         )
         after = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(before, after)
@@ -233,7 +242,54 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertIn("Presence never launches agents", " ".join(summary["wake_limitations"]))
         self.assertIn("app quit", " ".join(summary["wake_limitations"]))
 
+    def test_doctor_picks_newest_heartbeat_by_timestamp(self):
+        aru = self.root / "aru-hb"
+        aru.mkdir(mode=0o700)
+        projects_path = aru / "projects.json"
+        projects_path.write_text(
+            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(projects_path, 0o600)
+        project_id = ap.path_derived_project_id(self.project_a)
+        self.store.register(
+            agent_id="cursor-old",
+            family="cursor",
+            project_id=project_id,
+            checkout_path=str(self.project_a),
+        )
+        self.store.register(
+            agent_id="cursor-new",
+            family="cursor",
+            project_id=project_id,
+            checkout_path=str(self.project_a),
+        )
+        # Force offset-form timestamps where lexicographic order disagrees with time order.
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        raw["agents"]["cursor-old"]["last_heartbeat"] = "2026-08-16T20:00:00+05:30"
+        raw["agents"]["cursor-new"]["last_heartbeat"] = "2026-08-16T15:00:00Z"
+        self.path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+        os.chmod(self.path, 0o600)
+        agents = {"cursor": {}, "codex": {}, "claude": {}, "antigravity": {}}
+        summary = ap.doctor_presence_summary(
+            project=str(self.project_a),
+            agents=agents,
+            store=ap.PresenceStore(self.path),
+            projects_path=projects_path,
+        )
+        self.assertEqual(len(summary["tasks"]), 2)
+        # 15:00Z == 20:30 +05:30, so Z form is newer than +05:30 form above.
+        self.assertEqual(agents["cursor"]["last_heartbeat"], "2026-08-16T15:00:00Z")
+
     def test_doctor_summary_is_project_scoped(self):
+        aru = self.root / "aru-scoped"
+        aru.mkdir(mode=0o700)
+        projects_path = aru / "projects.json"
+        projects_path.write_text(
+            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(projects_path, 0o600)
         self.store.register(
             agent_id="cursor-cloud-1",
             family="cursor",
@@ -259,12 +315,14 @@ class AgentPresenceTests(unittest.TestCase):
             agents=agents,
             store=self.store,
             catalog_non_guarantees=["app quit"],
+            projects_path=projects_path,
         )
         self.assertEqual(len(summary["tasks"]), 1)
         self.assertEqual(summary["tasks"][0]["agent_id"], "cursor-cloud-1")
         self.assertEqual(agents["cursor"]["last_heartbeat"], summary["tasks"][0]["last_heartbeat"])
         self.assertIn("app quit", " ".join(summary["wake_limitations"]))
         self.assertIn("GitHub claims remain authoritative", summary["ownership"])
+        self.assertEqual(summary["project_id"], ap.path_derived_project_id(self.project_a))
 
     def test_persisted_document_is_json_object(self):
         self.store.register(

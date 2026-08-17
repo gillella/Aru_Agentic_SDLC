@@ -415,6 +415,8 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
             checkout_path=str(other.resolve()),
             availability="available",
         )
+        presence_file = aru / "agent-presence.json"
+        before = presence_file.read_text(encoding="utf-8")
         payload = json.loads(
             self.run_doctor("--json", "--project", str(project.resolve())).stdout
         )
@@ -430,10 +432,8 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         joined = " ".join(payload["presence"]["wake_limitations"])
         self.assertIn("Presence never launches agents", joined)
         self.assertIn("by_product", payload["presence"])
-        # Read-only: presence file unchanged after doctor.
-        before = (self.target_home / ".aru" / "agent-presence.json").read_text(encoding="utf-8")
-        self.run_doctor("--json", "--project", str(project.resolve()))
-        after = (self.target_home / ".aru" / "agent-presence.json").read_text(encoding="utf-8")
+        # Read-only: presence file unchanged after the first doctor run.
+        after = presence_file.read_text(encoding="utf-8")
         self.assertEqual(before, after)
 
     def test_presence_project_id_uses_target_home_registry(self):
@@ -441,7 +441,6 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
 
         sys.path.insert(0, str(ROOT / "scripts"))
         import agent_presence as ap
-        import slack_projects as sp
 
         project = self.target_home / "repo-reg"
         project.mkdir()
@@ -482,8 +481,15 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         )
         self.assertEqual(payload["presence"]["project_id"], "proj_from_target_home")
         self.assertEqual(len(payload["presence"]["tasks"]), 1)
-        # Ensure we did not accidentally import the real home registry path.
-        self.assertNotEqual(str(sp.DEFAULT_REGISTRY_PATH), str(projects_path))
+        # Prove the target-home registry supplied the project_id (not a path hash).
+        self.assertNotEqual(
+            payload["presence"]["project_id"],
+            ap.path_derived_project_id(project),
+        )
+        self.assertEqual(
+            ap.resolve_project_id(project, projects_path=projects_path),
+            "proj_from_target_home",
+        )
 
 
 if __name__ == "__main__":
