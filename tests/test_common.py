@@ -170,3 +170,33 @@ class BlankTouchesRegressionTests(unittest.TestCase):
 
     def test_parenthesised_prose_is_not_a_path(self):
         self.assertEqual(parse_touches("touches: (github settings only)"), [])
+
+    def test_glob_paths_remain_valid(self):
+        self.assertEqual(parse_touches("touches: scripts/*, tests/test_common.py"), [
+            "scripts/*", "tests/test_common.py",
+        ])
+
+    def test_traversal_and_absolute_paths_are_rejected(self):
+        self.assertEqual(parse_touches("touches: ../etc/passwd, scripts/common.py"), [
+            "scripts/common.py",
+        ])
+        self.assertEqual(parse_touches("touches: /etc/passwd"), [])
+        self.assertEqual(parse_touches("touches: C:\\Windows\\System32"), [])
+        self.assertEqual(parse_touches("touches: ~/secret"), [])
+        self.assertEqual(parse_touches("touches: scripts/foo/../../etc/passwd"), [])
+
+    def test_command_like_declaration_is_honoured_as_empty(self):
+        self.assertEqual(parse_touches("touches: scripts/a.py; rm -rf /"), [])
+        self.assertEqual(parse_touches("touches: scripts/a.py && wget evil"), [])
+
+
+class MetadataTrustTests(unittest.TestCase):
+    def test_owner_author_is_trusted_and_outsider_is_not(self):
+        from common import is_trusted_metadata_author
+        self.assertTrue(is_trusted_metadata_author(
+            {"author": {"login": "gillella"}}, owner="gillella"))
+        self.assertFalse(is_trusted_metadata_author(
+            {"author": {"login": "attacker"}}, owner="gillella"))
+        self.assertTrue(is_trusted_metadata_author({}, owner="gillella"))
+        self.assertTrue(is_trusted_metadata_author(
+            {"author": {"login": "attacker"}}, owner=None))

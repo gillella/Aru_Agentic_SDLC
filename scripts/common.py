@@ -349,7 +349,7 @@ def query_open_issues() -> Optional[List[Dict[str, Any]]]:
     with more issues than that and makes the dependency graph wrong.
     """
     cmd = ["gh", "issue", "list", "--state", "open", "--limit", "500",
-           "--json", "number,title,labels,assignees,body,state,updatedAt"]
+           "--json", "number,title,labels,assignees,body,state,updatedAt,author"]
     res = run_gh_json(cmd)
     return res if isinstance(res, list) else None
 
@@ -412,12 +412,79 @@ def ensure_label(name: str, color: str = "5319e7", description: str = "") -> boo
     return code == 0
 
 
+# Issue metadata is data, not a shell. Globs (`scripts/*`) are valid touches;
+# command operators and traversal are not. `*` `?` `[` stay allowed for globs.
+_METADATA_COMMAND_RE = re.compile(r"""[;&|`$()<>\n\r!\\]|&&|\|\|""")
+_WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def metadata_line_is_command_like(text: str) -> bool:
+    """True when a metadata line contains shell operators, not path/issue tokens."""
+    return bool(_METADATA_COMMAND_RE.search(text or ""))
+
+
+def declared_path_is_safe(path: str) -> bool:
+    """True if a `touches:` token is a relative repo path, not a command."""
+    value = (path or "").strip().strip("`")
+    if not value or value.startswith("/") or value.startswith("~"):
+        return False
+    if _WINDOWS_ABS_RE.match(value):
+        return False
+    if _METADATA_COMMAND_RE.search(value):
+        return False
+    parts = re.split(r"[\\/]", value)
+    if any(part == ".." for part in parts):
+        return False
+    return True
+
+
+def author_login(issue: Dict[str, Any]) -> Optional[str]:
+    """Returns the GitHub login that authored an issue list record, if present."""
+    author = issue.get("author") if isinstance(issue, dict) else None
+    if isinstance(author, dict):
+        login = author.get("login")
+        return login if isinstance(login, str) and login else None
+    if isinstance(author, str) and author:
+        return author
+    return None
+
+
+def repository_owner_login(slug: Optional[str] = None) -> Optional[str]:
+    """Owner half of `owner/repo`, or None when identity cannot be resolved."""
+    resolved = slug if slug is not None else get_repo_slug()
+    if not resolved or "/" not in resolved:
+        return None
+    owner = resolved.split("/", 1)[0].strip()
+    return owner or None
+
+
+def is_trusted_metadata_author(
+    issue: Dict[str, Any],
+    owner: Optional[str] = None,
+) -> bool:
+    """True when issue metadata may be honoured as `touches:` / `depends-on:`.
+
+    `gh issue list` cannot return authorAssociation, so the cheapest real
+    signal is: missing author (legacy fixtures / lookup gap) stays trusted;
+    a present login must match the repository owner. Fork and outside-collaborator
+    text is ignored until a trusted agent rewrites the issue body.
+    """
+    login = author_login(issue)
+    if not login:
+        return True
+    if not owner:
+        return True
+    return login.lower() == owner.lower()
+
+
 def parse_touches(body: str) -> List[str]:
     """Parses 'touches: src/a/*, docs/b.md' from an issue body.
 
     Declares which paths an issue will modify so the picker can refuse to hand
     two agents work that collides on the same files. `parallel-eligible` only
     means 'no unresolved depends-on'; it says nothing about file conflicts.
+    Untrusted input is data: traversal, absolute paths, and command operators
+    are dropped rather than executed.
     """
     if not body:
         return []
@@ -443,7 +510,13 @@ def parse_touches(body: str) -> List[str]:
     # in the tree - not that it declared a directory called "(github".
     if raw.startswith("("):
         return []
-    return [p.strip().strip("`") for p in raw.split(",") if p.strip()]
+    if metadata_line_is_command_like(raw):
+        return []
+    return [
+        p.strip().strip("`")
+        for p in raw.split(",")
+        if p.strip() and declared_path_is_safe(p.strip().strip("`"))
+    ]
 
 
 def _norm_path(p: str) -> str:

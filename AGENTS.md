@@ -144,7 +144,9 @@ Inside this playbook repo itself, `$ARU_SDLC_HOME` may be `.` / the repo root.
 ```
 
 See [`docs/project_board_workflow.md`](docs/project_board_workflow.md) and
-[`docs/coding_standards.md`](docs/coding_standards.md).
+[`docs/coding_standards.md`](docs/coding_standards.md) (including the
+[Trust Boundary](docs/coding_standards.md#trust-boundary-for-issue-pr-and-review-text)
+for untrusted issue, PR, and review text).
 
 ---
 

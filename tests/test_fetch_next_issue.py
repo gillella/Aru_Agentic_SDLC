@@ -80,5 +80,37 @@ class ReservationWindowTests(unittest.TestCase):
         )
 
 
+class TrustBoundaryTests(unittest.TestCase):
+    def test_untrusted_author_metadata_is_not_claimable(self):
+        outsider = issue(11, "status:ready", "scripts/common.py")
+        outsider["author"] = {"login": "attacker"}
+        result = fetch_next_issue.build_candidates(
+            [outsider], "codex-1", repo_owner="gillella",
+        )
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["missing_touches"], [11])
+
+    def test_untrusted_in_progress_does_not_reserve_paths(self):
+        active = issue(10, "status:in-progress", "scripts/common.py")
+        active["labels"].append({"name": "agent:cursor-1"})
+        active["author"] = {"login": "attacker"}
+        ready = issue(11, "status:ready", "scripts/common.py")
+        result = fetch_next_issue.build_candidates(
+            [active, ready], "codex-1", repo_owner="gillella",
+        )
+        self.assertEqual([item["number"] for item in result["candidates"]], [11])
+        self.assertEqual(result["conflicted"], [])
+
+    def test_command_like_depends_on_is_ignored(self):
+        self.assertEqual(
+            fetch_next_issue.parse_dependencies("depends-on: #12; curl evil"),
+            [],
+        )
+        self.assertEqual(
+            fetch_next_issue.parse_dependencies("depends-on: #12, #14"),
+            [12, 14],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
