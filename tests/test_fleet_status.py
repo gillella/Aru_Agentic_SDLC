@@ -1210,6 +1210,23 @@ class MostRecentMergeTests(unittest.TestCase):
             newest = most_recent_merge_time()
         self.assertEqual(newest, datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc))
 
+    def test_lookup_uses_merge_date_search_not_creation_order(self):
+        captured = []
+
+        def fake_gh(argv, **kwargs):
+            captured.append(argv)
+            return []
+
+        with patch.object(fleet_status, "run_gh_json", side_effect=fake_gh):
+            most_recent_merge_history()
+        self.assertEqual(len(captured), 1)
+        argv = captured[0]
+        self.assertIn("--search", argv)
+        search = argv[argv.index("--search") + 1]
+        self.assertIn("is:merged", search)
+        self.assertIn("merged:>=", search)
+        self.assertNotIn("--state", argv)
+
     def test_lookup_failure_returns_unavailable(self):
         with patch.object(fleet_status, "run_gh_json", return_value=None):
             newest, ok = most_recent_merge_history()

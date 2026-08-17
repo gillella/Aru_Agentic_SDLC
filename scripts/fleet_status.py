@@ -20,7 +20,7 @@ import os
 import re
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -47,9 +47,11 @@ EXIT_STALLED = 4
 
 STUCK_HOURS = 4.0
 DEFAULT_STALL_HOURS = 4.0
-# Merged PRs are returned newest-created first, not newest-merged, so the most
-# recent merge is the max mergedAt over a window rather than the first row.
-STALL_MERGE_WINDOW = 30
+# Merged PRs listed by ``gh pr list --state merged`` come back newest-created
+# first, not newest-merged. A long-lived PR merged today can fall outside a
+# 30-row creation window and look like a stall. Search by merge date instead.
+STALL_MERGE_WINDOW = 100
+STALL_MERGE_LOOKBACK_DAYS = 30
 REVIEW_AGE_WARN_HOURS = 2.0
 REVIEW_AGE_ATTN_HOURS = 8.0
 CI_FAIL_WARN = 0.2
@@ -239,15 +241,24 @@ def _question(key: str, title: str, severity: str, summary: str, **payload: Any)
     return {"key": key, "title": title, "severity": severity, "summary": summary, **payload}
 
 
+def _merged_pr_search(now: Optional[datetime] = None) -> str:
+    """GitHub search that is bounded by merge date, not creation date."""
+    when = now or datetime.now(timezone.utc)
+    since = (when - timedelta(days=STALL_MERGE_LOOKBACK_DAYS)).date().isoformat()
+    return f"is:pr is:merged merged:>={since}"
+
+
 def most_recent_merge_history() -> Tuple[Optional[datetime], bool]:
-    """Newest mergedAt in the stall window, plus whether the lookup succeeded.
+    """Newest mergedAt in the stall lookback, plus whether the lookup succeeded.
 
     A failed ``gh`` call is not the same as an empty merge history. Callers
     must not report a stall when this returns ``(None, False)``.
     """
     res = run_gh_json([
-        "gh", "pr", "list", "--state", "merged",
-        "--limit", str(STALL_MERGE_WINDOW), "--json", "mergedAt",
+        "gh", "pr", "list",
+        "--search", _merged_pr_search(),
+        "--limit", str(STALL_MERGE_WINDOW),
+        "--json", "mergedAt",
     ])
     if not isinstance(res, list):
         return None, False
