@@ -2204,11 +2204,15 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):
     except Exception as exc:
         ok, message = False, f"janitor skipped: {exc}"
     print(f"  {'✅' if ok else '❌'} {'janitor':<18} {message}")
+    if not ok and failures is not None:
+        failures.append(f"janitor: {message}")
     all_ok = all_ok and ok
     from cleanup_worktrees import local_ref_exists
     if local_ref_exists(repo_root, branch):
         all_ok = False
         print("  ⏳ merger claim      retained; local branch still present")
+        if failures is not None:
+            failures.append(f"local branch remaining: {branch}")
     if all_ok:
         try:
             ok, message = clear_merger_claims(pr.get("number"))

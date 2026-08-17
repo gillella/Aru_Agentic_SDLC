@@ -176,29 +176,32 @@ def branch_has_upstream(repo_root: str, branch: str) -> bool:
     return code == 0 and bool(out.strip())
 
 
-def stale_merged_branch(repo_root: str, branch: str) -> bool:
-    """Prune only when upstream existed, origin deleted it, and it is merged.
+def stale_merged_branch(repo_root: str, branch: str) -> bool | None:
+    """True when pruneable, False when in-flight, None when lookup failed.
 
     A new unpushed worktree is an ancestor of the default tip, so ancestor
     checks alone would delete in-flight trees. A failed ``ls-remote`` is not
-    absence. Fast-forward leftovers still match the default SHA, so SHA
-    inequality is not used as a gate.
+    absence and is not treated as in-flight. Fast-forward leftovers still
+    match the default SHA, so SHA inequality is not used as a gate.
     """
     if not branch or not branch_has_upstream(repo_root, branch):
         return False
     absent = remote_branch_absent(repo_root, branch)
+    if absent is None:
+        return None
     if absent is not True:
         return False
     return merged_into_default(repo_root, branch)
 
 
-def prune_orphan_worktrees(repo_root: str) -> list[str]:
+def prune_orphan_worktrees(repo_root: str) -> tuple[bool, list[str]]:
     notes = []
+    failed = False
     code, porcelain, err = run_cmd(
         ["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root
     )
     if code != 0:
-        return [f"could not list worktrees: {err.strip()}"]
+        return False, [f"could not list worktrees: {err.strip()}"]
     for fields in parse_worktrees(porcelain):
         path = fields["worktree"]
         if os.path.realpath(path) == os.path.realpath(repo_root):
@@ -212,12 +215,18 @@ def prune_orphan_worktrees(repo_root: str) -> list[str]:
         blocked = porcelain_blocks_prune(dirty_status(path))
         if blocked is None:
             notes.append(f"skipped {path}: status unreadable")
+            failed = True
             continue
         if blocked:
             notes.append(f"skipped dirty {path}")
             continue
         branch = branch_name(fields)
-        if not stale_merged_branch(repo_root, branch):
+        stale = stale_merged_branch(repo_root, branch)
+        if stale is None:
+            notes.append(f"could not inspect remote for {path}")
+            failed = True
+            continue
+        if not stale:
             notes.append(f"kept in-flight {path} ({branch})")
             continue
         rm_code, _, rm_err = run_cmd(
@@ -227,14 +236,16 @@ def prune_orphan_worktrees(repo_root: str) -> list[str]:
             notes.append(f"removed {path}")
         else:
             notes.append(f"could not remove {path}: {rm_err.strip()}")
-    return notes
+            failed = True
+    return (not failed), notes
 
 
-def prune_retained_copies(repo_root: str) -> list[str]:
+def prune_retained_copies(repo_root: str) -> tuple[bool, list[str]]:
     notes = []
+    failed = False
     retained = os.path.join(repo_root, RETAINED_DIR)
     if not os.path.isdir(retained):
-        return notes
+        return True, notes
     for name in sorted(os.listdir(retained)):
         path = os.path.join(retained, name)
         if not os.path.isdir(path):
@@ -249,17 +260,23 @@ def prune_retained_copies(repo_root: str) -> list[str]:
                 notes.append(f"removed retained {path}")
             except OSError as exc:
                 notes.append(f"could not remove retained {path}: {exc}")
+                failed = True
             continue
         blocked = porcelain_blocks_prune(dirty_status(path))
-        if blocked is None or blocked:
-            notes.append(f"skipped retained {path}: dirty or unreadable")
+        if blocked is None:
+            notes.append(f"skipped retained {path}: status unreadable")
+            failed = True
+            continue
+        if blocked:
+            notes.append(f"skipped retained {path}: dirty")
             continue
         try:
             shutil.rmtree(path)
             notes.append(f"removed retained {path}")
         except OSError as exc:
             notes.append(f"could not remove retained {path}: {exc}")
-    return notes
+            failed = True
+    return (not failed), notes
 
 
 def local_ref_exists(repo_root: str, branch: str) -> bool:
@@ -270,16 +287,6 @@ def local_ref_exists(repo_root: str, branch: str) -> bool:
         check=False, cwd=repo_root,
     )
     return code == 0
-
-
-def _is_failure_note(note: str) -> bool:
-    lowered = note.lower()
-    return (
-        lowered.startswith("fetch failed")
-        or lowered.startswith("could not ")
-        or "claim scan failed" in lowered
-        or "hit the page limit" in lowered
-    )
 
 
 def attached_branches(repo_root: str) -> set[str]:
@@ -302,20 +309,26 @@ def is_janitor_branch(name: str) -> bool:
     )
 
 
-def delete_merged_local_branches(repo_root: str) -> list[str]:
+def delete_merged_local_branches(repo_root: str) -> tuple[bool, list[str]]:
     notes = []
+    failed = False
     attached = attached_branches(repo_root)
     code, listing, err = run_cmd(
         ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"],
         check=False, cwd=repo_root,
     )
     if code != 0:
-        return [f"could not list local branches: {err.strip()}"]
+        return False, [f"could not list local branches: {err.strip()}"]
     for name in listing.splitlines():
         name = name.strip()
         if not is_janitor_branch(name) or name in attached:
             continue
-        if not stale_merged_branch(repo_root, name):
+        stale = stale_merged_branch(repo_root, name)
+        if stale is None:
+            notes.append(f"could not inspect remote for {name}")
+            failed = True
+            continue
+        if not stale:
             continue
         rm_code, _, rm_err = run_cmd(
             ["git", "branch", "-D", name], check=False, cwd=repo_root
@@ -324,7 +337,8 @@ def delete_merged_local_branches(repo_root: str) -> list[str]:
             notes.append(f"deleted local branch {name}")
         else:
             notes.append(f"could not delete {name}: {rm_err.strip()}")
-    return notes
+            failed = True
+    return (not failed), notes
 
 
 def _paginated_items(path: str, repo_root: str):
@@ -429,41 +443,68 @@ def merger_claim_still_needed(repo_root: str, pr_num: int) -> bool:
     return absent is not True
 
 
-def _record_claim_scan(notes: list[str], scan: str | None, kind: str, prefix: str) -> None:
+def _record_claim_scan(notes: list[str], scan: str | None, kind: str, prefix: str) -> bool:
+    if scan is None:
+        return True
     if scan == "truncated":
         notes.append(
             f"{kind} claim scan hit the page limit; older {prefix} labels may remain"
         )
-    elif scan == "unreadable":
-        notes.append(
-            f"{kind} claim scan failed; older {prefix} labels may remain"
-        )
+        return False
+    notes.append(
+        f"{kind} claim scan failed; older {prefix} labels may remain"
+    )
+    return False
 
 
-def clear_stale_claim_labels(repo_root: str, retain_merger_pr: int | None = None) -> list[str]:
+def _append_claim_result(
+    notes: list[str], ok: bool, success_note: str, failure_note: str
+) -> bool:
+    notes.append(success_note if ok else failure_note)
+    return ok
+
+
+def clear_stale_claim_labels(
+    repo_root: str, retain_merger_pr: int | None = None
+) -> tuple[bool, list[str]]:
     notes = []
+    failed = False
     issues, issue_scan = _items_with_prefix("issue", "closed", "agent:", repo_root)
-    _record_claim_scan(notes, issue_scan, "closed-issue", "agent:")
+    if not _record_claim_scan(notes, issue_scan, "closed-issue", "agent:"):
+        failed = True
     for number in issues:
         ok, message = merge_pr.clear_issue_claims(number, cwd=repo_root)
-        notes.append(message if ok else f"issue #{number}: {message}")
+        if not _append_claim_result(
+            notes, ok, message, f"issue #{number}: {message}"
+        ):
+            failed = True
     reviewers, review_scan = _items_with_prefix("pr", "merged", "reviewer:", repo_root)
-    _record_claim_scan(notes, review_scan, "merged-PR reviewer", "reviewer:")
+    if not _record_claim_scan(notes, review_scan, "merged-PR reviewer", "reviewer:"):
+        failed = True
     for number in reviewers:
         ok, message = merge_pr.clear_review_claims(number, cwd=repo_root)
-        notes.append(message if ok else f"PR #{number} reviewer: {message}")
+        if not _append_claim_result(
+            notes, ok, message, f"PR #{number} reviewer: {message}"
+        ):
+            failed = True
     mergers, merge_scan = _items_with_prefix("pr", "merged", "merger:", repo_root)
-    _record_claim_scan(notes, merge_scan, "merged-PR merger", "merger:")
+    if not _record_claim_scan(notes, merge_scan, "merged-PR merger", "merger:"):
+        failed = True
     for number in mergers:
         if retain_merger_pr is not None and int(number) == int(retain_merger_pr):
-            notes.append(f"kept merger claim on PR #{number}: current close-out incomplete")
+            notes.append(
+                f"kept merger claim on PR #{number}: current close-out incomplete"
+            )
             continue
         if merger_claim_still_needed(repo_root, number):
             notes.append(f"kept merger claim on PR #{number}: close-out incomplete")
             continue
         ok, message = merge_pr.clear_merger_claims(number, cwd=repo_root)
-        notes.append(message if ok else f"PR #{number} merger: {message}")
-    return notes
+        if not _append_claim_result(
+            notes, ok, message, f"PR #{number} merger: {message}"
+        ):
+            failed = True
+    return (not failed), notes
 
 
 def sweep(repo_root: str, include_labels: bool = True,
@@ -471,23 +512,25 @@ def sweep(repo_root: str, include_labels: bool = True,
     if not refresh_origin(repo_root):
         notes = ["fetch failed; keeping worktrees and local branches"]
         if include_labels:
-            notes = notes + clear_stale_claim_labels(
+            _, label_notes = clear_stale_claim_labels(
                 repo_root, retain_merger_pr=retain_merger_pr
             )
+            notes.extend(label_notes)
         return False, "; ".join(notes)
-    notes = (
-        prune_orphan_worktrees(repo_root)
-        + prune_retained_copies(repo_root)
-        + delete_merged_local_branches(repo_root)
-    )
+    orphan_ok, orphan_notes = prune_orphan_worktrees(repo_root)
+    retained_ok, retained_notes = prune_retained_copies(repo_root)
+    branch_ok, branch_notes = delete_merged_local_branches(repo_root)
+    notes = orphan_notes + retained_notes + branch_notes
+    ok = orphan_ok and retained_ok and branch_ok
     if include_labels:
-        notes = notes + clear_stale_claim_labels(
+        label_ok, label_notes = clear_stale_claim_labels(
             repo_root, retain_merger_pr=retain_merger_pr
         )
+        notes.extend(label_notes)
+        ok = ok and label_ok
     if not notes:
         return True, "already clean"
-    failed = any(_is_failure_note(note) for note in notes)
-    return (not failed), "; ".join(notes)
+    return ok, "; ".join(notes)
 
 
 def main() -> int:
