@@ -263,6 +263,7 @@ parallel-eligible: true
             if force:
                 argv.append("--force")
             with patch("triage_backlog.list_open_issues", return_value=[operator_issue]), \
+                 patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
                  patch("triage_backlog.update_status") as update, \
                  patch("sys.argv", argv):
                 self.assertEqual(tb.main(), 0)
@@ -271,6 +272,7 @@ parallel-eligible: true
     def test_main_refusal_emits_example_conforming_issue(self):
         issues_list = [issue(200, "type:feat", "status:backlog", body=READY_BODY)]
         with patch("triage_backlog.list_open_issues", return_value=issues_list), \
+             patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout, \
              patch("sys.argv", ["triage_backlog.py"]):
             tb.main()
@@ -300,6 +302,7 @@ class SplitRecommendationTests(unittest.TestCase):
         )
         narrow = issue(10, "type:chore", "status:backlog", body=narrow_body)
         with patch("triage_backlog.list_open_issues", return_value=[narrow]), \
+             patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
              patch("triage_backlog.update_status", return_value=True) as update, \
              patch("sys.argv", ["triage_backlog.py", "--promote"]):
             self.assertEqual(tb.main(), 0)
@@ -308,6 +311,7 @@ class SplitRecommendationTests(unittest.TestCase):
     def test_wide_touches_plus_many_criteria_is_held_for_split(self):
         wide = issue(11, "type:chore", "status:backlog", body=self.oversized_body())
         with patch("triage_backlog.list_open_issues", return_value=[wide]), \
+             patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
              patch("triage_backlog.update_status") as update, \
              patch("sys.argv", ["triage_backlog.py", "--promote"]), \
              patch("sys.stdout", new_callable=io.StringIO) as output:
@@ -409,6 +413,7 @@ class SplitRecommendationTests(unittest.TestCase):
             candidate = issue(number, "type:chore", "status:backlog", body=body)
             with self.subTest(number=number), \
                  patch("triage_backlog.list_open_issues", return_value=[candidate]), \
+                 patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
                  patch("triage_backlog.update_status") as update, \
                  patch("sys.argv", ["triage_backlog.py", "--promote"]), \
                  patch("sys.stdout", new_callable=io.StringIO):
@@ -488,6 +493,7 @@ class SplitRecommendationTests(unittest.TestCase):
     def test_force_promotes_split_recommended_issue(self):
         wide = issue(12, "type:chore", "status:backlog", body=self.oversized_body())
         with patch("triage_backlog.list_open_issues", return_value=[wide]), \
+             patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
              patch("triage_backlog.update_status", return_value=True) as update, \
              patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]):
             self.assertEqual(tb.main(), 0)
@@ -496,6 +502,7 @@ class SplitRecommendationTests(unittest.TestCase):
     def test_force_does_not_promote_epic(self):
         epic = issue(13, "type:epic", "status:backlog", body=self.oversized_body())
         with patch("triage_backlog.list_open_issues", return_value=[epic]), \
+             patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
              patch("triage_backlog.update_status") as update, \
              patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]):
             self.assertEqual(tb.main(), 0)
@@ -602,6 +609,18 @@ class PartitionTests(unittest.TestCase):
 
         self.assertEqual(cap["concurrent"], [40])
         self.assertEqual(cap["deferred"], [])
+
+    def test_standard_triage_report_uses_pr_file_mapping(self):
+        held = issue(39, "status:in-review", "agent:agent-1",
+                     body="touches: src/a.py, src/unused.py")
+        ready = issue(40, "status:ready", body="touches: src/unused.py")
+        with patch("triage_backlog.list_open_issues", return_value=[held, ready]), \
+             patch("triage_backlog.list_open_pr_files_by_issue",
+                   return_value={39: ["src/a.py"]}), \
+             patch("sys.stdout", new_callable=io.StringIO) as output, \
+             patch("sys.argv", ["triage_backlog.py"]):
+            self.assertEqual(tb.main(), 0)
+        self.assertIn("Claimable simultaneously: 1  [40]", output.getvalue())
 
 
 class CapacityTests(unittest.TestCase):

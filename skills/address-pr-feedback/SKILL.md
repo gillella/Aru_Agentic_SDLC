@@ -36,7 +36,7 @@ forever, so it must be routed to Step 1G instead.
 
 ### Step 1G: Clear the author-only gate
 
-No threads exist. Act on each name in `work.unmet_gates`:
+No unresolved threads exist. Act on each name in `work.unmet_gates`:
 
 - **`rebased`** — in the PR's worktree: `git fetch origin && git rebase
   origin/main`, re-run the full local verification, then push with
@@ -48,8 +48,9 @@ No threads exist. Act on each name in `work.unmet_gates`:
   purely to clear the gate.
 - **`review-evidence`** — a peer already reviewed and threads are resolved, but
   Definition of Done still fails `review` because a resolved thread has no
-  commit after the finding. Push a fix, or reply on the thread starting with
-  `Withdrawn:` and why. This is not a request to self-review.
+  commit after the finding. Locate that resolved thread (not the unresolved
+  checklist) and push a fix, or reply on it starting with `Withdrawn:` and
+  why. This is not a request to self-review.
 
 Then refresh evidence for the new head:
 

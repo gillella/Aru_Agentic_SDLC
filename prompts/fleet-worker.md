@@ -117,8 +117,9 @@ disagree — never resolve a thread silently. Re-run the full local verification
 push, and reply to each thread with the commit hash that addressed it.
 
 **A2 — present: a Definition-of-Done gate only you can clear.** There are **no
-threads to fetch**; the checklist is empty by construction, so do not go looking
-for one. Each named gate has exactly one action:
+unresolved threads to fetch**; the checklist is empty by construction, so do
+not run Step 1 looking for open comments. Each named gate has exactly one
+action:
 
 - `rebased` — `git fetch origin && git rebase origin/main` in the PR's worktree,
   re-run the full local verification, then push with `--force-with-lease`.
@@ -130,9 +131,10 @@ for one. Each named gate has exactly one action:
   clear the gate.
 - `review-evidence` — a peer already reviewed and the threads are resolved, but
   `merge_pr.py` still fails `review` because a resolved thread has no commit
-  after the finding and was not withdrawn. Push a fix commit, or reply on the
-  thread starting with `Withdrawn:` and why. Do not treat this as a missing
-  peer review.
+  after the finding and was not withdrawn. Locate that **resolved** thread
+  (GraphQL `reviewThreads` with `isResolved: true`, or the PR Conversation
+  tab) and either push a fix commit or reply on it starting with
+  `Withdrawn:` and why. Do not treat this as a missing peer review.
 
 Then refresh the evidence for the new head with
 `create_pr.py --refresh-pr <PR> --issue <N> --verify-command ...` and return to

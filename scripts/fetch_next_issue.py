@@ -28,9 +28,11 @@ from common import (
     claimed_by,
     get_current_branch,
     get_issue,
+    get_repo_slug,
     list_open_issues,
     parse_touches,
     run_cmd,
+    run_gh_json,
     touches_conflict,
 )
 from update_issue_status import update_status
@@ -38,6 +40,29 @@ from update_issue_status import update_status
 
 ISSUE_IN_BRANCH = re.compile(r"issue-(\d+)", re.IGNORECASE)
 CLOSES_ISSUE = re.compile(r"\bcloses\s+#(\d+)\b", re.IGNORECASE)
+RENAME_CHANGE_TYPES = frozenset({"RENAMED"})
+OPEN_PR_FILES_QUERY = """
+query($owner:String!, $repo:String!, $cursor:String) {
+  repository(owner:$owner, name:$repo) {
+    pullRequests(states: OPEN, first: 50, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        body
+        headRefName
+        changedFiles
+        files(first: 100) {
+          nodes { path changeType }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+class InvalidPrFiles(ValueError):
+    """PR file snapshot cannot be used as an authoritative lock."""
 
 
 def linked_issue_numbers_from_pr(pr: Dict[str, Any]) -> List[int]:
@@ -57,43 +82,159 @@ def linked_issue_numbers_from_pr(pr: Dict[str, Any]) -> List[int]:
     return []
 
 
-def pr_files_by_issue_from_prs(prs: List[Dict[str, Any]]) -> Dict[int, List[str]]:
-    """Map each linked issue to the union of PR file paths."""
-    mapping: Dict[int, List[str]] = {}
-    for pr in prs:
-        paths: List[str] = []
-        for entry in pr.get("files") or []:
-            path = entry.get("path") if isinstance(entry, dict) else None
-            if path and path not in paths:
-                paths.append(path)
-        if not paths:
+def _append_unique(paths: List[str], path: str) -> None:
+    if path not in paths:
+        paths.append(path)
+
+
+def reserved_paths_from_pr(pr: Dict[str, Any]) -> List[str]:
+    """Return this PR's lock paths, or raise if the snapshot is unusable."""
+    if not isinstance(pr, dict) or not isinstance(pr.get("files"), list):
+        raise InvalidPrFiles("invalid PR file response")
+    files = pr["files"]
+    changed = pr.get("changedFiles")
+    if isinstance(changed, int) and changed > len(files):
+        raise InvalidPrFiles("truncated PR file snapshot")
+    if not files:
+        raise InvalidPrFiles("empty PR file list")
+    paths: List[str] = []
+    for entry in files:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(path, str) or not path:
+            raise InvalidPrFiles("invalid PR file entry")
+        previous = entry.get("previousFileName") or entry.get("previous_filename")
+        renamed = str(entry.get("changeType") or "").upper() in RENAME_CHANGE_TYPES
+        if renamed or previous:
+            if not isinstance(previous, str) or not previous:
+                raise InvalidPrFiles("rename without previous path")
+            _append_unique(paths, path)
+            _append_unique(paths, previous)
             continue
-        for num in linked_issue_numbers_from_pr(pr):
+        _append_unique(paths, path)
+    return paths
+
+
+def pr_files_by_issue_from_prs(prs: List[Dict[str, Any]]) -> Dict[int, List[str]]:
+    """Map each linked issue to the union of usable PR file paths.
+
+    An issue is omitted when any linked PR snapshot is empty, truncated,
+    renamed without a source path, or malformed, so reservation_paths falls
+    back to declared touches. A non-dict record poisons the whole map.
+    """
+    if not isinstance(prs, list):
+        return {}
+    mapping: Dict[int, List[str]] = {}
+    invalid: set[int] = set()
+    for pr in prs:
+        if not isinstance(pr, dict):
+            return {}
+        issue_nums = linked_issue_numbers_from_pr(pr)
+        try:
+            paths = reserved_paths_from_pr(pr)
+        except InvalidPrFiles:
+            invalid.update(issue_nums)
+            continue
+        for num in issue_nums:
+            if num in invalid:
+                continue
             current = mapping.setdefault(num, [])
             for path in paths:
-                if path not in current:
-                    current.append(path)
+                _append_unique(current, path)
+    for num in invalid:
+        mapping.pop(num, None)
     return mapping
+
+
+def _normalize_pr_file_record(node: Dict[str, Any]) -> Dict[str, Any]:
+    files_conn = node.get("files")
+    if isinstance(files_conn, dict):
+        nodes = files_conn.get("nodes")
+        files = nodes if isinstance(nodes, list) else []
+    elif isinstance(files_conn, list):
+        files = files_conn
+    else:
+        files = []
+    return {
+        "number": node.get("number"),
+        "body": node.get("body") or "",
+        "headRefName": node.get("headRefName") or "",
+        "changedFiles": node.get("changedFiles"),
+        "files": files,
+    }
+
+
+def _pr_files_page(owner: str, repo: str, cursor: Optional[str]) -> Optional[Dict[str, Any]]:
+    cmd = [
+        "gh", "api", "graphql",
+        "-f", f"query={OPEN_PR_FILES_QUERY}",
+        "-F", f"owner={owner}",
+        "-F", f"repo={repo}",
+    ]
+    if cursor:
+        cmd.extend(["-F", f"cursor={cursor}"])
+    res = run_gh_json(cmd)
+    if not isinstance(res, dict) or res.get("errors"):
+        return None
+    try:
+        return res["data"]["repository"]["pullRequests"]
+    except (KeyError, TypeError):
+        return None
+
+
+def load_open_pr_file_records() -> Optional[List[Dict[str, Any]]]:
+    """GraphQL open-PR file snapshots, or None when the list cannot be trusted."""
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return None
+    owner, repo = slug.split("/", 1)
+    records: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+    seen: set[str] = set()
+    while True:
+        page = _pr_files_page(owner, repo, cursor)
+        if not isinstance(page, dict) or not isinstance(page.get("nodes"), list):
+            return None
+        for node in page["nodes"]:
+            if not isinstance(node, dict):
+                return None
+            records.append(_normalize_pr_file_record(node))
+        info = page.get("pageInfo") or {}
+        if not info.get("hasNextPage"):
+            return records
+        cursor = info.get("endCursor")
+        if not cursor or cursor in seen:
+            return None
+        seen.add(cursor)
+
+
+def attach_open_pr_file_snapshots(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Overlay GraphQL path/changeType/changedFiles onto an existing PR list."""
+    records = load_open_pr_file_records()
+    if records is None:
+        return prs
+    by_number = {
+        record["number"]: record
+        for record in records
+        if isinstance(record.get("number"), int)
+    }
+    for pr in prs:
+        extra = by_number.get(pr.get("number"))
+        if extra is None:
+            continue
+        pr["files"] = extra["files"]
+        pr["changedFiles"] = extra["changedFiles"]
+    return prs
 
 
 def list_open_pr_files_by_issue() -> Dict[int, List[str]]:
     """Live map of issue → open-PR files. Empty on lookup failure."""
-    code, out, _err = run_cmd(
-        [
-            "gh", "pr", "list", "--state", "open", "--limit", "200",
-            "--json", "number,body,headRefName,files",
-        ],
-        check=False,
-    )
-    if code != 0:
+    records = load_open_pr_file_records()
+    if records is None:
         return {}
     try:
-        prs = json.loads(out) if out else []
-    except json.JSONDecodeError:
+        return pr_files_by_issue_from_prs(records)
+    except (AttributeError, TypeError, ValueError):
         return {}
-    if not isinstance(prs, list):
-        return {}
-    return pr_files_by_issue_from_prs(prs)
 
 
 def reservation_paths(

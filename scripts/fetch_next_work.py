@@ -70,6 +70,7 @@ from common import (
     label_names as issue_label_names,
 )
 from fetch_next_issue import (
+    attach_open_pr_file_snapshots,
     build_candidates,
     pr_files_by_issue_from_prs,
     reap_stale_claims,
@@ -103,7 +104,7 @@ DEFAULT_CROSS_FAMILY_WAIT_MIN = 30
 
 PR_FIELDS = ("number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
              "createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt,"
-             "files")
+             "files,changedFiles")
 
 
 def _label_value(labels: list[str], prefix: str) -> str | None:
@@ -122,10 +123,13 @@ def list_open_prs() -> list[dict[str, Any]] | None:
         print(f"[WARN] Could not list PRs: {err.strip()}", file=sys.stderr)
         return None
     try:
-        return json.loads(out) if out else []
+        prs = json.loads(out) if out else []
     except json.JSONDecodeError:
         print("[WARN] Could not parse the PR list.", file=sys.stderr)
         return None
+    if not isinstance(prs, list):
+        return None
+    return attach_open_pr_file_snapshots(prs)
 
 
 def _issue_closeout_snapshot(slug: str) -> dict[int, dict[str, Any]] | None:

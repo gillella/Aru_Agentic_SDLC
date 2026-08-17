@@ -533,8 +533,8 @@ def main():
             except ValueError:
                 pass
 
+    pr_files = list_open_pr_files_by_issue()
     if args.capacity:
-        pr_files = list_open_pr_files_by_issue()
         print_capacity(
             capacity(ready, held, pr_files_by_issue=pr_files),
             held,
@@ -601,7 +601,11 @@ def main():
             "Use --promote --force to override the recommendation."
         )
 
-    print_capacity(capacity(ready, held), held, ready_target=target)
+    print_capacity(
+        capacity(ready, held, pr_files_by_issue=pr_files),
+        held,
+        ready_target=target,
+    )
     return 0
 
 

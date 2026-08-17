@@ -376,8 +376,95 @@ class PrFileReservationTests(unittest.TestCase):
         self.assertEqual(mapping[20], ["src/a.py", "src/b.py", "src/c.py"])
 
     def test_lookup_failure_returns_empty_map(self):
-        with patch.object(fetch_next_issue, "run_cmd", return_value=(1, "", "boom")):
+        with patch.object(fetch_next_issue, "get_repo_slug", return_value=None):
             self.assertEqual(fetch_next_issue.list_open_pr_files_by_issue(), {})
+
+    def test_graphql_error_returns_empty_map(self):
+        with patch.object(fetch_next_issue, "get_repo_slug", return_value="o/r"), \
+             patch.object(fetch_next_issue, "run_gh_json", return_value={"errors": ["boom"]}):
+            self.assertEqual(fetch_next_issue.list_open_pr_files_by_issue(), {})
+
+    def test_truncated_snapshot_omits_the_issue(self):
+        prs = [{
+            "body": "Closes #20",
+            "headRefName": "feat/issue-20-a",
+            "changedFiles": 101,
+            "files": [{"path": f"src/{i}.py"} for i in range(100)],
+        }]
+        self.assertEqual(fetch_next_issue.pr_files_by_issue_from_prs(prs), {})
+
+    def test_mixed_partial_file_lists_omit_that_issue(self):
+        prs = [
+            {
+                "body": "Closes #20",
+                "headRefName": "feat/issue-20-a",
+                "files": [{"path": "src/a.py"}],
+            },
+            {
+                "body": "Closes #20",
+                "headRefName": "feat/issue-20-b",
+                "files": [],
+            },
+            {
+                "body": "Closes #21",
+                "headRefName": "feat/issue-21-a",
+                "files": [{"path": "src/b.py"}],
+            },
+        ]
+        mapping = fetch_next_issue.pr_files_by_issue_from_prs(prs)
+        self.assertNotIn(20, mapping)
+        self.assertEqual(mapping[21], ["src/b.py"])
+
+    def test_malformed_file_entry_omits_that_issue(self):
+        prs = [{
+            "body": "Closes #20",
+            "headRefName": "feat/issue-20-a",
+            "files": [{"path": "src/a.py"}, None],
+        }]
+        self.assertEqual(fetch_next_issue.pr_files_by_issue_from_prs(prs), {})
+
+    def test_non_dict_pr_record_returns_empty_map(self):
+        prs = [
+            {
+                "body": "Closes #21",
+                "headRefName": "feat/issue-21-a",
+                "files": [{"path": "src/b.py"}],
+            },
+            None,
+        ]
+        self.assertEqual(fetch_next_issue.pr_files_by_issue_from_prs(prs), {})
+
+    def test_rename_with_previous_path_locks_both_sides(self):
+        prs = [{
+            "body": "Closes #20",
+            "headRefName": "feat/issue-20-a",
+            "files": [{
+                "path": "src/new.py",
+                "changeType": "RENAMED",
+                "previousFileName": "src/old.py",
+            }],
+        }]
+        mapping = fetch_next_issue.pr_files_by_issue_from_prs(prs)
+        self.assertEqual(mapping[20], ["src/new.py", "src/old.py"])
+
+    def test_rename_without_previous_path_omits_the_issue(self):
+        prs = [{
+            "body": "Closes #20",
+            "headRefName": "feat/issue-20-a",
+            "files": [{"path": "src/new.py", "changeType": "RENAMED"}],
+        }]
+        self.assertEqual(fetch_next_issue.pr_files_by_issue_from_prs(prs), {})
+
+    def test_graphql_nodes_normalize_into_mapper_records(self):
+        record = fetch_next_issue._normalize_pr_file_record({
+            "number": 7,
+            "body": "Closes #20",
+            "headRefName": "feat/issue-20-a",
+            "changedFiles": 1,
+            "files": {"nodes": [{"path": "src/a.py", "changeType": "MODIFIED"}]},
+        })
+        mapping = fetch_next_issue.pr_files_by_issue_from_prs([record])
+        self.assertEqual(mapping[20], ["src/a.py"])
 
 
 def fetch_next_issue_claim_conflict():
