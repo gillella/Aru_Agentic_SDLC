@@ -182,7 +182,7 @@ def _is_retain_manifest_path(path: str) -> bool:
     return rel in names or any(rel.endswith("/" + name) for name in names)
 
 
-def porcelain_dirty_except_manifest(status: str | None) -> bool | None:
+def porcelain_dirty_except_manifest(status: str | None, base_path: str | None = None) -> bool | None:
     if status is None:
         return None
     filtered = []
@@ -191,7 +191,7 @@ def porcelain_dirty_except_manifest(status: str | None) -> bool | None:
         if _is_retain_manifest_path(path):
             continue
         filtered.append(line)
-    return porcelain_blocks_prune("\n".join(filtered))
+    return porcelain_blocks_prune("\n".join(filtered), base_path)
 
 
 def retain_manifest_allows_prune(path: str) -> bool | None:
@@ -234,6 +234,27 @@ def dirty_status(path: str) -> str | None:
     return status
 
 
+def _is_empty_or_cache_dir(path: str) -> bool:
+    """True if directory is physically empty or contains only empty dirs / cache files."""
+    try:
+        if not os.path.isdir(path) or os.path.islink(path):
+            return False
+        for root, dirs, files in os.walk(path):
+            for d in dirs:
+                if os.path.islink(os.path.join(root, d)):
+                    return False
+            for f in files:
+                full_file = os.path.join(root, f)
+                if os.path.islink(full_file):
+                    return False
+                rel = os.path.relpath(full_file, path)
+                if not _known_cache_path(rel):
+                    return False
+        return True
+    except OSError:
+        return False
+
+
 def _known_cache_path(path: str) -> bool:
     normalized = path.strip().replace("\\", "/").strip("/")
     if normalized.endswith(".pyc"):
@@ -241,8 +262,8 @@ def _known_cache_path(path: str) -> bool:
     return any(part in KNOWN_CACHE_NAMES for part in normalized.split("/"))
 
 
-def porcelain_blocks_prune(status: str | None) -> bool | None:
-    """None if unreadable, True if real dirt, False if clean or cache-only."""
+def porcelain_blocks_prune(status: str | None, base_path: str | None = None) -> bool | None:
+    """None if unreadable, True if real dirt, False if clean, cache-only, or empty ignored dirs."""
     if status is None:
         return None
     for line in status.splitlines():
@@ -250,8 +271,12 @@ def porcelain_blocks_prune(status: str | None) -> bool | None:
             continue
         xy = line[:2]
         path = line[3:] if len(line) > 2 else ""
-        if xy == "!!" and _known_cache_path(path):
-            continue
+        if xy == "!!":
+            if _known_cache_path(path):
+                continue
+            candidate = os.path.join(base_path, path.strip()) if base_path else path.strip()
+            if _is_empty_or_cache_dir(candidate):
+                continue
         return True
     return False
 
@@ -363,7 +388,7 @@ def prune_orphan_worktrees(repo_root: str) -> tuple[bool, list[str]]:
         if not owned_worktree(path, repo_root):
             notes.append(f"skipped {path}: not a worktree of this repo")
             continue
-        blocked = porcelain_blocks_prune(dirty_status(path))
+        blocked = porcelain_blocks_prune(dirty_status(path), path)
         if blocked is None:
             notes.append(f"skipped {path}: status unreadable")
             failed = True
@@ -385,6 +410,9 @@ def prune_orphan_worktrees(repo_root: str) -> tuple[bool, list[str]]:
         )
         if rm_code == 0:
             notes.append(f"removed {path}")
+            if os.path.exists(path) and _is_empty_or_cache_dir(path):
+                import shutil
+                shutil.rmtree(path, ignore_errors=True)
         else:
             notes.append(f"could not remove {path}: {rm_err.strip()}")
             failed = True
@@ -451,7 +479,7 @@ def _retained_still_clean(path: str, deregistered: bool) -> tuple[bool | None, s
             "cleanliness unverifiable" if allowed is None else "dirty after retention"
         )
         return False, f"skipped retained {path}: {reason}"
-    blocked = porcelain_blocks_prune(dirty_status(path))
+    blocked = porcelain_blocks_prune(dirty_status(path), path)
     if blocked is None:
         return None, f"skipped retained {path}: status unreadable"
     if blocked:

@@ -93,6 +93,21 @@ class PorcelainPruneTests(unittest.TestCase):
     def test_ignored_non_cache_path_blocks(self):
         self.assertTrue(cleanup_worktrees.porcelain_blocks_prune("!! .env\n"))
 
+    def test_empty_ignored_directory_does_not_block_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_dir = Path(tmp) / ".worktrees"
+            empty_dir.mkdir()
+            status = "!! .worktrees/\n"
+            self.assertFalse(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
+    def test_non_empty_ignored_directory_blocks_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            non_empty_dir = Path(tmp) / ".worktrees"
+            non_empty_dir.mkdir()
+            (non_empty_dir / "child.txt").write_text("content")
+            status = "!! .worktrees/\n"
+            self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
     def test_retain_manifest_lines_are_ignored(self):
         status = "?? .aru-retained-clean\n!! .aru-retained-clean.tmp\n"
         self.assertFalse(cleanup_worktrees.porcelain_dirty_except_manifest(status))
@@ -100,6 +115,23 @@ class PorcelainPruneTests(unittest.TestCase):
             cleanup_worktrees.porcelain_dirty_except_manifest("?? secret.txt\n")
         )
         self.assertIsNone(cleanup_worktrees.porcelain_dirty_except_manifest(None))
+
+
+class WorktreeCleanupTests(unittest.TestCase):
+    def test_empty_ignored_directory_does_not_block_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_dir = Path(tmp) / ".worktrees"
+            empty_dir.mkdir()
+            status = "!! .worktrees/\n"
+            self.assertFalse(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
+    def test_non_empty_ignored_directory_blocks_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            non_empty_dir = Path(tmp) / ".worktrees"
+            non_empty_dir.mkdir()
+            (non_empty_dir / "child.txt").write_text("content")
+            status = "!! .worktrees/\n"
+            self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
 
 
 class RetainManifestWalkTests(unittest.TestCase):
