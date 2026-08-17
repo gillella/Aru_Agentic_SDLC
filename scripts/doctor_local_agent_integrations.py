@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 SECRET_ENV = re.compile(r"(TOKEN|SECRET|KEY|PASSWORD|PAT|CREDENTIAL|AUTH)", re.I)
@@ -25,6 +26,14 @@ VERSION_SAFE = re.compile(r"^[A-Za-z0-9._+ -]{1,80}$")
 MANAGED_CODEX_ID = re.compile(r'^id = "aru-code-loop(-[0-9a-f]+)?"\s*$', re.M)
 CODEX_STATUS = re.compile(r'^status = "([^"]+)"\s*$', re.M)
 GITHUB_TOKEN_SHAPE = re.compile(r"gh[pousr]_|github_pat_")
+GITHUB_CREDENTIAL_ENV = (
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
 SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
@@ -120,9 +129,9 @@ def cli_name(spec: dict) -> str | None:
     return None
 
 
-def application_roots(target_home: Path) -> list[Path]:
+def application_roots(target_home: Path, live: bool = True) -> list[Path]:
     roots = [target_home / "Applications"]
-    if target_home.resolve() == Path.home().resolve():
+    if live:
         roots.extend([Path("/Applications"), Path.home() / "Applications"])
     unique = []
     seen = set()
@@ -354,23 +363,23 @@ def surface_ok(path: Path) -> bool:
 def redact_text(text: str) -> str:
     lines = []
     for line in (text or "").splitlines():
-        lines.append("redacted" if SECRET_ENV.search(line) else line)
+        secret = SECRET_ENV.search(line) or GITHUB_TOKEN_SHAPE.search(line)
+        lines.append("redacted" if secret else line)
     return "\n".join(lines)
 
 
 def run_quiet(cmd: list[str], cwd: str | None = None,
-              redact: bool = True) -> tuple[int, str]:
+              redact: bool = True, home: Path | None = None) -> tuple[int, str]:
     env = {
         "PATH": os.environ.get("PATH", ""),
-        "HOME": os.environ.get("HOME", ""),
+        "HOME": str(home) if home is not None else os.environ.get("HOME", ""),
         "LANG": "C",
-        "GH_CONFIG_DIR": os.environ.get("GH_CONFIG_DIR", ""),
-        "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
-        "GH_TOKEN": os.environ.get("GH_TOKEN", ""),
-        "GITHUB_TOKEN": os.environ.get("GITHUB_TOKEN", ""),
-        "GH_ENTERPRISE_TOKEN": os.environ.get("GH_ENTERPRISE_TOKEN", ""),
-        "GITHUB_ENTERPRISE_TOKEN": os.environ.get("GITHUB_ENTERPRISE_TOKEN", ""),
     }
+    if home is None:
+        for key in GITHUB_CREDENTIAL_ENV:
+            value = os.environ.get(key, "")
+            if value:
+                env[key] = value
     env = {key: value for key, value in env.items() if value}
     try:
         proc = subprocess.run(
@@ -391,15 +400,18 @@ def gh_on_path() -> bool:
     return shutil.which("gh") is not None
 
 
-def gh_logged_in() -> bool:
+def gh_logged_in(home: Path | None = None) -> bool:
     if not gh_on_path():
         return False
-    code, _text = run_quiet(["gh", "auth", "status"])
+    code, _text = run_quiet(["gh", "auth", "status"], home=home)
     return code == 0
 
 
-def _is_git_repo(project: str) -> bool:
-    code, text = run_quiet(["git", "-C", project, "rev-parse", "--is-inside-work-tree"])
+def _is_git_repo(project: str, home: Path | None = None) -> bool:
+    code, text = run_quiet(
+        ["git", "-C", project, "rev-parse", "--is-inside-work-tree"],
+        home=home,
+    )
     return code == 0 and "true" in text.lower()
 
 
@@ -418,10 +430,10 @@ def redact_remote(url: str | None) -> str | None:
     return text
 
 
-def git_remote(project: str) -> str | None:
+def git_remote(project: str, home: Path | None = None) -> str | None:
     code, text = run_quiet(
         ["git", "-C", project, "remote", "get-url", "origin"],
-        redact=False,
+        redact=False, home=home,
     )
     if code != 0:
         return None
@@ -439,8 +451,11 @@ def agents_md_ok(project: str) -> bool:
         return False
 
 
-def aru_pre_push_installed(project: str) -> bool:
-    code, git_dir = run_quiet(["git", "-C", project, "rev-parse", "--git-common-dir"])
+def aru_pre_push_installed(project: str, home: Path | None = None) -> bool:
+    code, git_dir = run_quiet(
+        ["git", "-C", project, "rev-parse", "--git-common-dir"],
+        home=home,
+    )
     if code != 0 or not git_dir.strip():
         return False
     hook_root = Path(git_dir.strip())
@@ -460,10 +475,13 @@ def worktree_status(project: str) -> dict:
     present = root.is_dir()
     inflight = []
     if present:
-        inflight = sorted(
-            child.name for child in root.iterdir()
-            if child.is_dir() and child.name != ".retained"
-        )
+        try:
+            inflight = sorted(
+                child.name for child in root.iterdir()
+                if child.is_dir() and child.name != ".retained"
+            )
+        except OSError:
+            inflight = []
     return {"directory": str(root), "present": present, "in_flight": inflight}
 
 
@@ -481,21 +499,58 @@ def repo_slug_from_remote(remote: str | None) -> str | None:
     return None
 
 
-def project_board_identity(project: str, auth_ok: bool, remote: str | None) -> dict:
+@contextmanager
+def isolated_github_env(home: Path | None):
+    if home is None:
+        yield
+        return
+    import common as common_mod
+    previous = common_mod.run_cmd
+
+    def run_cmd_isolated(cmd, check=True, cwd=None, evidence=None):
+        del check, evidence
+        env = {
+            key: value for key, value in os.environ.items()
+            if key not in GITHUB_CREDENTIAL_ENV
+        }
+        env["HOME"] = str(home)
+        env.setdefault("PATH", os.environ.get("PATH", ""))
+        env.setdefault("LANG", "C")
+        try:
+            res = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, cwd=cwd, env=env, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 1, "", str(exc)
+        return res.returncode, (res.stdout or "").strip(), (res.stderr or "").strip()
+
+    common_mod.run_cmd = run_cmd_isolated
+    try:
+        yield
+    finally:
+        common_mod.run_cmd = previous
+
+
+def project_board_identity(
+    project: str, auth_ok: bool, remote: str | None,
+    home: Path | None = None,
+) -> dict:
     if not auth_ok:
         return {"ok": False, "state": "unauthenticated", "projects": []}
     slug = repo_slug_from_remote(remote)
     if not slug:
         code, text = run_quiet(
             ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            cwd=project,
+            cwd=project, home=home,
         )
         slug = text.strip() if code == 0 and text.strip() else None
     if not slug:
         return {"ok": False, "state": "unknown_repo", "projects": []}
     try:
         from common import get_repo_projects, select_governed_projects
-        boards = get_repo_projects(slug)
+        with isolated_github_env(home):
+            boards = get_repo_projects(slug)
     except Exception:
         return {"ok": False, "state": "unreadable", "projects": [], "repo": slug}
     if boards is None:
@@ -537,7 +592,8 @@ def append_link_checks(checks: list[dict], rows: list[dict]) -> None:
             ))
 
 
-def diagnose_install(aru_home: Path, target_home: Path, agents: dict) -> dict:
+def diagnose_install(aru_home: Path, target_home: Path, agents: dict,
+                     home: Path | None = None) -> dict:
     skills = canonical_skill_names(aru_home)
     checks: list[dict] = []
     catalog_ok = (aru_home / "templates" / "integrations" / "continuity.json").is_file()
@@ -617,7 +673,7 @@ def diagnose_install(aru_home: Path, target_home: Path, agents: dict) -> dict:
         }
     git_ok = git_on_path()
     gh_ok = gh_on_path()
-    auth_ok = gh_logged_in()
+    auth_ok = gh_logged_in(home=home)
     checks.append(check(
         "git", git_ok, "ok" if git_ok else "degraded",
         "Install git and ensure it is on PATH.",
@@ -645,9 +701,9 @@ def diagnose_install(aru_home: Path, target_home: Path, agents: dict) -> dict:
     }
 
 
-def diagnose_repo(project: str, auth_ok: bool) -> dict:
+def diagnose_repo(project: str, auth_ok: bool, home: Path | None = None) -> dict:
     checks: list[dict] = []
-    remote = git_remote(project)
+    remote = git_remote(project, home=home)
     checks.append(check(
         "git_remote", bool(remote), "degraded" if not remote else "ok",
         f"Add a GitHub origin remote in {project}.",
@@ -658,7 +714,7 @@ def diagnose_repo(project: str, auth_ok: bool) -> dict:
         "agents_md", agents_ok, "degraded" if not agents_ok else "ok",
         "Add AGENTS.md carrying the Issue-First Law, or run init-agent-project.",
     ))
-    hooks_ok = aru_pre_push_installed(project)
+    hooks_ok = aru_pre_push_installed(project, home=home)
     checks.append(check(
         "hooks", hooks_ok, "degraded" if not hooks_ok else "ok",
         "Run scripts/install_hooks.sh in the target repository.",
@@ -677,7 +733,7 @@ def diagnose_repo(project: str, auth_ok: bool) -> dict:
             "Project Board. Token values are never printed.",
         ))
     else:
-        board = project_board_identity(project, auth_ok, remote)
+        board = project_board_identity(project, auth_ok, remote, home=home)
         if board["state"] == "absent":
             checks.append(check(
                 "board", False, "degraded",
@@ -718,12 +774,14 @@ def overall_status(checks: list[dict], payload: dict) -> str:
     return "healthy"
 
 
-def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
+def report(aru_home: Path, target_home: Path, project: str | None,
+           isolate: bool = False) -> dict:
     catalog = load_catalog(aru_home)
     stop_doc = load_json(target_home / ".aru" / "factory-loop.stop")
     wake_doc = load_json(target_home / ".aru" / "native-wake.json") or {"projects": {}}
     wake_entry = (wake_doc.get("projects") or {}).get(project or "", {})
-    roots = application_roots(target_home)
+    roots = application_roots(target_home, live=not isolate)
+    home = target_home if isolate else None
     agents = {}
     for name, spec in catalog["agents"].items():
         app = find_macos_app(spec, roots)
@@ -752,11 +810,11 @@ def report(aru_home: Path, target_home: Path, project: str | None) -> dict:
             **wake,
         }
     stopped = stop_applies(stop_doc, project)
-    install = diagnose_install(aru_home, target_home, agents)
+    install = diagnose_install(aru_home, target_home, agents, home=home)
     repo = None
     checks = list(install["checks"])
-    if project and _is_git_repo(project):
-        repo = diagnose_repo(project, install["prerequisites"]["gh_logged_in"])
+    if project and _is_git_repo(project, home=home):
+        repo = diagnose_repo(project, install["prerequisites"]["gh_logged_in"], home=home)
         checks.extend(repo["checks"])
     elif project:
         checks.append(check(
@@ -868,6 +926,7 @@ def main() -> int:
     parser.add_argument("--project")
     args = parser.parse_args()
     aru_home = Path(args.aru_home or os.environ.get("ARU_SDLC_HOME") or Path(__file__).resolve().parents[1])
+    isolate = args.target_home is not None
     target_home = Path(args.target_home or Path.home())
     if args.project and not args.project.startswith("/"):
         print("error: --project must be an absolute path", file=sys.stderr)
@@ -875,7 +934,7 @@ def main() -> int:
     if not (aru_home / "templates" / "integrations" / "continuity.json").is_file():
         print("error: continuity catalog missing under --aru-home", file=sys.stderr)
         return EXIT_INVALID
-    payload = report(aru_home, target_home, args.project)
+    payload = report(aru_home, target_home, args.project, isolate=isolate)
     if args.json:
         json.dump(payload, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
