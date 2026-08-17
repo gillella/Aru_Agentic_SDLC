@@ -1,4 +1,5 @@
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -9,10 +10,12 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import fleet_status  # noqa: E402
 from fleet_status import (  # noqa: E402
     EXIT_BLOCKED,
     EXIT_COMPLETE,
     EXIT_ERROR,
+    EXIT_STALLED,
     EXIT_WAITING,
     LINE_CEILING,
     apply_ci_failure_rate,
@@ -20,6 +23,10 @@ from fleet_status import (  # noqa: E402
     build_merge_queue,
     build_operator_screen,
     collect_codebase_health,
+    detect_stall,
+    most_recent_merge_time,
+    notify_stall,
+    stall_alert_text,
     discover_fleet_size,
     evaluate_fleet_status,
     evaluate_queue_row,
@@ -1068,3 +1075,167 @@ class MergeQueueViewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DetectStallTests(unittest.TestCase):
+    """All three conditions are required; any one missing means no stall."""
+
+    def test_old_merge_with_open_prs_and_agents_is_a_stall(self):
+        self.assertTrue(detect_stall(7.0, open_pr_count=5, agent_count=3, stall_hours=4.0))
+
+    def test_recent_merge_is_not_a_stall(self):
+        self.assertFalse(detect_stall(0.5, open_pr_count=5, agent_count=3, stall_hours=4.0))
+
+    def test_no_open_prs_is_never_a_stall(self):
+        # A quiet board with nothing open is idle, not stalled, however old the
+        # last merge is.
+        self.assertFalse(detect_stall(99.0, open_pr_count=0, agent_count=3, stall_hours=4.0))
+
+    def test_no_registered_agents_is_never_a_stall(self):
+        # Nobody is running; zero throughput is expected, not a fault.
+        self.assertFalse(detect_stall(99.0, open_pr_count=5, agent_count=0, stall_hours=4.0))
+
+    def test_no_merge_at_all_with_work_and_agents_is_a_stall(self):
+        self.assertTrue(detect_stall(None, open_pr_count=2, agent_count=1, stall_hours=4.0))
+
+    def test_no_merge_at_all_without_agents_is_not_a_stall(self):
+        self.assertFalse(detect_stall(None, open_pr_count=2, agent_count=0, stall_hours=4.0))
+
+    def test_zero_stall_hours_disables_detection(self):
+        self.assertFalse(detect_stall(99.0, open_pr_count=5, agent_count=3, stall_hours=0))
+
+    def test_threshold_is_inclusive_at_the_boundary(self):
+        self.assertTrue(detect_stall(4.0, open_pr_count=1, agent_count=1, stall_hours=4.0))
+        self.assertFalse(detect_stall(3.99, open_pr_count=1, agent_count=1, stall_hours=4.0))
+
+
+class StallExitCodeTests(unittest.TestCase):
+    def test_stalled_exit_code_is_distinct_from_every_other_state(self):
+        codes = {EXIT_COMPLETE, EXIT_ERROR, EXIT_WAITING, EXIT_BLOCKED}
+        self.assertNotIn(EXIT_STALLED, codes)
+        self.assertEqual(EXIT_STALLED, 4)
+
+
+class StallQuestionTests(unittest.TestCase):
+    def _screen(self, **kwargs):
+        return fleet_status._stall_question(**kwargs)
+
+    def test_json_payload_carries_hours_and_verdict(self):
+        stall = self._screen(
+            hours_since_last_merge=7.5, open_pr_count=5,
+            agent_count=3, stall_hours=4.0,
+        )
+        self.assertTrue(stall["stalled"])
+        self.assertEqual(stall["hours_since_last_merge"], 7.5)
+        self.assertEqual(stall["open_pr_count"], 5)
+        self.assertEqual(stall["registered_agents"], 3)
+        self.assertEqual(stall["severity"], "attn")
+
+    def test_healthy_board_reports_ok(self):
+        stall = self._screen(
+            hours_since_last_merge=0.2, open_pr_count=2,
+            agent_count=2, stall_hours=4.0,
+        )
+        self.assertFalse(stall["stalled"])
+        self.assertEqual(stall["severity"], "ok")
+
+    def test_stall_is_not_a_seventh_operator_question(self):
+        # The operator screen is the documented six-question contract.
+        screen = build_operator_screen([], [])
+        self.assertNotIn("stall", [q["key"] for q in screen["questions"]])
+        self.assertEqual(len(screen["questions"]), 6)
+
+
+class MostRecentMergeTests(unittest.TestCase):
+    def test_returns_newest_merged_at_not_first_row(self):
+        # gh returns newest-created first, which is not newest-merged.
+        rows = [
+            {"mergedAt": "2026-08-17T01:00:00Z"},
+            {"mergedAt": "2026-08-17T09:00:00Z"},
+            {"mergedAt": "2026-08-17T03:00:00Z"},
+        ]
+        with patch.object(fleet_status, "run_gh_json", return_value=rows):
+            newest = most_recent_merge_time()
+        self.assertEqual(newest, datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc))
+
+    def test_lookup_failure_returns_none(self):
+        with patch.object(fleet_status, "run_gh_json", return_value=None):
+            self.assertIsNone(most_recent_merge_time())
+
+    def test_malformed_rows_are_skipped(self):
+        rows = ["nonsense", {"mergedAt": None}, {"mergedAt": "2026-08-17T05:00:00Z"}]
+        with patch.object(fleet_status, "run_gh_json", return_value=rows):
+            newest = most_recent_merge_time()
+        self.assertEqual(newest, datetime(2026, 8, 17, 5, 0, tzinfo=timezone.utc))
+
+
+class StallAlertTests(unittest.TestCase):
+    def _question(self):
+        return fleet_status._stall_question(9.0, 5, 3, 4.0)
+
+    def test_alert_body_carries_no_secrets_or_logs(self):
+        text = stall_alert_text(self._question(), ["PR #1 unmet: review"])
+        self.assertIn("stopped merging", text)
+        self.assertIn("PR #1 unmet: review", text)
+        for forbidden in ("diff --git", "Traceback", "ghp_", "gho_", "token"):
+            self.assertNotIn(forbidden, text)
+
+    def test_slack_invoked_once_with_hitl_and_a_file(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(fleet_status, "get_repo_slug", return_value="o/r"), \
+             patch.dict(os.environ, {"ARU_PROJECT_ID": "proj_1"}), \
+             patch.object(fleet_status, "run_cmd", side_effect=fake_run):
+            ok = notify_stall(self._question(), ["PR #1 unmet: review"],
+                              tmp, "claude-1", "anthropic")
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--event", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--event") + 1], "hitl")
+        self.assertIn("--decision-file", calls[0])
+
+    def test_alert_file_is_0600_and_removed_afterwards(self):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            path = cmd[cmd.index("--decision-file") + 1]
+            seen["path"] = path
+            seen["mode"] = stat.S_IMODE(os.stat(path).st_mode)
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(fleet_status, "get_repo_slug", return_value="o/r"), \
+             patch.dict(os.environ, {"ARU_PROJECT_ID": "proj_1"}), \
+             patch.object(fleet_status, "run_cmd", side_effect=fake_run):
+            notify_stall(self._question(), [], tmp, "claude-1", "anthropic")
+        self.assertEqual(seen["mode"], 0o600)
+        self.assertFalse(os.path.exists(seen["path"]))
+
+    def test_slack_failure_is_reported_without_raising(self):
+        # Slack downtime must never halt the GitHub loop.
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(fleet_status, "get_repo_slug", return_value="o/r"), \
+             patch.dict(os.environ, {"ARU_PROJECT_ID": "proj_1"}), \
+             patch.object(fleet_status, "run_cmd", return_value=(1, "", "boom")):
+            self.assertFalse(notify_stall(self._question(), [], tmp, "a", "anthropic"))
+
+    def test_missing_project_id_skips_notification(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(fleet_status, "get_repo_slug", return_value="o/r"), \
+             patch.dict(os.environ, {"ARU_PROJECT_ID": ""}), \
+             patch.object(fleet_status, "run_cmd") as run:
+            self.assertFalse(notify_stall(self._question(), [], tmp, "a", "anthropic"))
+        run.assert_not_called()
+
+
+class RegisteredAgentCountTests(unittest.TestCase):
+    def test_unreadable_presence_registry_reports_zero(self):
+        # Absence of evidence must not manufacture a stall.
+        with patch.object(fleet_status, "registered_agent_count", wraps=fleet_status.registered_agent_count):
+            with tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(fleet_status.registered_agent_count(tmp), 0)

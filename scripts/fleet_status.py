@@ -8,6 +8,8 @@ Provides deterministic evaluation of factory state:
   * waiting  (exit 2) - active work in flight, Ready/In Progress/In Review/Backlog issues,
                        pending CI, or pending reviews.
   * blocked  (exit 3) - severe escalated merge conflict or ambiguous board.
+  * stalled  (exit 4) - zero merges within --stall-hours while open PRs and
+                       registered agents both exist; outranks waiting, never blocked.
   * error    (exit 1) - GitHub API / auth failures; fails closed.
 """
 
@@ -39,8 +41,15 @@ EXIT_COMPLETE = 0
 EXIT_ERROR = 1
 EXIT_WAITING = 2
 EXIT_BLOCKED = 3
+# A stall is not a blocked repo. Reusing EXIT_BLOCKED would hide zero
+# throughput inside a code callers already treat as routine.
+EXIT_STALLED = 4
 
 STUCK_HOURS = 4.0
+DEFAULT_STALL_HOURS = 4.0
+# Merged PRs are returned newest-created first, not newest-merged, so the most
+# recent merge is the max mergedAt over a window rather than the first row.
+STALL_MERGE_WINDOW = 30
 REVIEW_AGE_WARN_HOURS = 2.0
 REVIEW_AGE_ATTN_HOURS = 8.0
 CI_FAIL_WARN = 0.2
@@ -228,6 +237,102 @@ def _worst_severity(levels: Iterable[str]) -> str:
 
 def _question(key: str, title: str, severity: str, summary: str, **payload: Any) -> Dict[str, Any]:
     return {"key": key, "title": title, "severity": severity, "summary": summary, **payload}
+
+
+def most_recent_merge_time() -> Optional[datetime]:
+    """Newest mergedAt across a bounded window of merged PRs, or None.
+
+    Returns None both when nothing has ever merged and when the lookup fails.
+    Callers must not treat None as "stalled" on its own -- detect_stall()
+    requires open PRs and registered agents before it reports anything.
+    """
+    res = run_gh_json([
+        "gh", "pr", "list", "--state", "merged",
+        "--limit", str(STALL_MERGE_WINDOW), "--json", "mergedAt",
+    ])
+    if not isinstance(res, list):
+        return None
+    stamps = []
+    for row in res:
+        if not isinstance(row, dict):
+            continue
+        parsed = _parse_ts(row.get("mergedAt"))
+        if parsed is not None:
+            stamps.append(parsed)
+    return max(stamps) if stamps else None
+
+
+def registered_agent_count(repo_dir: str = ".") -> int:
+    """Agents registered against this project. 0 when presence is unreadable.
+
+    Read-only: expire=False, matching doctor_presence_summary. Heartbeat
+    expiry must never mutate the registry from a diagnostic path, and it
+    never releases a GitHub claim.
+    """
+    try:
+        import agent_presence
+    except ImportError:
+        return 0
+    try:
+        target = str(Path(repo_dir).resolve())
+        project_id = agent_presence.resolve_project_id(Path(target))
+        records = agent_presence.PresenceStore().query_project(
+            checkout_path=target, project_id=project_id, expire=False,
+        )
+    except Exception:
+        # Presence is advisory. An unreadable registry must not manufacture a
+        # stall, and detect_stall() treats 0 agents as "no stall".
+        return 0
+    return len(records) if isinstance(records, list) else 0
+
+
+def detect_stall(
+    hours_since_last_merge: Optional[float],
+    open_pr_count: int,
+    agent_count: int,
+    stall_hours: float = DEFAULT_STALL_HOURS,
+) -> bool:
+    """True only when throughput is zero AND there is work AND agents to do it.
+
+    All three conditions are required. A quiet board with nothing open is not
+    a stall, and neither is a board with no agents running -- alerting on
+    either trains operators to ignore the alarm.
+    """
+    if stall_hours <= 0:
+        return False
+    if open_pr_count <= 0 or agent_count <= 0:
+        return False
+    if hours_since_last_merge is None:
+        # Nothing merged in the window, with open PRs and live agents.
+        return True
+    return hours_since_last_merge >= stall_hours
+
+
+def _stall_question(
+    hours_since_last_merge: Optional[float],
+    open_pr_count: int,
+    agent_count: int,
+    stall_hours: float = DEFAULT_STALL_HOURS,
+) -> Dict[str, Any]:
+    stalled = detect_stall(
+        hours_since_last_merge, open_pr_count, agent_count, stall_hours,
+    )
+    age = "never" if hours_since_last_merge is None else f"{hours_since_last_merge:.1f}h ago"
+    if stalled:
+        summary = (
+            f"No merge in {stall_hours:g}h (last: {age}) with "
+            f"{open_pr_count} open PR(s) and {agent_count} registered agent(s)."
+        )
+    else:
+        summary = f"Last merge {age}; {open_pr_count} open PR(s), {agent_count} agent(s)."
+    return _question(
+        "stall", "Is the fleet still merging?", "attn" if stalled else "ok", summary,
+        stalled=stalled,
+        hours_since_last_merge=hours_since_last_merge,
+        stall_hours=stall_hours,
+        open_pr_count=open_pr_count,
+        registered_agents=agent_count,
+    )
 
 
 def resolve_fleet_size(configured: Optional[int] = None) -> Optional[int]:
@@ -707,6 +812,69 @@ def format_operator_screen(screen: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _write_alert_file(directory: str, text: str) -> str:
+    """Operator-owned 0600 alert body. Never interpolated into a shell."""
+    path = os.path.join(directory, f"aru-stall-{os.getpid()}.txt")
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.write(descriptor, text.encode("utf-8"))
+    finally:
+        os.close(descriptor)
+    return path
+
+
+def stall_alert_text(question: Dict[str, Any], blocked: List[str]) -> str:
+    """Secret-safe alert body: counts and gate names only, never logs or diffs."""
+    lines = [
+        "Fleet has stopped merging.",
+        question.get("summary") or "",
+    ]
+    if blocked:
+        lines.append("Open PRs and their blocking gate:")
+        lines.extend(f"- {item}" for item in blocked)
+    return "\n".join(line for line in lines if line)
+
+
+def notify_stall(
+    question: Dict[str, Any],
+    blocked: List[str],
+    repo_dir: str,
+    agent: str,
+    family: str,
+) -> bool:
+    """Best-effort Slack alert. Never changes the caller's exit code.
+
+    slack_notify.py owns deduplication; this must not re-alert per tick or add
+    a second dedup layer. Slack downtime must never halt the GitHub loop.
+    """
+    slug = get_repo_slug()
+    if not slug:
+        return False
+    project_id = os.environ.get("ARU_PROJECT_ID") or ""
+    if not project_id:
+        return False
+    path = None
+    try:
+        path = _write_alert_file(repo_dir, stall_alert_text(question, blocked))
+        code, _, _ = run_cmd([
+            "python3", os.path.join(os.path.dirname(os.path.abspath(__file__)), "slack_notify.py"),
+            "--project-id", project_id,
+            "--agent", agent, "--family", family,
+            "--event", "hitl", "--repo", slug,
+            "--repo-dir", repo_dir,
+            "--decision-file", path,
+        ], check=False)
+        return code == 0
+    except (OSError, ValueError):
+        return False
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def _pr_label_value(pr: Dict[str, Any], prefix: str) -> Optional[str]:
     for name in label_names(pr):
         if name.startswith(prefix):
@@ -994,10 +1162,15 @@ def _with_operator_screen(
     prs: List[Dict[str, Any]],
     fleet_size: Optional[int] = None,
     ready_target: Optional[int] = None,
+    stall: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     status["operator_screen"] = build_operator_screen(
-        issues, prs, fleet_size=fleet_size, ready_target=ready_target
+        issues, prs, fleet_size=fleet_size, ready_target=ready_target,
     )
+    # Deliberately NOT a seventh operator-screen question: that screen is the
+    # documented six-question §4.2 contract. Stall is its own top-level key.
+    if stall is not None:
+        status["stall"] = stall
     return status
 
 
@@ -1005,6 +1178,7 @@ def evaluate_fleet_status(
     repo_dir: str = ".",
     fleet_size: Optional[int] = None,
     ready_target: Optional[int] = None,
+    stall_hours: float = DEFAULT_STALL_HOURS,
 ) -> Dict[str, Any]:
     """Calculates authoritative factory state for ``repo_dir``."""
     try:
@@ -1029,7 +1203,10 @@ def evaluate_fleet_status(
             else discover_fleet_size(target)
         )
         resolved_target = resolve_ready_target(size, configured=ready_target)
-        status = _evaluate_current_repo(fleet_size=size, ready_target=resolved_target)
+        status = _evaluate_current_repo(
+            fleet_size=size, ready_target=resolved_target,
+            stall_hours=stall_hours, repo_dir=target,
+        )
     except OSError as exc:
         return _error(
             f"Could not evaluate repository directory '{target}': {exc}",
@@ -1045,6 +1222,8 @@ def evaluate_fleet_status(
 def _evaluate_current_repo(
     fleet_size: Optional[int] = None,
     ready_target: Optional[int] = None,
+    stall_hours: float = DEFAULT_STALL_HOURS,
+    repo_dir: str = ".",
 ) -> Dict[str, Any]:
     """Calculates state after the caller has selected the repository cwd."""
     slug = get_repo_slug()
@@ -1184,6 +1363,16 @@ def _evaluate_current_repo(
             if not any(i["number"] == num for i in issues):
                 waiting_reasons.append(f"Worktree branch '{branch}' exists for closed/merged issue #{num}.")
 
+    # Stall is a fleet-level condition: no per-agent branch can observe zero
+    # global throughput, because every waiting agent is locally in a valid state.
+    hours_since_last_merge = _hours_ago(most_recent_merge_time(), datetime.now(timezone.utc))
+    stall = _stall_question(
+        hours_since_last_merge,
+        len(prs),
+        registered_agent_count(repo_dir),
+        stall_hours,
+    )
+
     # Calculate overall state
     if blocked_reasons:
         return _with_operator_screen({
@@ -1197,7 +1386,22 @@ def _evaluate_current_repo(
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
-        }, issues, prs, fleet_size=fleet_size, ready_target=ready_target)
+        }, issues, prs, fleet_size=fleet_size, ready_target=ready_target, stall=stall)
+
+    if stall.get("stalled"):
+        return _with_operator_screen({
+            "state": "stalled",
+            "exit_code": EXIT_STALLED,
+            "reasons": [stall["summary"]] + waiting_reasons,
+            "summary": f"STALLED: {stall['summary']}",
+            "hours_since_last_merge": hours_since_last_merge,
+            "project_board": {"title": board_title, "id": governed_board.get("id")},
+            "open_issues_count": len(issues),
+            "open_prs_count": len(prs),
+            "active_claims": active_claims,
+            "orphans": orphan_issues,
+            "drifted": drifted_issues,
+        }, issues, prs, fleet_size=fleet_size, ready_target=ready_target, stall=stall)
 
     if waiting_reasons or issues or prs:
         return _with_operator_screen({
@@ -1205,13 +1409,14 @@ def _evaluate_current_repo(
             "exit_code": EXIT_WAITING,
             "reasons": waiting_reasons,
             "summary": f"WAITING: {len(issues)} open issue(s), {len(prs)} open PR(s).",
+            "hours_since_last_merge": hours_since_last_merge,
             "project_board": {"title": board_title, "id": governed_board.get("id")},
             "open_issues_count": len(issues),
             "open_prs_count": len(prs),
             "active_claims": active_claims,
             "orphans": orphan_issues,
             "drifted": drifted_issues,
-        }, issues, prs, fleet_size=fleet_size, ready_target=ready_target)
+        }, issues, prs, fleet_size=fleet_size, ready_target=ready_target, stall=stall)
 
     return _with_operator_screen({
         "state": "complete",
@@ -1224,7 +1429,7 @@ def _evaluate_current_repo(
         "active_claims": [],
         "orphans": [],
         "drifted": [],
-    }, issues, prs, fleet_size=fleet_size, ready_target=ready_target)
+    }, issues, prs, fleet_size=fleet_size, ready_target=ready_target, stall=stall)
 
 
 def main():
@@ -1251,6 +1456,18 @@ def main():
     parser.add_argument(
         "--ready-target", type=int, default=None,
         help="Configured Ready depth target (or set ARU_READY_TARGET)",
+    )
+    parser.add_argument(
+        "--stall-hours", type=float, default=DEFAULT_STALL_HOURS,
+        help="Hours without a merge before reporting a stall (0 disables)",
+    )
+    parser.add_argument(
+        "--stall-agent", default="fleet-status",
+        help="Agent id used for the stall Slack alert",
+    )
+    parser.add_argument(
+        "--stall-family", default="human",
+        help="Model family used for the stall Slack alert",
     )
     args = parser.parse_args()
 
@@ -1289,7 +1506,22 @@ def main():
         args.repo_dir,
         fleet_size=resolve_fleet_size(args.fleet_size),
         ready_target=args.ready_target,
+        stall_hours=args.stall_hours,
     )
+    if status.get("state") == "stalled":
+        # GitHub first, Slack second, and a Slack failure never changes the
+        # exit code -- the loop must not halt because the control room is down.
+        question = next(
+            (q for q in (status.get("operator_screen") or {}).get("questions") or []
+             if q.get("key") == "stall"),
+            None,
+        )
+        if question:
+            notify_stall(
+                question,
+                [str(reason) for reason in status.get("reasons") or []],
+                args.repo_dir, args.stall_agent, args.stall_family,
+            )
     if status.get("operator_screen") and status.get("state") != "error":
         ci_error = None
         ci_runs = None
@@ -1331,6 +1563,10 @@ def main():
     print(f"Summary: {status['summary']}")
     if status.get("operator_screen"):
         print(format_operator_screen(status["operator_screen"]))
+    stall = status.get("stall")
+    if stall:
+        marker = "[ATTN]" if stall.get("stalled") else "[OK]  "
+        print(f"\n{marker} {stall['title']}: {stall['summary']}")
     if status.get("reasons"):
         print("\nDetails:")
         for r in status["reasons"]:
