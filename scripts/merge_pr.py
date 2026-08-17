@@ -109,9 +109,9 @@ PR_FIELDS = (
 )
 
 
-def _gh_json(args):
+def _gh_json(args, cwd=None):
     """Runs a gh command expected to emit JSON. Returns None on any failure."""
-    code, out, err = run_cmd(args, check=False)
+    code, out, err = run_cmd(args, check=False, cwd=cwd)
     if code != 0:
         print(f"[ERROR] {' '.join(args[:3])}...: {err.strip()}", file=sys.stderr)
         return None
@@ -2046,8 +2046,8 @@ def reconcile_issue_done(issue_num):
     return False, f"Could not reconcile issue #{issue_num} to Done."
 
 
-def clear_labels(kind, number, prefix):
-    data = _gh_json(["gh", kind, "view", str(number), "--json", "labels"])
+def clear_labels(kind, number, prefix, cwd=None):
+    data = _gh_json(["gh", kind, "view", str(number), "--json", "labels"], cwd=cwd)
     if data is None:
         return False, f"Could not read {kind} #{number} labels."
     names = [
@@ -2056,7 +2056,8 @@ def clear_labels(kind, number, prefix):
     ]
     for name in names:
         code, _, err = run_cmd(
-            ["gh", kind, "edit", str(number), "--remove-label", name], check=False
+            ["gh", kind, "edit", str(number), "--remove-label", name],
+            check=False, cwd=cwd,
         )
         if code != 0:
             return False, f"Could not remove {name} from {kind} #{number}: {err.strip()}"
@@ -2064,16 +2065,16 @@ def clear_labels(kind, number, prefix):
     return True, f"{kind.title()} #{number} {prefix}{noun} cleared or already absent."
 
 
-def clear_issue_claims(issue_num):
-    return clear_labels("issue", issue_num, "agent:")
+def clear_issue_claims(issue_num, cwd=None):
+    return clear_labels("issue", issue_num, "agent:", cwd=cwd)
 
 
-def clear_review_claims(pr_num):
-    return clear_labels("pr", pr_num, REVIEW_CLAIM_LABEL)
+def clear_review_claims(pr_num, cwd=None):
+    return clear_labels("pr", pr_num, REVIEW_CLAIM_LABEL, cwd=cwd)
 
 
-def clear_merger_claims(pr_num):
-    return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL)
+def clear_merger_claims(pr_num, cwd=None):
+    return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL, cwd=cwd)
 
 
 def evaluate_dod(pr, issue_bodies, evidence):

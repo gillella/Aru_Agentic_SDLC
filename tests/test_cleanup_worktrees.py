@@ -45,6 +45,21 @@ def _add_worktree(clone: Path, branch: str) -> Path:
     return path
 
 
+class GitdirTargetTests(unittest.TestCase):
+    def test_relative_gitdir_resolves_against_the_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker_dir = root / "linked"
+            marker_dir.mkdir()
+            target = root / "repo" / ".git" / "worktrees" / "linked"
+            target.mkdir(parents=True)
+            (marker_dir / ".git").write_text(
+                "gitdir: ../repo/.git/worktrees/linked\n"
+            )
+            resolved = cleanup_worktrees.gitdir_target(str(marker_dir))
+            self.assertEqual(resolved, os.path.realpath(target))
+
+
 class PorcelainPruneTests(unittest.TestCase):
     def test_empty_status_is_clean(self):
         self.assertFalse(cleanup_worktrees.porcelain_blocks_prune(""))
@@ -332,7 +347,7 @@ class CleanupWorktreesTests(unittest.TestCase):
     def test_stale_claim_labels_are_cleared(
         self, gh_json, issue_clear, review_clear, merger_clear, _needed
     ):
-        def fake_gh(cmd):
+        def fake_gh(cmd, cwd=None):
             if cmd[:3] == ["gh", "issue", "list"]:
                 return [{"number": 2, "labels": [{"name": "agent:cursor-1"}]}]
             if cmd[:3] == ["gh", "pr", "list"]:
@@ -344,9 +359,9 @@ class CleanupWorktreesTests(unittest.TestCase):
 
         gh_json.side_effect = fake_gh
         notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
-        issue_clear.assert_called_once_with(2)
-        review_clear.assert_called_once_with(3)
-        merger_clear.assert_called_once_with(3)
+        issue_clear.assert_called_once_with(2, cwd=str(self.clone))
+        review_clear.assert_called_once_with(3, cwd=str(self.clone))
+        merger_clear.assert_called_once_with(3, cwd=str(self.clone))
         self.assertTrue(notes)
 
     @patch.object(cleanup_worktrees, "merger_claim_still_needed", return_value=True)
@@ -357,7 +372,7 @@ class CleanupWorktreesTests(unittest.TestCase):
     def test_merger_label_kept_when_closeout_incomplete(
         self, gh_json, issue_clear, review_clear, merger_clear, _needed
     ):
-        def fake_gh(cmd):
+        def fake_gh(cmd, cwd=None):
             if cmd[:3] == ["gh", "issue", "list"]:
                 return [{"number": 2, "labels": [{"name": "agent:cursor-1"}]}]
             if cmd[:3] == ["gh", "pr", "list"]:
@@ -371,13 +386,13 @@ class CleanupWorktreesTests(unittest.TestCase):
         notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
         merger_clear.assert_not_called()
         self.assertTrue(any("kept merger claim" in note for note in notes))
-        issue_clear.assert_called_once_with(2)
-        review_clear.assert_called_once_with(3)
+        issue_clear.assert_called_once_with(2, cwd=str(self.clone))
+        review_clear.assert_called_once_with(3, cwd=str(self.clone))
 
     @patch.object(merge_pr, "clear_merger_claims")
     @patch.object(merge_pr, "_gh_json")
     def test_merger_claim_kept_when_linked_issue_open(self, gh_json, merger_clear):
-        def fake_gh(cmd):
+        def fake_gh(cmd, cwd=None):
             if cmd[:3] == ["gh", "pr", "list"]:
                 return [{"number": 3, "labels": [{"name": "merger:agent-3"}]}]
             if cmd[:3] == ["gh", "pr", "view"]:
@@ -400,7 +415,7 @@ class CleanupWorktreesTests(unittest.TestCase):
     @patch.object(merge_pr, "clear_merger_claims", return_value=(True, "cleared"))
     @patch.object(merge_pr, "_gh_json")
     def test_retain_merger_pr_skips_current_closeout(self, gh_json, merger_clear):
-        def fake_gh(cmd):
+        def fake_gh(cmd, cwd=None):
             if cmd[:3] == ["gh", "pr", "list"]:
                 return [{"number": 9, "labels": [{"name": "merger:agent-3"}]}]
             return []
@@ -420,7 +435,7 @@ class CleanupWorktreesTests(unittest.TestCase):
             for i in range(1, cleanup_worktrees.CLAIM_LIST_LIMIT + 1)
         ]
 
-        def fake_gh(cmd):
+        def fake_gh(cmd, cwd=None):
             if cmd[:3] == ["gh", "issue", "list"]:
                 self.assertIn(str(cleanup_worktrees.CLAIM_LIST_LIMIT), cmd)
                 return full
@@ -436,6 +451,14 @@ class CleanupWorktreesTests(unittest.TestCase):
     def test_unreadable_claim_list_is_recorded(self, _gh):
         notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
         self.assertTrue(any("claim scan failed" in item for item in notes))
+
+    @patch.object(merge_pr, "_gh_json", return_value=[])
+    def test_claim_scan_runs_gh_in_repo_root(self, gh_json):
+        notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
+        self.assertTrue(gh_json.call_args_list)
+        for call in gh_json.call_args_list:
+            self.assertEqual(call.kwargs.get("cwd"), str(self.clone))
+        self.assertEqual(notes, [])
 
 
 class CloseoutJanitorHookTests(unittest.TestCase):

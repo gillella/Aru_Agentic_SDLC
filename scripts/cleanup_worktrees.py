@@ -53,7 +53,10 @@ def gitdir_target(path: str) -> str | None:
         return None
     if not text.startswith("gitdir: "):
         return None
-    return os.path.realpath(text.split(": ", 1)[1])
+    target = text.split(": ", 1)[1]
+    if not os.path.isabs(target):
+        target = os.path.join(os.path.dirname(marker), target)
+    return os.path.realpath(target)
 
 
 def owned_worktree(path: str, repo_root: str) -> bool:
@@ -307,12 +310,14 @@ def delete_merged_local_branches(repo_root: str) -> list[str]:
 CLAIM_LIST_LIMIT = 1000
 
 
-def _items_with_prefix(kind: str, state: str, prefix: str) -> tuple[list[int], str | None]:
+def _items_with_prefix(
+    kind: str, state: str, prefix: str, repo_root: str,
+) -> tuple[list[int], str | None]:
     cmd = [
         "gh", kind, "list", "--state", state,
         "--limit", str(CLAIM_LIST_LIMIT), "--json", "number,labels",
     ]
-    data = merge_pr._gh_json(cmd)
+    data = merge_pr._gh_json(cmd, cwd=repo_root)
     if not isinstance(data, list):
         return [], "unreadable"
     found = []
@@ -327,14 +332,15 @@ def _items_with_prefix(kind: str, state: str, prefix: str) -> tuple[list[int], s
     return found, None
 
 
-def linked_issues_unfinished(pr: dict) -> bool:
+def linked_issues_unfinished(pr: dict, repo_root: str) -> bool:
     """True unless every Closes #N issue is closed with status:done."""
     nums = merge_pr.linked_issues(pr.get("body") or "")
     if not nums:
         return False
     for num in nums:
         issue = merge_pr._gh_json(
-            ["gh", "issue", "view", str(num), "--json", "state,labels"]
+            ["gh", "issue", "view", str(num), "--json", "state,labels"],
+            cwd=repo_root,
         )
         if issue is None:
             return True
@@ -356,10 +362,10 @@ def merger_claim_still_needed(repo_root: str, pr_num: int) -> bool:
     pr = merge_pr._gh_json([
         "gh", "pr", "view", str(pr_num),
         "--json", "body,headRefName,labels,state,mergedAt",
-    ])
+    ], cwd=repo_root)
     if not isinstance(pr, dict) or not merge_pr.is_merged(pr):
         return True
-    if linked_issues_unfinished(pr):
+    if linked_issues_unfinished(pr, repo_root):
         return True
     branch = pr.get("headRefName") or ""
     if not branch:
@@ -389,17 +395,17 @@ def _record_claim_scan(notes: list[str], scan: str | None, kind: str, prefix: st
 
 def clear_stale_claim_labels(repo_root: str, retain_merger_pr: int | None = None) -> list[str]:
     notes = []
-    issues, issue_scan = _items_with_prefix("issue", "closed", "agent:")
+    issues, issue_scan = _items_with_prefix("issue", "closed", "agent:", repo_root)
     _record_claim_scan(notes, issue_scan, "closed-issue", "agent:")
     for number in issues:
-        ok, message = merge_pr.clear_issue_claims(number)
+        ok, message = merge_pr.clear_issue_claims(number, cwd=repo_root)
         notes.append(message if ok else f"issue #{number}: {message}")
-    reviewers, review_scan = _items_with_prefix("pr", "merged", "reviewer:")
+    reviewers, review_scan = _items_with_prefix("pr", "merged", "reviewer:", repo_root)
     _record_claim_scan(notes, review_scan, "merged-PR reviewer", "reviewer:")
     for number in reviewers:
-        ok, message = merge_pr.clear_review_claims(number)
+        ok, message = merge_pr.clear_review_claims(number, cwd=repo_root)
         notes.append(message if ok else f"PR #{number} reviewer: {message}")
-    mergers, merge_scan = _items_with_prefix("pr", "merged", "merger:")
+    mergers, merge_scan = _items_with_prefix("pr", "merged", "merger:", repo_root)
     _record_claim_scan(notes, merge_scan, "merged-PR merger", "merger:")
     for number in mergers:
         if retain_merger_pr is not None and int(number) == int(retain_merger_pr):
@@ -408,7 +414,7 @@ def clear_stale_claim_labels(repo_root: str, retain_merger_pr: int | None = None
         if merger_claim_still_needed(repo_root, number):
             notes.append(f"kept merger claim on PR #{number}: close-out incomplete")
             continue
-        ok, message = merge_pr.clear_merger_claims(number)
+        ok, message = merge_pr.clear_merger_claims(number, cwd=repo_root)
         notes.append(message if ok else f"PR #{number} merger: {message}")
     return notes
 
