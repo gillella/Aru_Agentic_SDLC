@@ -1,5 +1,7 @@
+import json
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -396,6 +398,200 @@ class InReviewHandoffStatusTests(unittest.TestCase):
         self.assertIn("--remove-label", cmd)
         self.assertIn("status:in-progress", cmd)
         self.assertNotIn("agent:agent-1", cmd)
+
+
+class ClaimAgeReaperTests(unittest.TestCase):
+    OLD = "2020-01-01T00:00:00Z"
+
+    @staticmethod
+    def _pr(number, label, *, reviews=None, updated_at=None):
+        pr = {
+            "number": number,
+            "labels": [{"name": label}],
+            "reviews": reviews or [],
+        }
+        if updated_at is not None:
+            pr["updatedAt"] = updated_at
+        return pr
+
+    @staticmethod
+    def _timeline(label, created_at):
+        return [{
+            "event": "labeled",
+            "label": {"name": label},
+            "created_at": created_at,
+        }]
+
+    @staticmethod
+    def _list_result(prs):
+        return 0, json.dumps(prs), ""
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_recent_pr_activity_does_not_protect_old_review_claim(
+        self, run_cmd, fetch_timeline
+    ):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.side_effect = [
+            self._list_result([
+                self._pr(247, "reviewer:dead", updated_at=recent),
+            ]),
+            (0, "", ""),
+        ]
+        fetch_timeline.return_value = self._timeline("reviewer:dead", self.OLD)
+
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [247])
+        self.assertNotIn("updatedAt", run_cmd.call_args_list[0].args[0][-1])
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_recent_review_claim_survives_idle_pr(self, run_cmd, fetch_timeline):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.return_value = self._list_result([
+            self._pr(8, "reviewer:busy", updated_at=self.OLD),
+        ])
+        fetch_timeline.return_value = self._timeline("reviewer:busy", recent)
+
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
+        self.assertEqual(run_cmd.call_count, 1)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_review_after_claim_exempts_even_when_both_are_old(
+        self, run_cmd, fetch_timeline
+    ):
+        claim_time = "2020-01-02T00:00:00Z"
+        run_cmd.return_value = self._list_result([
+            self._pr(
+                9,
+                "reviewer:done",
+                reviews=[{"submittedAt": "2020-01-03T00:00:00Z"}],
+            ),
+        ])
+        fetch_timeline.return_value = self._timeline("reviewer:done", claim_time)
+
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_review_before_claim_does_not_exempt(self, run_cmd, fetch_timeline):
+        run_cmd.side_effect = [
+            self._list_result([
+                self._pr(
+                    10,
+                    "reviewer:abandoned",
+                    reviews=[{"submittedAt": "2020-01-01T00:00:00Z"}],
+                ),
+            ]),
+            (0, "", ""),
+        ]
+        fetch_timeline.return_value = self._timeline(
+            "reviewer:abandoned", "2020-01-02T00:00:00Z"
+        )
+
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [10])
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_timeline_failure_aborts_all_review_reaping_before_mutation(
+        self, run_cmd, fetch_timeline
+    ):
+        run_cmd.return_value = self._list_result([
+            self._pr(11, "reviewer:first"),
+            self._pr(12, "reviewer:unknown"),
+        ])
+        fetch_timeline.side_effect = [
+            self._timeline("reviewer:first", self.OLD),
+            None,
+        ]
+
+        with patch("sys.stderr") as stderr:
+            result = claim_issue.reap_stale_reviews(4)
+
+        self.assertEqual(result, [])
+        self.assertEqual(run_cmd.call_count, 1)
+        self.assertTrue(stderr.write.called)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_missing_exact_label_event_aborts_review_reaping(
+        self, run_cmd, fetch_timeline
+    ):
+        run_cmd.return_value = self._list_result([
+            self._pr(13, "reviewer:exact"),
+        ])
+        fetch_timeline.return_value = self._timeline(
+            "reviewer:someone-else", self.OLD
+        )
+
+        with patch("sys.stderr") as stderr:
+            result = claim_issue.reap_stale_reviews(4)
+
+        self.assertEqual(result, [])
+        self.assertEqual(run_cmd.call_count, 1)
+        self.assertTrue(stderr.write.called)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_latest_matching_label_event_wins(self, run_cmd, fetch_timeline):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.return_value = self._list_result([
+            self._pr(14, "reviewer:repeat"),
+        ])
+        fetch_timeline.return_value = [
+            *self._timeline("reviewer:repeat", self.OLD),
+            *self._timeline("reviewer:other", self.OLD),
+            *self._timeline("reviewer:repeat", recent),
+        ]
+
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
+        self.assertEqual(run_cmd.call_count, 1)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_merge_reaper_uses_each_claim_age(self, run_cmd, fetch_timeline):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.side_effect = [
+            self._list_result([
+                self._pr(15, "merger:stale", updated_at=recent),
+                self._pr(16, "merger:busy", updated_at=self.OLD),
+            ]),
+            self._list_result([]),
+            (0, "", ""),
+        ]
+
+        def timeline(endpoint):
+            if endpoint.endswith("/15/timeline"):
+                return self._timeline("merger:stale", self.OLD)
+            return self._timeline("merger:busy", recent)
+
+        fetch_timeline.side_effect = timeline
+
+        self.assertEqual(claim_issue.reap_stale_merges(4), [15])
+        self.assertNotIn("updatedAt", run_cmd.call_args_list[0].args[0][-1])
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api", return_value=None)
+    @patch.object(claim_issue, "run_cmd")
+    def test_merge_timeline_failure_reaps_nothing(self, run_cmd, _fetch_timeline):
+        run_cmd.side_effect = [
+            self._list_result([self._pr(17, "merger:unknown")]),
+            self._list_result([]),
+        ]
+
+        with patch("sys.stderr") as stderr:
+            result = claim_issue.reap_stale_merges(4)
+
+        self.assertEqual(result, [])
+        self.assertEqual(run_cmd.call_count, 2)
+        self.assertTrue(stderr.write.called)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_zero_threshold_makes_no_api_calls(self, run_cmd, fetch_timeline):
+        self.assertEqual(claim_issue.reap_stale_reviews(0), [])
+        self.assertEqual(claim_issue.reap_stale_merges(0), [])
+        run_cmd.assert_not_called()
+        fetch_timeline.assert_not_called()
 
 
 if __name__ == "__main__":
