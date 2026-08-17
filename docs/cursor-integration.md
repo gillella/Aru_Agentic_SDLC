@@ -128,6 +128,8 @@ Verify this machine and a target repo without mutating anything:
 python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py"
 python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py" --json \
   --project /absolute/path/to/repo
+python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py" \
+  --target-home /tmp/isolated-home --json
 ```
 
 The command checks `$ARU_SDLC_HOME`, Cursor skill links under `~/.cursor/skills/`
@@ -135,7 +137,11 @@ and `~/.agents/skills/`, the `/run-aru-factory` command file, the managed
 governance block, `git`/`gh`, and (with `--project`) `AGENTS.md`, hooks, the
 Project Board, and `.worktrees/`. Exit `0` / `2` / `1` means healthy /
 degraded / invalid. Failed checks print a repair command; the doctor never
-installs or prints credentials.
+installs or prints credentials. Default (no `--target-home`) diagnoses the
+live user home, including system `/Applications`. Explicit `--target-home`
+uses that directory as `HOME` for probes, does not inherit operator
+`GH_TOKEN` / `GH_CONFIG_DIR` / related credential env vars, and does not
+scan `/Applications` just because process `HOME` equals the fixture.
 
 ## Updating the playbook
 
