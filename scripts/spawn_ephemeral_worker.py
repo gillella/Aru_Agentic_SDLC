@@ -44,7 +44,11 @@ MAX_TIMEOUT_SECONDS = 3_600.0
 TASK_REVIEW = "code-review"
 TASK_FEEDBACK = "address-pr-feedback"
 TASKS = (TASK_REVIEW, TASK_FEEDBACK)
-ADAPTER_FAMILIES = {"codex": "openai", "claude": "anthropic"}
+ADAPTER_FAMILIES = {
+    "codex": "openai",
+    "claude": "anthropic",
+    "gemini": "google",
+}
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 EPHEMERAL_PATH_RE = re.compile(r"^ephemeral-(review|feedback)-[0-9]+$")
 
@@ -484,6 +488,43 @@ def build_task_prompt(
     )
 
 
+def build_ephemeral_agent_argv(
+    config: LauncherConfig,
+    prompt: str,
+    worktree: Path,
+) -> list[str]:
+    """Build an attested one-shot CLI invocation for the selected worker."""
+    adapter = config.adapter
+    if adapter == "auto":
+        adapter = next(
+            (
+                name
+                for name, family in ADAPTER_FAMILIES.items()
+                if family == config.worker_family
+            ),
+            "",
+        )
+    if adapter == "gemini":
+        return [
+            "gemini",
+            "--approval-mode",
+            "yolo",
+            "--output-format",
+            "stream-json",
+            prompt,
+        ]
+
+    runner_config = RunnerConfig(
+        repo=worktree,
+        aru_home=config.aru_home,
+        agent=config.worker_agent,
+        family=config.worker_family,
+        adapter=adapter,
+        adapter_command_json=config.adapter_command_json,
+    )
+    return build_agent_argv(runner_config, prompt)
+
+
 def child_environment(config: LauncherConfig) -> dict[str, str]:
     environment = authority_environment()
     environment.update({
@@ -610,15 +651,7 @@ def execute(config: LauncherConfig) -> int:
             config.repo, metadata, config.skill, os.getpid()
         )
         prompt = build_task_prompt(config, metadata, worktree)
-        runner_config = RunnerConfig(
-            repo=worktree,
-            aru_home=config.aru_home,
-            agent=config.worker_agent,
-            family=config.worker_family,
-            adapter=config.adapter,
-            adapter_command_json=config.adapter_command_json,
-        )
-        argv = build_agent_argv(runner_config, prompt)
+        argv = build_ephemeral_agent_argv(config, prompt, worktree)
         if shutil.which(argv[0]) is None:
             raise LauncherError(f"CLI adapter '{argv[0]}' is not installed")
 
@@ -685,7 +718,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-family", required=True, choices=MODEL_FAMILIES)
     parser.add_argument("--worker-agent", required=True)
     parser.add_argument("--worker-family", required=True, choices=MODEL_FAMILIES)
-    parser.add_argument("--adapter", choices=("auto", "codex", "claude"), default="auto")
+    parser.add_argument(
+        "--adapter",
+        choices=("auto", "codex", "claude", "gemini"),
+        default="auto",
+    )
     parser.add_argument("--adapter-command-json", default="")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--state-dir", default="")

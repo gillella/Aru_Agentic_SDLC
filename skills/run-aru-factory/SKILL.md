@@ -148,10 +148,10 @@ evidence means `merge_pr.py` exhausted its close-out retries; notify Slack with
 When context is running short, recover through the desktop product's context
 compaction and durable GitHub/worktree state, then continue.
 
-`scripts/run_fleet.py` is an **optional headless CLI mode**;
-`scripts/spawn_ephemeral_worker.py` provides one-PR JIT capacity documented in
-[docs/fleet-runner.md](../../docs/fleet-runner.md). Both start new CLI sessions and cannot resume the desktop conversation. Never use UI scripting to
-click or type into a desktop coding application. Per-app wake limits:
+`scripts/run_fleet.py` remains an **optional headless CLI mode**; the ephemeral
+launcher attests Codex/OpenAI, Claude/Anthropic, and Gemini/Google;
+never a Cursor-selected model or desktop UI. Neither resumes this task.
+Never use UI scripting. Details: [fleet runner](../../docs/fleet-runner.md) and
 `$ARU_SDLC_HOME/docs/desktop-agent-continuity.md`.
 
 ### doctor
