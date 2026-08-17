@@ -109,9 +109,9 @@ PR_FIELDS = (
 )
 
 
-def _gh_json(args):
+def _gh_json(args, cwd=None):
     """Runs a gh command expected to emit JSON. Returns None on any failure."""
-    code, out, err = run_cmd(args, check=False)
+    code, out, err = run_cmd(args, check=False, cwd=cwd)
     if code != 0:
         print(f"[ERROR] {' '.join(args[:3])}...: {err.strip()}", file=sys.stderr)
         return None
@@ -1926,16 +1926,46 @@ def prune_worktree(repo_root, branch, expected_sha):
         )
         if status_code != 0:
             return False, f"Could not inspect worktree {path}: {status_err.strip()}"
-        if status:
+        from cleanup_worktrees import (
+            porcelain_blocks_prune,
+            porcelain_dirty_except_manifest,
+            remove_retain_manifest,
+            write_retain_manifest,
+        )
+        if porcelain_blocks_prune(status):
             return False, (
-                f"Worktree {path} has tracked, untracked, or ignored files; left untouched."
+                f"Worktree {path} has tracked or untracked files; left untouched."
             )
-        if os.path.exists(retained_path):
+        if os.path.lexists(retained_path):
             return False, f"Retention destination already exists: {retained_path}"
+        try:
+            write_retain_manifest(path)
+        except OSError as exc:
+            return False, f"Could not snapshot worktree {path} for retention: {exc}"
+        status_code, status, status_err = run_cmd(
+            [
+                "git", "status", "--porcelain", "--untracked-files=all",
+                "--ignored=matching",
+            ],
+            check=False,
+            cwd=path,
+        )
+        if status_code != 0:
+            remove_retain_manifest(path)
+            return False, f"Could not inspect worktree {path}: {status_err.strip()}"
+        blocked = porcelain_dirty_except_manifest(status)
+        if blocked is not False:
+            remove_retain_manifest(path)
+            if blocked is None:
+                return False, f"Could not inspect worktree {path} after snapshot."
+            return False, (
+                f"Worktree {path} has tracked or untracked files; left untouched."
+            )
         try:
             os.makedirs(retained_root, exist_ok=True)
             os.rename(path, retained_path)
         except OSError as exc:
+            remove_retain_manifest(path)
             return False, f"Could not atomically retain worktree {path}: {exc}"
         code, _, err = run_cmd(
             ["git", "worktree", "remove", path], check=False, cwd=repo_root
@@ -2045,8 +2075,8 @@ def reconcile_issue_done(issue_num):
     return False, f"Could not reconcile issue #{issue_num} to Done."
 
 
-def clear_labels(kind, number, prefix):
-    data = _gh_json(["gh", kind, "view", str(number), "--json", "labels"])
+def clear_labels(kind, number, prefix, cwd=None):
+    data = _gh_json(["gh", kind, "view", str(number), "--json", "labels"], cwd=cwd)
     if data is None:
         return False, f"Could not read {kind} #{number} labels."
     names = [
@@ -2055,7 +2085,8 @@ def clear_labels(kind, number, prefix):
     ]
     for name in names:
         code, _, err = run_cmd(
-            ["gh", kind, "edit", str(number), "--remove-label", name], check=False
+            ["gh", kind, "edit", str(number), "--remove-label", name],
+            check=False, cwd=cwd,
         )
         if code != 0:
             return False, f"Could not remove {name} from {kind} #{number}: {err.strip()}"
@@ -2063,16 +2094,16 @@ def clear_labels(kind, number, prefix):
     return True, f"{kind.title()} #{number} {prefix}{noun} cleared or already absent."
 
 
-def clear_issue_claims(issue_num):
-    return clear_labels("issue", issue_num, "agent:")
+def clear_issue_claims(issue_num, cwd=None):
+    return clear_labels("issue", issue_num, "agent:", cwd=cwd)
 
 
-def clear_review_claims(pr_num):
-    return clear_labels("pr", pr_num, REVIEW_CLAIM_LABEL)
+def clear_review_claims(pr_num, cwd=None):
+    return clear_labels("pr", pr_num, REVIEW_CLAIM_LABEL, cwd=cwd)
 
 
-def clear_merger_claims(pr_num):
-    return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL)
+def clear_merger_claims(pr_num, cwd=None):
+    return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL, cwd=cwd)
 
 
 def evaluate_dod(pr, issue_bodies, evidence):
@@ -2193,9 +2224,24 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):
             failures.append(f"{name}: {message}")
         all_ok = all_ok and ok
 
-    # Keep merger:<id> until every prior step succeeds so the picker can still
-    # rediscover incomplete close-out. Clearing it after a board/Done failure
-    # would make recovery invisible once the linked issue is CLOSED.
+    # Keep merger:<id> until the current PR's leftovers are observably gone so
+    # the picker can rediscover incomplete close-out. Clearing it before the
+    # janitor runs made a leftover local branch invisible to recovery.
+    try:
+        retain = None if all_ok else pr.get("number")
+        ok, message = sweep_leftovers(repo_root, retain_merger_pr=retain)
+    except Exception as exc:
+        ok, message = False, f"janitor skipped: {exc}"
+    print(f"  {'✅' if ok else '❌'} {'janitor':<18} {message}")
+    if not ok and failures is not None:
+        failures.append(f"janitor: {message}")
+    all_ok = all_ok and ok
+    from cleanup_worktrees import local_ref_exists
+    if local_ref_exists(repo_root, branch):
+        all_ok = False
+        print("  ⏳ merger claim      retained; local branch still present")
+        if failures is not None:
+            failures.append(f"local branch remaining: {branch}")
     if all_ok:
         try:
             ok, message = clear_merger_claims(pr.get("number"))
@@ -2208,6 +2254,12 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):
     else:
         print("  ⏳ merger claim      retained so recovery remains discoverable")
     return all_ok
+
+
+def sweep_leftovers(repo_root, retain_merger_pr=None):
+    """Leftover sweep. Operational failures are returned to close-out."""
+    from cleanup_worktrees import sweep
+    return sweep(repo_root, retain_merger_pr=retain_merger_pr)
 
 
 def run_closeout_with_retries(pr, issue_nums, repo_root, sleep_fn=None):
