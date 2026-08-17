@@ -1274,6 +1274,28 @@ class ReviewRoundGateTests(unittest.TestCase):
         self.assertIn("--emit-review-split", rounds_gate[2])
         self.assertTrue(ok)
 
+    def test_evaluate_dod_includes_spec_sync_gate(self):
+        pr = {"body": "Closes #242\n"}
+        with patch.object(merge_pr, "check_open", return_value=(True, "open")), \
+             patch.object(merge_pr, "check_issue_link", return_value=(True, "linked")), \
+             patch.object(merge_pr, "check_verification", return_value=(True, "ok")), \
+             patch.object(merge_pr, "check_ci", return_value=(True, "green")), \
+             patch.object(merge_pr, "check_reviews", return_value=(True, "reviewed")), \
+             patch.object(merge_pr, "check_rebased", return_value=(True, "current")), \
+             patch.object(merge_pr, "check_size", return_value=(True, "small")), \
+             patch.object(merge_pr, "check_test_coverage", return_value=(True, "tests")), \
+             patch.object(merge_pr, "check_spec_sync", return_value=(True, "spec sync ok")), \
+             patch.object(merge_pr, "check_review_rounds", return_value=(True, "ok")), \
+             patch.object(merge_pr, "check_acceptance", return_value=(True, "accept")), \
+             patch.object(merge_pr, "linked_issues", return_value=[242]):
+            ok, gates = merge_pr.evaluate_dod(pr, {242: "- [x] done\n"}, evidence={})
+        names = [name for name, _, _ in gates]
+        self.assertIn("spec-sync", names)
+        sync_gate = next(g for g in gates if g[0] == "spec-sync")
+        self.assertTrue(sync_gate[1])
+        self.assertEqual(sync_gate[2], "spec sync ok")
+        self.assertTrue(ok)
+
 
 class TestCoverageGateTests(unittest.TestCase):
     def test_truncated_changed_file_list_fails_closed(self):

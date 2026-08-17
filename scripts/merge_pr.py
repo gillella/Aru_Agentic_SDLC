@@ -1959,6 +1959,27 @@ def check_test_coverage(pr):
     return True, f"Production changes include test coverage in {len(tests)} test file(s)."
 
 
+def check_spec_sync(pr, repo_dir=None):
+    """Require specifications and CLI arguments to remain synchronized with implementation."""
+    sync_script = os.path.join(repo_dir or ".", "scripts", "sync_spec.py")
+    if not os.path.exists(sync_script):
+        return True, "No sync_spec.py present; skipping spec-sync check."
+    try:
+        from sync_spec import check_spec_synchronization
+        clean, details = check_spec_synchronization(repo_dir or ".")
+        if clean:
+            return True, "Specifications and code are synchronized."
+        return False, f"Specification drift detected: {details}"
+    except Exception:
+        cmd = [sys.executable, sync_script, "--check"]
+        if repo_dir:
+            cmd.extend(["--repo-dir", repo_dir])
+        code, out, err = run_cmd(cmd, check=False)
+        if code == 0:
+            return True, "Specifications and code are synchronized."
+        return False, f"Specification drift detected: {out or err}"
+
+
 def is_merged(pr):
     return (pr.get("state") or "").upper() == "MERGED" or bool(pr.get("mergedAt"))
 
@@ -2419,6 +2440,7 @@ def evaluate_dod(pr, issue_bodies, evidence):
         ("rebased", *check_rebased(pr)),
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
+        ("spec-sync", *check_spec_sync(pr)),
         ("review rounds", *check_review_rounds(pr)),
     ]
     for num in issue_nums:
