@@ -1,5 +1,7 @@
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,7 +20,9 @@ MARKER = intake.incident_marker(FINGERPRINT)
 
 
 def _issue(number, status="Backlog", state="OPEN", body=None, extra_labels=None):
-    labels = [{"name": f"status:{status.lower().replace(' ', '-')}"}]
+    labels = []
+    if status:
+        labels.append({"name": f"status:{status.lower().replace(' ', '-')}"})
     for name in extra_labels or []:
         labels.append({"name": name})
     return {
@@ -51,12 +55,17 @@ class IncidentIntakeTests(unittest.TestCase):
             (0, "[]", ""),
             (0, "https://github.com/owner/repo/issues/301\n", ""),
             (0, "Attached to board", ""),
+            (0, json.dumps([_issue(301)]), ""),
         ]
         new_id = intake.intake_firing(SOURCE, COMPONENT, ALERT, "p1", EVIDENCE)
         self.assertEqual(new_id, 301)
+        list_cmd = mock_run.call_args_list[0].args[0]
+        self.assertIn("--search", list_cmd)
+        self.assertIn(f"in:body fingerprint={FINGERPRINT}", list_cmd)
         create_cmd = mock_run.call_args_list[1].args[0]
         self.assertEqual(create_cmd[0:3], ["gh", "issue", "create"])
         self.assertIn(MARKER, create_cmd[create_cmd.index("--body") + 1])
+        self.assertIn(f"incident-fingerprint: {FINGERPRINT}", create_cmd[create_cmd.index("--body") + 1])
         self.assertIn("pending-ops-triage", create_cmd[create_cmd.index("--body") + 1])
         self.assertIn("origin:incident", create_cmd[create_cmd.index("--label") + 1])
         attach_cmd = mock_run.call_args_list[2].args[0]
@@ -78,6 +87,7 @@ class IncidentIntakeTests(unittest.TestCase):
         self.assertIsNone(intake.intake_firing(SOURCE, COMPONENT, ALERT, "p1", EVIDENCE))
         self.assertEqual(mock_run.call_count, 1)
         self.assertEqual(mock_run.call_args.args[0][:3], ["gh", "issue", "list"])
+        self.assertIn("--search", mock_run.call_args.args[0])
 
     @patch("incident_intake.run_cmd")
     def test_recurring_alert_updates_existing_issue(self, mock_run):
@@ -129,14 +139,20 @@ class IncidentIntakeTests(unittest.TestCase):
         )
 
     @patch("incident_intake.run_cmd")
-    def test_duplicate_open_markers_fail_closed(self, mock_run):
-        mock_run.return_value = (
-            0,
-            json.dumps([_issue(199), _issue(200)]),
-            "",
+    def test_duplicate_open_markers_keep_oldest(self, mock_run):
+        mock_run.side_effect = [
+            (0, json.dumps([_issue(200), _issue(199)]), ""),
+            (0, "", ""),
+            (0, "Commented", ""),
+            (0, "Attached", ""),
+        ]
+        self.assertEqual(
+            intake.intake_firing(SOURCE, COMPONENT, ALERT, "p1", EVIDENCE),
+            199,
         )
-        self.assertIsNone(intake.intake_firing(SOURCE, COMPONENT, ALERT, "p1", EVIDENCE))
-        self.assertEqual(mock_run.call_count, 1)
+        self.assertFalse(
+            any(call.args[0][:3] == ["gh", "issue", "create"] for call in mock_run.call_args_list)
+        )
 
     @patch("incident_intake.run_cmd")
     def test_resolved_unclaimed_alert_closes_issue_and_prunes(self, mock_run):
@@ -289,6 +305,90 @@ class IncidentIntakeTests(unittest.TestCase):
         self.assertNotIn("\x00", cleaned)
         self.assertNotIn("abc123", cleaned)
         self.assertIn("[redacted]", cleaned)
+
+    def test_sanitize_evidence_redacts_common_credentials(self):
+        jwt_body = "eyJhbGciOiJub25yZWFsLXNlY3JldA"
+        gh_token = "ghp_" + "1234567890abcdefghij"
+        aws_key = "AK" + "IA1234567890ABCDEF"
+        cleaned = intake.sanitize_evidence(
+            f"Authorization: Bearer {jwt_body} {gh_token} {aws_key} credential=super-secret"
+        )
+        self.assertNotIn(jwt_body, cleaned)
+        self.assertNotIn(gh_token, cleaned)
+        self.assertNotIn(aws_key, cleaned)
+        self.assertNotIn("super-secret", cleaned)
+        self.assertIn("[redacted]", cleaned)
+
+    @patch("incident_intake.run_cmd")
+    def test_recurrence_skips_board_when_status_unknown(self, mock_run):
+        mock_run.side_effect = [
+            (0, json.dumps([_issue(199, status=None)]), ""),
+            (0, "", ""),
+            (0, "Commented", ""),
+        ]
+        self.assertEqual(
+            intake.intake_firing(SOURCE, COMPONENT, ALERT, "p1", EVIDENCE),
+            199,
+        )
+        self.assertFalse(
+            any(
+                "update_issue_status.py" in " ".join(str(part) for part in call.args[0])
+                for call in mock_run.call_args_list
+            )
+        )
+
+    @patch("incident_intake.run_cmd")
+    def test_resolved_open_done_issue_retries_close(self, mock_run):
+        porcelain = (
+            "worktree /tmp/repo\nHEAD abc\nbranch refs/heads/main\n\n"
+            "worktree /tmp/repo/.worktrees/feat-issue-199-ops\n"
+            "HEAD def\n"
+            "branch refs/heads/feat/issue-199-ops\n"
+        )
+        mock_run.side_effect = [
+            (0, json.dumps([_issue(199, status="Done", state="OPEN")]), ""),
+            (0, "Moved to Done", ""),
+            (0, "", ""),
+            (0, "/tmp/repo/.git", ""),
+            (0, porcelain, ""),
+            (0, "", ""),
+            (0, "", ""),
+        ]
+        self.assertEqual(intake.intake_resolved(SOURCE, COMPONENT, ALERT, EVIDENCE), 199)
+        self.assertTrue(
+            any(call.args[0][:3] == ["gh", "issue", "close"] for call in mock_run.call_args_list)
+        )
+
+    def test_evidence_file_success_and_missing(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
+            handle.write(EVIDENCE)
+            path = handle.name
+        try:
+            with patch("incident_intake.run_cmd") as mock_run:
+                code = intake.main(
+                    [
+                        "--signal", "firing",
+                        "--source", SOURCE,
+                        "--component", COMPONENT,
+                        "--alert-name", ALERT,
+                        "--evidence-file", path,
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            mock_run.assert_not_called()
+        finally:
+            os.unlink(path)
+        missing = intake.main(
+            [
+                "--signal", "firing",
+                "--source", SOURCE,
+                "--component", COMPONENT,
+                "--alert-name", ALERT,
+                "--evidence-file", "/no/such/evidence.txt",
+            ]
+        )
+        self.assertEqual(missing, 1)
 
 
 if __name__ == "__main__":

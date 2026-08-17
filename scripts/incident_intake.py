@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from common import ensure_label, run_cmd
+from common import _redact_embedded_secrets, ensure_label, run_cmd
 
 
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$")
@@ -41,7 +41,7 @@ VALID_SEVERITIES = ("p0", "p1", "p2", "p3")
 @dataclass(frozen=True)
 class IncidentMatch:
     number: int
-    status: str
+    status: Optional[str]
     body: str
     state: str
 
@@ -71,12 +71,22 @@ def resolved_marker(fingerprint: str) -> str:
 def sanitize_evidence(value: str) -> str:
     """Strip controls, markup, and credential-shaped tokens from evidence."""
     summary = re.sub(r"[\x00-\x1f\x7f]+", " ", value or "").strip()
-    summary = re.sub(r"[`<>]", "", summary)
+    summary = _redact_embedded_secrets(summary)
+    summary = re.sub(r"(?:AKIA|ASIA)[A-Z0-9]{16}", "[redacted]", summary)
     summary = re.sub(
-        r"(?i)(token|secret|password|passwd|api[_-]?key)\s*[:=]\s*\S+",
-        r"\1=[redacted]",
+        r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----.*?"
+        r"-----END(?: [A-Z0-9]+)? PRIVATE KEY-----",
+        "[redacted]",
+        summary,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    summary = re.sub(
+        r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+        "[redacted]",
         summary,
     )
+    summary = summary.replace("<redacted>", "[redacted]")
+    summary = re.sub(r"[`<>]", "", summary)
     return summary[:2000] or "No additional diagnostic summary was available."
 
 
@@ -96,9 +106,9 @@ def _status_from_labels(labels: Any) -> Optional[str]:
         if isinstance(label, dict) and isinstance(label.get("name"), str)
     }
     statuses = [status for key, status in STATUS_LABELS.items() if key in names]
-    if len(statuses) > 1:
+    if len(statuses) != 1:
         return None
-    return statuses[0] if statuses else "Backlog"
+    return statuses[0]
 
 
 def _matches_for_marker(issues: list[Any], marker: str) -> Optional[list[IncidentMatch]]:
@@ -114,24 +124,26 @@ def _matches_for_marker(issues: list[Any], marker: str) -> Optional[list[Inciden
         if marker not in body:
             continue
         status = _status_from_labels(issue.get("labels", []))
-        if status is None or not isinstance(state, str):
+        if not isinstance(state, str):
             return None
         matches.append(IncidentMatch(number, status, body, state.upper()))
     return matches
 
 
-def find_existing_incident(
+def _list_incident_matches(
     fingerprint: str, include_closed: bool = False
-) -> tuple[bool, Optional[IncidentMatch]]:
-    """Return query success and the unique marker match, if any."""
+) -> tuple[bool, Optional[list[IncidentMatch]]]:
+    """Return query success and every marker match in the searched states."""
     marker = incident_marker(fingerprint)
+    query = f"in:body fingerprint={fingerprint}"
     states = ("open", "closed") if include_closed else ("open",)
     matches: list[IncidentMatch] = []
+    seen: set[int] = set()
     for state in states:
         code, out, _ = run_cmd(
             [
-                "gh", "issue", "list", "--state", state, "--limit", "500",
-                "--json", "number,title,body,labels,state",
+                "gh", "issue", "list", "--state", state, "--limit", "100",
+                "--search", query, "--json", "number,title,body,labels,state",
             ],
             check=False,
         )
@@ -146,16 +158,30 @@ def find_existing_incident(
         parsed = _matches_for_marker(issues, marker)
         if parsed is None:
             return False, None
-        matches.extend(parsed)
+        for match in parsed:
+            if match.number not in seen:
+                seen.add(match.number)
+                matches.append(match)
         if matches and state == "open":
             break
-    if len(matches) > 1:
+    return True, matches
+
+
+def find_existing_incident(
+    fingerprint: str, include_closed: bool = False
+) -> tuple[bool, Optional[IncidentMatch]]:
+    """Return query success and the unique marker match, if any."""
+    query_ok, matches = _list_incident_matches(fingerprint, include_closed)
+    if not query_ok or matches is None:
         return False, None
+    if len(matches) > 1:
+        return True, min(matches, key=lambda item: item.number)
     return True, matches[0] if matches else None
 
 
 def _sdlc_home() -> Path:
-    return Path(os.environ.get("ARU_SDLC_HOME", ".")).resolve()
+    default = Path(__file__).resolve().parent.parent
+    return Path(os.environ.get("ARU_SDLC_HOME") or default).resolve()
 
 
 def attach_board(issue_id: int, status: str) -> bool:
@@ -204,13 +230,10 @@ def _marker_already_recorded(existing: IncidentMatch, marker: str) -> Optional[b
     return marker in comments
 
 
-def ensure_intake_labels(severity: str) -> bool:
-    specs = (
-        ("origin:incident", "5319e7", "Opened from a production signal"),
-        (f"priority:{severity}", "fbca04", f"Intake severity {severity}"),
-        ("type:fix", "d73a4a", "Bug fix"),
+def ensure_intake_labels(_severity: str) -> bool:
+    return ensure_label(
+        "origin:incident", "5319e7", "Opened from a production signal"
     )
-    return all(ensure_label(name, color, desc) for name, color, desc in specs)
 
 
 def _issue_body(
@@ -226,6 +249,7 @@ def _issue_body(
     return f"""## Problem Description
 Production signal `{alert_name}` fired on `{component}` (source: `{source}`).
 
+incident-fingerprint: {fingerprint}
 {marker}
 {event}
 
@@ -287,8 +311,7 @@ def create_incident_issue(
     new_id = int(match.group(1))
     if not attach_board(new_id, "Backlog"):
         return None
-    print(f"✅ Created incident issue #{new_id}")
-    return new_id
+    return reconcile_created(new_id, fingerprint, evidence)
 
 
 def record_recurrence(existing: IncidentMatch, fingerprint: str, evidence: str) -> Optional[int]:
@@ -305,16 +328,40 @@ def record_recurrence(existing: IncidentMatch, fingerprint: str, evidence: str) 
         )
         if not comment_on(existing.number, body):
             return None
-    if not attach_board(existing.number, existing.status):
+    if existing.status and not attach_board(existing.number, existing.status):
         return None
     print(f"ℹ️ Recurring alert: updated issue #{existing.number}")
     return existing.number
 
 
+def reconcile_created(
+    new_id: int, fingerprint: str, evidence: str
+) -> Optional[int]:
+    """Keep the oldest open match if two firing calls raced."""
+    query_ok, matches = _list_incident_matches(fingerprint)
+    if not query_ok or matches is None:
+        return None
+    if not matches:
+        print(f"✅ Created incident issue #{new_id}")
+        return new_id
+    canonical = min(matches, key=lambda item: item.number)
+    for extra in matches:
+        if extra.number == canonical.number:
+            continue
+        if extra.number == new_id and extra.status in UNCLAIMED_STATUSES:
+            if not close_unclaimed(extra.number):
+                return None
+    if canonical.number != new_id:
+        print(f"ℹ️ Reconciled duplicate to issue #{canonical.number}")
+        return record_recurrence(canonical, fingerprint, evidence)
+    print(f"✅ Created incident issue #{new_id}")
+    return new_id
+
+
 def repository_root() -> Optional[str]:
     """Return the primary worktree root even when invoked from a linked one."""
     code, common_dir, _ = run_cmd(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ["git", "rev-parse", "--git-common-dir"],
         check=False,
     )
     if code != 0 or not common_dir:
@@ -433,7 +480,14 @@ def intake_resolved(
     if existing is None:
         print("ℹ️ No matching incident issue for resolved signal")
         return 0
-    if existing.state == "CLOSED" or existing.status == "Done":
+    if existing.state != "CLOSED" and existing.status == "Done":
+        if not close_unclaimed(existing.number):
+            return None
+        if not prune_issue_worktrees(existing.number):
+            return None
+        print(f"✅ Resolved alert: closed leftover Done issue #{existing.number}")
+        return existing.number
+    if existing.state == "CLOSED":
         if not prune_issue_worktrees(existing.number):
             return None
         print(f"✅ Resolved alert: cleaned leftover worktrees for issue #{existing.number}")
@@ -452,9 +506,13 @@ def intake_resolved(
     return existing.number
 
 
+EVIDENCE_READ_LIMIT = 8192
+
+
 def _read_evidence(text: str, evidence_file: Optional[str]) -> str:
     if evidence_file:
-        return Path(evidence_file).read_text(encoding="utf-8")
+        with Path(evidence_file).open(encoding="utf-8", errors="replace") as handle:
+            return handle.read(EVIDENCE_READ_LIMIT)
     return text
 
 

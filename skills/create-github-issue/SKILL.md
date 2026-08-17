@@ -50,19 +50,24 @@ This skill defines the declarative workflow for creating clear, actionable GitHu
 Do not file production alerts by hand through this skill. Monitoring, health
 checks, and error-rate thresholds invoke:
 
-```
+```bash
 python3 "$ARU_SDLC_HOME/scripts/incident_intake.py" \
-  --signal firing|resolved \
+  --signal <firing|resolved> \
   --source <monitor> \
   --component <component> \
   --alert-name <alert> \
-  --severity p0|p1|p2|p3 \
-  --evidence "<summary>"
+  --severity <p0|p1|p2|p3> \
+  --evidence "<summary>" \
+  [--evidence-file <path>] \
+  [--dry-run]
 ```
 
 Intake opens a skill-shaped issue on the same Project Board (`Backlog`, labels
 `type:fix`, `origin:incident`, `priority:<severity>`). Recurring alerts comment
 on that open issue. Resolved alerts close unclaimed Backlog/Ready issues and
-prune leftover `issue-<N>` worktrees when Done. Triage replaces
-`touches: pending-ops-triage` before promoting to Ready. There is no second
-incident process.
+prune leftover `issue-<N>` worktrees when Done. `--severity` applies only to
+firing signals. `--dry-run` validates identity without writing to GitHub.
+`--evidence-file` reads a bounded diagnostic excerpt from a file. Triage
+replaces `touches: pending-ops-triage` before promoting to Ready. There is no
+second incident process. Post-merge janitor cleanup for arbitrary leftovers is
+issue #126, not this intake door.
