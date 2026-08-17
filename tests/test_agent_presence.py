@@ -210,6 +210,40 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(store.get("cursor-1").availability, "busy")
 
+    def test_cli_wires_cooldown_metadata_for_all_presence_mutations(self):
+        presence_path = self.root / "cli-cooldown-presence.json"
+        first_retry = "2026-08-16T12:05:00Z"
+        code = ap.main([
+            "--path", str(presence_path), "register",
+            "--agent", "cursor-1", "--family", "cursor",
+            "--checkout", str(self.project_a), "--project-id", "proj_alpha",
+            "--availability", "cooling-down",
+            "--cooldown-reason", "rate-limited",
+            "--cooldown-until", first_retry,
+        ])
+        self.assertEqual(code, 0)
+        store = ap.PresenceStore(presence_path)
+        self.assertEqual(store.get("cursor-1").cooldown_reason, "rate-limited")
+        self.assertEqual(store.get("cursor-1").cooldown_until, first_retry)
+
+        code = ap.main([
+            "--path", str(presence_path), "heartbeat", "--agent", "cursor-1",
+            "--availability", "cooling-down",
+            "--cooldown-reason", "provider-outage",
+            "--cooldown-until", "2026-08-16T12:10:00Z",
+        ])
+        self.assertEqual(code, 0)
+        self.assertEqual(store.get("cursor-1").cooldown_reason, "provider-outage")
+
+        code = ap.main([
+            "--path", str(presence_path), "set-availability",
+            "--agent", "cursor-1", "--availability", "cooling-down",
+            "--cooldown-reason", "credit-exhausted",
+            "--cooldown-until", "2026-08-16T12:15:00Z",
+        ])
+        self.assertEqual(code, 0)
+        self.assertEqual(store.get("cursor-1").cooldown_reason, "credit-exhausted")
+
     def test_doctor_summary_is_read_only(self):
         aru = self.root / "aru-isolated"
         aru.mkdir(mode=0o700)
@@ -493,6 +527,19 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertIn(record.availability, {"available", "returned"})
         self.assertIsNone(record.cooldown_reason)
         self.assertIsNone(record.cooldown_until)
+
+    def test_explicit_unavailable_heartbeat_stays_unavailable(self):
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="rate-limited",
+        )
+        record = self.store.heartbeat("agent-1", availability="unavailable")
+        self.assertEqual(record.availability, "unavailable")
+        self.assertIsNone(record.cooldown_reason)
+        eligible = ap.query_role_poll_agents(self.store, project_id="proj_test")
+        self.assertEqual(eligible, [])
 
     def test_query_cooling_agents(self):
         """query_cooling_agents returns only cooling-down agents."""

@@ -974,7 +974,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("posted")
         return 0
 
-    result = post_event(config, event)
+    result = post_event(config, event, cache=FileDedupeCache())
     if not result.get("ok"):
         print(f"[WARN] Slack notify failed: {result.get('error')}", file=sys.stderr)
         if result.get("error") == "invalid_availability":

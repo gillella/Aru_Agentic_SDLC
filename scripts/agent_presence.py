@@ -463,7 +463,7 @@ class PresenceStore:
             next_availability = existing.availability
             if (
                 existing.availability in {"cooling-down", "temporarily-offline"}
-                and availability not in {None, "cooling-down", "temporarily-offline"}
+                and availability in {"available", "busy", "returned"}
             ):
                 next_availability = "returned"
             elif availability is not None:
@@ -879,6 +879,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     register.add_argument("--capability", action="append", default=[])
     register.add_argument("--wake-evidence", action="append", default=[])
+    register.add_argument("--cooldown-until", default=None)
+    register.add_argument("--cooldown-reason", choices=sorted(COOLDOWN_REASONS))
 
     heartbeat = sub.add_parser("heartbeat", help="Refresh heartbeat / availability")
     heartbeat.add_argument("--agent", required=True)
@@ -888,6 +890,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(AVAILABILITY_STATES),
     )
     heartbeat.add_argument("--role", default=None)
+    heartbeat.add_argument("--cooldown-until", default=None)
+    heartbeat.add_argument("--cooldown-reason", choices=sorted(COOLDOWN_REASONS))
 
     availability = sub.add_parser(
         "set-availability", help="Set availability without changing project binding",
@@ -898,6 +902,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=sorted(AVAILABILITY_STATES),
     )
+    availability.add_argument("--cooldown-until", default=None)
+    availability.add_argument("--cooldown-reason", choices=sorted(COOLDOWN_REASONS))
 
     unregister = sub.add_parser(
         "unregister",
@@ -964,6 +970,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 role=args.role,
                 availability=args.availability,
                 wake_evidence_supported=args.wake_evidence or ["github-recovery"],
+                cooldown_until=args.cooldown_until,
+                cooldown_reason=args.cooldown_reason,
             )
             _print_record(record, as_json=args.json)
             return 0
@@ -973,12 +981,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.agent,
                 availability=args.availability,
                 role=args.role,
+                cooldown_until=args.cooldown_until,
+                cooldown_reason=args.cooldown_reason,
             )
             _print_record(record, as_json=args.json)
             return 0
 
         if command == "set-availability":
-            record = store.set_availability(args.agent, args.availability)
+            record = store.set_availability(
+                args.agent,
+                args.availability,
+                cooldown_until=args.cooldown_until,
+                cooldown_reason=args.cooldown_reason,
+            )
             _print_record(record, as_json=args.json)
             return 0
 

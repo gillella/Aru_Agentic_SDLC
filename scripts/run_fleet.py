@@ -26,6 +26,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,7 @@ RECOVERABLE_PHASES = {
 }
 MAX_WAIT_SECONDS = 86_400.0
 MAX_HELPER_TIMEOUT_SECONDS = 3_600.0
+MAX_CHILD_STDERR_CHARS = 65_536
 
 
 @dataclass(frozen=True)
@@ -198,10 +200,38 @@ def run_agent(
         return CommandResult(127, "", str(exc))
     if on_start is not None:
         on_start(child.pid)
-    _, stderr = child.communicate()
-    if stderr:
-        print(stderr, file=sys.stderr, end="" if stderr.endswith("\n") else "\n")
-    return CommandResult(child.returncode, "", stderr or "")
+    stderr_tail = [""]
+
+    def drain_stderr() -> None:
+        tail = ""
+        stream = child.stderr
+        if stream is None:
+            return
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            sys.stderr.write(chunk)
+            sys.stderr.flush()
+            tail = (tail + chunk)[-MAX_CHILD_STDERR_CHARS:]
+        stderr_tail[0] = tail
+
+    stderr_thread = threading.Thread(
+        target=drain_stderr,
+        name=f"{configurable_thread_name(argv)}-stderr",
+        daemon=True,
+    )
+    stderr_thread.start()
+    returncode = child.wait()
+    stderr_thread.join()
+    return CommandResult(returncode, "", stderr_tail[0])
+
+
+def configurable_thread_name(argv: Sequence[str]) -> str:
+    """Return a non-sensitive diagnostic name without embedding arguments."""
+    executable = Path(argv[0]).name if argv else "agent"
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "-", executable)
+    return cleaned[:32] or "agent"
 
 
 def parse_json_result(result: CommandResult) -> dict[str, Any] | None:
@@ -696,10 +726,12 @@ class FleetRunner:
             return IterationResult("active", 0.0, work_type, work_number, child_code)
 
         reason = classify_child_failure(child_code, child_stderr)
+        entering_cooldown = self.active_cooldown_reason is None
+        previous_reason = self.active_cooldown_reason
+        self.active_cooldown_reason = reason
         result = self._park("agent_unavailable_wait", fleet, work, cooldown_reason=reason)
-        if self.active_cooldown_reason != reason:
+        if entering_cooldown:
             retry_at = timestamp(self.clock() + timedelta(seconds=result.delay))
-            self.active_cooldown_reason = reason
             self.active_cooldown_id = f"cycle:{self.cycle}:{retry_at}:{reason}"
             self._log(
                 "cooldown_enter",
@@ -718,6 +750,13 @@ class FleetRunner:
                     f"availability:{self.active_cooldown_id}:cooling-down"
                 ),
             })
+        elif previous_reason != reason:
+            self._log(
+                "cooldown_reason_updated",
+                previous_reason=previous_reason or "unknown",
+                cooldown_reason=reason,
+                retry_count=self.retry_count,
+            )
         return IterationResult(
             result.phase, result.delay, work_type, work_number, child_code,
         )

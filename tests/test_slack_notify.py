@@ -381,6 +381,7 @@ class SlackNotifyTests(unittest.TestCase):
                 ])
             self.assertEqual(code, 0)
             self.assertEqual(posted.call_args.args[0].channel_id, "C99999999")
+            self.assertIsInstance(posted.call_args.kwargs["cache"], FileDedupeCache)
 
     def test_unknown_outbound_project_fails_closed_without_posting(self):
         with tempfile.TemporaryDirectory() as raw:

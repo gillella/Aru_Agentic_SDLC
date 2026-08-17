@@ -132,8 +132,8 @@ class AdapterTests(RunnerFixture):
         kill_group.assert_called_once_with(9876, rf.signal.SIGTERM)
 
     def test_child_is_signal_isolated_and_reports_its_pid(self):
-        child = unittest.mock.Mock(pid=4321)
-        child.communicate.return_value = (None, "429 rate limit\n")
+        child = unittest.mock.Mock(pid=4321, stderr=io.StringIO("429 rate limit\n"))
+        child.wait.return_value = 75
         child.returncode = 75
         started = []
 
@@ -150,6 +150,18 @@ class AdapterTests(RunnerFixture):
             ["agent", "one unit"], cwd=str(self.repo),
             stderr=rf.subprocess.PIPE, text=True, start_new_session=True,
         )
+
+    def test_child_stderr_capture_is_a_bounded_tail(self):
+        payload = "prefix-" + ("x" * rf.MAX_CHILD_STDERR_CHARS) + "-tail"
+        child = unittest.mock.Mock(pid=4321, stderr=io.StringIO(payload))
+        child.wait.return_value = 75
+        with (
+            patch.object(rf.subprocess, "Popen", return_value=child),
+            redirect_stderr(io.StringIO()),
+        ):
+            result = rf.run_agent(["agent", "one unit"], self.repo)
+        self.assertEqual(len(result.stderr), rf.MAX_CHILD_STDERR_CHARS)
+        self.assertTrue(result.stderr.endswith("-tail"))
 
     def test_custom_adapter_is_argv_only_and_prompt_stays_one_argument(self):
         config = self.config(
@@ -353,6 +365,31 @@ class IterationTests(RunnerFixture):
         self.assertEqual([event["state"] for event in notices], ["cooling-down", "returned"])
         self.assertEqual(notices[0]["cooldown_reason"], "credit-exhausted")
         self.assertEqual(notices[1]["work_number"], 2)
+
+    def test_reason_change_inside_one_cooldown_does_not_post_again(self):
+        commands = FakeCommands(
+            [fleet(), fleet(), fleet()],
+            [selection("issue", 1), selection("issue", 1), selection("issue", 2)],
+        )
+        notices = []
+        child_results = iter((
+            rf.CommandResult(75, "", "429 rate limit"),
+            rf.CommandResult(1, "", "generic child failure"),
+            rf.CommandResult(0),
+        ))
+        runner = self.runner(
+            commands,
+            agent_runner=lambda *_: next(child_results),
+            transition_notifier=notices.append,
+        )
+
+        runner.run_iteration()
+        runner.run_iteration()
+        runner.run_iteration()
+
+        self.assertEqual([event["state"] for event in notices], ["cooling-down", "returned"])
+        self.assertEqual(notices[0]["cooldown_reason"], "rate-limited")
+        self.assertEqual(runner.active_cooldown_reason, None)
 
     def test_transferred_work_is_not_reused_after_cooldown(self):
         commands = FakeCommands(

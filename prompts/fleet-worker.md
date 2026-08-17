@@ -54,6 +54,9 @@ Desktop tasks advertise presence with:
 python3 "$ARU_SDLC_HOME/scripts/agent_presence.py" register \
   --agent <AGENT_ID> --family <FAMILY> --checkout "$PWD"
 python3 "$ARU_SDLC_HOME/scripts/agent_presence.py" heartbeat --agent <AGENT_ID>
+python3 "$ARU_SDLC_HOME/scripts/agent_presence.py" set-availability \
+  --agent <AGENT_ID> --availability cooling-down \
+  --cooldown-reason <REASON> [--cooldown-until <UTC_TIMESTAMP>]
 ```
 
 Credit exhaustion, rate limits, provider outages, and failed child sessions are
