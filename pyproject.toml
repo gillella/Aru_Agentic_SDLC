@@ -30,3 +30,60 @@ select = ["E4", "E7", "E9", "F"]
 # so it needs a reason of this kind - the rule is wrong for this file - rather
 # than "the finding already existed".
 "tests/*" = ["E402"]
+
+[tool.importlinter]
+root_packages = [
+    "hooks",
+    "scripts",
+]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Contract 1: hooks must not import skills or templates"
+type = "forbidden"
+source_modules = [
+    "hooks",
+]
+forbidden_modules = [
+    "skills",
+    "templates",
+]
+
+[[tool.importlinter.contracts]]
+name = "Contract 2: hooks must not import scripts"
+type = "forbidden"
+source_modules = [
+    "hooks",
+]
+forbidden_modules = [
+    "scripts",
+]
+
+[[tool.importlinter.contracts]]
+name = "Contract 3: governance primitives (common.py) cannot import workflow scripts"
+type = "forbidden"
+source_modules = [
+    "scripts.common",
+]
+forbidden_modules = [
+    "scripts.claim_issue",
+    "scripts.fetch_next_work",
+    "scripts.fetch_next_issue",
+    "scripts.create_branch",
+    "scripts.create_pr",
+    "scripts.merge_pr",
+    "scripts.check_ci",
+    "scripts.triage_backlog",
+    "scripts.fleet_status",
+    "scripts.slack_notify",
+    "scripts.slack_control_room",
+    "scripts.slack_projects",
+    "scripts.agent_presence",
+    "scripts.run_fleet",
+    "scripts.init_project",
+    "scripts.promote",
+    "scripts.deploy_preview",
+    "scripts.revert_merge",
+    "scripts.incident_intake",
+    "scripts.verify_citations",
+]
