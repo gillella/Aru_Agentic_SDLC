@@ -46,6 +46,25 @@ RECOVERABLE_PHASES = {
 MAX_WAIT_SECONDS = 86_400.0
 MAX_HELPER_TIMEOUT_SECONDS = 3_600.0
 MAX_CHILD_STDERR_CHARS = 65_536
+RATE_LIMIT_RE = re.compile(
+    r"\b(?:rate[ _-]?limit(?:ed)?|too many requests"
+    r"|(?:http(?: status)?|status(?: code)?|response|error)\s*[:=]?\s*429"
+    r"|429\s+(?:too many requests|rate[ _-]?limit(?:ed)?))\b",
+    re.IGNORECASE,
+)
+CREDIT_RE = re.compile(
+    r"\b(?:credits?\s+exhausted|insufficient\s+credits?"
+    r"|billing\s+(?:error|failure|required)|quota\s+(?:exceeded|exhausted)"
+    r"|(?:http(?: status)?|status(?: code)?|response|error)\s*[:=]?\s*402"
+    r"|402\s+(?:payment required|billing error))\b",
+    re.IGNORECASE,
+)
+OUTAGE_RE = re.compile(
+    r"\b(?:service\s+unavailable|upstream\s+unavailable|provider\s+outage"
+    r"|(?:http(?: status)?|status(?: code)?|response|error)\s*[:=]?\s*50[234]"
+    r"|50[234]\s+(?:service|upstream)\s+unavailable)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -81,12 +100,11 @@ class RunnerConfig:
 
 
 def classify_child_failure(returncode: int, stderr: str = "") -> str:
-    lower = stderr.lower()
-    if returncode == 75 or "rate limit" in lower or "429" in lower or "rate_limit" in lower:
+    if returncode == 75 or RATE_LIMIT_RE.search(stderr):
         return "rate-limited"
-    if returncode == 73 or "credit" in lower or "402" in lower or "billing" in lower or "quota" in lower:
+    if returncode == 73 or CREDIT_RE.search(stderr):
         return "credit-exhausted"
-    if returncode == 69 or "unavailable" in lower or "503" in lower or "service unavailable" in lower:
+    if returncode == 69 or OUTAGE_RE.search(stderr):
         return "provider-outage"
     return "child-crash"
 

@@ -303,7 +303,7 @@ class IterationTests(RunnerFixture):
     def test_cooldown_recheck_capped_at_five_minutes(self):
         """Backoff delay for agent_unavailable_wait is capped at cooldown_recheck_seconds."""
         commands = FakeCommands([fleet("waiting")], [selection("issue", 1)])
-        cfg = self.config(cooldown_recheck_seconds=300.0)
+        cfg = self.config(max_wait=900.0, cooldown_recheck_seconds=300.0)
         r = rf.FleetRunner(
             cfg,
             command_runner=commands,
@@ -316,7 +316,7 @@ class IterationTests(RunnerFixture):
         r.retry_count = 20
         result = r.run_iteration()
         self.assertEqual(result.phase, "agent_unavailable_wait")
-        self.assertLessEqual(result.delay, 300.0)
+        self.assertEqual(result.delay, 300.0)
 
     def test_child_credit_failure_logs_cooldown_reason(self):
         """Non-zero child exit classifies failure reason in log."""
@@ -328,6 +328,13 @@ class IterationTests(RunnerFixture):
         self.assertEqual(classify_child_failure(69), "provider-outage")
         self.assertEqual(classify_child_failure(1, "503 service unavailable"), "provider-outage")
         self.assertEqual(classify_child_failure(1), "child-crash")
+
+    def test_failure_classifier_ignores_incidental_provider_words_and_numbers(self):
+        from run_fleet import classify_child_failure
+
+        self.assertEqual(classify_child_failure(1, "working on issue 429"), "child-crash")
+        self.assertEqual(classify_child_failure(1, "credit the original author"), "child-crash")
+        self.assertEqual(classify_child_failure(1, "feature unavailable in this build"), "child-crash")
 
     def test_child_stderr_classifies_provider_failure_in_runner(self):
         commands = FakeCommands([fleet()], [selection("issue", 1)])

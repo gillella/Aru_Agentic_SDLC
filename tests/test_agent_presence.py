@@ -524,7 +524,7 @@ class AgentPresenceTests(unittest.TestCase):
         record = self.store.heartbeat(
             "agent-1", availability="available",
         )
-        self.assertIn(record.availability, {"available", "returned"})
+        self.assertEqual(record.availability, "returned")
         self.assertIsNone(record.cooldown_reason)
         self.assertIsNone(record.cooldown_until)
 
@@ -537,6 +537,19 @@ class AgentPresenceTests(unittest.TestCase):
         )
         record = self.store.heartbeat("agent-1", availability="unavailable")
         self.assertEqual(record.availability, "unavailable")
+        self.assertIsNone(record.cooldown_reason)
+        eligible = ap.query_role_poll_agents(self.store, project_id="proj_test")
+        self.assertEqual(eligible, [])
+
+    def test_explicit_busy_heartbeat_stays_busy(self):
+        self.store.register(
+            agent_id="agent-1", family="openai",
+            project_id="proj_test", checkout_path=str(self.root),
+            availability="cooling-down",
+            cooldown_reason="rate-limited",
+        )
+        record = self.store.heartbeat("agent-1", availability="busy")
+        self.assertEqual(record.availability, "busy")
         self.assertIsNone(record.cooldown_reason)
         eligible = ap.query_role_poll_agents(self.store, project_id="proj_test")
         self.assertEqual(eligible, [])

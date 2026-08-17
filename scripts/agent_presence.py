@@ -463,7 +463,7 @@ class PresenceStore:
             next_availability = existing.availability
             if (
                 existing.availability in {"cooling-down", "temporarily-offline"}
-                and availability in {"available", "busy", "returned"}
+                and availability == "available"
             ):
                 next_availability = "returned"
             elif availability is not None:
