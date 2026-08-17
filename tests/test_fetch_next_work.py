@@ -747,12 +747,42 @@ class UnmetGateParsingTests(unittest.TestCase):
         self.assertEqual(fnw._unmet_gates("could not fetch pull request"), set())
         self.assertEqual(fnw._unmet_gates(""), set())
 
+    def test_reads_failed_gate_messages_from_dry_run_json(self):
+        payload = {
+            "pr": 7,
+            "gates": [
+                {"name": "tests", "passed": False,
+                 "message": "Changed-file data is truncated; split the PR."},
+                {"name": "accept #254", "passed": False,
+                 "message": "Two criteria remain unticked."},
+                {"name": "ci", "passed": True, "message": "green"},
+            ],
+        }
+        with patch.object(
+            fnw, "run_cmd", return_value=(1, json.dumps(payload), ""),
+        ):
+            details = fnw._dod_gate_details(7)
+        self.assertEqual(details, {
+            "tests": "Changed-file data is truncated; split the PR.",
+            "accept": "Two criteria remain unticked.",
+        })
+
+    def test_malformed_gate_detail_payload_fails_closed(self):
+        with patch.object(fnw, "run_cmd", return_value=(1, "not json", "")):
+            self.assertIsNone(fnw._dod_gate_details(7))
+
 
 class AuthorGateFixTests(unittest.TestCase):
     def fix(self, candidate, agent="agent-2", reason="unmet: rebased"):
         # `reason` is the verdict merge_eligibility already computed, so the
-        # gates are never evaluated twice.
-        return fnw.author_gate_fix(candidate, agent, reason)
+        # full gate is reevaluated only when its action depends on the failure
+        # subtype; the dry-run JSON then preserves that detail for the agent.
+        details = {
+            "tests": "Changed-file data is truncated; split the PR.",
+            "verification": "Verification evidence markers are malformed.",
+        }
+        with patch.object(fnw, "_dod_gate_details", return_value=details):
+            return fnw.author_gate_fix(candidate, agent, reason)
 
     def test_rebased_only_is_offered_to_the_author(self):
         found = self.fix(stranded(), reason="unmet: rebased")
@@ -776,6 +806,16 @@ class AuthorGateFixTests(unittest.TestCase):
         self.assertEqual(
             found["unmet_gates"], ["accept", "size", "verification"],
         )
+        self.assertEqual(found["gate_details"], {
+            "verification": "Verification evidence markers are malformed.",
+        })
+
+    def test_subtype_sensitive_gate_messages_are_preserved(self):
+        found = self.fix(stranded(), reason="unmet: tests, verification")
+        self.assertEqual(found["gate_details"], {
+            "tests": "Changed-file data is truncated; split the PR.",
+            "verification": "Verification evidence markers are malformed.",
+        })
 
     def test_non_author_is_never_offered_it(self):
         self.assertIsNone(self.fix(stranded(author="agent-1"), agent="agent-2"))
@@ -870,7 +910,7 @@ class GateFixSelectionTests(unittest.TestCase):
         self.assertEqual(res["work"]["unmet_gates"], ["accept"])
 
     def test_red_ci_is_routed_even_before_full_dod_evaluation(self):
-        res = self.select_with(stranded(checks="red"))
+        res = self.select_with(stranded(checks="red", peer=None))
         self.assertEqual(res["work"]["type"], "feedback")
         self.assertEqual(res["work"]["unmet_gates"], ["ci"])
 

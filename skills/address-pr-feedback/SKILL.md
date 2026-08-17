@@ -34,6 +34,9 @@ only surfaces these when the thread count is **zero**. Treating that empty
 checklist as "nothing to do" is what makes the item reappear on the next cycle
 forever, so it must be routed to Step 1G instead.
 
+When present, `work.gate_details` contains the authoritative dry-run failure
+message for a subtype-sensitive gate. Read it before choosing the action.
+
 ### Step 1G: Clear the author-only gate
 
 No unresolved threads exist. Act on each name in `work.unmet_gates`:
@@ -56,11 +59,13 @@ No unresolved threads exist. Act on each name in `work.unmet_gates`:
   commit after the finding. Locate that resolved thread (not the unresolved
   checklist) and push a fix, or reply on it starting with `Withdrawn:` and
   why. This is not a request to self-review.
-- **`tests`** — add or update test coverage for the changed production files,
-  then run the relevant verification before pushing.
-- **`verification`** — refresh the PR's current-head evidence with
-  `create_pr.py --refresh-pr`; stale or malformed evidence must not be edited
-  by hand.
+- **`tests`** — read `work.gate_details.tests`. If changed-file data is
+  truncated, split the PR until the gate can inspect the complete diff;
+  otherwise add or update test coverage for the changed production files.
+- **`verification`** — read `work.gate_details.verification`. Refresh stale
+  current-head evidence with `create_pr.py --refresh-pr`; if malformed or
+  duplicate markers prevent the helper from refreshing, repair the marker
+  structure first, then run the helper rather than fabricating its JSON.
 
 Then refresh evidence for the new head:
 
