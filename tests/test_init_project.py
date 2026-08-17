@@ -19,7 +19,10 @@ import init_project  # noqa: E402
 from init_project import (  # noqa: E402
     CI_GATE_MARKERS,
     render_ci_workflow,
+    render_deploy_docs,
+    render_deploy_preview_workflow,
     render_gitignore,
+    render_release_workflow,
     write_templates,
 )
 
@@ -606,6 +609,103 @@ class DogfoodCiParityTests(unittest.TestCase):
                 "gitleaks must fail on a planted AWS example key; "
                 f"stdout={scanned.stdout!r} stderr={scanned.stderr!r}",
             )
+
+    def test_deploy_preview_and_release_workflows_are_stack_aware(self):
+        python_deploy = render_deploy_preview_workflow("python")
+        node_deploy = render_deploy_preview_workflow("typescript")
+        go_deploy = render_deploy_preview_workflow("go")
+
+        # Fail-closed checks on missing deploy credentials
+        for wf in (python_deploy, node_deploy, go_deploy):
+            self.assertIn("Validate deployment credentials", wf)
+            self.assertIn("PREVIEW_DEPLOY_TOKEN", wf)
+            self.assertIn("Deploy credentials absent", wf)
+
+        # Stack-specific runtime setups
+        self.assertIn("actions/setup-python", python_deploy)
+        self.assertIn("actions/setup-node", node_deploy)
+        self.assertIn("actions/setup-go", go_deploy)
+
+        # Release workflows
+        python_release = render_release_workflow("python")
+        node_release = render_release_workflow("react")
+        go_release = render_release_workflow("go")
+
+        for rwf in (python_release, node_release, go_release):
+            self.assertIn("Validate release credentials", rwf)
+            self.assertIn("RELEASE_TOKEN", rwf)
+            self.assertIn("Release credentials absent", rwf)
+
+        self.assertIn("python -m build", python_release)
+        self.assertIn("npm run build", node_release)
+        self.assertIn("go build", go_release)
+
+        # Deploy docs point at governed factory skills
+        docs = render_deploy_docs("python", "demo-app")
+        self.assertIn("deploy-preview", docs)
+        self.assertIn("deploy_preview.py", docs)
+        self.assertIn("promote.py", docs)
+        self.assertIn("Aru_Agentic_SDLC", docs)
+        self.assertIn("PREVIEW_DEPLOY_TOKEN", docs)
+        self.assertIn("Fail-Closed Gate", docs)
+
+    def test_write_governance_scripts_creates_stack_deploy_and_release_workflows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_project.scaffold_directory_structure(temp_dir)
+            init_project.write_governance_scripts(temp_dir, stack="node", project_name="node-app")
+
+            deploy_wf = Path(temp_dir) / ".github" / "workflows" / "deploy-preview.yml"
+            release_wf = Path(temp_dir) / ".github" / "workflows" / "release.yml"
+            deploy_docs = Path(temp_dir) / "docs" / "deploy.md"
+
+            self.assertTrue(deploy_wf.is_file())
+            self.assertTrue(release_wf.is_file())
+            self.assertTrue(deploy_docs.is_file())
+
+            self.assertIn("actions/setup-node", deploy_wf.read_text())
+            self.assertIn("npm run build", release_wf.read_text())
+            self.assertIn("deploy_preview.py", deploy_docs.read_text())
+
+    def test_cli_scaffold_creates_stack_pack_workflows_for_node_and_go(self):
+        for stack in ("node", "go"):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                env = os.environ.copy()
+                env.update({
+                    "GIT_AUTHOR_NAME": "Aru SDLC Test",
+                    "GIT_AUTHOR_EMAIL": "aru-sdlc-test@example.invalid",
+                    "GIT_COMMITTER_NAME": "Aru SDLC Test",
+                    "GIT_COMMITTER_EMAIL": "aru-sdlc-test@example.invalid",
+                })
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "scripts" / "init_project.py"),
+                        "--name", f"stack-{stack}-smoke",
+                        "--stack", stack,
+                        "--no-remote",
+                        "--target-dir", temp_dir,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=env,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+                deploy_wf = Path(temp_dir) / ".github" / "workflows" / "deploy-preview.yml"
+                release_wf = Path(temp_dir) / ".github" / "workflows" / "release.yml"
+                deploy_docs = Path(temp_dir) / "docs" / "deploy.md"
+
+                self.assertTrue(deploy_wf.is_file())
+                self.assertTrue(release_wf.is_file())
+                self.assertTrue(deploy_docs.is_file())
+
+                if stack == "node":
+                    self.assertIn("actions/setup-node", deploy_wf.read_text())
+                    self.assertIn("npm run build", release_wf.read_text())
+                else:
+                    self.assertIn("actions/setup-go", deploy_wf.read_text())
+                    self.assertIn("go build", release_wf.read_text())
 
 
 if __name__ == "__main__":

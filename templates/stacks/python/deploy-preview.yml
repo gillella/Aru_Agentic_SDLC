@@ -1,0 +1,135 @@
+name: Deploy Preview
+run-name: "Deploy Preview for ${{ inputs.commit_sha }} (${{ inputs.run_token || 'default' }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Exact merged commit SHA to deploy preview for'
+        required: true
+        type: string
+      run_token:
+        description: 'Correlation token for dispatch matching'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "preview-${{ github.repository }}"
+  cancel-in-progress: false
+
+jobs:
+  build-preview:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      has_preview: ${{ steps.build.outputs.has_preview }}
+      is_library: ${{ steps.build.outputs.is_library }}
+    steps:
+      - name: Checkout trusted control plane
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: control-plane
+          fetch-depth: 0
+
+      - name: Validate exact merged target
+        working-directory: control-plane
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ ! "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "[ERROR] commit_sha must be an exact 40-character SHA." >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          git merge-base --is-ancestor "${TARGET_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
+          git worktree add --detach ../target "${TARGET_SHA}"
+
+      - name: Validate deployment credentials
+        env:
+          DEPLOY_CREDENTIALS: ${{ secrets.PREVIEW_DEPLOY_TOKEN || secrets.DEPLOY_TOKEN }}
+        run: |
+          if [ -z "${DEPLOY_CREDENTIALS}" ] && [ "${ALLOW_ANONYMOUS_PREVIEW:-false}" != "true" ]; then
+            echo "[ERROR] Deploy credentials absent. Set PREVIEW_DEPLOY_TOKEN in repository secrets." >&2
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build with trusted helper
+        id: build
+        run: |
+          python3 control-plane/scripts/build_preview.py --source target --output target/dist --allow-library
+
+      - name: Upload Pages artifact
+        if: steps.build.outputs.has_preview == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'target/dist'
+
+      - name: Record exact-run library skip metadata
+        if: steps.build.outputs.is_library == 'true'
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+        run: |
+          jq -n             --arg run_id "${GITHUB_RUN_ID}"             --arg commit_sha "${TARGET_SHA}"             --arg repository "${GITHUB_REPOSITORY}"             --arg preview_url "skipped"             '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url, is_library: true, status: "skipped"}'             > preview-metadata.json
+
+      - name: Upload exact-run library skip metadata
+        if: steps.build.outputs.is_library == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-metadata
+          path: preview-metadata.json
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy-preview:
+    needs: build-preview
+    if: needs.build-preview.outputs.has_preview == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  smoke-preview:
+    needs: deploy-preview
+    if: needs.build-preview.outputs.has_preview == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted control plane
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: control-plane
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run preview smoke tests
+        run: |
+          python3 control-plane/scripts/smoke_preview.py --preview-url "${{ needs.deploy-preview.outputs.page_url }}"
