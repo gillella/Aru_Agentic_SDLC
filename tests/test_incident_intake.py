@@ -228,6 +228,24 @@ class IncidentIntakeTests(unittest.TestCase):
         self.assertIn(intake.resolved_marker(FINGERPRINT), comment_cmd[comment_cmd.index("--body") + 1])
 
     @patch("incident_intake.run_cmd")
+    def test_resolved_closed_in_progress_notes_without_pruning(self, mock_run):
+        mock_run.side_effect = [
+            (0, "[]", ""),
+            (0, json.dumps([_issue(199, status="In Progress", state="CLOSED")]), ""),
+            (0, "", ""),
+            (0, "Commented", ""),
+        ]
+        self.assertEqual(intake.intake_resolved(SOURCE, COMPONENT, ALERT, EVIDENCE), 199)
+        comment_cmd = mock_run.call_args_list[3].args[0]
+        self.assertIn(intake.resolved_marker(FINGERPRINT), comment_cmd[comment_cmd.index("--body") + 1])
+        self.assertFalse(
+            any(
+                call.args[0][:3] == ["git", "worktree", "remove"]
+                for call in mock_run.call_args_list
+            )
+        )
+
+    @patch("incident_intake.run_cmd")
     def test_resolved_done_issue_prunes_leftover_worktrees(self, mock_run):
         porcelain = (
             "worktree /tmp/repo\nHEAD abc\nbranch refs/heads/main\n\n"

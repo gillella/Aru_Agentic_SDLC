@@ -487,7 +487,7 @@ def intake_resolved(
             return None
         print(f"✅ Resolved alert: closed leftover Done issue #{existing.number}")
         return existing.number
-    if existing.state == "CLOSED":
+    if existing.state == "CLOSED" and existing.status == "Done":
         if not prune_issue_worktrees(existing.number):
             return None
         print(f"✅ Resolved alert: cleaned leftover worktrees for issue #{existing.number}")
