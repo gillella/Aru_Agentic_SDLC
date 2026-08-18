@@ -276,7 +276,7 @@ The binding constraint, per §3.3.
 | **S5.1** | Stack packs: **deployment and release templates** per stack. `init_project.py` already accepts `node`/`nodejs`/`typescript`/`react`/`go`, picks the test runner, and renders per-stack CI (`init_project.py:312-337`, covered in `tests/test_init_project.py:148-195`). The gap is after CI, not at init. |
 | **S5.2** | Trust boundary for untrusted issue/PR text (§3.6) — required before any repo accepts external issues |
 | **S5.3** | Degraded-mode decision (§3.7) — document the dependency or mitigate it |
-| **S5.4** | Golden-path demo repo exercising the full loop including deploy |
+| **S5.4** | Golden-path demo repo exercising the full loop including deploy. Companion and walk: `docs/golden-path-demo.md`. |
 | **S5.5** | Merge-queue view wrapping `fleet_status` + `merge_pr --dry-run` |
 
 ---
