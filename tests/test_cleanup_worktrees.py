@@ -177,29 +177,42 @@ class WorktreeCleanupTests(unittest.TestCase):
     def test_report_retained_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _init_clone(Path(tmp))
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
             retained = repo / ".worktrees" / ".retained"
             retained.mkdir(parents=True)
-            legacy_wt = retained / "12345678-feat-old"
+            legacy_wt = retained / f"{sha[:12]}-feat-old"
             legacy_wt.mkdir()
-            (legacy_wt / "README").write_text("hello\n")
+            (legacy_wt / "README").write_text("main\n")
             (legacy_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
             stats, summary = cleanup_worktrees.report_retained(str(repo))
             self.assertEqual(stats["total_count"], 1)
             self.assertEqual(stats["legacy_count"], 1)
             self.assertEqual(stats["manifest_count"], 0)
             self.assertIn("Retained worktrees: 1 total", summary)
+            self.assertGreater(stats["reclaimable_bytes"], 0)
 
     def test_legacy_copy_with_modifications_is_kept(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _init_clone(Path(tmp))
+            old_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            # Advance main with new commit so main != old_sha
+            (repo / "new_on_main.txt").write_text("main advanced\n")
+            _git(repo, "add", "new_on_main.txt")
+            _git(repo, "commit", "-m", "advance main")
+
             retained = repo / ".worktrees" / ".retained"
             retained.mkdir(parents=True)
-            dirty_wt = retained / "12345678-feat-dirty"
+            dirty_wt = retained / f"{old_sha[:12]}-feat-dirty"
             dirty_wt.mkdir()
+            (dirty_wt / "README").write_text("main\n")
             (dirty_wt / "uncommitted.txt").write_text("dirty work\n")
             (dirty_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
 
-            clean_wt = retained / "abcdef12-feat-clean"
+            clean_wt = retained / f"{old_sha[:12]}-feat-clean"
             clean_wt.mkdir()
             (clean_wt / "README").write_text("main\n")
             (clean_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")

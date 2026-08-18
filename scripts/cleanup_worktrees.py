@@ -14,7 +14,9 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 import uuid
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -623,20 +625,107 @@ def retained_directory_size(path: str) -> int:
     return total
 
 
-def _legacy_copy_is_clean(path: str, repo_root: str) -> bool:
-    """Checks if a legacy retained copy has no uncommitted changes or dirt."""
-    code, status, _ = run_cmd(
-        [
-            "git", f"--git-dir={os.path.join(repo_root, '.git')}",
-            f"--work-tree={path}", "status", "--porcelain",
-            "--untracked-files=all", "--ignored=matching",
-        ],
-        check=False,
+def _extract_retained_sha(name: str, repo_root: str) -> str | None:
+    """Extracts commit SHA prefix from retained directory name if valid."""
+    prefix = name.split("-", 1)[0]
+    if len(prefix) < 7 or not all(c in "0123456789abcdefABCDEF" for c in prefix):
+        return None
+    git_dir = os.path.join(repo_root, ".git")
+    if not os.path.exists(git_dir):
+        return None
+    res = subprocess.run(
+        ["git", "--git-dir", git_dir, "rev-parse", "--verify", "--quiet", f"{prefix}^{{commit}}"],
+        capture_output=True,
+        text=True,
     )
-    if code != 0:
+    if res.returncode == 0 and res.stdout.strip():
+        return res.stdout.strip()
+    return None
+
+
+def _legacy_copy_is_clean(path: str, repo_root: str, sha: str | None = None) -> bool:
+    """Checks if a legacy retained copy has no uncommitted changes relative to its retained SHA."""
+    if sha is None:
+        dirname = os.path.basename(os.path.normpath(path))
+        sha = _extract_retained_sha(dirname, repo_root)
+    if not sha:
         return False
-    blocked = porcelain_blocks_prune(status, base_path=path)
-    return blocked is False
+    git_dir = os.path.join(repo_root, ".git")
+    if not os.path.exists(git_dir):
+        return False
+    with tempfile.NamedTemporaryFile(prefix="aru_index_", delete=False) as tmp_idx:
+        tmp_index_path = tmp_idx.name
+    try:
+        env = os.environ.copy()
+        env["GIT_DIR"] = git_dir
+        env["GIT_WORK_TREE"] = path
+        env["GIT_INDEX_FILE"] = tmp_index_path
+
+        read_res = subprocess.run(
+            ["git", "read-tree", sha],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+        if read_res.returncode != 0:
+            return False
+
+        subprocess.run(
+            ["git", "update-index", "--refresh", "-q"],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+
+        diff_res = subprocess.run(
+            ["git", "diff-files", "--quiet"],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+        if diff_res.returncode != 0:
+            return False
+
+        untracked_res = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+        if untracked_res.stdout.strip():
+            return False
+
+        ignored_res = subprocess.run(
+            [
+                "git", "ls-files", "--others", "--ignored",
+                "--exclude-standard", "--directory",
+            ],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+        for line in ignored_res.stdout.splitlines():
+            item = line.strip()
+            if not item:
+                continue
+            if _known_cache_path(item):
+                continue
+            full_cand = os.path.join(path, item)
+            if _is_empty_or_cache_dir(full_cand):
+                continue
+            return False
+        return True
+    finally:
+        try:
+            if os.path.exists(tmp_index_path):
+                os.remove(tmp_index_path)
+        except OSError:
+            pass
 
 
 def report_retained(repo_root: str) -> tuple[dict, str]:
@@ -714,7 +803,8 @@ def purge_legacy_retained(repo_root: str) -> tuple[bool, list[str]]:  # noqa: C9
         if os.path.isfile(manifest_file):
             continue
 
-        if not _legacy_copy_is_clean(path, repo_root):
+        sha = _extract_retained_sha(name, repo_root)
+        if not sha or not _legacy_copy_is_clean(path, repo_root, sha=sha):
             notes.append(f"skipped legacy retained {path}: contains uncommitted modifications")
             continue
 
@@ -727,7 +817,7 @@ def purge_legacy_retained(repo_root: str) -> tuple[bool, list[str]]:  # noqa: C9
             notes.append(f"skipped legacy retained {claimed}: not physically contained")
             failed = True
             continue
-        if not _legacy_copy_is_clean(claimed, repo_root):
+        if not _legacy_copy_is_clean(claimed, repo_root, sha=sha):
             notes.append(f"kept legacy retained {claimed}: modified after claim")
             continue
 
