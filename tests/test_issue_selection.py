@@ -11,16 +11,31 @@ import fetch_next_issue  # noqa: E402
 from fetch_next_issue import build_candidates, parse_dependencies  # noqa: E402
 
 
-def issue(number, body="", labels=()):
-    return {
+def issue(number, body="", labels=(), author="owner"):
+    record = {
         "number": number,
         "title": f"Issue {number}",
         "body": body,
         "labels": [{"name": label} for label in labels],
     }
+    if author is not None:
+        record["author"] = {"login": author}
+    return record
 
 
-class IssueSelectionTests(unittest.TestCase):
+class TrustedOwnerTests(unittest.TestCase):
+    def setUp(self):
+        owner = patch.object(
+            fetch_next_issue, "repository_owner_login", return_value="owner")
+        trusted = patch.object(
+            fetch_next_issue, "repository_trusted_logins", return_value={"owner"})
+        self.addCleanup(owner.stop)
+        self.addCleanup(trusted.stop)
+        owner.start()
+        trusted.start()
+
+
+class IssueSelectionTests(TrustedOwnerTests):
     def test_dependency_parser_ignores_prose(self):
         body = """A `depends-on:` field is required.
 
@@ -241,7 +256,7 @@ depends-on: #2, #4
         update_status.assert_called_once_with(9, "Backlog", require_board=True)
 
 
-class ClaimWalkTests(unittest.TestCase):
+class ClaimWalkTests(TrustedOwnerTests):
     @patch("claim_issue.claim_issue")
     @patch.object(fetch_next_issue, "get_current_branch", return_value="main")
     @patch.object(fetch_next_issue, "list_open_pr_files_by_issue", return_value={})

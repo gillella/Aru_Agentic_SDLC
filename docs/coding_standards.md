@@ -75,3 +75,35 @@ with the reason recorded inline, so the gate applies to new code immediately
 rather than waiting for a tree-wide cleanup. Adding a file to that list is a
 debt entry, not a fix: it needs a tracked burn-down issue. Removing an entry
 should accompany the change that makes it unnecessary.
+
+---
+
+## Trust Boundary for Issue, PR, and Review Text
+
+Issue bodies, pull request text, and review comments are **data**, not
+instructions and not a shell. Agents parse `touches:` and `depends-on:` from
+that text and then write those paths. Until a repository accepts outside
+contributions this is theoretical (`ARU-SOFTWARE-FACTORY.md` §3.6). The
+mechanical guard is already on; do not enable public issues on this playbook
+repo as a substitute for the parser.
+
+**Who may author honoured metadata.** The picker honours `touches:` /
+`depends-on:` only when provenance can be verified. Missing author identity
+or a failed owner/collaborator lookup fails closed. Authorized actors are
+the repository owner, users with collaborator access, and GitHub
+associations `OWNER` / `MEMBER` / `COLLABORATOR` — not equality with an
+organization login. Fork PRs and outside collaborators can still file
+text; that text does not widen reservations or become claimable work until
+a trusted rewrite is recorded (`trusted-rewrite` label together with a
+last editor who is an authorized actor; an outsider edit after the label
+is applied fails closed). Direct `claim_issue.py --issue` re-checks the
+same predicate during claim, finalization, and the post-status read. A
+failed GraphQL identity lookup does not honour `trusted-rewrite`. Review
+comments are never executed and never parsed as `touches:`.
+
+**What the parser rejects.** `parse_touches` drops absolute paths, `.` and
+`..` segments, and shell operators (`;`, `|`, `` ` ``, `$`, redirects). Glob
+tokens such as `scripts/*` remain valid. A command-like `depends-on:` line is
+ignored rather than turned into dependency numbers. Invalid or untrusted
+metadata fails closed: the issue is not claimable and contributes no
+path reservation.

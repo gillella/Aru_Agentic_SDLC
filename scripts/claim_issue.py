@@ -40,7 +40,10 @@ from common import (
     ensure_label,
     get_issue,
     get_repo_slug,
+    is_trusted_metadata_author,
     label_names,
+    repository_owner_login,
+    repository_trusted_logins,
     run_cmd,
 )
 from factory_metrics import fetch_paginated_gh_api, parse_iso
@@ -112,6 +115,22 @@ def _status_name(issue: dict) -> str:
 
 def _has_ready(issue: dict) -> bool:
     return _status_labels(issue) == ["status:ready"]
+
+
+def _metadata_is_trusted(issue: dict, owner=None, trusted_logins=None) -> bool:
+    """Re-evaluates provenance with the same predicate the picker uses."""
+    return is_trusted_metadata_author(
+        issue, owner, trusted_logins=trusted_logins,
+    )
+
+
+def _refuse_untrusted_metadata(issue_id: int) -> int:
+    print(
+        f"[CONFLICT] Issue #{issue_id} metadata is untrusted; refusing to claim "
+        "until a trusted rewrite.",
+        file=sys.stderr,
+    )
+    return EXIT_CONFLICT
 
 
 def _needs_human(issue: dict) -> bool:
@@ -203,13 +222,18 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
 
 
 def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
-                    my_label: str) -> int:
+                    my_label: str, owner=None, trusted_logins=None) -> int:
     """Assign, move board status, and confirm no late lower-sorting contender."""
     issue = get_issue(issue_id)
     if not issue:
         print(f"[ERROR] Could not revalidate Issue #{issue_id} before finalizing.",
               file=sys.stderr)
         return EXIT_ERROR
+    if not _metadata_is_trusted(issue, owner, trusted_logins):
+        holders = agent_labels(issue)
+        if my_label in holders:
+            _rollback_claim(issue_id, agent, assignee)
+        return _refuse_untrusted_metadata(issue_id)
     holders = agent_labels(issue)
     if _needs_human(issue):
         if my_label in holders:
@@ -259,6 +283,9 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
         print(f"[ERROR] Could not verify Issue #{issue_id} after status update.", file=sys.stderr)
         _rollback_claim(issue_id, agent, assignee)
         return EXIT_ERROR
+    if not _metadata_is_trusted(issue, owner, trusted_logins):
+        _rollback_claim(issue_id, agent, assignee)
+        return _refuse_untrusted_metadata(issue_id)
 
     holders = agent_labels(issue)
     if _needs_human(issue):
@@ -291,6 +318,8 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
         return EXIT_ERROR
 
     my_label = _label_for(agent)
+    owner = repository_owner_login()
+    trusted_logins = repository_trusted_logins()
 
     # --- Step 1: pre-check -------------------------------------------------
     if _needs_human(issue):
@@ -300,6 +329,9 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
             file=sys.stderr,
         )
         return EXIT_CONFLICT
+
+    if _has_ready(issue) and not _metadata_is_trusted(issue, owner, trusted_logins):
+        return _refuse_untrusted_metadata(issue_id)
 
     holder = claimed_by(issue)
     if holder and holder != agent:
@@ -313,7 +345,10 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
             return EXIT_OK
         if _has_ready(issue):
             print(f"[INFO] Completing interrupted claim on #{issue_id}...")
-            return _finalize_claim(issue_id, agent, status, assignee, my_label)
+            return _finalize_claim(
+                issue_id, agent, status, assignee, my_label,
+                owner=owner, trusted_logins=trusted_logins,
+            )
         print(
             f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready or "
             "In Progress; refusing stale same-agent recovery.",
@@ -351,7 +386,10 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
         return settled
 
     # --- Step 4: commit the claim + post-verify ---------------------------
-    return _finalize_claim(issue_id, agent, status, assignee, my_label)
+    return _finalize_claim(
+        issue_id, agent, status, assignee, my_label,
+        owner=owner, trusted_logins=trusted_logins,
+    )
 
 
 def release_issue(issue_id: int, agent: str) -> int:
