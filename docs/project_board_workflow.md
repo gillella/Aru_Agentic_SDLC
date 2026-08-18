@@ -57,6 +57,8 @@ and the release state is separate from the increment lifecycle: acceptance
 does not authorize deployment. A second accepted-but-undeployed increment is
 refused unless the operator explicitly records risk acceptance.
 
+When an increment reaches the `accepted` state, `scripts/increment_release.py` tags the exact accepted default-branch commit (`ckpt/<project_id>/<increment_id>`) with structured metadata (increment ID, project identity, committed issue set, acceptance decision URL, timestamp, and concise message) and publishes a formal release record linking evidence, demo artifacts, and deployment state without triggering production deployment.
+
 ---
 
 ## 🌳 Git Worktree Isolation Guidelines
