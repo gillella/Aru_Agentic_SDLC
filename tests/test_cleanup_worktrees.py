@@ -133,6 +133,26 @@ class WorktreeCleanupTests(unittest.TestCase):
             status = "!! .worktrees/\n"
             self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
 
+    def test_unreadable_nested_dir_fails_closed_and_blocks_prune(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / ".worktrees"
+            d.mkdir()
+            sub = d / "unreadable"
+            sub.mkdir()
+            try:
+                os.chmod(sub, 0o000)
+            except OSError:
+                self.skipTest("chmod 000 not supported in this environment")
+            try:
+                status = "!! .worktrees/\n"
+                if not os.access(sub, os.R_OK):
+                    self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+            finally:
+                try:
+                    os.chmod(sub, 0o755)
+                except OSError:
+                    pass
+
 
 class RetainManifestWalkTests(unittest.TestCase):
     def test_symlink_to_device_is_recorded_without_following(self):

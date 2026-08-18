@@ -234,12 +234,16 @@ def dirty_status(path: str) -> str | None:
     return status
 
 
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
 def _is_empty_or_cache_dir(path: str) -> bool:
     """True if directory is physically empty or contains only empty dirs / cache files."""
     try:
         if not os.path.isdir(path) or os.path.islink(path):
             return False
-        for root, dirs, files in os.walk(path):
+        for root, dirs, files in os.walk(path, onerror=_raise_walk_error):
             for d in dirs:
                 if os.path.islink(os.path.join(root, d)):
                     return False
