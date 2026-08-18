@@ -8,15 +8,19 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import triage_backlog as tb
+import fetch_next_issue  # noqa: E402
 
 
-def issue(number, *labels, body="", title="t"):
-    return {
+def issue(number, *labels, body="", title="t", author="owner"):
+    record = {
         "number": number,
         "title": title,
         "body": body,
         "labels": [{"name": name} for name in labels],
     }
+    if author is not None:
+        record["author"] = {"login": author}
+    return record
 
 
 READY_BODY = """## Summary
@@ -38,6 +42,18 @@ depends-on:
 touches: src/thing.py, tests/test_thing.py
 parallel-eligible: true
 """
+
+
+class TrustedOwnerTests(unittest.TestCase):
+    def setUp(self):
+        owner = patch.object(
+            fetch_next_issue, "repository_owner_login", return_value="owner")
+        trusted = patch.object(
+            fetch_next_issue, "repository_trusted_logins", return_value={"owner"})
+        self.addCleanup(owner.stop)
+        self.addCleanup(trusted.stop)
+        owner.start()
+        trusted.start()
 
 
 class SectionParsingTests(unittest.TestCase):
@@ -509,7 +525,7 @@ class SplitRecommendationTests(unittest.TestCase):
         update.assert_not_called()
 
 
-class PartitionTests(unittest.TestCase):
+class PartitionTests(TrustedOwnerTests):
     def test_splits_by_status_and_claim(self):
         issues = [
             issue(1, "status:backlog"),
@@ -623,7 +639,7 @@ class PartitionTests(unittest.TestCase):
         self.assertIn("Claimable simultaneously: 1  [40]", output.getvalue())
 
 
-class CapacityTests(unittest.TestCase):
+class CapacityTests(TrustedOwnerTests):
     def test_non_overlapping_issues_are_all_concurrent(self):
         ready = [
             issue(1, "status:ready", body="touches: src/a.py"),

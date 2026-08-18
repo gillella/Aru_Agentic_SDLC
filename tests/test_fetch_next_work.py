@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import fetch_next_work as fnw
+import fetch_next_issue  # noqa: E402
 import merge_pr
 
 
@@ -363,15 +364,19 @@ class PriorityTests(unittest.TestCase):
                 {"name": "status:ready"},
                 {"name": "needs-human"},
             ],
+            "author": {"login": "owner"},
         }
         ordinary_issue = {
             "number": 2,
             "title": "document behavior",
             "body": "touches: docs/**\n",
             "labels": [{"name": "status:ready"}],
+            "author": {"login": "owner"},
         }
         with patch.object(fnw, "list_work_prs", return_value=[]), \
-             patch.object(fnw, "list_open_issues", return_value=[operator_issue, ordinary_issue]):
+             patch.object(fnw, "list_open_issues", return_value=[operator_issue, ordinary_issue]), \
+             patch.object(fetch_next_issue, "repository_owner_login", return_value="owner"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins", return_value={"owner"}):
             result = fnw.select("agent-2", "openai", 3, 30)
 
         self.assertEqual(result["work"]["issue"], 2)
@@ -590,15 +595,19 @@ class ParkedInReviewTests(unittest.TestCase):
                 "title": "fix issue 20",
                 "body": "touches: src/a.py\n",
                 "labels": [{"name": "status:in-review"}],
+                "author": {"login": "owner"},
             },
             {
                 "number": 21,
                 "title": "feat issue 21",
                 "body": "touches: src/b.py\n",
                 "labels": [{"name": "status:ready"}],
+                "author": {"login": "owner"},
             },
         ]
-        res = fnw.select("agent-1", "openai", round_cap=3, cross_family_wait=30)
+        with patch.object(fetch_next_issue, "repository_owner_login", return_value="owner"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins", return_value={"owner"}):
+            res = fnw.select("agent-1", "openai", round_cap=3, cross_family_wait=30)
         self.assertEqual(res["work"]["type"], "issue")
         self.assertEqual(res["work"]["issue"], 21)
         self.assertFalse(res["work"]["resuming"])
