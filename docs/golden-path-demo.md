@@ -37,37 +37,44 @@ when the repository owner is the login string.
 `scripts/init_project.py` also writes the consumer preview pair
 (`scripts/build_preview.py`, `scripts/smoke_preview.py`) plus generated
 `.github` review/touches helpers so GitHub Actions can assemble a static
-artifact. Those are not a second factory. `skills/` stays empty (`.gitkeep` only).
+artifact. Those are not a second factory. The **demo** repository's `skills/`
+directory stays empty (`.gitkeep` only). Happy-path procedures live in
+`$ARU_SDLC_HOME/skills/`, including `idea-to-prd`, `prd-to-issues`,
+`implement-next-issue`, `code-review`, and `deploy-preview` at the pinned SHA.
 
 ## Happy path
 
-Every step leaves an issue or PR on the **demo** board.
+Every step leaves an issue or PR on the **demo** board. Follow the playbook
+skills under `$ARU_SDLC_HOME`, not the empty demo `skills/` directory.
 
-1. File an idea. Skill: `skills/idea-to-prd/SKILL.md`. Seed idea:
+1. File an idea. Skill: `$ARU_SDLC_HOME/skills/idea-to-prd/SKILL.md`. Seed idea:
    [aru-golden-path-demo#1](https://github.com/gillella/aru-golden-path-demo/issues/1).
-2. After operator approval, decompose with `skills/prd-to-issues/SKILL.md`.
+2. After operator approval, decompose with `$ARU_SDLC_HOME/skills/prd-to-issues/SKILL.md`.
    Seed implementation:
    [aru-golden-path-demo#2](https://github.com/gillella/aru-golden-path-demo/issues/2).
-3. Claim and implement in a worktree (`skills/implement-next-issue/SKILL.md`).
+3. Claim and implement in a worktree (`$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`).
    Seed PR:
    [aru-golden-path-demo#3](https://github.com/gillella/aru-golden-path-demo/pull/3).
-4. A **distinct** agent reviews (`skills/code-review/SKILL.md`). Authors never
+4. A **distinct** agent reviews (`$ARU_SDLC_HOME/skills/code-review/SKILL.md`). Authors never
    self-review.
 5. `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`
 6. `python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <40-char-sha> --issue <N>`
-   Skill: `skills/deploy-preview/SKILL.md`. The helper records the GitHub Pages
+   Skill: `$ARU_SDLC_HOME/skills/deploy-preview/SKILL.md`. The helper records the GitHub Pages
    URL on the originating issue.
 
 ## Runnable surface before Pages
 
 Until a peer review and gated merge land the seed PR, the equivalent surface is
-local:
+the assembled preview:
 
 ```bash
 cd /path/to/aru-golden-path-demo
 python3 scripts/build_preview.py
-# open dist/index.html  (or public/index.html)
+# open dist/index.html
 ```
+
+`public/index.html` is the static source `build_preview.py` copies; it is not
+the assembled artifact.
 
 Walk numbers and the live preview URL are recorded on playbook issue #131 as
 comments when each step completes.
