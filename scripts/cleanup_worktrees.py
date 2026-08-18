@@ -643,6 +643,14 @@ def _extract_retained_sha(name: str, repo_root: str) -> str | None:
     return None
 
 
+def _restore_claimed_name(claimed: str, original_path: str) -> None:
+    try:
+        if os.path.exists(claimed) and not os.path.exists(original_path):
+            os.replace(claimed, original_path)
+    except OSError:
+        pass
+
+
 def _legacy_copy_is_clean(path: str, repo_root: str, sha: str | None = None) -> bool:
     """Checks if a legacy retained copy has no uncommitted changes relative to its retained SHA."""
     if sha is None:
@@ -671,13 +679,15 @@ def _legacy_copy_is_clean(path: str, repo_root: str, sha: str | None = None) -> 
         if read_res.returncode != 0:
             return False
 
-        subprocess.run(
+        refresh_res = subprocess.run(
             ["git", "update-index", "--refresh", "-q"],
             env=env,
             cwd=path,
             capture_output=True,
             text=True,
         )
+        if refresh_res.returncode != 0:
+            return False
 
         diff_res = subprocess.run(
             ["git", "diff-files", "--quiet"],
@@ -696,7 +706,7 @@ def _legacy_copy_is_clean(path: str, repo_root: str, sha: str | None = None) -> 
             capture_output=True,
             text=True,
         )
-        if untracked_res.stdout.strip():
+        if untracked_res.returncode != 0 or untracked_res.stdout.strip():
             return False
 
         ignored_res = subprocess.run(
@@ -709,6 +719,8 @@ def _legacy_copy_is_clean(path: str, repo_root: str, sha: str | None = None) -> 
             capture_output=True,
             text=True,
         )
+        if ignored_res.returncode != 0:
+            return False
         for line in ignored_res.stdout.splitlines():
             item = line.strip()
             if not item:
@@ -814,16 +826,19 @@ def purge_legacy_retained(repo_root: str) -> tuple[bool, list[str]]:  # noqa: C9
             failed = True
             continue
         if not _retained_child_deletable(claimed, retained, repo_root):
+            _restore_claimed_name(claimed, path)
             notes.append(f"skipped legacy retained {claimed}: not physically contained")
             failed = True
             continue
         if not _legacy_copy_is_clean(claimed, repo_root, sha=sha):
+            _restore_claimed_name(claimed, path)
             notes.append(f"kept legacy retained {claimed}: modified after claim")
             continue
 
         try:
             expected = retain_manifest_payload(claimed)["entries"]
         except OSError as exc:
+            _restore_claimed_name(claimed, path)
             notes.append(f"kept legacy retained {claimed}: snapshot failed: {exc}")
             failed = True
             continue
@@ -1152,9 +1167,9 @@ def main() -> int:
     repo_root = args.repo or merge_pr.repository_root() or os.getcwd()
 
     if args.report_retained:
-        _, summary = report_retained(repo_root)
+        stats, summary = report_retained(repo_root)
         print(summary)
-        return 0
+        return 1 if "error" in stats else 0
 
     if args.purge_legacy_retained:
         ok, notes = purge_legacy_retained(repo_root)

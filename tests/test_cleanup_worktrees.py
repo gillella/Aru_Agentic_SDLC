@@ -222,6 +222,26 @@ class WorktreeCleanupTests(unittest.TestCase):
             self.assertTrue(dirty_wt.exists())
             self.assertFalse(clean_wt.exists())
 
+    def test_aborted_legacy_claim_restores_original_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_clone(Path(tmp))
+            old_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            retained = repo / ".worktrees" / ".retained"
+            retained.mkdir(parents=True)
+
+            wt = retained / f"{old_sha[:12]}-feat-restore"
+            wt.mkdir()
+            (wt / "README").write_text("main\n")
+            (wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+
+            with patch.object(cleanup_worktrees, "_remove_claimed_retained", return_value=(False, "simulated failure")):
+                with patch.object(cleanup_worktrees, "retain_manifest_payload", side_effect=OSError("snapshot error")):
+                    ok, notes = cleanup_worktrees.purge_legacy_retained(str(repo))
+                    self.assertFalse(ok)
+                    self.assertTrue(wt.exists())
+
 
 
 
