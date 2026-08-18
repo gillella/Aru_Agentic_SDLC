@@ -34,6 +34,7 @@ from common import (
     metadata_line_is_command_like,
     parse_touches,
     repository_owner_login,
+    repository_trusted_logins,
     run_cmd,
     run_gh_json,
     touches_conflict,
@@ -291,6 +292,7 @@ def reservation_paths(
     issue: Dict[str, Any],
     pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
     repo_owner: Optional[str] = None,
+    trusted_logins: Optional[set] = None,
 ) -> List[str]:
     """Paths this in-flight issue currently locks.
 
@@ -301,7 +303,10 @@ def reservation_paths(
     Untrusted authors contribute no reservation; they cannot lock the board.
     """
     owner = repo_owner if repo_owner is not None else repository_owner_login()
-    if not is_trusted_metadata_author(issue, owner):
+    logins = trusted_logins
+    if logins is None and repo_owner is None:
+        logins = repository_trusted_logins()
+    if not is_trusted_metadata_author(issue, owner, trusted_logins=logins):
         return []
     names = {label.get("name", "").lower() for label in issue.get("labels", [])}
     if "status:in-review" in names:
@@ -472,12 +477,15 @@ def build_candidates(
     agent: Optional[str],
     pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
     repo_owner: Optional[str] = None,
+    trusted_logins: Optional[set] = None,
 ) -> Dict[str, Any]:
     """Partitions open issues into in-flight, blocked, and claimable."""
     open_numbers = {i["number"] for i in issues}
 
     in_flight_paths: List[str] = []
     my_in_flight_issues: List[Dict[str, Any]] = []
+    if trusted_logins is None and repo_owner is None:
+        trusted_logins = repository_trusted_logins()
     if repo_owner is None:
         repo_owner = repository_owner_login()
 
@@ -487,7 +495,10 @@ def build_candidates(
         holder = claimed_by(issue)
         if holder or "status:in-progress" in names or "status:in-review" in names:
             in_flight_paths.extend(
-                reservation_paths(issue, pr_files_by_issue, repo_owner=repo_owner)
+                reservation_paths(
+                    issue, pr_files_by_issue,
+                    repo_owner=repo_owner, trusted_logins=trusted_logins,
+                )
             )
         if needs_human(labels):
             continue
@@ -515,7 +526,9 @@ def build_candidates(
             not_ready.append(num)
             continue
 
-        if not is_trusted_metadata_author(issue, repo_owner):
+        if not is_trusted_metadata_author(
+            issue, repo_owner, trusted_logins=trusted_logins,
+        ):
             missing_touches.append(num)
             continue
 

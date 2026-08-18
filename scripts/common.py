@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
@@ -433,20 +433,36 @@ def declared_path_is_safe(path: str) -> bool:
     if _METADATA_COMMAND_RE.search(value):
         return False
     parts = re.split(r"[\\/]", value)
-    if any(part == ".." for part in parts):
+    if any(part in {".", ".."} for part in parts):
         return False
     return True
 
 
+TRUSTED_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+TRUSTED_REWRITE_LABEL = "trusted-rewrite"
+
+
+def _actor_login(record: Any) -> Optional[str]:
+    if isinstance(record, dict):
+        login = record.get("login")
+        return login if isinstance(login, str) and login else None
+    if isinstance(record, str) and record:
+        return record
+    return None
+
+
 def author_login(issue: Dict[str, Any]) -> Optional[str]:
     """Returns the GitHub login that authored an issue list record, if present."""
-    author = issue.get("author") if isinstance(issue, dict) else None
-    if isinstance(author, dict):
-        login = author.get("login")
-        return login if isinstance(login, str) and login else None
-    if isinstance(author, str) and author:
-        return author
-    return None
+    if not isinstance(issue, dict):
+        return None
+    return _actor_login(issue.get("author"))
+
+
+def editor_login(issue: Dict[str, Any]) -> Optional[str]:
+    """Returns the last body editor login when the payload includes one."""
+    if not isinstance(issue, dict):
+        return None
+    return _actor_login(issue.get("editor"))
 
 
 def repository_owner_login(slug: Optional[str] = None) -> Optional[str]:
@@ -458,23 +474,90 @@ def repository_owner_login(slug: Optional[str] = None) -> Optional[str]:
     return owner or None
 
 
+def repository_trusted_logins(slug: Optional[str] = None) -> Optional[Set[str]]:
+    """Owner plus collaborator logins, or None when identity cannot be resolved."""
+    resolved = slug if slug is not None else get_repo_slug()
+    owner = repository_owner_login(resolved)
+    if not owner or not resolved:
+        return None
+    code, stdout, _ = run_cmd(
+        [
+            "gh", "api", "--paginate",
+            f"repos/{resolved}/collaborators",
+            "--jq", ".[].login",
+        ],
+        check=False,
+    )
+    if code != 0:
+        return None
+    logins = {owner.lower()}
+    logins.update(line.strip().lower() for line in stdout.splitlines() if line.strip())
+    return logins
+
+
+def _association_value(issue: Dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        value = issue.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _login_is_authorized(
+    login: Optional[str],
+    *,
+    owner: Optional[str] = None,
+    trusted_logins: Optional[Iterable[str]] = None,
+    association: Optional[str] = None,
+) -> bool:
+    if not login:
+        return False
+    if association and association.upper() in TRUSTED_AUTHOR_ASSOCIATIONS:
+        return True
+    names = {name.lower() for name in (trusted_logins or []) if name}
+    if owner:
+        names.add(owner.lower())
+    return login.lower() in names
+
+
+def has_trusted_rewrite_label(issue: Dict[str, Any]) -> bool:
+    """True when a write-access actor attested the current issue body."""
+    return TRUSTED_REWRITE_LABEL in {name.lower() for name in label_names(issue)}
+
+
 def is_trusted_metadata_author(
     issue: Dict[str, Any],
     owner: Optional[str] = None,
+    trusted_logins: Optional[Iterable[str]] = None,
 ) -> bool:
     """True when issue metadata may be honoured as `touches:` / `depends-on:`.
 
-    `gh issue list` cannot return authorAssociation, so the cheapest real
-    signal is: missing author (legacy fixtures / lookup gap) stays trusted;
-    a present login must match the repository owner. Fork and outside-collaborator
-    text is ignored until a trusted agent rewrites the issue body.
+    Fail closed when author identity is missing. Org-owned repositories trust
+    collaborators and GitHub associations (OWNER / MEMBER / COLLABORATOR), not
+    equality with the organization login. An outsider issue stays untrusted
+    until a trusted rewrite is recorded: a `trusted-rewrite` label (write-access
+    only) or a last editor who is an authorized actor.
     """
+    if not isinstance(issue, dict):
+        return False
+    if has_trusted_rewrite_label(issue):
+        return True
     login = author_login(issue)
     if not login:
+        return False
+    if _login_is_authorized(
+        login,
+        owner=owner,
+        trusted_logins=trusted_logins,
+        association=_association_value(issue, "authorAssociation", "author_association"),
+    ):
         return True
-    if not owner:
-        return True
-    return login.lower() == owner.lower()
+    return _login_is_authorized(
+        editor_login(issue),
+        owner=owner,
+        trusted_logins=trusted_logins,
+        association=_association_value(issue, "editorAssociation", "editor_association"),
+    )
 
 
 def parse_touches(body: str) -> List[str]:
@@ -574,7 +657,10 @@ def touches_conflict(a_paths: List[str], b_paths: List[str]) -> Optional[Tuple[s
 
 def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
     """Fetches single issue details via gh CLI."""
-    cmd = ["gh", "issue", "view", str(issue_id), "--json", "number,title,labels,assignees,body,state"]
+    cmd = [
+        "gh", "issue", "view", str(issue_id),
+        "--json", "number,title,labels,assignees,body,state,author",
+    ]
     res = run_gh_json(cmd)
     return res if isinstance(res, dict) else None
 

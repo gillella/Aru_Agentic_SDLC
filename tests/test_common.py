@@ -186,6 +186,8 @@ class BlankTouchesRegressionTests(unittest.TestCase):
         self.assertEqual(parse_touches("touches: C:\\Windows\\System32"), [])
         self.assertEqual(parse_touches("touches: ~/secret"), [])
         self.assertEqual(parse_touches("touches: scripts/foo/../../etc/passwd"), [])
+        self.assertEqual(parse_touches("touches: ./scripts/common.py"), [])
+        self.assertEqual(parse_touches("touches: scripts/./common.py"), [])
 
     def test_command_like_declaration_is_honoured_as_empty(self):
         self.assertEqual(parse_touches("touches: scripts/a.py; rm -rf /"), [])
@@ -199,6 +201,56 @@ class MetadataTrustTests(unittest.TestCase):
             {"author": {"login": "gillella"}}, owner="gillella"))
         self.assertFalse(is_trusted_metadata_author(
             {"author": {"login": "attacker"}}, owner="gillella"))
-        self.assertTrue(is_trusted_metadata_author({}, owner="gillella"))
-        self.assertTrue(is_trusted_metadata_author(
+
+    def test_missing_identity_fails_closed(self):
+        from common import is_trusted_metadata_author
+        self.assertFalse(is_trusted_metadata_author({}, owner="gillella"))
+        self.assertFalse(is_trusted_metadata_author(
             {"author": {"login": "attacker"}}, owner=None))
+        self.assertFalse(is_trusted_metadata_author(
+            {"author": {"login": ""}}, owner="gillella"))
+
+    def test_org_collaborator_is_trusted_without_owner_login_match(self):
+        from common import is_trusted_metadata_author
+        outsider = {"author": {"login": "alice"}}
+        self.assertFalse(is_trusted_metadata_author(outsider, owner="acme-corp"))
+        self.assertTrue(is_trusted_metadata_author(
+            outsider, owner="acme-corp", trusted_logins={"alice", "bob"}))
+        self.assertTrue(is_trusted_metadata_author(
+            {"author": {"login": "alice"}, "authorAssociation": "MEMBER"},
+            owner="acme-corp",
+        ))
+
+    def test_trusted_rewrite_state_unlocks_outsider_metadata(self):
+        from common import TRUSTED_REWRITE_LABEL, is_trusted_metadata_author
+        outsider = {
+            "author": {"login": "attacker"},
+            "labels": [{"name": "status:ready"}],
+        }
+        self.assertFalse(is_trusted_metadata_author(outsider, owner="gillella"))
+        rewritten = {
+            **outsider,
+            "labels": [
+                {"name": "status:ready"},
+                {"name": TRUSTED_REWRITE_LABEL},
+            ],
+        }
+        self.assertTrue(is_trusted_metadata_author(rewritten, owner="gillella"))
+        edited = {
+            "author": {"login": "attacker"},
+            "editor": {"login": "gillella"},
+        }
+        self.assertTrue(is_trusted_metadata_author(edited, owner="gillella"))
+
+    @patch.object(common, "run_cmd", return_value=(1, "", "http 403"))
+    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
+    def test_collaborator_lookup_failure_is_unresolved(self, _slug, _run):
+        self.assertIsNone(common.repository_trusted_logins())
+
+    @patch.object(common, "run_cmd", return_value=(0, "alice\nbob\n", ""))
+    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
+    def test_collaborator_lookup_includes_owner_and_actors(self, _slug, _run):
+        self.assertEqual(
+            common.repository_trusted_logins(),
+            {"acme-corp", "alice", "bob"},
+        )

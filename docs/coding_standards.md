@@ -88,13 +88,19 @@ mechanical guard is already on; do not enable public issues on this playbook
 repo as a substitute for the parser.
 
 **Who may author honoured metadata.** The picker honours `touches:` /
-`depends-on:` only when the issue author is the repository owner. Fork PRs
-and outside collaborators can still file text; that text does not widen
-reservations or become claimable work until a trusted agent rewrites the
-issue body. Review comments are never executed and never parsed as `touches:`.
+`depends-on:` only when provenance can be verified. Missing author identity
+or a failed owner/collaborator lookup fails closed. Authorized actors are
+the repository owner, users with collaborator access, and GitHub
+associations `OWNER` / `MEMBER` / `COLLABORATOR` — not equality with an
+organization login. Fork PRs and outside collaborators can still file
+text; that text does not widen reservations or become claimable work until
+a trusted rewrite is recorded (`trusted-rewrite` label, or a last editor
+who is an authorized actor). Direct `claim_issue.py --issue` re-checks the
+same predicate during claim and finalization. Review comments are never
+executed and never parsed as `touches:`.
 
-**What the parser rejects.** `parse_touches` drops absolute paths, `..`
-segments, and shell operators (`;`, `|`, `` ` ``, `$`, redirects). Glob
+**What the parser rejects.** `parse_touches` drops absolute paths, `.` and
+`..` segments, and shell operators (`;`, `|`, `` ` ``, `$`, redirects). Glob
 tokens such as `scripts/*` remain valid. A command-like `depends-on:` line is
 ignored rather than turned into dependency numbers. Invalid or untrusted
 metadata fails closed: the issue is not claimable and contributes no

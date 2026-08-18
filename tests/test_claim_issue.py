@@ -10,11 +10,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import claim_issue  # noqa: E402
 
 
-def issue_with_labels(*names):
-    return {"number": 7, "labels": [{"name": name} for name in names]}
+def issue_with_labels(*names, author="owner", number=7):
+    record = {
+        "number": number,
+        "labels": [{"name": name} for name in names],
+    }
+    if author is not None:
+        record["author"] = {"login": author}
+    return record
 
 
 class ClaimProtocolTests(unittest.TestCase):
+    def setUp(self):
+        owner = patch.object(
+            claim_issue, "repository_owner_login", return_value="owner")
+        trusted = patch.object(
+            claim_issue, "repository_trusted_logins", return_value={"owner"})
+        self.addCleanup(owner.stop)
+        self.addCleanup(trusted.stop)
+        owner.start()
+        trusted.start()
     @patch.object(claim_issue, "update_status")
     @patch.object(claim_issue, "run_cmd")
     @patch.object(claim_issue, "ensure_label")
@@ -373,6 +388,87 @@ class ClaimProtocolTests(unittest.TestCase):
         self.assertEqual(
             claim_issue._status_name(get_issue.return_value),
             "ambiguous(in-review,ready)",
+        )
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_direct_claim_refuses_untrusted_author(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels("status:ready", author="attacker")
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_direct_claim_refuses_authorless_issue(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels("status:ready", author=None)
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_trusted_rewrite_label_allows_outsider_claim(
+        self, get_issue, _ensure, _run, update_status, _sleep
+    ):
+        rewritten = issue_with_labels(
+            "status:ready", "trusted-rewrite", author="attacker")
+        claimed = issue_with_labels(
+            "status:ready", "trusted-rewrite", "agent:agent-a", author="attacker")
+        in_progress = issue_with_labels(
+            "status:in-progress", "trusted-rewrite", "agent:agent-a",
+            author="attacker")
+        get_issue.side_effect = [
+            rewritten, claimed, claimed, claimed, in_progress,
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_OK)
+        update_status.assert_called_once_with(7, "In Progress", require_board=True)
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_finalize_revalidates_and_rolls_back_untrusted_rewrite(
+        self, get_issue, _ensure, run_cmd, update_status, _sleep
+    ):
+        ready = issue_with_labels("status:ready")
+        labeled = issue_with_labels("status:ready", "agent:agent-a")
+        untrusted = issue_with_labels(
+            "status:ready", "agent:agent-a", author="attacker")
+        get_issue.side_effect = [
+            ready, labeled, labeled, untrusted,
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        update_status.assert_called_once_with(7, "Ready", require_board=True)
+        self.assertEqual(
+            run_cmd.call_args_list[-2].args[0],
+            ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
         )
 
 
