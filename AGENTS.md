@@ -43,6 +43,11 @@ has completed the independent review and every enforced gate passes. An author
 must never review their own PR. No agent or human may bypass the merge helper
 with a direct push or an ad-hoc merge.
 
+GitHub required-approval rulesets stay **off** until the #123 reviewer App
+(`ARU_REVIEW_APP_LOGIN`, provisionally `aru-reviewer[bot]`) is installed and
+can `gh pr review --approve` a fleet-authored PR. Until then, `author:` /
+`reviewed-by:` labels remain the independent-review authority.
+
 Money, PII, security, schema, migration, irreversible behavior, large diffs,
 and repeated review rounds increase the required planning, testing, and review
 depth; none of them alone creates a mandatory human gate. Human intervention

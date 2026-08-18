@@ -196,6 +196,12 @@ Two consequences worth knowing before you hit them:
   head, no unresolved threads, and how many findings were withdrawn rather
   than fixed — so a later reader can reconstruct why.
 
+GitHub **required approving reviews** stay disabled until issue #123's
+reviewer App is live. Set `ARU_REVIEW_APP_LOGIN` to that App's login
+(provisionally `aru-reviewer[bot]`). Unconfigured bots remain advisory.
+Same-account fleet reviews still use `reviewer:` as the claim and
+`reviewed-by:` as completion; those labels are not interchangeable.
+
 ---
 
 ## 📊 Factory Fleet Status & Completion Evaluation

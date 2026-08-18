@@ -579,7 +579,7 @@ def _reviewed_by_label_for(agent: str) -> str:
 
 
 def _reviewed_head_for_completion(pr_id: int) -> str | None:
-    """Current head only when a substantive human review covers it."""
+    """Current head only when a substantive independent review covers it."""
     slug = get_repo_slug()
     if not slug or "/" not in slug:
         return None
