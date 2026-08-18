@@ -537,7 +537,8 @@ def is_trusted_metadata_author(
     equality with the organization login. An outsider issue stays untrusted
     until a trusted rewrite is bound to the current body: a last editor who is
     an authorized actor, optionally attested by a `trusted-rewrite` label.
-    The label alone is not enough when the last editor is an outsider.
+    The label alone is not enough when the last editor is an outsider, or when
+    a claim-path identity lookup failed (`trustIdentityResolved` is False).
     """
     if not isinstance(issue, dict):
         return False
@@ -561,6 +562,10 @@ def is_trusted_metadata_author(
     if has_trusted_rewrite_label(issue):
         # A write-access label attests a rewrite only when the last editor is
         # unknown (list payloads) or is itself an authorized actor.
+        # A failed GraphQL lookup omits editor the same way a list payload
+        # does; that is not "unknown" and must not honour the label.
+        if issue.get("trustIdentityResolved") is False:
+            return False
         return editor is None
     return False
 
@@ -672,6 +677,7 @@ def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
     if not isinstance(res, dict):
         return None
     trust = _issue_trust_identity(issue_id)
+    res["trustIdentityResolved"] = trust is not None
     if trust:
         if "editor" in trust:
             res["editor"] = trust["editor"]
@@ -720,7 +726,7 @@ def _issue_trust_identity(issue_id: int) -> Optional[Dict[str, Any]]:
     association = node.get("authorAssociation")
     if isinstance(association, str) and association:
         trust["authorAssociation"] = association
-    return trust or None
+    return trust
 
 
 def fetch_pr_comments(pr_id: int) -> List[Dict[str, Any]]:

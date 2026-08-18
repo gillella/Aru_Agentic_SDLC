@@ -97,8 +97,9 @@ text; that text does not widen reservations or become claimable work until
 a trusted rewrite is recorded (`trusted-rewrite` label together with a
 last editor who is an authorized actor; an outsider edit after the label
 is applied fails closed). Direct `claim_issue.py --issue` re-checks the
-same predicate during claim, finalization, and the post-status read. Review comments are never
-executed and never parsed as `touches:`.
+same predicate during claim, finalization, and the post-status read. A
+failed GraphQL identity lookup does not honour `trusted-rewrite`. Review
+comments are never executed and never parsed as `touches:`.
 
 **What the parser rejects.** `parse_touches` drops absolute paths, `.` and
 `..` segments, and shell operators (`;`, `|`, `` ` ``, `$`, redirects). Glob

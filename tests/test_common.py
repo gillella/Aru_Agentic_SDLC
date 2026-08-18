@@ -249,6 +249,12 @@ class MetadataTrustTests(unittest.TestCase):
         }
         self.assertFalse(is_trusted_metadata_author(
             relabeled_then_hijacked, owner="gillella"))
+        lookup_failed = {
+            **rewritten,
+            "trustIdentityResolved": False,
+        }
+        self.assertFalse(is_trusted_metadata_author(
+            lookup_failed, owner="gillella"))
 
     @patch.object(common, "run_cmd", return_value=(1, "", "http 403"))
     @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
@@ -288,3 +294,24 @@ class MetadataTrustTests(unittest.TestCase):
         self.assertEqual(issue["author"], {"login": "alice"})
         self.assertEqual(issue["editor"], {"login": "owner"})
         self.assertEqual(issue["authorAssociation"], "COLLABORATOR")
+        self.assertTrue(issue["trustIdentityResolved"])
+
+    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
+    @patch.object(common, "run_gh_json")
+    def test_get_issue_failed_trust_lookup_rejects_rewrite_label(
+        self, gh_json, _slug
+    ):
+        gh_json.side_effect = [
+            {
+                "number": 7,
+                "title": "t",
+                "labels": [{"name": common.TRUSTED_REWRITE_LABEL}],
+                "author": {"login": "attacker"},
+            },
+            {"errors": [{"message": "timeout"}]},
+        ]
+        issue = common.get_issue(7)
+        self.assertFalse(issue["trustIdentityResolved"])
+        self.assertNotIn("editor", issue)
+        self.assertFalse(
+            common.is_trusted_metadata_author(issue, owner="gillella"))

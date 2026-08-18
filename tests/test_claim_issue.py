@@ -446,6 +446,25 @@ class ClaimProtocolTests(unittest.TestCase):
         self.assertEqual(result, claim_issue.EXIT_OK)
         update_status.assert_called_once_with(7, "In Progress", require_board=True)
 
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_direct_claim_refuses_unresolved_trust_identity(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        record = issue_with_labels(
+            "status:ready", "trusted-rewrite", author="attacker")
+        record["trustIdentityResolved"] = False
+        get_issue.return_value = record
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "update_status", return_value=True)
     @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
