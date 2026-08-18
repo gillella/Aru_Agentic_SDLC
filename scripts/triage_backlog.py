@@ -103,7 +103,37 @@ def _is_valid_fenced_verify_command(cmd: str) -> bool:
         return False
     if re.match(r"^(?:<.*>|\.{3,}|todo|tbd|none|n/a)$", lower):
         return False
-    return True
+    try:
+        from acceptance_runner import validate_command
+        validate_command(cleaned)
+        return True
+    except Exception:
+        return False
+
+
+def unrunnable_verify_predicates(criteria: list[str]) -> list[tuple[str, str]]:
+    """Returns a list of (criterion_text, rejection_reason) for any unrunnable verify command."""
+    fenced_verify_pattern = re.compile(
+        r"\((?:verify|verify_cmd):\s*`([^`]+)`\)"
+        r"|\b(?:verify|verify_cmd)\s*:\s*`([^`]+)`",
+        re.IGNORECASE,
+    )
+    unrunnable = []
+    for criterion in criteria:
+        for m in fenced_verify_pattern.finditer(criterion):
+            cmd = m.group(1) or m.group(2)
+            if not cmd:
+                continue
+            cleaned = cmd.strip("`'\" \t\r\n").strip()
+            if not cleaned or cleaned.lower() in VERIFY_PLACEHOLDERS:
+                unrunnable.append((criterion, f"placeholder verify command: {cmd!r}"))
+                continue
+            try:
+                from acceptance_runner import validate_command
+                validate_command(cleaned)
+            except Exception as exc:
+                unrunnable.append((criterion, str(exc)))
+    return unrunnable
 
 
 def _is_criterion_machine_checkable(criterion: str) -> bool:
@@ -172,7 +202,7 @@ Describe the problem and intended change.
 
 ## Acceptance Criteria
 - [ ] Predicate 1 (verify: `python3 -m unittest tests.test_foo`)
-- [ ] Predicate 2 (verify: `python3 scripts/foo.py --check`)
+- [ ] Predicate 2 (verify: `ruff check .`)
 
 ## Decision Boundaries
 - Default: return 0 on success
@@ -295,14 +325,19 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str
     criteria = acceptance_criteria(body)
     if not criteria:
         gaps.append("no acceptance criteria checkboxes")
-    elif is_feat_or_fix(issue) and not has_machine_checkable_predicates(criteria):
-        if is_legacy_issue(num, repo_slug):
-            print(
-                f"  [WARN] Pre-existing legacy issue #{num} lacks machine-checkable verification predicates in acceptance criteria; warning only.",
-                file=sys.stderr,
-            )
-        else:
-            gaps.append("acceptance criteria lack machine-checkable predicate (e.g., '(verify: `cmd`)' or test assertion)")
+    elif is_feat_or_fix(issue):
+        if not has_machine_checkable_predicates(criteria):
+            if is_legacy_issue(num, repo_slug):
+                print(
+                    f"  [WARN] Pre-existing legacy issue #{num} lacks machine-checkable verification predicates in acceptance criteria; warning only.",
+                    file=sys.stderr,
+                )
+            else:
+                gaps.append("acceptance criteria lack machine-checkable predicate (e.g., '(verify: `cmd`)' or test assertion)")
+        unrunnable = unrunnable_verify_predicates(criteria)
+        if unrunnable:
+            for text, reason in unrunnable:
+                gaps.append(f"unrunnable verify predicate ({reason}) in criterion: {text[:60]}")
 
     if not has_verification(body):
         gaps.append("no verification section")

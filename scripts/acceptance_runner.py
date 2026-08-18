@@ -40,13 +40,15 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from common import VERIFICATION_EVIDENCE_SCHEMA, sanitize_command
 
-ALLOWED_RUNNERS = frozenset({"python3", "python", "pytest"})
+ALLOWED_RUNNERS = frozenset({"python3", "python", "pytest", "ruff"})
 ALLOWED_PYTHON_SCRIPTS = frozenset({
     "scripts/verify_citations.py",
 })
 PYTHON_UNITTEST_FLAGS = frozenset({"-v", "-q", "-b", "-f"})
 PYTHON_SCRIPT_FLAGS = frozenset({"-q", "-v", "--check"})
 PYTEST_FLAGS = frozenset({"-q", "-v", "--tb=short", "--quiet"})
+RUFF_SUBCOMMANDS = frozenset({"check", "format"})
+RUFF_FLAGS = frozenset({"-q", "--quiet", "-v", "--verbose", "--no-fix", "--diff"})
 VERIFY_TIMEOUT_SECONDS = 120
 UNITTEST_MODULE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$"
@@ -101,6 +103,18 @@ def _is_safe_relpath(path: str) -> bool:
     return True
 
 
+def _is_safe_target_path(path: str) -> bool:
+    if not path or path.startswith("/") or path.startswith("~"):
+        return False
+    normalized = path.strip().rstrip("/")
+    if not normalized or normalized == ".":
+        return True
+    parts = normalized.split("/")
+    if ".." in parts or "" in parts:
+        return False
+    return True
+
+
 def _safe_script_arg(arg: str) -> bool:
     if not arg or arg.startswith("/") or arg.startswith("~") or arg.startswith("-"):
         return False
@@ -140,13 +154,32 @@ def _validate_python_argv(argv: List[str]) -> None:
 
 
 def _validate_pytest_argv(argv: List[str]) -> None:
-    if len(argv) < 2:
-        raise CommandRejected("pytest is missing a target")
     for arg in argv[1:]:
         if arg in PYTEST_FLAGS:
             continue
-        if arg.startswith("-") or not _is_safe_relpath(arg):
+        if arg.startswith("-"):
+            raise CommandRejected(f"pytest flag not allowed: {arg}")
+        if not _is_safe_target_path(arg):
             raise CommandRejected(f"pytest argument not allowed: {arg}")
+
+
+def _validate_ruff_argv(argv: List[str]) -> None:
+    if len(argv) < 2:
+        raise CommandRejected("ruff invocation is missing arguments")
+    subcommand = argv[1]
+    if subcommand not in RUFF_SUBCOMMANDS:
+        raise CommandRejected(
+            f"ruff subcommand {subcommand!r} is not allowlisted; must be one of {sorted(RUFF_SUBCOMMANDS)}"
+        )
+    for arg in argv[2:]:
+        if arg in RUFF_FLAGS:
+            continue
+        if arg == ".":
+            continue
+        if arg.startswith("-"):
+            raise CommandRejected(f"ruff flag {arg!r} is not allowlisted")
+        if not _is_safe_target_path(arg):
+            raise CommandRejected(f"ruff target not allowed: {arg}")
 
 
 def validate_command(text: str) -> List[str]:
@@ -164,9 +197,12 @@ def validate_command(text: str) -> List[str]:
         raise CommandRejected("empty command")
     runner = argv[0]
     if runner != os.path.basename(runner) or runner not in ALLOWED_RUNNERS:
-        raise CommandRejected(f"runner {runner!r} is not allowlisted")
+        allowed = ", ".join(sorted(ALLOWED_RUNNERS))
+        raise CommandRejected(f"runner {runner!r} is not allowlisted; allowed runners: {allowed}")
     if runner in {"python3", "python"}:
         _validate_python_argv(argv)
+    elif runner == "ruff":
+        _validate_ruff_argv(argv)
     else:
         _validate_pytest_argv(argv)
     return argv
