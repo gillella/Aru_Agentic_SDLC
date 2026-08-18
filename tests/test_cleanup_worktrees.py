@@ -482,6 +482,25 @@ class CleanupWorktreesTests(unittest.TestCase):
         self.assertFalse(remaining)
         self.assertIn("removed retained", sweep_msg)
 
+    def test_prune_worktree_retains_worktree_with_empty_ignored_worktrees_dir(self):
+        path = _add_worktree(self.clone, "feat/issue-8-empty-worktrees")
+        (path / ".gitignore").write_text(".worktrees/\n")
+        _git(path, "add", ".gitignore")
+        _git(path, "commit", "-m", "ignore worktrees")
+        (path / ".worktrees").mkdir()
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=path, text=True
+        ).strip()
+        ok, message = merge_pr.prune_worktree(
+            str(self.clone), "feat/issue-8-empty-worktrees", sha
+        )
+        self.assertTrue(ok, message)
+        self.assertIn("Retained worktree", message)
+        self.assertNotIn(os.path.realpath(path), self._worktree_paths())
+        retained_root = self.clone / ".worktrees" / ".retained"
+        leftovers = [item for item in retained_root.iterdir() if item.is_dir()]
+        self.assertTrue(leftovers)
+
     def test_dirty_deregistered_retained_copy_is_kept(self):
         path = _add_worktree(self.clone, "feat/issue-8-retain-dirty")
         sha = subprocess.check_output(
