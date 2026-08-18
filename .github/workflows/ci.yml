@@ -89,14 +89,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Enforce architectural layer contracts via import-linter
       - name: Enforce module boundaries
         run: |
-          if [ -f .importlinter ] || grep -q "importlinter" pyproject.toml 2>/dev/null; then
-            pip install import-linter
-            lint-imports
-          else
-            echo "No import-linter contracts configured yet; skipping."
-          fi
+          pip install -r requirements-dev.txt
+          lint-imports
 
   # Documentation drift here accumulated in days (issue #115). A convention
   # that docs stay accurate is followed probabilistically; this job is the

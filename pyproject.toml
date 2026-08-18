@@ -30,3 +30,78 @@ select = ["E4", "E7", "E9", "F"]
 # so it needs a reason of this kind - the rule is wrong for this file - rather
 # than "the finding already existed".
 "tests/*" = ["E402"]
+
+[tool.importlinter]
+root_packages = [
+    "hooks",
+    "scripts",
+]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Contract 1: hooks must not import skills or templates"
+type = "forbidden"
+source_modules = [
+    "hooks",
+]
+forbidden_modules = [
+    "skills",
+    "templates",
+]
+
+[[tool.importlinter.contracts]]
+name = "Contract 2: hooks must not import scripts or common"
+type = "forbidden"
+source_modules = [
+    "hooks",
+]
+forbidden_modules = [
+    "scripts",
+    "common",
+]
+
+[[tool.importlinter.contracts]]
+name = "Contract 3: governance primitives (common.py) cannot import workflow scripts"
+type = "forbidden"
+source_modules = [
+    "scripts.common",
+]
+forbidden_modules = [
+    "scripts.acceptance_runner",
+    "scripts.agent_presence",
+    "scripts.build_preview",
+    "scripts.check_ci",
+    "scripts.check_docs",
+    "scripts.claim_issue",
+    "scripts.cleanup_worktrees",
+    "scripts.create_branch",
+    "scripts.create_pr",
+    "scripts.delivery_increments",
+    "scripts.deploy_preview",
+    "scripts.doctor_local_agent_integrations",
+    "scripts.enable_main_ruleset",
+    "scripts.factory_metrics",
+    "scripts.fetch_next_issue",
+    "scripts.fetch_next_work",
+    "scripts.fetch_pr_feedback",
+    "scripts.fixtures",
+    "scripts.fleet_status",
+    "scripts.incident_intake",
+    "scripts.init_project",
+    "scripts.merge_pr",
+    "scripts.prd_to_issues",
+    "scripts.promote",
+    "scripts.prune_codebase",
+    "scripts.release",
+    "scripts.revert_merge",
+    "scripts.run_fleet",
+    "scripts.slack_control_room",
+    "scripts.slack_notify",
+    "scripts.slack_projects",
+    "scripts.smoke_preview",
+    "scripts.spawn_ephemeral_worker",
+    "scripts.sync_spec",
+    "scripts.triage_backlog",
+    "scripts.update_issue_status",
+    "scripts.verify_citations",
+]
