@@ -641,7 +641,7 @@ def complete_review(pr_id: int, agent: str) -> int:
     reviewed_head = _reviewed_head_for_completion(pr_id)
     if reviewed_head is None:
         print(
-            f"[CONFLICT] PR #{pr_id} has no substantive human review on its "
+            f"[CONFLICT] PR #{pr_id} has no substantive independent review on its "
             "current head. Submit the review before completing attribution.",
             file=sys.stderr,
         )

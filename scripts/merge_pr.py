@@ -1040,7 +1040,7 @@ def _evidence_note(evidence):
     head_reviewers = _current_head_reviewers(evidence)
     if head and head_reviewers:
         head_note = (
-            f"current head {head[:12]} has substantive human review from "
+            f"current head {head[:12]} has substantive independent review from "
             f"{', '.join(head_reviewers)}"
         )
     else:

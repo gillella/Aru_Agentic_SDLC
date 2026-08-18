@@ -467,7 +467,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("Peer attribution: cursor-1", message)
         self.assertIn(f"current head {head[:12]}", message)
-        self.assertIn("substantive human review from gillella", message)
+        self.assertIn("substantive independent review from gillella", message)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
