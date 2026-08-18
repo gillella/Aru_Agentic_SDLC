@@ -282,6 +282,9 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
         print(f"[ERROR] Could not verify Issue #{issue_id} after status update.", file=sys.stderr)
         _rollback_claim(issue_id, agent, assignee)
         return EXIT_ERROR
+    if not _metadata_is_trusted(issue, owner, trusted_logins):
+        _rollback_claim(issue_id, agent, assignee)
+        return _refuse_untrusted_metadata(issue_id)
 
     holders = agent_labels(issue)
     if _needs_human(issue):

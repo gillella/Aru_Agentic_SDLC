@@ -177,6 +177,8 @@ class BlankTouchesRegressionTests(unittest.TestCase):
         ])
         self.assertEqual(parse_touches("touches: **"), ["**"])
         self.assertEqual(parse_touches("touches: `**`"), ["**"])
+        self.assertEqual(parse_touches("touches: **/*.py"), ["**/*.py"])
+        self.assertEqual(parse_touches("touches: **/module.py"), ["**/module.py"])
 
     def test_traversal_and_absolute_paths_are_rejected(self):
         self.assertEqual(parse_touches("touches: ../etc/passwd, scripts/common.py"), [
@@ -241,6 +243,12 @@ class MetadataTrustTests(unittest.TestCase):
             "editor": {"login": "gillella"},
         }
         self.assertTrue(is_trusted_metadata_author(edited, owner="gillella"))
+        relabeled_then_hijacked = {
+            **rewritten,
+            "editor": {"login": "attacker"},
+        }
+        self.assertFalse(is_trusted_metadata_author(
+            relabeled_then_hijacked, owner="gillella"))
 
     @patch.object(common, "run_cmd", return_value=(1, "", "http 403"))
     @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
@@ -254,3 +262,29 @@ class MetadataTrustTests(unittest.TestCase):
             common.repository_trusted_logins(),
             {"acme-corp", "alice", "bob"},
         )
+
+    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
+    @patch.object(common, "run_gh_json")
+    def test_get_issue_merges_graphql_trust_identity(self, gh_json, _slug):
+        gh_json.side_effect = [
+            {
+                "number": 7,
+                "title": "t",
+                "labels": [],
+                "author": {"login": "alice"},
+            },
+            {
+                "data": {
+                    "repository": {
+                        "issue": {
+                            "editor": {"login": "owner"},
+                            "authorAssociation": "COLLABORATOR",
+                        }
+                    }
+                }
+            },
+        ]
+        issue = common.get_issue(7)
+        self.assertEqual(issue["author"], {"login": "alice"})
+        self.assertEqual(issue["editor"], {"login": "owner"})
+        self.assertEqual(issue["authorAssociation"], "COLLABORATOR")

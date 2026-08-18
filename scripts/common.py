@@ -535,16 +535,13 @@ def is_trusted_metadata_author(
     Fail closed when author identity is missing. Org-owned repositories trust
     collaborators and GitHub associations (OWNER / MEMBER / COLLABORATOR), not
     equality with the organization login. An outsider issue stays untrusted
-    until a trusted rewrite is recorded: a `trusted-rewrite` label (write-access
-    only) or a last editor who is an authorized actor.
+    until a trusted rewrite is bound to the current body: a last editor who is
+    an authorized actor, optionally attested by a `trusted-rewrite` label.
+    The label alone is not enough when the last editor is an outsider.
     """
     if not isinstance(issue, dict):
         return False
-    if has_trusted_rewrite_label(issue):
-        return True
     login = author_login(issue)
-    if not login:
-        return False
     if _login_is_authorized(
         login,
         owner=owner,
@@ -552,12 +549,20 @@ def is_trusted_metadata_author(
         association=_association_value(issue, "authorAssociation", "author_association"),
     ):
         return True
-    return _login_is_authorized(
-        editor_login(issue),
+    editor = editor_login(issue)
+    editor_is_trusted = _login_is_authorized(
+        editor,
         owner=owner,
         trusted_logins=trusted_logins,
         association=_association_value(issue, "editorAssociation", "editor_association"),
     )
+    if editor_is_trusted:
+        return True
+    if has_trusted_rewrite_label(issue):
+        # A write-access label attests a rewrite only when the last editor is
+        # unknown (list payloads) or is itself an authorized actor.
+        return editor is None
+    return False
 
 
 def parse_touches(body: str) -> List[str]:
@@ -606,6 +611,8 @@ def _unwrap_declared_touches_value(raw: str) -> str:
     """Strip wrapping markdown without destroying a repo-wide ``**`` glob."""
     value = (raw or "").strip()
     if value in {"*", "**"}:
+        return value
+    if value.startswith("**/"):
         return value
     if len(value) >= 2 and value[0] == "`" and value[-1] == "`" and "`" not in value[1:-1]:
         inner = value[1:-1].strip()
@@ -656,13 +663,64 @@ def touches_conflict(a_paths: List[str], b_paths: List[str]) -> Optional[Tuple[s
 
 
 def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
-    """Fetches single issue details via gh CLI."""
+    """Fetches single issue details via gh CLI, plus GraphQL trust identity."""
     cmd = [
         "gh", "issue", "view", str(issue_id),
         "--json", "number,title,labels,assignees,body,state,author",
     ]
     res = run_gh_json(cmd)
-    return res if isinstance(res, dict) else None
+    if not isinstance(res, dict):
+        return None
+    trust = _issue_trust_identity(issue_id)
+    if trust:
+        if "editor" in trust:
+            res["editor"] = trust["editor"]
+        if trust.get("authorAssociation"):
+            res["authorAssociation"] = trust["authorAssociation"]
+    return res
+
+
+_ISSUE_TRUST_QUERY = """
+query($owner:String!, $repo:String!, $number:Int!) {
+  repository(owner:$owner, name:$repo) {
+    issue(number:$number) {
+      editor { login }
+      authorAssociation
+    }
+  }
+}
+"""
+
+
+def _issue_trust_identity(issue_id: int) -> Optional[Dict[str, Any]]:
+    """Editor and association fields that `gh issue view --json` cannot return."""
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return None
+    owner, repo = slug.split("/", 1)
+    cmd = [
+        "gh", "api", "graphql",
+        "-f", f"query={_ISSUE_TRUST_QUERY}",
+        "-F", f"owner={owner}",
+        "-F", f"repo={repo}",
+        "-F", f"number={issue_id}",
+    ]
+    payload = run_gh_json(cmd)
+    if not isinstance(payload, dict) or payload.get("errors"):
+        return None
+    try:
+        node = payload["data"]["repository"]["issue"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(node, dict):
+        return None
+    trust: Dict[str, Any] = {}
+    if "editor" in node:
+        trust["editor"] = node.get("editor")
+    association = node.get("authorAssociation")
+    if isinstance(association, str) and association:
+        trust["authorAssociation"] = association
+    return trust or None
 
 
 def fetch_pr_comments(pr_id: int) -> List[Dict[str, Any]]:

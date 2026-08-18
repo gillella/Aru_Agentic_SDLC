@@ -94,9 +94,10 @@ the repository owner, users with collaborator access, and GitHub
 associations `OWNER` / `MEMBER` / `COLLABORATOR` — not equality with an
 organization login. Fork PRs and outside collaborators can still file
 text; that text does not widen reservations or become claimable work until
-a trusted rewrite is recorded (`trusted-rewrite` label, or a last editor
-who is an authorized actor). Direct `claim_issue.py --issue` re-checks the
-same predicate during claim and finalization. Review comments are never
+a trusted rewrite is recorded (`trusted-rewrite` label together with a
+last editor who is an authorized actor; an outsider edit after the label
+is applied fails closed). Direct `claim_issue.py --issue` re-checks the
+same predicate during claim, finalization, and the post-status read. Review comments are never
 executed and never parsed as `touches:`.
 
 **What the parser rejects.** `parse_touches` drops absolute paths, `.` and

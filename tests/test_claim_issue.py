@@ -471,6 +471,33 @@ class ClaimProtocolTests(unittest.TestCase):
             ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
         )
 
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_post_status_read_revalidates_metadata_trust(
+        self, get_issue, _ensure, run_cmd, update_status, _sleep
+    ):
+        ready = issue_with_labels("status:ready")
+        labeled = issue_with_labels("status:ready", "agent:agent-a")
+        untrusted = issue_with_labels(
+            "status:in-progress", "agent:agent-a", author="attacker")
+        get_issue.side_effect = [
+            ready, labeled, labeled, labeled, untrusted,
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        self.assertEqual(
+            update_status.call_args_list,
+            [
+                call(7, "In Progress", require_board=True),
+                call(7, "Ready", require_board=True),
+            ],
+        )
+
 
 class InReviewHandoffStatusTests(unittest.TestCase):
     @patch("update_issue_status.run_cmd", return_value=(0, "", ""))
