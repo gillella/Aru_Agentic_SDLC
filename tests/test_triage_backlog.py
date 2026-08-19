@@ -116,7 +116,7 @@ Do the feature.
 ## Acceptance Criteria
 
 - [ ] Predicate 1 (verify: `pytest -q`)
-- [ ] Predicate 2 (verify: `python3 scripts/foo.py --check`)
+- [ ] Predicate 2 (verify: `ruff check .`)
 
 ## Decision Boundaries
 - Default: value
@@ -230,14 +230,45 @@ parallel-eligible: true
         self.assertFalse(tb.has_machine_checkable_predicates(bare_code_criteria))
 
     def test_machine_checkable_predicates_accepts_verify_and_assertions(self):
-        verify_criteria = ["- [ ] Verify output (verify: `python3 test.py`)"]
+        verify_criteria = ["- [ ] Verify output (verify: `python3 -m unittest tests.test_foo`)"]
         self.assertTrue(tb.has_machine_checkable_predicates(verify_criteria))
+
+        ruff_criteria = ["- [ ] Lint clean (verify: `ruff check .`)"]
+        self.assertTrue(tb.has_machine_checkable_predicates(ruff_criteria))
 
         assert_criteria = ["- [ ] Asserts that return code is 0"]
         self.assertTrue(tb.has_machine_checkable_predicates(assert_criteria))
 
         exit_criteria = ["- [ ] Exits with code 0 on valid input"]
         self.assertTrue(tb.has_machine_checkable_predicates(exit_criteria))
+
+    def test_unrunnable_verify_predicate_flags_gaps(self):
+        body = """## Summary
+Do thing.
+
+## Acceptance Criteria
+- [ ] Bad command (verify: `bash -c something`)
+
+## Decision Boundaries
+- Default: 0
+
+## Non-Goals
+- None
+
+## Verification
+`pytest` exits 0
+
+## Dependencies
+touches: scripts/foo.py
+"""
+        gaps = tb.ready_gaps(issue(200, "type:feat", body=body), set())
+        self.assertTrue(any("unrunnable verify predicate" in g for g in gaps))
+
+    def test_existing_open_issues_with_unrunnable_lint_predicate_are_reported(self):
+        criteria = ["- [ ] Lint clean (verify: `unsupported_runner check .`)"]
+        unrunnable = tb.unrunnable_verify_predicates(criteria)
+        self.assertEqual(len(unrunnable), 1)
+        self.assertIn("unsupported_runner", unrunnable[0][1])
 
     def test_feature_request_template_with_untouched_criteria_placeholder_is_blocked(self):
         tmpl = (Path(__file__).resolve().parents[1] / ".github" / "ISSUE_TEMPLATE" / "feature_request.md").read_text()
