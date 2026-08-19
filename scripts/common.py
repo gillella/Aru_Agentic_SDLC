@@ -417,6 +417,67 @@ def ensure_label(name: str, color: str = "5319e7", description: str = "") -> boo
 _METADATA_COMMAND_RE = re.compile(r"""[;&|`$()<>\n\r!\\]|&&|\|\|""")
 _WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
+_FENCE_RE = re.compile(r"(`{3,}|~{3,})")
+
+
+def strip_code_blocks(body: str) -> str:
+    """Blanks fenced and indented code blocks, preserving line positions.
+
+    Issue metadata parsers anchor to the start of a line so a code *span* cannot
+    hijack them, but a fenced code *block* also begins at column 0, and an
+    indented (4-space or tab) block is indistinguishable from an ordinary
+    declaration to a ``^[ \\t]*`` anchor. An issue that quotes the issue
+    template as an example would otherwise have the example's ``touches:`` and
+    ``depends-on:`` parsed as its own declaration: reserving paths it will
+    never edit while leaving its real paths unreserved (a two-agent collision)
+    and masking real prerequisites with ``depends-on: none`` (blocked work
+    that looks claimable).
+
+    An unterminated fence blanks the remainder of the body. That is the safe
+    direction: a missing declaration makes an issue non-claimable, whereas a
+    wrong one causes collisions.
+    """
+    if not body:
+        return body
+    lines = []
+    open_fence = None
+    for line in body.splitlines():
+        indented = line.startswith(("    ", "\t"))
+        match = _FENCE_RE.match(line.lstrip())
+        # Normalise to the fence character: a closing fence must use the same
+        # character as the one that opened the block.
+        token = match.group(1)[0] if match else None
+        if open_fence is None:
+            if token is not None:
+                open_fence = token
+                lines.append("")
+                continue
+            if indented:
+                lines.append("")
+                continue
+            lines.append(line)
+        else:
+            if token == open_fence:
+                open_fence = None
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _is_plausible_declared_path(path: str) -> bool:
+    """True when a ``touches:`` token is a real tree reference, not prose.
+
+    The line-anchored parse can still grab a prose tail ("declaration - every
+    issue about the touches system naturally discusses") or a quoted wrapper,
+    so an entry carrying embedded whitespace, a quote, or an em dash cannot be
+    a path and must not reserve anything. Legit references - `src/a.py`,
+    `tests/*`, `docs/guide.md`, `**/*.py` - carry none of those.
+    """
+    if any(ch.isspace() for ch in path):
+        return False
+    if '"' in path or "'" in path or "—" in path or "–" in path:
+        return False
+    return True
+
 
 def metadata_line_is_command_like(text: str) -> bool:
     """True when a metadata line contains shell operators, not path/issue tokens."""
@@ -592,9 +653,13 @@ def parse_touches(body: str) -> List[str]:
     # no path budget look claimable to build_candidates() while the enforcement
     # hook's stricter parser saw nothing and failed open - so two agents could
     # be handed overlapping files.
+    # Ignore code blocks before the line-anchored search: a fenced or indented
+    # example quotes the template and would supply its own declaration in place
+    # of the issue's, reserving the wrong paths and masking real depends-on
+    # edges (issue #294).
     match = re.search(
         r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
-        body, re.IGNORECASE | re.MULTILINE,
+        strip_code_blocks(body), re.IGNORECASE | re.MULTILINE,
     )
     if not match:
         return []
@@ -608,7 +673,9 @@ def parse_touches(body: str) -> List[str]:
     return [
         p.strip().strip("`")
         for p in raw.split(",")
-        if p.strip() and declared_path_is_safe(p.strip().strip("`"))
+        if p.strip()
+        and declared_path_is_safe(p.strip().strip("`"))
+        and _is_plausible_declared_path(p.strip().strip("`"))
     ]
 
 

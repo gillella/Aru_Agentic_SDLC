@@ -163,5 +163,45 @@ class TrustBoundaryTests(unittest.TestCase):
         self.assertEqual([item["number"] for item in result["candidates"]], [11])
 
 
+class DependencyCodeBlockTests(unittest.TestCase):
+    """#294 AC for parse_dependencies: the same code-block exclusions apply."""
+
+    BODY = (
+        "## Feature Description\n"
+        "Issues follow this shape:\n\n"
+        "```\n"
+        "depends-on: none\n"
+        "touches: scripts/EXAMPLE.py\n"
+        "```\n\n"
+        "## Dependencies\n"
+        "depends-on: #288, #289\n"
+    )
+
+    def test_real_dependencies_win_over_fenced_example(self):
+        self.assertEqual(
+            fetch_next_issue.parse_dependencies(self.BODY), [288, 289]
+        )
+
+    def test_indented_example_is_ignored(self):
+        body = (
+            "## Example\n\n"
+            "    depends-on: none\n\n"
+            "## Dependencies\n"
+            "depends-on: #12, #14\n"
+        )
+        self.assertEqual(fetch_next_issue.parse_dependencies(body), [12, 14])
+
+    def test_plain_body_is_unaffected(self):
+        self.assertEqual(
+            fetch_next_issue.parse_dependencies("depends-on: #12, #14"),
+            [12, 14],
+        )
+
+    def test_genuine_none_still_parses_as_unblocked(self):
+        self.assertEqual(
+            fetch_next_issue.parse_dependencies("depends-on: none"), []
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

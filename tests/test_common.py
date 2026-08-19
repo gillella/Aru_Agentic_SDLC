@@ -315,3 +315,80 @@ class MetadataTrustTests(unittest.TestCase):
         self.assertNotIn("editor", issue)
         self.assertFalse(
             common.is_trusted_metadata_author(issue, owner="gillella"))
+
+
+class ProseAndCodeBlockExclusionTests(unittest.TestCase):
+    """#294: line-anchored metadata must not treat code or prose as paths.
+
+    A fenced block begins at column 0 and an indented block is indistinguishable
+    from a declaration to a ``^[ \t]*`` anchor, and a prose sentence that
+    happens to mention ``touches:`` at line start must never become a
+    reservation.
+    """
+
+    TEMPLATE = (
+        "## Feature Description\n"
+        "Issues follow this template:\n\n"
+        "```\n"
+        "depends-on: none\n"
+        "touches: scripts/EXAMPLE.py, tests/test_EXAMPLE.py\n"
+        "```\n\n"
+        "## Dependencies\n"
+        "depends-on: #288, #289\n"
+        "touches: scripts/intake.py, tests/test_intake.py\n"
+    )
+
+    def test_real_declaration_wins_over_fenced_example(self):
+        self.assertEqual(
+            parse_touches(self.TEMPLATE),
+            ["scripts/intake.py", "tests/test_intake.py"],
+        )
+
+    def test_tilde_fences_are_handled(self):
+        self.assertEqual(
+            parse_touches(self.TEMPLATE.replace("```", "~~~")),
+            ["scripts/intake.py", "tests/test_intake.py"],
+        )
+
+    def test_indented_code_block_is_ignored(self):
+        body = (
+            "## Example\n\n"
+            "    touches: scripts/EXAMPLE.py\n"
+            "    depends-on: none\n\n"
+            "## Dependencies\n"
+            "touches: scripts/real.py\n"
+        )
+        self.assertEqual(parse_touches(body), ["scripts/real.py"])
+
+    def test_tab_indented_block_is_ignored(self):
+        body = "\ttouches: scripts/EXAMPLE.py\n\n## Dependencies\ntouches: scripts/real.py\n"
+        self.assertEqual(parse_touches(body), ["scripts/real.py"])
+
+    def test_em_dash_prose_tail_is_rejected(self):
+        # Observed on #294's own first draft: the parse returned the em-dash
+        # prose fragment as a reserved path.
+        self.assertEqual(
+            parse_touches("`touches:` declaration \u2014 every issue discusses it"),
+            [],
+        )
+
+    def test_whitespace_inside_a_value_is_rejected(self):
+        self.assertEqual(parse_touches("touches: scripts/foo bar.py"), [])
+        self.assertEqual(parse_touches("touches: scripts/a.py, b c.py"),
+                         ["scripts/a.py"])
+
+    def test_quoted_wrapper_is_rejected(self):
+        self.assertEqual(parse_touches('touches: "scripts/foo.py"'), [])
+
+    def test_unterminated_fence_fails_closed(self):
+        # No declaration makes an issue non-claimable; a wrong one causes two
+        # agents to collide. Prefer the former.
+        self.assertEqual(parse_touches("```\ntouches: scripts/EXAMPLE.py"), [])
+
+    def test_strip_code_blocks_preserves_line_count(self):
+        body = "a\n```\nb\n```\nc\n    indented"
+        stripped = common.strip_code_blocks(body)
+        # split("\n") not splitlines(): the trailing blank line that represents
+        # the blanked indented block must survive the round-trip.
+        self.assertEqual(stripped.split("\n"), ["a", "", "", "", "c", ""])
+        self.assertEqual(len(stripped.split("\n")), len(body.split("\n")))

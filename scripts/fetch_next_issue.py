@@ -34,6 +34,7 @@ from common import (
     metadata_line_is_command_like,
     parse_touches,
     repository_owner_login,
+    strip_code_blocks,
     repository_trusted_logins,
     run_cmd,
     run_gh_json,
@@ -318,9 +319,11 @@ def parse_dependencies(body: str) -> List[int]:
     """Parses 'depends-on: #12, #14' pattern from issue body."""
     if not body:
         return []
+    # A fenced or indented template example would otherwise supply its example
+    # 'depends-on: none', masking this issue's real prerequisites (issue #294).
     match = re.search(
         r"^\s*depends-on\s*:\s*(.*?)\s*$",
-        body,
+        strip_code_blocks(body),
         re.IGNORECASE | re.MULTILINE,
     )
     if not match:
