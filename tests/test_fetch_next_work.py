@@ -653,7 +653,31 @@ class UnreadableQueueTests(unittest.TestCase):
         self.assertEqual(res["work"]["type"], "error")
         self.assertIn("could not be read", res["work"]["reason"])
 
-    def test_unknown_threads_on_authored_pr_block_new_issue_selection(self):
+    def test_unknown_threads_on_authored_pr_are_skipped_not_fatal(self):
+        # A read failure on ONE PR must not idle the whole board: the PR is
+        # dropped from the candidate set and selection continues.
+        authored = pr(57, "author:agent-2", "family:openai")
+        authored["_active_review_feedback"] = None
+        other = pr(58, "author:agent-1", "family:anthropic")
+        parts = {
+            "candidates": [{"number": 99, "title": "new work"}],
+            "my_in_flight": None, "blocked": [], "conflicted": [],
+            "missing_touches": [], "not_ready": [],
+        }
+        with patch.object(fnw, "list_work_prs", return_value=[authored, other]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts):
+            res = fnw.select("agent-2", "openai", 3, 30)
+        # Not an error: peer review is still on offer, and the unreadable PR
+        # surfaces in skipped_prs naming the read failure.
+        self.assertEqual(res["work"]["type"], "review")
+        self.assertEqual(res["work"]["pr"], 58)
+        refused = {s["number"]: s["why"] for s in res["skipped_prs"]}
+        self.assertIn(57, refused)
+        self.assertIn("unreadable", refused[57])
+
+    def test_unknown_threads_on_authored_pr_do_not_block_issue_selection(self):
+        # With the unreadable PR skipped, a claimable issue is still served.
         authored = pr(57, "author:agent-2", "family:openai")
         authored["_active_review_feedback"] = None
         parts = {
@@ -665,22 +689,22 @@ class UnreadableQueueTests(unittest.TestCase):
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
             res = fnw.select("agent-2", "openai", 3, 30)
-        self.assertEqual(res["work"]["type"], "error")
-        self.assertEqual(res["claimable_issues"], [])
+        self.assertEqual(res["work"]["type"], "issue")
+        self.assertEqual(res["work"]["issue"], 99)
 
-    def test_unknown_threads_on_peer_pr_block_new_issue_selection(self):
-        peer_pr = pr(57, "author:agent-1", "family:anthropic")
-        peer_pr["_active_review_feedback"] = None
+    def test_every_pr_unreadable_and_no_issue_reports_no_work(self):
+        # No hard error, no exit-code change: the selector reports no work.
+        unreadable_pr = pr(57, "author:agent-1", "family:anthropic")
+        unreadable_pr["_active_review_feedback"] = None
         parts = {
-            "candidates": [{"number": 99, "title": "new work"}],
-            "my_in_flight": None, "blocked": [], "conflicted": [],
-            "missing_touches": [], "not_ready": [],
+            "candidates": [], "my_in_flight": None, "blocked": [],
+            "conflicted": [], "missing_touches": [], "not_ready": [],
         }
-        with patch.object(fnw, "list_work_prs", return_value=[peer_pr]), \
+        with patch.object(fnw, "list_work_prs", return_value=[unreadable_pr]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
             res = fnw.select("agent-2", "openai", 3, 30)
-        self.assertEqual(res["work"]["type"], "error")
+        self.assertEqual(res["work"]["type"], "idle")
         self.assertEqual(res["claimable_issues"], [])
 
 

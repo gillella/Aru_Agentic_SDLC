@@ -777,19 +777,10 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
                 "missing_touches": [], "operator_only_issues": []}
 
-    unreadable_threads = [
-        pr["number"] for pr in prs if review_thread_count(pr) is None
-    ]
-    if unreadable_threads:
-        numbers = ", ".join(f"#{number}" for number in unreadable_threads)
-        return {"agent": agent, "family": family,
-                "work": {"type": "error", "skill": None,
-                         "reason": f"review thread state could not be read for {numbers}"},
-                "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
-                "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
-                "escalated_prs": [], "claimable_issues": [],
-                "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
-                "missing_touches": [], "operator_only_issues": []}
+    # A PR whose review state cannot be read is not a candidate - it is skipped
+    # (with its reason) and selection continues over the rest. A transient read
+    # on one PR must not idle the whole agent for a loop cycle.
+    unreadable = {pr["number"] for pr in prs if review_thread_count(pr) is None}
 
     # 1. Finish what I started.
     mine = [p for p in prs if needs_my_attention(p, agent)]
@@ -843,7 +834,10 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         if verdict["eligible"]:
             reviewable.append((pr, verdict))
         else:
-            skipped.append({"number": pr["number"], "why": verdict["reason"]})
+            reason = verdict["reason"]
+            if pr["number"] in unreadable:
+                reason = "review thread state is unreadable"
+            skipped.append({"number": pr["number"], "why": reason})
 
     # Cross-family first, then degraded same-family, oldest PR first within each.
     reviewable.sort(key=lambda pair: (not pair[1]["cross_family"], -waiting_minutes(pair[0])))
