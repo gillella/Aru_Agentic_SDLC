@@ -167,6 +167,10 @@ action. For `tests` and `verification`, read the corresponding
   `create_pr.py --refresh-pr`. If `work.gate_details.verification` reports
   malformed or duplicate markers that block the helper, repair the marker
   structure first and then rerun the helper; never fabricate its JSON.
+- `spec-sync` — the code and the spec table fell out of sync: update the
+  spec table or the code so they agree, then run
+  `python3 "$ARU_SDLC_HOME/scripts/sync_spec.py"` (or the PR's documented
+  sync command) and push the new head.
 
 Then refresh the evidence for the new head with
 `create_pr.py --refresh-pr <PR> --issue <N> --verify-command ...` and return to

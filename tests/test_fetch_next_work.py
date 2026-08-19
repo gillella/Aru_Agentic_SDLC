@@ -1052,6 +1052,7 @@ class GateFixRoutingContractTests(unittest.TestCase):
             "review-evidence": "Withdrawn:",
             "tests": "test coverage",
             "verification": "--refresh-pr",
+            "spec-sync": "sync_spec.py",
         }
         self.assertEqual(set(required), set(fnw.AUTHOR_FIXABLE_GATES),
                          "a gate was added without an action marker to assert on")

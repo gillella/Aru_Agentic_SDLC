@@ -394,7 +394,7 @@ def needs_my_attention(pr: dict[str, Any], agent: str) -> bool:
 # reply exists. Generic `review` (needs a peer) is never author-fixable.
 AUTHOR_FIXABLE_GATES = frozenset({
     "accept", "ci", "rebased", "review-evidence", "size", "tests",
-    "verification",
+    "verification", "spec-sync",
 })
 PEER_ROUTABLE_GATES = frozenset({"review"})
 
