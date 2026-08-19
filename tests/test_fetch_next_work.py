@@ -1174,7 +1174,6 @@ class StaleAttributionReportTests(unittest.TestCase):
 class AgentResolutionTests(unittest.TestCase):
     def setUp(self):
         import tempfile
-        import io
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.presence = Path(self.temporary.name)

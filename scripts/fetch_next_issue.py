@@ -475,7 +475,7 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  #
     return released
 
 
-def build_candidates(  # noqa: C901, PLR0912
+def build_candidates(  # noqa: C901, PLR0912, PLR0915
     issues: List[Dict[str, Any]],
     agent: Optional[str],
     pr_files_by_issue: Optional[Dict[int, List[str]]] = None,

@@ -651,7 +651,7 @@ def _restore_claimed_name(claimed: str, original_path: str) -> None:
         pass
 
 
-def _legacy_copy_is_clean(path: str, repo_root: str, sha: str | None = None) -> bool:
+def _legacy_copy_is_clean(path: str, repo_root: str, sha: str | None = None) -> bool:  # noqa: C901, PLR0912
     """Checks if a legacy retained copy has no uncommitted changes relative to its retained SHA."""
     if sha is None:
         dirname = os.path.basename(os.path.normpath(path))

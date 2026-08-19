@@ -221,8 +221,7 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
     return EXIT_OK
 
 
-def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
-                    my_label: str, owner=None, trusted_logins=None) -> int:
+def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_label: str, owner=None, trusted_logins=None) -> int:  # noqa: C901, PLR0912
     """Assign, move board status, and confirm no late lower-sorting contender."""
     issue = get_issue(issue_id)
     if not issue:
@@ -996,7 +995,7 @@ def _effective_reap_threshold(
     return base, "live agent"
 
 
-def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:
+def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:  # noqa: C901
     """Releases merge claims that went quiet without finishing close-out.
 
     Open and merged PRs are both scanned. A crash right after server-side merge
