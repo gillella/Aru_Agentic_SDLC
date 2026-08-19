@@ -231,9 +231,7 @@ def _verify_claim_target(
     return True, "ok"
 
 
-def audit_docs_and_skills(
-    repo_dir: Path, cli_specs: Dict[str, Dict[str, Any]], head_sha: Optional[str] = None
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def audit_docs_and_skills(repo_dir: Path, cli_specs: Dict[str, Dict[str, Any]], head_sha: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # noqa: C901, PLR0912, PLR0915
     """Audit markdown docs and specs against code in both directions under the snapshot."""
     drift_findings: List[Dict[str, Any]] = []
     claims: List[Dict[str, Any]] = []
