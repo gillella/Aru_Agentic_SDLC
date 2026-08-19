@@ -1131,6 +1131,117 @@ def set_board_status(issue_number: int, status: str) -> bool:
     return moved
 
 
+def get_issue_priority_field(issue_number: int) -> Optional[str]:
+    """Returns the Project 'Priority' single-select value (e.g. 'P0'..'P3').
+
+    Returns ``None`` on any GraphQL failure, missing field, or value, so the
+    caller can fail closed instead of guessing. ``priority:pN`` labels are the
+    canonical source; this board field is a synchronized mirror.
+    """
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return None
+    owner, repo = slug.split("/", 1)
+    query = """
+    query($owner:String!, $repo:String!, $number:Int!) {
+      repository(owner:$owner, name:$repo) {
+        issue(number:$number) {
+          projectItems(first:10) {
+            nodes {
+              priority: fieldValueByName(name:"Priority") {
+                ... on ProjectV2ItemFieldSingleSelectValue { name }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    cmd = [
+        "gh", "api", "graphql",
+        "-f", f"query={query}",
+        "-F", f"owner={owner}",
+        "-F", f"repo={repo}",
+        "-F", f"number={issue_number}",
+    ]
+    res = run_gh_json(cmd)
+    if not isinstance(res, dict) or res.get("errors"):
+        return None
+    try:
+        nodes = res["data"]["repository"]["issue"]["projectItems"]["nodes"]
+    except (KeyError, TypeError):
+        return None
+    for node in nodes or []:
+        value = (node or {}).get("priority") or {}
+        name = value.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return None
+
+
+def set_issue_priority_field(issue_number: int, value: str) -> bool:
+    """Sets the governed Project 'Priority' field to a P0..P3 value.
+
+    ``value`` must already be an exact option (e.g. 'P2'). Returns True only
+    when at least one board item updated, mirroring ``set_board_status``.
+    """
+    slug = get_repo_slug()
+    if not slug or "/" not in slug or "P" not in value:
+        return False
+    items = get_issue_project_items(issue_number)
+    items = select_governed_project_items(items, slug)
+    if not items:
+        if not attach_issue_to_governed_project(issue_number):
+            return False
+        items = select_governed_project_items(
+            get_issue_project_items(issue_number), slug
+        )
+    if not items:
+        return False
+
+    updated = False
+    for item in items:
+        project = item.get("project") or {}
+        field = next(
+            (f for f in project.get("fields", []) if f.get("name") == "Priority"),
+            None,
+        )
+        if not field:
+            continue
+        option = next(
+            (o for o in field.get("options", []) if o.get("name") == value),
+            None,
+        )
+        if not option:
+            continue
+        mutation = """
+        mutation($project:ID!, $item:ID!, $field:ID!, $option:String!) {
+          updateProjectV2ItemFieldValue(input:{
+            projectId:$project, itemId:$item, fieldId:$field,
+            value:{ singleSelectOptionId:$option }
+          }) { projectV2Item { id } }
+        }
+        """
+        cmd = [
+            "gh", "api", "graphql",
+            "-f", f"query={mutation}",
+            "-F", f"project={project['id']}",
+            "-F", f"item={item['id']}",
+            "-F", f"field={field['id']}",
+            "-F", f"option={option['id']}",
+        ]
+        code, _, err = run_cmd(cmd, check=False)
+        if code == 0:
+            updated = True
+        else:
+            print(
+                f"[WARN] Priority field update failed for project "
+                f"'{project.get('title')}': {err}",
+                file=sys.stderr,
+            )
+    return updated
+
+
 def add_issue_to_project(issue_number: int, project_number: int, owner: str = "@me") -> bool:
     """Adds an issue to a project board. Idempotent - re-adding is a no-op."""
     slug = get_repo_slug()

@@ -73,6 +73,7 @@ from common import (
     label_names as issue_label_names,
 )
 from fetch_next_issue import (
+    active_increment_scope,
     attach_open_pr_file_snapshots,
     build_candidates,
     pr_files_by_issue_from_prs,
@@ -868,6 +869,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     issues = list_open_issues()
     parts = build_candidates(
         issues, agent, pr_files_by_issue=pr_files_by_issue_from_prs(prs),
+        increment_scope=active_increment_scope(),
     )
 
     if feedback is not None:

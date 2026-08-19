@@ -28,19 +28,123 @@ from common import (
     claimed_by,
     get_current_branch,
     get_issue,
+    get_issue_priority_field,
     get_repo_slug,
     is_trusted_metadata_author,
     list_open_issues,
     metadata_line_is_command_like,
     parse_touches,
     repository_owner_login,
+    set_issue_priority_field,
     strip_code_blocks,
     repository_trusted_logins,
     run_cmd,
     run_gh_json,
     touches_conflict,
 )
+from delivery_increments import DeliveryIncrementStore
 from update_issue_status import update_status
+
+# Canonical Priority ranking: `priority:p0` is the highest. The governance
+# label is the canonical source; the Project Board Priority field is a
+# synchronized mirror (see common.get_issue_priority_field).
+PRIORITY_RANK = {
+    "priority:p0": 0,
+    "priority:p1": 1,
+    "priority:p2": 2,
+    "priority:p3": 3,
+}
+
+
+def priority_rank(labels: List[Dict[str, Any]]) -> "tuple[Optional[int], Optional[str]]":
+    """Returns (rank, None) when exactly one priority:pN label is present.
+
+    Fails closed with (None, reason) on missing, duplicate, or contradictory
+    priority metadata so the picker reports the issue for grooming instead of
+    guessing.
+    """
+    found = [
+        (label.get("name") or "").lower()
+        for label in labels
+        if (label.get("name") or "").lower() in PRIORITY_RANK
+    ]
+    if not found:
+        return None, "missing priority:pN label"
+    unique = sorted(set(found))
+    if len(unique) > 1:
+        return None, f"contradictory priority labels: {', '.join(unique)}"
+    if len(found) > 1:
+        return None, f"duplicate priority label: {found[0]}"
+    return PRIORITY_RANK[unique[0]], None
+
+
+def active_increment_scope(project_id: Optional[str] = None) -> Optional[set]:
+    """Resolves the active operator-authorized increment's issue scope.
+
+    Returns the set of in-scope issue numbers, or ``None`` when no active
+    increment exists or its state cannot be resolved unambiguously (callers
+    fail closed on ``IncrementError``). The store is the durable record
+    authorized by the operator through the #205 flow.
+    """
+    try:
+        store = DeliveryIncrementStore()
+        if project_id is None:
+            project_id = repo_project_id()
+        increment = store.active(project_id) if project_id else None
+    except Exception:
+        return None
+    if not increment:
+        return None
+    scope = increment.get("issue_scope") or []
+    return {int(num) for num in scope}
+
+
+def repo_project_id() -> Optional[str]:
+    """Deterministic project id for this repository, or None when unknown."""
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return None
+    owner, repo = slug.split("/", 1)
+    return f"proj_{owner}_{repo}".replace("-", "_")
+
+
+def canonical_priority_display(labels: List[Dict[str, Any]]) -> Optional[str]:
+    """The canonical board-field spelling ('P0'..'P3') of an issue's label."""
+    rank, _ = priority_rank(labels)
+    if rank is None:
+        return None
+    name = next(
+        (label.get("name") for label in labels
+         if (label.get("name") or "").lower() in PRIORITY_RANK),
+        None,
+    )
+    if not name:
+        return None
+    return name[len("priority:"):].upper()
+
+
+def sync_board_priority(issue: Dict[str, Any]) -> Optional[str]:
+    """Enforces the Project Priority field mirror for one issue.
+
+    The ``priority:pN`` label is the canonical source. The board Priority
+    field must agree; when it disagrees the field is deterministically synced
+    from the label. Returns the canonical display value ('P0'..'P3') on
+    agreement or successful sync, else ``None`` (fail closed - never guess).
+    """
+    labels = issue.get("labels", [])
+    canonical = canonical_priority_display(labels)
+    if canonical is None:
+        return None
+    field_value = get_issue_priority_field(issue.get("number"))
+    if field_value == canonical:
+        return canonical
+    if field_value is None:
+        # Field unreadable is not a disagreement we can prove or fix; fail
+        # closed rather than guess.
+        return None
+    if set_issue_priority_field(issue.get("number"), canonical):
+        return canonical
+    return None
 
 
 ISSUE_IN_BRANCH = re.compile(r"issue-(\d+)", re.IGNORECASE)
@@ -481,8 +585,18 @@ def build_candidates(  # noqa: C901, PLR0912, PLR0915
     pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
     repo_owner: Optional[str] = None,
     trusted_logins: Optional[set] = None,
+    increment_scope: Optional[set] = None,
 ) -> Dict[str, Any]:
-    """Partitions open issues into in-flight, blocked, and claimable."""
+    """Partitions open issues into in-flight, blocked, and claimable.
+
+    ``increment_scope`` (set of issue numbers from the active authorized
+    Delivery Increment) restricts claimable candidates to the active sprint:
+    Ready, dependency-unblocked, path-safe issues outside the scope are
+    returned as ``future_inventory`` and cannot be claimed. Issues with
+    missing, duplicate, or contradictory ``priority:pN`` metadata fail closed
+    and are returned as ``integrity_issues`` for grooming. Claimable
+    candidates sort by priority (P0 > P1 > P2 > P3) then ascending issue
+    number as the deterministic tie-break."""
     open_numbers = {i["number"] for i in issues}
 
     in_flight_paths: List[str] = []
@@ -511,6 +625,8 @@ def build_candidates(  # noqa: C901, PLR0912, PLR0915
 
     candidates, blocked, conflicted, not_ready, missing_touches = [], [], [], [], []
     operator_only = []
+    future_inventory = []
+    integrity_issues = []
 
     for issue in issues:
         num = issue["number"]
@@ -549,11 +665,32 @@ def build_candidates(  # noqa: C901, PLR0912, PLR0915
             conflicted.append({"number": num, "conflict": list(clash)})
             continue
 
+        # Priority integrity gate: missing/duplicate/contradictory priority
+        # fails closed for this issue and is reported for grooming.
+        rank, reason = priority_rank(labels)
+        if rank is None:
+            integrity_issues.append({"number": num, "reason": reason})
+            continue
+
+        # Active-increment gate: only stories inside the operator-authorized
+        # sprint may be claimed. Ready stories outside it stay visible as
+        # future inventory (never claimable as new implementation).
+        if increment_scope is not None and num not in increment_scope:
+            future_inventory.append(issue)
+            continue
+
         candidates.append(issue)
 
-    candidates.sort(key=lambda x: x["number"])
+    # Priority sort: P0..P3 then lowest issue number as deterministic tie-break.
+    def _sort_key(item: Dict[str, Any]) -> tuple:
+        rank, _ = priority_rank(item.get("labels", []))
+        return (rank if rank is not None else 99, item["number"])
+
+    candidates.sort(key=_sort_key)
     return {
         "candidates": candidates,
+        "future_inventory": future_inventory,
+        "integrity_issues": integrity_issues,
         "blocked": blocked,
         "conflicted": conflicted,
         "not_ready": not_ready,
@@ -586,7 +723,10 @@ def main():  # noqa: C901, PLR0912, PLR0915
             issues = list_open_issues()
 
     pr_files = list_open_pr_files_by_issue()
-    parts = build_candidates(issues, args.agent, pr_files_by_issue=pr_files)
+    parts = build_candidates(
+        issues, args.agent, pr_files_by_issue=pr_files,
+        increment_scope=active_increment_scope(),
+    )
     candidates = parts["candidates"]
     my_in_flight = parts["my_in_flight"]
 

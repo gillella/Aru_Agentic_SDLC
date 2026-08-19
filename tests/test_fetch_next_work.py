@@ -371,7 +371,7 @@ class PriorityTests(unittest.TestCase):
             "number": 2,
             "title": "document behavior",
             "body": "touches: docs/**\n",
-            "labels": [{"name": "status:ready"}],
+            "labels": [{"name": "status:ready"}, {"name": "priority:p3"}],
             "author": {"login": "owner"},
         }
         with patch.object(fnw, "list_work_prs", return_value=[]), \
@@ -602,7 +602,7 @@ class ParkedInReviewTests(unittest.TestCase):
                 "number": 21,
                 "title": "feat issue 21",
                 "body": "touches: src/b.py\n",
-                "labels": [{"name": "status:ready"}],
+                "labels": [{"name": "status:ready"}, {"name": "priority:p3"}],
                 "author": {"login": "owner"},
             },
         ]
@@ -730,7 +730,7 @@ class ResearchRoutingTests(unittest.TestCase):
         issue = {
             "number": 101,
             "title": "research: citations",
-            "labels": [{"name": "type:research"}, {"name": "status:ready"}],
+            "labels": [{"name": "type:research"}, {"name": "status:ready"}, {"name": "priority:p3"}],
         }
         parts = {
             "candidates": [issue],
