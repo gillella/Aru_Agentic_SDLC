@@ -289,6 +289,14 @@ jobs:
               py_compile.compile(f, doraise=True)
           "
 
+      # This playbook is a guidelines/meta project: most PRs change docs, skills,
+      # and review prose rather than Python the CI needs to re-prove. Running the
+      # full unit test suite on every pull request is expensive for little signal
+      # here, so it is deferred to the end of the pipeline instead - when a commit
+      # lands on main, on the weekly schedule, or on manual dispatch. PRs still
+      # get every fast, cheap static gate above (secret scan, dependency audit,
+      # import boundaries, docs freshness, lint, line ceilings, syntax).
       - name: Execute Tests
+        if: github.event_name != 'pull_request'
         run: |
           python -m unittest discover tests
