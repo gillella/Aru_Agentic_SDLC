@@ -141,34 +141,30 @@ error strands the agent while the board still has work.
 ### loop
 
 Read `prompts/fleet-worker.md`, then run its loop **inside the current desktop
-task**. Pace dynamically: after progress, ask the picker again immediately;
-for unchanged, idle, Complete, review/CI/dependency wait, rate limit, exhausted
-credits, helper failure, or GitHub/network error, use the app's supported wait
-or background primitive with a long fallback heartbeat, not a fixed interval.
+task**. Pace dynamically: after progress, ask the picker again immediately; for
+unchanged, idle, Complete, review/CI/dependency wait, rate limit, exhausted credits,
+helper failure, or GitHub/network error, use supported app-native wait or background
+primitives with a long fallback heartbeat, not a fixed interval.
+Whenever entering a wait state or heartbeat, emit the standard **Status Card**
+defined in `prompts/fleet-worker.md` before sleeping.
 Do not emit a final response for a recoverable state.
 
 Loop mode ends intentionally only when the operator explicitly stops it or a
 specific decision/approval needs human intervention. If
-`$HOME/.aru/factory-loop.stop` applies to this project, stop immediately and
-do not arm native wakes. Ambiguous board identity, an unresolved `touches:`
-conflict, money semantics, security posture, or a hard rule can require that
-intervention; explain the exact decision needed on the linked GitHub issue/PR,
-then notify Slack with `--event hitl` (operator mention) via
-`python3 "$ARU_SDLC_HOME/scripts/slack_notify.py"`. Every invocation requires
-`--project-id <PROJECT_ID> --agent <AGENT_ID> --family <FAMILY> --event
-<blocked|waiting-on|hitl> --repo <OWNER/REPO>` plus the linked `--issue`/`--pr`,
-`--repo-dir <CONSUMER_REPO_ROOT>`, and event details.
-For dependency / claim waits use `--event waiting-on`
-(name the peer agent and their issue/PR; never steal the claim). For other
-blocks use `--event blocked`. Idle ticks and heartbeats must **not** notify.
-GitHub remains the work queue; Slack downtime must not halt the loop. Full
-command examples: `prompts/fleet-worker.md` and `docs/slack-control-room.md`.
-Routine helper exits `1` and repeated CI or review rounds do not end the loop.
-Exception: a post-merge exit `1` with durable `## Human intervention required`
-evidence means `merge_pr.py` exhausted its close-out retries; notify Slack with
-`--event hitl` and stop instead of multiplying retries in the desktop task.
-When context is running short, recover through the desktop product's context
-compaction and durable GitHub/worktree state, then continue.
+`$HOME/.aru/factory-loop.stop` applies to this project, stop immediately and do
+not arm native wakes. Ambiguous board identity, unresolved `touches:` conflicts,
+money semantics, security posture, or hard rules can require intervention; explain
+the exact decision needed on the linked GitHub issue/PR, then notify Slack with
+`--event hitl` (operator mention) via `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py"`.
+Every invocation requires `--project-id <PROJECT_ID> --agent <AGENT_ID> --family <FAMILY>
+--event <blocked|waiting-on|hitl> --repo <OWNER/REPO> --repo-dir <CONSUMER_REPO_ROOT>` plus linked issue/PR.
+For dependency/claim waits use `--event waiting-on`; for other blocks use `--event blocked`.
+Idle ticks and heartbeats must not notify. Full examples: `prompts/fleet-worker.md`.
+Routine helper exits `1` and repeated CI/review rounds do not end the loop. Exception:
+post-merge exit `1` with durable `## Human intervention required` means `merge_pr.py`
+exhausted retries; notify Slack (`--event hitl`) and stop. When context is running short,
+recover through the desktop product's context compaction and durable GitHub/worktree
+state, then continue.
 
 `scripts/run_fleet.py` remains an **optional headless CLI mode**; the ephemeral
 launcher attests Codex/OpenAI, Claude/Anthropic, and Gemini/Google;
