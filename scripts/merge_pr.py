@@ -1959,6 +1959,38 @@ def check_test_coverage(pr):
     return True, f"Production changes include test coverage in {len(tests)} test file(s)."
 
 
+def check_spec_sync(pr, repo_dir=None):
+    """Require specifications and CLI arguments to remain synchronized with implementation on PR head."""
+    merge_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(merge_dir, "sync_spec.py"),
+        os.path.join(os.environ.get("ARU_SDLC_HOME", ""), "scripts", "sync_spec.py"),
+        os.path.join(repo_dir or ".", "scripts", "sync_spec.py"),
+    ]
+    sync_script = next((c for c in candidates if c and os.path.exists(c)), None)
+    if not sync_script:
+        return False, "Required sync_spec.py engine is missing; cannot audit specification synchronization."
+
+    head_sha = (pr or {}).get("headRefOid") if isinstance(pr, dict) else None
+    cmd = [sys.executable, sync_script, "--check"]
+    if repo_dir:
+        cmd.extend(["--repo-dir", repo_dir])
+    if head_sha:
+        check_proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{head_sha}^{{commit}}"],
+            cwd=repo_dir or ".",
+            capture_output=True,
+            check=False,
+        )
+        if check_proc.returncode == 0:
+            cmd.extend(["--head", head_sha])
+
+    code, out, err = run_cmd(cmd, check=False)
+    if code == 0:
+        return True, "Specifications and code are synchronized."
+    return False, f"Specification drift detected: {out or err}"
+
+
 def is_merged(pr):
     return (pr.get("state") or "").upper() == "MERGED" or bool(pr.get("mergedAt"))
 
@@ -2419,6 +2451,7 @@ def evaluate_dod(pr, issue_bodies, evidence):
         ("rebased", *check_rebased(pr)),
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
+        ("spec-sync", *check_spec_sync(pr)),
         ("review rounds", *check_review_rounds(pr)),
     ]
     for num in issue_nums:
