@@ -109,6 +109,7 @@ DEFAULT_ROUND_CAP = 3
 # may take it. Long enough that a mixed fleet routes correctly; short enough
 # that a single-family fleet is never stuck.
 DEFAULT_CROSS_FAMILY_WAIT_MIN = 30
+DEFAULT_REAP_AFTER_HOURS = 4
 
 PR_FIELDS = ("number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
              "createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt,"
@@ -937,8 +938,8 @@ def main():  # noqa: C901, PLR0912, PLR0915
     )
     parser.add_argument("--cross-family-wait", type=int, default=DEFAULT_CROSS_FAMILY_WAIT_MIN,
                         metavar="MINUTES")
-    parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
-                        help="Release issue and review claims idle longer than HOURS")
+    parser.add_argument("--reap-after", type=int, default=DEFAULT_REAP_AFTER_HOURS, metavar="HOURS",
+                        help="Release issue and review claims idle longer than HOURS (default: 4h; 0 disables)")
     args = parser.parse_args()
 
     session_id = args.session_id or _default_session_id()
@@ -982,10 +983,13 @@ def main():  # noqa: C901, PLR0912, PLR0915
             )
             return 1
 
-    if args.reap_after:
-        reap_stale_reviews(args.reap_after)
-        reap_stale_merges(args.reap_after)
-        reap_stale_claims(list_open_issues(), args.reap_after)
+    if args.reap_after > 0:
+        try:
+            reap_stale_reviews(args.reap_after)
+            reap_stale_merges(args.reap_after)
+            reap_stale_claims(list_open_issues(), args.reap_after)
+        except Exception as err:
+            print(f"[WARN] Autonomous claim reap encountered error: {err}", file=sys.stderr)
 
     res = select(args.agent, (args.family or "").lower() or None,
                  args.round_cap, args.cross_family_wait)
