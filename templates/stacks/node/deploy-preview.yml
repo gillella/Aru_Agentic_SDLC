@@ -61,7 +61,12 @@ jobs:
             exit 1
           fi
 
-      - name: Set up Python
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python for build helper
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -164,7 +169,12 @@ jobs:
           path: control-plane
           fetch-depth: 0
 
-      - name: Set up Python
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python for build helper
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'

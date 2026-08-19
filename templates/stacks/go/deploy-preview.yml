@@ -61,7 +61,12 @@ jobs:
             exit 1
           fi
 
-      - name: Set up Python
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Set up Python for build helper
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -164,7 +169,12 @@ jobs:
           path: control-plane
           fetch-depth: 0
 
-      - name: Set up Python
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Set up Python for build helper
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'

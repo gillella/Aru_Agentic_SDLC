@@ -672,7 +672,7 @@ reviewers:
     google: anthropic
 """
 
-DEPLOY_PREVIEW_WORKFLOW = """name: Deploy Preview
+DEPLOY_PREVIEW_WORKFLOW = r"""name: Deploy Preview
 run-name: "Deploy Preview for ${{ inputs.commit_sha }} (${{ inputs.run_token || 'default' }})"
 
 on:
@@ -725,6 +725,16 @@ jobs:
           git merge-base --is-ancestor "${TARGET_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
           git worktree add --detach ../target "${TARGET_SHA}"
 
+      - name: Validate deployment credentials
+        env:
+          DEPLOY_CREDENTIALS: ${{ secrets.PREVIEW_DEPLOY_TOKEN || secrets.DEPLOY_TOKEN }}
+          ALLOW_ANONYMOUS_PREVIEW: ${{ vars.ALLOW_ANONYMOUS_PREVIEW }}
+        run: |
+          if [ -z "${DEPLOY_CREDENTIALS}" ] && [ "${ALLOW_ANONYMOUS_PREVIEW:-false}" != "true" ]; then
+            echo "[ERROR] Deploy credentials absent. Set PREVIEW_DEPLOY_TOKEN in repository secrets." >&2
+            exit 1
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -746,12 +756,13 @@ jobs:
         env:
           TARGET_SHA: ${{ inputs.commit_sha }}
         run: |
-          jq -n \\
-            --arg run_id "${GITHUB_RUN_ID}" \\
-            --arg commit_sha "${TARGET_SHA}" \\
-            --arg repository "${GITHUB_REPOSITORY}" \\
-            --arg preview_url "skipped" \\
-            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url, is_library: true, status: "skipped"}' \\
+          TARGET_SHA_CANONICAL="$(printf '%s' "${TARGET_SHA}" | tr '[:upper:]' '[:lower:]')"
+          jq -n \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg commit_sha "${TARGET_SHA_CANONICAL}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg preview_url "skipped" \
+            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url, is_library: true, status: "skipped"}' \
             > preview-metadata.json
 
       - name: Upload exact-run library skip metadata
@@ -789,12 +800,13 @@ jobs:
           TARGET_SHA: ${{ inputs.commit_sha }}
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
-          jq -n \\
-            --arg run_id "${GITHUB_RUN_ID}" \\
-            --arg commit_sha "${TARGET_SHA}" \\
-            --arg repository "${GITHUB_REPOSITORY}" \\
-            --arg preview_url "${PAGE_URL}" \\
-            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url}' \\
+          TARGET_SHA_CANONICAL="$(printf '%s' "${TARGET_SHA}" | tr '[:upper:]' '[:lower:]')"
+          jq -n \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg commit_sha "${TARGET_SHA_CANONICAL}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg preview_url "${PAGE_URL}" \
+            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url}' \
             > preview-metadata.json
 
       - name: Upload exact-run preview metadata
@@ -838,13 +850,272 @@ jobs:
           PREVIEW_URL: ${{ needs.deploy-preview.outputs.page_url }}
           COMMIT_SHA: ${{ inputs.commit_sha }}
         run: |
-          python3 control-plane/scripts/smoke_preview.py \\
-            --url "${PREVIEW_URL}" \\
-            --has-preview "${HAS_PREVIEW}" \\
-            --is-library "${IS_LIBRARY}" \\
-            --commit-sha "${COMMIT_SHA}" \\
+          python3 control-plane/scripts/smoke_preview.py \
+            --url "${PREVIEW_URL}" \
+            --has-preview "${HAS_PREVIEW}" \
+            --is-library "${IS_LIBRARY}" \
+            --commit-sha "${COMMIT_SHA}" \
             --scenarios-file control-plane/.github/scenarios/smoke.json
 """
+
+STACK_DEPLOY_PREVIEW = {
+    "python": DEPLOY_PREVIEW_WORKFLOW,
+    "node": DEPLOY_PREVIEW_WORKFLOW.replace(
+        "      - name: Set up Python\n        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'",
+        "      - name: Set up Node.js\n        uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n\n      - name: Set up Python for build helper\n        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'",
+    ),
+    "go": DEPLOY_PREVIEW_WORKFLOW.replace(
+        "      - name: Set up Python\n        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'",
+        "      - name: Set up Go\n        uses: actions/setup-go@v5\n        with:\n          go-version: '1.22'\n\n      - name: Set up Python for build helper\n        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'",
+    ),
+}
+
+STACK_RELEASE = {
+    "python": """name: Release
+run-name: "Release ${{ inputs.tag_name || github.ref_name }}"
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release credentials
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "${RELEASE_TOKEN}" ]; then
+            echo "[ERROR] Release credentials absent. Set RELEASE_TOKEN or GITHUB_TOKEN." >&2
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip build
+
+      - name: Build distribution package
+        run: |
+          python -m build
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          gh release create "${TAG_NAME}" dist/* --generate-notes --title "${TAG_NAME}" || true
+""",
+    "node": """name: Release
+run-name: "Release ${{ inputs.tag_name || github.ref_name }}"
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release credentials
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "${RELEASE_TOKEN}" ]; then
+            echo "[ERROR] Release credentials absent. Set RELEASE_TOKEN or GITHUB_TOKEN." >&2
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies and build
+        run: |
+          npm ci || npm install
+          npm run build --if-present
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          gh release create "${TAG_NAME}" --generate-notes --title "${TAG_NAME}" || true
+""",
+    "go": """name: Release
+run-name: "Release ${{ inputs.tag_name || github.ref_name }}"
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release credentials
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "${RELEASE_TOKEN}" ]; then
+            echo "[ERROR] Release credentials absent. Set RELEASE_TOKEN or GITHUB_TOKEN." >&2
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build release binaries
+        run: |
+          mkdir -p bin
+          go build -v -o bin/ ./...
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          gh release create "${TAG_NAME}" bin/* --generate-notes --title "${TAG_NAME}" || true
+""",
+}
+
+DEPLOY_DOCS_TEMPLATE = """# Deployment and Promotion Guide
+
+This repository is governed by **Aru_Agentic_SDLC**. Deployments and release promotions are managed through the governed SDLC factory skills rather than ad-hoc scripts or unversioned manual actions.
+
+---
+
+## Governed Workflows
+
+### 1. Preview Deployment
+Preview deployments for merged commits are dispatched using the `deploy-preview` skill:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <COMMIT_SHA> [--issue <ISSUE_NUMBER>]
+```
+
+The preview deployment workflow (`.github/workflows/deploy-preview.yml`) verifies:
+- Merged state and commit ancestry on the default branch.
+- Availability of required deployment credentials (`PREVIEW_DEPLOY_TOKEN`). If credentials are absent, the workflow fails closed.
+- Automatic recording of the preview URL or remediation issue on the Project Board.
+
+### 2. Release and Checkpoints
+Releases and version tags are cut from verified merge checkpoints:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/promote.py" \\
+  --commit <MERGED_COMMIT_SHA> \\
+  --checkpoint <ckpt/PR-SHA7> \\
+  --issue <ISSUE_NUMBER> \\
+  --from-environment preview \\
+  --to-environment staging \\
+  --evidence-run <PREVIEW_RUN_ID>
+```
+
+The release workflow (`.github/workflows/release.yml`) builds release artifacts for `{stack}` upon pushing release tags (`v*.*.*`) or explicit dispatch.
+
+---
+
+## Required Secrets & Environment Variables
+
+| Secret / Env Var | Purpose | Required For |
+|---|---|---|
+| `PREVIEW_DEPLOY_TOKEN` | Token for hosting/preview infrastructure | `.github/workflows/deploy-preview.yml` |
+| `RELEASE_TOKEN` | Token for publishing releases / package registry | `.github/workflows/release.yml` |
+| `GITHUB_TOKEN` | Repository-scoped token for releases and Pages | Preview & Release |
+
+---
+
+## Guardrails
+- **No Direct Deployments**: Never deploy unmerged code or push untracked tags directly to production.
+- **Fail-Closed Gate**: All deployment and release workflows fail closed if required credentials are missing.
+- **Audit Trail**: Every preview and release event is recorded on the corresponding GitHub Issue and Project Board card.
+"""
+
+
+def render_deploy_preview_workflow(stack: str = "python") -> str:
+    """Renders a Deploy Preview workflow tailored to the stack with fail-closed credential checks."""
+    normalized = stack.strip().lower()
+    if normalized in {"node", "nodejs", "typescript", "react"}:
+        family = "node"
+    elif normalized == "go":
+        family = "go"
+    else:
+        family = "python"
+    return STACK_DEPLOY_PREVIEW[family].strip() + "\n"
+
+
+def render_release_workflow(stack: str = "python") -> str:
+    """Renders a Release workflow tailored to the stack with fail-closed credential checks."""
+    normalized = stack.strip().lower()
+    if normalized in {"node", "nodejs", "typescript", "react"}:
+        family = "node"
+    elif normalized == "go":
+        family = "go"
+    else:
+        family = "python"
+    return STACK_RELEASE[family].strip() + "\n"
+
+
+def render_deploy_docs(stack: str = "python", project_name: str = "Project") -> str:
+    """Renders docs/deploy.md explaining preview deployment and release promotions."""
+    return DEPLOY_DOCS_TEMPLATE.format(stack=stack, project_name=project_name).strip() + "\n"
 
 
 def scaffold_directory_structure(target_dir: str):
@@ -871,8 +1142,12 @@ def scaffold_directory_structure(target_dir: str):
     print("✅ Standard directory structure scaffolded.")
 
 
-def write_governance_scripts(target_dir: str):  # noqa: PLR0915
-    """Write governed review, preview, and audit-only promotion workflows."""
+def write_governance_scripts(  # noqa: PLR0915
+    target_dir: str,
+    stack: str = "python",
+    project_name: str = "Project",
+):
+    """Write governed review, preview, release, and audit-only promotion workflows."""
     project_scripts_dir = os.path.join(target_dir, "scripts")
     scripts_dir = os.path.join(target_dir, ".github", "scripts")
     workflows_dir = os.path.join(target_dir, ".github", "workflows")
@@ -931,7 +1206,18 @@ def write_governance_scripts(target_dir: str):  # noqa: PLR0915
 
     deploy_preview_wf_path = os.path.join(workflows_dir, "deploy-preview.yml")
     with open(deploy_preview_wf_path, "w", encoding="utf-8") as f:
-        f.write(DEPLOY_PREVIEW_WORKFLOW)
+        f.write(render_deploy_preview_workflow(stack))
+
+    release_wf_path = os.path.join(workflows_dir, "release.yml")
+    with open(release_wf_path, "w", encoding="utf-8") as f:
+        f.write(render_release_workflow(stack))
+
+    docs_dir = os.path.join(target_dir, "docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    deploy_docs_path = os.path.join(docs_dir, "deploy.md")
+    if not os.path.exists(deploy_docs_path):
+        with open(deploy_docs_path, "w", encoding="utf-8") as f:
+            f.write(render_deploy_docs(stack, project_name))
 
     promote_wf_source = os.path.join(
         os.path.dirname(__file__), "..", ".github", "workflows", "promote.yml"
@@ -1567,7 +1853,7 @@ def main():  # noqa: PLR0915
     create_cursor_project_rule(target)
     write_ci_workflow(target, test_runner, args.stack)
     write_templates(target)
-    write_governance_scripts(target)
+    write_governance_scripts(target, args.stack, args.name)
     if not init_git_repo(target) or not initial_commit(target, args.name):
         print("[FATAL] Local repository bootstrap failed.", file=sys.stderr)
         sys.exit(1)
