@@ -2000,6 +2000,11 @@ def check_test_coverage(pr):
         and not ((entry.get("additions") or 0) == 0 and (entry.get("deletions") or 0) > 0)
     ]
     if not tests:
+        if RELAXED:
+            # TEMPORARY fast-track (owner directive): don't require a fresh
+            # test file for every PR during the backlog effort. The full unit
+            # suite still runs at the end of the project.
+            return True, "relaxed: test-coverage requirement waived (fast-track)."
         return False, (
             "Production changes under src/ or scripts/ require a changed, non-deleted "
             "test file under tests/."
