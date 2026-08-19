@@ -323,6 +323,13 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str
     if not parse_touches(body):
         gaps.append("no touches: declaration")
 
+    bare_globs = _bare_directory_globs(body)
+    if bare_globs:
+        gaps.append(
+            "touches use a bare directory glob (reserves a whole top-level area): "
+            + ", ".join(bare_globs)
+        )
+
     if is_feat_or_fix(issue):
         missing_db = not has_decision_boundaries(body)
         missing_ng = not has_non_goals(body)
@@ -361,6 +368,50 @@ def _repository_root() -> str:
     return result.stdout.strip() if result.returncode == 0 else os.getcwd()
 
 
+_TOUCHES_LINE_RE = re.compile(
+    r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# A bare directory glob reserves a whole top-level area: `<dir>/**` (or
+# `<dir>/**/*`). A glob that names files - e.g. `docs/adr/*.md` - is fine.
+_BARE_DIR_GLOB_RE = re.compile(r"^[A-Za-z0-9_.\-]+/\*\*(?:/\*)?$")
+
+
+def _declared_touches_paths(body: str) -> list[str]:
+    """Flat list of paths declared in an issue's ``touches:`` line."""
+    m = _TOUCHES_LINE_RE.search(body)
+    if not m:
+        return []
+    return [
+        path.strip().strip("`")
+        for path in m.group(1).split(",")
+        if path.strip().strip("`")
+    ]
+
+
+def _bare_directory_globs(body: str) -> list[str]:
+    return [p for p in _declared_touches_paths(body) if _BARE_DIR_GLOB_RE.match(p)]
+
+
+def hub_path_contention(issues: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """How many open non-epic issues declare each hub path.
+
+    Hub files (``AGENTS.md``, ``scripts/common.py``) are declared by many issues
+    because nearly every governance change edits them, so they serialise the
+    board invisibly. Returns ``(path, count)`` for each path declared by two or
+    more issues, most-declared first - the paths most worth splitting around.
+    """
+    counts: dict[str, int] = {}
+    for issue in issues:
+        if is_epic(issue.get("labels", [])):
+            continue
+        for path in _declared_touches_paths(issue.get("body") or ""):
+            counts[path] = counts.get(path, 0) + 1
+    hubs = [(path, count) for path, count in counts.items() if count >= 2]
+    hubs.sort(key=lambda item: (-item[1], item[0].lower()))
+    return hubs
+
+
 def split_reasons(issue: dict[str, Any]) -> list[str]:
     """Returns concrete reasons a Ready-contract issue should be split.
 
@@ -374,18 +425,7 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
     # security hardening (#129) makes parse_touches drop root ("."/"/") and
     # "./"-prefixed declarations as unsafe, but triage must keep seeing those
     # as "repository-wide" so an over-wide issue is held for splitting.
-    touches_match = re.search(
-        r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
-        body,
-        re.IGNORECASE | re.MULTILINE,
-    )
-    declared_paths = []
-    if touches_match:
-        declared_paths = [
-            path.strip().strip("`")
-            for path in touches_match.group(1).split(",")
-            if path.strip().strip("`")
-        ]
+    declared_paths = _declared_touches_paths(body)
     area_roots = []
     repository_wide = False
     repository_root = _repository_root()
@@ -529,6 +569,19 @@ def print_capacity(
         print(f"\n  → Launch at most {n} agent(s). More will idle.")
 
 
+def _print_hub_contention(issues: list[dict[str, Any]]) -> None:
+    hubs = hub_path_contention(issues)
+    if not hubs:
+        return
+    print("\n=== Hub path contention (shared across open non-epic issues) ===")
+    print("  Paths declared by the most issues serialise the board. Split them:")
+    for path, count in hubs:
+        area = path.split("/", 1)[0]
+        print(f"  {count:>3} issues declare  {path}" + (
+            "   ← bare top-level area" if area and path.endswith("**") else ""
+        ))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Verify the Ready contract and promote Backlog issues.")
     parser.add_argument("--promote", action="store_true", help="Promote qualifying issues to Ready")
@@ -567,6 +620,7 @@ def main():
             held,
             ready_target=target,
         )
+        _print_hub_contention(issues)
         return 0
 
     if args.issue:

@@ -755,5 +755,76 @@ class CapacityTests(TrustedOwnerTests):
         self.assertIn("no touches", cap["deferred"][0][1])
 
 
+class BareDirectoryGlobTests(unittest.TestCase):
+    def test_ready_gaps_reject_bare_directory_glob(self):
+        for declaration in ("docs/**", "scripts/**", "docs/**/*"):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                gaps = tb.ready_gaps(issue(1, "type:chore", body=body), set())
+                self.assertTrue(
+                    any("bare directory glob" in g for g in gaps),
+                    f"{declaration} should be flagged, got {gaps}",
+                )
+
+    def test_file_naming_glob_is_accepted(self):
+        # A specific glob naming files rather than a whole top-level directory
+        # stays accepted by the Ready contract.
+        for declaration in ("docs/adr/*.md", "scripts/*.py", "docs/*.md"):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                gaps = tb.ready_gaps(issue(1, "type:chore", body=body), set())
+                self.assertFalse(
+                    any("bare directory glob" in g for g in gaps),
+                    f"{declaration} should not be flagged, got {gaps}",
+                )
+
+    def test_file_glob_reasons_still_span_areas(self):
+        # A file-naming glob is still classified by its first path segment, so
+        # it spans top-level areas like any concrete declaration. Use two
+        # non-companion areas (docs and tests are companions).
+        body = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: scripts/*.py, hooks/*.py",
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(22, "type:chore", body=body)),
+            ["touches span 2 top-level areas: hooks, scripts"],
+        )
+
+
+class HubPathContentionTests(unittest.TestCase):
+    def test_reports_only_declared_paths_with_count_two_or_more(self):
+        issues = [
+            issue(1, "type:fix", body="touches: AGENTS.md"),
+            issue(2, "type:feat", body="touches: AGENTS.md, scripts/common.py"),
+            issue(3, "type:chore", body="touches: scripts/common.py"),
+            issue(4, "type:chore", body="touches: docs/README.md"),
+        ]
+        hubs = dict(tb.hub_path_contention(issues))
+        self.assertEqual(hubs, {"AGENTS.md": 2, "scripts/common.py": 2})
+        self.assertNotIn("docs/README.md", hubs)
+
+    def test_epics_are_excluded_from_hub_counts(self):
+        # Declared by two non-epic issues plus an epic: the epic's declare must
+        # not inflate the hub count.
+        issues = [
+            issue(1, "type:epic", body="touches: AGENTS.md"),
+            issue(2, "type:fix", body="touches: AGENTS.md, scripts/common.py"),
+            issue(3, "type:feat", body="touches: AGENTS.md"),
+        ]
+        hubs = dict(tb.hub_path_contention(issues))
+        self.assertEqual(hubs["AGENTS.md"], 2)  # the epic's declare is ignored
+
+    def test_single_declaration_is_not_a_hub(self):
+        issues = [issue(1, "type:fix", body="touches: AGENTS.md")]
+        self.assertEqual(tb.hub_path_contention(issues), [])
+
+
 if __name__ == "__main__":
     unittest.main()
