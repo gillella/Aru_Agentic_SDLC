@@ -153,11 +153,17 @@ governed remediation.
    machine-level Cursor integration (`docs/cursor-integration.md` in
    `$ARU_SDLC_HOME`). Do not vendor a second copy of SDLC skills into this repo.
 6. **Plan Gate**: Before the first edit, `type:feat`, `needs-design`, money,
-   PII, schema, migration, and other irreversible work posts the implementation
-   plan required by `implement-next-issue`. High-risk scope triggers the gate
-   regardless of issue type labels. The plan is always post-and-proceed unless
-   the issue lacks a product decision needed to define acceptance; risk alone
-   does not require human acknowledgement.
+   PII, schema, migration, and other irreversible work — and any change that
+   introduces a new helper function, module, or script — posts the
+   implementation plan required by `implement-next-issue`. High-risk scope
+   triggers the gate regardless of issue type labels. The plan includes an
+   `### Existing Utility Reuse Audit` recording the concrete name and exact
+   search location for every shared function, module, script, or framework
+   facility evaluated and which will be reused; for each proposed new helper
+   it explains why the existing utilities are insufficient — a bare `None`
+   is not an audit. The plan is always post-and-proceed unless the issue
+   lacks a product decision needed to define acceptance; risk alone does not
+   require human acknowledgement.
 
 ---
 

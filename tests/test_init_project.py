@@ -25,6 +25,20 @@ from init_project import (  # noqa: E402
 
 
 class ProjectBootstrapTests(unittest.TestCase):
+    def test_generated_plan_gate_requires_reuse_audit_with_names_and_locations(self):
+        """Generated governance must carry the canonical reuse audit contract."""
+        rules = init_project.DEFAULT_AGENTS_TEMPLATE
+        self.assertIn("### Existing Utility Reuse Audit", rules)
+        self.assertIn("concrete name and exact", rules)
+        self.assertIn("search location", rules)
+        self.assertIn("bare `None`", rules)
+        self.assertIn("is not an audit", rules)
+
+    def test_generated_plan_gate_triggers_on_new_helper_module_or_script(self):
+        """A new helper/module/script is an independent Plan Gate trigger."""
+        rules = init_project.DEFAULT_AGENTS_TEMPLATE
+        self.assertIn("introduces a new helper function, module, or script", rules)
+
     def test_generated_governance_uses_agent_review_and_mechanical_merge(self):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
 
