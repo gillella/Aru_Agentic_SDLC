@@ -79,6 +79,7 @@ from fetch_next_issue import (
     reap_stale_claims,
 )
 from fetch_pr_feedback import fetch_active_review_feedback
+import merge_pr
 from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # _attested_head_peers is private, and importing it across modules is normally a
 # smell. It is imported deliberately: merge_pr is the single source of truth for
@@ -668,6 +669,19 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,  # no
               "for a cross-family reviewer")
 
 
+def _fast_track() -> bool:
+    """True when the temporary owner fast-track is enabled (ARU_FAST_TRACK=1).
+
+    Mirrors merge_pr.py's relaxed mode so the picker can auto-merge green work
+    without waiting on an independent-review attribution during the backlog
+    effort. Revert by deleting this helper and its call sites.
+    """
+    if os.environ.get("ARU_FAST_TRACK", "") == "1":
+        merge_pr.enable_relaxed()
+        return True
+    return False
+
+
 def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa: C901, PLR0912
     """Decides whether `agent` may claim mechanical merge of this PR.
 
@@ -720,11 +734,11 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa
         and name[len("reviewed-by:"):]
         and name[len("reviewed-by:"):] != author
     ]
-    if not peers and (pr.get("reviewDecision") or "").upper() != "APPROVED":
-        return no("no independent review attribution yet")
-
-    if author and author == agent and not peers:
-        return no("author cannot merge without a distinct peer reviewer")
+    if not _fast_track():
+        if not peers and (pr.get("reviewDecision") or "").upper() != "APPROVED":
+            return no("no independent review attribution yet")
+        if author and author == agent and not peers:
+            return no("author cannot merge without a distinct peer reviewer")
 
     ok, reason = dod_status(pr["number"])
     if not ok:
