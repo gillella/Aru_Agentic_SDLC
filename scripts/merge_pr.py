@@ -2260,7 +2260,7 @@ def prune_worktree(repo_root, branch, expected_sha):  # noqa: C901, PLR0912, PLR
             remove_retain_manifest,
             write_retain_manifest,
         )
-        if porcelain_blocks_prune(status):
+        if porcelain_blocks_prune(status, path):
             return False, (
                 f"Worktree {path} has tracked or untracked files; left untouched."
             )
@@ -2281,7 +2281,7 @@ def prune_worktree(repo_root, branch, expected_sha):  # noqa: C901, PLR0912, PLR
         if status_code != 0:
             remove_retain_manifest(path)
             return False, f"Could not inspect worktree {path}: {status_err.strip()}"
-        blocked = porcelain_dirty_except_manifest(status)
+        blocked = porcelain_dirty_except_manifest(status, path)
         if blocked is not False:
             remove_retain_manifest(path)
             if blocked is None:

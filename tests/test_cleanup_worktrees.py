@@ -93,6 +93,21 @@ class PorcelainPruneTests(unittest.TestCase):
     def test_ignored_non_cache_path_blocks(self):
         self.assertTrue(cleanup_worktrees.porcelain_blocks_prune("!! .env\n"))
 
+    def test_empty_ignored_directory_does_not_block_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_dir = Path(tmp) / ".worktrees"
+            empty_dir.mkdir()
+            status = "!! .worktrees/\n"
+            self.assertFalse(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
+    def test_non_empty_ignored_directory_blocks_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            non_empty_dir = Path(tmp) / ".worktrees"
+            non_empty_dir.mkdir()
+            (non_empty_dir / "child.txt").write_text("content")
+            status = "!! .worktrees/\n"
+            self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
     def test_retain_manifest_lines_are_ignored(self):
         status = "?? .aru-retained-clean\n!! .aru-retained-clean.tmp\n"
         self.assertFalse(cleanup_worktrees.porcelain_dirty_except_manifest(status))
@@ -100,6 +115,43 @@ class PorcelainPruneTests(unittest.TestCase):
             cleanup_worktrees.porcelain_dirty_except_manifest("?? secret.txt\n")
         )
         self.assertIsNone(cleanup_worktrees.porcelain_dirty_except_manifest(None))
+
+
+class WorktreeCleanupTests(unittest.TestCase):
+    def test_empty_ignored_directory_does_not_block_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_dir = Path(tmp) / ".worktrees"
+            empty_dir.mkdir()
+            status = "!! .worktrees/\n"
+            self.assertFalse(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
+    def test_non_empty_ignored_directory_blocks_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            non_empty_dir = Path(tmp) / ".worktrees"
+            non_empty_dir.mkdir()
+            (non_empty_dir / "child.txt").write_text("content")
+            status = "!! .worktrees/\n"
+            self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
+    def test_unreadable_nested_dir_fails_closed_and_blocks_prune(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / ".worktrees"
+            d.mkdir()
+            sub = d / "unreadable"
+            sub.mkdir()
+            try:
+                os.chmod(sub, 0o000)
+            except OSError:
+                self.skipTest("chmod 000 not supported in this environment")
+            try:
+                status = "!! .worktrees/\n"
+                if not os.access(sub, os.R_OK):
+                    self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+            finally:
+                try:
+                    os.chmod(sub, 0o755)
+                except OSError:
+                    pass
 
 
 class RetainManifestWalkTests(unittest.TestCase):
@@ -449,6 +501,25 @@ class CleanupWorktreesTests(unittest.TestCase):
         )
         self.assertFalse(remaining)
         self.assertIn("removed retained", sweep_msg)
+
+    def test_prune_worktree_retains_worktree_with_empty_ignored_worktrees_dir(self):
+        path = _add_worktree(self.clone, "feat/issue-8-empty-worktrees")
+        (path / ".gitignore").write_text(".worktrees/\n")
+        _git(path, "add", ".gitignore")
+        _git(path, "commit", "-m", "ignore worktrees")
+        (path / ".worktrees").mkdir()
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=path, text=True
+        ).strip()
+        ok, message = merge_pr.prune_worktree(
+            str(self.clone), "feat/issue-8-empty-worktrees", sha
+        )
+        self.assertTrue(ok, message)
+        self.assertIn("Retained worktree", message)
+        self.assertNotIn(os.path.realpath(path), self._worktree_paths())
+        retained_root = self.clone / ".worktrees" / ".retained"
+        leftovers = [item for item in retained_root.iterdir() if item.is_dir()]
+        self.assertTrue(leftovers)
 
     def test_dirty_deregistered_retained_copy_is_kept(self):
         path = _add_worktree(self.clone, "feat/issue-8-retain-dirty")
