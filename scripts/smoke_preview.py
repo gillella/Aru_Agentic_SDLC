@@ -90,7 +90,7 @@ DEFAULT_SCENARIO_PATHS = [
 ]
 
 
-def load_and_validate_scenarios(scenarios_file: Optional[str] = None) -> Tuple[bool, Optional[List[Dict[str, Any]]], str]:
+def load_and_validate_scenarios(scenarios_file: Optional[str] = None) -> Tuple[bool, Optional[List[Dict[str, Any]]], str]:  # noqa: C901, PLR0912
     """Load and validate scenario definitions. Fails closed if file is requested but invalid."""
     target_file = scenarios_file
     if not target_file:

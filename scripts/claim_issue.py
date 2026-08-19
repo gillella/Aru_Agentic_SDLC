@@ -494,7 +494,7 @@ def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
     return code == 0
 
 
-def claim_review(pr_id: int, agent: str) -> int:
+def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
     """Claims a pull request for review. Same exit codes as claim_issue."""
     labels = _pr_labels(pr_id)
     if labels is None:
@@ -740,7 +740,7 @@ def _has_peer_reviewer(labels, author: str | None) -> bool:
     return False
 
 
-def claim_merge(pr_id: int, agent: str) -> int:
+def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     """Claims a pull request for mechanical merge. Same exit codes as claim_issue.
 
     The PR author may hold this claim only when a distinct completed peer review
@@ -1063,7 +1063,7 @@ def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[
     return released
 
 
-def reap_stale_reviews(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:
+def reap_stale_reviews(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:  # noqa: C901, PLR0912
     """Releases review claims that have gone quiet.
 
     An agent that dies mid-review leaves the PR claimed forever, and a claimed

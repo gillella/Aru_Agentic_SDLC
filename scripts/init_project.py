@@ -871,7 +871,7 @@ def scaffold_directory_structure(target_dir: str):
     print("✅ Standard directory structure scaffolded.")
 
 
-def write_governance_scripts(target_dir: str):
+def write_governance_scripts(target_dir: str):  # noqa: PLR0915
     """Write governed review, preview, and audit-only promotion workflows."""
     project_scripts_dir = os.path.join(target_dir, "scripts")
     scripts_dir = os.path.join(target_dir, ".github", "scripts")
@@ -1524,7 +1524,7 @@ def link_project_to_repo(number: int, owner: str, repo_slug: str, target_dir: st
         return False
 
 
-def main():
+def main():  # noqa: PLR0915
     parser = argparse.ArgumentParser(description="Bootstrap a new repository under Aru_Agentic_SDLC governance.")
     parser.add_argument("--name", type=str, required=True, help="Project name (also the GitHub repo name)")
     visibility = parser.add_mutually_exclusive_group()

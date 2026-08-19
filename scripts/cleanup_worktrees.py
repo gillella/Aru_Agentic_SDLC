@@ -485,7 +485,7 @@ def _verified_unlink(full: str, rel: str, expected: dict) -> bool:
     return True
 
 
-def _remove_claimed_retained(path: str, expected: dict) -> tuple[bool, str]:
+def _remove_claimed_retained(path: str, expected: dict) -> tuple[bool, str]:  # noqa: C901, PLR0912
     """Delete a validated retained tree, verifying each entry as it is removed.
 
     ``shutil.rmtree`` separates validation from deletion by an entire tree walk,

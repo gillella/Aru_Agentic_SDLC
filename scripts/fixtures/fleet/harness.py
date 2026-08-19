@@ -254,7 +254,7 @@ class HermeticFleet:
         self.issues[issue_number].status = status
         return True
 
-    def _transport_command(self, argv: Sequence[str], **_kwargs: Any) -> tuple[int, str, str]:
+    def _transport_command(self, argv: Sequence[str], **_kwargs: Any) -> tuple[int, str, str]:  # noqa: C901, PLR0912
         command = list(argv)
         if len(command) < 4 or command[0] != "gh":
             raise AssertionError(f"unexpected claim transport command: {command}")

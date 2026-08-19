@@ -235,7 +235,7 @@ def _finding_body_region(body):
     return None
 
 
-def _body_edit_events(owner, name, pr_id, expected_head):
+def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912, PLR0915
     """Verified author body-region changes, sourced from GitHub edit history.
 
     A bare pull-request ``updatedAt`` cannot distinguish body edits from reviews,
@@ -402,7 +402,7 @@ def _body_edit_events(owner, name, pr_id, expected_head):
     return events
 
 
-def _reviewed_current_head(owner, name, pr_id):
+def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
     """Returns ``(head_oid, reviewed_head, reviews)`` for every review page.
 
     GitHub caps connection pages at 100 entries.  Review-heavy pull requests
@@ -529,7 +529,7 @@ def _reviewed_current_head(owner, name, pr_id):
         cursor = next_cursor
 
 
-def _review_head_attestations(owner, name, pr_id, expected_head):
+def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
     """Head-bound agent attestations written by complete_review().
 
     Pull-request comments are paginated independently from reviews and review
@@ -623,7 +623,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):
         cursor = next_cursor
 
 
-def review_evidence(pr_id):
+def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     """Facts the review gate needs beyond a count of open threads.
 
     Returns ``None`` on any query failure - an unknown review state must never
@@ -1044,7 +1044,7 @@ def _evidence_note(evidence):
     return ", ".join(parts) + "."
 
 
-def check_reviews(pr, evidence):
+def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # Prefer the same explicitly paginated review history used for current-head
     # evidence. The PR snapshot remains a compatibility fallback for pure
     # unit-level callers that supply handcrafted evidence.
@@ -1239,7 +1239,7 @@ def check_issue_link(pr):
     return True, "Linked to " + ", ".join(f"#{i}" for i in issues) + "."
 
 
-def parse_verification_evidence(body):
+def parse_verification_evidence(body):  # noqa: C901
     """Parses the marker-delimited verification JSON without scraping prose."""
     body = body or ""
     start_count = body.count(VERIFICATION_EVIDENCE_START)
@@ -1284,7 +1284,7 @@ def parse_verification_evidence(body):
     return evidence, None
 
 
-def check_verification(pr):
+def check_verification(pr):  # noqa: C901, PLR0912
     """Validates recorded commands while warning on legacy or not-run PRs."""
     evidence, error = parse_verification_evidence(pr.get("body") or "")
     if error == "missing":
@@ -1523,7 +1523,7 @@ def check_review_rounds(pr):
     return True, f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD})."
 
 
-def fetch_unresolved_finding_summaries(pr_id, limit=8):
+def fetch_unresolved_finding_summaries(pr_id, limit=8):  # noqa: C901, PLR0912
     """Load short unresolved review-thread summaries for split guidance."""
     slug = get_repo_slug()
     if not slug:
@@ -1807,7 +1807,7 @@ def _attach_follow_up_to_board(issue_num):
     return update_status(issue_num, "Backlog", require_board=True)
 
 
-def emit_review_round_split(pr, findings=None, *, apply=True):
+def emit_review_round_split(pr, findings=None, *, apply=True):  # noqa: C901, PLR0912
     """Post split guidance and file follow-up issues when the threshold is crossed.
 
     Idempotent: if ``REVIEW_ROUND_SPLIT_MARKER`` is already present on the PR,
@@ -2115,7 +2115,7 @@ def find_branch_worktree(porcelain, branch):
     return None, None
 
 
-def prune_worktree(repo_root, branch, expected_sha):
+def prune_worktree(repo_root, branch, expected_sha):  # noqa: C901, PLR0912, PLR0915
     """Deregisters the exact worktree after atomically retaining its directory."""
     if not branch or not expected_sha:
         return False, "Branch and gated head SHA are required; no worktree removed."
@@ -2481,7 +2481,7 @@ def dod_status(pr_id):
     return False, f"unmet: {', '.join(blocked)}"
 
 
-def run_closeout(pr, issue_nums, repo_root, failures=None):
+def run_closeout(pr, issue_nums, repo_root, failures=None):  # noqa: C901, PLR0912
     """Runs every idempotent close-out step, even after an earlier failure."""
     try:
         os.chdir(repo_root)
@@ -2885,7 +2885,7 @@ def write_checkpoint_tag(repo_root, pr, issue_nums, gates, gated_head, merged_sh
         return False, f"Unexpected checkpoint error: {exc}"
 
 
-def main():
+def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Merge a PR only if the Definition of Done is met.")
     parser.add_argument("--pr", type=int, required=True, help="Pull request number")
     parser.add_argument("--dry-run", action="store_true", help="Run every check, merge nothing")

@@ -560,7 +560,7 @@ def record_promotion(
     return code == 0
 
 
-def promote(
+def promote(  # noqa: C901, PLR0912
     commit_sha: str,
     checkpoint: str,
     issues: Sequence[int],

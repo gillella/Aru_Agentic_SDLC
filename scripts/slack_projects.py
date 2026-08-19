@@ -40,7 +40,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _private_directory(path: Path) -> None:
+def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
     if path.is_symlink():
         raise RegistryError(f"unsafe registry directory: {path}")
     if path.exists():

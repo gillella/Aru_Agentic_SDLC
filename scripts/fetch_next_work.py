@@ -548,7 +548,7 @@ def author_gate_fix(pr: dict[str, Any], agent: str,
     return work
 
 
-def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
+def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,  # noqa: C901, PLR0912
                        round_cap: int, cross_family_wait: int,
                        merge_reason: str | None = None) -> dict[str, Any]:
     """Decides whether `agent` may review this PR, and why not if not.
@@ -667,7 +667,7 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
               "for a cross-family reviewer")
 
 
-def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:
+def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa: C901, PLR0912
     """Decides whether `agent` may claim mechanical merge of this PR.
 
     Cheap label/CI/thread filters run first. Only survivors call the shared
@@ -767,7 +767,7 @@ def record_review_claim(pr_number: int, agent: str, created_at: str | None) -> N
               f"{err.strip()}", file=sys.stderr)
 
 
-def select(agent: str, family: str | None, round_cap: int, cross_family_wait: int
+def select(agent: str, family: str | None, round_cap: int, cross_family_wait: int  # noqa: C901, PLR0912, PLR0915
            ) -> dict[str, Any]:
     """Builds the full picture, then picks by priority."""
     prs = list_work_prs()
@@ -917,7 +917,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     }
 
 
-def main():
+def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Pick the next work item for one agent.")
     parser.add_argument("--agent", required=False, default=None,
                         help="Agent id. Omit to auto-assign a free identity from the "

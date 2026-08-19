@@ -15,7 +15,7 @@ from common import get_repo_slug, run_gh_json
 from merge_pr import is_advisory_review_account
 
 
-def fetch_active_review_feedback(pr_id: int) -> list[dict] | None:
+def fetch_active_review_feedback(pr_id: int) -> list[dict] | None:  # noqa: C901, PLR0912, PLR0915
     """Returns current actionable review items, or None on uncertainty.
 
     A plain issue comment is intentionally outside this query and cannot route

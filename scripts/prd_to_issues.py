@@ -110,7 +110,7 @@ def repository_inventory(repo_root: Path) -> tuple[str, ...]:
     return paths
 
 
-def derive_touches(
+def derive_touches(  # noqa: C901, PLR0912
     change_targets: Any,
     repo_root: Path,
     inventory: tuple[str, ...],
@@ -259,7 +259,7 @@ def _has_overlap(issue: PreparedIssue, others: dict[str, PreparedIssue]) -> bool
     return False
 
 
-def prepare_plan(manifest: Any, repo_root: Path, inventory: tuple[str, ...]) -> PreparedPlan:
+def prepare_plan(manifest: Any, repo_root: Path, inventory: tuple[str, ...]) -> PreparedPlan:  # noqa: C901, PLR0912, PLR0915
     if not isinstance(manifest, dict):
         raise PlanError("plan root must be a JSON object")
     source_prd = manifest.get("source_prd")
