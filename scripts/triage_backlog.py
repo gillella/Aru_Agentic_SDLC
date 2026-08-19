@@ -12,10 +12,14 @@ half is a two-minute job instead of an archaeology session.
   python3 triage_backlog.py --promote --issue 24 --issue 25
   python3 triage_backlog.py --capacity     # just the fleet-size answer
 
-The Ready contract (all four required):
-  * not an epic
+The Ready contract (everything ready_gaps() actually enforces):
+  * not needs-human (operator-only) and not an epic
   * acceptance criteria present, as checkboxes
+  * on a feat/fix: every acceptance criterion carries a machine-checkable
+    predicate such as ``(verify: `cmd`)`` or a test assertion
+  * a verification section
   * a touches: declaration
+  * on a feat/fix: a ``## Decision Boundaries`` and a ``## Non-Goals`` section
   * every depends-on issue is closed
 
 Oversized-scope recommendation (either signal is sufficient):
@@ -166,6 +170,16 @@ def has_verification(body: str) -> bool:
 ARU_SDLC_REPO_SLUG = "gillella/Aru_Agentic_SDLC"
 LEGACY_ISSUE_CUTOFF_NUMBER = 158
 SPLIT_ACCEPTANCE_CRITERIA_THRESHOLD = 8
+
+# Areas that accompany production work rather than widening its scope.
+# merge_pr.py's `tests` gate REQUIRES a changed file under tests/ whenever
+# scripts/ or src/ changes, and CI's documentation-freshness check pulls docs/
+# along the same way. Counting either as an independent top-level area made the
+# Ready contract and the merge contract mutually unsatisfiable: the only
+# touches: shape that cleared triage (a single area) was guaranteed to fail the
+# merge gate, and the only shape that cleared merge was guaranteed to be held
+# here (issue #288).
+COMPANION_AREAS = frozenset({"tests", "docs"})
 
 EXAMPLE_CONFORMING_ISSUE_BODY = """## Feature Description
 Describe the problem and intended change.
@@ -356,6 +370,10 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
     """
     body = issue.get("body") or ""
     criteria_count = len(acceptance_criteria(body))
+    # Keep triage's own cross-checking parser rather than `parse_touches`: the
+    # security hardening (#129) makes parse_touches drop root ("."/"/") and
+    # "./"-prefixed declarations as unsafe, but triage must keep seeing those
+    # as "repository-wide" so an over-wide issue is held for splitting.
     touches_match = re.search(
         r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
         body,
@@ -401,6 +419,12 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
     areas = sorted({
         root for root in area_roots if not any(char in root for char in "*?[")
     })
+    # Drop companion areas before measuring span. A production change is
+    # obliged to carry its tests (and often its docs), so those paths describe
+    # the same unit of work rather than a second one. An issue touching only
+    # companions is small by construction, so it collapses to no span at all
+    # instead of reporting tests+docs as two areas.
+    span_areas = [root for root in areas if root not in COMPANION_AREAS]
     reasons = []
     if criteria_count > SPLIT_ACCEPTANCE_CRITERIA_THRESHOLD:
         reasons.append(
@@ -409,8 +433,11 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
         )
     if repository_wide:
         reasons.append("touches include the whole repository root")
-    if len(areas) > 1:
-        reasons.append(f"touches span {len(areas)} top-level areas: {', '.join(areas)}")
+    if len(span_areas) > 1:
+        reasons.append(
+            f"touches span {len(span_areas)} top-level areas: "
+            f"{', '.join(span_areas)}"
+        )
     if wildcard_roots:
         reasons.append(
             "touches use wildcard top-level area patterns: "

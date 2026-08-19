@@ -336,7 +336,9 @@ class SplitRecommendationTests(unittest.TestCase):
         self.assertIn("SPLIT", output.getvalue())
         self.assertIn("not a human gate", output.getvalue())
         self.assertIn("9 acceptance criteria exceed the threshold of 8", output.getvalue())
-        self.assertIn("3 top-level areas: hooks, scripts, tests", output.getvalue())
+        # tests/ is a companion area, so the span is hooks+scripts. The
+        # accompanying test file never widens scope on its own.
+        self.assertIn("2 top-level areas: hooks, scripts", output.getvalue())
 
     def test_each_oversize_signal_is_independently_actionable(self):
         wide_only = READY_BODY.replace(
@@ -523,6 +525,89 @@ class SplitRecommendationTests(unittest.TestCase):
              patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]):
             self.assertEqual(tb.main(), 0)
         update.assert_not_called()
+
+    def test_companion_areas_do_not_widen_scope(self):
+        """tests/ and docs/ accompany production work instead of widening it."""
+        for declaration in (
+            "scripts/thing.py, tests/test_thing.py",
+            "src/thing.py, tests/test_thing.py",
+            "scripts/thing.py, tests/test_thing.py, docs/guide.md",
+            "tests/test_thing.py, docs/guide.md",
+            "docs/guide.md",
+        ):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(40, "type:chore", body=body)), []
+                )
+
+    def test_companion_areas_do_not_mask_real_scope_creep(self):
+        """Two production areas still split even when tests/ rides along."""
+        for declaration, expected in (
+            ("scripts/a.py, src/b.py, tests/test_a.py",
+             "touches span 2 top-level areas: scripts, src"),
+            ("scripts/a.py, hooks/g.sh, tests/test_a.py, docs/d.md",
+             "touches span 2 top-level areas: hooks, scripts"),
+        ):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(41, "type:chore", body=body)),
+                    [expected],
+                )
+
+    def test_the_documented_example_issue_is_promotable(self):
+        """Regression guard for the triage/merge deadlock (#288).
+
+        merge_pr.py requires a tests/ change whenever src/ or scripts/ changes.
+        When tests/ also counted as a second top-level area, the only shape that
+        cleared this module was guaranteed to fail the merge gate - and the
+        example body printed here as the conforming template was itself held.
+        Following our own documented instructions must yield a promotable issue.
+        """
+        self.assertEqual(
+            tb.split_reasons({"body": tb.EXAMPLE_CONFORMING_ISSUE_BODY,
+                              "labels": []}),
+            [],
+        )
+
+
+class ReadyDocstringContractTests(unittest.TestCase):
+    """The module docstring must describe the contract ready_gaps() enforces.
+
+    #288 regression guard: the docstring once claimed "all four required"
+    while ready_gaps() enforced nine elements, so anyone filing from the
+    docstring wrote an issue that failed triage.
+    """
+
+    def test_docstring_does_not_claim_four_required(self):
+        doc = tb.__doc__
+        self.assertNotIn("all four", doc)
+        self.assertNotIn("four required", doc)
+
+    def test_docstring_names_every_enforced_element(self):
+        doc = tb.__doc__
+        for element in (
+            "needs-human", "epic", "acceptance criteria", "verification",
+            "touches:", "Decision Boundaries", "Non-Goals",
+        ):
+            with self.subTest(element=element):
+                self.assertIn(element, doc)
+
+    def test_docstring_contract_accepts_a_conforming_issue(self):
+        # The docstring's own claims must be consistent with ready_gaps: an
+        # issue that meets every named element is promotable.
+        self.assertEqual(
+            tb.ready_gaps({"body": tb.EXAMPLE_CONFORMING_ISSUE_BODY,
+                           "labels": []}, set()),
+            [],
+        )
 
 
 class PartitionTests(TrustedOwnerTests):
