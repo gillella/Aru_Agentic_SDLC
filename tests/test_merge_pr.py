@@ -467,7 +467,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("Peer attribution: cursor-1", message)
         self.assertIn(f"current head {head[:12]}", message)
-        self.assertIn("substantive human review from gillella", message)
+        self.assertIn("substantive independent review from gillella", message)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -849,6 +849,62 @@ class ExternalReviewerTests(unittest.TestCase):
             labelled("author:agent-1", review_login="chatgpt-codex-connector"), 0)
         self.assertFalse(ok)
         self.assertIn("advisory", msg)
+
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_configured_review_app_approval_satisfies_the_gate(self):
+        ok, msg = _gate(
+            labelled("author:agent-1", review_login="aru-reviewer[bot]"), 0)
+        self.assertTrue(ok)
+        self.assertIn("aru-reviewer[bot]", msg)
+
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_configured_review_app_bot_actor_at_current_head_counts(self):
+        head = "a" * 40
+        reviews = [{
+            "id": "app-approve",
+            "state": "APPROVED",
+            "submittedAt": "2026-01-01T00:00:00Z",
+            "author": {"login": "aru-reviewer[bot]", "__typename": "Bot"},
+            "commit": {"oid": head},
+            "body": "",
+        }]
+        pr = labelled("author:agent-1", reviews=reviews)
+        ok, msg = _gate(
+            pr, 0,
+            head_oid=head,
+            reviews=reviews,
+            review_attestations=[],
+            reviewed_head=True,
+        )
+        self.assertTrue(ok)
+        self.assertIn("aru-reviewer[bot]", msg)
+
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_unconfigured_bot_stays_advisory_when_app_is_named(self):
+        ok, msg = _gate(
+            labelled("author:agent-1", review_login="coderabbitai[bot]"), 0)
+        self.assertFalse(ok)
+        self.assertIn("advisory", msg)
+
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_same_account_self_review_still_fails_when_app_is_named(self):
+        ok, msg = _gate(
+            labelled("author:agent-1", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg)
+
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_reviewer_claim_still_blocks_configured_app_approval(self):
+        ok, msg = _gate(
+            labelled(
+                "author:agent-1",
+                "reviewer:agent-2",
+                review_login="aru-reviewer[bot]",
+            ),
+            0,
+        )
+        self.assertFalse(ok)
+        self.assertIn("reviewer:", msg)
 
     def test_an_external_approval_counts_without_any_label(self):
         ok, _ = _gate(

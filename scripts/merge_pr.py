@@ -69,9 +69,11 @@ REVIEW_CLAIM_LABEL = "reviewer:"
 MERGER_CLAIM_LABEL = "merger:"
 
 # Review apps can add useful findings, but their comments are not independent
-# approval. GitHub exposes some bot logins with a ``[bot]`` suffix and the
+# approval unless the factory operator names that App as the reviewer identity
+# (#123). GitHub exposes some bot logins with a ``[bot]`` suffix and the
 # Codex connector without one, so both forms must be recognized explicitly.
 ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
+REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
 # review evidence; all other known actor kinds are automation or identities
 # whose human independence cannot be established. An unrecognized kind makes
@@ -502,7 +504,9 @@ def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
                 return None
             seen_review_ids.add(review_id)
             reviews.append(review)
-            if state in {"PENDING", "DISMISSED"} or actor_type != "User":
+            if state in {"PENDING", "DISMISSED"}:
+                continue
+            if actor_type != "User" and not is_configured_review_app(login):
                 continue
             if is_advisory_review_account(login):
                 continue
@@ -951,17 +955,33 @@ def latest_state_per_reviewer(reviews):
     return {who: state for who, (_, state) in latest.items()}
 
 
+def configured_review_app_logins():
+    """Operator-configured GitHub App logins trusted as independent reviewers."""
+    raw = os.environ.get(REVIEW_APP_LOGIN_ENV, "")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def is_configured_review_app(login):
+    """True when ``login`` is the installed reviewer App from #123."""
+    normalized = (login or "").lower()
+    return bool(normalized) and normalized in configured_review_app_logins()
+
+
 def is_advisory_review_account(login):
     """Whether a GitHub reviewer identity belongs to review automation."""
+    if is_configured_review_app(login):
+        return False
     normalized = (login or "").lower()
     return normalized.endswith("[bot]") or normalized in ADVISORY_REVIEW_ACCOUNTS
 
 
 def is_advisory_review_actor(review):
-    """Whether a review's GraphQL actor cannot provide human attestation."""
+    """Whether a review's GraphQL actor cannot provide independent attestation."""
     author = review.get("author") or {}
     actor_type = author.get("__typename")
     login = author.get("login") or ""
+    if is_configured_review_app(login):
+        return False
     return (
         actor_type is not None and actor_type != "User"
     ) or is_advisory_review_account(login)
@@ -984,7 +1004,7 @@ def _current_head_reviewers(evidence):
         body = review.get("body")
         if (
             oid == head
-            and actor_type == "User"
+            and (actor_type == "User" or is_configured_review_app(login))
             and not is_advisory_review_actor(review)
             and state not in {"PENDING", "DISMISSED"}
             and (state != "COMMENTED" or isinstance(body, str) and body.strip())
@@ -1020,7 +1040,7 @@ def _evidence_note(evidence):
     head_reviewers = _current_head_reviewers(evidence)
     if head and head_reviewers:
         head_note = (
-            f"current head {head[:12]} has substantive human review from "
+            f"current head {head[:12]} has substantive independent review from "
             f"{', '.join(head_reviewers)}"
         )
     else:
@@ -1118,9 +1138,9 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # the same person who opened the PR. The agent identity labels are the only
     # thing that distinguishes them.
     # A review from a different non-automation GitHub account is provably not a
-    # self-review, but only its latest APPROVED verdict counts. Review apps are
-    # advisory: their comments and approvals can inform an agent review, but
-    # cannot satisfy the independent-review gate themselves.
+    # self-review, but only its latest APPROVED verdict counts. Unconfigured
+    # review apps stay advisory. An App login named in ARU_REVIEW_APP_LOGIN is
+    # the #123 reviewer identity and counts as that external account.
     pr_login = ((pr.get("author") or {}).get("login") or "").lower()
     other_accounts = sorted({
         ((r.get("author") or {}).get("login") or "").lower()

@@ -579,7 +579,7 @@ def _reviewed_by_label_for(agent: str) -> str:
 
 
 def _reviewed_head_for_completion(pr_id: int) -> str | None:
-    """Current head only when a substantive human review covers it."""
+    """Current head only when a substantive independent review covers it."""
     slug = get_repo_slug()
     if not slug or "/" not in slug:
         return None
@@ -641,7 +641,7 @@ def complete_review(pr_id: int, agent: str) -> int:
     reviewed_head = _reviewed_head_for_completion(pr_id)
     if reviewed_head is None:
         print(
-            f"[CONFLICT] PR #{pr_id} has no substantive human review on its "
+            f"[CONFLICT] PR #{pr_id} has no substantive independent review on its "
             "current head. Submit the review before completing attribution.",
             file=sys.stderr,
         )
