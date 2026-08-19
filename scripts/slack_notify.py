@@ -893,7 +893,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     payload.add_argument("--decision-file", default="", help="read HITL decision text from a file")
     parser.add_argument("--repo-dir", default=".")
     parser.add_argument("--no-github-comment", action="store_true")
-    parser.add_argument("--project-id", required=True)
+    parser.add_argument("--project-id", default="")
     parser.add_argument("--registry-file", default="")
     parser.add_argument("--env-file", default=str(ENV_PATH))
     args = parser.parse_args(argv)
@@ -904,9 +904,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     try:
         base = config_from_env(load_slack_env(Path(args.env_file)), require_channel=False)
-        project = ProjectRegistry(
+        registry = ProjectRegistry(
             Path(args.registry_file) if args.registry_file else DEFAULT_REGISTRY_PATH
-        ).get(args.project_id)
+        )
+        if args.project_id:
+            # An explicit --project-id always wins.
+            project = registry.get(args.project_id)
+        else:
+            # Otherwise resolve the binding from the checkout the agent is
+            # working in, so a bound repo needs no per-agent Slack setup.
+            project = registry.find_by_checkout(Path(args.repo_dir))
         config = config_for_project(base, project)
     except (ValueError, RegistryError) as exc:
         print(f"[WARN] Slack notify skipped: {exc}", file=sys.stderr)
@@ -933,7 +940,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "pr": args.pr,
         "state": args.state,
         "text": text,
-        "project_id": args.project_id,
+        "project_id": project.project_id,
     }
     if args.waiting_on_agent:
         event["waiting_on_agent"] = args.waiting_on_agent

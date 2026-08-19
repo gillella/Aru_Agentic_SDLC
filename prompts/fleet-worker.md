@@ -385,6 +385,7 @@ must never be interpolated into a shell command.
 
 ```bash
 # blocked — unresolved depends-on, missing product decision, merge/close-out stuck
+# --project-id is optional: omit it to resolve the binding from --repo-dir.
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id <PROJECT_ID> \
   --agent <AGENT_ID> --family <FAMILY> \

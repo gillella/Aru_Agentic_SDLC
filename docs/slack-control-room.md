@@ -117,7 +117,12 @@ issue/PR comment with the same facts **before** the Slack message:
 For the examples below, prepare `ARU_ALERT_TEXT_FILE` or
 `ARU_ALERT_DECISION_FILE` with the same secure file procedure. The registry
 record is authoritative for both repository slug and checkout path; `--repo`
-and `--repo-dir` cannot redirect an alert.
+and `--repo-dir` cannot redirect an alert. `--project-id` is optional: when
+omitted, `slack_notify.py` resolves the binding from `--repo-dir` via
+`~/.aru/projects.json`, so any factory agent can notify from a bound checkout
+with no per-agent Slack setup. An unbound checkout fails closed with a clear
+warning (bind it once with `slack_projects.py migrate --local-path <repo>
+--operator <you>`).
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
