@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fetch_next_work as fnw
 import fetch_next_issue  # noqa: E402
 import merge_pr
+import agent_presence as ap
 
 
 def ts(minutes_ago):
@@ -1167,3 +1168,71 @@ class StaleAttributionReportTests(unittest.TestCase):
         self.assertEqual(res["work"]["type"], "review")
         self.assertEqual(res["work"]["pr"], 11)
         self.assertTrue(res["reviewable_detail"][0]["stale_attribution"])
+
+
+class AgentResolutionTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import io
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.presence = Path(self.temporary.name)
+        self._patch_path = patch.object(ap, "DEFAULT_PRESENCE_PATH",
+                                        self.presence / "agent-presence.json")
+        self._patch_path.start()
+        self.addCleanup(self._patch_path.stop)
+
+    def _capture(self):
+        import io
+        return patch("sys.stdout", new_callable=io.StringIO), \
+               patch("sys.stderr", new_callable=io.StringIO)
+
+    def test_omitting_agent_auto_assigns_a_free_identity(self):
+        store = ap.PresenceStore(self.presence / "agent-presence.json")
+        store.resolve_free_identity(["gemini-1"], "setup-session")
+        idle = {"agent": "unused", "family": None, "work": {"type": "idle",
+                "skill": None}, "skipped_prs": [], "merge_skipped": [],
+                "claimable_issues": [], "mergeable_detail": [],
+                "reviewable_detail": []}
+        out, err = self._capture()
+        with patch.object(fnw, "select", return_value=idle) as select_mock, \
+             patch("sys.argv", ["fetch_next_work.py"]), out as _o, err as _e:
+            rc = fnw.main()
+        self.assertEqual(rc, None)  # success
+        # A free agent from the pool was assigned and passed to select.
+        args, _kwargs = select_mock.call_args
+        self.assertEqual(args[0], "claude-1")
+        self.assertIn("auto-assigned agent id", _e.getvalue())
+
+    def test_explicit_agent_held_by_another_session_exits_nonzero(self):
+        store = ap.PresenceStore(self.presence / "agent-presence.json")
+        store.resolve_free_identity(["gemini-1"], "session-other")
+        idle = {"agent": "unused", "family": None, "work": {"type": "idle",
+                "skill": None}, "skipped_prs": [], "merge_skipped": [],
+                "claimable_issues": []}
+        out, err = self._capture()
+        with patch.object(fnw, "select", return_value=idle) as select_mock, \
+             patch("sys.argv", ["fetch_next_work.py", "--agent", "gemini-1"]), \
+             out as _o, err as _e:
+            rc = fnw.main()
+        self.assertEqual(rc, 1)
+        select_mock.assert_not_called()
+        self.assertIn("live heartbeat", _e.getvalue())
+
+    def test_explicit_agent_with_no_conflict_proceeds(self):
+        idle = {"agent": "unused", "family": None, "work": {"type": "idle",
+                "skill": None}, "skipped_prs": [], "merge_skipped": [],
+                "claimable_issues": []}
+        out, err = self._capture()
+        with patch.object(fnw, "select", return_value=idle) as select_mock, \
+             patch("sys.argv", ["fetch_next_work.py", "--agent", "claude-1",
+                                "--session-id", "me"]), \
+             out as _o, err as _e:
+            rc = fnw.main()
+        self.assertEqual(rc, None)
+        args, _kwargs = select_mock.call_args
+        self.assertEqual(args[0], "claude-1")
+
+
+if __name__ == "__main__":
+    unittest.main()

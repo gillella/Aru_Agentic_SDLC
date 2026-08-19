@@ -34,6 +34,10 @@ DEFAULT_HEARTBEAT_TTL_SECONDS = 300
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 FAMILY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+# Default ring used to auto-assign a free identity when the registry has no
+# registered agents yet. Registered identities from `list` take precedence.
+DEFAULT_AGENT_RING = ("gemini-1", "claude-1", "codex-1", "cursor-1", "cursor-2")
+
 AVAILABILITY_STATES = frozenset({
     "available",
     "busy",
@@ -183,6 +187,7 @@ def _empty_document() -> Dict[str, Any]:
         "schema": SCHEMA_NAME,
         "version": SCHEMA_VERSION,
         "agents": {},
+        "claims": {},
     }
 
 
@@ -349,12 +354,75 @@ class PresenceStore:
             "schema": SCHEMA_NAME,
             "version": SCHEMA_VERSION,
             "agents": {agent_id: record.public_dict() for agent_id, record in validated.items()},
+            "claims": document.get("claims") or {},
             "_records": validated,
         }
 
     def get(self, agent_id: str) -> Optional[PresenceRecord]:
         agent_id = _validate_agent_id(agent_id)
         return self._read()["_records"].get(agent_id)
+
+    def identity_holder(self, agent_id: str, session_id: str, now: Optional[datetime] = None) -> Optional[str]:
+        """Return the live session id holding `agent_id`, or None if free.
+
+        A claim is live when it is fresher than the heartbeat TTL. A claim held
+        by this very session is not a conflict.
+        """
+        agent_id = _validate_agent_id(agent_id)
+        now = now or self.clock()
+        claim = (self._read().get("claims") or {}).get(agent_id)
+        if not claim or not isinstance(claim, dict):
+            return None
+        try:
+            at = _parse_iso(claim.get("at", ""))
+        except PresenceError:
+            return None
+        if (now - at).total_seconds() >= self.heartbeat_ttl_seconds:
+            return None
+        holder = claim.get("session")
+        if holder == session_id:
+            return None
+        return holder
+
+    def resolve_free_identity(self, pool, session_id: str, now: Optional[datetime] = None) -> str:
+        """Atomically claim and return one free identity from `pool`.
+
+        Free means not claimed by another live session. Resolution runs inside
+        the file-locked mutate, so two concurrent resolutions can never return
+        the same identity across processes.
+        """
+        pool = list(dict.fromkeys(_validate_agent_id(a) for a in pool))
+        if pool == [] or not session_id:
+            raise PresenceError("resolve_free_identity needs a non-empty pool and a session id")
+        now = now or self.clock()
+        now_iso = _iso(now)
+
+        def apply(document: Dict[str, Any]) -> str:
+            claims = document.get("claims") or {}
+            live: Dict[str, Dict[str, Any]] = {}
+            for agent_id, claim in claims.items():
+                if not isinstance(claim, dict):
+                    continue
+                try:
+                    at = _parse_iso(claim.get("at", ""))
+                except PresenceError:
+                    continue
+                if (now - at).total_seconds() < self.heartbeat_ttl_seconds:
+                    live[agent_id] = claim
+            busy = {a for a, c in live.items() if c.get("session") != session_id}
+            free = [a for a in pool if a not in busy]
+            if not free:
+                raise PresenceError(
+                    "no free agent identity; all are held by another live session: "
+                    + ", ".join(sorted(busy))
+                )
+            chosen = free[0]
+            updated = dict(live)
+            updated[chosen] = {"session": session_id, "at": now_iso}
+            document["claims"] = updated
+            return chosen
+
+        return self._mutate(apply)
 
     def _mutate(self, updater: Callable[[Dict[str, Any]], Any]) -> Any:
         """Apply an in-place document updater; persist the document, return result."""
@@ -375,6 +443,7 @@ class PresenceStore:
                 "schema": SCHEMA_NAME,
                 "version": SCHEMA_VERSION,
                 "agents": document["agents"],
+                "claims": document.get("claims") or {},
             }
 
         mutate_secure_json(self.path, _empty_document(), apply)

@@ -598,5 +598,62 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertEqual(len(cooling_b), 0)
 
 
+class FreeIdentityResolutionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name) / "agent-presence.json"
+        self.clock = {"now": datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)}
+        self.store = ap.PresenceStore(
+            self.path,
+            clock=lambda: self.clock["now"],
+            heartbeat_ttl_seconds=60,
+        )
+
+    def advance(self, seconds: int) -> None:
+        self.clock["now"] = self.clock["now"] + timedelta(seconds=seconds)
+
+    def test_resolves_first_free_identity(self):
+        chosen = self.store.resolve_free_identity(
+            ["gemini-1", "claude-1", "codex-1"], "session-a"
+        )
+        self.assertEqual(chosen, "gemini-1")
+        # The claim is attributable to session-a.
+        self.assertEqual(self.store.identity_holder("gemini-1", "session-a"), None)
+
+    def test_two_sessions_never_get_the_same_identity(self):
+        first = self.store.resolve_free_identity(
+            ["gemini-1", "claude-1"], "session-a"
+        )
+        second = self.store.resolve_free_identity(
+            ["gemini-1", "claude-1"], "session-b"
+        )
+        self.assertNotEqual(first, second)
+        self.assertEqual(sorted((first, second)), ["claude-1", "gemini-1"])
+
+    def test_explicit_identity_held_by_other_session_is_conflicted(self):
+        self.store.resolve_free_identity(["gemini-1", "claude-1"], "session-a")
+        holder = self.store.identity_holder("gemini-1", "session-b")
+        self.assertEqual(holder, "session-a")
+
+    def test_same_session_is_not_a_conflict(self):
+        self.store.resolve_free_identity(["gemini-1"], "session-a")
+        # Re-resolving from the same session may reclaim the same id.
+        self.assertEqual(self.store.identity_holder("gemini-1", "session-a"), None)
+
+    def test_stale_claim_is_free_again(self):
+        self.store.resolve_free_identity(["gemini-1"], "session-a")
+        self.advance(120)  # past the 60s TTL
+        self.assertEqual(self.store.identity_holder("gemini-1", "session-b"), None)
+        # And it can be handed to another session now.
+        chosen = self.store.resolve_free_identity(["gemini-1"], "session-b")
+        self.assertEqual(chosen, "gemini-1")
+
+    def test_no_free_identity_raises(self):
+        self.store.resolve_free_identity(["gemini-1"], "session-a")
+        with self.assertRaises(ap.PresenceError):
+            self.store.resolve_free_identity(["gemini-1"], "session-b")
+
+
 if __name__ == "__main__":
     unittest.main()

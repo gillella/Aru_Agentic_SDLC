@@ -40,8 +40,25 @@ Pick an id once per concurrent session (`claude-1`, `codex-1`, …) and keep it
 for the whole session. Every agent authenticates as the same GitHub user, so
 these labels are the only identity the board has — they are what lets the
 picker route a PR to someone who did not write it, and what lets the merge
-gate tell a peer review from a self-review. **A picker or claim command
-without both flags is a bug**, not a shortcut.
+gate tell a peer review from a self-review.
+
+### Auto-assigned identity (recommended for new sessions)
+
+`--agent` is **optional**. Omit it and the picker auto-assigns a free identity
+from the presence registry (`~/.aru/agent-presence.json`) — registered agents
+first, then the default ring (`gemini-1`, `claude-1`, `codex-1`, `cursor-1`,
+`cursor-2`) — so identity collision is structurally impossible instead of a
+matter of operator discipline:
+
+```
+python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --claim --json
+```
+
+Resolution is atomic (file-locked): two concurrent sessions can never receive
+the same identity. Each claim is attributed to a **session id** (default
+`hostname|pid`, or pass `--session-id`). Requesting an id that another live
+session already holds fails with a message naming the conflicted session —
+pass a different `--session-id`, pick a free id, or just omit `--agent`.
 
 ## Modes
 

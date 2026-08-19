@@ -48,7 +48,9 @@ adds diverse blind spots on top of that; it is not the whole value.
 
 import argparse
 import json
+import os
 import re
+import socket
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -84,6 +86,11 @@ from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # implementation of that predicate in the picker is exactly the drift that let
 # reviewed-but-since-pushed PRs reach no agent at all.
 from merge_pr import _attested_head_peers, review_evidence
+
+
+def _default_session_id() -> str:
+    """A per-invocation session token so live claims are attributable."""
+    return f"{socket.gethostname().split('.')[0]}|{os.getpid()}"
 
 
 def skill_for_issue(issue: dict[str, Any]) -> str:
@@ -912,7 +919,13 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
 
 def main():
     parser = argparse.ArgumentParser(description="Pick the next work item for one agent.")
-    parser.add_argument("--agent", required=True, help="Agent id; required for every claim")
+    parser.add_argument("--agent", required=False, default=None,
+                        help="Agent id. Omit to auto-assign a free identity from the "
+                             "presence registry (see --session-id).")
+    parser.add_argument("--session-id", default=None,
+                        help="Identity of this loop session. Defaults to "
+                             "hostname|pid. Used to attribute live presence claims "
+                             "so two sessions never share an identity.")
     parser.add_argument("--family", default=None,
                         help="This agent's model family (anthropic, openai, ...). "
                              "Omitting it means every PR looks cross-family.")
@@ -927,6 +940,47 @@ def main():
     parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
                         help="Release issue and review claims idle longer than HOURS")
     args = parser.parse_args()
+
+    session_id = args.session_id or _default_session_id()
+    if args.agent is None:
+        # Auto-assign a free identity instead of erroring. Registered agents in
+        # the presence registry are the pool; the default ring backstops an
+        # empty registry.
+        from agent_presence import (
+            DEFAULT_AGENT_RING,
+            DEFAULT_PRESENCE_PATH,
+            PresenceError,
+            PresenceStore,
+        )
+        store = PresenceStore(DEFAULT_PRESENCE_PATH)
+        try:
+            registered = sorted(store._read().get("agents") or {})
+            pool = registered or list(DEFAULT_AGENT_RING)
+            args.agent = store.resolve_free_identity(pool, session_id)
+            print(
+                f"[presence] auto-assigned agent id '{args.agent}' for session '{session_id}'",
+                file=sys.stderr,
+            )
+        except PresenceError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            return 1
+    else:
+        # Explicit identity: refuse one already held by another live session.
+        from agent_presence import (
+            DEFAULT_PRESENCE_PATH,
+            PresenceStore,
+        )
+        holder = PresenceStore(DEFAULT_PRESENCE_PATH).identity_holder(
+            args.agent, session_id
+        )
+        if holder is not None:
+            print(
+                f"[ERROR] agent '{args.agent}' already has a live heartbeat from "
+                f"session '{holder}'. Omit --agent to auto-assign a free identity, "
+                "or wait for that session to expire.",
+                file=sys.stderr,
+            )
+            return 1
 
     if args.reap_after:
         reap_stale_reviews(args.reap_after)
