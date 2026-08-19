@@ -110,7 +110,7 @@ class VersionPinningTests(unittest.TestCase):
             if (ROOT / "commands").exists():
                 shutil.copytree(ROOT / "commands", Path(temp_root) / "commands")
             shutil.copy(installer, os.path.join(temp_root, "scripts", "install_local_agent_integrations.sh"))
-            shutil.copy(str(ROOT / "scripts" / "install_cursor_integration.sh"), os.path.join(temp_root, "scripts", "install_cursor_integration.sh"))
+            shutil.copy(str(ROOT / "scripts" / "install_agent_integration.sh"), os.path.join(temp_root, "scripts", "install_agent_integration.sh"))
             common.run_cmd(["git", "add", "."], cwd=temp_root, check=True)
             common.run_cmd(["git", "commit", "-m", "init"], cwd=temp_root, check=True)
             code, commit_sha, _ = common.run_cmd(["git", "rev-parse", "HEAD"], cwd=temp_root, check=True)

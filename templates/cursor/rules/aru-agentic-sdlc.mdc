@@ -11,7 +11,7 @@ This repository is governed by **Aru_Agentic_SDLC**.
 
 1. Confirm work originates from a tracked GitHub issue (Issue-First Law).
 2. Read and follow the matching skill under `$ARU_SDLC_HOME/skills/`:
-   - `run-aru-factory` — "please continue", work the board, loop
+   - `run-aru-factory` — `aru code` (synonyms software/dev/sdlc), "please continue", work the board, loop
    - `implement-next-issue` — claim/implement/PR for a named or next issue
    - `create-github-issue` — file work
    - `code-review` — review a PR

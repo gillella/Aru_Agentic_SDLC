@@ -28,10 +28,10 @@ SKILLS_DIR = ROOT / "skills"
 
 
 def installer_path():
-    """The legacy Cursor installer governed by issue #163."""
-    path = ROOT / "scripts" / "install_cursor_integration.sh"
+    """The vendor-neutral agent installer (renamed from install_cursor_integration.sh)."""
+    path = ROOT / "scripts" / "install_agent_integration.sh"
     if not path.is_file():
-        raise AssertionError("scripts/install_cursor_integration.sh is missing")
+        raise AssertionError("scripts/install_agent_integration.sh is missing")
     return path
 
 
@@ -219,6 +219,16 @@ class InstallerRejectionTest(unittest.TestCase):
                 "installer accepted an empty skills tree" + forensics(result, script, home),
             )
             self.assertIn("no skills found", result.stderr, forensics(result, script, home))
+
+
+class LegacyShimTest(unittest.TestCase):
+    def test_cursor_installer_name_is_a_deprecated_shim(self):
+        """The old name must keep working for one release and point forward."""
+        shim = ROOT / "scripts" / "install_cursor_integration.sh"
+        self.assertTrue(shim.is_file(), "install_cursor_integration.sh shim is missing")
+        text = shim.read_text(encoding="utf-8")
+        self.assertIn("deprecated", text)
+        self.assertIn("install_agent_integration.sh", text)
 
 
 if __name__ == "__main__":

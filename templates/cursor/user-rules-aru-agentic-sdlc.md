@@ -15,7 +15,8 @@ Aru_Agentic_SDLC governance:
    `$ARU_SDLC_HOME/skills/` (or the symlinked Cursor skill of the same name)
    and follow it before improvising.
 4. Default skill routing:
-   - please continue / continue / keep going / work the board → `run-aru-factory` (loop)
+   - `aru code` (software/dev/sdlc) / please continue / continue / keep going / work the board → `run-aru-factory` (loop)
+   - `aru video` / `aru poem` → reserved for unbuilt factories: stop, do not improvise
    - implement next issue / a named issue → `implement-next-issue`
    - new governed repo → `init-agent-project`
    - file bug/feature/task → `create-github-issue`
@@ -25,8 +26,9 @@ Aru_Agentic_SDLC governance:
 5. Use worktrees under `.worktrees/`, never push straight to main/master,
    run local tests before commit, and put `Closes #<n>` in every PR body.
 6. Run GitHub/git automation via
-   `python3 "$ARU_SDLC_HOME/scripts/<script>.py"` with a stable `--agent`
-   id (for example `cursor-1`).
+   `python3 "$ARU_SDLC_HOME/scripts/<script>.py"`. Omit `--agent` to
+   auto-assign a free identity from the presence registry, or pass a stable
+   `--agent` id (for example `cursor-1`) for this session.
 7. If a project lacks `AGENTS.md` but the user wants this process, offer to
    bootstrap with `init-agent-project` rather than inventing a parallel workflow.
 8. Before continuing a factory loop, check `$HOME/.aru/factory-loop.stop`. If it

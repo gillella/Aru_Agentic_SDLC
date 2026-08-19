@@ -23,7 +23,7 @@ CONSUMED_CLI_SURFACE = [
     "scripts/triage_backlog.py",
     "scripts/enable_main_ruleset.py",
     "scripts/install_local_agent_integrations.sh",
-    "scripts/install_cursor_integration.sh",
+    "scripts/install_agent_integration.sh",
     "scripts/release.py",
     "scripts/increment_release.py",
 ]

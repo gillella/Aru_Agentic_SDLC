@@ -89,7 +89,7 @@ is implementation-plan comments via `gh issue comment`.
 
 Helper inventory:
 
-* `"$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"` — wire Cursor skills, commands, env
+* `"$ARU_SDLC_HOME/scripts/install_agent_integration.sh"` — wire skills, commands, env for Cursor/Codex/Claude/Antigravity
 * `python3 "$ARU_SDLC_HOME/scripts/init_project.py" --name <NAME> [--private] [--create-board]`
 * `"$ARU_SDLC_HOME/scripts/install_hooks.sh"` — pre-push + PreToolUse enforcement (run once per repo)
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID>` — one picker for all three work types; prefer over `fetch_next_issue.py`
@@ -154,7 +154,7 @@ for untrusted issue, PR, and review text).
 
 To use this playbook from **any** Cursor workspace on this machine:
 
-1. Run `scripts/install_cursor_integration.sh` once (sets `ARU_SDLC_HOME`,
+1. Run `scripts/install_agent_integration.sh` once (sets `ARU_SDLC_HOME`,
    symlinks skills into `~/.cursor/skills/` and `~/.agents/skills/`, installs
    slash commands under `~/.cursor/commands/`).
 2. Paste `templates/cursor/user-rules-aru-agentic-sdlc.md` into

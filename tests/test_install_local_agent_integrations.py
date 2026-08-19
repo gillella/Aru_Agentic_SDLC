@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install_local_agent_integrations.sh"
-CURSOR_INSTALLER = ROOT / "scripts" / "install_cursor_integration.sh"
+CURSOR_INSTALLER = ROOT / "scripts" / "install_agent_integration.sh"
 
 
 def codex_auto_id(project: str) -> str:

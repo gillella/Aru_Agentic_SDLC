@@ -31,7 +31,7 @@ The following scripts constitute the supported consumer-facing CLI surface:
 9. `scripts/merge_pr.py`
 10. `scripts/triage_backlog.py`
 11. `scripts/enable_main_ruleset.py`
-12. `scripts/install_local_agent_integrations.sh` / `scripts/install_cursor_integration.sh`
+12. `scripts/install_local_agent_integrations.sh` / `scripts/install_agent_integration.sh`
 13. `scripts/release.py`
 14. `scripts/increment_release.py`
 

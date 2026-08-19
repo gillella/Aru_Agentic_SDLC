@@ -36,7 +36,7 @@ Aru_Agentic_SDLC/
 │   ├── remediate-ci-failure/        # CI log parse & fix loop
 │   └── address-pr-feedback/         # Resolve review threads
 ├── scripts/                         # Reusable GitHub helper automation tools
-│   ├── install_cursor_integration.sh # Wire skills/commands/env into local Cursor
+│   ├── install_agent_integration.sh  # Wire skills/adapters for Cursor/Codex/Claude/Antigravity
 │   ├── common.py                    # Shared Git / Worktree / GitHub API / gh CLI helpers
 │   ├── init_project.py              # Bootstraps AGENTS.md, CI, private repo & board
 │   ├── fetch_next_issue.py          # Next unblocked issue respecting dependencies
@@ -85,7 +85,7 @@ Aru_Agentic_SDLC/
 One-time machine setup:
 
 ```bash
-./scripts/install_cursor_integration.sh
+./scripts/install_agent_integration.sh
 ```
 
 Then paste `templates/cursor/user-rules-aru-agentic-sdlc.md` into

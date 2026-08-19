@@ -1,11 +1,16 @@
 ---
 name: run-aru-factory
-description: Single entrypoint to the Aru_Agentic_SDLC factory for any local coding agent. Selects the right lifecycle skill and offers adopt, status, next, loop, and doctor modes. Use when the user says please continue, continue, keep going, run the factory, work the project board, continue development, adopt this project, keep going on the backlog, what is the factory doing, or check the factory setup.
+description: Single entrypoint to the Aru_Agentic_SDLC factory for any local coding agent. Selects the right lifecycle skill and offers adopt, status, next, loop, and doctor modes. Use when the user says "aru code" (or aru software/dev/sdlc), aru, please continue, continue, keep going, run the factory, work the project board, continue development, adopt this project, keep going on the backlog, what is the factory doing, or check the factory setup.
 triggers:
   - "please continue"
   - "continue"
   - "keep going"
   - "run the factory"
+  - "aru code"
+  - "aru software"
+  - "aru dev"
+  - "aru sdlc"
+  - "aru"
   - "work the project board"
   - "continue development"
   - "adopt this project"

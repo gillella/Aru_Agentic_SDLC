@@ -1,24 +1,49 @@
-# Cursor Integration for Aru_Agentic_SDLC
+# Agent Integration for Aru_Agentic_SDLC
 
-This playbook is vendor-neutral. Cursor-specific wiring lives here so every
-software project can share one Issue-First SDLC without copying skills into
-each repo.
+This playbook is vendor-neutral. The installer wires the same Issue-First SDLC
+into **Cursor, Codex, Claude Code, and Antigravity** so every software project
+can share one governance layer without copying skills into each repo.
+
+> The installer was previously named `install_cursor_integration.sh`; that
+> name is a deprecated shim that still forwards here for one release.
 
 ## What gets installed
 
-Running `scripts/install_cursor_integration.sh` configures the local machine:
+Running `scripts/install_agent_integration.sh` configures the local machine:
 
 | Artifact | Location | Purpose |
 |---|---|---|
 | `ARU_SDLC_HOME` | shell profile (`~/.zshrc` / `~/.bashrc`) | Canonical path to this playbook |
-| Agent skills | `~/.cursor/skills/<skill>/` and `~/.agents/skills/<skill>/` | Symlinks so Cursor discovers SDLC skills in every workspace |
-| Slash commands | `~/.cursor/commands/*.md` | `/continue`, `/run-aru-factory`, `/implement-next-issue`, … |
-| User-rules paste file | `~/.cursor/user-rules-aru-agentic-sdlc.md` | Text to paste into **Customize → Rules → User Rules** |
-| Optional global rule file | `~/.cursor/rules/aru-agentic-sdlc.mdc` | Best-effort file-backed rule (User Rules UI is authoritative) |
+| Agent skills | per-agent skill dirs + `~/.agents/skills/<skill>/` | Symlinks so each agent discovers SDLC skills in every workspace |
+| Governance blocks | `~/.cursor/rules/`, `~/.claude/CLAUDE.md`, `~/.codex/instructions.md`, `~/.gemini/AGENTS.md` | Managed `# >>> aru` / `# <<< aru` blocks; unmanaged user content is never touched |
+| Native adapters | Cursor commands, Codex thread automation, Antigravity workflow, Claude command | `aru code loop` wake / resume surfaces |
+| User-rules paste file | `~/.cursor/user-rules-aru-agentic-sdlc.md` | Text to paste into **Customize → Rules → User Rules** (Cursor only) |
 
-Project bootstraps (`init_project.py`) also drop
-`.cursor/rules/aru-agentic-sdlc.mdc` into each new repo so project rules
-mirror the User Rule for teammates who do not have the global install.
+### Targeting one agent
+
+`--agent cursor|codex|antigravity|claude|all` (default `all`):
+
+```bash
+"$ARU_SDLC_HOME/scripts/install_agent_integration.sh" --agent codex
+"$ARU_SDLC_HOME/scripts/install_agent_integration.sh" --agent all
+```
+
+The installer is idempotent: re-running rewrites only its delimited managed
+blocks and skill symlinks, and never clobbers unmanaged user content.
+
+Project bootstraps (`init_project.py`) also drop `.cursor/rules/aru-agentic-sdlc.mdc`
+into each new repo so project rules mirror the global rule for teammates who
+do not have the global install.
+
+### Cursor user rules are paste-required
+
+Cursor reads user rules from its settings store, **not** from disk. The
+installer writes `~/.cursor/user-rules-aru-agentic-sdlc.md` as a paste source,
+but the text only takes effect once pasted into **Customize → Rules → User
+Rules** (or equivalent). The install output does not overstate this: skills,
+commands, and project rules work without the paste; the global User Rule needs
+the manual step. Finding the UI (Cursor 3.x): Command Palette (`Cmd+Shift+P`) →
+**Cursor Settings** → **Rules**, or gear icon → **Cursor Settings** → **Rules**.
 
 ### Pinning a Version with `ARU_SDLC_REF`
 
@@ -28,7 +53,7 @@ To prevent unannounced breaks on `main` from impacting consumer projects, pin a 
 export ARU_SDLC_HOME=/Users/aravindgillella/projects/Aru_Agentic_SDLC
 # Pin to an immutable commit SHA, release tag, or checkpoint:
 export ARU_SDLC_REF=d3a0588
-"$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"
+"$ARU_SDLC_HOME/scripts/install_agent_integration.sh"
 ```
 
 - When `ARU_SDLC_REF` is set to an immutable ref, the installer checks out that ref in `$ARU_SDLC_HOME` and exports `ARU_SDLC_REF` in your shell profile. Do not use moving branch names like `main` if you wish to prevent upstream changes from updating your environment.
@@ -56,7 +81,7 @@ cd "$ARU_SDLC_HOME"
 git fetch origin
 git checkout <target-ref-or-main>
 export ARU_SDLC_REF=<target-ref-or-main>
-"$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"
+"$ARU_SDLC_HOME/scripts/install_agent_integration.sh"
 ```
 
 ### GitHub access: `gh`, not MCP
@@ -68,19 +93,6 @@ store and bypasses author/reviewer stamps and the merge gate. MCP GitHub is
 optional and non-authoritative. Do not copy a PAT into MCP. Direct `gh` is
 allowed only when no helper exists (`gh issue comment` for implementation
 plans).
-
-### Finding User Rules in the UI (Cursor 3.x)
-
-The label moves between builds. Try these in order:
-
-1. **Command Palette** (`Cmd+Shift+P`) → type `Cursor Settings` → open it →
-   look for **Rules** / **Rules for AI** / **User Rules**.
-2. Gear icon (top-right) → **Cursor Settings** (not “VS Code Settings”) →
-   **Rules**.
-3. Agents / Glass sidebar → **Customize** → **Rules**.
-4. If you still cannot find a User Rules text box: you can skip it.
-   Skills under `~/.cursor/skills/`, project `.cursor/rules/`, and
-   `~/.cursor/global.rules.mdc` already carry the SDLC guidance.
 
 ## Per-project governance
 
@@ -95,13 +107,12 @@ Every software repo still needs:
 Do **not** vendor a second copy of `skills/` or `scripts/` into each app
 repo. Point agents at `$ARU_SDLC_HOME` instead.
 
-## Skill routing inside Cursor
+## Skill routing
 
-Cursor auto-discovers personal skills from `~/.cursor/skills/` (and, on this
-machine, `~/.agents/skills/`). The installer symlinks:
+All four agents auto-discover the symlinked skills. The installer links:
 
 - `aru-agentic-sdlc` (router)
-- `run-aru-factory` (please continue / work the board)
+- `run-aru-factory` (aru code / please continue / work the board)
 - `implement-next-issue`
 - `init-agent-project`
 - `create-github-issue`
@@ -109,9 +120,12 @@ machine, `~/.agents/skills/`). The installer symlinks:
 - `remediate-ci-failure`
 - `address-pr-feedback`
 
-In a new chat, **please continue** (or `/continue`) is loop mode: recover from
-the board, then pick feedback → merge → review → issue. Do not route bare
-"continue" to `implement-next-issue`; that skips review and merge.
+The canonical entry phrase is **`aru code`** (synonyms `software` / `dev` /
+`sdlc`); `aru video` / `aru poem` are reserved for factories not yet built —
+stop rather than improvising from Code Factory skills. In a new chat,
+**`aru code`** (or `/continue`) is loop mode: recover from the board, then
+pick feedback → merge → review → issue. Do not route bare "continue" to
+`implement-next-issue`; that skips review and merge.
 
 Agents must **read** the matching `SKILL.md` before acting. Scripts are
 invoked as:
@@ -132,9 +146,9 @@ python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py" \
   --target-home /tmp/isolated-home --json
 ```
 
-The command checks `$ARU_SDLC_HOME`, Cursor skill links under `~/.cursor/skills/`
+The command checks `$ARU_SDLC_HOME`, skill links under each agent's skill dir
 and `~/.agents/skills/`, the `/run-aru-factory` command file, the managed
-governance block, `git`/`gh`, and (with `--project`) `AGENTS.md`, hooks, the
+governance blocks, `git`/`gh`, and (with `--project`) `AGENTS.md`, hooks, the
 Project Board, and `.worktrees/`. Exit `0` / `2` / `1` means healthy /
 degraded / invalid. Failed checks print a repair command; the doctor never
 installs or prints credentials. Default (no `--target-home`) diagnoses the
