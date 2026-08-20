@@ -195,7 +195,8 @@ class DefinitionOfDoneTests(unittest.TestCase):
     """The conjunction: all gates active at once, and every gate routed."""
 
     def test_canonical_pr_passes_every_gate(self):
-        with patch.object(merge_pr, "check_spec_sync") as _ss:
+        with patch.object(merge_pr, "check_spec_sync") as _ss, \
+             patch.object(merge_pr, "_behind_by", return_value=0) as _bb:
             _ss.return_value = (True, "specifications synchronized.")
             ok, gates = merge_pr.evaluate_dod(
                 canonical_pr(), {293: CANONICAL_ISSUE_BODY}, canonical_evidence()
@@ -220,7 +221,8 @@ class DefinitionOfDoneTests(unittest.TestCase):
         self.assertEqual(EXPECTED_GATES, frozenset(routed))
 
     def test_unknown_future_gate_fails_build(self):
-        with patch.object(merge_pr, "check_spec_sync") as _ss:
+        with patch.object(merge_pr, "check_spec_sync") as _ss, \
+             patch.object(merge_pr, "_behind_by", return_value=0) as _bb:
             _ss.return_value = (True, "ok")
             _, gates = merge_pr.evaluate_dod(
                 canonical_pr(), {293: CANONICAL_ISSUE_BODY}, canonical_evidence()
