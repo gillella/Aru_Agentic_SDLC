@@ -1,4 +1,4 @@
-# line-ceiling: 789
+# line-ceiling: 794
 import io
 import sys
 import unittest
@@ -239,6 +239,11 @@ depends-on: #2, #4
 
         self.assertEqual(released, [9])
         update_status.assert_called_once_with(9, "Backlog", require_board=True)
+        # Prove the audit comment was actually posted, not merely permitted by
+        # the side_effect list length.
+        audit = next(call.args[0] for call in run_cmd.call_args_list
+                     if call.args[0][:3] == ["gh", "issue", "comment"])
+        self.assertIn("9", audit)
 
     @patch.object(fetch_next_issue, "update_status", return_value=True)
     @patch.object(fetch_next_issue, "run_cmd")

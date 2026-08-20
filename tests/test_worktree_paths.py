@@ -50,6 +50,28 @@ class WorktreePathScopingTests(unittest.TestCase):
             common.WORKTREE_AGENT_MAXLEN,
         )
 
+    def test_ids_that_sanitise_alike_still_get_different_directories(self):
+        # `claude.1` and `claude-1` both reduce to `claude-1` under plain
+        # sanitisation, which would put two agents back in one directory.
+        a = common.worktree_path_for("feat/x", "claude.1")
+        b = common.worktree_path_for("feat/x", "claude-1")
+        self.assertNotEqual(a, b)
+
+    def test_ids_sharing_a_long_prefix_still_get_different_directories(self):
+        a = common.worktree_path_for("feat/x", "a" * 30 + "X")
+        b = common.worktree_path_for("feat/x", "a" * 30 + "Y")
+        self.assertNotEqual(a, b)
+
+    def test_a_clean_short_id_is_left_alone(self):
+        # The digest is a fallback for lossy reduction, not a default.
+        self.assertEqual(
+            common.worktree_path_for("feat/x", "claude-a3f19c"),
+            ".worktrees/feat-x__claude-a3f19c")
+
+    def test_disambiguated_component_still_fits_the_length_budget(self):
+        component = common.worktree_agent_component("a" * 200)
+        self.assertLessEqual(len(component), common.WORKTREE_AGENT_MAXLEN)
+
     def test_agent_is_recoverable_from_the_path(self):
         path = common.worktree_path_for("feat/issue-3-thing", "claude-1")
         self.assertEqual(common.worktree_agent_of(path), "claude-1")

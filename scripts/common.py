@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# line-ceiling: 1470
+# line-ceiling: 1482
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
 """
 
 import fnmatch
+import hashlib
 import json
 import os
 import random
@@ -322,10 +323,21 @@ def worktree_agent_component(agent: str) -> str:
 
     Dots are not preserved: an agent id is untrusted enough that leaving '..'
     intact in a path component invites a traversal for no benefit.
+
+    Sanitising and truncating are both lossy, so two distinct ids can reduce to
+    one component -- `claude.1` and `claude-1`, or any pair sharing a long
+    prefix. That would put two agents back in one directory, which is precisely
+    the data-integrity defect this scoping exists to prevent, so a lossy
+    reduction carries a short digest of the id as given.
     """
-    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", str(agent))
+    raw = str(agent)
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", raw)
     slug = re.sub(r"-{2,}", "-", slug).strip("-")
-    return slug[:WORKTREE_AGENT_MAXLEN].strip("-")
+    if slug == raw and len(slug) <= WORKTREE_AGENT_MAXLEN:
+        return slug
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:6]
+    head = slug[:WORKTREE_AGENT_MAXLEN - len(digest) - 1].strip("-")
+    return f"{head}-{digest}" if head else digest
 
 
 def worktree_path_for(branch_name: str, agent: str = "") -> str:

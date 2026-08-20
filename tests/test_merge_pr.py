@@ -1,4 +1,4 @@
-# line-ceiling: 3684
+# line-ceiling: 3709
 from contextlib import nullcontext
 import json
 import os
@@ -1137,7 +1137,37 @@ class SelfReviewTests(unittest.TestCase):
     def test_reviewer_families_ignores_malformed_labels(self):
         pr = labelled("reviewer-family:a1:google", "reviewer-family:nofamily",
                       "reviewer-family:")
-        self.assertEqual(merge_pr.reviewer_families(pr), {"a1": "google"})
+        self.assertEqual(merge_pr.reviewer_families(pr), {"a1": ["google"]})
+
+    def test_conflicting_family_stamps_are_reported_as_ambiguity(self):
+        # Two families for one id is evidence of the reissue defect; letting the
+        # last label win would describe the wrong situation entirely.
+        pr = labelled("author:agent-1", "family:anthropic",
+                      "reviewed-by:agent-1",
+                      "reviewer-family:agent-1:anthropic",
+                      "reviewer-family:agent-1:google")
+        _peers, collisions, _unresolved = merge_pr.classify_reviewers(
+            pr, ["agent-1"], "agent-1")
+        self.assertEqual(len(collisions), 1)
+        self.assertIn("ambiguous", collisions[0][1])
+
+    def test_two_author_family_labels_are_reported_as_ambiguity(self):
+        pr = labelled("author:agent-1", "family:anthropic", "family:google",
+                      "reviewed-by:agent-1",
+                      "reviewer-family:agent-1:anthropic")
+        _peers, collisions, _unresolved = merge_pr.classify_reviewers(
+            pr, ["agent-1"], "agent-1")
+        self.assertEqual(len(collisions), 1)
+        self.assertIn("anthropic, google", collisions[0][1])
+
+    def test_ambiguous_families_still_block_the_merge(self):
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1",
+            "reviewer-family:agent-1:anthropic",
+            "reviewer-family:agent-1:google"), 0)
+        self.assertFalse(ok)
+        self.assertIn("ambiguous", msg)
 
     def test_reviewer_family_label_is_not_read_as_the_author_family(self):
         # family: and reviewer-family: must not be confused by prefix matching.

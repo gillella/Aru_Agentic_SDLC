@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3524
+# line-ceiling: 3555
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -940,6 +940,17 @@ def _check_time(check):
     return parsed
 
 
+def _check_outcome(check):
+    """Normalised (status, result) for one run, used to compare two runs.
+
+    Check runs report 'conclusion'; legacy commit statuses report 'state'.
+    """
+    return (
+        (check.get("status") or "").upper(),
+        (check.get("conclusion") or check.get("state") or "").upper(),
+    )
+
+
 def _current_runs(rollup):
     """Reduce the rollup to the live run of each check name.
 
@@ -967,7 +978,17 @@ def _current_runs(rollup):
         if any(when is None for when, _ in stamped):
             unorderable.append(name)
             continue
-        current[name] = max(stamped, key=lambda pair: pair[0])[1]
+        newest = max(when for when, _ in stamped)
+        tied = [run for when, run in stamped if when == newest]
+        # max() returns the first maximal element, which is array order -- the
+        # one thing this function documents as carrying no recency evidence. Two
+        # runs finishing in the same second would otherwise decide a merge by
+        # response ordering. Ties that agree on the outcome are harmless; ties
+        # that disagree are undecidable.
+        if len({_check_outcome(run) for run in tied}) > 1:
+            unorderable.append(name)
+            continue
+        current[name] = tied[0]
     return current, sorted(unorderable)
 
 
@@ -996,10 +1017,7 @@ def check_ci(pr):
             # Advisory review bots are not build checks; a stuck PENDING status
             # from one must not hold the CI gate (see ADVISORY_CHECK_CONTEXTS).
             continue
-        check = current[name]
-        # Check runs use 'conclusion'; legacy statuses use 'state'.
-        status = (check.get("status") or "").upper()
-        result = (check.get("conclusion") or check.get("state") or "").upper()
+        status, result = _check_outcome(current[name])
         if status and status != "COMPLETED" and not result or result in in_progress:
             pending.append(name)
         elif result not in passing:
@@ -1111,13 +1129,21 @@ def _current_head_reviewers(evidence):
 
 
 def reviewer_families(pr):
-    """Map reviewer id -> model family from reviewer-family:<id>:<family> labels."""
+    """Map reviewer id -> the distinct families stamped for it.
+
+    A list rather than a single value on purpose. Two conflicting
+    reviewer-family labels for one id are themselves evidence of the id-reissue
+    defect this module exists to detect, so letting the last one win would hide
+    the very signal worth reporting.
+    """
     families = {}
     for value in label_values(pr, REVIEWER_FAMILY_LABEL):
         agent_id, _, family = value.partition(":")
         if agent_id and family:
-            families[agent_id] = family
-    return families
+            families.setdefault(agent_id, [])
+            if family not in families[agent_id]:
+                families[agent_id].append(family)
+    return {agent_id: sorted(values) for agent_id, values in families.items()}
 
 
 def classify_reviewers(pr, reviewers, author):
@@ -1140,14 +1166,25 @@ def classify_reviewers(pr, reviewers, author):
       collisions  (id, author_family, reviewer_family) - one id, two agents
       unresolved  (id, [what is missing]) - cannot be decided, fails closed
     """
-    author_family = next(iter(label_values(pr, FAMILY_LABEL)), "")
+    author_families = sorted(set(label_values(pr, FAMILY_LABEL)))
     families = reviewer_families(pr)
     peers, collisions, unresolved = [], [], []
     for agent_id in reviewers:
         if agent_id != author:
             peers.append(agent_id)
             continue
-        reviewer_family = families.get(agent_id, "")
+        reviewer_values = families.get(agent_id, [])
+        # An identity stamped with two different families is not a family we can
+        # compare; it is an ambiguity, and reporting it as one beats picking
+        # either and describing the wrong situation.
+        if len(author_families) > 1 or len(reviewer_values) > 1:
+            ambiguous = (f"the PR ({', '.join(author_families)})"
+                         if len(author_families) > 1
+                         else f"reviewer '{agent_id}' ({', '.join(reviewer_values)})")
+            collisions.append((agent_id, f"ambiguous on {ambiguous}", "unresolvable"))
+            continue
+        author_family = author_families[0] if author_families else ""
+        reviewer_family = reviewer_values[0] if reviewer_values else ""
         if not author_family or not reviewer_family:
             missing = []
             if not author_family:

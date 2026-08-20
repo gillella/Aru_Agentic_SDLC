@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1391
+# line-ceiling: 1406
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.
@@ -615,6 +615,21 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
         print(f"[ERROR] Could not transfer authorship of PR #{pr_id}: {err}",
               file=sys.stderr)
         return EXIT_ERROR
+
+    # Read back before reporting success. Two successors can both clear
+    # _adoption_target and both run `gh pr edit`; without this the loser prints
+    # success and exits EXIT_OK, leaving two agents believing they own one PR.
+    settled = _pr_snapshot(pr_id)
+    if settled is None:
+        print(f"[ERROR] Could not re-read PR #{pr_id} to confirm adoption. "
+              "Verify ownership before pushing to this branch.", file=sys.stderr)
+        return EXIT_ERROR
+    winner = pr_author(settled["labels"])
+    if winner != agent:
+        print(f"[CONFLICT] Adoption of PR #{pr_id} did not settle on '{agent}'; "
+              f"'{winner or 'nobody'}' holds it. Another successor adopted it "
+              "first.", file=sys.stderr)
+        return EXIT_CONFLICT
 
     run_cmd(["gh", "pr", "comment", str(pr_id), "--body",
              f"🤝 Adopted by `{agent}`"
