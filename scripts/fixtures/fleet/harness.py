@@ -1,4 +1,4 @@
-# line-ceiling: 503
+# line-ceiling: 513
 """Hermetic board and local-agent adapters for the full fleet lifecycle.
 
 The fixture deliberately models GitHub as the durable queue while exercising
@@ -27,6 +27,10 @@ class Issue:
     number: int
     touches: tuple[str, ...]
     depends_on: tuple[int, ...] = ()
+    # The picker's priority-integrity gate fails an issue closed when it carries
+    # no priority:pN label, so a fixture issue without one is never claimable and
+    # every scenario silently reports idle. Default it; scenarios may override.
+    priority: str = "p1"
     high_risk: bool = False
     unresolved_decision: str = ""
     status: str = "Ready"
@@ -66,6 +70,7 @@ class HermeticFleet:
                 number=item["number"],
                 touches=tuple(item["touches"]),
                 depends_on=tuple(item.get("depends_on", ())),
+                priority=item.get("priority", "p1"),
                 high_risk=item.get("high_risk", False),
                 unresolved_decision=item.get("unresolved_decision", ""),
                 status="Blocked" if item.get("unresolved_decision") else "Ready",
@@ -136,7 +141,8 @@ class HermeticFleet:
         }[status]
 
     def _issue_record(self, issue: Issue) -> dict[str, Any]:
-        labels = [{"name": self._status_label(issue.status)}]
+        labels = [{"name": self._status_label(issue.status)},
+                  {"name": f"priority:{issue.priority}"}]
         if issue.claim:
             labels.append({"name": f"agent:{issue.claim}"})
         dependencies = "\n".join(f"depends-on: #{number}" for number in issue.depends_on)
@@ -229,6 +235,10 @@ class HermeticFleet:
         issue_body = "## Acceptance Criteria\n- [x] fixture acceptance"
         ok, gates = merge_pr.evaluate_dod(
             self._pr_record(pr), {pr.issue: issue_body}, evidence,
+            # The rebased gate resolves ancestry through git and the compare
+            # API, and fails closed when it cannot. There is no repository here,
+            # so state the fixture's own truth: simulated branches are current.
+            behind_resolver=lambda _base, _head: 0,
         )
         blocked = [name for name, passed, _message in gates if not passed]
         return ok, "every Definition-of-Done gate passed" if ok else f"unmet: {', '.join(blocked)}"
