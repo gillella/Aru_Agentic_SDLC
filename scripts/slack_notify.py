@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 999
+# line-ceiling: 1036
 """Post stamped Slack events for the Aru factory control room.
 
 GitHub remains the work queue. Slack downtime must not halt factory work.
@@ -110,9 +110,14 @@ ENV_KEYS = (
     "SLACK_TEAM_ID",
     "SLACK_CHANNEL_ID",
     "SLACK_OPERATOR_USER_ID",
+    "SLACK_ESCALATION_USER_ID",
     "SLACK_CHANNEL_NAME",
 )
 ALERT_TYPES = frozenset({"blocked", "waiting-on", "hitl"})
+# Alert kinds that must wake the Hermes war-room bot via @-mention so
+# material decisions escalate to Telegram. `waiting-on` is routine
+# peer-claim chatter and deliberately stays mention-free.
+ESCALATION_ALERT_TYPES = frozenset({"blocked", "hitl"})
 AVAILABILITY_EVENT = "availability"
 AVAILABILITY_STATES = frozenset({"cooling-down", "returned"})
 COOLDOWN_REASONS = frozenset({
@@ -145,6 +150,7 @@ class SlackConfig:
     team_id: str
     channel_id: str
     operator_user_id: str = ""
+    escalation_user_id: str = ""
     app_token: str = ""
     signing_secret: str = ""
     channel_name: str = "project-aru-code"
@@ -186,6 +192,7 @@ def config_from_env(values: Dict[str, str], require_channel: bool = True) -> Sla
         team_id=team,
         channel_id=channel,
         operator_user_id=values.get("SLACK_OPERATOR_USER_ID", ""),
+        escalation_user_id=values.get("SLACK_ESCALATION_USER_ID", ""),
         app_token=values.get("SLACK_APP_TOKEN", ""),
         signing_secret=values.get("SLACK_SIGNING_SECRET", ""),
         channel_name=values.get("SLACK_CHANNEL_NAME", "project-aru-code").lstrip("#"),
@@ -379,6 +386,9 @@ def format_event(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> 
     body = redact(str(event.get("text") or ""), extra=secrets).strip()
     lines: list[str] = []
     operator = str(event.get("operator_user_id") or "").strip()
+    escalation = str(event.get("escalation_user_id") or "").strip()
+    if kind in ESCALATION_ALERT_TYPES and escalation.startswith("U"):
+        lines.append(f"<@{escalation}> {kind.upper()} — escalate to Hermes")
     if kind == "hitl" and operator.startswith("U"):
         lines.append(f"<@{operator}> HITL — decision needed")
     lines.append(f"[{kind}] agent=`{agent}` family=`{family}` {ref_s}")
@@ -627,6 +637,28 @@ def slack_api_transport(config: SlackConfig, text: str, thread_ts: Optional[str]
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _stamp_authoritative_mentions(config: SlackConfig, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Stamp operator + escalation user ids from config; reject invalid values.
+
+    The configured ids are authoritative; caller-supplied mention identities
+    are never trusted. Empty escalation config means no escalation mention
+    (legacy behavior). Returns an error dict on the first invalid identity,
+    else None.
+    """
+    kind = event.get("type")
+    if kind == "hitl":
+        operator = str(config.operator_user_id or "").strip()
+        if not SLACK_USER_RE.fullmatch(operator):
+            return {"ok": False, "error": "invalid_operator_user_id"}
+        event["operator_user_id"] = operator
+    if kind in ESCALATION_ALERT_TYPES:
+        escalation = str(config.escalation_user_id or "").strip()
+        if escalation and not SLACK_USER_RE.fullmatch(escalation):
+            return {"ok": False, "error": "invalid_escalation_user_id"}
+        event["escalation_user_id"] = escalation
+    return None
+
+
 def post_event(
     config: SlackConfig,
     event: Dict[str, Any],
@@ -658,13 +690,9 @@ def post_event(
                 "error": "invalid_availability",
                 "detail": str(exc),
             }
-    if kind == "hitl":
-        operator = str(config.operator_user_id or "").strip()
-        if not SLACK_USER_RE.fullmatch(operator):
-            return {"ok": False, "error": "invalid_operator_user_id"}
-        # The configured allowlist is authoritative; caller-supplied mention
-        # identities are never trusted.
-        stamped["operator_user_id"] = operator
+    mention_error = _stamp_authoritative_mentions(config, stamped)
+    if mention_error:
+        return mention_error
     stamped = sanitize_event(stamped, secrets_from_config(config))
     cache = cache if cache is not None else DedupeCache()
     key = dedupe_key(stamped)
@@ -785,15 +813,13 @@ def notify_alert(  # noqa: C901, PLR0912
 
     secrets = secrets_from_config(config)
     stamped = dict(event)
-    if stamped.get("type") == "hitl":
-        operator = str(config.operator_user_id or "").strip()
-        if not SLACK_USER_RE.fullmatch(operator):
-            return {
-                "ok": False,
-                "error": "invalid_alert",
-                "detail": "configured operator user id is missing or invalid",
-            }
-        stamped["operator_user_id"] = operator
+    mention_error = _stamp_authoritative_mentions(config, stamped)
+    if mention_error:
+        return {
+            "ok": False,
+            "error": "invalid_alert",
+            "detail": mention_error.get("error", "invalid mention identity"),
+        }
     stamped = sanitize_event(stamped, secrets)
 
     alert_cache = cache if cache is not None else FileDedupeCache()
