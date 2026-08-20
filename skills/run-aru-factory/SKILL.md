@@ -136,7 +136,8 @@ here, stop immediately and do not arm native wakes. Ambiguous board identity,
 unresolved `touches:` conflicts, money semantics, security posture, or hard
 rules can require intervention; explain the exact decision needed on the linked
 issue or PR, then notify Slack with
-`scripts/slack_notify.py` with the linked issue or PR and every flag below.
+`$ARU_SDLC_HOME/scripts/slack_notify.py` with the linked issue or PR and every
+flag below.
 `waiting-on` covers dependency and claim waits, `blocked` other blocks, `hitl`
 an operator mention; idle ticks and heartbeats never notify. Examples:
 `prompts/fleet-worker.md`.

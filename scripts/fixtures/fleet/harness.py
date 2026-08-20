@@ -1,4 +1,4 @@
-# line-ceiling: 512
+# line-ceiling: 513
 """Hermetic board and local-agent adapters for the full fleet lifecycle.
 
 The fixture deliberately models GitHub as the durable queue while exercising
@@ -70,6 +70,7 @@ class HermeticFleet:
                 number=item["number"],
                 touches=tuple(item["touches"]),
                 depends_on=tuple(item.get("depends_on", ())),
+                priority=item.get("priority", "p1"),
                 high_risk=item.get("high_risk", False),
                 unresolved_decision=item.get("unresolved_decision", ""),
                 status="Blocked" if item.get("unresolved_decision") else "Ready",
