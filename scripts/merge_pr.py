@@ -1261,7 +1261,31 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     return True, note
 
 
-def check_rebased(pr):
+def _behind_by(base_ref, head_sha):
+    """Commits `head_sha` is behind `base_ref`, or None if it cannot be determined.
+
+    GitHub only sets mergeStateStatus to BEHIND when the base branch has
+    protection requiring branches to be up to date. On an unprotected repo --
+    the default for a newly governed project -- that field never expresses
+    staleness at all, so a gate reading it alone can never fail. The compare
+    API reports behind_by unconditionally.
+    """
+    if not base_ref or not head_sha:
+        return None
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    data = _gh_json(["gh", "api", f"repos/{slug}/compare/{base_ref}...{head_sha}"])
+    if not isinstance(data, dict):
+        return None
+    behind = data.get("behind_by")
+    # bool is an int subclass; True would otherwise read as "1 commit behind".
+    if isinstance(behind, bool) or not isinstance(behind, int) or behind < 0:
+        return None
+    return behind
+
+
+def check_rebased(pr, behind_resolver=None):
     state = (pr.get("mergeStateStatus") or "").upper()
     if state == "BEHIND":
         return False, "Branch is behind the base. Rebase on main and re-run."
@@ -1269,6 +1293,29 @@ def check_rebased(pr):
         return False, "Branch has merge conflicts with the base."
     if (pr.get("mergeable") or "").upper() == "CONFLICTING":
         return False, "Branch conflicts with the base."
+    # The checks above are a fast path, not the authority: they only fire on
+    # repos configured to surface staleness. Ask for ancestry directly, and
+    # treat unknown as not-current. A gate that cannot fail is worse than an
+    # absent one, because the Definition of Done then asserts a property
+    # nothing verified.
+    resolve = behind_resolver or _behind_by
+    try:
+        behind = resolve(pr.get("baseRefName"), pr.get("headRefOid"))
+    except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
+        return False, (
+            f"Could not determine whether the branch is current with the base "
+            f"({type(exc).__name__}: {exc}). Refusing to merge on unverified ancestry."
+        )
+    if behind is None:
+        return False, (
+            "Could not determine whether the branch is current with the base. "
+            "Refusing to merge on unverified ancestry."
+        )
+    if behind > 0:
+        plural = "commit" if behind == 1 else "commits"
+        return False, (
+            f"Branch is {behind} {plural} behind the base. Rebase on main and re-run."
+        )
     return True, "Branch is current with the base."
 
 
