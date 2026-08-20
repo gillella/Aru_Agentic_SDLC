@@ -110,9 +110,14 @@ ENV_KEYS = (
     "SLACK_TEAM_ID",
     "SLACK_CHANNEL_ID",
     "SLACK_OPERATOR_USER_ID",
+    "SLACK_ESCALATION_USER_ID",
     "SLACK_CHANNEL_NAME",
 )
 ALERT_TYPES = frozenset({"blocked", "waiting-on", "hitl"})
+# Alert kinds that must wake the Hermes war-room bot via @-mention so
+# material decisions escalate to Telegram. `waiting-on` is routine
+# peer-claim chatter and deliberately stays mention-free.
+ESCALATION_ALERT_TYPES = frozenset({"blocked", "hitl"})
 AVAILABILITY_EVENT = "availability"
 AVAILABILITY_STATES = frozenset({"cooling-down", "returned"})
 COOLDOWN_REASONS = frozenset({
@@ -145,6 +150,7 @@ class SlackConfig:
     team_id: str
     channel_id: str
     operator_user_id: str = ""
+    escalation_user_id: str = ""
     app_token: str = ""
     signing_secret: str = ""
     channel_name: str = "project-aru-code"
@@ -186,6 +192,7 @@ def config_from_env(values: Dict[str, str], require_channel: bool = True) -> Sla
         team_id=team,
         channel_id=channel,
         operator_user_id=values.get("SLACK_OPERATOR_USER_ID", ""),
+        escalation_user_id=values.get("SLACK_ESCALATION_USER_ID", ""),
         app_token=values.get("SLACK_APP_TOKEN", ""),
         signing_secret=values.get("SLACK_SIGNING_SECRET", ""),
         channel_name=values.get("SLACK_CHANNEL_NAME", "project-aru-code").lstrip("#"),
@@ -379,6 +386,9 @@ def format_event(event: Dict[str, Any], secrets: Optional[list[str]] = None) -> 
     body = redact(str(event.get("text") or ""), extra=secrets).strip()
     lines: list[str] = []
     operator = str(event.get("operator_user_id") or "").strip()
+    escalation = str(event.get("escalation_user_id") or "").strip()
+    if kind in ESCALATION_ALERT_TYPES and escalation.startswith("U"):
+        lines.append(f"<@{escalation}> {kind.upper()} — escalate to Hermes")
     if kind == "hitl" and operator.startswith("U"):
         lines.append(f"<@{operator}> HITL — decision needed")
     lines.append(f"[{kind}] agent=`{agent}` family=`{family}` {ref_s}")
@@ -665,6 +675,13 @@ def post_event(
         # The configured allowlist is authoritative; caller-supplied mention
         # identities are never trusted.
         stamped["operator_user_id"] = operator
+    if kind in ESCALATION_ALERT_TYPES:
+        escalation = str(config.escalation_user_id or "").strip()
+        if escalation and not SLACK_USER_RE.fullmatch(escalation):
+            return {"ok": False, "error": "invalid_escalation_user_id"}
+        # Authoritative from config; caller-supplied escalation identities
+        # are never trusted. Empty config = no escalation mention (legacy).
+        stamped["escalation_user_id"] = escalation
     stamped = sanitize_event(stamped, secrets_from_config(config))
     cache = cache if cache is not None else DedupeCache()
     key = dedupe_key(stamped)
@@ -794,6 +811,15 @@ def notify_alert(  # noqa: C901, PLR0912
                 "detail": "configured operator user id is missing or invalid",
             }
         stamped["operator_user_id"] = operator
+    if stamped.get("type") in ESCALATION_ALERT_TYPES:
+        escalation = str(config.escalation_user_id or "").strip()
+        if escalation and not SLACK_USER_RE.fullmatch(escalation):
+            return {
+                "ok": False,
+                "error": "invalid_alert",
+                "detail": "configured escalation user id is invalid",
+            }
+        stamped["escalation_user_id"] = escalation
     stamped = sanitize_event(stamped, secrets)
 
     alert_cache = cache if cache is not None else FileDedupeCache()

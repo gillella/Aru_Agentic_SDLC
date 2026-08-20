@@ -114,6 +114,19 @@ issue/PR comment with the same facts **before** the Slack message:
 | `waiting-on` | peer holds a claim, review, or overlapping `touches:` path | names `--waiting-on-agent` and the peer issue/PR; never steals the claim |
 | `hitl` | severe merge/close-out failure, exhausted credits, or an unresolvable decision | mentions only the validated `<@SLACK_OPERATOR_USER_ID>` from configuration; agents still stop per `AGENTS.md` |
 
+## Escalation to Hermes (mention the war-room bot)
+
+The factory posts through one bot (`@aru_code_app`), and Hermes is a *separate*
+bot (`@hermes-war-room`, see `templates/slack/manifest-hermes-war-room.yaml`).
+A Slack bot cannot wake itself, so material events must mention Hermes' bot,
+never the factory bot.
+
+Configure `SLACK_ESCALATION_USER_ID` (Hermes' bot user id) in `~/.aru/slack.env`.
+`blocked` and `hitl` events then prepend `<@SLACK_ESCALATION_USER_ID> …
+escalate to Hermes` so Hermes wakes and escalates the decision to Telegram.
+`waiting-on` stays mention-free (routine peer-claim chatter). Leave the var
+unset to keep legacy behavior (no escalation mention).
+
 For the examples below, prepare `ARU_ALERT_TEXT_FILE` or
 `ARU_ALERT_DECISION_FILE` with the same secure file procedure. The registry
 record is authoritative for both repository slug and checkout path; `--repo`
@@ -260,8 +273,8 @@ Agents still pick work only through `fetch_next_work.py`.
 2. Create an app-level token with `connections:write` and install the app.
 3. Invite the bot into each private project channel.
 4. Store `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_SIGNING_SECRET`,
-   `SLACK_TEAM_ID`, and `SLACK_OPERATOR_USER_ID` in `~/.aru/slack.env` with
-   mode `0600`.
+   `SLACK_TEAM_ID`, `SLACK_OPERATOR_USER_ID`, and (for Hermes escalation)
+   `SLACK_ESCALATION_USER_ID` in `~/.aru/slack.env` with mode `0600`.
 5. Create or migrate one registry record per project and run `doctor`.
 
 The bridge authorizes only the configured operator user in the record's Slack

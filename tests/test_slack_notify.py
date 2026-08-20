@@ -861,6 +861,102 @@ class SlackNotifyTests(unittest.TestCase):
         self.assertIn("<@U01234567>", text)
         self.assertIn("need schema decision", text)
 
+    def test_hitl_mentions_escalation_target(self):
+        text = format_event(
+            {
+                "type": "hitl",
+                "agent": "cursor-1",
+                "operator_user_id": "U01234567",
+                "escalation_user_id": "U0BQ762MD7Y",
+                "text": "need schema decision",
+                "ts": "2026-08-14T12:00:00Z",
+            }
+        )
+        self.assertIn("<@U0BQ762MD7Y> HITL — escalate to Hermes", text)
+        self.assertIn("<@U01234567> HITL — decision needed", text)
+
+    def test_blocked_mentions_escalation_target(self):
+        text = format_event(
+            {
+                "type": "blocked",
+                "agent": "cursor-1",
+                "escalation_user_id": "U0BQ762MD7Y",
+                "text": "no path forward",
+            }
+        )
+        self.assertIn("<@U0BQ762MD7Y> BLOCKED — escalate to Hermes", text)
+
+    def test_waiting_on_has_no_escalation_mention(self):
+        text = format_event(
+            {
+                "type": "waiting-on",
+                "agent": "cursor-1",
+                "escalation_user_id": "U0BQ762MD7Y",
+                "waiting_on_agent": "claude-1",
+                "waiting_on_issue": 163,
+            }
+        )
+        self.assertNotIn("escalate to Hermes", text)
+        self.assertNotIn("<@U0BQ762MD7Y>", text)
+
+    def test_escalation_unset_preserves_legacy_no_mention(self):
+        text = format_event(
+            {
+                "type": "hitl",
+                "agent": "cursor-1",
+                "operator_user_id": "U01234567",
+                "text": "need decision",
+            }
+        )
+        self.assertNotIn("escalate to Hermes", text)
+
+    def test_post_event_stamps_escalation_from_config(self):
+        captured = {}
+
+        def transport(config, text, thread_ts):
+            captured["text"] = text
+            return {"ok": True, "ts": "9.9"}
+
+        result = post_event(
+            sample_config(escalation_user_id="U0BQ762MD7Y"),
+            {
+                "type": "blocked",
+                "agent": "cursor-1",
+                "family": "xai",
+                "repo": REPO,
+                "issue": 172,
+                "text": "blocked on merge",
+                "project_id": "proj_test",
+            },
+            transport=transport,
+            cache=DedupeCache(),
+        )
+        self.assertTrue(result["ok"])
+        self.assertIn("<@U0BQ762MD7Y> BLOCKED — escalate to Hermes", captured["text"])
+
+    def test_post_event_rejects_invalid_escalation_user_id(self):
+        def transport(config, text, thread_ts):
+            return {"ok": True, "ts": "9.9"}
+
+        result = post_event(
+            sample_config(
+                operator_user_id="U01234567", escalation_user_id="not-a-user-id"
+            ),
+            {
+                "type": "hitl",
+                "agent": "cursor-1",
+                "family": "xai",
+                "repo": REPO,
+                "issue": 172,
+                "text": "decision",
+                "project_id": "proj_test",
+            },
+            transport=transport,
+            cache=DedupeCache(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "invalid_escalation_user_id")
+
     def test_notify_alert_comments_github_before_slack(self):
         order = []
 
