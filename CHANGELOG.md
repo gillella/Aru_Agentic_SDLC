@@ -27,6 +27,17 @@ Breaking changes (renames, mandatory flags, exit contract changes) force a **MAJ
 
 ## Checkpoint History
 
+- **ckpt/302-55830e3**: checkpoint: PR #302 — test(factory): prove the lifecycle is traversable end to end (#302)
+- **ckpt/309-394f6d6**: checkpoint: PR #309 — fix(merge): decide the rebased gate from ancestry, not mergeStateStatus (#309)
+- **ckpt/312-74876fc**: checkpoint: PR #312 — Merge pull request #312 from gillella/fix/p0-p1-sweep
+- **ckpt/313-c70486b**: checkpoint: PR #313 — Merge pull request #313 from gillella/feat/issue-301-featbuild-grill-aru-interrogation-skill
+- **ckpt/315-539b57b**: checkpoint: PR #315 — fix(review): resolve four ambiguities by failing closed instead of guessing (#315)
+- **ckpt/317-ea13d27**: checkpoint: PR #317 — fix(tests): green the suite by fixing three stale contracts (#317)
+- **ckpt/318-a361e16**: checkpoint: PR #318 — chore(ci): govern TypeScript and Go sources with the line ceiling (#318)
+- **ckpt/320-03e2f15**: checkpoint: PR #320 — chore(init): give bootstrapped projects the line-ceiling ratchet (#320)
+- **ckpt/322-f19d5cd**: checkpoint: PR #322 — chore(governance): remove the fast-track relaxation and restore the full merge gate (#322)
+- **ckpt/323-4f77fcb**: checkpoint: PR #323 — docs(release): generate CHANGELOG for v0.1.0 (#323)
+- **ckpt/325-6c3a97a**: checkpoint: PR #325 — chore(repo): ignore the claude-mem generated scripts/CLAUDE.md (#325)
 - **ckpt/300-86b2ddc**: checkpoint: PR #300 — feat(picker): claim only priority-ranked stories in the active authorized sprint
 - **ckpt/295-2009f0c**: checkpoint: PR #295 — feat(governance): separate reviewer identity via configured GitHub App
 - **ckpt/297-2db7d34**: checkpoint: PR #297 — fix(gates): allow ruff verify predicates and flag unrunnable predicates at triage
