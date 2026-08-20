@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1128
+# line-ceiling: 1175
 """fetch_next_work.py - answers "what should I do next?" for one agent.
 
 The issue picker only ever answered "which issue do I implement?", so a fleet
@@ -68,6 +68,7 @@ from claim_issue import (
     reviewed_by,
 )
 from common import (
+    board_agent_identities,
     get_repo_slug,
     list_open_issues,
     run_cmd,
@@ -89,6 +90,88 @@ from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # implementation of that predicate in the picker is exactly the drift that let
 # reviewed-but-since-pushed PRs reach no agent at all.
 from merge_pr import _attested_head_peers, review_evidence
+
+
+def _auto_assign_identity(args, session_id):
+    """Pick a free identity, consulting GitHub before the local registry.
+
+    The registry alone was never enough: its 300-second heartbeat TTL freed an
+    id that the board still showed holding an issue claim and authoring an open
+    PR, so a live agent's id was reissued to a second session (#304). The
+    registry stays as fast-path advisory state; GitHub decides liveness.
+    """
+    from agent_presence import (
+        DEFAULT_AGENT_RING,
+        DEFAULT_PRESENCE_PATH,
+        PresenceError,
+        PresenceStore,
+    )
+    holders, error = board_agent_identities()
+    if holders is None:
+        # Fail closed. Assigning under an unreadable board risks handing out an
+        # id another agent is demonstrably using, which is the defect itself.
+        print(f"[ERROR] Cannot verify agent id ownership on GitHub: {error}. "
+              "Refusing to auto-assign an identity; pass --agent explicitly if "
+              "you know the id is free.", file=sys.stderr)
+        return 1
+
+    store = PresenceStore(DEFAULT_PRESENCE_PATH)
+    try:
+        registered = sorted(store._read().get("agents") or {})
+        pool = registered or list(DEFAULT_AGENT_RING)
+        free_pool = [a for a in pool if a not in holders]
+        if not free_pool:
+            taken = ", ".join(
+                f"{a} held by {holders[a][0]}" for a in pool if a in holders)
+            print(f"[ERROR] Every agent id in the pool is in use on the board: "
+                  f"{taken}. Refusing to reuse a live id -- add ids to the pool "
+                  "or wait for that work to close.", file=sys.stderr)
+            return 1
+        args.agent = store.resolve_free_identity(free_pool, session_id)
+        print(
+            f"[presence] auto-assigned agent id '{args.agent}' for session '{session_id}'",
+            file=sys.stderr,
+        )
+    except PresenceError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    return None
+
+
+def _explicit_identity(args, session_id):
+    """Refuse an explicitly named identity that another live session holds.
+
+    The board is consulted for evidence, not as an extra refusal trigger. An
+    agent legitimately keeps its id while it holds an issue claim and while its
+    PR sits in review, so board presence alone cannot mean "taken" here without
+    stopping an agent from ever picking up its next item. What the board adds is
+    a message that names the work the conflicting session is on, instead of only
+    an opaque session token.
+    """
+    from agent_presence import DEFAULT_PRESENCE_PATH, PresenceStore
+
+    holder = PresenceStore(DEFAULT_PRESENCE_PATH).identity_holder(
+        args.agent, session_id
+    )
+    if holder is None:
+        return None
+    holders, _error = board_agent_identities()
+    where = (holders or {}).get(args.agent) or []
+    evidence = f" It currently holds {', '.join(where)}." if where else ""
+    print(
+        f"[ERROR] agent '{args.agent}' already has a live heartbeat from "
+        f"session '{holder}'.{evidence} Omit --agent to auto-assign a free "
+        "identity, or wait for that session to expire.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _resolve_identity(args, session_id):
+    """Settle args.agent. Returns an exit code to abort on, or None to proceed."""
+    if args.agent is None:
+        return _auto_assign_identity(args, session_id)
+    return _explicit_identity(args, session_id)
 
 
 def _default_session_id() -> str:
@@ -960,45 +1043,9 @@ def main():  # noqa: C901, PLR0912, PLR0915
     args = parser.parse_args()
 
     session_id = args.session_id or _default_session_id()
-    if args.agent is None:
-        # Auto-assign a free identity instead of erroring. Registered agents in
-        # the presence registry are the pool; the default ring backstops an
-        # empty registry.
-        from agent_presence import (
-            DEFAULT_AGENT_RING,
-            DEFAULT_PRESENCE_PATH,
-            PresenceError,
-            PresenceStore,
-        )
-        store = PresenceStore(DEFAULT_PRESENCE_PATH)
-        try:
-            registered = sorted(store._read().get("agents") or {})
-            pool = registered or list(DEFAULT_AGENT_RING)
-            args.agent = store.resolve_free_identity(pool, session_id)
-            print(
-                f"[presence] auto-assigned agent id '{args.agent}' for session '{session_id}'",
-                file=sys.stderr,
-            )
-        except PresenceError as exc:
-            print(f"[ERROR] {exc}", file=sys.stderr)
-            return 1
-    else:
-        # Explicit identity: refuse one already held by another live session.
-        from agent_presence import (
-            DEFAULT_PRESENCE_PATH,
-            PresenceStore,
-        )
-        holder = PresenceStore(DEFAULT_PRESENCE_PATH).identity_holder(
-            args.agent, session_id
-        )
-        if holder is not None:
-            print(
-                f"[ERROR] agent '{args.agent}' already has a live heartbeat from "
-                f"session '{holder}'. Omit --agent to auto-assign a free identity, "
-                "or wait for that session to expire.",
-                file=sys.stderr,
-            )
-            return 1
+    rc = _resolve_identity(args, session_id)
+    if rc is not None:
+        return rc
 
     if args.reap_after > 0:
         try:

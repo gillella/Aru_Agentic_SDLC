@@ -1,4 +1,4 @@
-# line-ceiling: 1299
+# line-ceiling: 1396
 import json
 import sys
 import unittest
@@ -1188,6 +1188,11 @@ class AgentResolutionTests(unittest.TestCase):
         return patch("sys.stdout", new_callable=io.StringIO), \
                patch("sys.stderr", new_callable=io.StringIO)
 
+    def _board(self, holders=None, readable=True):
+        """Stub the GitHub-side identity query (#304)."""
+        value = (holders if readable else None, "" if readable else "boom")
+        return patch.object(fnw, "board_agent_identities", return_value=value)
+
     def test_omitting_agent_auto_assigns_a_free_identity(self):
         store = ap.PresenceStore(self.presence / "agent-presence.json")
         store.resolve_free_identity(["gemini-1"], "setup-session")
@@ -1197,6 +1202,7 @@ class AgentResolutionTests(unittest.TestCase):
                 "reviewable_detail": []}
         out, err = self._capture()
         with patch.object(fnw, "select", return_value=idle) as select_mock, \
+             self._board({}), \
              patch("sys.argv", ["fetch_next_work.py"]), out as _o, err as _e:
             rc = fnw.main()
         self.assertEqual(rc, None)  # success
@@ -1213,6 +1219,7 @@ class AgentResolutionTests(unittest.TestCase):
                 "claimable_issues": []}
         out, err = self._capture()
         with patch.object(fnw, "select", return_value=idle) as select_mock, \
+             self._board({}), \
              patch("sys.argv", ["fetch_next_work.py", "--agent", "gemini-1"]), \
              out as _o, err as _e:
             rc = fnw.main()
@@ -1226,6 +1233,7 @@ class AgentResolutionTests(unittest.TestCase):
                 "claimable_issues": []}
         out, err = self._capture()
         with patch.object(fnw, "select", return_value=idle) as select_mock, \
+             self._board({}), \
              patch("sys.argv", ["fetch_next_work.py", "--agent", "claude-1",
                                 "--session-id", "me"]), \
              out as _o, err as _e:
@@ -1233,6 +1241,95 @@ class AgentResolutionTests(unittest.TestCase):
         self.assertEqual(rc, None)
         args, _kwargs = select_mock.call_args
         self.assertEqual(args[0], "claude-1")
+
+class BoardIdentityUniquenessTests(unittest.TestCase):
+    """Identity resolution consults GitHub, not only the local registry (#304).
+
+    The registry's 300s heartbeat TTL freed an id that the board still showed
+    holding an issue claim and authoring an open PR, so the id was reissued and
+    two open PRs ended up stamped with one author: label and two family: labels.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.presence = Path(self.temporary.name) / "agent-presence.json"
+        patcher = patch.object(ap, "DEFAULT_PRESENCE_PATH", self.presence)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _idle(self):
+        return {"agent": "unused", "family": None,
+                "work": {"type": "idle", "skill": None}, "skipped_prs": [],
+                "merge_skipped": [], "claimable_issues": [],
+                "mergeable_detail": [], "reviewable_detail": []}
+
+    def _run(self, argv, holders, readable=True):
+        import io
+        value = (holders if readable else None, "" if readable else "boom")
+        out = patch("sys.stdout", new_callable=io.StringIO)
+        err = patch("sys.stderr", new_callable=io.StringIO)
+        with patch.object(fnw, "select", return_value=self._idle()) as select_mock, \
+             patch.object(fnw, "board_agent_identities", return_value=value), \
+             patch("sys.argv", argv), out as _o, err as _e:
+            rc = fnw.main()
+        return rc, select_mock, _e.getvalue()
+
+    def test_stale_heartbeat_does_not_free_an_id_github_shows_in_use(self):
+        # The exact #304 scenario: registry says free, board says otherwise.
+        holders = {"gemini-1": ["issue #3 (agent:gemini-1)",
+                                "PR #27 (author:gemini-1)"]}
+        rc, select_mock, _err = self._run(["fetch_next_work.py"], holders)
+        self.assertIsNone(rc)
+        # gemini-1 is first in the default ring; the board must exclude it.
+        self.assertNotEqual(select_mock.call_args[0][0], "gemini-1")
+
+    def test_an_id_free_on_both_github_and_the_registry_is_still_assigned(self):
+        # The zero-config path keeps working without operator action.
+        rc, select_mock, err = self._run(["fetch_next_work.py"], {})
+        self.assertIsNone(rc)
+        self.assertEqual(select_mock.call_args[0][0], "gemini-1")
+        self.assertIn("auto-assigned agent id", err)
+
+    def test_exhausted_pool_fails_rather_than_reusing_an_id(self):
+        holders = {a: [f"issue #1 (agent:{a})"] for a in ap.DEFAULT_AGENT_RING}
+        rc, select_mock, err = self._run(["fetch_next_work.py"], holders)
+        self.assertEqual(rc, 1)
+        select_mock.assert_not_called()
+        self.assertIn("Every agent id in the pool is in use", err)
+        self.assertIn("gemini-1", err)
+
+    def test_unreadable_board_fails_closed(self):
+        # A GitHub or network failure must refuse, not assign optimistically.
+        rc, select_mock, err = self._run(["fetch_next_work.py"], None, readable=False)
+        self.assertEqual(rc, 1)
+        select_mock.assert_not_called()
+        self.assertIn("Cannot verify agent id ownership", err)
+
+    def test_explicit_conflict_names_the_work_not_only_the_session(self):
+        store = ap.PresenceStore(self.presence)
+        store.resolve_free_identity(["gemini-1"], "session-other")
+        holders = {"gemini-1": ["PR #27 (author:gemini-1)"]}
+        rc, select_mock, err = self._run(
+            ["fetch_next_work.py", "--agent", "gemini-1"], holders)
+        self.assertEqual(rc, 1)
+        select_mock.assert_not_called()
+        self.assertIn("PR #27", err)
+        self.assertIn("session-other", err)
+
+    def test_explicit_agent_keeps_its_id_while_holding_board_work(self):
+        # An agent legitimately holds its id across the issue it claimed and the
+        # PR it left in review; board presence alone must not lock it out of
+        # picking up its next item.
+        holders = {"claude-1": ["issue #5 (agent:claude-1)",
+                                "PR #9 (author:claude-1)"]}
+        rc, select_mock, _err = self._run(
+            ["fetch_next_work.py", "--agent", "claude-1", "--session-id", "me"],
+            holders)
+        self.assertIsNone(rc)
+        self.assertEqual(select_mock.call_args[0][0], "claude-1")
+
 
 class WorkPickerTests(unittest.TestCase):
     def _dummy_select(self):

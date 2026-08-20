@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1429
+# line-ceiling: 1470
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -429,6 +429,47 @@ def create_worktree(branch_name: str, path: str = None, attempts: int = 5,
 
     print(f"[ERROR] Could not create worktree at '{path}': {stderr}", file=sys.stderr)
     return None
+
+
+BOARD_IDENTITY_LABEL_PREFIXES = ("agent:", "reviewer:", "merger:", "author:")
+
+
+def board_agent_identities() -> Tuple[Optional[Dict[str, List[str]]], str]:
+    """Agent ids GitHub currently shows in use, mapped to where they are held.
+
+    GitHub is the system of record for liveness; the presence registry is a
+    local cache of intent with a 300-second heartbeat TTL. A session that missed
+    a heartbeat -- or never registered at all -- looked free to the registry
+    while the board still showed it holding an issue claim and authoring an open
+    PR, so its id was handed to a second session and every downstream identity
+    guarantee degraded (#304).
+
+    Two endpoints because gh exposes issues and pull requests separately; this
+    runs once at identity resolution, not per tick.
+
+    Returns (holders, error). ``holders`` is None when the board could not be
+    read, so callers fail closed rather than assign a possibly-held id.
+    """
+    holders: Dict[str, List[str]] = {}
+    queries = (
+        (["gh", "issue", "list", "--state", "open", "--limit", "500",
+          "--json", "number,labels"], "issue"),
+        (["gh", "pr", "list", "--state", "open", "--limit", "500",
+          "--json", "number,labels"], "PR"),
+    )
+    for cmd, kind in queries:
+        items = run_gh_json(cmd)
+        if not isinstance(items, list):
+            return None, f"could not read open {kind}s from GitHub"
+        for item in items:
+            for label in item.get("labels") or []:
+                name = str(label.get("name") or "")
+                for prefix in BOARD_IDENTITY_LABEL_PREFIXES:
+                    if name.startswith(prefix) and name[len(prefix):]:
+                        agent_id = name[len(prefix):]
+                        holders.setdefault(agent_id, []).append(
+                            f"{kind} #{item.get('number')} ({name})")
+    return holders, ""
 
 
 def query_open_issues() -> Optional[List[Dict[str, Any]]]:
