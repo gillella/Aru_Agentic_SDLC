@@ -1132,11 +1132,13 @@ def set_board_status(issue_number: int, status: str) -> bool:
 
 
 def get_issue_priority_field(issue_number: int) -> Optional[str]:
-    """Returns the Project 'Priority' single-select value (e.g. 'P0'..'P3').
+    """Returns the governed Project 'Priority' single-select value (P0..P3).
 
     Returns ``None`` on any GraphQL failure, missing field, or value, so the
-    caller can fail closed instead of guessing. ``priority:pN`` labels are the
-    canonical source; this board field is a synchronized mirror.
+    caller can fail closed instead of guessing. The read is scoped to the
+    governed board item — mirroring ``set_issue_priority_field`` and the
+    Status helpers — because an issue can appear on several boards and only
+    the governed item is the synchronization mirror for ``priority:pN``.
     """
     slug = get_repo_slug()
     if not slug or "/" not in slug:
@@ -1150,6 +1152,13 @@ def get_issue_priority_field(issue_number: int) -> Optional[str]:
             nodes {
               priority: fieldValueByName(name:"Priority") {
                 ... on ProjectV2ItemFieldSingleSelectValue { name }
+              }
+              project {
+                id
+                title
+                repositories(first:100) {
+                  nodes { nameWithOwner }
+                }
               }
             }
           }
@@ -1171,8 +1180,9 @@ def get_issue_priority_field(issue_number: int) -> Optional[str]:
         nodes = res["data"]["repository"]["issue"]["projectItems"]["nodes"]
     except (KeyError, TypeError):
         return None
-    for node in nodes or []:
-        value = (node or {}).get("priority") or {}
+    items = select_governed_project_items(nodes or [], slug)
+    for item in items:
+        value = (item or {}).get("priority") or {}
         name = value.get("name")
         if isinstance(name, str) and name:
             return name
