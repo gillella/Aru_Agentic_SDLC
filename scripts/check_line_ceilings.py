@@ -39,7 +39,18 @@ MARKER_RE = re.compile(
 # 3,000-line module is not reviewable, which defeats the purpose.
 MARKER_SCAN_LINES = 15
 
-SOURCE_SUFFIXES = (".py", ".js", ".sh", ".css", ".html")
+# Every language the framework governs or bootstraps. init_project.py offers
+# python, node, typescript, react, and go stacks, so a guard that scanned only
+# the first three left a project this framework created free to grow .ts, .tsx,
+# .jsx, and .go files without limit (#316). This tuple is the single definition;
+# nothing else describes "a governed source file".
+SOURCE_SUFFIXES = (
+    ".py",
+    ".sh",
+    ".js", ".jsx", ".ts", ".tsx",
+    ".go",
+    ".css", ".html",
+)
 
 SKIP_DIRS = {".git", ".venv", ".worktrees", "node_modules", "__pycache__", "dist"}
 
