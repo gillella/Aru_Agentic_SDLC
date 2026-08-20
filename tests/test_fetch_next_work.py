@@ -1,4 +1,4 @@
-# line-ceiling: 1399
+# line-ceiling: 1450
 import json
 import sys
 import unittest
@@ -1241,6 +1241,57 @@ class AgentResolutionTests(unittest.TestCase):
         self.assertEqual(rc, None)
         args, _kwargs = select_mock.call_args
         self.assertEqual(args[0], "claude-1")
+
+class NoFastTrackInThePickerTests(unittest.TestCase):
+    """Merge eligibility requires review attribution again (#321).
+
+    _fast_track() let the picker route a PR to merge with no independent review
+    attribution, and let an author be handed its own PR to merge.
+    """
+
+    def _pr(self, **over):
+        """A PR that clears every cheap filter, so the attribution check is what
+        decides the verdict rather than an earlier guard."""
+        pr = {
+            "number": 9,
+            "title": "t",
+            "labels": [{"name": "author:claude-1"}],
+            "reviewDecision": "",
+            "isDraft": False,
+            # review_thread_count caches this key; seeding it keeps the test
+            # off the network and out of the "state unavailable" refusal.
+            "_active_review_feedback": [],
+            "statusCheckRollup": [
+                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }
+        pr.update(over)
+        return pr
+
+    def test_environment_cannot_waive_review_attribution(self):
+        with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}), \
+             patch.object(fnw, "dod_status", return_value=(True, "green")):
+            verdict = fnw.merge_eligibility(self._pr(), "codex-1")
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("no independent review attribution", verdict["reason"])
+
+    def test_environment_cannot_let_an_author_merge_its_own_pr(self):
+        with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}), \
+             patch.object(fnw, "dod_status", return_value=(True, "green")):
+            verdict = fnw.merge_eligibility(
+                self._pr(reviewDecision="APPROVED"), "claude-1")
+        self.assertFalse(verdict["eligible"])
+        self.assertIn("distinct peer reviewer", verdict["reason"])
+
+    def test_a_genuine_peer_still_makes_a_pr_mergeable(self):
+        pr = self._pr(labels=[{"name": "author:claude-1"},
+                              {"name": "reviewed-by:codex-1"}])
+        with patch.object(fnw, "dod_status", return_value=(True, "green")):
+            verdict = fnw.merge_eligibility(pr, "codex-1")
+        self.assertTrue(verdict["eligible"], verdict["reason"])
+
+    def test_the_helper_is_gone(self):
+        self.assertFalse(hasattr(fnw, "_fast_track"))
+
 
 class BoardIdentityUniquenessTests(unittest.TestCase):
     """Identity resolution consults GitHub, not only the local registry (#304).
