@@ -165,3 +165,41 @@ Full notes: [`docs/cursor-integration.md`](docs/cursor-integration.md).
 Slash commands after install: `/implement-next-issue`, `/init-agent-project`,
 `/create-github-issue`, `/code-review`, `/remediate-ci-failure`,
 `/address-pr-feedback`.
+
+---
+
+## Slack War Room & Escalation
+
+Slack is the **escalation channel only** — never a work queue and never a second
+chat home. The GitHub Project Board is the work queue; Telegram is Hermes'
+home. Escalation is low-volume by design: routine issue work proceeds
+autonomously (escalate on Slack, not silently — consult Aru only for important
+new decisions and complex merge/conflict resolution).
+
+**Single-channel decision (Aru, 2026-08-20):** all projects share ONE war
+room. Escalation volume is near-zero for a solo operator, so one watched
+channel beats per-project fragmentation. Per-project channels are reserved for
+when a second human operator joins — do not create them now.
+
+- Workspace: `anguliyam.slack.com` (team `T07L1SZCQEM`)
+- War room: `#project-aru-code` (private, channel ID `C0BPZMRR1RC`)
+- Bot: `@aru_code_app` (the Aru-CODE app)
+
+Every alert is self-identifying — `slack_notify.py` stamps agent, model
+family, `project_id`, issue/PR, and time — so a single channel stays navigable
+without per-project fan-out. Disambiguation is metadata, not channel count.
+
+**Two Slack layers (do not confuse them):**
+
+1. **Hermes war room (live).** Bot `@aru_code_app` reads agent chatter in
+   `#project-aru-code` and posts escalation pings + resolutions. Tokens live in
+   `~/.hermes/.env` (`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`).
+2. **Factory bridge (documented, not yet deployed).** `scripts/slack_notify.py`
+   + `scripts/slack_control_room.py` (Socket Mode, one bot, project registry in
+   `~/.aru/projects.json`) emit the `blocked` / `waiting-on` / `hitl` alert
+   events. As of 2026-08-20 the `~/.aru/` credential directory is absent, so
+   this bridge is not wired; when it is, it MUST target the same
+   `#project-aru-code` channel (single-channel decision), not per-project
+   channels.
+
+Details: [`docs/slack-control-room.md`](docs/slack-control-room.md).
