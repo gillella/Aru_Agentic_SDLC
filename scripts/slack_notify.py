@@ -637,6 +637,28 @@ def slack_api_transport(config: SlackConfig, text: str, thread_ts: Optional[str]
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _stamp_authoritative_mentions(config: SlackConfig, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Stamp operator + escalation user ids from config; reject invalid values.
+
+    The configured ids are authoritative; caller-supplied mention identities
+    are never trusted. Empty escalation config means no escalation mention
+    (legacy behavior). Returns an error dict on the first invalid identity,
+    else None.
+    """
+    kind = event.get("type")
+    if kind == "hitl":
+        operator = str(config.operator_user_id or "").strip()
+        if not SLACK_USER_RE.fullmatch(operator):
+            return {"ok": False, "error": "invalid_operator_user_id"}
+        event["operator_user_id"] = operator
+    if kind in ESCALATION_ALERT_TYPES:
+        escalation = str(config.escalation_user_id or "").strip()
+        if escalation and not SLACK_USER_RE.fullmatch(escalation):
+            return {"ok": False, "error": "invalid_escalation_user_id"}
+        event["escalation_user_id"] = escalation
+    return None
+
+
 def post_event(
     config: SlackConfig,
     event: Dict[str, Any],
@@ -668,20 +690,9 @@ def post_event(
                 "error": "invalid_availability",
                 "detail": str(exc),
             }
-    if kind == "hitl":
-        operator = str(config.operator_user_id or "").strip()
-        if not SLACK_USER_RE.fullmatch(operator):
-            return {"ok": False, "error": "invalid_operator_user_id"}
-        # The configured allowlist is authoritative; caller-supplied mention
-        # identities are never trusted.
-        stamped["operator_user_id"] = operator
-    if kind in ESCALATION_ALERT_TYPES:
-        escalation = str(config.escalation_user_id or "").strip()
-        if escalation and not SLACK_USER_RE.fullmatch(escalation):
-            return {"ok": False, "error": "invalid_escalation_user_id"}
-        # Authoritative from config; caller-supplied escalation identities
-        # are never trusted. Empty config = no escalation mention (legacy).
-        stamped["escalation_user_id"] = escalation
+    mention_error = _stamp_authoritative_mentions(config, stamped)
+    if mention_error:
+        return mention_error
     stamped = sanitize_event(stamped, secrets_from_config(config))
     cache = cache if cache is not None else DedupeCache()
     key = dedupe_key(stamped)
