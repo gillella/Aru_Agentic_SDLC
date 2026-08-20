@@ -123,19 +123,57 @@ class AdoptPullRequestTests(unittest.TestCase):
             "state": state,
         }
 
-    def _adopt(self, snapshot, **kwargs):
+    def _adopt(self, snapshot, settled_author=None, **kwargs):
+        """Drive adopt_pr. `settled_author` is who the read-back reports."""
         calls = []
+        agent = kwargs.pop("agent", "claude-a3f19c")
 
         def fake_run_cmd(cmd, *args, **kw):
             calls.append(cmd)
             return 0, "", ""
 
-        with patch.object(claim_issue, "run_gh_json", return_value=snapshot), \
+        # adopt_pr reads the PR twice: once to qualify it, once to confirm the
+        # write settled on this agent.
+        after = dict(snapshot)
+        after["labels"] = [{"name": f"author:{settled_author or agent}"}]
+        snapshots = [snapshot, after]
+
+        with patch.object(claim_issue, "run_gh_json",
+                          side_effect=lambda *a, **k: snapshots.pop(0)
+                          if snapshots else after), \
              patch.object(claim_issue, "ensure_label", return_value=True), \
              patch.object(claim_issue, "run_cmd", side_effect=fake_run_cmd):
-            rc = claim_issue.adopt_pr(42, kwargs.pop("agent", "claude-a3f19c"),
-                                      **kwargs)
+            rc = claim_issue.adopt_pr(42, agent, **kwargs)
         return rc, calls
+
+    def test_a_lost_adoption_race_reports_conflict_not_success(self):
+        # Two successors can both qualify and both edit; the loser must not
+        # print success and exit OK, or two agents believe they own one PR.
+        rc, _calls = self._adopt(self.snapshot(), settled_author="gemini-77aa",
+                                 family="anthropic")
+        self.assertEqual(rc, claim_issue.EXIT_CONFLICT)
+
+    def test_two_author_labels_after_the_write_is_a_conflict(self):
+        # pr_author returns the first match, so "the first one is us" would
+        # report success while the PR carries ambiguous ownership.
+        snapshot = self.snapshot()
+        after = dict(snapshot)
+        after["labels"] = [{"name": "author:claude-a3f19c"},
+                           {"name": "author:gemini-77aa"}]
+        with patch.object(claim_issue, "run_gh_json",
+                          side_effect=[snapshot, after]), \
+             patch.object(claim_issue, "ensure_label", return_value=True), \
+             patch.object(claim_issue, "run_cmd", return_value=(0, "", "")):
+            rc = claim_issue.adopt_pr(42, "claude-a3f19c", "anthropic")
+        self.assertEqual(rc, claim_issue.EXIT_CONFLICT)
+
+    def test_an_unreadable_read_back_is_an_error(self):
+        with patch.object(claim_issue, "run_gh_json",
+                          side_effect=[self.snapshot(), None]), \
+             patch.object(claim_issue, "ensure_label", return_value=True), \
+             patch.object(claim_issue, "run_cmd", return_value=(0, "", "")):
+            rc = claim_issue.adopt_pr(42, "claude-a3f19c", "anthropic")
+        self.assertEqual(rc, claim_issue.EXIT_ERROR)
 
     def test_authorship_and_family_move_to_the_successor(self):
         rc, calls = self._adopt(self.snapshot(), family="anthropic")
