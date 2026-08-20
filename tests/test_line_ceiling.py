@@ -68,10 +68,16 @@ class LineCeilingTests(unittest.TestCase):
         self.assertEqual(guard.read_allowance(os.path.join(self.root, "one.py")), 600)
         self.assertEqual(guard.read_allowance(os.path.join(self.root, "two.py")), 700)
 
-    def test_marker_accepted_in_js_and_css_comment_forms(self):
+    def test_marker_accepted_in_every_scanned_comment_form(self):
+        # A governed file whose comment syntax is unrecognised would fall back
+        # to the strict default and fail CI for no stated reason.
         write(self.root, "a.js", 450, header="// line-ceiling: 450")
         write(self.root, "b.css", 450, header="/* line-ceiling: 450 */")
+        write(self.root, "c.html", 450, header="<!-- line-ceiling: 450 -->")
         self.assertEqual(guard.check_tree(self.root), [])
+
+    def test_missing_root_fails_rather_than_reporting_a_clean_tree(self):
+        self.assertEqual(guard.main(["--root", os.path.join(self.root, "nope")]), 1)
 
     def test_marker_below_shebang_is_found(self):
         write(self.root, "a.sh", 450, header="#!/usr/bin/env bash\n# line-ceiling: 450")

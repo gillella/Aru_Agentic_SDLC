@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -88,6 +89,27 @@ def _machine_identifier() -> str:
     return platform.node() or "unknown-host"
 
 
+def _checkout_root(repo_root: Optional[str] = None) -> str:
+    """The checkout the agent works in, not the directory it was started from.
+
+    Defaulting to os.getcwd() would fingerprint the *launch* directory, so the
+    same worker started from a subdirectory -- or from a worktree under
+    .worktrees/ -- would derive a different id and lose the stability the whole
+    scheme exists to provide.
+    """
+    if repo_root:
+        return os.path.realpath(repo_root)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            return os.path.realpath(result.stdout.strip())
+    except OSError:
+        pass
+    return os.path.realpath(os.getcwd())
+
+
 def worker_fingerprint(repo_root: Optional[str] = None, family: str = "",
                        machine: Optional[str] = None) -> str:
     """Short, stable hash of machine + checkout + family.
@@ -95,7 +117,7 @@ def worker_fingerprint(repo_root: Optional[str] = None, family: str = "",
     The checkout path is hashed, never embedded: the id ends up in public
     GitHub labels, and an absolute path names the operator's home directory.
     """
-    root = os.path.realpath(repo_root or os.getcwd())
+    root = _checkout_root(repo_root)
     parts = "\x00".join([
         machine or _machine_identifier(),
         root,

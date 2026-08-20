@@ -26,11 +26,13 @@ import sys
 LINE_CEILING = 400
 
 # The marker must be a comment occupying a whole line, so that a mention of the
-# token inside a string, a regex, or prose cannot be read as an allowance. Both
-# `#` (Python, shell) and `//` or `/* */` (JS, CSS) comment forms are accepted
-# because the guard covers all of them.
+# token inside a string, a regex, or prose cannot be read as an allowance. Every
+# comment form the scanned suffixes use is accepted -- `#` (Python, shell),
+# `//` and `/* */` (JS, CSS), `<!-- -->` (HTML) -- because a governed file whose
+# comment syntax is not recognised silently falls back to the strict default and
+# fails CI for no stated reason.
 MARKER_RE = re.compile(
-    r"^\s*(?:#+|//+|/\*)\s*line-ceiling:\s*(\d+)\s*(?:\*/)?\s*$"
+    r"^\s*(?:#+|//+|/\*|<!--)\s*line-ceiling:\s*(\d+)\s*(?:\*/|-->)?\s*$"
 )
 
 # Only the head of the file is scanned. A marker buried in the middle of a
@@ -103,6 +105,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".", help="tree to scan")
     args = parser.parse_args(argv)
+
+    if not os.path.isdir(args.root):
+        # os.walk on a missing path yields nothing, which would report a clean
+        # tree and pass the job without scanning a single file.
+        print(f"error: --root {args.root!r} is not a directory", file=sys.stderr)
+        return 1
 
     violations = check_tree(args.root)
     if violations:
