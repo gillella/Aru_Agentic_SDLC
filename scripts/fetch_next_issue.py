@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 860
+# line-ceiling: 969
 """
 fetch_next_issue.py - Selects the next actionable issue for one agent.
 
@@ -462,13 +462,116 @@ def is_parallel_eligible(body: str, labels: List[Dict[str, Any]]) -> bool:
     return bool(body) and "parallel-eligible: true" in body.lower()
 
 
+def parse_remote_branches(text: str) -> Dict[str, str]:
+    """Map branch name -> tip sha from `git ls-remote --heads` output."""
+    branches: Dict[str, str] = {}
+    for line in (text or "").splitlines():
+        sha, _, ref = line.partition("\t")
+        ref = ref.strip()
+        if ref.startswith("refs/heads/"):
+            branches[ref[len("refs/heads/"):]] = sha.strip()
+    return branches
+
+
+def _parse_github_time(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def branch_tip_time(branch: str) -> Optional[datetime]:
+    """When a remote branch was last committed to, or None if unreadable."""
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    payload = run_gh_json(
+        ["gh", "api", f"repos/{slug}/branches/{branch}",
+         "--jq", "{date: .commit.commit.committer.date}"])
+    if not isinstance(payload, dict):
+        return None
+    return _parse_github_time(payload.get("date"))
+
+
+def work_is_abandoned(num: int, cutoff: datetime, open_prs: List[Dict[str, Any]],
+                      branches: Dict[str, str]) -> Optional[bool]:
+    """Whether an issue's *work* has gone quiet, not just its issue record.
+
+    The old rule skipped any issue that had a branch or an open PR outright, so
+    the reaper could only recover work from an agent that vanished having done
+    nothing. The moment an agent pushed -- which it does early, long before the
+    work is reviewable -- its claim became permanent, and an agent that stopped
+    mid-task stranded the issue, the branch, and the PR with no way back (#311).
+
+    Evidence of work should raise the bar for reclaiming a claim, not make it
+    permanent. Returns True when branch and PR are both quiet past the cutoff,
+    False when either is active, and None when recency cannot be established --
+    the caller retains the claim on None, because absence of evidence is not
+    evidence of abandonment.
+    """
+    linked = [pr for pr in open_prs if pr_addresses_issue(pr, num)]
+    for pr in linked:
+        updated = _parse_github_time(pr.get("updatedAt"))
+        if updated is None:
+            return None
+        if updated > cutoff:
+            return False
+
+    for branch in sorted(b for b in branches if f"issue-{num}-" in b):
+        tip = branch_tip_time(branch)
+        if tip is None:
+            return None
+        if tip > cutoff:
+            return False
+    return True
+
+
+def pr_addresses_issue(pr: Dict[str, Any], num: int) -> bool:
+    pattern = re.compile(rf"closes\s+#{num}\b", re.IGNORECASE)
+    return bool(pattern.search(pr.get("body") or "")
+                or f"issue-{num}-" in (pr.get("headRefName") or ""))
+
+
+def abandoned_work_note(num: int, holders: List[str], hours: int,
+                        open_prs: List[Dict[str, Any]],
+                        branches: Dict[str, str]) -> str:
+    """Audit comment so the successor continues instead of starting over."""
+    lines = [
+        f"♻️ Claim released after {hours}h with no activity on the issue, "
+        "its branch, or its pull request.",
+        "",
+        f"Previously held by: {', '.join(holders) or 'unknown'}",
+    ]
+    linked = [pr for pr in open_prs if pr_addresses_issue(pr, num)]
+    if linked:
+        refs = ", ".join(f"#{pr.get('number')}" for pr in linked)
+        lines.append(f"Abandoned pull request(s): {refs}")
+        lines.append(
+            "Adopt one with `python3 scripts/claim_issue.py --pr <n> --adopt "
+            "--agent <id> --model-family <family>` to keep its commits, CI "
+            "history, and review threads.")
+    owned = sorted(b for b in branches if f"issue-{num}-" in b)
+    if owned:
+        lines.append(f"Abandoned branch(es): {', '.join(owned)}")
+    if not linked and not owned:
+        lines.append("No branch or pull request was left behind.")
+    return "\n".join(lines)
+
+
 def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  # noqa: C901, PLR0912, PLR0915
     """Releases claims that have gone quiet.
 
     An agent that crashes mid-issue leaves it In Progress forever, and once
     claimed issues are excluded from selection nothing would ever pick it up
-    again. An issue is stale when it has been untouched for `hours`, has no
-    open PR, and has no remote branch carrying commits.
+    again. An issue is stale when it, its branch, and its pull request have all
+    been untouched for `hours`. Evidence of work no longer makes a claim
+    permanent -- it only has to be quiet too (#311).
     """
     if hours <= 0:
         return []
@@ -476,7 +579,7 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  #
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     pr_code, prs, pr_err = run_cmd(
         ["gh", "pr", "list", "--state", "open", "--limit", "200",
-         "--json", "number,body,headRefName"],
+         "--json", "number,body,headRefName,updatedAt"],
         check=False,
     )
     if pr_code != 0:
@@ -499,13 +602,7 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  #
         )
         return []
 
-    def has_open_pr(num: int) -> bool:
-        pat = re.compile(rf"closes\s+#{num}\b", re.IGNORECASE)
-        return any(pat.search(p.get("body") or "") or f"issue-{num}-" in p.get("headRefName", "")
-                   for p in open_prs)
-
-    def has_remote_branch(num: int) -> bool:
-        return f"issue-{num}-" in remote_branches
+    branches = parse_remote_branches(remote_branches)
 
     released = []
     for issue in issues:
@@ -520,7 +617,14 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  #
             ts = datetime.fromisoformat(updated.replace("Z", "+00:00"))
         except ValueError:
             continue
-        if ts > cutoff or has_open_pr(num) or has_remote_branch(num):
+        if ts > cutoff:
+            continue
+        abandoned = work_is_abandoned(num, cutoff, open_prs, branches)
+        if abandoned is None:
+            print(f"[WARN] Could not establish activity for #{num}; claim retained.",
+                  file=sys.stderr)
+            continue
+        if not abandoned:
             continue
 
         current = get_issue(num)
@@ -569,8 +673,13 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  #
             cmd += ["--remove-label", lbl]
         if run_cmd(cmd, check=False)[0] == 0:
             released.append(num)
-            print(f"♻️  Released stale claim on #{num} (idle > {hours}h, no PR, no branch).",
-                  file=sys.stderr)
+            # Name the branch and PR the departing agent left, so the successor
+            # adopts the work instead of rediscovering or repeating it.
+            run_cmd(["gh", "issue", "comment", str(num), "--body",
+                     abandoned_work_note(num, original_holders, hours, open_prs, branches)],
+                    check=False)
+            print(f"♻️  Released stale claim on #{num} "
+                  f"(issue, branch, and PR all idle > {hours}h).", file=sys.stderr)
         else:
             update_status(num, "In Progress", require_board=True)
             print(

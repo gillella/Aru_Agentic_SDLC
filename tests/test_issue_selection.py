@@ -1,4 +1,4 @@
-# line-ceiling: 785
+# line-ceiling: 789
 import io
 import sys
 import unittest
@@ -210,7 +210,9 @@ depends-on: #2, #4
 
         self.assertEqual(released, [8])
         update_status.assert_called_once_with(8, "Ready", require_board=True)
-        release_command = run_cmd.call_args_list[-1].args[0]
+        release_command = next(
+            call.args[0] for call in run_cmd.call_args_list
+            if "--remove-assignee" in call.args[0])
         self.assertIn("--remove-assignee", release_command)
         self.assertIn("agent:agent-a", release_command)
 
@@ -229,6 +231,7 @@ depends-on: #2, #4
             (0, "[]", ""),
             (0, "", ""),
             (0, "", ""),
+            (0, "", ""),   # audit comment naming abandoned branch/PR (#311)
         ]
 
         with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
@@ -259,6 +262,7 @@ depends-on: #2, #4
             (0, "[]", ""),
             (0, "", ""),
             (0, "", ""),
+            (0, "", ""),   # audit comment naming abandoned branch/PR (#311)
         ]
 
         with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
