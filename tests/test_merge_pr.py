@@ -1,4 +1,4 @@
-# line-ceiling: 3777
+# line-ceiling: 3815
 from contextlib import nullcontext
 import json
 import os
@@ -866,6 +866,44 @@ class CiGateTests(unittest.TestCase):
         ok, msg = merge_pr.check_ci({"statusCheckRollup": []})
         self.assertFalse(ok)
         self.assertIn("No CI checks", msg)
+
+
+class NoFastTrackEscapeHatchTests(unittest.TestCase):
+    """The owner fast-track is gone, wiring and all (#321).
+
+    Defaulting the flag off was not enough: a waiver that only needs one
+    environment variable to re-enable is one export away from asserting a peer
+    reviewed work that nobody reviewed, and nothing on the board would record it.
+    """
+
+    def test_no_relaxation_switch_survives_on_the_module(self):
+        for name in ("RELAXED", "enable_relaxed"):
+            self.assertFalse(hasattr(merge_pr, name),
+                             f"merge_pr.{name} still exists")
+
+    def test_the_environment_cannot_waive_the_review_gate(self):
+        with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}):
+            ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok, "a self-review merged under ARU_FAST_TRACK")
+        self.assertIn("self-review", msg.lower())
+
+    def test_the_environment_cannot_waive_test_coverage(self):
+        pr = {"files": [{"path": "scripts/thing.py", "additions": 10, "deletions": 0}]}
+        with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}):
+            ok, msg = merge_pr.check_test_coverage(pr)
+        self.assertFalse(ok)
+        self.assertIn("test file", msg)
+
+    def test_the_environment_cannot_waive_acceptance_criteria(self):
+        body = "## Acceptance Criteria\n- [ ] not done yet\n"
+        with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}):
+            ok, _msg = merge_pr.check_acceptance(7, body)
+        self.assertFalse(ok)
+
+    def test_the_cli_no_longer_offers_a_relaxed_flag(self):
+        source = Path(merge_pr.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("--relaxed", source)
+        self.assertNotIn("ARU_FAST_TRACK", source)
 
 
 class ReviewGateTests(unittest.TestCase):
