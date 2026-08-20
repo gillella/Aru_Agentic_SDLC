@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 411
 """Execute issue-sourced acceptance-criteria `verify:` commands.
 
 Trust boundary

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 789
 """Launch one governed, task-scoped CLI worker for a pull request.
 
 The GitHub Project Board and the normal Aru lifecycle helpers remain

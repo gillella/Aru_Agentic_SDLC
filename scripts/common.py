@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1341
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.

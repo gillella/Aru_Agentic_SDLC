@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 957
 """Read-only diagnosis for local coding-agent integrations.
 
 Reports desktop continuity adapters plus install-link checks (canonical home,

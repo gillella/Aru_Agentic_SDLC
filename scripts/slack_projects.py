@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 811
 """Secure multi-project registry for the Slack control-room bridge."""
 
 from __future__ import annotations

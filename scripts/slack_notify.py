@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 999
 """Post stamped Slack events for the Aru factory control room.
 
 GitHub remains the work queue. Slack downtime must not halt factory work.

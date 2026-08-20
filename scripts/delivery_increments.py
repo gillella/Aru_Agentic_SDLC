@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 586
 """Operator-authorized Delivery Increment records and transition rules."""
 
 from __future__ import annotations

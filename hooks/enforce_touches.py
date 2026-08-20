@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1709
 """PreToolUse hook: enforces the write budget an agent declared on its issue.
 
 Why this exists as a hook rather than a rule in AGENTS.md: prompt-level rules

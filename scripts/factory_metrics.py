@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 585
 """
 factory_metrics.py - Reconstructs factory performance metrics from GitHub state:
   1. Constraint Dwell Time (median time in hours per board status)

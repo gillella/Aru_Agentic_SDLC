@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# line-ceiling: 769
 # install_local_agent_integrations.sh — wire Aru_Agentic_SDLC skills and native adapters for local coding agents
 set -euo pipefail
 

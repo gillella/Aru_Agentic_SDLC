@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 877
 """Mechanically resolve citations in a research findings artifact.
 
 A research issue is Done only when every citation resolves. Unresolvable

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 3344
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"

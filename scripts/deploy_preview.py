@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 979
 """deploy_preview.py — Governed preview deployment helper.
 
 Dispatches configured CD workflow for a specific merged commit, waits for completion,

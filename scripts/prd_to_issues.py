@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 624
 """Validate and publish an approved PRD decomposition as governed issues."""
 
 import argparse

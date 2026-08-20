@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1186
 """Post-merge janitor: orphan worktrees, merged local branches, stale claims.
 
 Invoked from merge_pr close-out and as

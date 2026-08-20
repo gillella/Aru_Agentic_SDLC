@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1401
 """Aru Slack control-room bridge: routed operator commands, not a work queue."""
 
 from __future__ import annotations

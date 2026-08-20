@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 554
 """Fail when documentation contradicts the code it describes.
 
 Three mechanical checks over ``docs/**/*.md``:

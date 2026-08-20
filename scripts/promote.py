@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 716
 """Governed audit-only environment state promotion for merged checkpoints.
 
 This helper records GitHub Environment/Deployment state and an issue trail. It

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1198
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 860
 """
 fetch_next_issue.py - Selects the next actionable issue for one agent.
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1128
 """fetch_next_work.py - answers "what should I do next?" for one agent.
 
 The issue picker only ever answered "which issue do I implement?", so a fleet
