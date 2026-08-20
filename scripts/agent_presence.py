@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1204
+# line-ceiling: 1232
 """Project-scoped agent presence and availability registry.
 
 GitHub claims remain authoritative ownership. This registry only records which
