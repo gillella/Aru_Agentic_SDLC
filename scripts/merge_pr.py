@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3605
+# line-ceiling: 3610
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -2796,12 +2796,17 @@ def clear_merger_claims(pr_num, cwd=None):
     return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL, cwd=cwd)
 
 
-def evaluate_dod(pr, issue_bodies, evidence):
+def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None):
     """Runs every Definition-of-Done check without merging.
 
     Returns ``(ok, gates)`` where ``gates`` is a list of
     ``(name, passed, message)`` in evaluation order. Shared by ``--dry-run``
     and the merge work picker so eligibility cannot drift from the gate.
+
+    ``behind_resolver`` is threaded to :func:`check_rebased` so a caller with no
+    repository to interrogate -- a hermetic fleet simulation -- can state
+    ancestry directly. Production callers omit it and get the fail-closed git
+    path, which is the point of the gate.
     """
     issue_nums = linked_issues(pr.get("body"))
     gates = [
@@ -2810,7 +2815,7 @@ def evaluate_dod(pr, issue_bodies, evidence):
         ("verification", *check_verification(pr)),
         ("ci", *check_ci(pr)),
         ("review", *check_reviews(pr, evidence)),
-        ("rebased", *check_rebased(pr)),
+        ("rebased", *check_rebased(pr, behind_resolver)),
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
         ("spec-sync", *check_spec_sync(pr)),
