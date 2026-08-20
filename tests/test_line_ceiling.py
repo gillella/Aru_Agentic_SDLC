@@ -104,6 +104,22 @@ class LineCeilingTests(unittest.TestCase):
         write(self.root, "node_modules/b.js", 5000)
         self.assertEqual(guard.check_tree(self.root), [])
 
+    def test_typescript_and_go_sources_are_governed(self):
+        """#316: the bootstrap offers node, typescript, react and go stacks, so a
+        guard that scans only .py/.js/.sh/.css/.html lets those grow unbounded."""
+        for name in ("a.ts", "b.tsx", "c.jsx", "d.go"):
+            with self.subTest(name=name):
+                root = tempfile.mkdtemp()
+                write(root, name, 401)
+                self.assertEqual(
+                    {os.path.relpath(p, root) for p, _, _ in guard.check_tree(root)},
+                    {name})
+
+    def test_markers_work_in_typescript_and_go(self):
+        write(self.root, "a.ts", 450, header="// line-ceiling: 450")
+        write(self.root, "b.go", 450, header="// line-ceiling: 450")
+        self.assertEqual(guard.check_tree(self.root), [])
+
     def test_non_source_suffixes_are_ignored(self):
         write(self.root, "notes.md", 5000)
         self.assertEqual(guard.check_tree(self.root), [])
