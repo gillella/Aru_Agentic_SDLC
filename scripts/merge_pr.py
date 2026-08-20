@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3410
+# line-ceiling: 3510
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -75,6 +75,12 @@ CHECKPOINT_PREFIX = "ckpt/"
 # Completed-review attribution, written by claim_issue.py --complete-review.
 # This is the only label that satisfies the gate.
 REVIEWED_BY_LABEL = "reviewed-by:"
+# The authoring agent's model family, stamped on the PR by create_pr.py.
+FAMILY_LABEL = "family:"
+# reviewer-family:<id>:<family> - the reviewing agent's model family, stamped by
+# claim_issue.py --complete-review. Needed because the framework's identity is
+# the pair (id, family) and only the PR's own family was ever recorded (#307).
+REVIEWER_FAMILY_LABEL = "reviewer-family:"
 REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
 # The transient claim, written by claim_review. Deliberately NOT accepted here:
 # it records that an agent took the PR off the queue, not that it read anything.
@@ -1096,6 +1102,96 @@ def _current_head_reviewers(evidence):
     return sorted(reviewers)
 
 
+def reviewer_families(pr):
+    """Map reviewer id -> model family from reviewer-family:<id>:<family> labels."""
+    families = {}
+    for value in label_values(pr, REVIEWER_FAMILY_LABEL):
+        agent_id, _, family = value.partition(":")
+        if agent_id and family:
+            families[agent_id] = family
+    return families
+
+
+def classify_reviewers(pr, reviewers, author):
+    """Split reviewers into genuine peers, id collisions, and unresolvable ones.
+
+    Identity in this framework is the pair (id, family). Agents all authenticate
+    as one GitHub user, so the labels are the only thing that tells them apart,
+    and the gate previously compared the id alone. That makes a
+    same-id/different-family reviewer -- which is evidence of the #304 id-reissue
+    defect, not a self-review -- indistinguishable from the author reviewing its
+    own work.
+
+    Family is consulted only where identity is actually contested. A reviewer
+    whose id differs from the author's is a peer whatever its family, so PRs
+    predating family stamping keep merging exactly as before. Where the ids do
+    match, a missing family is reported rather than guessed at.
+
+    Returns (peers, collisions, unresolved):
+      peers       reviewer ids that are genuinely somebody else
+      collisions  (id, author_family, reviewer_family) - one id, two agents
+      unresolved  (id, [what is missing]) - cannot be decided, fails closed
+    """
+    author_family = next(iter(label_values(pr, FAMILY_LABEL)), "")
+    families = reviewer_families(pr)
+    peers, collisions, unresolved = [], [], []
+    for agent_id in reviewers:
+        if agent_id != author:
+            peers.append(agent_id)
+            continue
+        reviewer_family = families.get(agent_id, "")
+        if not author_family or not reviewer_family:
+            missing = []
+            if not author_family:
+                missing.append(f"{FAMILY_LABEL}<family> on the PR")
+            if not reviewer_family:
+                missing.append(
+                    f"{REVIEWER_FAMILY_LABEL}{agent_id}:<family> for the review"
+                )
+            unresolved.append((agent_id, missing))
+        elif reviewer_family != author_family:
+            collisions.append((agent_id, author_family, reviewer_family))
+    return peers, collisions, unresolved
+
+
+def id_collision_message(collisions):
+    """Refusal text for one agent id stamped as both author and reviewer.
+
+    Deliberately neither an acceptance nor a self-review rejection: the two
+    families prove two different agents are answering to one id, so the honest
+    report is that the id namespace broke, not that somebody reviewed its own
+    work. Blocking here is what stops the #304 collision from merging.
+    """
+    agent_id, author_family, reviewer_family = collisions[0]
+    return (
+        f"Agent id '{agent_id}' is stamped as both the author "
+        f"(family:{author_family}) and a reviewer (family:{reviewer_family}) of "
+        "this PR. Two agents are sharing one id, so no attribution on it can be "
+        "trusted - this is neither a self-review nor a valid peer review. "
+        "Reissue one of them a distinct id (see #304) and re-review."
+    )
+
+
+def self_review_message(author, unresolved):
+    """Refusal text when the author's id is the only attribution on the PR.
+
+    When the family labels needed to rule out an id collision are absent, the
+    gate says so instead of quietly assuming the two are the same agent. It
+    still refuses either way, so the caveat costs nothing and names exactly what
+    an operator must stamp to tell the two situations apart.
+    """
+    message = (f"The only review is from '{author}', who wrote this PR. "
+               "A self-review does not satisfy the gate.")
+    if unresolved:
+        _agent_id, missing = unresolved[0]
+        message += (
+            f" Note: {' and '.join(missing)} is missing, so a second agent "
+            "sharing this id (#304) cannot be ruled out - stamp the family "
+            "labels if that is what happened. The gate will not assume a family."
+        )
+    return message
+
+
 def _attested_head_peers(evidence, peers):
     """Attributed peer agents whose completion stamp matches this exact head."""
     if not evidence or "review_attestations" not in evidence:
@@ -1274,10 +1370,14 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # Only completed attribution counts. Active reviewer claims were rejected
     # above because they represent work still in progress, not attestation.
     reviewers = label_values(pr, REVIEWED_BY_LABEL)
-    peers = [r for r in reviewers if r != author]
+    peers, collisions, unresolved = classify_reviewers(pr, reviewers, author)
+    # A collision blocks even when a genuine peer also reviewed: the operator
+    # needs to know the id namespace broke. A merely unstamped family does not,
+    # or every PR predating family stamping would stop merging.
+    if collisions:
+        return False, id_collision_message(collisions)
     if reviewers and not peers:
-        return False, (f"The only review is from '{author}', who wrote this PR. "
-                       "A self-review does not satisfy the gate.")
+        return False, self_review_message(author, unresolved)
     if not reviewers:
         advisory = sorted(a for a in advisory_accounts if a and a != pr_login)
         if advisory:

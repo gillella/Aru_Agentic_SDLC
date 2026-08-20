@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1198
+# line-ceiling: 1237
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.
@@ -574,8 +574,15 @@ REVIEWED_BY_LABEL_PREFIX = "reviewed-by:"
 REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
 
 
+REVIEWER_FAMILY_LABEL_PREFIX = "reviewer-family:"
+
+
 def _reviewed_by_label_for(agent: str) -> str:
     return f"{REVIEWED_BY_LABEL_PREFIX}{agent}"
+
+
+def _reviewer_family_label_for(agent: str, family: str) -> str:
+    return f"{REVIEWER_FAMILY_LABEL_PREFIX}{agent}:{family}"
 
 
 def _reviewed_head_for_completion(pr_id: int) -> str | None:
@@ -605,7 +612,32 @@ def _review_head_attestation(agent: str, head: str) -> str:
     )
 
 
-def complete_review(pr_id: int, agent: str) -> int:
+def _stamp_reviewer_family(pr_id: int, agent: str, family: str) -> None:
+    """Record the reviewing agent's model family on the PR.
+
+    The merge gate compares identity as the pair (id, family). Without this
+    label a reviewer that shares the author's id cannot be told apart from the
+    author reviewing its own work, so the gate has to fail closed (#307).
+    Advisory rather than fatal: attribution itself already succeeded, and the
+    label only matters in the id-collision case.
+    """
+    if not family:
+        print("[WARN] No --model-family given. If this reviewer ever shares the "
+              "author's agent id, the merge gate cannot tell them apart and "
+              "will refuse the PR.", file=sys.stderr)
+        return
+    stamp = _reviewer_family_label_for(agent, family)
+    if not ensure_label(stamp, "d4a27f", f"Review by a {family}-family model"):
+        print(f"[WARN] Could not provision '{stamp}'; the merge gate will fail "
+              "closed if this reviewer shares the author's id.", file=sys.stderr)
+        return
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--add-label", stamp], check=False)
+    if code != 0:
+        print(f"[WARN] Could not apply '{stamp}': {err}", file=sys.stderr)
+
+
+def complete_review(pr_id: int, agent: str, family: str = "") -> int:
     """Attributes a finished review, then releases the claim.
 
     This exists because the step had no command. `fleet-worker.md` told the
@@ -667,6 +699,7 @@ def complete_review(pr_id: int, agent: str) -> int:
         print(f"[ERROR] Could not attribute the review: {err}", file=sys.stderr)
         return EXIT_ERROR
     print(f"🏷️  Attributed review of PR #{pr_id} to '{agent}'.")
+    _stamp_reviewer_family(pr_id, agent, family)
 
     if not _remove_reviewer_label(pr_id, agent):
         # The merge gate deliberately blocks every live claim. Returning
@@ -1155,6 +1188,12 @@ def main():
     parser.add_argument("--complete-review", action="store_true", dest="complete",
                         help="Attribute a finished PR review (reviewed-by:<id>) and "
                              "release the claim. Run after submitting the GitHub review.")
+    parser.add_argument("--model-family", "--family", type=str, default="",
+                        dest="family",
+                        help="Reviewing agent's model family. With "
+                             "--complete-review, stamps "
+                             "reviewer-family:<id>:<family> so the merge gate "
+                             "can compare identity as (id, family).")
     parser.add_argument("--merge", action="store_true",
                         help="With --pr: claim or release mechanical merge (merger:<id>), "
                              "not review.")
@@ -1176,7 +1215,7 @@ def main():
                   else claim_merge(args.pr, args.agent))
             sys.exit(rc)
         if args.complete:
-            sys.exit(complete_review(args.pr, args.agent))
+            sys.exit(complete_review(args.pr, args.agent, args.family))
         rc = release_review(args.pr, args.agent) if args.release else claim_review(args.pr, args.agent)
         sys.exit(rc)
 

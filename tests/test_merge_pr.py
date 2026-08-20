@@ -1,4 +1,4 @@
-# line-ceiling: 3589
+# line-ceiling: 3671
 from contextlib import nullcontext
 import json
 import os
@@ -1053,6 +1053,88 @@ class SelfReviewTests(unittest.TestCase):
             labelled("author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
         self.assertTrue(ok)
         self.assertIn("agent-3", msg)
+
+    # --- Identity as the pair (id, family) (#307) ---------------------------
+    # Agents authenticate as one GitHub user, so the labels are all that
+    # distinguish them. Comparing the id alone cannot tell a genuine
+    # cross-family reviewer apart from the author reviewing its own work.
+
+    def test_same_id_same_family_is_still_a_self_review(self):
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1", "reviewer-family:agent-1:anthropic"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
+        # Families were present, so no missing-label caveat is warranted.
+        self.assertNotIn("cannot be ruled out", msg)
+
+    def test_same_id_different_family_is_reported_as_an_id_collision(self):
+        # Two agents answering to one id (#304). Not a peer review, and not
+        # honestly a self-review either -- the namespace broke.
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1", "reviewer-family:agent-1:google"), 0)
+        self.assertFalse(ok)
+        self.assertIn("sharing one id", msg)
+        self.assertIn("anthropic", msg)
+        self.assertIn("google", msg)
+        self.assertNotIn("A self-review does not satisfy", msg)
+
+    def test_id_collision_blocks_even_with_a_genuine_peer(self):
+        # A broken id namespace is reportable regardless of who else reviewed:
+        # no attribution carrying that id can be trusted.
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1", "reviewer-family:agent-1:google",
+            "reviewed-by:agent-9"), 0)
+        self.assertFalse(ok)
+        self.assertIn("sharing one id", msg)
+
+    def test_distinct_id_review_passes_without_any_family_labels(self):
+        # Unchanged from today: family is consulted only where the ids collide,
+        # so PRs predating family stamping keep merging.
+        ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-2"), 0)
+        self.assertTrue(ok)
+        self.assertIn("agent-2", msg)
+
+    def test_missing_family_on_a_same_id_review_names_what_is_missing(self):
+        ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
+        self.assertIn("family:<family> on the PR", msg)
+        self.assertIn("reviewer-family:agent-1:<family>", msg)
+
+    def test_missing_reviewer_family_alone_is_named(self):
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("reviewer-family:agent-1:<family>", msg)
+        self.assertNotIn("family:<family> on the PR", msg)
+
+    def test_missing_family_does_not_block_a_genuine_peer(self):
+        ok, _ = _gate(labelled(
+            "author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
+        self.assertTrue(ok)
+
+    def test_classifier_partitions_reviewers(self):
+        pr = labelled("author:a1", "family:anthropic",
+                      "reviewed-by:a1", "reviewer-family:a1:google",
+                      "reviewed-by:a2")
+        peers, collisions, unresolved = merge_pr.classify_reviewers(
+            pr, ["a1", "a2"], "a1")
+        self.assertEqual(peers, ["a2"])
+        self.assertEqual(collisions, [("a1", "anthropic", "google")])
+        self.assertEqual(unresolved, [])
+
+    def test_reviewer_families_ignores_malformed_labels(self):
+        pr = labelled("reviewer-family:a1:google", "reviewer-family:nofamily",
+                      "reviewer-family:")
+        self.assertEqual(merge_pr.reviewer_families(pr), {"a1": "google"})
+
+    def test_reviewer_family_label_is_not_read_as_the_author_family(self):
+        # family: and reviewer-family: must not be confused by prefix matching.
+        pr = labelled("reviewer-family:a1:google")
+        self.assertEqual(merge_pr.label_values(pr, merge_pr.FAMILY_LABEL), [])
 
     def test_review_without_attribution_is_refused(self):
         # Unattributable on a stamped PR: it cannot be told apart from a
