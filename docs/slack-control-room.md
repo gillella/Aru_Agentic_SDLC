@@ -112,7 +112,7 @@ issue/PR comment with the same facts **before** the Slack message:
 |---|---|---|
 | `blocked` | unresolved `depends-on`, missing product decision, merge/close-out stuck | stamped identity + reason |
 | `waiting-on` | peer holds a claim, review, or overlapping `touches:` path | names `--waiting-on-agent` and the peer issue/PR; never steals the claim |
-| `hitl` | severe merge/close-out failure, exhausted credits, or an unresolvable decision | mentions only the validated `<@SLACK_OPERATOR_USER_ID>` from configuration; agents still stop per `AGENTS.md` |
+| `hitl` | severe merge/close-out failure, exhausted credits, or an unresolvable decision | mentions the validated operator (`SLACK_OPERATOR_USER_ID`) and, when `SLACK_ESCALATION_USER_ID` is set, Hermes' war-room bot; agents still stop per `AGENTS.md` |
 
 ## Escalation to Hermes (mention the war-room bot)
 
@@ -121,11 +121,12 @@ bot (`@hermes-war-room`, see `templates/slack/manifest-hermes-war-room.yaml`).
 A Slack bot cannot wake itself, so material events must mention Hermes' bot,
 never the factory bot.
 
-Configure `SLACK_ESCALATION_USER_ID` (Hermes' bot user id) in `~/.aru/slack.env`.
-`blocked` and `hitl` events then prepend `<@SLACK_ESCALATION_USER_ID> …
-escalate to Hermes` so Hermes wakes and escalates the decision to Telegram.
-`waiting-on` stays mention-free (routine peer-claim chatter). Leave the var
-unset to keep legacy behavior (no escalation mention).
+Configure `SLACK_ESCALATION_USER_ID` (Hermes' bot user id, e.g. `U0BRH53KR51`)
+in `~/.aru/slack.env`. `blocked` and `hitl` events then prepend a runtime
+mention of that id — `<@U0BRH53KR51> BLOCKED — escalate to Hermes` — so Hermes
+wakes and escalates the decision to Telegram. `waiting-on` stays mention-free
+(routine peer-claim chatter). Leave the var unset to keep legacy behavior (no
+escalation mention).
 
 For the examples below, prepare `ARU_ALERT_TEXT_FILE` or
 `ARU_ALERT_DECISION_FILE` with the same secure file procedure. The registry

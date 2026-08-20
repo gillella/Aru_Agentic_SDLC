@@ -813,24 +813,13 @@ def notify_alert(  # noqa: C901, PLR0912
 
     secrets = secrets_from_config(config)
     stamped = dict(event)
-    if stamped.get("type") == "hitl":
-        operator = str(config.operator_user_id or "").strip()
-        if not SLACK_USER_RE.fullmatch(operator):
-            return {
-                "ok": False,
-                "error": "invalid_alert",
-                "detail": "configured operator user id is missing or invalid",
-            }
-        stamped["operator_user_id"] = operator
-    if stamped.get("type") in ESCALATION_ALERT_TYPES:
-        escalation = str(config.escalation_user_id or "").strip()
-        if escalation and not SLACK_USER_RE.fullmatch(escalation):
-            return {
-                "ok": False,
-                "error": "invalid_alert",
-                "detail": "configured escalation user id is invalid",
-            }
-        stamped["escalation_user_id"] = escalation
+    mention_error = _stamp_authoritative_mentions(config, stamped)
+    if mention_error:
+        return {
+            "ok": False,
+            "error": "invalid_alert",
+            "detail": mention_error.get("error", "invalid mention identity"),
+        }
     stamped = sanitize_event(stamped, secrets)
 
     alert_cache = cache if cache is not None else FileDedupeCache()
