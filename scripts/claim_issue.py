@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1406
+# line-ceiling: 1413
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.
@@ -624,11 +624,18 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
         print(f"[ERROR] Could not re-read PR #{pr_id} to confirm adoption. "
               "Verify ownership before pushing to this branch.", file=sys.stderr)
         return EXIT_ERROR
-    winner = pr_author(settled["labels"])
-    if winner != agent:
-        print(f"[CONFLICT] Adoption of PR #{pr_id} did not settle on '{agent}'; "
-              f"'{winner or 'nobody'}' holds it. Another successor adopted it "
-              "first.", file=sys.stderr)
+    # Exactly one, not merely "the first one is us". pr_author returns the first
+    # match, so two concurrent edits leaving two author: labels would report
+    # success to whichever agent that happened to name, while the PR carries
+    # ambiguous ownership that merge_pr would then resolve just as arbitrarily.
+    holders = [name[len(AUTHOR_LABEL_PREFIX):] for name in settled["labels"]
+               if name.startswith(AUTHOR_LABEL_PREFIX)]
+    if holders != [agent]:
+        held = ", ".join(f"'{who}'" for who in holders) or "nobody"
+        print(f"[CONFLICT] Adoption of PR #{pr_id} did not settle on '{agent}' "
+              f"alone; {held} stamped as author. Another successor adopted it "
+              "concurrently -- resolve the duplicate author: labels before "
+              "pushing to this branch.", file=sys.stderr)
         return EXIT_CONFLICT
 
     run_cmd(["gh", "pr", "comment", str(pr_id), "--body",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3555
+# line-ceiling: 3592
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -74,6 +74,7 @@ CHECKPOINT_PREFIX = "ckpt/"
 
 # Completed-review attribution, written by claim_issue.py --complete-review.
 # This is the only label that satisfies the gate.
+AUTHOR_LABEL = "author:"
 REVIEWED_BY_LABEL = "reviewed-by:"
 # The authoring agent's model family, stamped on the PR by create_pr.py.
 FAMILY_LABEL = "family:"
@@ -940,8 +941,17 @@ def _check_time(check):
     return parsed
 
 
+# Allowlist, not denylist. Enumerating the failure conclusions let unknown ones -
+# STARTUP_FAILURE, STALE, anything GitHub adds later - fall through to "green"
+# and merge an unverified head. Only these three mean "passed"; every other
+# completed conclusion fails closed.
+PASSING_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+IN_PROGRESS_STATES = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS",
+                      "WAITING", "REQUESTED"}
+
+
 def _check_outcome(check):
-    """Normalised (status, result) for one run, used to compare two runs.
+    """Raw (status, result) for one run.
 
     Check runs report 'conclusion'; legacy commit statuses report 'state'.
     """
@@ -949,6 +959,26 @@ def _check_outcome(check):
         (check.get("status") or "").upper(),
         (check.get("conclusion") or check.get("state") or "").upper(),
     )
+
+
+def _check_verdict(check):
+    """The (verdict, detail) this run contributes: pending, passing, or failing.
+
+    Ties between two runs are compared on this rather than on the raw fields. A
+    check run ({status: COMPLETED, conclusion: SUCCESS}) and a legacy commit
+    status ({state: SUCCESS}) describe one green outcome through different
+    fields, so comparing raw tuples would call them a disagreement and block a
+    PR that check_ci itself treats as green.
+
+    check_ci reads the same helper, so the tie-break and the verdict cannot
+    disagree about what a run means.
+    """
+    status, result = _check_outcome(check)
+    if (status and status != "COMPLETED" and not result) or result in IN_PROGRESS_STATES:
+        return ("pending", "")
+    if result in PASSING_CONCLUSIONS:
+        return ("passing", "")
+    return ("failing", result.lower() or "unknown")
 
 
 def _current_runs(rollup):
@@ -985,7 +1015,7 @@ def _current_runs(rollup):
         # runs finishing in the same second would otherwise decide a merge by
         # response ordering. Ties that agree on the outcome are harmless; ties
         # that disagree are undecidable.
-        if len({_check_outcome(run) for run in tied}) > 1:
+        if len({_check_verdict(run) for run in tied}) > 1:
             unorderable.append(name)
             continue
         current[name] = tied[0]
@@ -996,19 +1026,17 @@ def check_ci(pr):
     rollup = pr.get("statusCheckRollup") or []
     if not rollup:
         return False, "No CI checks reported on the head commit. A PR with no checks is not verified."
-    # Allowlist, not denylist. Enumerating the failure conclusions let unknown
-    # ones - STARTUP_FAILURE, STALE, anything GitHub adds later - fall through
-    # to "green" and merge an unverified head. Only these three mean "passed";
-    # every other completed conclusion fails closed.
-    passing = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-    in_progress = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
-
     current, unorderable = _current_runs(rollup)
+    # An advisory review bot is not a build check, so it must not hold the gate
+    # by being unresolvable either (see ADVISORY_CHECK_CONTEXTS).
+    unorderable = [name for name in unorderable
+                   if (name or "").lower() not in ADVISORY_CHECK_CONTEXTS]
     if unorderable:
         return False, (
             f"CI recency is undecidable for: {', '.join(unorderable)}. "
-            "Several runs of one check carry no usable timestamp, so which one "
-            "is current cannot be established."
+            "Several runs of one check either carry no usable timestamp or are "
+            "tied on the newest one while disagreeing, so which is current "
+            "cannot be established."
         )
 
     failing, pending = [], []
@@ -1017,11 +1045,11 @@ def check_ci(pr):
             # Advisory review bots are not build checks; a stuck PENDING status
             # from one must not hold the CI gate (see ADVISORY_CHECK_CONTEXTS).
             continue
-        status, result = _check_outcome(current[name])
-        if status and status != "COMPLETED" and not result or result in in_progress:
+        verdict, detail = _check_verdict(current[name])
+        if verdict == "pending":
             pending.append(name)
-        elif result not in passing:
-            failing.append(f"{name}={result.lower() or 'unknown'}")
+        elif verdict == "failing":
+            failing.append(f"{name}={detail}")
     if failing:
         return False, f"CI is red: {', '.join(failing)}."
     if pending:
@@ -1379,13 +1407,22 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # governed author stamp, even a genuine external approval cannot prove the
     # PR did not bypass create_pr.py or establish who must be excluded from
     # same-account agent review.
-    authors = label_values(pr, "author:")
+    authors = label_values(pr, AUTHOR_LABEL)
     if not authors:
         return False, (
             "PR has no author:<id> label, so the gate cannot prove that the "
             "reviewer is independent. Create PRs with "
             "`scripts/create_pr.py --issue <n> --agent <id>`; stamp the verified "
             "author on a legacy PR before retrying."
+        )
+    if len(set(authors)) > 1:
+        # Resolving this by position would pick an author arbitrarily, and the
+        # whole peer comparison below rests on knowing who wrote the PR.
+        return False, (
+            f"PR carries {len(set(authors))} different {AUTHOR_LABEL} labels "
+            f"({', '.join(sorted(set(authors)))}), so who wrote it cannot be "
+            "established. Two agents likely adopted it concurrently; remove the "
+            "stale label before merging."
         )
     author = authors[0]
 

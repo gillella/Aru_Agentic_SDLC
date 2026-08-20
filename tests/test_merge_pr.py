@@ -1,4 +1,4 @@
-# line-ceiling: 3709
+# line-ceiling: 3756
 from contextlib import nullcontext
 import json
 import os
@@ -801,6 +801,39 @@ class CiGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("undecidable", msg)
 
+    def test_tied_runs_agreeing_through_different_fields_still_resolve(self):
+        # A check run and a legacy commit status express one green outcome
+        # through different fields. Comparing raw fields called that a
+        # disagreement and blocked a PR check_ci itself treats as green.
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS",
+             "completedAt": "2026-08-20T02:00:00Z"},
+            {"context": "test", "state": "SUCCESS",
+             "completedAt": "2026-08-20T02:00:00Z"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertTrue(ok, msg)
+
+    def test_tied_runs_disagreeing_fail_closed(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+            self._run("test", "FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("undecidable", msg)
+        self.assertIn("tied", msg)
+
+    def test_a_tie_never_resolves_by_array_order(self):
+        both_orders = []
+        for order in ((("SUCCESS",), ("FAILURE",)), (("FAILURE",), ("SUCCESS",))):
+            pr = {"statusCheckRollup": [
+                self._run("test", order[0][0], "2026-08-20T02:00:00Z"),
+                self._run("test", order[1][0], "2026-08-20T02:00:00Z"),
+            ]}
+            both_orders.append(merge_pr.check_ci(pr)[0])
+        self.assertEqual(both_orders, [False, False])
+
     def test_uncontested_name_without_a_timestamp_still_judged(self):
         # A single run needs no ordering; it is the run. Requiring a timestamp
         # here would break every ordinary pending check.
@@ -1173,6 +1206,20 @@ class SelfReviewTests(unittest.TestCase):
         # family: and reviewer-family: must not be confused by prefix matching.
         pr = labelled("reviewer-family:a1:google")
         self.assertEqual(merge_pr.label_values(pr, merge_pr.FAMILY_LABEL), [])
+
+    def test_two_different_author_labels_fail_closed(self):
+        # Concurrent adoption can leave two author: stamps. Picking one by
+        # position would decide the peer comparison arbitrarily.
+        ok, msg = _gate(labelled("author:agent-1", "author:agent-2",
+                                 "reviewed-by:agent-3"), 0)
+        self.assertFalse(ok)
+        self.assertIn("cannot be established", msg)
+        self.assertIn("agent-1, agent-2", msg)
+
+    def test_a_duplicated_identical_author_label_is_not_ambiguous(self):
+        ok, _msg = _gate(labelled("author:agent-1", "author:agent-1",
+                                  "reviewed-by:agent-3"), 0)
+        self.assertTrue(ok)
 
     def test_review_without_attribution_is_refused(self):
         # Unattributable on a stamped PR: it cannot be told apart from a

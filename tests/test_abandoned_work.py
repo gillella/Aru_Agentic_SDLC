@@ -153,6 +153,20 @@ class AdoptPullRequestTests(unittest.TestCase):
                                  family="anthropic")
         self.assertEqual(rc, claim_issue.EXIT_CONFLICT)
 
+    def test_two_author_labels_after_the_write_is_a_conflict(self):
+        # pr_author returns the first match, so "the first one is us" would
+        # report success while the PR carries ambiguous ownership.
+        snapshot = self.snapshot()
+        after = dict(snapshot)
+        after["labels"] = [{"name": "author:claude-a3f19c"},
+                           {"name": "author:gemini-77aa"}]
+        with patch.object(claim_issue, "run_gh_json",
+                          side_effect=[snapshot, after]), \
+             patch.object(claim_issue, "ensure_label", return_value=True), \
+             patch.object(claim_issue, "run_cmd", return_value=(0, "", "")):
+            rc = claim_issue.adopt_pr(42, "claude-a3f19c", "anthropic")
+        self.assertEqual(rc, claim_issue.EXIT_CONFLICT)
+
     def test_an_unreadable_read_back_is_an_error(self):
         with patch.object(claim_issue, "run_gh_json",
                           side_effect=[self.snapshot(), None]), \
