@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3344
+# line-ceiling: 3410
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -34,7 +34,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import acceptance_runner
@@ -903,6 +903,64 @@ def check_open(pr):
     return True, "PR is open."
 
 
+def _check_name(check):
+    """Check runs carry 'name'; legacy commit statuses carry 'context'."""
+    return check.get("name") or check.get("context") or "check"
+
+
+def _check_time(check):
+    """When this run finished, for ordering runs of the same check.
+
+    Falls back to the start time when a run has not completed. Returns None
+    when neither timestamp is usable, which the caller treats as "cannot be
+    ordered" rather than "is current".
+    """
+    raw = check.get("completedAt") or check.get("startedAt")
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _current_runs(rollup):
+    """Reduce the rollup to the live run of each check name.
+
+    GitHub keeps every run recorded against the head commit: the push-triggered
+    run, the pull_request-triggered run, and every re-run. Judging all of them
+    means one superseded failure holds the gate red forever, so re-running a
+    job green cannot unblock a PR and only an operator can (#306).
+
+    Array order carries no recency guarantee, so ordering comes from the
+    timestamps. A name with a single entry needs no ordering - that entry is
+    the run. A name with several entries where any timestamp is unusable is
+    reported as unorderable and fails closed: guessing which run is live is
+    exactly the mistake being fixed.
+    """
+    groups = {}
+    for check in rollup:
+        groups.setdefault(_check_name(check), []).append(check)
+
+    current, unorderable = {}, []
+    for name, runs in groups.items():
+        if len(runs) == 1:
+            current[name] = runs[0]
+            continue
+        stamped = [(_check_time(run), run) for run in runs]
+        if any(when is None for when, _ in stamped):
+            unorderable.append(name)
+            continue
+        current[name] = max(stamped, key=lambda pair: pair[0])[1]
+    return current, sorted(unorderable)
+
+
 def check_ci(pr):
     rollup = pr.get("statusCheckRollup") or []
     if not rollup:
@@ -914,12 +972,20 @@ def check_ci(pr):
     passing = {"SUCCESS", "NEUTRAL", "SKIPPED"}
     in_progress = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
+    current, unorderable = _current_runs(rollup)
+    if unorderable:
+        return False, (
+            f"CI recency is undecidable for: {', '.join(unorderable)}. "
+            "Several runs of one check carry no usable timestamp, so which one "
+            "is current cannot be established."
+        )
+
     failing, pending = [], []
-    for check in rollup:
+    for name in sorted(current):
+        check = current[name]
         # Check runs use 'conclusion'; legacy statuses use 'state'.
         status = (check.get("status") or "").upper()
         result = (check.get("conclusion") or check.get("state") or "").upper()
-        name = check.get("name") or check.get("context") or "check"
         if status and status != "COMPLETED" and not result or result in in_progress:
             pending.append(name)
         elif result not in passing:
@@ -928,7 +994,7 @@ def check_ci(pr):
         return False, f"CI is red: {', '.join(failing)}."
     if pending:
         return False, f"CI has not finished: {', '.join(pending)}."
-    return True, f"CI green ({len(rollup)} checks)."
+    return True, f"CI green ({len(current)} checks)."
 
 
 def label_values(pr, prefix):

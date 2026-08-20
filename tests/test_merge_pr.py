@@ -1,4 +1,4 @@
-# line-ceiling: 3484
+# line-ceiling: 3589
 from contextlib import nullcontext
 import json
 import os
@@ -713,6 +713,111 @@ class CiGateTests(unittest.TestCase):
             pr = {"statusCheckRollup": [
                 {"name": "verify", "status": "COMPLETED", "conclusion": conclusion}]}
             self.assertTrue(merge_pr.check_ci(pr)[0], f"{conclusion} should pass")
+
+    # --- Superseded runs (#306) ---------------------------------------------
+    # The rollup holds every run recorded against the head commit, so a check
+    # that failed and was re-run green appears twice. Judging both kept the PR
+    # red forever, with re-running powerless to clear it.
+
+    @staticmethod
+    def _run(name, conclusion, completed_at):
+        return {"name": name, "status": "COMPLETED",
+                "conclusion": conclusion, "completedAt": completed_at}
+
+    def test_stale_failure_superseded_by_newer_success_is_green(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "FAILURE", "2026-08-20T01:00:00Z"),
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertTrue(ok, msg)
+        # Deduplicated: one check name, not two runs.
+        self.assertIn("1 checks", msg)
+
+    def test_array_order_does_not_decide_recency(self):
+        # GitHub gives no ordering guarantee, so the newest-last arrangement
+        # above must not be what makes the previous test pass.
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+            self._run("test", "FAILURE", "2026-08-20T01:00:00Z"),
+        ]}
+        self.assertTrue(merge_pr.check_ci(pr)[0])
+
+    def test_stale_success_superseded_by_newer_failure_is_red(self):
+        # Recency has to cut both ways, or the fix becomes a way to merge red.
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T01:00:00Z"),
+            self._run("test", "FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("test=failure", msg)
+
+    def test_distinct_check_names_are_not_collapsed(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+            self._run("lint", "FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("lint=failure", msg)
+
+    def test_started_at_is_used_when_a_run_has_not_completed(self):
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE",
+             "completedAt": "2026-08-20T01:00:00Z"},
+            {"name": "test", "status": "IN_PROGRESS", "conclusion": None,
+             "startedAt": "2026-08-20T02:00:00Z"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("not finished", msg)
+
+    def test_contested_name_without_timestamps_fails_closed(self):
+        # Two runs of one name and no way to order them: refuse rather than
+        # assume either is current.
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("undecidable", msg)
+
+    def test_unparsable_timestamp_on_a_contested_name_fails_closed(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "FAILURE", "not-a-time"),
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("undecidable", msg)
+
+    def test_uncontested_name_without_a_timestamp_still_judged(self):
+        # A single run needs no ordering; it is the run. Requiring a timestamp
+        # here would break every ordinary pending check.
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+        self.assertTrue(merge_pr.check_ci(pr)[0])
+
+    def test_allowlist_survives_deduplication(self):
+        # The newest run being an unknown conclusion must still fail closed.
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T01:00:00Z"),
+            self._run("test", "STARTUP_FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("startup_failure", msg)
+
+    def test_legacy_status_context_entries_group_by_context(self):
+        pr = {"statusCheckRollup": [
+            {"context": "ci/legacy", "state": "FAILURE",
+             "completedAt": "2026-08-20T01:00:00Z"},
+            {"context": "ci/legacy", "state": "SUCCESS",
+             "completedAt": "2026-08-20T02:00:00Z"},
+        ]}
+        self.assertTrue(merge_pr.check_ci(pr)[0])
 
     def test_no_checks_at_all_blocks(self):
         # A PR with zero checks is unverified, not verified-by-default. This is
