@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3510
+# line-ceiling: 3524
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -96,6 +96,10 @@ MERGER_CLAIM_LABEL = "merger:"
 # (#123). GitHub exposes some bot logins with a ``[bot]`` suffix and the
 # Codex connector without one, so both forms must be recognized explicitly.
 ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
+# Advisory review-bot commit-status contexts that must never gate CI. A bot
+# review (e.g. CodeRabbit) posts a StatusContext that stays PENDING while it
+# re-reads the diff; it is not a build check and cannot certify the head.
+ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
 # review evidence; all other known actor kinds are automation or identities
@@ -988,6 +992,10 @@ def check_ci(pr):
 
     failing, pending = [], []
     for name in sorted(current):
+        if (name or "").lower() in ADVISORY_CHECK_CONTEXTS:
+            # Advisory review bots are not build checks; a stuck PENDING status
+            # from one must not hold the CI gate (see ADVISORY_CHECK_CONTEXTS).
+            continue
         check = current[name]
         # Check runs use 'conclusion'; legacy statuses use 'state'.
         status = (check.get("status") or "").upper()

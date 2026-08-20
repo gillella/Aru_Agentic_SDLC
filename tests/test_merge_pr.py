@@ -1,4 +1,4 @@
-# line-ceiling: 3671
+# line-ceiling: 3684
 from contextlib import nullcontext
 import json
 import os
@@ -696,6 +696,14 @@ class CiGateTests(unittest.TestCase):
         ok, msg = merge_pr.check_ci(pr)
         self.assertFalse(ok)
         self.assertIn("not finished", msg)
+
+    def test_advisory_bot_status_does_not_gate_ci(self):
+        pr = {"statusCheckRollup": [
+            {"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"context": "CodeRabbit", "state": "PENDING"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertTrue(ok, msg)
 
     def test_unknown_conclusions_fail_closed(self):
         # STARTUP_FAILURE and STALE are neither in the old failure list nor the
