@@ -36,7 +36,7 @@ Aru_Agentic_SDLC/
 │   ├── remediate-ci-failure/        # CI log parse & fix loop
 │   └── address-pr-feedback/         # Resolve review threads
 ├── scripts/                         # Reusable GitHub helper automation tools
-│   ├── install_cursor_integration.sh # Wire skills/commands/env into local Cursor
+│   ├── install_agent_integration.sh  # Wire skills/adapters for Cursor/Codex/Claude/Antigravity
 │   ├── common.py                    # Shared Git / Worktree / GitHub API / gh CLI helpers
 │   ├── init_project.py              # Bootstraps AGENTS.md, CI, private repo & board
 │   ├── fetch_next_issue.py          # Next unblocked issue respecting dependencies
@@ -53,7 +53,8 @@ Aru_Agentic_SDLC/
     ├── PROJECT-BOARD-FOR-AGENTIC-FACTORY.md        # GitHub vs Linear vs Jira for agents
     ├── cursor-integration.md        # Cross-project Cursor setup
     ├── project_board_workflow.md    # Board, dependencies, worktrees
-    └── coding_standards.md          # Commit hygiene & testing standards
+    ├── coding_standards.md          # Commit hygiene & testing standards
+    └── golden-path-demo.md          # Companion demo: idea through preview
 ```
 
 **Where the project is going:** [`docs/ARU-SOFTWARE-FACTORY.md`](docs/ARU-SOFTWARE-FACTORY.md) is the working plan — what is settled, what is being corrected, and the sequenced roadmap from here to idea-to-deployment. Read it before proposing structural changes.
@@ -84,7 +85,7 @@ Aru_Agentic_SDLC/
 One-time machine setup:
 
 ```bash
-./scripts/install_cursor_integration.sh
+./scripts/install_agent_integration.sh
 ```
 
 Then paste `templates/cursor/user-rules-aru-agentic-sdlc.md` into
@@ -100,6 +101,22 @@ Details: [`docs/cursor-integration.md`](docs/cursor-integration.md).
 
 GitHub access for the factory is the configured **`gh` CLI** via
 `$ARU_SDLC_HOME/scripts/*.py`. GitHub MCP is not a required setup step.
+
+---
+
+## 🛤️ Golden-path demo
+
+Walk idea → Ready → PR → distinct review → `merge_pr.py` → deploy-preview on
+the public companion repo
+[gillella/aru-golden-path-demo](https://github.com/gillella/aru-golden-path-demo)
+without copying this playbook's `skills/` or factory helpers.
+
+Runbook: [`docs/golden-path-demo.md`](docs/golden-path-demo.md).
+
+**Playbook pin (S1.4):** set `ARU_SDLC_REF` to an immutable commit SHA or
+`ckpt/<PR>-<sha7>` tag before installing. The demo currently pins `8d0513b`.
+Do not pin the moving branch name `main` if you want a frozen walk. Details:
+[`docs/cursor-integration.md`](docs/cursor-integration.md).
 
 ---
 

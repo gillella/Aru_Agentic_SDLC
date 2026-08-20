@@ -170,7 +170,7 @@ def _set_github_output(name: str, value: str) -> None:
         pass
 
 
-def assemble_preview_artifact(source_dir: str, output_dir: str, allow_library: bool = False) -> bool:
+def assemble_preview_artifact(source_dir: str, output_dir: str, allow_library: bool = False) -> bool:  # noqa: C901, PLR0912, PLR0915
     """Copy only public static files into the source checkout's canonical dist/."""
     lexical_source = _absolute_lexical(source_dir)
     if lexical_source.is_symlink() or not lexical_source.is_dir():

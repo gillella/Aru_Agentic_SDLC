@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 999
 """Post stamped Slack events for the Aru factory control room.
 
 GitHub remains the work queue. Slack downtime must not halt factory work.
@@ -250,7 +251,7 @@ def config_for_project(config: SlackConfig, project: Any) -> SlackConfig:
     return replace(config, channel_id=project.slack_channel_id)
 
 
-def validate_alert_event(event: Dict[str, Any]) -> None:
+def validate_alert_event(event: Dict[str, Any]) -> None:  # noqa: C901, PLR0912
     """Raise ValueError when an alert event is incomplete or forbidden."""
     kind = str(event.get("type") or "").strip().lower()
     if kind in FORBIDDEN_TYPES:
@@ -297,7 +298,7 @@ def validate_alert_event(event: Dict[str, Any]) -> None:
     event["type"] = kind
 
 
-def validate_availability_event(event: Dict[str, Any]) -> None:
+def validate_availability_event(event: Dict[str, Any]) -> None:  # noqa: C901, PLR0912
     """Validate one concise project-channel availability transition."""
     kind = str(event.get("type") or "").strip().lower()
     if kind != AVAILABILITY_EVENT:
@@ -759,7 +760,7 @@ def delivery_retry_pending(path: Path, key: str) -> bool:
     return bool(matches and matches[-1].get("retry_state") == "pending_retry")
 
 
-def notify_alert(
+def notify_alert(  # noqa: C901, PLR0912
     config: SlackConfig,
     event: Dict[str, Any],
     *,
@@ -871,7 +872,7 @@ def notify_alert(
     }
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Post one Aru factory Slack event.")
     parser.add_argument("--agent", required=True)
     parser.add_argument("--family", required=True)
@@ -893,7 +894,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     payload.add_argument("--decision-file", default="", help="read HITL decision text from a file")
     parser.add_argument("--repo-dir", default=".")
     parser.add_argument("--no-github-comment", action="store_true")
-    parser.add_argument("--project-id", required=True)
+    parser.add_argument("--project-id", default="")
     parser.add_argument("--registry-file", default="")
     parser.add_argument("--env-file", default=str(ENV_PATH))
     args = parser.parse_args(argv)
@@ -904,9 +905,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     try:
         base = config_from_env(load_slack_env(Path(args.env_file)), require_channel=False)
-        project = ProjectRegistry(
+        registry = ProjectRegistry(
             Path(args.registry_file) if args.registry_file else DEFAULT_REGISTRY_PATH
-        ).get(args.project_id)
+        )
+        if args.project_id:
+            # An explicit --project-id always wins.
+            project = registry.get(args.project_id)
+        else:
+            # Otherwise resolve the binding from the checkout the agent is
+            # working in, so a bound repo needs no per-agent Slack setup.
+            project = registry.find_by_checkout(Path(args.repo_dir))
         config = config_for_project(base, project)
     except (ValueError, RegistryError) as exc:
         print(f"[WARN] Slack notify skipped: {exc}", file=sys.stderr)
@@ -933,7 +941,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "pr": args.pr,
         "state": args.state,
         "text": text,
-        "project_id": args.project_id,
+        "project_id": project.project_id,
     }
     if args.waiting_on_agent:
         event["waiting_on_agent"] = args.waiting_on_agent

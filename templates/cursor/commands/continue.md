@@ -1,10 +1,10 @@
-Resume the Aru factory from GitHub board state.
+Resume the Aru factory from GitHub board state (`aru code` / `aru` loop).
 
 1. Read and follow `$ARU_SDLC_HOME/skills/run-aru-factory/SKILL.md` in **loop**
    mode (not `next`, not `implement-next-issue`).
-2. Use agent id `cursor-1` and family `xai` unless this session already has
-   another id. Pass `--agent` and `--family` on every picker command.
-3. Recover first: `fetch_next_work.py --agent <id> --family <family> --claim --json`.
+2. Omit `--agent` to auto-assign a free identity, or keep this session's id and
+   family and pass `--agent` / `--family` on every picker command.
+3. Recover first: `fetch_next_work.py --claim --json`.
    Finish in-flight work for this id before claiming anything new.
 4. Pace dynamically: after each unit, ask the picker again if it would return
    work; if the blocker is CI or a peer review you must not perform, wait on

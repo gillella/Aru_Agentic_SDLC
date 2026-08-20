@@ -167,6 +167,10 @@ action. For `tests` and `verification`, read the corresponding
   `create_pr.py --refresh-pr`. If `work.gate_details.verification` reports
   malformed or duplicate markers that block the helper, repair the marker
   structure first and then rerun the helper; never fabricate its JSON.
+- `spec-sync` — the code and the spec table fell out of sync: update the
+  spec table or the code so they agree, then run
+  `python3 "$ARU_SDLC_HOME/scripts/sync_spec.py"` (or the PR's documented
+  sync command) and push the new head.
 
 Then refresh the evidence for the new head with
 `create_pr.py --refresh-pr <PR> --issue <N> --verify-command ...` and return to
@@ -372,6 +376,35 @@ GitHub, or the network fails transiently, record the state, wait with bounded
 dynamic backoff, and ask again. Use a supported app-native wait/background
 primitive when available. A fixed-interval busy loop wastes credits.
 
+### Standard Waiting / Heartbeat Status Card
+
+Whenever an agent enters a waiting state, sleep interval, or heartbeat tick, emit the standard status card in desktop output before sleeping. This allows the operator to inspect fleet-wide health without probing.
+
+Format:
+
+```markdown
+=== 🏭 ARU FACTORY STATUS CARD ===
+Agent: <AGENT_ID> (<FAMILY>) | Project: <PROJECT_NAME> | Status: WAITING
+Trigger / Wake: <WAKE_TRIGGER_REASON_OR_TIMER>
+
+BOARD STATS: Total: <TOTAL> | Backlog: <BACKLOG> | Ready: <READY> | In Progress: <IN_PROGRESS> | In Review: <IN_REVIEW> | Done: <DONE>
+
+Fleet Active Work Matrix:
+- <AGENT_1> (<FAMILY_1>): <CURRENT_ISSUE_OR_PR_OR_IDLE> (<STATUS>)
+- <AGENT_2> (<FAMILY_2>): <CURRENT_ISSUE_OR_PR_OR_IDLE> (<STATUS>)
+
+Parallel Safety Locks:
+- Active Touches: <LIST_OF_TOUCHED_PATHS_OR_NONE>
+- Review Slots: <LIST_OF_OPEN_REVIEWS_OR_NONE>
+
+Waiting Reason: <CONCISE_EXPLANATION_OF_WAIT_STATE>
+==================================
+```
+
+- **Degrade Honestly**: When board stats cannot be queried (e.g. during rate limits or offline), report `BOARD STATS: Unavailable (rate-limited / offline)` rather than printing stale or invented figures.
+- **Waiting States Only**: Emit on wait or heartbeat boundaries, not on every active loop iteration or progress step.
+- **Zero Extra Dependencies**: Assemble from existing data (`fetch_next_work.py --json`, `triage_backlog.py --capacity`).
+
 **Slack control-room alerts (GitHub first).** When work is blocked, waiting on
 another agent, or needs HITL, post the same facts to the linked GitHub issue or
 PR, then notify Slack. Never post heartbeats, diffs, prompts, tokens, or test
@@ -385,6 +418,7 @@ must never be interpolated into a shell command.
 
 ```bash
 # blocked — unresolved depends-on, missing product decision, merge/close-out stuck
+# --project-id is optional: omit it to resolve the binding from --repo-dir.
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
   --project-id <PROJECT_ID> \
   --agent <AGENT_ID> --family <FAMILY> \
@@ -479,13 +513,11 @@ BOARD:        <what the picker last reported>
 
 ---
 
-## Designated janitor
+## Autonomous claim reaping
 
-Give exactly **one** agent (conventionally `agent-1`) this extra line. Every
-agent reaping concurrently produces racing label writes.
-
-> Add `--reap-after 4` to your picker command each cycle, to release issue and
-> review claims abandoned by crashed sessions.
+All agents autonomously reap abandoned issue, review, and merge claims with a
+default 4-hour threshold (`--reap-after 4`). Concurrent reaping is safe and
+idempotent across agents. To disable reaping explicitly, pass `--reap-after 0`.
 
 ## Board preflight (run once, before launching)
 

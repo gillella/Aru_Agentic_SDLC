@@ -1,4 +1,8 @@
+# line-ceiling: 768
+import contextlib
+import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,12 +23,29 @@ import init_project  # noqa: E402
 from init_project import (  # noqa: E402
     CI_GATE_MARKERS,
     render_ci_workflow,
+    render_deploy_docs,
+    render_deploy_preview_workflow,
     render_gitignore,
+    render_release_workflow,
     write_templates,
 )
 
 
 class ProjectBootstrapTests(unittest.TestCase):
+    def test_generated_plan_gate_requires_reuse_audit_with_names_and_locations(self):
+        """Generated governance must carry the canonical reuse audit contract."""
+        rules = init_project.DEFAULT_AGENTS_TEMPLATE
+        self.assertIn("### Existing Utility Reuse Audit", rules)
+        self.assertIn("concrete name and exact", rules)
+        self.assertIn("search location", rules)
+        self.assertIn("bare `None`", rules)
+        self.assertIn("is not an audit", rules)
+
+    def test_generated_plan_gate_triggers_on_new_helper_module_or_script(self):
+        """A new helper/module/script is an independent Plan Gate trigger."""
+        rules = init_project.DEFAULT_AGENTS_TEMPLATE
+        self.assertIn("introduces a new helper function, module, or script", rules)
+
     def test_generated_governance_uses_agent_review_and_mechanical_merge(self):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
 
@@ -592,6 +613,155 @@ class DogfoodCiParityTests(unittest.TestCase):
                 "gitleaks must fail on a planted AWS example key; "
                 f"stdout={scanned.stdout!r} stderr={scanned.stderr!r}",
             )
+
+    def test_deploy_preview_and_release_workflows_are_stack_aware(self):
+        python_deploy = render_deploy_preview_workflow("python")
+        node_deploy = render_deploy_preview_workflow("typescript")
+        go_deploy = render_deploy_preview_workflow("go")
+
+        # Fail-closed checks on missing deploy credentials
+        for wf in (python_deploy, node_deploy, go_deploy):
+            self.assertIn("Validate deployment credentials", wf)
+            self.assertIn("PREVIEW_DEPLOY_TOKEN", wf)
+            self.assertIn("Deploy credentials absent", wf)
+
+        # Stack-specific runtime setups
+        self.assertIn("actions/setup-python", python_deploy)
+        self.assertIn("actions/setup-node", node_deploy)
+        self.assertIn("actions/setup-go", go_deploy)
+
+        # Release workflows
+        python_release = render_release_workflow("python")
+        node_release = render_release_workflow("react")
+        go_release = render_release_workflow("go")
+
+        for rwf in (python_release, node_release, go_release):
+            self.assertIn("Validate release credentials", rwf)
+            self.assertIn("RELEASE_TOKEN", rwf)
+            self.assertIn("Release credentials absent", rwf)
+
+        self.assertIn("python -m build", python_release)
+        self.assertIn("npm run build", node_release)
+        self.assertIn("go build", go_release)
+
+        # Deploy docs point at governed factory skills
+        docs = render_deploy_docs("python", "demo-app")
+        self.assertIn("deploy-preview", docs)
+        self.assertIn("deploy_preview.py", docs)
+        self.assertIn("promote.py", docs)
+        self.assertIn("Aru_Agentic_SDLC", docs)
+        self.assertIn("PREVIEW_DEPLOY_TOKEN", docs)
+        self.assertIn("Fail-Closed Gate", docs)
+
+    def test_write_governance_scripts_creates_stack_deploy_and_release_workflows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_project.scaffold_directory_structure(temp_dir)
+            init_project.write_governance_scripts(temp_dir, stack="node", project_name="node-app")
+
+            deploy_wf = Path(temp_dir) / ".github" / "workflows" / "deploy-preview.yml"
+            release_wf = Path(temp_dir) / ".github" / "workflows" / "release.yml"
+            deploy_docs = Path(temp_dir) / "docs" / "deploy.md"
+
+            self.assertTrue(deploy_wf.is_file())
+            self.assertTrue(release_wf.is_file())
+            self.assertTrue(deploy_docs.is_file())
+
+            self.assertIn("actions/setup-node", deploy_wf.read_text())
+            self.assertIn("npm run build", release_wf.read_text())
+            self.assertIn("deploy_preview.py", deploy_docs.read_text())
+
+    def test_cli_scaffold_creates_stack_pack_workflows_for_node_and_go(self):
+        for stack in ("node", "go"):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                env = os.environ.copy()
+                env.update({
+                    "GIT_AUTHOR_NAME": "Aru SDLC Test",
+                    "GIT_AUTHOR_EMAIL": "aru-sdlc-test@example.invalid",
+                    "GIT_COMMITTER_NAME": "Aru SDLC Test",
+                    "GIT_COMMITTER_EMAIL": "aru-sdlc-test@example.invalid",
+                })
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "scripts" / "init_project.py"),
+                        "--name", f"stack-{stack}-smoke",
+                        "--stack", stack,
+                        "--no-remote",
+                        "--target-dir", temp_dir,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=env,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+                deploy_wf = Path(temp_dir) / ".github" / "workflows" / "deploy-preview.yml"
+                release_wf = Path(temp_dir) / ".github" / "workflows" / "release.yml"
+                deploy_docs = Path(temp_dir) / "docs" / "deploy.md"
+
+                self.assertTrue(deploy_wf.is_file())
+                self.assertTrue(release_wf.is_file())
+                self.assertTrue(deploy_docs.is_file())
+
+                if stack == "node":
+                    self.assertIn("actions/setup-node", deploy_wf.read_text())
+                    self.assertIn("npm run build", release_wf.read_text())
+                else:
+                    self.assertIn("actions/setup-go", deploy_wf.read_text())
+                    self.assertIn("go build", release_wf.read_text())
+
+
+class LineCeilingBootstrapTests(unittest.TestCase):
+    """A bootstrapped project inherits the anti-bloat ratchet (#319).
+
+    Before this, init generated CI for python, node and go with no ceiling step
+    at all, so a project this framework created was governed by none of it.
+    """
+
+    def _bootstrap(self, stack, runner):
+        target = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, target, True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            init_project.write_governance_scripts(target, stack=stack, project_name="Demo")
+            init_project.write_ci_workflow(target, runner, stack)
+        return target
+
+    def test_every_stack_gets_the_ceiling_step(self):
+        for stack, runner in (("python", "pytest -q"),
+                              ("typescript", "npm test"),
+                              ("go", "go test ./...")):
+            with self.subTest(stack=stack):
+                target = self._bootstrap(stack, runner)
+                workflow = Path(target, ".github/workflows/ci.yml").read_text(encoding="utf-8")
+                self.assertIn("Enforce file line ceilings", workflow)
+                self.assertIn("python3 scripts/check_line_ceilings.py", workflow)
+
+    def test_the_guard_is_vendored_verbatim_not_reimplemented(self):
+        # A regenerated copy could drift; the same file cannot.
+        target = self._bootstrap("python", "pytest -q")
+        vendored = Path(target, "scripts/check_line_ceilings.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1]
+                  / "scripts" / "check_line_ceilings.py").read_text(encoding="utf-8")
+        self.assertEqual(vendored, source)
+
+    def test_a_new_project_passes_its_own_guard_immediately(self):
+        # No manual baseline step: any marker the source carries is vendored too,
+        # which is what keeps the 460-line smoke_preview.py from failing day one.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import check_line_ceilings as guard
+        for stack, runner in (("python", "pytest -q"),
+                              ("typescript", "npm test"),
+                              ("go", "go test ./...")):
+            with self.subTest(stack=stack):
+                self.assertEqual(guard.check_tree(self._bootstrap(stack, runner)), [])
+
+    def test_the_generated_workflow_is_valid_yaml(self):
+        yaml = __import__("yaml")
+        target = self._bootstrap("go", "go test ./...")
+        parsed = yaml.safe_load(Path(target, ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+        names = [s.get("name") for s in parsed["jobs"]["verify"]["steps"]]
+        self.assertIn("Enforce file line ceilings", names)
 
 
 if __name__ == "__main__":

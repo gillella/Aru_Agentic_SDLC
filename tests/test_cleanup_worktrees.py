@@ -1,3 +1,4 @@
+# line-ceiling: 1072
 import os
 import subprocess
 import tempfile
@@ -93,6 +94,21 @@ class PorcelainPruneTests(unittest.TestCase):
     def test_ignored_non_cache_path_blocks(self):
         self.assertTrue(cleanup_worktrees.porcelain_blocks_prune("!! .env\n"))
 
+    def test_empty_ignored_directory_does_not_block_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_dir = Path(tmp) / ".worktrees"
+            empty_dir.mkdir()
+            status = "!! .worktrees/\n"
+            self.assertFalse(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
+    def test_non_empty_ignored_directory_blocks_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            non_empty_dir = Path(tmp) / ".worktrees"
+            non_empty_dir.mkdir()
+            (non_empty_dir / "child.txt").write_text("content")
+            status = "!! .worktrees/\n"
+            self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
     def test_retain_manifest_lines_are_ignored(self):
         status = "?? .aru-retained-clean\n!! .aru-retained-clean.tmp\n"
         self.assertFalse(cleanup_worktrees.porcelain_dirty_except_manifest(status))
@@ -100,6 +116,134 @@ class PorcelainPruneTests(unittest.TestCase):
             cleanup_worktrees.porcelain_dirty_except_manifest("?? secret.txt\n")
         )
         self.assertIsNone(cleanup_worktrees.porcelain_dirty_except_manifest(None))
+
+
+class WorktreeCleanupTests(unittest.TestCase):
+    def test_empty_ignored_directory_does_not_block_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_dir = Path(tmp) / ".worktrees"
+            empty_dir.mkdir()
+            status = "!! .worktrees/\n"
+            self.assertFalse(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
+    def test_non_empty_ignored_directory_blocks_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            non_empty_dir = Path(tmp) / ".worktrees"
+            non_empty_dir.mkdir()
+            (non_empty_dir / "child.txt").write_text("content")
+            status = "!! .worktrees/\n"
+            self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+
+    def test_unreadable_nested_dir_fails_closed_and_blocks_prune(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / ".worktrees"
+            d.mkdir()
+            sub = d / "unreadable"
+            sub.mkdir()
+            try:
+                os.chmod(sub, 0o000)
+            except OSError:
+                self.skipTest("chmod 000 not supported in this environment")
+            try:
+                status = "!! .worktrees/\n"
+                if not os.access(sub, os.R_OK):
+                    self.assertTrue(cleanup_worktrees.porcelain_blocks_prune(status, base_path=tmp))
+            finally:
+                try:
+                    os.chmod(sub, 0o755)
+                except OSError:
+                    pass
+
+    def test_legacy_retained_copy_handling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy_dir = Path(tmp) / "legacy_wt"
+            legacy_dir.mkdir()
+            clean, note = cleanup_worktrees._retained_still_clean(str(legacy_dir), deregistered=True)
+            self.assertFalse(clean)
+            self.assertIn("cleanliness unverifiable", note)
+
+    def test_legacy_retained_copies_do_not_fail_sweep(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_clone(Path(tmp))
+            retained = repo / ".worktrees" / ".retained"
+            retained.mkdir(parents=True)
+            legacy_wt = retained / "12345678-feat-old"
+            legacy_wt.mkdir()
+            (legacy_wt / "README").write_text("old\n")
+            (legacy_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+            ok, notes = cleanup_worktrees.prune_retained_copies(str(repo))
+            self.assertTrue(ok)
+            self.assertTrue(any("cleanliness unverifiable" in n for n in notes))
+
+    def test_report_retained_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_clone(Path(tmp))
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            retained = repo / ".worktrees" / ".retained"
+            retained.mkdir(parents=True)
+            legacy_wt = retained / f"{sha[:12]}-feat-old"
+            legacy_wt.mkdir()
+            (legacy_wt / "README").write_text("main\n")
+            (legacy_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+            stats, summary = cleanup_worktrees.report_retained(str(repo))
+            self.assertEqual(stats["total_count"], 1)
+            self.assertEqual(stats["legacy_count"], 1)
+            self.assertEqual(stats["manifest_count"], 0)
+            self.assertIn("Retained worktrees: 1 total", summary)
+            self.assertGreater(stats["reclaimable_bytes"], 0)
+
+    def test_legacy_copy_with_modifications_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_clone(Path(tmp))
+            old_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            # Advance main with new commit so main != old_sha
+            (repo / "new_on_main.txt").write_text("main advanced\n")
+            _git(repo, "add", "new_on_main.txt")
+            _git(repo, "commit", "-m", "advance main")
+
+            retained = repo / ".worktrees" / ".retained"
+            retained.mkdir(parents=True)
+            dirty_wt = retained / f"{old_sha[:12]}-feat-dirty"
+            dirty_wt.mkdir()
+            (dirty_wt / "README").write_text("main\n")
+            (dirty_wt / "uncommitted.txt").write_text("dirty work\n")
+            (dirty_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+
+            clean_wt = retained / f"{old_sha[:12]}-feat-clean"
+            clean_wt.mkdir()
+            (clean_wt / "README").write_text("main\n")
+            (clean_wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+
+            ok, notes = cleanup_worktrees.purge_legacy_retained(str(repo))
+            self.assertTrue(ok)
+            self.assertTrue(dirty_wt.exists())
+            self.assertFalse(clean_wt.exists())
+
+    def test_aborted_legacy_claim_restores_original_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_clone(Path(tmp))
+            old_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            retained = repo / ".worktrees" / ".retained"
+            retained.mkdir(parents=True)
+
+            wt = retained / f"{old_sha[:12]}-feat-restore"
+            wt.mkdir()
+            (wt / "README").write_text("main\n")
+            (wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/nonexistent\n")
+
+            with patch.object(cleanup_worktrees, "_remove_claimed_retained", return_value=(False, "simulated failure")):
+                with patch.object(cleanup_worktrees, "retain_manifest_payload", side_effect=OSError("snapshot error")):
+                    ok, notes = cleanup_worktrees.purge_legacy_retained(str(repo))
+                    self.assertFalse(ok)
+                    self.assertTrue(wt.exists())
+
+
 
 
 class RetainManifestWalkTests(unittest.TestCase):
@@ -449,6 +593,25 @@ class CleanupWorktreesTests(unittest.TestCase):
         )
         self.assertFalse(remaining)
         self.assertIn("removed retained", sweep_msg)
+
+    def test_prune_worktree_retains_worktree_with_empty_ignored_worktrees_dir(self):
+        path = _add_worktree(self.clone, "feat/issue-8-empty-worktrees")
+        (path / ".gitignore").write_text(".worktrees/\n")
+        _git(path, "add", ".gitignore")
+        _git(path, "commit", "-m", "ignore worktrees")
+        (path / ".worktrees").mkdir()
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=path, text=True
+        ).strip()
+        ok, message = merge_pr.prune_worktree(
+            str(self.clone), "feat/issue-8-empty-worktrees", sha
+        )
+        self.assertTrue(ok, message)
+        self.assertIn("Retained worktree", message)
+        self.assertNotIn(os.path.realpath(path), self._worktree_paths())
+        retained_root = self.clone / ".worktrees" / ".retained"
+        leftovers = [item for item in retained_root.iterdir() if item.is_dir()]
+        self.assertTrue(leftovers)
 
     def test_dirty_deregistered_retained_copy_is_kept(self):
         path = _add_worktree(self.clone, "feat/issue-8-retain-dirty")

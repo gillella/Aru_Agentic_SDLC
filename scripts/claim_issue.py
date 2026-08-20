@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1413
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.
@@ -30,6 +31,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
 import merge_pr
 from common import (
@@ -39,8 +41,12 @@ from common import (
     ensure_label,
     get_issue,
     get_repo_slug,
+    is_trusted_metadata_author,
     label_names,
+    repository_owner_login,
+    repository_trusted_logins,
     run_cmd,
+    run_gh_json,
 )
 from factory_metrics import fetch_paginated_gh_api, parse_iso
 from update_issue_status import update_status
@@ -111,6 +117,22 @@ def _status_name(issue: dict) -> str:
 
 def _has_ready(issue: dict) -> bool:
     return _status_labels(issue) == ["status:ready"]
+
+
+def _metadata_is_trusted(issue: dict, owner=None, trusted_logins=None) -> bool:
+    """Re-evaluates provenance with the same predicate the picker uses."""
+    return is_trusted_metadata_author(
+        issue, owner, trusted_logins=trusted_logins,
+    )
+
+
+def _refuse_untrusted_metadata(issue_id: int) -> int:
+    print(
+        f"[CONFLICT] Issue #{issue_id} metadata is untrusted; refusing to claim "
+        "until a trusted rewrite.",
+        file=sys.stderr,
+    )
+    return EXIT_CONFLICT
 
 
 def _needs_human(issue: dict) -> bool:
@@ -201,14 +223,18 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
     return EXIT_OK
 
 
-def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
-                    my_label: str) -> int:
+def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_label: str, owner=None, trusted_logins=None) -> int:  # noqa: C901, PLR0912
     """Assign, move board status, and confirm no late lower-sorting contender."""
     issue = get_issue(issue_id)
     if not issue:
         print(f"[ERROR] Could not revalidate Issue #{issue_id} before finalizing.",
               file=sys.stderr)
         return EXIT_ERROR
+    if not _metadata_is_trusted(issue, owner, trusted_logins):
+        holders = agent_labels(issue)
+        if my_label in holders:
+            _rollback_claim(issue_id, agent, assignee)
+        return _refuse_untrusted_metadata(issue_id)
     holders = agent_labels(issue)
     if _needs_human(issue):
         if my_label in holders:
@@ -258,6 +284,9 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str,
         print(f"[ERROR] Could not verify Issue #{issue_id} after status update.", file=sys.stderr)
         _rollback_claim(issue_id, agent, assignee)
         return EXIT_ERROR
+    if not _metadata_is_trusted(issue, owner, trusted_logins):
+        _rollback_claim(issue_id, agent, assignee)
+        return _refuse_untrusted_metadata(issue_id)
 
     holders = agent_labels(issue)
     if _needs_human(issue):
@@ -290,6 +319,8 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
         return EXIT_ERROR
 
     my_label = _label_for(agent)
+    owner = repository_owner_login()
+    trusted_logins = repository_trusted_logins()
 
     # --- Step 1: pre-check -------------------------------------------------
     if _needs_human(issue):
@@ -299,6 +330,9 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
             file=sys.stderr,
         )
         return EXIT_CONFLICT
+
+    if _has_ready(issue) and not _metadata_is_trusted(issue, owner, trusted_logins):
+        return _refuse_untrusted_metadata(issue_id)
 
     holder = claimed_by(issue)
     if holder and holder != agent:
@@ -312,7 +346,10 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
             return EXIT_OK
         if _has_ready(issue):
             print(f"[INFO] Completing interrupted claim on #{issue_id}...")
-            return _finalize_claim(issue_id, agent, status, assignee, my_label)
+            return _finalize_claim(
+                issue_id, agent, status, assignee, my_label,
+                owner=owner, trusted_logins=trusted_logins,
+            )
         print(
             f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready or "
             "In Progress; refusing stale same-agent recovery.",
@@ -350,7 +387,10 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
         return settled
 
     # --- Step 4: commit the claim + post-verify ---------------------------
-    return _finalize_claim(issue_id, agent, status, assignee, my_label)
+    return _finalize_claim(
+        issue_id, agent, status, assignee, my_label,
+        owner=owner, trusted_logins=trusted_logins,
+    )
 
 
 def release_issue(issue_id: int, agent: str) -> int:
@@ -445,6 +485,171 @@ def pr_author(labels):
     return None
 
 
+ADOPTED_FROM_LABEL_PREFIX = "adopted-from:"
+FAMILY_LABEL_PREFIX = "family:"
+DEFAULT_ADOPT_AFTER_HOURS = 4
+
+
+def _pr_snapshot(pr_id: int):
+    """Labels plus the PR's last-update time, or None when it cannot be read."""
+    payload = run_gh_json(
+        ["gh", "pr", "view", str(pr_id), "--json", "labels,updatedAt,state"])
+    if not isinstance(payload, dict):
+        return None
+    return {
+        "labels": [str((lab or {}).get("name") or "")
+                   for lab in payload.get("labels") or []],
+        "updatedAt": payload.get("updatedAt"),
+        "state": payload.get("state"),
+    }
+
+
+def _label_value(labels, prefix: str):
+    for name in labels or []:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return None
+
+
+def _pr_idle_hours(updated_at) -> Optional[float]:
+    if not updated_at:
+        return None
+    text = str(updated_at).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed).total_seconds() / 3600.0
+
+
+def _adoption_target(pr_id: int, agent: str, after_hours: int):
+    """Validate that PR `pr_id` may be adopted by `agent`.
+
+    Returns (snapshot, previous_author, idle_hours, refusal). `refusal` is None
+    when adoption may proceed, otherwise the exit code to return.
+    """
+    snapshot = _pr_snapshot(pr_id)
+    if snapshot is None:
+        print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
+        return None, None, None, EXIT_ERROR
+    if (snapshot.get("state") or "").upper() != "OPEN":
+        print(f"[CONFLICT] PR #{pr_id} is {(snapshot.get('state') or '?').lower()}, "
+              "not open. There is nothing to adopt.", file=sys.stderr)
+        return None, None, None, EXIT_CONFLICT
+
+    previous = pr_author(snapshot["labels"])
+    if previous is None:
+        print(f"[CONFLICT] PR #{pr_id} has no {AUTHOR_LABEL_PREFIX}<id> label, so "
+              "there is no ownership to transfer. Stamp the author first.",
+              file=sys.stderr)
+        return None, None, None, EXIT_CONFLICT
+    if previous == agent:
+        print(f"[CONFLICT] PR #{pr_id} is already authored by '{agent}'.",
+              file=sys.stderr)
+        return None, None, None, EXIT_CONFLICT
+
+    # Abandonment has to be demonstrated, not assumed. A PR touched recently
+    # belongs to an agent that is still working, and taking it would be theft.
+    idle_hours = _pr_idle_hours(snapshot.get("updatedAt"))
+    if idle_hours is None:
+        print(f"[CONFLICT] PR #{pr_id} has no readable update time, so it cannot "
+              "be shown abandoned. Ownership retained.", file=sys.stderr)
+        return None, None, None, EXIT_CONFLICT
+    if idle_hours < after_hours:
+        print(f"[CONFLICT] PR #{pr_id} was updated {idle_hours:.1f}h ago, inside "
+              f"the {after_hours}h abandonment window. '{previous}' may still be "
+              "working; refusing to take it.", file=sys.stderr)
+        return None, None, None, EXIT_CONFLICT
+    return snapshot, previous, idle_hours, None
+
+
+def adopt_pr(pr_id: int, agent: str, family: str = "",
+             after_hours: int = DEFAULT_ADOPT_AFTER_HOURS) -> int:
+    """Transfers authorship of an abandoned PR to a successor agent.
+
+    An agent that stops mid-task leaves an issue, a branch, and a PR that
+    nothing can reach: the reaper can release the issue claim, but `author:` on
+    the PR was never reassigned by anything, so no agent could push the fix that
+    would let it merge (#311).
+
+    Adoption is in place. Commits, CI history, and review threads are preserved;
+    only ownership moves. The successor becomes the author, so the (id, family)
+    peer gate still refuses to let it review its own PR -- which is the correct
+    outcome, not a regression.
+    """
+    snapshot, previous, idle_hours, refusal = _adoption_target(
+        pr_id, agent, after_hours)
+    if refusal is not None:
+        return refusal
+    labels = snapshot["labels"]
+
+    previous_family = _label_value(labels, FAMILY_LABEL_PREFIX)
+    add = [f"{AUTHOR_LABEL_PREFIX}{agent}",
+           f"{ADOPTED_FROM_LABEL_PREFIX}{previous}"]
+    remove = [f"{AUTHOR_LABEL_PREFIX}{previous}"]
+    if family:
+        add.append(f"{FAMILY_LABEL_PREFIX}{family}")
+        if previous_family and previous_family != family:
+            remove.append(f"{FAMILY_LABEL_PREFIX}{previous_family}")
+    else:
+        print("[WARN] No --model-family given. The merge gate compares identity "
+              "as (id, family); stamp it so review routing stays correct.",
+              file=sys.stderr)
+
+    for name in add:
+        if not ensure_label(name, "5319e7", f"Adoption marker '{name}'"):
+            print(f"[ERROR] Could not provision label '{name}'.", file=sys.stderr)
+            return EXIT_ERROR
+
+    cmd = ["gh", "pr", "edit", str(pr_id)]
+    for name in add:
+        cmd += ["--add-label", name]
+    for name in remove:
+        cmd += ["--remove-label", name]
+    code, _, err = run_cmd(cmd, check=False)
+    if code != 0:
+        print(f"[ERROR] Could not transfer authorship of PR #{pr_id}: {err}",
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    # Read back before reporting success. Two successors can both clear
+    # _adoption_target and both run `gh pr edit`; without this the loser prints
+    # success and exits EXIT_OK, leaving two agents believing they own one PR.
+    settled = _pr_snapshot(pr_id)
+    if settled is None:
+        print(f"[ERROR] Could not re-read PR #{pr_id} to confirm adoption. "
+              "Verify ownership before pushing to this branch.", file=sys.stderr)
+        return EXIT_ERROR
+    # Exactly one, not merely "the first one is us". pr_author returns the first
+    # match, so two concurrent edits leaving two author: labels would report
+    # success to whichever agent that happened to name, while the PR carries
+    # ambiguous ownership that merge_pr would then resolve just as arbitrarily.
+    holders = [name[len(AUTHOR_LABEL_PREFIX):] for name in settled["labels"]
+               if name.startswith(AUTHOR_LABEL_PREFIX)]
+    if holders != [agent]:
+        held = ", ".join(f"'{who}'" for who in holders) or "nobody"
+        print(f"[CONFLICT] Adoption of PR #{pr_id} did not settle on '{agent}' "
+              f"alone; {held} stamped as author. Another successor adopted it "
+              "concurrently -- resolve the duplicate author: labels before "
+              "pushing to this branch.", file=sys.stderr)
+        return EXIT_CONFLICT
+
+    run_cmd(["gh", "pr", "comment", str(pr_id), "--body",
+             f"🤝 Adopted by `{agent}`"
+             + (f" (family `{family}`)" if family else "")
+             + f" from `{previous}`, idle {idle_hours:.1f}h.\n\n"
+             "Commits, CI history, and review threads are preserved. The "
+             "adopting agent is now the author and cannot review this PR."],
+            check=False)
+    print(f"🤝 PR #{pr_id} adopted by '{agent}' from '{previous}' "
+          f"(idle {idle_hours:.1f}h).")
+    return EXIT_OK
+
+
 def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
     code, _, err = run_cmd(
         ["gh", "pr", "edit", str(pr_id), "--remove-label", _reviewer_label_for(agent)],
@@ -455,7 +660,7 @@ def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
     return code == 0
 
 
-def claim_review(pr_id: int, agent: str) -> int:
+def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
     """Claims a pull request for review. Same exit codes as claim_issue."""
     labels = _pr_labels(pr_id)
     if labels is None:
@@ -535,12 +740,19 @@ REVIEWED_BY_LABEL_PREFIX = "reviewed-by:"
 REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
 
 
+REVIEWER_FAMILY_LABEL_PREFIX = "reviewer-family:"
+
+
 def _reviewed_by_label_for(agent: str) -> str:
     return f"{REVIEWED_BY_LABEL_PREFIX}{agent}"
 
 
+def _reviewer_family_label_for(agent: str, family: str) -> str:
+    return f"{REVIEWER_FAMILY_LABEL_PREFIX}{agent}:{family}"
+
+
 def _reviewed_head_for_completion(pr_id: int) -> str | None:
-    """Current head only when a substantive human review covers it."""
+    """Current head only when a substantive independent review covers it."""
     slug = get_repo_slug()
     if not slug or "/" not in slug:
         return None
@@ -566,7 +778,32 @@ def _review_head_attestation(agent: str, head: str) -> str:
     )
 
 
-def complete_review(pr_id: int, agent: str) -> int:
+def _stamp_reviewer_family(pr_id: int, agent: str, family: str) -> None:
+    """Record the reviewing agent's model family on the PR.
+
+    The merge gate compares identity as the pair (id, family). Without this
+    label a reviewer that shares the author's id cannot be told apart from the
+    author reviewing its own work, so the gate has to fail closed (#307).
+    Advisory rather than fatal: attribution itself already succeeded, and the
+    label only matters in the id-collision case.
+    """
+    if not family:
+        print("[WARN] No --model-family given. If this reviewer ever shares the "
+              "author's agent id, the merge gate cannot tell them apart and "
+              "will refuse the PR.", file=sys.stderr)
+        return
+    stamp = _reviewer_family_label_for(agent, family)
+    if not ensure_label(stamp, "d4a27f", f"Review by a {family}-family model"):
+        print(f"[WARN] Could not provision '{stamp}'; the merge gate will fail "
+              "closed if this reviewer shares the author's id.", file=sys.stderr)
+        return
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--add-label", stamp], check=False)
+    if code != 0:
+        print(f"[WARN] Could not apply '{stamp}': {err}", file=sys.stderr)
+
+
+def complete_review(pr_id: int, agent: str, family: str = "") -> int:
     """Attributes a finished review, then releases the claim.
 
     This exists because the step had no command. `fleet-worker.md` told the
@@ -602,7 +839,7 @@ def complete_review(pr_id: int, agent: str) -> int:
     reviewed_head = _reviewed_head_for_completion(pr_id)
     if reviewed_head is None:
         print(
-            f"[CONFLICT] PR #{pr_id} has no substantive human review on its "
+            f"[CONFLICT] PR #{pr_id} has no substantive independent review on its "
             "current head. Submit the review before completing attribution.",
             file=sys.stderr,
         )
@@ -628,6 +865,7 @@ def complete_review(pr_id: int, agent: str) -> int:
         print(f"[ERROR] Could not attribute the review: {err}", file=sys.stderr)
         return EXIT_ERROR
     print(f"🏷️  Attributed review of PR #{pr_id} to '{agent}'.")
+    _stamp_reviewer_family(pr_id, agent, family)
 
     if not _remove_reviewer_label(pr_id, agent):
         # The merge gate deliberately blocks every live claim. Returning
@@ -701,7 +939,7 @@ def _has_peer_reviewer(labels, author: str | None) -> bool:
     return False
 
 
-def claim_merge(pr_id: int, agent: str) -> int:
+def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     """Claims a pull request for mechanical merge. Same exit codes as claim_issue.
 
     The PR author may hold this claim only when a distinct completed peer review
@@ -897,7 +1135,67 @@ def _revalidate_claims(prs: list, prefix: str, claimant, expected: list):
     return refreshed
 
 
-def reap_stale_merges(hours: int = 4) -> list:
+def _effective_reap_threshold(
+    holder: str,
+    base_hours: int | float,
+    store: Any = None,
+    now: Optional[datetime] = None,
+) -> tuple[float, str]:
+    """Computes the effective reap threshold in hours and the explanatory reason.
+
+    - Live agent with a fresh heartbeat -> full base_hours ("live agent")
+    - Agent absent from registry -> reduced threshold max(1.0, base_hours / 2.0) ("agent absent from presence registry")
+    - Agent with expired heartbeat / offline -> reduced threshold max(1.0, base_hours / 2.0) ("agent heartbeat expired" / availability)
+    - Missing or unreadable presence registry -> falls back to full base_hours with a warning ("presence unavailable")
+    - The reduced threshold never drops below 1.0 hour.
+    """
+    base = float(base_hours)
+    if base <= 0:
+        return 0.0, "reaping disabled"
+
+    if store is None:
+        try:
+            from agent_presence import PresenceStore
+            store = PresenceStore()
+        except Exception as exc:
+            print(f"[WARN] Presence registry unavailable: {exc}", file=sys.stderr)
+            return base, "presence registry unavailable (full threshold fallback)"
+
+    current_time = now or datetime.now(timezone.utc)
+    try:
+        record = store.get(holder)
+    except Exception as exc:
+        print(f"[WARN] Could not inspect presence for '{holder}': {exc}", file=sys.stderr)
+        return base, "presence check failed (full threshold fallback)"
+
+    if record is None:
+        reduced = max(1.0, base / 2.0)
+        return reduced, "agent absent from presence registry"
+
+    if record.availability in {"unavailable", "temporarily-offline"}:
+        reduced = max(1.0, base / 2.0)
+        return reduced, f"agent availability is '{record.availability}'"
+
+    if not record.last_heartbeat:
+        reduced = max(1.0, base / 2.0)
+        return reduced, "agent has no recorded heartbeat"
+
+    try:
+        from agent_presence import _parse_iso
+        last_hb = _parse_iso(record.last_heartbeat)
+    except Exception:
+        reduced = max(1.0, base / 2.0)
+        return reduced, "agent has invalid heartbeat timestamp"
+
+    ttl_seconds = getattr(store, "heartbeat_ttl_seconds", 300)
+    if (current_time - last_hb).total_seconds() > ttl_seconds:
+        reduced = max(1.0, base / 2.0)
+        return reduced, "agent heartbeat expired"
+
+    return base, "live agent"
+
+
+def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:  # noqa: C901
     """Releases merge claims that went quiet without finishing close-out.
 
     Open and merged PRs are both scanned. A crash right after server-side merge
@@ -927,7 +1225,6 @@ def reap_stale_merges(hours: int = 4) -> list:
             return []
         prs.extend(batch)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     claims = _claims_with_timestamps(prs, MERGER_LABEL_PREFIX, merge_claimant)
     if claims is None:
         return []
@@ -936,28 +1233,45 @@ def reap_stale_merges(hours: int = 4) -> list:
     )
     if claims is None:
         return []
+
+    store = presence_store
+    if store is None:
+        try:
+            from agent_presence import PresenceStore
+            store = PresenceStore()
+        except Exception as exc:
+            print(f"[WARN] Could not initialize presence store: {exc}", file=sys.stderr)
+            store = None
+
+    current_now = now or datetime.now(timezone.utc)
     released = []
     for pr, holder, claimed_at in claims:
         number = pr["number"]
+        eff_hours, reason = _effective_reap_threshold(holder, hours, store, now=current_now)
+        if eff_hours <= 0:
+            continue
+        cutoff = current_now - timedelta(hours=eff_hours)
         if claimed_at >= cutoff:
             continue
         if _remove_merger_label(number, holder):
             released.append(number)
+            eff_str = f"{int(eff_hours)}h" if eff_hours.is_integer() else f"{eff_hours:.1f}h"
             print(f"♻️  Released stale merge claim on PR #{number} "
-                  f"(held by '{holder}', claim age > {hours}h).",
+                  f"(held by '{holder}', {reason}, claim age > {eff_str}).",
                   file=sys.stderr)
     return released
 
 
-def reap_stale_reviews(hours: int = 4) -> list:
+def reap_stale_reviews(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:  # noqa: C901, PLR0912
     """Releases review claims that have gone quiet.
 
     An agent that dies mid-review leaves the PR claimed forever, and a claimed
     PR is excluded from selection - so without this, one crash removes a PR
     from the review queue permanently and merge_pr.py blocks on it for good.
 
-    A claim is stale when its latest labeled event is older than `hours` and
-    carries no recent submitted review after that claim event.
+    A claim is stale when its latest labeled event is older than `hours` (or reduced
+    threshold for absent/inactive agents) and carries no recent submitted review after
+    that claim event.
     """
     if hours <= 0:
         return []
@@ -976,7 +1290,6 @@ def reap_stale_reviews(hours: int = 4) -> list:
         print("[WARN] Could not parse PR list; no review claims were reaped.", file=sys.stderr)
         return []
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     claims = _claims_with_timestamps(prs, REVIEWER_LABEL_PREFIX, review_claimant)
     if claims is None:
         return []
@@ -985,8 +1298,23 @@ def reap_stale_reviews(hours: int = 4) -> list:
     )
     if claims is None:
         return []
+
+    store = presence_store
+    if store is None:
+        try:
+            from agent_presence import PresenceStore
+            store = PresenceStore()
+        except Exception as exc:
+            print(f"[WARN] Could not initialize presence store: {exc}", file=sys.stderr)
+            store = None
+
+    current_now = now or datetime.now(timezone.utc)
     released = []
     for pr, holder, claimed_at in claims:
+        eff_hours, reason = _effective_reap_threshold(holder, hours, store, now=current_now)
+        if eff_hours <= 0:
+            continue
+        cutoff = current_now - timedelta(hours=eff_hours)
         reviewed_after_claim = False
         for review in pr.get("reviews") or []:
             login = ((review.get("author") or {}).get("login") or "")
@@ -1004,8 +1332,9 @@ def reap_stale_reviews(hours: int = 4) -> list:
             continue
         if _remove_reviewer_label(pr["number"], holder):
             released.append(pr["number"])
+            eff_str = f"{int(eff_hours)}h" if eff_hours.is_integer() else f"{eff_hours:.1f}h"
             print(f"♻️  Released stale review claim on PR #{pr['number']} "
-                  f"(held by '{holder}', claim age > {hours}h, "
+                  f"(held by '{holder}', {reason}, claim age > {eff_str}, "
                   "no recent review submitted after claim).",
                   file=sys.stderr)
     return released
@@ -1025,6 +1354,20 @@ def main():
     parser.add_argument("--complete-review", action="store_true", dest="complete",
                         help="Attribute a finished PR review (reviewed-by:<id>) and "
                              "release the claim. Run after submitting the GitHub review.")
+    parser.add_argument("--model-family", "--family", type=str, default="",
+                        dest="family",
+                        help="Reviewing agent's model family. With "
+                             "--complete-review, stamps "
+                             "reviewer-family:<id>:<family> so the merge gate "
+                             "can compare identity as (id, family).")
+    parser.add_argument("--adopt", action="store_true",
+                        help="With --pr: take over an abandoned PR, moving "
+                             "author: and family: to this agent and recording "
+                             "adopted-from:<previous>.")
+    parser.add_argument("--adopt-after", type=int, default=DEFAULT_ADOPT_AFTER_HOURS,
+                        metavar="HOURS",
+                        help="Hours a PR must be idle before it may be adopted "
+                             f"(default: {DEFAULT_ADOPT_AFTER_HOURS})")
     parser.add_argument("--merge", action="store_true",
                         help="With --pr: claim or release mechanical merge (merger:<id>), "
                              "not review.")
@@ -1037,6 +1380,8 @@ def main():
         reap_stale_merges(args.reap_after)
 
     if args.pr is not None:
+        if args.adopt:
+            sys.exit(adopt_pr(args.pr, args.agent, args.family, args.adopt_after))
         if args.merge and args.complete:
             print("[ERROR] --complete-review does not apply to merge claims.",
                   file=sys.stderr)
@@ -1046,7 +1391,7 @@ def main():
                   else claim_merge(args.pr, args.agent))
             sys.exit(rc)
         if args.complete:
-            sys.exit(complete_review(args.pr, args.agent))
+            sys.exit(complete_review(args.pr, args.agent, args.family))
         rc = release_review(args.pr, args.agent) if args.release else claim_review(args.pr, args.agent)
         sys.exit(rc)
 

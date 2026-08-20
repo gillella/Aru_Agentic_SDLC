@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1232
 """Project-scoped agent presence and availability registry.
 
 GitHub claims remain authoritative ownership. This registry only records which
@@ -13,7 +14,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import platform
 import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -33,6 +37,10 @@ DEFAULT_PRESENCE_PATH = Path.home() / ".aru" / "agent-presence.json"
 DEFAULT_HEARTBEAT_TTL_SECONDS = 300
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 FAMILY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# Default ring used to auto-assign a free identity when the registry has no
+# registered agents yet. Registered identities from `list` take precedence.
+DEFAULT_AGENT_RING = ("gemini-1", "claude-1", "codex-1", "cursor-1", "cursor-2")
 
 AVAILABILITY_STATES = frozenset({
     "available",
@@ -57,6 +65,89 @@ FAMILY_TO_PRODUCT = {
     "google": "antigravity",
     "cursor": "cursor",
 }
+
+# --- Worker fingerprint identity (#310) ------------------------------------
+# Agent ids used to come from a shared pool, assigned per process. A restart was
+# a new PID with no link to the worker that had been running, so it auto-assigned
+# a different name; and two machines each arbitrated the pool from their own
+# local registry, so both picked ring[0]. Deriving the id from *where the agent
+# runs* makes it stable across restarts and distinct across machines without any
+# coordination, which removes the collision class rather than policing it.
+
+# Environment override for operators who want to name a worker themselves.
+AGENT_ID_ENV_VAR = "ARU_AGENT_ID"
+FINGERPRINT_LENGTH = 6
+
+
+def _machine_identifier() -> str:
+    """A value stable for the life of this machine.
+
+    Deliberately not the MAC address or a hardware UUID: those need platform
+    -specific probes and add failure modes for something that only has to be
+    locally unique and locally stable.
+    """
+    return platform.node() or "unknown-host"
+
+
+def _checkout_root(repo_root: Optional[str] = None) -> str:
+    """The checkout the agent works in, not the directory it was started from.
+
+    Defaulting to os.getcwd() would fingerprint the *launch* directory, so the
+    same worker started from a subdirectory -- or from a worktree under
+    .worktrees/ -- would derive a different id and lose the stability the whole
+    scheme exists to provide.
+    """
+    if repo_root:
+        return os.path.realpath(repo_root)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            return os.path.realpath(result.stdout.strip())
+    except OSError:
+        pass
+    return os.path.realpath(os.getcwd())
+
+
+def worker_fingerprint(repo_root: Optional[str] = None, family: str = "",
+                       machine: Optional[str] = None) -> str:
+    """Short, stable hash of machine + checkout + family.
+
+    The checkout path is hashed, never embedded: the id ends up in public
+    GitHub labels, and an absolute path names the operator's home directory.
+    """
+    root = _checkout_root(repo_root)
+    parts = "\x00".join([
+        machine or _machine_identifier(),
+        root,
+        (family or "").strip().lower(),
+    ])
+    return hashlib.sha256(parts.encode("utf-8")).hexdigest()[:FINGERPRINT_LENGTH]
+
+
+def product_for_family(family: str) -> str:
+    """Readable prefix for an id, e.g. 'claude' for the anthropic family."""
+    return FAMILY_TO_PRODUCT.get((family or "").strip().lower()) or "agent"
+
+
+def fingerprint_agent_id(family: str = "", repo_root: Optional[str] = None,
+                         machine: Optional[str] = None, seat: int = 1) -> str:
+    """The id this worker resolves to, e.g. 'claude-a3f19c'.
+
+    `seat` disambiguates a second live session sharing one checkout, which is
+    the only case the fingerprint alone cannot separate. Seat 1 carries no
+    suffix so the ordinary id stays short.
+    """
+    base = f"{product_for_family(family)}-{worker_fingerprint(repo_root, family, machine)}"
+    return base if seat <= 1 else f"{base}-{seat}"
+
+
+def configured_agent_id(env: Optional[Dict[str, str]] = None) -> str:
+    """An operator-pinned id from the environment, or '' when unset."""
+    source = env if env is not None else os.environ
+    return (source.get(AGENT_ID_ENV_VAR) or "").strip()
+
 
 PHASE_TO_AVAILABILITY = {
     "starting": "available",
@@ -116,7 +207,7 @@ def identity_derived_project_id(github_repo_id: str, project_v2_id: str) -> str:
     return f"proj_repo_{digest}"
 
 
-def resolve_project_id(
+def resolve_project_id(  # noqa: C901, PLR0912
     checkout: Path,
     *,
     projects_path: Optional[Path] = None,
@@ -183,6 +274,7 @@ def _empty_document() -> Dict[str, Any]:
         "schema": SCHEMA_NAME,
         "version": SCHEMA_VERSION,
         "agents": {},
+        "claims": {},
     }
 
 
@@ -349,12 +441,75 @@ class PresenceStore:
             "schema": SCHEMA_NAME,
             "version": SCHEMA_VERSION,
             "agents": {agent_id: record.public_dict() for agent_id, record in validated.items()},
+            "claims": document.get("claims") or {},
             "_records": validated,
         }
 
     def get(self, agent_id: str) -> Optional[PresenceRecord]:
         agent_id = _validate_agent_id(agent_id)
         return self._read()["_records"].get(agent_id)
+
+    def identity_holder(self, agent_id: str, session_id: str, now: Optional[datetime] = None) -> Optional[str]:
+        """Return the live session id holding `agent_id`, or None if free.
+
+        A claim is live when it is fresher than the heartbeat TTL. A claim held
+        by this very session is not a conflict.
+        """
+        agent_id = _validate_agent_id(agent_id)
+        now = now or self.clock()
+        claim = (self._read().get("claims") or {}).get(agent_id)
+        if not claim or not isinstance(claim, dict):
+            return None
+        try:
+            at = _parse_iso(claim.get("at", ""))
+        except PresenceError:
+            return None
+        if (now - at).total_seconds() >= self.heartbeat_ttl_seconds:
+            return None
+        holder = claim.get("session")
+        if holder == session_id:
+            return None
+        return holder
+
+    def resolve_free_identity(self, pool, session_id: str, now: Optional[datetime] = None) -> str:
+        """Atomically claim and return one free identity from `pool`.
+
+        Free means not claimed by another live session. Resolution runs inside
+        the file-locked mutate, so two concurrent resolutions can never return
+        the same identity across processes.
+        """
+        pool = list(dict.fromkeys(_validate_agent_id(a) for a in pool))
+        if pool == [] or not session_id:
+            raise PresenceError("resolve_free_identity needs a non-empty pool and a session id")
+        now = now or self.clock()
+        now_iso = _iso(now)
+
+        def apply(document: Dict[str, Any]) -> str:
+            claims = document.get("claims") or {}
+            live: Dict[str, Dict[str, Any]] = {}
+            for agent_id, claim in claims.items():
+                if not isinstance(claim, dict):
+                    continue
+                try:
+                    at = _parse_iso(claim.get("at", ""))
+                except PresenceError:
+                    continue
+                if (now - at).total_seconds() < self.heartbeat_ttl_seconds:
+                    live[agent_id] = claim
+            busy = {a for a, c in live.items() if c.get("session") != session_id}
+            free = [a for a in pool if a not in busy]
+            if not free:
+                raise PresenceError(
+                    "no free agent identity; all are held by another live session: "
+                    + ", ".join(sorted(busy))
+                )
+            chosen = free[0]
+            updated = dict(live)
+            updated[chosen] = {"session": session_id, "at": now_iso}
+            document["claims"] = updated
+            return chosen
+
+        return self._mutate(apply)
 
     def _mutate(self, updater: Callable[[Dict[str, Any]], Any]) -> Any:
         """Apply an in-place document updater; persist the document, return result."""
@@ -375,6 +530,7 @@ class PresenceStore:
                 "schema": SCHEMA_NAME,
                 "version": SCHEMA_VERSION,
                 "agents": document["agents"],
+                "claims": document.get("claims") or {},
             }
 
         mutate_secure_json(self.path, _empty_document(), apply)
@@ -944,7 +1100,7 @@ def _print_record(record: PresenceRecord, *, as_json: bool) -> None:
     )
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:  # noqa: C901, PLR0912, PLR0915
     argv_list = list(argv) if argv is not None else list(sys.argv[1:])
     known = {
         "register", "heartbeat", "set-availability", "unregister",

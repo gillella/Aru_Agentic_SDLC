@@ -1,7 +1,8 @@
+# line-ceiling: 916
 import json
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -10,11 +11,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import claim_issue  # noqa: E402
 
 
-def issue_with_labels(*names):
-    return {"number": 7, "labels": [{"name": name} for name in names]}
+def issue_with_labels(*names, author="owner", number=7):
+    record = {
+        "number": number,
+        "labels": [{"name": name} for name in names],
+    }
+    if author is not None:
+        record["author"] = {"login": author}
+    return record
 
 
 class ClaimProtocolTests(unittest.TestCase):
+    def setUp(self):
+        owner = patch.object(
+            claim_issue, "repository_owner_login", return_value="owner")
+        trusted = patch.object(
+            claim_issue, "repository_trusted_logins", return_value={"owner"})
+        self.addCleanup(owner.stop)
+        self.addCleanup(trusted.stop)
+        owner.start()
+        trusted.start()
     @patch.object(claim_issue, "update_status")
     @patch.object(claim_issue, "run_cmd")
     @patch.object(claim_issue, "ensure_label")
@@ -375,6 +391,133 @@ class ClaimProtocolTests(unittest.TestCase):
             "ambiguous(in-review,ready)",
         )
 
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_direct_claim_refuses_untrusted_author(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels("status:ready", author="attacker")
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_direct_claim_refuses_authorless_issue(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels("status:ready", author=None)
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_trusted_rewrite_label_allows_outsider_claim(
+        self, get_issue, _ensure, _run, update_status, _sleep
+    ):
+        rewritten = issue_with_labels(
+            "status:ready", "trusted-rewrite", author="attacker")
+        claimed = issue_with_labels(
+            "status:ready", "trusted-rewrite", "agent:agent-a", author="attacker")
+        in_progress = issue_with_labels(
+            "status:in-progress", "trusted-rewrite", "agent:agent-a",
+            author="attacker")
+        get_issue.side_effect = [
+            rewritten, claimed, claimed, claimed, in_progress,
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_OK)
+        update_status.assert_called_once_with(7, "In Progress", require_board=True)
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_direct_claim_refuses_unresolved_trust_identity(
+        self, get_issue, ensure_label, run_cmd, update_status
+    ):
+        record = issue_with_labels(
+            "status:ready", "trusted-rewrite", author="attacker")
+        record["trustIdentityResolved"] = False
+        get_issue.return_value = record
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_finalize_revalidates_and_rolls_back_untrusted_rewrite(
+        self, get_issue, _ensure, run_cmd, update_status, _sleep
+    ):
+        ready = issue_with_labels("status:ready")
+        labeled = issue_with_labels("status:ready", "agent:agent-a")
+        untrusted = issue_with_labels(
+            "status:ready", "agent:agent-a", author="attacker")
+        get_issue.side_effect = [
+            ready, labeled, labeled, untrusted,
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        update_status.assert_called_once_with(7, "Ready", require_board=True)
+        self.assertEqual(
+            run_cmd.call_args_list[-2].args[0],
+            ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
+        )
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_post_status_read_revalidates_metadata_trust(
+        self, get_issue, _ensure, run_cmd, update_status, _sleep
+    ):
+        ready = issue_with_labels("status:ready")
+        labeled = issue_with_labels("status:ready", "agent:agent-a")
+        untrusted = issue_with_labels(
+            "status:in-progress", "agent:agent-a", author="attacker")
+        get_issue.side_effect = [
+            ready, labeled, labeled, labeled, untrusted,
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        self.assertEqual(
+            update_status.call_args_list,
+            [
+                call(7, "In Progress", require_board=True),
+                call(7, "Ready", require_board=True),
+            ],
+        )
+
 
 class InReviewHandoffStatusTests(unittest.TestCase):
     @patch("update_issue_status.run_cmd", return_value=(0, "", ""))
@@ -683,6 +826,90 @@ class ClaimAgeReaperTests(unittest.TestCase):
         self.assertEqual(claim_issue.reap_stale_merges(0), [])
         run_cmd.assert_not_called()
         fetch_timeline.assert_not_called()
+
+
+class DummyPresenceStore:
+    def __init__(self, records=None, error=None, ttl_seconds=300):
+        self.records = records or {}
+        self.error = error
+        self.heartbeat_ttl_seconds = ttl_seconds
+
+    def get(self, agent_id):
+        if self.error:
+            raise self.error
+        return self.records.get(agent_id)
+
+
+class DummyRecord:
+    def __init__(self, agent_id, availability="available", last_heartbeat=""):
+        self.agent_id = agent_id
+        self.availability = availability
+        self.last_heartbeat = last_heartbeat
+
+
+class ClaimIssueTests(unittest.TestCase):
+    def test_absent_agent_reduced_reap_threshold(self):
+        store = DummyPresenceStore(records={})
+        hours, reason = claim_issue._effective_reap_threshold("absent-agent", 4, store=store)
+        self.assertEqual(hours, 2.0)
+        self.assertIn("absent from presence registry", reason)
+
+    def test_live_agent_full_reap_threshold(self):
+        now = datetime.now(timezone.utc)
+        fresh_hb = now.isoformat().replace("+00:00", "Z")
+        store = DummyPresenceStore(records={
+            "live-agent": DummyRecord("live-agent", availability="available", last_heartbeat=fresh_hb)
+        })
+        hours, reason = claim_issue._effective_reap_threshold("live-agent", 4, store=store, now=now)
+        self.assertEqual(hours, 4.0)
+        self.assertEqual(reason, "live agent")
+
+    def test_recent_claim_never_reaped(self):
+        store = DummyPresenceStore(records={})
+        hours, _ = claim_issue._effective_reap_threshold("absent-agent", 4, store=store)
+        # 0.5h claim is younger than the 2.0h reduced threshold
+        self.assertLess(0.5, hours)
+
+    def test_missing_presence_fallback(self):
+        store = DummyPresenceStore(error=RuntimeError("disk unreadable"))
+        import io
+        fake_stderr = io.StringIO()
+        with patch("sys.stderr", fake_stderr):
+            hours, reason = claim_issue._effective_reap_threshold("any-agent", 4, store=store)
+        self.assertEqual(hours, 4.0)
+        self.assertIn("fallback", reason)
+        self.assertIn("[WARN]", fake_stderr.getvalue())
+
+    def test_reduced_threshold_floor_1h(self):
+        store = DummyPresenceStore(records={})
+        # Base 1.5h -> half is 0.75h -> floored at 1.0h
+        hours, _ = claim_issue._effective_reap_threshold("absent-agent", 1.5, store=store)
+        self.assertEqual(hours, 1.0)
+        # Base 1.0h -> half is 0.5h -> floored at 1.0h
+        hours_one, _ = claim_issue._effective_reap_threshold("absent-agent", 1.0, store=store)
+        self.assertEqual(hours_one, 1.0)
+
+    def test_reap_output_explains_threshold(self):
+        import io
+        fake_stderr = io.StringIO()
+        store = DummyPresenceStore(records={})
+        now = datetime.now(timezone.utc)
+        claimed_at = (now - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+
+        with patch("sys.stderr", fake_stderr), \
+             patch.object(claim_issue, "run_cmd") as mock_cmd, \
+             patch.object(claim_issue, "fetch_paginated_gh_api") as mock_timeline:
+            mock_cmd.side_effect = [
+                (0, json.dumps([{"number": 42, "labels": [{"name": "reviewer:absent-agent"}], "reviews": []}]), ""),
+                (0, "", ""),
+            ]
+            mock_timeline.return_value = [{"event": "labeled", "label": {"name": "reviewer:absent-agent"}, "created_at": claimed_at}]
+            released = claim_issue.reap_stale_reviews(4, presence_store=store, now=now)
+            self.assertEqual(released, [42])
+            output = fake_stderr.getvalue()
+            self.assertIn("Released stale review claim on PR #42", output)
+            self.assertIn("absent from presence registry", output)
+            self.assertIn("claim age > 2h", output)
 
 
 if __name__ == "__main__":

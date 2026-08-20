@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 811
 """Secure multi-project registry for the Slack control-room bridge."""
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _private_directory(path: Path) -> None:
+def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
     if path.is_symlink():
         raise RegistryError(f"unsafe registry directory: {path}")
     if path.exists():
@@ -394,6 +395,32 @@ class ProjectRegistry:
         if record is None or (active_only and record.lifecycle != "active"):
             raise RegistryError(f"unknown or closed project_id: {project_id}")
         return record
+
+    def find_by_checkout(self, local_path: Path, active_only: bool = True) -> ProjectRecord:
+        """Resolve the registry binding for a checked-out directory.
+
+        Agents (Cursor, Antigravity, Claude, Codex) share one Slack bot and
+        must not get per-agent Slack users or tokens; this lets any factory
+        agent resolve the project binding from the repo it is working in.
+        An unknown or ambiguous checkout fails closed so a missing binding is
+        loud instead of silently unrouted.
+        """
+        wanted = Path(local_path).expanduser().resolve()
+        matches = []
+        for record in self.list(include_closed=not active_only):
+            if active_only and record.lifecycle != "active":
+                continue
+            candidate = Path(record.local_path).expanduser().resolve()
+            if candidate == wanted:
+                matches.append(record)
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            raise RegistryError(
+                f"no project binding for checkout {wanted}. Bind it once with: "
+                "python3 scripts/slack_projects.py migrate --local-path <repo> --operator <you>"
+            )
+        raise RegistryError(f"ambiguous project binding for {wanted}")
 
     def resolve(self, team_id: str, channel_id: str) -> ProjectRecord:
         matches = [

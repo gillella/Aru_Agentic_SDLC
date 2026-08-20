@@ -1,3 +1,4 @@
+# line-ceiling: 794
 import io
 import sys
 import unittest
@@ -8,19 +9,45 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import fetch_next_issue  # noqa: E402
-from fetch_next_issue import build_candidates, parse_dependencies  # noqa: E402
+from fetch_next_issue import (  # noqa: E402
+    build_candidates,
+    parse_dependencies,
+    sync_board_priority,
+)
 
 
-def issue(number, body="", labels=()):
-    return {
+def issue(number, body="", labels=(), author="owner"):
+    label_list = list(labels)
+    if "status:ready" in label_list and not any(
+        name.startswith("priority:") for name in label_list
+    ):
+        # Pickers fail closed on missing priority metadata; tests that are
+        # not exercising priority behavior default ready work to P3.
+        label_list.append("priority:p3")
+    record = {
         "number": number,
         "title": f"Issue {number}",
         "body": body,
-        "labels": [{"name": label} for label in labels],
+        "labels": [{"name": label} for label in label_list],
     }
+    if author is not None:
+        record["author"] = {"login": author}
+    return record
 
 
-class IssueSelectionTests(unittest.TestCase):
+class TrustedOwnerTests(unittest.TestCase):
+    def setUp(self):
+        owner = patch.object(
+            fetch_next_issue, "repository_owner_login", return_value="owner")
+        trusted = patch.object(
+            fetch_next_issue, "repository_trusted_logins", return_value={"owner"})
+        self.addCleanup(owner.stop)
+        self.addCleanup(trusted.stop)
+        owner.start()
+        trusted.start()
+
+
+class IssueSelectionTests(TrustedOwnerTests):
     def test_dependency_parser_ignores_prose(self):
         body = """A `depends-on:` field is required.
 
@@ -183,7 +210,9 @@ depends-on: #2, #4
 
         self.assertEqual(released, [8])
         update_status.assert_called_once_with(8, "Ready", require_board=True)
-        release_command = run_cmd.call_args_list[-1].args[0]
+        release_command = next(
+            call.args[0] for call in run_cmd.call_args_list
+            if "--remove-assignee" in call.args[0])
         self.assertIn("--remove-assignee", release_command)
         self.assertIn("agent:agent-a", release_command)
 
@@ -202,6 +231,7 @@ depends-on: #2, #4
             (0, "[]", ""),
             (0, "", ""),
             (0, "", ""),
+            (0, "", ""),   # audit comment naming abandoned branch/PR (#311)
         ]
 
         with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
@@ -209,6 +239,11 @@ depends-on: #2, #4
 
         self.assertEqual(released, [9])
         update_status.assert_called_once_with(9, "Backlog", require_board=True)
+        # Prove the audit comment was actually posted, not merely permitted by
+        # the side_effect list length.
+        audit = next(call.args[0] for call in run_cmd.call_args_list
+                     if call.args[0][:3] == ["gh", "issue", "comment"])
+        self.assertIn("9", audit)
 
     @patch.object(fetch_next_issue, "update_status", return_value=True)
     @patch.object(fetch_next_issue, "run_cmd")
@@ -232,6 +267,7 @@ depends-on: #2, #4
             (0, "[]", ""),
             (0, "", ""),
             (0, "", ""),
+            (0, "", ""),   # audit comment naming abandoned branch/PR (#311)
         ]
 
         with patch.object(fetch_next_issue, "get_issue", side_effect=[current, current]):
@@ -241,7 +277,7 @@ depends-on: #2, #4
         update_status.assert_called_once_with(9, "Backlog", require_board=True)
 
 
-class ClaimWalkTests(unittest.TestCase):
+class ClaimWalkTests(TrustedOwnerTests):
     @patch("claim_issue.claim_issue")
     @patch.object(fetch_next_issue, "get_current_branch", return_value="main")
     @patch.object(fetch_next_issue, "list_open_pr_files_by_issue", return_value={})
@@ -566,3 +602,193 @@ def fetch_next_issue_claim_ok():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _raw_issue(number, labels=(), body="touches: docs/a.md\n",
+               title=None, author="owner"):
+    """Issue record without the helper's automatic priority defaulting."""
+    return {
+        "number": number,
+        "title": title or f"Issue {number}",
+        "body": body,
+        "labels": [{"name": label} for label in labels],
+        "author": {"login": author} if author else None,
+    }
+
+
+class AuthorizedIncrementSelectionTests(TrustedOwnerTests):
+    def test_candidates_must_belong_to_the_active_increment_scope(self):
+        issues = [
+            issue(10, "touches: docs/a.md\n", labels=("status:ready", "priority:p0")),
+            issue(11, "touches: docs/b.md\n", labels=("status:ready", "priority:p1")),
+            issue(12, "touches: docs/c.md\n", labels=("status:ready", "priority:p0")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={10, 11})
+        self.assertEqual([i["number"] for i in result["candidates"]], [10, 11])
+        self.assertNotIn(12, [i["number"] for i in result["candidates"]])
+
+    def test_empty_increment_scope_claims_nothing(self):
+        issues = [
+            issue(1, "touches: docs/a.md\n", labels=("status:ready",)),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope=set())
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual([i["number"] for i in result["future_inventory"]], [1])
+
+    def test_dependency_blocked_story_stays_blocked_even_in_scope(self):
+        issues = [
+            issue(99, "touches: docs/z.md\n", labels=("status:backlog",)),
+            issue(20, "touches: docs/a.md\ndepends-on: #99\n",
+                  labels=("status:ready", "priority:p0")),
+            issue(10, "touches: docs/b.md\n", labels=("status:ready", "priority:p1")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={20, 10, 99})
+        self.assertEqual([i["number"] for i in result["candidates"]], [10])
+        self.assertEqual(result["blocked"], [{"number": 20, "blocked_by": [99]}])
+
+
+class FutureReadyIsolationTests(TrustedOwnerTests):
+    def test_out_of_scope_ready_stories_are_future_inventory_not_claimable(self):
+        issues = [
+            issue(1, "touches: docs/a.md\n", labels=("status:ready", "priority:p0")),
+            issue(2, "touches: docs/b.md\n", labels=("status:ready", "priority:p1")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={1})
+        self.assertEqual([i["number"] for i in result["candidates"]], [1])
+        self.assertEqual([i["number"] for i in result["future_inventory"]], [2])
+
+    def test_higher_priority_out_of_scope_still_not_claimable(self):
+        issues = [
+            issue(10, "touches: docs/a.md\n", labels=("status:ready", "priority:p0")),
+            issue(11, "touches: docs/b.md\n", labels=("status:ready", "priority:p3")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={11})
+        self.assertEqual([i["number"] for i in result["candidates"]], [11])
+        self.assertEqual([i["number"] for i in result["future_inventory"]], [10])
+
+
+class PriorityOrderingTests(TrustedOwnerTests):
+    def test_candidates_sort_p0_p1_p2_p3_then_lowest_number(self):
+        issues = [
+            issue(30, "touches: docs/a.md\n", labels=("status:ready", "priority:p3")),
+            issue(10, "touches: docs/b.md\n", labels=("status:ready", "priority:p1")),
+            issue(20, "touches: docs/c.md\n", labels=("status:ready", "priority:p0")),
+            issue(5, "touches: docs/d.md\n", labels=("status:ready", "priority:p2")),
+            issue(15, "touches: docs/e.md\n", labels=("status:ready", "priority:p0")),
+        ]
+        result = build_candidates(
+            issues, "agent-a", increment_scope={30, 10, 20, 5, 15}
+        )
+        nums = [i["number"] for i in result["candidates"]]
+        self.assertEqual(nums, [15, 20, 10, 5, 30])
+
+    def test_lowest_number_is_the_tie_break(self):
+        issues = [
+            issue(42, "touches: docs/a.md\n", labels=("status:ready", "priority:p1")),
+            issue(7, "touches: docs/b.md\n", labels=("status:ready", "priority:p1")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={42, 7})
+        self.assertEqual([i["number"] for i in result["candidates"]], [7, 42])
+
+
+class DependencyPriorityTests(TrustedOwnerTests):
+    def test_blocked_p0_skipped_without_weakening_dependency(self):
+        issues = [
+            issue(99, "touches: docs/z.md\n", labels=("status:backlog",)),
+            issue(20, "touches: docs/a.md\ndepends-on: #99\n",
+                  labels=("status:ready", "priority:p0")),
+            issue(10, "touches: docs/b.md\n", labels=("status:ready", "priority:p1")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={20, 10})
+        self.assertEqual([i["number"] for i in result["candidates"]], [10])
+        self.assertEqual(result["blocked"], [{"number": 20, "blocked_by": [99]}])
+
+    def test_highest_priority_unblocked_authorized_story_is_selected(self):
+        issues = [
+            issue(30, "touches: docs/a.md\n", labels=("status:ready", "priority:p2")),
+            issue(20, "touches: docs/b.md\n", labels=("status:ready", "priority:p0")),
+            issue(10, "touches: docs/c.md\n", labels=("status:ready", "priority:p1")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={30, 20, 10})
+        self.assertEqual([i["number"] for i in result["candidates"]], [20, 10, 30])
+
+
+class PriorityIntegrityTests(TrustedOwnerTests):
+    def test_missing_priority_fails_closed_and_is_reported(self):
+        issues = [
+            _raw_issue(5, labels=("status:ready",)),
+            issue(6, "touches: docs/b.md\n", labels=("status:ready", "priority:p0")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={5, 6})
+        self.assertEqual([i["number"] for i in result["candidates"]], [6])
+        self.assertEqual(
+            result["integrity_issues"],
+            [{"number": 5, "reason": "missing priority:pN label"}],
+        )
+
+    def test_duplicate_priority_fails_closed(self):
+        issues = [
+            _raw_issue(5, labels=("status:ready", "priority:p1", "priority:p1")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={5})
+        self.assertEqual(result["candidates"], [])
+        self.assertIn(5, [i["number"] for i in result["integrity_issues"]])
+
+    def test_contradictory_priority_fails_closed(self):
+        issues = [
+            _raw_issue(5, labels=("status:ready", "priority:p0", "priority:p2")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={5})
+        self.assertEqual(result["candidates"], [])
+        report = result["integrity_issues"][0]
+        self.assertEqual(report["number"], 5)
+        self.assertIn("contradictory", report["reason"])
+
+
+class PriorityFieldSyncTests(TrustedOwnerTests):
+    def test_agreement_returns_canonical_without_sync(self):
+        iss = issue(5, "touches: docs/a.md\n", labels=("status:ready", "priority:p0"))
+        with patch("fetch_next_issue.get_issue_priority_field", return_value="P0"), \
+             patch("fetch_next_issue.set_issue_priority_field") as setter:
+            self.assertEqual(sync_board_priority(iss), "P0")
+            setter.assert_not_called()
+
+    def test_disagreement_syncs_field_from_canonical_label(self):
+        iss = issue(5, "touches: docs/a.md\n", labels=("status:ready", "priority:p1"))
+        with patch("fetch_next_issue.get_issue_priority_field", return_value="P2"), \
+             patch("fetch_next_issue.set_issue_priority_field", return_value=True) as setter:
+            self.assertEqual(sync_board_priority(iss), "P1")
+            setter.assert_called_once_with(5, "P1")
+
+    def test_disagreement_fails_closed_when_sync_fails(self):
+        iss = issue(5, "touches: docs/a.md\n", labels=("status:ready", "priority:p0"))
+        with patch("fetch_next_issue.get_issue_priority_field", return_value="P3"), \
+             patch("fetch_next_issue.set_issue_priority_field", return_value=False):
+            self.assertIsNone(sync_board_priority(iss))
+
+    def test_unreadable_field_fails_closed(self):
+        iss = issue(5, "touches: docs/a.md\n", labels=("status:ready", "priority:p0"))
+        with patch("fetch_next_issue.get_issue_priority_field", return_value=None):
+            self.assertIsNone(sync_board_priority(iss))
+
+
+class OperatorOnlyTests(TrustedOwnerTests):
+    def test_needs_human_p0_in_scope_remains_unclaimable(self):
+        issues = [
+            issue(1, "touches: operator/x\n",
+                  labels=("status:ready", "priority:p0", "needs-human")),
+            issue(2, "touches: docs/a.md\n", labels=("status:ready", "priority:p1")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={1, 2})
+        self.assertEqual([i["number"] for i in result["candidates"]], [2])
+        self.assertEqual(result["operator_only"], [1])
+
+    def test_needs_human_p0_never_becomes_future_inventory_or_candidate(self):
+        issues = [
+            issue(1, "touches: operator/x\n",
+                  labels=("status:ready", "priority:p0", "needs-human")),
+        ]
+        result = build_candidates(issues, "agent-a", increment_scope={1})
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["future_inventory"], [])
+        self.assertEqual(result["operator_only"], [1])

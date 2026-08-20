@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1186
 """Post-merge janitor: orphan worktrees, merged local branches, stale claims.
 
 Invoked from merge_pr close-out and as
@@ -14,7 +15,9 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 import uuid
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -182,7 +185,7 @@ def _is_retain_manifest_path(path: str) -> bool:
     return rel in names or any(rel.endswith("/" + name) for name in names)
 
 
-def porcelain_dirty_except_manifest(status: str | None) -> bool | None:
+def porcelain_dirty_except_manifest(status: str | None, base_path: str | None = None) -> bool | None:
     if status is None:
         return None
     filtered = []
@@ -191,7 +194,7 @@ def porcelain_dirty_except_manifest(status: str | None) -> bool | None:
         if _is_retain_manifest_path(path):
             continue
         filtered.append(line)
-    return porcelain_blocks_prune("\n".join(filtered))
+    return porcelain_blocks_prune("\n".join(filtered), base_path)
 
 
 def retain_manifest_allows_prune(path: str) -> bool | None:
@@ -234,6 +237,31 @@ def dirty_status(path: str) -> str | None:
     return status
 
 
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
+def _is_empty_or_cache_dir(path: str) -> bool:
+    """True if directory is physically empty or contains only empty dirs / cache files."""
+    try:
+        if not os.path.isdir(path) or os.path.islink(path):
+            return False
+        for root, dirs, files in os.walk(path, onerror=_raise_walk_error):
+            for d in dirs:
+                if os.path.islink(os.path.join(root, d)):
+                    return False
+            for f in files:
+                full_file = os.path.join(root, f)
+                if os.path.islink(full_file):
+                    return False
+                rel = os.path.relpath(full_file, path)
+                if not _known_cache_path(rel):
+                    return False
+        return True
+    except OSError:
+        return False
+
+
 def _known_cache_path(path: str) -> bool:
     normalized = path.strip().replace("\\", "/").strip("/")
     if normalized.endswith(".pyc"):
@@ -241,8 +269,8 @@ def _known_cache_path(path: str) -> bool:
     return any(part in KNOWN_CACHE_NAMES for part in normalized.split("/"))
 
 
-def porcelain_blocks_prune(status: str | None) -> bool | None:
-    """None if unreadable, True if real dirt, False if clean or cache-only."""
+def porcelain_blocks_prune(status: str | None, base_path: str | None = None) -> bool | None:
+    """None if unreadable, True if real dirt, False if clean, cache-only, or empty ignored dirs."""
     if status is None:
         return None
     for line in status.splitlines():
@@ -250,8 +278,12 @@ def porcelain_blocks_prune(status: str | None) -> bool | None:
             continue
         xy = line[:2]
         path = line[3:] if len(line) > 2 else ""
-        if xy == "!!" and _known_cache_path(path):
-            continue
+        if xy == "!!":
+            if _known_cache_path(path):
+                continue
+            candidate = os.path.join(base_path, path.strip()) if base_path else path.strip()
+            if _is_empty_or_cache_dir(candidate):
+                continue
         return True
     return False
 
@@ -363,7 +395,7 @@ def prune_orphan_worktrees(repo_root: str) -> tuple[bool, list[str]]:
         if not owned_worktree(path, repo_root):
             notes.append(f"skipped {path}: not a worktree of this repo")
             continue
-        blocked = porcelain_blocks_prune(dirty_status(path))
+        blocked = porcelain_blocks_prune(dirty_status(path), path)
         if blocked is None:
             notes.append(f"skipped {path}: status unreadable")
             failed = True
@@ -385,6 +417,9 @@ def prune_orphan_worktrees(repo_root: str) -> tuple[bool, list[str]]:
         )
         if rm_code == 0:
             notes.append(f"removed {path}")
+            if os.path.exists(path) and _is_empty_or_cache_dir(path):
+                import shutil
+                shutil.rmtree(path, ignore_errors=True)
         else:
             notes.append(f"could not remove {path}: {rm_err.strip()}")
             failed = True
@@ -451,7 +486,7 @@ def _retained_still_clean(path: str, deregistered: bool) -> tuple[bool | None, s
             "cleanliness unverifiable" if allowed is None else "dirty after retention"
         )
         return False, f"skipped retained {path}: {reason}"
-    blocked = porcelain_blocks_prune(dirty_status(path))
+    blocked = porcelain_blocks_prune(dirty_status(path), path)
     if blocked is None:
         return None, f"skipped retained {path}: status unreadable"
     if blocked:
@@ -485,7 +520,7 @@ def _verified_unlink(full: str, rel: str, expected: dict) -> bool:
     return True
 
 
-def _remove_claimed_retained(path: str, expected: dict) -> tuple[bool, str]:
+def _remove_claimed_retained(path: str, expected: dict) -> tuple[bool, str]:  # noqa: C901, PLR0912
     """Delete a validated retained tree, verifying each entry as it is removed.
 
     ``shutil.rmtree`` separates validation from deletion by an entire tree walk,
@@ -574,6 +609,249 @@ def _prune_claimed_retained(
     return _remove_claimed_retained(claimed2, expected)
 
 
+def retained_directory_size(path: str) -> int:
+    """Calculates total disk usage in bytes for a directory."""
+    total = 0
+    try:
+        for dirpath, _, filenames in os.walk(path, followlinks=False):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                try:
+                    if not os.path.islink(fp):
+                        total += os.path.getsize(fp)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _extract_retained_sha(name: str, repo_root: str) -> str | None:
+    """Extracts commit SHA prefix from retained directory name if valid."""
+    prefix = name.split("-", 1)[0]
+    if len(prefix) < 7 or not all(c in "0123456789abcdefABCDEF" for c in prefix):
+        return None
+    git_dir = os.path.join(repo_root, ".git")
+    if not os.path.exists(git_dir):
+        return None
+    res = subprocess.run(
+        ["git", "--git-dir", git_dir, "rev-parse", "--verify", "--quiet", f"{prefix}^{{commit}}"],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode == 0 and res.stdout.strip():
+        return res.stdout.strip()
+    return None
+
+
+def _restore_claimed_name(claimed: str, original_path: str) -> None:
+    try:
+        if os.path.exists(claimed) and not os.path.exists(original_path):
+            os.replace(claimed, original_path)
+    except OSError:
+        pass
+
+
+def _legacy_copy_is_clean(path: str, repo_root: str, sha: str | None = None) -> bool:  # noqa: C901, PLR0912
+    """Checks if a legacy retained copy has no uncommitted changes relative to its retained SHA."""
+    if sha is None:
+        dirname = os.path.basename(os.path.normpath(path))
+        sha = _extract_retained_sha(dirname, repo_root)
+    if not sha:
+        return False
+    git_dir = os.path.join(repo_root, ".git")
+    if not os.path.exists(git_dir):
+        return False
+    with tempfile.NamedTemporaryFile(prefix="aru_index_", delete=False) as tmp_idx:
+        tmp_index_path = tmp_idx.name
+    try:
+        env = os.environ.copy()
+        env["GIT_DIR"] = git_dir
+        env["GIT_WORK_TREE"] = path
+        env["GIT_INDEX_FILE"] = tmp_index_path
+
+        read_res = subprocess.run(
+            ["git", "read-tree", sha],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+        if read_res.returncode != 0:
+            return False
+
+        refresh_res = subprocess.run(
+            ["git", "update-index", "--refresh", "-q"],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+        if refresh_res.returncode != 0:
+            return False
+
+        diff_res = subprocess.run(
+            ["git", "diff-files", "--quiet"],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+        if diff_res.returncode != 0:
+            return False
+
+        untracked_res = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+        if untracked_res.returncode != 0 or untracked_res.stdout.strip():
+            return False
+
+        ignored_res = subprocess.run(
+            [
+                "git", "ls-files", "--others", "--ignored",
+                "--exclude-standard", "--directory",
+            ],
+            env=env,
+            cwd=path,
+            capture_output=True,
+            text=True,
+        )
+        if ignored_res.returncode != 0:
+            return False
+        for line in ignored_res.stdout.splitlines():
+            item = line.strip()
+            if not item:
+                continue
+            if _known_cache_path(item):
+                continue
+            full_cand = os.path.join(path, item)
+            if _is_empty_or_cache_dir(full_cand):
+                continue
+            return False
+        return True
+    finally:
+        try:
+            if os.path.exists(tmp_index_path):
+                os.remove(tmp_index_path)
+        except OSError:
+            pass
+
+
+def report_retained(repo_root: str) -> tuple[dict, str]:
+    """Inspects .worktrees/.retained/ and returns (stats_dict, formatted_summary_string)."""
+    retained, err = inspect_retained_root(repo_root)
+    if err:
+        return {"error": err}, f"error: {err}"
+    if retained is None or not os.path.isdir(retained):
+        return {
+            "total_count": 0,
+            "manifest_count": 0,
+            "legacy_count": 0,
+            "reclaimable_bytes": 0,
+            "total_bytes": 0,
+        }, "No retained worktrees found."
+
+    total_count = 0
+    manifest_count = 0
+    legacy_count = 0
+    reclaimable_bytes = 0
+    total_bytes = 0
+
+    for name in sorted(os.listdir(retained)):
+        path = os.path.join(retained, name)
+        if not os.path.isdir(path) or os.path.islink(path):
+            continue
+        if not owned_worktree(path, repo_root):
+            continue
+        total_count += 1
+        size = retained_directory_size(path)
+        total_bytes += size
+
+        manifest_file = os.path.join(path, RETAIN_MANIFEST)
+        if os.path.isfile(manifest_file):
+            manifest_count += 1
+            if retain_manifest_allows_prune(path) is True:
+                reclaimable_bytes += size
+        else:
+            legacy_count += 1
+            if _legacy_copy_is_clean(path, repo_root):
+                reclaimable_bytes += size
+
+    stats = {
+        "total_count": total_count,
+        "manifest_count": manifest_count,
+        "legacy_count": legacy_count,
+        "reclaimable_bytes": reclaimable_bytes,
+        "total_bytes": total_bytes,
+    }
+    summary = (
+        f"Retained worktrees: {total_count} total "
+        f"({manifest_count} with manifest, {legacy_count} legacy), "
+        f"total size: {total_bytes} bytes, reclaimable: {reclaimable_bytes} bytes"
+    )
+    return stats, summary
+
+
+def purge_legacy_retained(repo_root: str) -> tuple[bool, list[str]]:  # noqa: C901
+    """Operator-invoked cleanup for clean legacy retained copies lacking manifests."""
+    notes = []
+    failed = False
+    retained, err = inspect_retained_root(repo_root)
+    if err:
+        return False, [err]
+    if retained is None:
+        return True, notes
+
+    for name in sorted(os.listdir(retained)):
+        path = os.path.join(retained, name)
+        if not os.path.isdir(path) or os.path.islink(path):
+            continue
+        if not owned_worktree(path, repo_root):
+            continue
+        manifest_file = os.path.join(path, RETAIN_MANIFEST)
+        if os.path.isfile(manifest_file):
+            continue
+
+        sha = _extract_retained_sha(name, repo_root)
+        if not sha or not _legacy_copy_is_clean(path, repo_root, sha=sha):
+            notes.append(f"skipped legacy retained {path}: contains uncommitted modifications")
+            continue
+
+        claimed = claim_retained_directory(path, retained)
+        if claimed is None:
+            notes.append(f"skipped legacy retained {path}: could not claim exclusive ownership")
+            failed = True
+            continue
+        if not _retained_child_deletable(claimed, retained, repo_root):
+            _restore_claimed_name(claimed, path)
+            notes.append(f"skipped legacy retained {claimed}: not physically contained")
+            failed = True
+            continue
+        if not _legacy_copy_is_clean(claimed, repo_root, sha=sha):
+            _restore_claimed_name(claimed, path)
+            notes.append(f"kept legacy retained {claimed}: modified after claim")
+            continue
+
+        try:
+            expected = retain_manifest_payload(claimed)["entries"]
+        except OSError as exc:
+            _restore_claimed_name(claimed, path)
+            notes.append(f"kept legacy retained {claimed}: snapshot failed: {exc}")
+            failed = True
+            continue
+
+        ok, note = _remove_claimed_retained(claimed, expected)
+        notes.append(note)
+        if not ok:
+            failed = True
+
+    return (not failed), notes
+
+
 def prune_retained_copies(repo_root: str) -> tuple[bool, list[str]]:
     notes = []
     failed = False
@@ -602,7 +880,7 @@ def prune_retained_copies(repo_root: str) -> tuple[bool, list[str]]:
         clean, note = _retained_still_clean(path, deregistered)
         if clean is not True:
             notes.append(note)
-            if (not deregistered) and note.endswith(": dirty"):
+            if (not deregistered and note.endswith(": dirty")) or "cleanliness unverifiable" in note:
                 continue
             failed = True
             continue
@@ -876,8 +1154,29 @@ def main() -> int:
         description="Prune leftover worktrees, merged local branches, and stale claims."
     )
     parser.add_argument("--repo", help="Repository root (default: this clone)")
+    parser.add_argument(
+        "--report-retained",
+        action="store_true",
+        help="Report total retained worktree copies and reclaimable bytes.",
+    )
+    parser.add_argument(
+        "--purge-legacy-retained",
+        action="store_true",
+        help="Purge verified clean legacy retained copies lacking manifests.",
+    )
     args = parser.parse_args()
     repo_root = args.repo or merge_pr.repository_root() or os.getcwd()
+
+    if args.report_retained:
+        stats, summary = report_retained(repo_root)
+        print(summary)
+        return 1 if "error" in stats else 0
+
+    if args.purge_legacy_retained:
+        ok, notes = purge_legacy_retained(repo_root)
+        print("; ".join(notes) if notes else "no legacy copies found")
+        return 0 if ok else 1
+
     ok, message = sweep(repo_root)
     print(message)
     return 0 if ok else 1

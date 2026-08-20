@@ -9,28 +9,74 @@ Git passes:
 """
 
 import os
+import re
 import sys
 from pathlib import Path
-
-# Search candidate locations for common.py across canonical home and consumer repos
-SCRIPT_DIR = Path(__file__).resolve().parent
-candidates = [
-    Path(os.environ.get("ARU_SDLC_HOME", "")) / "scripts",
-    SCRIPT_DIR.parent / "scripts",
-    SCRIPT_DIR.parents[1] / "scripts" if len(SCRIPT_DIR.parents) > 1 else None,
-    SCRIPT_DIR / "scripts",
-]
-for candidate in candidates:
-    if candidate and candidate.is_dir() and str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
-
-try:
-    import common
-except ImportError:
-    common = None
+from typing import List, Optional, Tuple
 
 
-def stamp_commit_message_file(msg_file_path: str, agent: str = None) -> bool:
+def _parse_terminal_trailers(message: str) -> Tuple[str, List[str]]:
+    """Splits a commit message into the main content (subject/body) and terminal trailer lines.
+
+    According to Git trailer conventions:
+    - Trailers appear in a contiguous block at the end of the message.
+    - Each trailer line matches `<Token>: <value>`.
+    - The first line (subject) is never a trailer.
+    - If the terminal paragraph contains any non-trailer lines, the entire paragraph is body prose.
+    """
+    raw_lines = message.rstrip().splitlines()
+    if not raw_lines:
+        return "", []
+
+    idx = len(raw_lines) - 1
+    while idx >= 0 and not raw_lines[idx].strip():
+        idx -= 1
+
+    if idx <= 0:
+        return "\n".join(raw_lines).rstrip(), []
+
+    paragraph_end = idx
+    while idx >= 0 and raw_lines[idx].strip():
+        idx -= 1
+    paragraph_start = idx + 1
+
+    if paragraph_start == 0:
+        return "\n".join(raw_lines).rstrip(), []
+
+    candidate_lines = raw_lines[paragraph_start:paragraph_end + 1]
+    trailer_regex = re.compile(r"^[A-Za-z0-9_-]+:\s*.+$")
+
+    if not all(trailer_regex.match(line.strip()) for line in candidate_lines):
+        return "\n".join(raw_lines).rstrip(), []
+
+    body = "\n".join(raw_lines[:paragraph_start]).rstrip()
+    trailers = [line.strip() for line in candidate_lines]
+    return body, trailers
+
+
+def _format_commit_message(content: str, agent_id: str) -> str:
+    """Formats a git commit message with standard Agent trailer."""
+    msg = content.strip()
+    if not msg:
+        return msg
+
+    trailer = f"Agent: {agent_id}"
+    body, trailers = _parse_terminal_trailers(msg)
+
+    if any(re.match(r"^agent\s*:", t, re.IGNORECASE) for t in trailers):
+        return msg
+
+    if trailers:
+        trailers.append(trailer)
+        return body + "\n\n" + "\n".join(trailers)
+
+    if body:
+        return body + "\n\n" + trailer
+
+    return msg + "\n\n" + trailer
+
+
+def stamp_commit_message_file(msg_file_path: str, agent: Optional[str] = None) -> bool:
     """Reads commit message file, applies Agent trailer if appropriate, and writes back."""
     path = Path(msg_file_path)
     if not path.is_file():
@@ -44,7 +90,7 @@ def stamp_commit_message_file(msg_file_path: str, agent: str = None) -> bool:
     if not content.strip():
         return False
 
-    agent_id = agent or (common.get_agent_id() if common else None)
+    agent_id = agent
     if not agent_id:
         for var in ("ARU_AGENT_ID", "AGENT_ID", "ARU_AGENT", "AGENT"):
             val = os.environ.get(var, "").strip()
@@ -55,10 +101,7 @@ def stamp_commit_message_file(msg_file_path: str, agent: str = None) -> bool:
     if not agent_id:
         return False
 
-    if not common:
-        return False
-
-    formatted = common.format_commit_message(content, agent=agent_id)
+    formatted = _format_commit_message(content, agent_id=agent_id)
 
     if formatted.rstrip() != content.rstrip():
         try:

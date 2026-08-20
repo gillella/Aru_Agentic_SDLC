@@ -1,3 +1,4 @@
+# line-ceiling: 3815
 from contextlib import nullcontext
 import json
 import os
@@ -467,7 +468,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("Peer attribution: cursor-1", message)
         self.assertIn(f"current head {head[:12]}", message)
-        self.assertIn("substantive human review from gillella", message)
+        self.assertIn("substantive independent review from gillella", message)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -696,6 +697,14 @@ class CiGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("not finished", msg)
 
+    def test_advisory_bot_status_does_not_gate_ci(self):
+        pr = {"statusCheckRollup": [
+            {"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"context": "CodeRabbit", "state": "PENDING"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertTrue(ok, msg)
+
     def test_unknown_conclusions_fail_closed(self):
         # STARTUP_FAILURE and STALE are neither in the old failure list nor the
         # pending list, so a denylist reported them as green and merged an
@@ -713,12 +722,188 @@ class CiGateTests(unittest.TestCase):
                 {"name": "verify", "status": "COMPLETED", "conclusion": conclusion}]}
             self.assertTrue(merge_pr.check_ci(pr)[0], f"{conclusion} should pass")
 
+    # --- Superseded runs (#306) ---------------------------------------------
+    # The rollup holds every run recorded against the head commit, so a check
+    # that failed and was re-run green appears twice. Judging both kept the PR
+    # red forever, with re-running powerless to clear it.
+
+    @staticmethod
+    def _run(name, conclusion, completed_at):
+        return {"name": name, "status": "COMPLETED",
+                "conclusion": conclusion, "completedAt": completed_at}
+
+    def test_stale_failure_superseded_by_newer_success_is_green(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "FAILURE", "2026-08-20T01:00:00Z"),
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertTrue(ok, msg)
+        # Deduplicated: one check name, not two runs.
+        self.assertIn("1 checks", msg)
+
+    def test_array_order_does_not_decide_recency(self):
+        # GitHub gives no ordering guarantee, so the newest-last arrangement
+        # above must not be what makes the previous test pass.
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+            self._run("test", "FAILURE", "2026-08-20T01:00:00Z"),
+        ]}
+        self.assertTrue(merge_pr.check_ci(pr)[0])
+
+    def test_stale_success_superseded_by_newer_failure_is_red(self):
+        # Recency has to cut both ways, or the fix becomes a way to merge red.
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T01:00:00Z"),
+            self._run("test", "FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("test=failure", msg)
+
+    def test_distinct_check_names_are_not_collapsed(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+            self._run("lint", "FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("lint=failure", msg)
+
+    def test_started_at_is_used_when_a_run_has_not_completed(self):
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE",
+             "completedAt": "2026-08-20T01:00:00Z"},
+            {"name": "test", "status": "IN_PROGRESS", "conclusion": None,
+             "startedAt": "2026-08-20T02:00:00Z"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("not finished", msg)
+
+    def test_contested_name_without_timestamps_fails_closed(self):
+        # Two runs of one name and no way to order them: refuse rather than
+        # assume either is current.
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("undecidable", msg)
+
+    def test_unparsable_timestamp_on_a_contested_name_fails_closed(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "FAILURE", "not-a-time"),
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("undecidable", msg)
+
+    def test_tied_runs_agreeing_through_different_fields_still_resolve(self):
+        # A check run and a legacy commit status express one green outcome
+        # through different fields. Comparing raw fields called that a
+        # disagreement and blocked a PR check_ci itself treats as green.
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS",
+             "completedAt": "2026-08-20T02:00:00Z"},
+            {"context": "test", "state": "SUCCESS",
+             "completedAt": "2026-08-20T02:00:00Z"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertTrue(ok, msg)
+
+    def test_tied_runs_disagreeing_fail_closed(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+            self._run("test", "FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("undecidable", msg)
+        self.assertIn("tied", msg)
+
+    def test_a_tie_never_resolves_by_array_order(self):
+        both_orders = []
+        for order in ((("SUCCESS",), ("FAILURE",)), (("FAILURE",), ("SUCCESS",))):
+            pr = {"statusCheckRollup": [
+                self._run("test", order[0][0], "2026-08-20T02:00:00Z"),
+                self._run("test", order[1][0], "2026-08-20T02:00:00Z"),
+            ]}
+            both_orders.append(merge_pr.check_ci(pr)[0])
+        self.assertEqual(both_orders, [False, False])
+
+    def test_uncontested_name_without_a_timestamp_still_judged(self):
+        # A single run needs no ordering; it is the run. Requiring a timestamp
+        # here would break every ordinary pending check.
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+        self.assertTrue(merge_pr.check_ci(pr)[0])
+
+    def test_allowlist_survives_deduplication(self):
+        # The newest run being an unknown conclusion must still fail closed.
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T01:00:00Z"),
+            self._run("test", "STARTUP_FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("startup_failure", msg)
+
+    def test_legacy_status_context_entries_group_by_context(self):
+        pr = {"statusCheckRollup": [
+            {"context": "ci/legacy", "state": "FAILURE",
+             "completedAt": "2026-08-20T01:00:00Z"},
+            {"context": "ci/legacy", "state": "SUCCESS",
+             "completedAt": "2026-08-20T02:00:00Z"},
+        ]}
+        self.assertTrue(merge_pr.check_ci(pr)[0])
+
     def test_no_checks_at_all_blocks(self):
         # A PR with zero checks is unverified, not verified-by-default. This is
         # the exact hole that let a green-looking PR certify nothing.
         ok, msg = merge_pr.check_ci({"statusCheckRollup": []})
         self.assertFalse(ok)
         self.assertIn("No CI checks", msg)
+
+
+class NoFastTrackEscapeHatchTests(unittest.TestCase):
+    """The owner fast-track is gone, wiring and all (#321).
+
+    Defaulting the flag off was not enough: a waiver that only needs one
+    environment variable to re-enable is one export away from asserting a peer
+    reviewed work that nobody reviewed, and nothing on the board would record it.
+    """
+
+    def test_no_relaxation_switch_survives_on_the_module(self):
+        for name in ("RELAXED", "enable_relaxed"):
+            self.assertFalse(hasattr(merge_pr, name),
+                             f"merge_pr.{name} still exists")
+
+    def test_the_environment_cannot_waive_the_review_gate(self):
+        with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}):
+            ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok, "a self-review merged under ARU_FAST_TRACK")
+        self.assertIn("self-review", msg.lower())
+
+    def test_the_environment_cannot_waive_test_coverage(self):
+        pr = {"files": [{"path": "scripts/thing.py", "additions": 10, "deletions": 0}]}
+        with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}):
+            ok, msg = merge_pr.check_test_coverage(pr)
+        self.assertFalse(ok)
+        self.assertIn("test file", msg)
+
+    def test_the_environment_cannot_waive_acceptance_criteria(self):
+        body = "## Acceptance Criteria\n- [ ] not done yet\n"
+        with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}):
+            ok, _msg = merge_pr.check_acceptance(7, body)
+        self.assertFalse(ok)
+
+    def test_the_cli_no_longer_offers_a_relaxed_flag(self):
+        source = Path(merge_pr.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("--relaxed", source)
+        self.assertNotIn("ARU_FAST_TRACK", source)
 
 
 class ReviewGateTests(unittest.TestCase):
@@ -850,6 +1035,62 @@ class ExternalReviewerTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("advisory", msg)
 
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_configured_review_app_approval_satisfies_the_gate(self):
+        ok, msg = _gate(
+            labelled("author:agent-1", review_login="aru-reviewer[bot]"), 0)
+        self.assertTrue(ok)
+        self.assertIn("aru-reviewer[bot]", msg)
+
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_configured_review_app_bot_actor_at_current_head_counts(self):
+        head = "a" * 40
+        reviews = [{
+            "id": "app-approve",
+            "state": "APPROVED",
+            "submittedAt": "2026-01-01T00:00:00Z",
+            "author": {"login": "aru-reviewer[bot]", "__typename": "Bot"},
+            "commit": {"oid": head},
+            "body": "",
+        }]
+        pr = labelled("author:agent-1", reviews=reviews)
+        ok, msg = _gate(
+            pr, 0,
+            head_oid=head,
+            reviews=reviews,
+            review_attestations=[],
+            reviewed_head=True,
+        )
+        self.assertTrue(ok)
+        self.assertIn("aru-reviewer[bot]", msg)
+
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_unconfigured_bot_stays_advisory_when_app_is_named(self):
+        ok, msg = _gate(
+            labelled("author:agent-1", review_login="coderabbitai[bot]"), 0)
+        self.assertFalse(ok)
+        self.assertIn("advisory", msg)
+
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_same_account_self_review_still_fails_when_app_is_named(self):
+        ok, msg = _gate(
+            labelled("author:agent-1", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg)
+
+    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
+    def test_reviewer_claim_still_blocks_configured_app_approval(self):
+        ok, msg = _gate(
+            labelled(
+                "author:agent-1",
+                "reviewer:agent-2",
+                review_login="aru-reviewer[bot]",
+            ),
+            0,
+        )
+        self.assertFalse(ok)
+        self.assertIn("reviewer:", msg)
+
     def test_an_external_approval_counts_without_any_label(self):
         ok, _ = _gate(
             labelled("author:agent-1", review_login="some-colleague"), 0)
@@ -891,6 +1132,153 @@ class SelfReviewTests(unittest.TestCase):
             labelled("author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
         self.assertTrue(ok)
         self.assertIn("agent-3", msg)
+
+    # --- Identity as the pair (id, family) (#307) ---------------------------
+    # Agents authenticate as one GitHub user, so the labels are all that
+    # distinguish them. Comparing the id alone cannot tell a genuine
+    # cross-family reviewer apart from the author reviewing its own work.
+
+    def test_same_id_same_family_is_still_a_self_review(self):
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1", "reviewer-family:agent-1:anthropic"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
+        # Families were present, so no missing-label caveat is warranted.
+        self.assertNotIn("cannot be ruled out", msg)
+
+    def test_same_id_different_family_is_reported_as_an_id_collision(self):
+        # Two agents answering to one id (#304). Not a peer review, and not
+        # honestly a self-review either -- the namespace broke.
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1", "reviewer-family:agent-1:google"), 0)
+        self.assertFalse(ok)
+        self.assertIn("sharing one id", msg)
+        self.assertIn("anthropic", msg)
+        self.assertIn("google", msg)
+        self.assertNotIn("A self-review does not satisfy", msg)
+
+    def test_id_collision_blocks_even_with_a_genuine_peer(self):
+        # A broken id namespace is reportable regardless of who else reviewed:
+        # no attribution carrying that id can be trusted.
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1", "reviewer-family:agent-1:google",
+            "reviewed-by:agent-9"), 0)
+        self.assertFalse(ok)
+        self.assertIn("sharing one id", msg)
+
+    def test_distinct_id_review_passes_without_any_family_labels(self):
+        # Unchanged from today: family is consulted only where the ids collide,
+        # so PRs predating family stamping keep merging.
+        ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-2"), 0)
+        self.assertTrue(ok)
+        self.assertIn("agent-2", msg)
+
+    def test_missing_family_on_a_same_id_review_names_what_is_missing(self):
+        ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
+        self.assertIn("family:<family> on the PR", msg)
+        self.assertIn("reviewer-family:agent-1:<family>", msg)
+
+    def test_missing_reviewer_family_alone_is_named(self):
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("reviewer-family:agent-1:<family>", msg)
+        self.assertNotIn("family:<family> on the PR", msg)
+
+    def test_missing_family_does_not_block_a_genuine_peer(self):
+        ok, _ = _gate(labelled(
+            "author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
+        self.assertTrue(ok)
+
+    def test_classifier_partitions_reviewers(self):
+        pr = labelled("author:a1", "family:anthropic",
+                      "reviewed-by:a1", "reviewer-family:a1:google",
+                      "reviewed-by:a2")
+        peers, collisions, unresolved = merge_pr.classify_reviewers(
+            pr, ["a1", "a2"], "a1")
+        self.assertEqual(peers, ["a2"])
+        self.assertEqual(collisions, [("a1", "anthropic", "google")])
+        self.assertEqual(unresolved, [])
+
+    def test_reviewer_families_ignores_malformed_labels(self):
+        pr = labelled("reviewer-family:a1:google", "reviewer-family:nofamily",
+                      "reviewer-family:")
+        self.assertEqual(merge_pr.reviewer_families(pr), {"a1": ["google"]})
+
+    def test_conflicting_family_stamps_are_reported_as_ambiguity(self):
+        # Two families for one id is evidence of the reissue defect; letting the
+        # last label win would describe the wrong situation entirely.
+        pr = labelled("author:agent-1", "family:anthropic",
+                      "reviewed-by:agent-1",
+                      "reviewer-family:agent-1:anthropic",
+                      "reviewer-family:agent-1:google")
+        _peers, collisions, _unresolved = merge_pr.classify_reviewers(
+            pr, ["agent-1"], "agent-1")
+        self.assertEqual(len(collisions), 1)
+        self.assertIn("ambiguous", collisions[0][1])
+
+    def test_two_author_family_labels_are_reported_as_ambiguity(self):
+        pr = labelled("author:agent-1", "family:anthropic", "family:google",
+                      "reviewed-by:agent-1",
+                      "reviewer-family:agent-1:anthropic")
+        _peers, collisions, _unresolved = merge_pr.classify_reviewers(
+            pr, ["agent-1"], "agent-1")
+        self.assertEqual(len(collisions), 1)
+        self.assertIn("anthropic, google", collisions[0][1])
+
+    def test_ambiguous_families_still_block_the_merge(self):
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1",
+            "reviewer-family:agent-1:anthropic",
+            "reviewer-family:agent-1:google"), 0)
+        self.assertFalse(ok)
+        self.assertIn("ambiguous", msg)
+
+    def test_reviewer_family_label_is_not_read_as_the_author_family(self):
+        # family: and reviewer-family: must not be confused by prefix matching.
+        pr = labelled("reviewer-family:a1:google")
+        self.assertEqual(merge_pr.label_values(pr, merge_pr.FAMILY_LABEL), [])
+
+    def test_an_empty_author_label_does_not_make_every_reviewer_a_peer(self):
+        # A bare `author:` label parses to "", which no reviewer id equals, so
+        # a self-review read as an independent peer and satisfied the gate.
+        ok, msg = _gate(labelled("author:", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("author:", msg)
+
+    def test_a_whitespace_only_author_label_is_also_rejected(self):
+        ok, _msg = _gate(labelled("author:   ", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+
+    def test_an_empty_reviewed_by_label_is_not_a_peer(self):
+        ok, _msg = _gate(labelled("author:agent-1", "reviewed-by:"), 0)
+        self.assertFalse(ok)
+
+    def test_author_label_whitespace_is_trimmed_not_treated_as_distinct(self):
+        # " agent-1" and "agent-1" are one identity, not an ambiguity.
+        ok, _msg = _gate(labelled("author: agent-1", "author:agent-1",
+                                  "reviewed-by:agent-2"), 0)
+        self.assertTrue(ok)
+
+    def test_two_different_author_labels_fail_closed(self):
+        # Concurrent adoption can leave two author: stamps. Picking one by
+        # position would decide the peer comparison arbitrarily.
+        ok, msg = _gate(labelled("author:agent-1", "author:agent-2",
+                                 "reviewed-by:agent-3"), 0)
+        self.assertFalse(ok)
+        self.assertIn("cannot be established", msg)
+        self.assertIn("agent-1, agent-2", msg)
+
+    def test_a_duplicated_identical_author_label_is_not_ambiguous(self):
+        ok, _msg = _gate(labelled("author:agent-1", "author:agent-1",
+                                  "reviewed-by:agent-3"), 0)
+        self.assertTrue(ok)
 
     def test_review_without_attribution_is_refused(self):
         # Unattributable on a stamped PR: it cannot be told apart from a
@@ -991,18 +1379,98 @@ class ClaimIsNotAttestationTests(unittest.TestCase):
         self.assertIn("self-review", msg.lower())
 
 
+def _pr(state="CLEAN", mergeable="MERGEABLE", base="main", head="deadbeef"):
+    return {"mergeStateStatus": state, "mergeable": mergeable,
+            "baseRefName": base, "headRefOid": head}
+
+
+def _behind(n):
+    """Resolver stub returning a fixed behind_by, so no test touches the network."""
+    return lambda base, head: n
+
+
 class RebaseGateTests(unittest.TestCase):
     def test_behind_blocks(self):
-        ok, msg = merge_pr.check_rebased({"mergeStateStatus": "BEHIND"})
+        ok, msg = merge_pr.check_rebased({"mergeStateStatus": "BEHIND"}, _behind(0))
         self.assertFalse(ok)
         self.assertIn("Rebase", msg)
 
     def test_conflicts_block(self):
-        self.assertFalse(merge_pr.check_rebased({"mergeStateStatus": "DIRTY"})[0])
-        self.assertFalse(merge_pr.check_rebased({"mergeable": "CONFLICTING"})[0])
+        self.assertFalse(merge_pr.check_rebased({"mergeStateStatus": "DIRTY"}, _behind(0))[0])
+        self.assertFalse(merge_pr.check_rebased({"mergeable": "CONFLICTING"}, _behind(0))[0])
 
-    def test_clean_passes(self):
-        self.assertTrue(merge_pr.check_rebased({"mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"})[0])
+    def test_clean_and_current_passes(self):
+        self.assertTrue(merge_pr.check_rebased(_pr(), _behind(0))[0])
+
+    def test_clean_but_behind_blocks(self):
+        """The case GitHub's status cannot express on an unprotected repo."""
+        ok, msg = merge_pr.check_rebased(_pr(state="CLEAN"), _behind(3))
+        self.assertFalse(ok)
+        self.assertIn("3 commits behind", msg)
+        self.assertIn("Rebase", msg)
+
+    def test_unstable_and_behind_blocks(self):
+        """Regression: hermes-trading-automation PR #17, 18 behind, reported current."""
+        ok, msg = merge_pr.check_rebased(_pr(state="UNSTABLE"), _behind(18))
+        self.assertFalse(ok)
+        self.assertIn("18 commits behind", msg)
+
+    def test_one_commit_behind_is_singular(self):
+        self.assertIn("1 commit behind", merge_pr.check_rebased(_pr(), _behind(1))[1])
+
+    def test_unknown_ancestry_fails_closed(self):
+        ok, msg = merge_pr.check_rebased(_pr(), lambda base, head: None)
+        self.assertFalse(ok)
+        self.assertIn("unverified ancestry", msg)
+
+    def test_resolver_exception_fails_closed(self):
+        def boom(base, head):
+            raise RuntimeError("api exploded")
+        ok, msg = merge_pr.check_rebased(_pr(), boom)
+        self.assertFalse(ok)
+        self.assertIn("unverified ancestry", msg)
+        self.assertIn("api exploded", msg)
+
+    def test_fast_path_rejections_do_not_consult_the_resolver(self):
+        """Protected repos keep working, and the fast path costs no API call."""
+        calls = []
+
+        def spy(base, head):
+            calls.append((base, head))
+            return 0
+
+        for pr in ({"mergeStateStatus": "BEHIND"}, {"mergeStateStatus": "DIRTY"},
+                   {"mergeable": "CONFLICTING"}):
+            self.assertFalse(merge_pr.check_rebased(pr, spy)[0])
+        self.assertEqual(calls, [])
+
+    def test_resolver_receives_base_and_head(self):
+        seen = []
+        merge_pr.check_rebased(_pr(base="release/v2", head="abc123"),
+                               lambda base, head: seen.append((base, head)) or 0)
+        self.assertEqual(seen, [("release/v2", "abc123")])
+
+
+class BehindByTests(unittest.TestCase):
+    def test_missing_refs_return_none(self):
+        self.assertIsNone(merge_pr._behind_by("", "abc"))
+        self.assertIsNone(merge_pr._behind_by("main", ""))
+
+    def test_valid_payload_returns_count(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "_gh_json", return_value={"behind_by": 7}):
+            self.assertEqual(merge_pr._behind_by("main", "abc"), 7)
+
+    def test_malformed_payloads_return_none(self):
+        for payload in (None, [], {}, {"behind_by": "3"}, {"behind_by": True},
+                        {"behind_by": -1}, {"behind_by": None}):
+            with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+                 patch.object(merge_pr, "_gh_json", return_value=payload):
+                self.assertIsNone(merge_pr._behind_by("main", "abc"), f"{payload!r}")
+
+    def test_missing_slug_returns_none(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value=None):
+            self.assertIsNone(merge_pr._behind_by("main", "abc"))
 
 
 class SizeGateTests(unittest.TestCase):
@@ -1274,6 +1742,28 @@ class ReviewRoundGateTests(unittest.TestCase):
         self.assertIn("--emit-review-split", rounds_gate[2])
         self.assertTrue(ok)
 
+    def test_evaluate_dod_includes_spec_sync_gate(self):
+        pr = {"body": "Closes #242\n"}
+        with patch.object(merge_pr, "check_open", return_value=(True, "open")), \
+             patch.object(merge_pr, "check_issue_link", return_value=(True, "linked")), \
+             patch.object(merge_pr, "check_verification", return_value=(True, "ok")), \
+             patch.object(merge_pr, "check_ci", return_value=(True, "green")), \
+             patch.object(merge_pr, "check_reviews", return_value=(True, "reviewed")), \
+             patch.object(merge_pr, "check_rebased", return_value=(True, "current")), \
+             patch.object(merge_pr, "check_size", return_value=(True, "small")), \
+             patch.object(merge_pr, "check_test_coverage", return_value=(True, "tests")), \
+             patch.object(merge_pr, "check_spec_sync", return_value=(True, "spec sync ok")), \
+             patch.object(merge_pr, "check_review_rounds", return_value=(True, "ok")), \
+             patch.object(merge_pr, "check_acceptance", return_value=(True, "accept")), \
+             patch.object(merge_pr, "linked_issues", return_value=[242]):
+            ok, gates = merge_pr.evaluate_dod(pr, {242: "- [x] done\n"}, evidence={})
+        names = [name for name, _, _ in gates]
+        self.assertIn("spec-sync", names)
+        sync_gate = next(g for g in gates if g[0] == "spec-sync")
+        self.assertTrue(sync_gate[1])
+        self.assertEqual(sync_gate[2], "spec sync ok")
+        self.assertTrue(ok)
+
 
 class TestCoverageGateTests(unittest.TestCase):
     def test_truncated_changed_file_list_fails_closed(self):
@@ -1419,10 +1909,12 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "withdrawn": 0, "reviewed_head": True,
         },
     )
+    @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
+    @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_successful_merge_with_branch_delete_failure_is_resumable(
-        self, fetch, _json, _threads, execute, _root, _chdir, _prune, _local,
+        self, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
         _remote, _close, _done, _issue_claim, _review_claim, merger_claim,
         sleep, intervention,
     ):
@@ -1480,10 +1972,12 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "withdrawn": 0, "reviewed_head": True,
         },
     )
+    @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
+    @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_default_merge_method_is_merge(
-        self, fetch, _json, _threads, execute, _root, closeout
+        self, fetch, _json, _sync, _threads, execute, _root, closeout
     ):
         fetch.return_value = {
             "number": 9,
@@ -3172,6 +3666,7 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
             code = merge_pr.main()
         return code, tag
 
+    @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_the_merge_path_writes_the_checkpoint_with_real_verdicts(self):
         code, tag = self._main(["merge_pr.py", "--pr", "9"])
         self.assertEqual(code, merge_pr.EXIT_OK)
@@ -3184,6 +3679,7 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
         self.assertEqual(code, merge_pr.EXIT_OK)
         tag.assert_not_called()
 
+    @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_a_failed_closeout_on_the_merge_path_writes_no_checkpoint(self):
         code, tag = self._main(["merge_pr.py", "--pr", "9"], closeout_ok=False)
         self.assertEqual(code, merge_pr.EXIT_ERROR)

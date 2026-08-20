@@ -1,3 +1,4 @@
+# line-ceiling: 862
 import io
 import sys
 import tempfile
@@ -8,15 +9,19 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import triage_backlog as tb
+import fetch_next_issue  # noqa: E402
 
 
-def issue(number, *labels, body="", title="t"):
-    return {
+def issue(number, *labels, body="", title="t", author="owner"):
+    record = {
         "number": number,
         "title": title,
         "body": body,
         "labels": [{"name": name} for name in labels],
     }
+    if author is not None:
+        record["author"] = {"login": author}
+    return record
 
 
 READY_BODY = """## Summary
@@ -38,6 +43,18 @@ depends-on:
 touches: src/thing.py, tests/test_thing.py
 parallel-eligible: true
 """
+
+
+class TrustedOwnerTests(unittest.TestCase):
+    def setUp(self):
+        owner = patch.object(
+            fetch_next_issue, "repository_owner_login", return_value="owner")
+        trusted = patch.object(
+            fetch_next_issue, "repository_trusted_logins", return_value={"owner"})
+        self.addCleanup(owner.stop)
+        self.addCleanup(trusted.stop)
+        owner.start()
+        trusted.start()
 
 
 class SectionParsingTests(unittest.TestCase):
@@ -100,7 +117,7 @@ Do the feature.
 ## Acceptance Criteria
 
 - [ ] Predicate 1 (verify: `pytest -q`)
-- [ ] Predicate 2 (verify: `python3 scripts/foo.py --check`)
+- [ ] Predicate 2 (verify: `ruff check .`)
 
 ## Decision Boundaries
 - Default: value
@@ -214,14 +231,45 @@ parallel-eligible: true
         self.assertFalse(tb.has_machine_checkable_predicates(bare_code_criteria))
 
     def test_machine_checkable_predicates_accepts_verify_and_assertions(self):
-        verify_criteria = ["- [ ] Verify output (verify: `python3 test.py`)"]
+        verify_criteria = ["- [ ] Verify output (verify: `python3 -m unittest tests.test_foo`)"]
         self.assertTrue(tb.has_machine_checkable_predicates(verify_criteria))
+
+        ruff_criteria = ["- [ ] Lint clean (verify: `ruff check .`)"]
+        self.assertTrue(tb.has_machine_checkable_predicates(ruff_criteria))
 
         assert_criteria = ["- [ ] Asserts that return code is 0"]
         self.assertTrue(tb.has_machine_checkable_predicates(assert_criteria))
 
         exit_criteria = ["- [ ] Exits with code 0 on valid input"]
         self.assertTrue(tb.has_machine_checkable_predicates(exit_criteria))
+
+    def test_unrunnable_verify_predicate_flags_gaps(self):
+        body = """## Summary
+Do thing.
+
+## Acceptance Criteria
+- [ ] Bad command (verify: `bash -c something`)
+
+## Decision Boundaries
+- Default: 0
+
+## Non-Goals
+- None
+
+## Verification
+`pytest` exits 0
+
+## Dependencies
+touches: scripts/foo.py
+"""
+        gaps = tb.ready_gaps(issue(200, "type:feat", body=body), set())
+        self.assertTrue(any("unrunnable verify predicate" in g for g in gaps))
+
+    def test_existing_open_issues_with_unrunnable_lint_predicate_are_reported(self):
+        criteria = ["- [ ] Lint clean (verify: `unsupported_runner check .`)"]
+        unrunnable = tb.unrunnable_verify_predicates(criteria)
+        self.assertEqual(len(unrunnable), 1)
+        self.assertIn("unsupported_runner", unrunnable[0][1])
 
     def test_feature_request_template_with_untouched_criteria_placeholder_is_blocked(self):
         tmpl = (Path(__file__).resolve().parents[1] / ".github" / "ISSUE_TEMPLATE" / "feature_request.md").read_text()
@@ -320,7 +368,9 @@ class SplitRecommendationTests(unittest.TestCase):
         self.assertIn("SPLIT", output.getvalue())
         self.assertIn("not a human gate", output.getvalue())
         self.assertIn("9 acceptance criteria exceed the threshold of 8", output.getvalue())
-        self.assertIn("3 top-level areas: hooks, scripts, tests", output.getvalue())
+        # tests/ is a companion area, so the span is hooks+scripts. The
+        # accompanying test file never widens scope on its own.
+        self.assertIn("2 top-level areas: hooks, scripts", output.getvalue())
 
     def test_each_oversize_signal_is_independently_actionable(self):
         wide_only = READY_BODY.replace(
@@ -508,8 +558,91 @@ class SplitRecommendationTests(unittest.TestCase):
             self.assertEqual(tb.main(), 0)
         update.assert_not_called()
 
+    def test_companion_areas_do_not_widen_scope(self):
+        """tests/ and docs/ accompany production work instead of widening it."""
+        for declaration in (
+            "scripts/thing.py, tests/test_thing.py",
+            "src/thing.py, tests/test_thing.py",
+            "scripts/thing.py, tests/test_thing.py, docs/guide.md",
+            "tests/test_thing.py, docs/guide.md",
+            "docs/guide.md",
+        ):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(40, "type:chore", body=body)), []
+                )
 
-class PartitionTests(unittest.TestCase):
+    def test_companion_areas_do_not_mask_real_scope_creep(self):
+        """Two production areas still split even when tests/ rides along."""
+        for declaration, expected in (
+            ("scripts/a.py, src/b.py, tests/test_a.py",
+             "touches span 2 top-level areas: scripts, src"),
+            ("scripts/a.py, hooks/g.sh, tests/test_a.py, docs/d.md",
+             "touches span 2 top-level areas: hooks, scripts"),
+        ):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                self.assertEqual(
+                    tb.split_reasons(issue(41, "type:chore", body=body)),
+                    [expected],
+                )
+
+    def test_the_documented_example_issue_is_promotable(self):
+        """Regression guard for the triage/merge deadlock (#288).
+
+        merge_pr.py requires a tests/ change whenever src/ or scripts/ changes.
+        When tests/ also counted as a second top-level area, the only shape that
+        cleared this module was guaranteed to fail the merge gate - and the
+        example body printed here as the conforming template was itself held.
+        Following our own documented instructions must yield a promotable issue.
+        """
+        self.assertEqual(
+            tb.split_reasons({"body": tb.EXAMPLE_CONFORMING_ISSUE_BODY,
+                              "labels": []}),
+            [],
+        )
+
+
+class ReadyDocstringContractTests(unittest.TestCase):
+    """The module docstring must describe the contract ready_gaps() enforces.
+
+    #288 regression guard: the docstring once claimed "all four required"
+    while ready_gaps() enforced nine elements, so anyone filing from the
+    docstring wrote an issue that failed triage.
+    """
+
+    def test_docstring_does_not_claim_four_required(self):
+        doc = tb.__doc__
+        self.assertNotIn("all four", doc)
+        self.assertNotIn("four required", doc)
+
+    def test_docstring_names_every_enforced_element(self):
+        doc = tb.__doc__
+        for element in (
+            "needs-human", "epic", "acceptance criteria", "verification",
+            "touches:", "Decision Boundaries", "Non-Goals",
+        ):
+            with self.subTest(element=element):
+                self.assertIn(element, doc)
+
+    def test_docstring_contract_accepts_a_conforming_issue(self):
+        # The docstring's own claims must be consistent with ready_gaps: an
+        # issue that meets every named element is promotable.
+        self.assertEqual(
+            tb.ready_gaps({"body": tb.EXAMPLE_CONFORMING_ISSUE_BODY,
+                           "labels": []}, set()),
+            [],
+        )
+
+
+class PartitionTests(TrustedOwnerTests):
     def test_splits_by_status_and_claim(self):
         issues = [
             issue(1, "status:backlog"),
@@ -623,7 +756,7 @@ class PartitionTests(unittest.TestCase):
         self.assertIn("Claimable simultaneously: 1  [40]", output.getvalue())
 
 
-class CapacityTests(unittest.TestCase):
+class CapacityTests(TrustedOwnerTests):
     def test_non_overlapping_issues_are_all_concurrent(self):
         ready = [
             issue(1, "status:ready", body="touches: src/a.py"),
@@ -652,6 +785,77 @@ class CapacityTests(unittest.TestCase):
         cap = tb.capacity(ready, [])
         self.assertEqual(cap["concurrent"], [])
         self.assertIn("no touches", cap["deferred"][0][1])
+
+
+class BareDirectoryGlobTests(unittest.TestCase):
+    def test_ready_gaps_reject_bare_directory_glob(self):
+        for declaration in ("docs/**", "scripts/**", "docs/**/*"):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                gaps = tb.ready_gaps(issue(1, "type:chore", body=body), set())
+                self.assertTrue(
+                    any("bare directory glob" in g for g in gaps),
+                    f"{declaration} should be flagged, got {gaps}",
+                )
+
+    def test_file_naming_glob_is_accepted(self):
+        # A specific glob naming files rather than a whole top-level directory
+        # stays accepted by the Ready contract.
+        for declaration in ("docs/adr/*.md", "scripts/*.py", "docs/*.md"):
+            with self.subTest(declaration=declaration):
+                body = READY_BODY.replace(
+                    "touches: src/thing.py, tests/test_thing.py",
+                    f"touches: {declaration}",
+                )
+                gaps = tb.ready_gaps(issue(1, "type:chore", body=body), set())
+                self.assertFalse(
+                    any("bare directory glob" in g for g in gaps),
+                    f"{declaration} should not be flagged, got {gaps}",
+                )
+
+    def test_file_glob_reasons_still_span_areas(self):
+        # A file-naming glob is still classified by its first path segment, so
+        # it spans top-level areas like any concrete declaration. Use two
+        # non-companion areas (docs and tests are companions).
+        body = READY_BODY.replace(
+            "touches: src/thing.py, tests/test_thing.py",
+            "touches: scripts/*.py, hooks/*.py",
+        )
+        self.assertEqual(
+            tb.split_reasons(issue(22, "type:chore", body=body)),
+            ["touches span 2 top-level areas: hooks, scripts"],
+        )
+
+
+class HubPathContentionTests(unittest.TestCase):
+    def test_reports_only_declared_paths_with_count_two_or_more(self):
+        issues = [
+            issue(1, "type:fix", body="touches: AGENTS.md"),
+            issue(2, "type:feat", body="touches: AGENTS.md, scripts/common.py"),
+            issue(3, "type:chore", body="touches: scripts/common.py"),
+            issue(4, "type:chore", body="touches: docs/README.md"),
+        ]
+        hubs = dict(tb.hub_path_contention(issues))
+        self.assertEqual(hubs, {"AGENTS.md": 2, "scripts/common.py": 2})
+        self.assertNotIn("docs/README.md", hubs)
+
+    def test_epics_are_excluded_from_hub_counts(self):
+        # Declared by two non-epic issues plus an epic: the epic's declare must
+        # not inflate the hub count.
+        issues = [
+            issue(1, "type:epic", body="touches: AGENTS.md"),
+            issue(2, "type:fix", body="touches: AGENTS.md, scripts/common.py"),
+            issue(3, "type:feat", body="touches: AGENTS.md"),
+        ]
+        hubs = dict(tb.hub_path_contention(issues))
+        self.assertEqual(hubs["AGENTS.md"], 2)  # the epic's declare is ignored
+
+    def test_single_declaration_is_not_a_hub(self):
+        issues = [issue(1, "type:fix", body="touches: AGENTS.md")]
+        self.assertEqual(tb.hub_path_contention(issues), [])
 
 
 if __name__ == "__main__":

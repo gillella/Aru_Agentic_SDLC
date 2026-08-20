@@ -1,3 +1,4 @@
+# line-ceiling: 1433
 import sys
 import tempfile
 import unittest
@@ -342,9 +343,108 @@ class SlackNotifyTests(unittest.TestCase):
         )
         self.assertEqual(slack, ["posted"])
 
-    def test_cli_requires_explicit_project_id(self):
-        with self.assertRaises(SystemExit):
-            main(["--agent", "codex-1", "--family", "openai", "--event", "state"])
+    def test_cli_without_project_id_fails_closed_on_unbound_checkout(self):
+        # Omitting --project-id is now legal: it resolves from the checkout.
+        # An unbound checkout must fail closed with a warning, not crash.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            os.chmod(root, 0o700)
+            registry_path = root / "projects.json"
+            env_file = root / "slack.env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+                + "\nSLACK_TEAM_ID=T01234567\nSLACK_CHANNEL_ID=C11111111\n",
+                encoding="utf-8",
+            )
+            with patch("slack_notify.post_event") as posted:
+                code = main([
+                    "--agent", "codex-1", "--family", "openai", "--event", "state",
+                    "--repo-dir", str(root / "unknown-checkout"),
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            self.assertEqual(code, 0)
+            posted.assert_not_called()
+
+    def test_cli_resolves_project_id_from_checkout_when_omitted(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            os.chmod(root, 0o700)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            registry_path = root / "projects.json"
+            audit_path = root / "audit.json"
+
+            def identity(path):
+                return {
+                    "github_repo_id": "R_repo",
+                    "github_repo_database_id": 1,
+                    "project_v2_id": "P_project",
+                    "repo_slug": "owner/repo",
+                    "local_path": str(path.resolve()),
+                }
+
+            record = ProjectRegistry(registry_path, audit_path, identity).create(
+                checkout, "T01234567", "C99999999", "operator", "proj_resolved"
+            )
+            env_file = root / "slack.env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+                + "\nSLACK_TEAM_ID=T01234567\nSLACK_CHANNEL_ID=C11111111\n",
+                encoding="utf-8",
+            )
+            with patch("slack_notify.post_event", return_value={"ok": True}) as posted:
+                code = main([
+                    "--agent", "codex-1", "--family", "openai", "--event", "state",
+                    "--repo-dir", str(checkout),
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(posted.call_args.args[0].channel_id, "C99999999")
+            self.assertEqual(posted.call_args.args[1]["project_id"], record.project_id)
+
+    def test_explicit_project_id_wins_over_checkout_resolution(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            os.chmod(root, 0o700)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            elsewhere = root / "elsewhere"
+            elsewhere.mkdir()
+            registry_path = root / "projects.json"
+            audit_path = root / "audit.json"
+
+            def identity(path):
+                repo = "owner/" + path.resolve().name
+                return {
+                    "github_repo_id": f"R_{path.resolve().name}",
+                    "github_repo_database_id": 1,
+                    "project_v2_id": f"P_{path.resolve().name}",
+                    "repo_slug": repo,
+                    "local_path": str(path.resolve()),
+                }
+
+            ProjectRegistry(registry_path, audit_path, identity).create(
+                checkout, "T01234567", "C99999999", "operator", "proj_from_checkout"
+            )
+            explicit = ProjectRegistry(registry_path, audit_path, identity).create(
+                elsewhere, "T01234567", "C88888888", "operator", "proj_explicit"
+            )
+            env_file = root / "slack.env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+                + "\nSLACK_TEAM_ID=T01234567\nSLACK_CHANNEL_ID=C11111111\n",
+                encoding="utf-8",
+            )
+            with patch("slack_notify.post_event", return_value={"ok": True}) as posted:
+                code = main([
+                    "--agent", "codex-1", "--family", "openai", "--event", "state",
+                    "--repo-dir", str(checkout),
+                    "--project-id", explicit.project_id,
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(posted.call_args.args[0].channel_id, "C88888888")
+            self.assertNotEqual(explicit.project_id, "proj_from_checkout")
 
     def test_cli_routes_by_registry_and_ignores_legacy_channel(self):
         with tempfile.TemporaryDirectory() as raw:

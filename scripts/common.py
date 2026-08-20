@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
+# line-ceiling: 1482
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
 """
 
 import fnmatch
+import hashlib
 import json
 import os
 import random
@@ -13,7 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
@@ -308,17 +310,116 @@ def get_current_branch() -> str:
     return stdout or "main"
 
 
-def create_worktree(branch_name: str, path: str = None, attempts: int = 5) -> str:
+WORKTREE_ROOT = ".worktrees"
+# Separator between the branch slug and the owning agent in a worktree path.
+# Doubled so it cannot occur inside a sanitised branch slug or agent id.
+WORKTREE_AGENT_SEP = "__"
+# Path length matters on macOS and Linux, and branch slugs are already long.
+WORKTREE_AGENT_MAXLEN = 24
+
+
+def worktree_agent_component(agent: str) -> str:
+    """Filesystem-safe, short form of an agent id for use in a path.
+
+    Dots are not preserved: an agent id is untrusted enough that leaving '..'
+    intact in a path component invites a traversal for no benefit.
+
+    Sanitising and truncating are both lossy, so two distinct ids can reduce to
+    one component -- `claude.1` and `claude-1`, or any pair sharing a long
+    prefix. That would put two agents back in one directory, which is precisely
+    the data-integrity defect this scoping exists to prevent, so a lossy
+    reduction carries a short digest of the id as given.
+    """
+    raw = str(agent)
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", raw)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    if slug == raw and len(slug) <= WORKTREE_AGENT_MAXLEN:
+        return slug
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:6]
+    head = slug[:WORKTREE_AGENT_MAXLEN - len(digest) - 1].strip("-")
+    return f"{head}-{digest}" if head else digest
+
+
+def worktree_path_for(branch_name: str, agent: str = "") -> str:
+    """The directory this agent uses for this branch.
+
+    The owning agent is encoded in the path rather than recorded inside the
+    worktree, so ownership cannot be read wrong and no marker file can be swept
+    into somebody's commit. Two agents in one clone therefore never derive the
+    same directory (#305). Calls that name no agent keep the historical
+    unscoped path, so worktrees created before this change still resolve.
+    """
+    base = os.path.join(WORKTREE_ROOT, branch_name.replace("/", "-"))
+    component = worktree_agent_component(agent) if agent else ""
+    return f"{base}{WORKTREE_AGENT_SEP}{component}" if component else base
+
+
+def worktree_agent_of(path: str) -> str:
+    """The agent encoded in a worktree path, or '' for an unscoped one."""
+    tail = os.path.basename(os.path.normpath(path))
+    _, sep, component = tail.rpartition(WORKTREE_AGENT_SEP)
+    return component if sep else ""
+
+
+def worktree_holding_branch(branch_name: str) -> Optional[str]:
+    """Path of the worktree that currently has ``branch_name`` checked out.
+
+    Returns None when no worktree holds it, or when the listing cannot be read
+    -- callers treat an unreadable listing as "no known holder" and let git
+    itself refuse, rather than blocking on a transient failure.
+    """
+    code, out, _ = run_cmd(["git", "worktree", "list", "--porcelain"], check=False)
+    if code != 0:
+        return None
+    current = None
+    for line in (out or "").splitlines():
+        if line.startswith("worktree "):
+            current = line[len("worktree "):].strip()
+        elif line.startswith("branch "):
+            ref = line[len("branch "):].strip()
+            if ref in (f"refs/heads/{branch_name}", branch_name):
+                return current
+    return None
+
+
+def _describe_worktree_holder(holder: str) -> str:
+    agent = worktree_agent_of(holder)
+    return f"'{holder}' (agent '{agent}')" if agent else f"'{holder}' (no agent recorded)"
+
+
+def create_worktree(branch_name: str, path: str = None, attempts: int = 5,
+                    agent: str = "") -> Optional[str]:
     """Creates a git worktree for isolated feature development/review.
+
+    Returns the worktree path, or None if one could not be established. The old
+    contract returned the path unconditionally, so a caller that lost the race
+    for a shared directory was handed another agent's checkout and committed
+    out of it -- the #305 data-integrity defect, where one agent's commit
+    carried another's uncommitted files.
 
     Retries with backoff: concurrent agents in one clone contend on
     .git/index.lock, and `git worktree add` fails transiently rather than
     waiting.
     """
     if not path:
-        path = os.path.join(".worktrees", branch_name.replace("/", "-"))
+        path = worktree_path_for(branch_name, agent)
+
+    # Never adopt a directory we did not resolve for ourselves. git allows only
+    # one worktree per branch, so a holder at any other path is somebody else's
+    # working directory -- refuse and name it instead of silently sharing it.
+    holder = worktree_holding_branch(branch_name)
+    if holder and os.path.realpath(holder) != os.path.realpath(path):
+        print(f"[ERROR] Branch '{branch_name}' is already checked out at "
+              f"{_describe_worktree_holder(holder)}, not at '{path}'. Refusing to "
+              "share another agent's worktree.", file=sys.stderr)
+        return None
+    if holder:
+        print(f"✅ Reattached to existing worktree at: '{path}'")
+        return path
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
+    stderr = ""
     for attempt in range(attempts):
         code, _, stderr = run_cmd(["git", "worktree", "add", "-b", branch_name, path], check=False)
         if code == 0:
@@ -339,7 +440,48 @@ def create_worktree(branch_name: str, path: str = None, attempts: int = 5) -> st
         time.sleep(sleep_s)
 
     print(f"[ERROR] Could not create worktree at '{path}': {stderr}", file=sys.stderr)
-    return path
+    return None
+
+
+BOARD_IDENTITY_LABEL_PREFIXES = ("agent:", "reviewer:", "merger:", "author:")
+
+
+def board_agent_identities() -> Tuple[Optional[Dict[str, List[str]]], str]:
+    """Agent ids GitHub currently shows in use, mapped to where they are held.
+
+    GitHub is the system of record for liveness; the presence registry is a
+    local cache of intent with a 300-second heartbeat TTL. A session that missed
+    a heartbeat -- or never registered at all -- looked free to the registry
+    while the board still showed it holding an issue claim and authoring an open
+    PR, so its id was handed to a second session and every downstream identity
+    guarantee degraded (#304).
+
+    Two endpoints because gh exposes issues and pull requests separately; this
+    runs once at identity resolution, not per tick.
+
+    Returns (holders, error). ``holders`` is None when the board could not be
+    read, so callers fail closed rather than assign a possibly-held id.
+    """
+    holders: Dict[str, List[str]] = {}
+    queries = (
+        (["gh", "issue", "list", "--state", "open", "--limit", "500",
+          "--json", "number,labels"], "issue"),
+        (["gh", "pr", "list", "--state", "open", "--limit", "500",
+          "--json", "number,labels"], "PR"),
+    )
+    for cmd, kind in queries:
+        items = run_gh_json(cmd)
+        if not isinstance(items, list):
+            return None, f"could not read open {kind}s from GitHub"
+        for item in items:
+            for label in item.get("labels") or []:
+                name = str(label.get("name") or "")
+                for prefix in BOARD_IDENTITY_LABEL_PREFIXES:
+                    if name.startswith(prefix) and name[len(prefix):]:
+                        agent_id = name[len(prefix):]
+                        holders.setdefault(agent_id, []).append(
+                            f"{kind} #{item.get('number')} ({name})")
+    return holders, ""
 
 
 def query_open_issues() -> Optional[List[Dict[str, Any]]]:
@@ -349,7 +491,7 @@ def query_open_issues() -> Optional[List[Dict[str, Any]]]:
     with more issues than that and makes the dependency graph wrong.
     """
     cmd = ["gh", "issue", "list", "--state", "open", "--limit", "500",
-           "--json", "number,title,labels,assignees,body,state,updatedAt"]
+           "--json", "number,title,labels,assignees,body,state,updatedAt,author"]
     res = run_gh_json(cmd)
     return res if isinstance(res, list) else None
 
@@ -412,12 +554,233 @@ def ensure_label(name: str, color: str = "5319e7", description: str = "") -> boo
     return code == 0
 
 
+# Issue metadata is data, not a shell. Globs (`scripts/*`) are valid touches;
+# command operators and traversal are not. `*` `?` `[` stay allowed for globs.
+_METADATA_COMMAND_RE = re.compile(r"""[;&|`$()<>\n\r!\\]|&&|\|\|""")
+_WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+_FENCE_RE = re.compile(r"(`{3,}|~{3,})")
+
+
+def strip_code_blocks(body: str) -> str:
+    """Blanks fenced and indented code blocks, preserving line positions.
+
+    Issue metadata parsers anchor to the start of a line so a code *span* cannot
+    hijack them, but a fenced code *block* also begins at column 0, and an
+    indented (4-space or tab) block is indistinguishable from an ordinary
+    declaration to a ``^[ \\t]*`` anchor. An issue that quotes the issue
+    template as an example would otherwise have the example's ``touches:`` and
+    ``depends-on:`` parsed as its own declaration: reserving paths it will
+    never edit while leaving its real paths unreserved (a two-agent collision)
+    and masking real prerequisites with ``depends-on: none`` (blocked work
+    that looks claimable).
+
+    An unterminated fence blanks the remainder of the body. That is the safe
+    direction: a missing declaration makes an issue non-claimable, whereas a
+    wrong one causes collisions.
+    """
+    if not body:
+        return body
+    lines = []
+    open_fence = None
+    for line in body.splitlines():
+        indented = line.startswith(("    ", "\t"))
+        match = _FENCE_RE.match(line.lstrip())
+        # Normalise to the fence character: a closing fence must use the same
+        # character as the one that opened the block.
+        token = match.group(1)[0] if match else None
+        if open_fence is None:
+            if token is not None:
+                open_fence = token
+                lines.append("")
+                continue
+            if indented:
+                lines.append("")
+                continue
+            lines.append(line)
+        else:
+            if token == open_fence:
+                open_fence = None
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _is_plausible_declared_path(path: str) -> bool:
+    """True when a ``touches:`` token is a real tree reference, not prose.
+
+    The line-anchored parse can still grab a prose tail ("declaration - every
+    issue about the touches system naturally discusses") or a quoted wrapper,
+    so an entry carrying embedded whitespace, a quote, or an em dash cannot be
+    a path and must not reserve anything. Legit references - `src/a.py`,
+    `tests/*`, `docs/guide.md`, `**/*.py` - carry none of those.
+    """
+    if any(ch.isspace() for ch in path):
+        return False
+    if '"' in path or "'" in path or "—" in path or "–" in path:
+        return False
+    return True
+
+
+def metadata_line_is_command_like(text: str) -> bool:
+    """True when a metadata line contains shell operators, not path/issue tokens."""
+    return bool(_METADATA_COMMAND_RE.search(text or ""))
+
+
+def declared_path_is_safe(path: str) -> bool:
+    """True if a `touches:` token is a relative repo path, not a command."""
+    value = (path or "").strip().strip("`")
+    if not value or value.startswith("/") or value.startswith("~"):
+        return False
+    if _WINDOWS_ABS_RE.match(value):
+        return False
+    if _METADATA_COMMAND_RE.search(value):
+        return False
+    parts = re.split(r"[\\/]", value)
+    if any(part in {".", ".."} for part in parts):
+        return False
+    return True
+
+
+TRUSTED_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+TRUSTED_REWRITE_LABEL = "trusted-rewrite"
+
+
+def _actor_login(record: Any) -> Optional[str]:
+    if isinstance(record, dict):
+        login = record.get("login")
+        return login if isinstance(login, str) and login else None
+    if isinstance(record, str) and record:
+        return record
+    return None
+
+
+def author_login(issue: Dict[str, Any]) -> Optional[str]:
+    """Returns the GitHub login that authored an issue list record, if present."""
+    if not isinstance(issue, dict):
+        return None
+    return _actor_login(issue.get("author"))
+
+
+def editor_login(issue: Dict[str, Any]) -> Optional[str]:
+    """Returns the last body editor login when the payload includes one."""
+    if not isinstance(issue, dict):
+        return None
+    return _actor_login(issue.get("editor"))
+
+
+def repository_owner_login(slug: Optional[str] = None) -> Optional[str]:
+    """Owner half of `owner/repo`, or None when identity cannot be resolved."""
+    resolved = slug if slug is not None else get_repo_slug()
+    if not resolved or "/" not in resolved:
+        return None
+    owner = resolved.split("/", 1)[0].strip()
+    return owner or None
+
+
+def repository_trusted_logins(slug: Optional[str] = None) -> Optional[Set[str]]:
+    """Owner plus collaborator logins, or None when identity cannot be resolved."""
+    resolved = slug if slug is not None else get_repo_slug()
+    owner = repository_owner_login(resolved)
+    if not owner or not resolved:
+        return None
+    code, stdout, _ = run_cmd(
+        [
+            "gh", "api", "--paginate",
+            f"repos/{resolved}/collaborators",
+            "--jq", ".[].login",
+        ],
+        check=False,
+    )
+    if code != 0:
+        return None
+    logins = {owner.lower()}
+    logins.update(line.strip().lower() for line in stdout.splitlines() if line.strip())
+    return logins
+
+
+def _association_value(issue: Dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        value = issue.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _login_is_authorized(
+    login: Optional[str],
+    *,
+    owner: Optional[str] = None,
+    trusted_logins: Optional[Iterable[str]] = None,
+    association: Optional[str] = None,
+) -> bool:
+    if not login:
+        return False
+    if association and association.upper() in TRUSTED_AUTHOR_ASSOCIATIONS:
+        return True
+    names = {name.lower() for name in (trusted_logins or []) if name}
+    if owner:
+        names.add(owner.lower())
+    return login.lower() in names
+
+
+def has_trusted_rewrite_label(issue: Dict[str, Any]) -> bool:
+    """True when a write-access actor attested the current issue body."""
+    return TRUSTED_REWRITE_LABEL in {name.lower() for name in label_names(issue)}
+
+
+def is_trusted_metadata_author(
+    issue: Dict[str, Any],
+    owner: Optional[str] = None,
+    trusted_logins: Optional[Iterable[str]] = None,
+) -> bool:
+    """True when issue metadata may be honoured as `touches:` / `depends-on:`.
+
+    Fail closed when author identity is missing. Org-owned repositories trust
+    collaborators and GitHub associations (OWNER / MEMBER / COLLABORATOR), not
+    equality with the organization login. An outsider issue stays untrusted
+    until a trusted rewrite is bound to the current body: a last editor who is
+    an authorized actor, optionally attested by a `trusted-rewrite` label.
+    The label alone is not enough when the last editor is an outsider, or when
+    a claim-path identity lookup failed (`trustIdentityResolved` is False).
+    """
+    if not isinstance(issue, dict):
+        return False
+    login = author_login(issue)
+    if _login_is_authorized(
+        login,
+        owner=owner,
+        trusted_logins=trusted_logins,
+        association=_association_value(issue, "authorAssociation", "author_association"),
+    ):
+        return True
+    editor = editor_login(issue)
+    editor_is_trusted = _login_is_authorized(
+        editor,
+        owner=owner,
+        trusted_logins=trusted_logins,
+        association=_association_value(issue, "editorAssociation", "editor_association"),
+    )
+    if editor_is_trusted:
+        return True
+    if has_trusted_rewrite_label(issue):
+        # A write-access label attests a rewrite only when the last editor is
+        # unknown (list payloads) or is itself an authorized actor.
+        # A failed GraphQL lookup omits editor the same way a list payload
+        # does; that is not "unknown" and must not honour the label.
+        if issue.get("trustIdentityResolved") is False:
+            return False
+        return editor is None
+    return False
+
+
 def parse_touches(body: str) -> List[str]:
     """Parses 'touches: src/a/*, docs/b.md' from an issue body.
 
     Declares which paths an issue will modify so the picker can refuse to hand
     two agents work that collides on the same files. `parallel-eligible` only
     means 'no unresolved depends-on'; it says nothing about file conflicts.
+    Untrusted input is data: traversal, absolute paths, and command operators
+    are dropped rather than executed.
     """
     if not body:
         return []
@@ -432,18 +795,47 @@ def parse_touches(body: str) -> List[str]:
     # no path budget look claimable to build_candidates() while the enforcement
     # hook's stricter parser saw nothing and failed open - so two agents could
     # be handed overlapping files.
+    # Ignore code blocks before the line-anchored search: a fenced or indented
+    # example quotes the template and would supply its own declaration in place
+    # of the issue's, reserving the wrong paths and masking real depends-on
+    # edges (issue #294).
     match = re.search(
         r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
-        body, re.IGNORECASE | re.MULTILINE,
+        strip_code_blocks(body), re.IGNORECASE | re.MULTILINE,
     )
     if not match:
         return []
-    raw = match.group(1).strip().strip("*_").strip()
+    raw = _unwrap_declared_touches_value(match.group(1))
     # "(github settings only)" and similar prose mean the issue changes nothing
     # in the tree - not that it declared a directory called "(github".
     if raw.startswith("("):
         return []
-    return [p.strip().strip("`") for p in raw.split(",") if p.strip()]
+    if metadata_line_is_command_like(raw):
+        return []
+    return [
+        p.strip().strip("`")
+        for p in raw.split(",")
+        if p.strip()
+        and declared_path_is_safe(p.strip().strip("`"))
+        and _is_plausible_declared_path(p.strip().strip("`"))
+    ]
+
+
+def _unwrap_declared_touches_value(raw: str) -> str:
+    """Strip wrapping markdown without destroying a repo-wide ``**`` glob."""
+    value = (raw or "").strip()
+    if value in {"*", "**"}:
+        return value
+    if value.startswith("**/"):
+        return value
+    if len(value) >= 2 and value[0] == "`" and value[-1] == "`" and "`" not in value[1:-1]:
+        inner = value[1:-1].strip()
+        return inner if inner else value
+    if value.startswith("**") and value.endswith("**") and len(value) > 4:
+        return value[2:-2].strip()
+    if value.startswith("**"):
+        return value[2:].strip()
+    return value
 
 
 def _norm_path(p: str) -> str:
@@ -485,10 +877,65 @@ def touches_conflict(a_paths: List[str], b_paths: List[str]) -> Optional[Tuple[s
 
 
 def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
-    """Fetches single issue details via gh CLI."""
-    cmd = ["gh", "issue", "view", str(issue_id), "--json", "number,title,labels,assignees,body,state"]
+    """Fetches single issue details via gh CLI, plus GraphQL trust identity."""
+    cmd = [
+        "gh", "issue", "view", str(issue_id),
+        "--json", "number,title,labels,assignees,body,state,author",
+    ]
     res = run_gh_json(cmd)
-    return res if isinstance(res, dict) else None
+    if not isinstance(res, dict):
+        return None
+    trust = _issue_trust_identity(issue_id)
+    res["trustIdentityResolved"] = trust is not None
+    if trust:
+        if "editor" in trust:
+            res["editor"] = trust["editor"]
+        if trust.get("authorAssociation"):
+            res["authorAssociation"] = trust["authorAssociation"]
+    return res
+
+
+_ISSUE_TRUST_QUERY = """
+query($owner:String!, $repo:String!, $number:Int!) {
+  repository(owner:$owner, name:$repo) {
+    issue(number:$number) {
+      editor { login }
+      authorAssociation
+    }
+  }
+}
+"""
+
+
+def _issue_trust_identity(issue_id: int) -> Optional[Dict[str, Any]]:
+    """Editor and association fields that `gh issue view --json` cannot return."""
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return None
+    owner, repo = slug.split("/", 1)
+    cmd = [
+        "gh", "api", "graphql",
+        "-f", f"query={_ISSUE_TRUST_QUERY}",
+        "-F", f"owner={owner}",
+        "-F", f"repo={repo}",
+        "-F", f"number={issue_id}",
+    ]
+    payload = run_gh_json(cmd)
+    if not isinstance(payload, dict) or payload.get("errors"):
+        return None
+    try:
+        node = payload["data"]["repository"]["issue"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(node, dict):
+        return None
+    trust: Dict[str, Any] = {}
+    if "editor" in node:
+        trust["editor"] = node.get("editor")
+    association = node.get("authorAssociation")
+    if isinstance(association, str) and association:
+        trust["authorAssociation"] = association
+    return trust
 
 
 def fetch_pr_comments(pr_id: int) -> List[Dict[str, Any]]:
@@ -824,6 +1271,127 @@ def set_board_status(issue_number: int, status: str) -> bool:
         else:
             print(f"[WARN] Board move failed for project '{project.get('title')}': {err}", file=sys.stderr)
     return moved
+
+
+def get_issue_priority_field(issue_number: int) -> Optional[str]:
+    """Returns the governed Project 'Priority' single-select value (P0..P3).
+
+    Returns ``None`` on any GraphQL failure, missing field, or value, so the
+    caller can fail closed instead of guessing. The read is scoped to the
+    governed board item — mirroring ``set_issue_priority_field`` and the
+    Status helpers — because an issue can appear on several boards and only
+    the governed item is the synchronization mirror for ``priority:pN``.
+    """
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return None
+    owner, repo = slug.split("/", 1)
+    query = """
+    query($owner:String!, $repo:String!, $number:Int!) {
+      repository(owner:$owner, name:$repo) {
+        issue(number:$number) {
+          projectItems(first:10) {
+            nodes {
+              priority: fieldValueByName(name:"Priority") {
+                ... on ProjectV2ItemFieldSingleSelectValue { name }
+              }
+              project {
+                id
+                title
+                repositories(first:100) {
+                  nodes { nameWithOwner }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    cmd = [
+        "gh", "api", "graphql",
+        "-f", f"query={query}",
+        "-F", f"owner={owner}",
+        "-F", f"repo={repo}",
+        "-F", f"number={issue_number}",
+    ]
+    res = run_gh_json(cmd)
+    if not isinstance(res, dict) or res.get("errors"):
+        return None
+    try:
+        nodes = res["data"]["repository"]["issue"]["projectItems"]["nodes"]
+    except (KeyError, TypeError):
+        return None
+    items = select_governed_project_items(nodes or [], slug)
+    for item in items:
+        value = (item or {}).get("priority") or {}
+        name = value.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return None
+
+
+def set_issue_priority_field(issue_number: int, value: str) -> bool:
+    """Sets the governed Project 'Priority' field to a P0..P3 value.
+
+    ``value`` must already be an exact option (e.g. 'P2'). Returns True only
+    when at least one board item updated, mirroring ``set_board_status``.
+    """
+    slug = get_repo_slug()
+    if not slug or "/" not in slug or "P" not in value:
+        return False
+    items = get_issue_project_items(issue_number)
+    items = select_governed_project_items(items, slug)
+    if not items:
+        if not attach_issue_to_governed_project(issue_number):
+            return False
+        items = select_governed_project_items(
+            get_issue_project_items(issue_number), slug
+        )
+    if not items:
+        return False
+
+    updated = False
+    for item in items:
+        project = item.get("project") or {}
+        field = next(
+            (f for f in project.get("fields", []) if f.get("name") == "Priority"),
+            None,
+        )
+        if not field:
+            continue
+        option = next(
+            (o for o in field.get("options", []) if o.get("name") == value),
+            None,
+        )
+        if not option:
+            continue
+        mutation = """
+        mutation($project:ID!, $item:ID!, $field:ID!, $option:String!) {
+          updateProjectV2ItemFieldValue(input:{
+            projectId:$project, itemId:$item, fieldId:$field,
+            value:{ singleSelectOptionId:$option }
+          }) { projectV2Item { id } }
+        }
+        """
+        cmd = [
+            "gh", "api", "graphql",
+            "-f", f"query={mutation}",
+            "-F", f"project={project['id']}",
+            "-F", f"item={item['id']}",
+            "-F", f"field={field['id']}",
+            "-F", f"option={option['id']}",
+        ]
+        code, _, err = run_cmd(cmd, check=False)
+        if code == 0:
+            updated = True
+        else:
+            print(
+                f"[WARN] Priority field update failed for project "
+                f"'{project.get('title')}': {err}",
+                file=sys.stderr,
+            )
+    return updated
 
 
 def add_issue_to_project(issue_number: int, project_number: int, owner: str = "@me") -> bool:

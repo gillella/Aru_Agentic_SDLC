@@ -1,3 +1,4 @@
+// line-ceiling: 442
 /**
  * Aru Agentic SDLC — Interactive Graphical Visualizer Logic
  * Provides component metadata, drawer inspection, search filtering,

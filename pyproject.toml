@@ -13,20 +13,106 @@ target-version = "py311"
 #
 #   E4  import placement      E7  likely mistakes (ambiguous names, comparisons)
 #   E9  syntax and IO errors  F   pyflakes: undefined names, unused imports
+#   C901 cyclomatic complexity (>12)
+#   PLR0912 too many branches (>12)
+#   PLR0915 too many statements (>50)
 #
-# This is the correctness core, not a style opinion. Formatting rules are
-# deliberately absent: the repository has no formatter, and enabling E501
-# would add 305 findings that say nothing about whether the code works.
-select = ["E4", "E7", "E9", "F"]
+# This is the correctness and complexity core, not a style opinion. Formatting
+# rules are deliberately absent: the repository has no formatter, and enabling
+# E501 would add 305 findings that say nothing about whether the code works.
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "C901",
+    "PLR0912",
+    "PLR0915",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
 
 [tool.ruff.lint.per-file-ignores]
 # Every test module puts scripts/ or hooks/ on sys.path before importing the
 # module under test. The import cannot precede the path setup, so E402 is
-# wrong here by construction rather than by neglect.
-#
-# This is the only entry, and it should stay that way. #64 introduced a block
-# of per-file debt entries as a deliberate stopgap; #66 emptied it. A new
-# entry here silences a rule for a whole file, including code not yet written,
-# so it needs a reason of this kind - the rule is wrong for this file - rather
-# than "the finding already existed".
-"tests/*" = ["E402"]
+# wrong here by construction rather than by neglect. Test suites also
+# legitimately contain extensive scenarios and assertions, so complexity
+# checks are suppressed for test fixtures and assertions.
+"tests/*" = ["E402", "C901", "PLR0912", "PLR0915"]
+
+[tool.importlinter]
+root_packages = [
+    "hooks",
+    "scripts",
+]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Contract 1: hooks must not import skills or templates"
+type = "forbidden"
+source_modules = [
+    "hooks",
+]
+forbidden_modules = [
+    "skills",
+    "templates",
+]
+
+[[tool.importlinter.contracts]]
+name = "Contract 2: hooks must not import scripts or common"
+type = "forbidden"
+source_modules = [
+    "hooks",
+]
+forbidden_modules = [
+    "scripts",
+    "common",
+]
+
+[[tool.importlinter.contracts]]
+name = "Contract 3: governance primitives (common.py) cannot import workflow scripts"
+type = "forbidden"
+source_modules = [
+    "scripts.common",
+]
+forbidden_modules = [
+    "scripts.acceptance_runner",
+    "scripts.agent_presence",
+    "scripts.build_preview",
+    "scripts.check_ci",
+    "scripts.check_docs",
+    "scripts.claim_issue",
+    "scripts.cleanup_worktrees",
+    "scripts.create_branch",
+    "scripts.create_pr",
+    "scripts.delivery_increments",
+    "scripts.deploy_preview",
+    "scripts.doctor_local_agent_integrations",
+    "scripts.enable_main_ruleset",
+    "scripts.factory_metrics",
+    "scripts.fetch_next_issue",
+    "scripts.fetch_next_work",
+    "scripts.fetch_pr_feedback",
+    "scripts.fixtures",
+    "scripts.fleet_status",
+    "scripts.incident_intake",
+    "scripts.init_project",
+    "scripts.merge_pr",
+    "scripts.prd_to_issues",
+    "scripts.promote",
+    "scripts.prune_codebase",
+    "scripts.release",
+    "scripts.revert_merge",
+    "scripts.run_fleet",
+    "scripts.slack_control_room",
+    "scripts.slack_notify",
+    "scripts.slack_projects",
+    "scripts.smoke_preview",
+    "scripts.spawn_ephemeral_worker",
+    "scripts.sync_spec",
+    "scripts.triage_backlog",
+    "scripts.update_issue_status",
+    "scripts.verify_citations",
+]
+

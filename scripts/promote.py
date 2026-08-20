@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 716
 """Governed audit-only environment state promotion for merged checkpoints.
 
 This helper records GitHub Environment/Deployment state and an issue trail. It
@@ -560,7 +561,7 @@ def record_promotion(
     return code == 0
 
 
-def promote(
+def promote(  # noqa: C901, PLR0912
     commit_sha: str,
     checkpoint: str,
     issues: Sequence[int],

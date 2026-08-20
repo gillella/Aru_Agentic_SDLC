@@ -115,7 +115,7 @@ class CreateBranchPlanGateTests(unittest.TestCase):
 
         path = cb.create_branch(999, branch_type="feat", use_worktree=True, fetch_remote=True)
         self.assertEqual(path, ".worktrees/feat-issue-999-planned-feature")
-        mock_worktree.assert_called_once_with("feat/issue-999-planned-feature")
+        mock_worktree.assert_called_once_with("feat/issue-999-planned-feature", agent="")
 
     def test_inline_touches_placeholder_rejected(self):
         plan_with_tbd_touches = (

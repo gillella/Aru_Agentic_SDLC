@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 730
 """triage_backlog.py - promotes Backlog issues to Ready, and sizes the fleet.
 
 Triage is the throughput cap nobody owns. The picker cannot hand out a Backlog
@@ -12,10 +13,14 @@ half is a two-minute job instead of an archaeology session.
   python3 triage_backlog.py --promote --issue 24 --issue 25
   python3 triage_backlog.py --capacity     # just the fleet-size answer
 
-The Ready contract (all four required):
-  * not an epic
+The Ready contract (everything ready_gaps() actually enforces):
+  * not needs-human (operator-only) and not an epic
   * acceptance criteria present, as checkboxes
+  * on a feat/fix: every acceptance criterion carries a machine-checkable
+    predicate such as ``(verify: `cmd`)`` or a test assertion
+  * a verification section
   * a touches: declaration
+  * on a feat/fix: a ``## Decision Boundaries`` and a ``## Non-Goals`` section
   * every depends-on issue is closed
 
 Oversized-scope recommendation (either signal is sufficient):
@@ -103,7 +108,37 @@ def _is_valid_fenced_verify_command(cmd: str) -> bool:
         return False
     if re.match(r"^(?:<.*>|\.{3,}|todo|tbd|none|n/a)$", lower):
         return False
-    return True
+    try:
+        from acceptance_runner import validate_command
+        validate_command(cleaned)
+        return True
+    except Exception:
+        return False
+
+
+def unrunnable_verify_predicates(criteria: list[str]) -> list[tuple[str, str]]:
+    """Returns a list of (criterion_text, rejection_reason) for any unrunnable verify command."""
+    fenced_verify_pattern = re.compile(
+        r"\((?:verify|verify_cmd):\s*`([^`]+)`\)"
+        r"|\b(?:verify|verify_cmd)\s*:\s*`([^`]+)`",
+        re.IGNORECASE,
+    )
+    unrunnable = []
+    for criterion in criteria:
+        for m in fenced_verify_pattern.finditer(criterion):
+            cmd = m.group(1) or m.group(2)
+            if not cmd:
+                continue
+            cleaned = cmd.strip("`'\" \t\r\n").strip()
+            if not cleaned or cleaned.lower() in VERIFY_PLACEHOLDERS:
+                unrunnable.append((criterion, f"placeholder verify command: {cmd!r}"))
+                continue
+            try:
+                from acceptance_runner import validate_command
+                validate_command(cleaned)
+            except Exception as exc:
+                unrunnable.append((criterion, str(exc)))
+    return unrunnable
 
 
 def _is_criterion_machine_checkable(criterion: str) -> bool:
@@ -167,12 +202,22 @@ ARU_SDLC_REPO_SLUG = "gillella/Aru_Agentic_SDLC"
 LEGACY_ISSUE_CUTOFF_NUMBER = 158
 SPLIT_ACCEPTANCE_CRITERIA_THRESHOLD = 8
 
+# Areas that accompany production work rather than widening its scope.
+# merge_pr.py's `tests` gate REQUIRES a changed file under tests/ whenever
+# scripts/ or src/ changes, and CI's documentation-freshness check pulls docs/
+# along the same way. Counting either as an independent top-level area made the
+# Ready contract and the merge contract mutually unsatisfiable: the only
+# touches: shape that cleared triage (a single area) was guaranteed to fail the
+# merge gate, and the only shape that cleared merge was guaranteed to be held
+# here (issue #288).
+COMPANION_AREAS = frozenset({"tests", "docs"})
+
 EXAMPLE_CONFORMING_ISSUE_BODY = """## Feature Description
 Describe the problem and intended change.
 
 ## Acceptance Criteria
 - [ ] Predicate 1 (verify: `python3 -m unittest tests.test_foo`)
-- [ ] Predicate 2 (verify: `python3 scripts/foo.py --check`)
+- [ ] Predicate 2 (verify: `ruff check .`)
 
 ## Decision Boundaries
 - Default: return 0 on success
@@ -278,7 +323,7 @@ def is_legacy_issue(num: int, repo_slug: Optional[str] = None) -> bool:
     return bool(repo_slug and repo_slug.strip().lower() == ARU_SDLC_REPO_SLUG.lower())
 
 
-def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str] = None) -> list[str]:
+def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str] = None) -> list[str]:  # noqa: C901, PLR0912
     """Returns the list of unmet Ready-contract elements. Empty means ready."""
     body = issue.get("body") or ""
     num = issue.get("number", 0)
@@ -295,19 +340,31 @@ def ready_gaps(issue: dict[str, Any], open_numbers: set, repo_slug: Optional[str
     criteria = acceptance_criteria(body)
     if not criteria:
         gaps.append("no acceptance criteria checkboxes")
-    elif is_feat_or_fix(issue) and not has_machine_checkable_predicates(criteria):
-        if is_legacy_issue(num, repo_slug):
-            print(
-                f"  [WARN] Pre-existing legacy issue #{num} lacks machine-checkable verification predicates in acceptance criteria; warning only.",
-                file=sys.stderr,
-            )
-        else:
-            gaps.append("acceptance criteria lack machine-checkable predicate (e.g., '(verify: `cmd`)' or test assertion)")
+    elif is_feat_or_fix(issue):
+        if not has_machine_checkable_predicates(criteria):
+            if is_legacy_issue(num, repo_slug):
+                print(
+                    f"  [WARN] Pre-existing legacy issue #{num} lacks machine-checkable verification predicates in acceptance criteria; warning only.",
+                    file=sys.stderr,
+                )
+            else:
+                gaps.append("acceptance criteria lack machine-checkable predicate (e.g., '(verify: `cmd`)' or test assertion)")
+        unrunnable = unrunnable_verify_predicates(criteria)
+        if unrunnable:
+            for text, reason in unrunnable:
+                gaps.append(f"unrunnable verify predicate ({reason}) in criterion: {text[:60]}")
 
     if not has_verification(body):
         gaps.append("no verification section")
     if not parse_touches(body):
         gaps.append("no touches: declaration")
+
+    bare_globs = _bare_directory_globs(body)
+    if bare_globs:
+        gaps.append(
+            "touches use a bare directory glob (reserves a whole top-level area): "
+            + ", ".join(bare_globs)
+        )
 
     if is_feat_or_fix(issue):
         missing_db = not has_decision_boundaries(body)
@@ -347,7 +404,51 @@ def _repository_root() -> str:
     return result.stdout.strip() if result.returncode == 0 else os.getcwd()
 
 
-def split_reasons(issue: dict[str, Any]) -> list[str]:
+_TOUCHES_LINE_RE = re.compile(
+    r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# A bare directory glob reserves a whole top-level area: `<dir>/**` (or
+# `<dir>/**/*`). A glob that names files - e.g. `docs/adr/*.md` - is fine.
+_BARE_DIR_GLOB_RE = re.compile(r"^[A-Za-z0-9_.\-]+/\*\*(?:/\*)?$")
+
+
+def _declared_touches_paths(body: str) -> list[str]:
+    """Flat list of paths declared in an issue's ``touches:`` line."""
+    m = _TOUCHES_LINE_RE.search(body)
+    if not m:
+        return []
+    return [
+        path.strip().strip("`")
+        for path in m.group(1).split(",")
+        if path.strip().strip("`")
+    ]
+
+
+def _bare_directory_globs(body: str) -> list[str]:
+    return [p for p in _declared_touches_paths(body) if _BARE_DIR_GLOB_RE.match(p)]
+
+
+def hub_path_contention(issues: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """How many open non-epic issues declare each hub path.
+
+    Hub files (``AGENTS.md``, ``scripts/common.py``) are declared by many issues
+    because nearly every governance change edits them, so they serialise the
+    board invisibly. Returns ``(path, count)`` for each path declared by two or
+    more issues, most-declared first - the paths most worth splitting around.
+    """
+    counts: dict[str, int] = {}
+    for issue in issues:
+        if is_epic(issue.get("labels", [])):
+            continue
+        for path in _declared_touches_paths(issue.get("body") or ""):
+            counts[path] = counts.get(path, 0) + 1
+    hubs = [(path, count) for path, count in counts.items() if count >= 2]
+    hubs.sort(key=lambda item: (-item[1], item[0].lower()))
+    return hubs
+
+
+def split_reasons(issue: dict[str, Any]) -> list[str]:  # noqa: C901, PLR0912
     """Returns concrete reasons a Ready-contract issue should be split.
 
     This is deliberately advisory: each visible oversize signal is enough to
@@ -356,18 +457,11 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
     """
     body = issue.get("body") or ""
     criteria_count = len(acceptance_criteria(body))
-    touches_match = re.search(
-        r"^[ \t]*[*_`]{0,2}touches[*_`]{0,2}[ \t]*:[ \t]*([^\n]*)",
-        body,
-        re.IGNORECASE | re.MULTILINE,
-    )
-    declared_paths = []
-    if touches_match:
-        declared_paths = [
-            path.strip().strip("`")
-            for path in touches_match.group(1).split(",")
-            if path.strip().strip("`")
-        ]
+    # Keep triage's own cross-checking parser rather than `parse_touches`: the
+    # security hardening (#129) makes parse_touches drop root ("."/"/") and
+    # "./"-prefixed declarations as unsafe, but triage must keep seeing those
+    # as "repository-wide" so an over-wide issue is held for splitting.
+    declared_paths = _declared_touches_paths(body)
     area_roots = []
     repository_wide = False
     repository_root = _repository_root()
@@ -401,6 +495,12 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
     areas = sorted({
         root for root in area_roots if not any(char in root for char in "*?[")
     })
+    # Drop companion areas before measuring span. A production change is
+    # obliged to carry its tests (and often its docs), so those paths describe
+    # the same unit of work rather than a second one. An issue touching only
+    # companions is small by construction, so it collapses to no span at all
+    # instead of reporting tests+docs as two areas.
+    span_areas = [root for root in areas if root not in COMPANION_AREAS]
     reasons = []
     if criteria_count > SPLIT_ACCEPTANCE_CRITERIA_THRESHOLD:
         reasons.append(
@@ -409,8 +509,11 @@ def split_reasons(issue: dict[str, Any]) -> list[str]:
         )
     if repository_wide:
         reasons.append("touches include the whole repository root")
-    if len(areas) > 1:
-        reasons.append(f"touches span {len(areas)} top-level areas: {', '.join(areas)}")
+    if len(span_areas) > 1:
+        reasons.append(
+            f"touches span {len(span_areas)} top-level areas: "
+            f"{', '.join(span_areas)}"
+        )
     if wildcard_roots:
         reasons.append(
             "touches use wildcard top-level area patterns: "
@@ -502,7 +605,20 @@ def print_capacity(
         print(f"\n  → Launch at most {n} agent(s). More will idle.")
 
 
-def main():
+def _print_hub_contention(issues: list[dict[str, Any]]) -> None:
+    hubs = hub_path_contention(issues)
+    if not hubs:
+        return
+    print("\n=== Hub path contention (shared across open non-epic issues) ===")
+    print("  Paths declared by the most issues serialise the board. Split them:")
+    for path, count in hubs:
+        area = path.split("/", 1)[0]
+        print(f"  {count:>3} issues declare  {path}" + (
+            "   ← bare top-level area" if area and path.endswith("**") else ""
+        ))
+
+
+def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Verify the Ready contract and promote Backlog issues.")
     parser.add_argument("--promote", action="store_true", help="Promote qualifying issues to Ready")
     parser.add_argument(
@@ -540,6 +656,7 @@ def main():
             held,
             ready_target=target,
         )
+        _print_hub_contention(issues)
         return 0
 
     if args.issue:

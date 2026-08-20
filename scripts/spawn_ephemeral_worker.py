@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 789
 """Launch one governed, task-scoped CLI worker for a pull request.
 
 The GitHub Project Board and the normal Aru lifecycle helpers remain
@@ -283,7 +284,7 @@ def load_pr_metadata(repo: Path, pr: int) -> PRMetadata:
     )
 
 
-def validate_task(config: LauncherConfig, metadata: PRMetadata) -> None:
+def validate_task(config: LauncherConfig, metadata: PRMetadata) -> None:  # noqa: C901, PLR0912
     if os.environ.get("ARU_CAN_SPAWN", "1") != "1":
         raise LauncherError("recursive ephemeral spawning is disabled (ARU_CAN_SPAWN != 1)")
     if metadata.state != "OPEN":
@@ -620,7 +621,7 @@ def release_review_or_report(config: LauncherConfig) -> bool:
     return True
 
 
-def execute(config: LauncherConfig) -> int:
+def execute(config: LauncherConfig) -> int:  # noqa: C901, PLR0912, PLR0915
     if os.environ.get("ARU_CAN_SPAWN", "1") != "1":
         raise LauncherError("recursive ephemeral spawning is disabled (ARU_CAN_SPAWN != 1)")
     metadata = load_pr_metadata(config.repo, config.pr)

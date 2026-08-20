@@ -1,3 +1,4 @@
+# line-ceiling: 437
 import json
 import os
 import subprocess
@@ -79,8 +80,27 @@ class ValidateTests(unittest.TestCase):
                     acceptance_runner.validate_command(command)
 
     def test_non_allowlisted_runner_is_rejected(self):
-        with self.assertRaises(acceptance_runner.CommandRejected):
+        with self.assertRaises(acceptance_runner.CommandRejected) as ctx:
             acceptance_runner.validate_command("bash -lc id")
+        self.assertIn("allowed runners:", str(ctx.exception))
+        self.assertIn("ruff", str(ctx.exception))
+        self.assertIn("pytest", str(ctx.exception))
+
+    def test_ruff_check_command_is_allowed(self):
+        argv = acceptance_runner.validate_command("ruff check .")
+        self.assertEqual(argv, ["ruff", "check", "."])
+
+    def test_ruff_with_flags_and_safe_target_is_allowed(self):
+        argv = acceptance_runner.validate_command("ruff check scripts/ tests/ --no-fix")
+        self.assertEqual(argv, ["ruff", "check", "scripts/", "tests/", "--no-fix"])
+
+    def test_ruff_disallowed_subcommand_is_rejected(self):
+        with self.assertRaises(acceptance_runner.CommandRejected):
+            acceptance_runner.validate_command("ruff clean .")
+
+    def test_ruff_disallowed_flag_is_rejected(self):
+        with self.assertRaises(acceptance_runner.CommandRejected):
+            acceptance_runner.validate_command("ruff check --add-noqa .")
 
     def test_python_dash_c_is_rejected(self):
         with self.assertRaises(acceptance_runner.CommandRejected):

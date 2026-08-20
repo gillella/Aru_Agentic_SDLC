@@ -43,6 +43,11 @@ has completed the independent review and every enforced gate passes. An author
 must never review their own PR. No agent or human may bypass the merge helper
 with a direct push or an ad-hoc merge.
 
+GitHub required-approval rulesets stay **off** until the #123 reviewer App
+(`ARU_REVIEW_APP_LOGIN`, provisionally `aru-reviewer[bot]`) is installed and
+can `gh pr review --approve` a fleet-authored PR. Until then, `author:` /
+`reviewed-by:` labels remain the independent-review authority.
+
 Money, PII, security, schema, migration, irreversible behavior, large diffs,
 and repeated review rounds increase the required planning, testing, and review
 depth; none of them alone creates a mandatory human gate. Human intervention
@@ -89,7 +94,7 @@ is implementation-plan comments via `gh issue comment`.
 
 Helper inventory:
 
-* `"$ARU_SDLC_HOME/scripts/install_cursor_integration.sh"` — wire Cursor skills, commands, env
+* `"$ARU_SDLC_HOME/scripts/install_agent_integration.sh"` — wire skills, commands, env for Cursor/Codex/Claude/Antigravity
 * `python3 "$ARU_SDLC_HOME/scripts/init_project.py" --name <NAME> [--private] [--create-board]`
 * `"$ARU_SDLC_HOME/scripts/install_hooks.sh"` — pre-push + PreToolUse enforcement (run once per repo)
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID>` — one picker for all three work types; prefer over `fetch_next_issue.py`
@@ -97,7 +102,30 @@ Helper inventory:
 * `python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" [--capacity]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --agent <AGENT_ID>` — claim a PR for review
-* `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree]`
+* `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree] [--agent <id>]`
+* `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --adopt --agent <id> --model-family <family>` — take over an abandoned PR
+
+## Agent identity
+
+An agent's id is derived from where it runs: `<product>-<fingerprint>`, e.g.
+`claude-a3f19c`, where the fingerprint hashes machine, checkout, and model
+family. It is therefore **stable across restarts** — a restarted session
+recomputes the same id and reclaims its own board work — and **distinct across
+machines**, so two agents can never be issued the same id.
+
+Override with `ARU_AGENT_ID`, or name one explicitly with `--agent`. Fleets that
+want fixed readable names (`claude-1`, `codex-1`) can pass `--agent-pool`.
+
+## When an agent disappears
+
+Claims are not permanent. An issue whose record, branch, and pull request have
+all been quiet longer than `--reap-after` (default 4h) is released back to
+Ready, with an audit comment naming the branch and PR that were left behind.
+
+A successor **adopts** the abandoned PR rather than restarting it: `author:` and
+`family:` move to the adopting agent, `adopted-from:<previous>` is recorded, and
+the commits, CI history, and review threads are preserved. Adoption refuses a PR
+updated inside the abandonment window, so live work cannot be taken.
 * `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> [--model-family <family>] --title "<Title>" --body "<body>"`
   — `--agent` is required. It stamps `author:<id>`, which is the only thing
   that lets the merge gate tell a peer review from a self-review, since every
@@ -144,7 +172,9 @@ Inside this playbook repo itself, `$ARU_SDLC_HOME` may be `.` / the repo root.
 ```
 
 See [`docs/project_board_workflow.md`](docs/project_board_workflow.md) and
-[`docs/coding_standards.md`](docs/coding_standards.md).
+[`docs/coding_standards.md`](docs/coding_standards.md) (including the
+[Trust Boundary](docs/coding_standards.md#trust-boundary-for-issue-pr-and-review-text)
+for untrusted issue, PR, and review text).
 
 ---
 
@@ -152,7 +182,7 @@ See [`docs/project_board_workflow.md`](docs/project_board_workflow.md) and
 
 To use this playbook from **any** Cursor workspace on this machine:
 
-1. Run `scripts/install_cursor_integration.sh` once (sets `ARU_SDLC_HOME`,
+1. Run `scripts/install_agent_integration.sh` once (sets `ARU_SDLC_HOME`,
    symlinks skills into `~/.cursor/skills/` and `~/.agents/skills/`, installs
    slash commands under `~/.cursor/commands/`).
 2. Paste `templates/cursor/user-rules-aru-agentic-sdlc.md` into

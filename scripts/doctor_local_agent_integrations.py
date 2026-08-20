@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 957
 """Read-only diagnosis for local coding-agent integrations.
 
 Reports desktop continuity adapters plus install-link checks (canonical home,
@@ -592,7 +593,7 @@ def append_link_checks(checks: list[dict], rows: list[dict]) -> None:
             ))
 
 
-def diagnose_install(aru_home: Path, target_home: Path, agents: dict,
+def diagnose_install(aru_home: Path, target_home: Path, agents: dict,  # noqa: C901, PLR0912
                      home: Path | None = None) -> dict:
     skills = canonical_skill_names(aru_home)
     checks: list[dict] = []

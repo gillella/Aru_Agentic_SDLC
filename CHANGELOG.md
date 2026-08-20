@@ -21,11 +21,80 @@ Breaking changes (renames, mandatory flags, exit contract changes) force a **MAJ
 - `scripts/triage_backlog.py`
 - `scripts/enable_main_ruleset.py`
 - `scripts/install_local_agent_integrations.sh`
-- `scripts/install_cursor_integration.sh`
+- `scripts/install_agent_integration.sh`
 - `scripts/release.py`
+- `scripts/increment_release.py`
 
 ## Checkpoint History
 
-- **ckpt/140-54086f3**: checkpoint: PR #140 — feat(merge): write an annotated checkpoint tag on every merge
-- **ckpt/138-950762c**: checkpoint: PR #138 — docs(loop): please continue resumes the factory from the board
+- **ckpt/302-55830e3**: checkpoint: PR #302 — test(factory): prove the lifecycle is traversable end to end (#302)
+- **ckpt/309-394f6d6**: checkpoint: PR #309 — fix(merge): decide the rebased gate from ancestry, not mergeStateStatus (#309)
+- **ckpt/312-74876fc**: checkpoint: PR #312 — Merge pull request #312 from gillella/fix/p0-p1-sweep
+- **ckpt/313-c70486b**: checkpoint: PR #313 — Merge pull request #313 from gillella/feat/issue-301-featbuild-grill-aru-interrogation-skill
+- **ckpt/315-539b57b**: checkpoint: PR #315 — fix(review): resolve four ambiguities by failing closed instead of guessing (#315)
+- **ckpt/317-ea13d27**: checkpoint: PR #317 — fix(tests): green the suite by fixing three stale contracts (#317)
+- **ckpt/318-a361e16**: checkpoint: PR #318 — chore(ci): govern TypeScript and Go sources with the line ceiling (#318)
+- **ckpt/320-03e2f15**: checkpoint: PR #320 — chore(init): give bootstrapped projects the line-ceiling ratchet (#320)
+- **ckpt/322-f19d5cd**: checkpoint: PR #322 — chore(governance): remove the fast-track relaxation and restore the full merge gate (#322)
+- **ckpt/323-4f77fcb**: checkpoint: PR #323 — docs(release): generate CHANGELOG for v0.1.0 (#323)
+- **ckpt/325-6c3a97a**: checkpoint: PR #325 — chore(repo): ignore the claude-mem generated scripts/CLAUDE.md (#325)
+- **ckpt/300-86b2ddc**: checkpoint: PR #300 — feat(picker): claim only priority-ranked stories in the active authorized sprint
+- **ckpt/295-2009f0c**: checkpoint: PR #295 — feat(governance): separate reviewer identity via configured GitHub App
+- **ckpt/297-2db7d34**: checkpoint: PR #297 — fix(gates): allow ruff verify predicates and flag unrunnable predicates at triage
+- **ckpt/265-42ac844**: checkpoint: PR #265 — fix(reaper): key stale claims to claim age
+- **ckpt/257-adcf1e8**: checkpoint: PR #257 — feat(factory): add attested Gemini ephemeral reviewer adapter
+- **ckpt/251-f9f4601**: checkpoint: PR #251 — feat(fleet): add governed single-shot ephemeral workers
+- **ckpt/246-26a1b34**: checkpoint: PR #246 — feat(deploy): add audit-only governed promotion records
+- **ckpt/239-3a21ee3**: checkpoint: PR #239 — feat(review): bound review rounds with automated scope reduction
+- **ckpt/240-116c860**: checkpoint: PR #240 — feat(docs): add interactive software factory briefing
+- **ckpt/226-6120be9**: checkpoint: PR #226 — docs: correct stale factory claims against current gates
+- **ckpt/236-0999dc2**: checkpoint: PR #236 — fix(picker): route the re-review that stale peer attribution requires
+- **ckpt/233-c2e83a2**: checkpoint: PR #233 — fix(merge): reject author replies and bot reviews as head evidence
+- **ckpt/229-9ff5ec4**: checkpoint: PR #229 — fix(picker): surface PRs stranded on author-clearable gates
+- **ckpt/230-489d677**: checkpoint: PR #230 — feat(ops): surface exhausted close-out intervention
+- **ckpt/227-cb3988c**: checkpoint: PR #227 — feat(review): execute acceptance-criteria verify commands at merge
+- **ckpt/217-dfd628a**: checkpoint: PR #217 — feat(merge): enforce size and test coverage gates
+- **ckpt/225-edc7c9c**: checkpoint: PR #225 — feat(intake): add PRD dependency planner
+- **ckpt/219-2473c0e**: checkpoint: PR #219 — docs: consolidate factory guides into one canonical structure
+- **ckpt/218-03616d7**: checkpoint: PR #218 — feat(intake): add idea-to-PRD workflow
+- **ckpt/223-33bf0cd**: checkpoint: PR #223 — feat(iteration): add operator-authorized delivery increments
+- **ckpt/222-06606df**: checkpoint: PR #222 — feat(picker): exclude operator-only issues
+- **ckpt/162-0b4a94f**: checkpoint: PR #162 — feat(deploy): deploy-preview skill gated on a merged commit
+- **ckpt/221-ec7ca31**: checkpoint: PR #221 — fix(merge): paginate current-head review evidence
+- **ckpt/201-ee40973**: checkpoint: PR #201 — feat(ops): post blocking, waiting-on-peer, and HITL Slack alerts
+- **ckpt/202-f7294f6**: checkpoint: PR #202 — feat(intake): research as claimable board work with citation verification
+- **ckpt/216-0023372**: checkpoint: PR #216 — feat(ops): merge-queue view wrapping fleet_status and merge dry-run
+- **ckpt/210-2841c85**: checkpoint: PR #210 — feat(triage): recommend splitting oversized scopes
+- **ckpt/214-11fdae9**: checkpoint: PR #214 — fix(hooks): scope protected-branch guard to governed repos
+- **ckpt/213-a59bddb**: checkpoint: PR #213 — feat(review): capture verification evidence in PR bodies
+- **ckpt/166-7ebf667**: checkpoint: PR #166 — feat(ops): revert_merge.py — a governed reverse gear
+- **ckpt/167-b1fc2e2**: checkpoint: PR #167 — chore(hooks): pin the prose false-positive fix and stop the guard accepting raw commands
+- **ckpt/169-c7c99ad**: checkpoint: PR #169 — docs(review): widen the narrower-than-reality trigger to cover its own examples
+- **ckpt/170-c0ec09e**: checkpoint: PR #170 — fix(merge): an outdated review thread stops gating without any evidence
+- **ckpt/165-2527d8e**: checkpoint: PR #165 — fix(install): derive installed skill list from skills/ on disk
+- **ckpt/212-e9cd851**: checkpoint: PR #212 — fix(slack): support current GitHub repository identity APIs
+- **ckpt/203-649827e**: checkpoint: PR #203 — feat(intake): Ready-depth SLO so the fleet is never starved
+- **ckpt/209-11f5272**: checkpoint: PR #209 — chore(governance): harden main ruleset protections
+- **ckpt/168-5ebb48d**: checkpoint: PR #168 — chore(governance): apply the main ruleset once GitHub unlocks rulesets
+- **ckpt/159-ea6d62b**: checkpoint: PR #159 — feat(intake): require machine-checkable criteria before an issue reaches Ready
+- **ckpt/160-de52cd0**: checkpoint: PR #160 — feat(intake): make the plan gate a mechanism instead of prompt prose
+- **ckpt/158-6af5efc**: checkpoint: PR #158 — feat(consumers): honour ARU_SDLC_REF so installs can pin a version
+- **ckpt/200-1bfbf84**: checkpoint: PR #200 — feat(slack): add multi-project routed bridge
+- **ckpt/199-f3cd10f**: checkpoint: PR #199 — feat(telemetry): extend fleet_status into the operator's one screen
+- **ckpt/185-a2aef46**: checkpoint: PR #185 — feat(telemetry): capture cost and cycle time per closed issue
+- **ckpt/161-df5d188**: checkpoint: PR #161 — feat(telemetry): constraint dwell time and rework rounds metrics script
+- **ckpt/184-ea95553**: checkpoint: PR #184 — feat(ops): add Slack control-room notify and bridge
+- **ckpt/174-4953bd5**: checkpoint: PR #174 — feat(intake): require utility reuse audit in implementation plans
+- **ckpt/176-ed7309c**: checkpoint: PR #176 — feat(telemetry): add codebase health and LOC metrics to fleet_status.py
+- **ckpt/177-f7da159**: checkpoint: PR #177 — test(loop): prove unattended board completion end to end
+- **ckpt/175-70dec21**: checkpoint: PR #175 — feat(loop): add desktop-native continuity adapters for coding applications
+- **ckpt/173-d1f6961**: checkpoint: PR #173 — feat(gc): add report-only codebase prune scanner
+- **ckpt/171-7f78256**: checkpoint: PR #171 — feat(loop): keep desktop factory tasks running until stopped
+- **ckpt/157-82abd26**: checkpoint: PR #157 — fix(merge): default to merge commits instead of squash
+- **ckpt/155-c8defb9**: checkpoint: PR #155 — feat(release): SemVer release tags with a major bump on consumed-CLI breaks
+- **ckpt/153-f3680df**: checkpoint: PR #153 — feat(init): install Aru skills and native adapters for local coding agents
+- **ckpt/154-11b4ae3**: checkpoint: PR #154 — chore(ci): fail the build when source exists without tests
+- **ckpt/156-931cb61**: checkpoint: PR #156 — feat(docs): add interactive SDLC factory flow visualizer
 - **ckpt/134-d3a0588**: checkpoint: PR #134 — chore(governance): ruleset helper for main, without required reviews
+- **ckpt/138-950762c**: checkpoint: PR #138 — docs(loop): please continue resumes the factory from the board
+- **ckpt/140-54086f3**: checkpoint: PR #140 — feat(merge): write an annotated checkpoint tag on every merge

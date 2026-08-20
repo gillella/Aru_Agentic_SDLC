@@ -4,7 +4,7 @@ This environment is governed by Aru_Agentic_SDLC.
 
 1. Confirm work originates from a tracked GitHub issue (Issue-First Law).
 2. Read and follow matching skills under `$ARU_SDLC_HOME/skills/`:
-   - `run-aru-factory` — "please continue", work the board, loop mode
+   - `run-aru-factory` — `aru code` (synonyms `software`/`dev`/`sdlc`), "please continue", work the board, loop mode. `aru video` / `aru poem` are reserved for unbuilt factories: stop, do not improvise from Code Factory skills
    - `implement-next-issue` — claim / worktree / implement / PR for an issue
    - `create-github-issue` — file work
    - `code-review` — review a PR in an isolated worktree

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 3565
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -33,7 +34,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import acceptance_runner
@@ -57,7 +58,14 @@ CHECKPOINT_PREFIX = "ckpt/"
 
 # Completed-review attribution, written by claim_issue.py --complete-review.
 # This is the only label that satisfies the gate.
+AUTHOR_LABEL = "author:"
 REVIEWED_BY_LABEL = "reviewed-by:"
+# The authoring agent's model family, stamped on the PR by create_pr.py.
+FAMILY_LABEL = "family:"
+# reviewer-family:<id>:<family> - the reviewing agent's model family, stamped by
+# claim_issue.py --complete-review. Needed because the framework's identity is
+# the pair (id, family) and only the PR's own family was ever recorded (#307).
+REVIEWER_FAMILY_LABEL = "reviewer-family:"
 REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
 # The transient claim, written by claim_review. Deliberately NOT accepted here:
 # it records that an agent took the PR off the queue, not that it read anything.
@@ -69,9 +77,15 @@ REVIEW_CLAIM_LABEL = "reviewer:"
 MERGER_CLAIM_LABEL = "merger:"
 
 # Review apps can add useful findings, but their comments are not independent
-# approval. GitHub exposes some bot logins with a ``[bot]`` suffix and the
+# approval unless the factory operator names that App as the reviewer identity
+# (#123). GitHub exposes some bot logins with a ``[bot]`` suffix and the
 # Codex connector without one, so both forms must be recognized explicitly.
 ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
+# Advisory review-bot commit-status contexts that must never gate CI. A bot
+# review (e.g. CodeRabbit) posts a StatusContext that stays PENDING while it
+# re-reads the diff; it is not a build check and cannot certify the head.
+ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
+REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
 # review evidence; all other known actor kinds are automation or identities
 # whose human independence cannot be established. An unrecognized kind makes
@@ -235,7 +249,7 @@ def _finding_body_region(body):
     return None
 
 
-def _body_edit_events(owner, name, pr_id, expected_head):
+def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912, PLR0915
     """Verified author body-region changes, sourced from GitHub edit history.
 
     A bare pull-request ``updatedAt`` cannot distinguish body edits from reviews,
@@ -402,7 +416,7 @@ def _body_edit_events(owner, name, pr_id, expected_head):
     return events
 
 
-def _reviewed_current_head(owner, name, pr_id):
+def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
     """Returns ``(head_oid, reviewed_head, reviews)`` for every review page.
 
     GitHub caps connection pages at 100 entries.  Review-heavy pull requests
@@ -502,7 +516,9 @@ def _reviewed_current_head(owner, name, pr_id):
                 return None
             seen_review_ids.add(review_id)
             reviews.append(review)
-            if state in {"PENDING", "DISMISSED"} or actor_type != "User":
+            if state in {"PENDING", "DISMISSED"}:
+                continue
+            if actor_type != "User" and not is_configured_review_app(login):
                 continue
             if is_advisory_review_account(login):
                 continue
@@ -529,7 +545,7 @@ def _reviewed_current_head(owner, name, pr_id):
         cursor = next_cursor
 
 
-def _review_head_attestations(owner, name, pr_id, expected_head):
+def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
     """Head-bound agent attestations written by complete_review().
 
     Pull-request comments are paginated independently from reviews and review
@@ -623,7 +639,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):
         cursor = next_cursor
 
 
-def review_evidence(pr_id):
+def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     """Facts the review gate needs beyond a count of open threads.
 
     Returns ``None`` on any query failure - an unknown review state must never
@@ -882,32 +898,147 @@ def check_open(pr):
     return True, "PR is open."
 
 
+def _check_name(check):
+    """Check runs carry 'name'; legacy commit statuses carry 'context'."""
+    return check.get("name") or check.get("context") or "check"
+
+
+def _check_time(check):
+    """When this run finished, for ordering runs of the same check.
+
+    Falls back to the start time when a run has not completed. Returns None
+    when neither timestamp is usable, which the caller treats as "cannot be
+    ordered" rather than "is current".
+    """
+    raw = check.get("completedAt") or check.get("startedAt")
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+# Allowlist, not denylist. Enumerating the failure conclusions let unknown ones -
+# STARTUP_FAILURE, STALE, anything GitHub adds later - fall through to "green"
+# and merge an unverified head. Only these three mean "passed"; every other
+# completed conclusion fails closed.
+PASSING_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+IN_PROGRESS_STATES = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS",
+                      "WAITING", "REQUESTED"}
+
+
+def _check_outcome(check):
+    """Raw (status, result) for one run.
+
+    Check runs report 'conclusion'; legacy commit statuses report 'state'.
+    """
+    return (
+        (check.get("status") or "").upper(),
+        (check.get("conclusion") or check.get("state") or "").upper(),
+    )
+
+
+def _check_verdict(check):
+    """The (verdict, detail) this run contributes: pending, passing, or failing.
+
+    Ties between two runs are compared on this rather than on the raw fields. A
+    check run ({status: COMPLETED, conclusion: SUCCESS}) and a legacy commit
+    status ({state: SUCCESS}) describe one green outcome through different
+    fields, so comparing raw tuples would call them a disagreement and block a
+    PR that check_ci itself treats as green.
+
+    check_ci reads the same helper, so the tie-break and the verdict cannot
+    disagree about what a run means.
+    """
+    status, result = _check_outcome(check)
+    if (status and status != "COMPLETED" and not result) or result in IN_PROGRESS_STATES:
+        return ("pending", "")
+    if result in PASSING_CONCLUSIONS:
+        return ("passing", "")
+    return ("failing", result.lower() or "unknown")
+
+
+def _current_runs(rollup):
+    """Reduce the rollup to the live run of each check name.
+
+    GitHub keeps every run recorded against the head commit: the push-triggered
+    run, the pull_request-triggered run, and every re-run. Judging all of them
+    means one superseded failure holds the gate red forever, so re-running a
+    job green cannot unblock a PR and only an operator can (#306).
+
+    Array order carries no recency guarantee, so ordering comes from the
+    timestamps. A name with a single entry needs no ordering - that entry is
+    the run. A name with several entries where any timestamp is unusable is
+    reported as unorderable and fails closed: guessing which run is live is
+    exactly the mistake being fixed.
+    """
+    groups = {}
+    for check in rollup:
+        groups.setdefault(_check_name(check), []).append(check)
+
+    current, unorderable = {}, []
+    for name, runs in groups.items():
+        if len(runs) == 1:
+            current[name] = runs[0]
+            continue
+        stamped = [(_check_time(run), run) for run in runs]
+        if any(when is None for when, _ in stamped):
+            unorderable.append(name)
+            continue
+        newest = max(when for when, _ in stamped)
+        tied = [run for when, run in stamped if when == newest]
+        # max() returns the first maximal element, which is array order -- the
+        # one thing this function documents as carrying no recency evidence. Two
+        # runs finishing in the same second would otherwise decide a merge by
+        # response ordering. Ties that agree on the outcome are harmless; ties
+        # that disagree are undecidable.
+        if len({_check_verdict(run) for run in tied}) > 1:
+            unorderable.append(name)
+            continue
+        current[name] = tied[0]
+    return current, sorted(unorderable)
+
+
 def check_ci(pr):
     rollup = pr.get("statusCheckRollup") or []
     if not rollup:
         return False, "No CI checks reported on the head commit. A PR with no checks is not verified."
-    # Allowlist, not denylist. Enumerating the failure conclusions let unknown
-    # ones - STARTUP_FAILURE, STALE, anything GitHub adds later - fall through
-    # to "green" and merge an unverified head. Only these three mean "passed";
-    # every other completed conclusion fails closed.
-    passing = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-    in_progress = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
+    current, unorderable = _current_runs(rollup)
+    # An advisory review bot is not a build check, so it must not hold the gate
+    # by being unresolvable either (see ADVISORY_CHECK_CONTEXTS).
+    unorderable = [name for name in unorderable
+                   if (name or "").lower() not in ADVISORY_CHECK_CONTEXTS]
+    if unorderable:
+        return False, (
+            f"CI recency is undecidable for: {', '.join(unorderable)}. "
+            "Several runs of one check either carry no usable timestamp or are "
+            "tied on the newest one while disagreeing, so which is current "
+            "cannot be established."
+        )
 
     failing, pending = [], []
-    for check in rollup:
-        # Check runs use 'conclusion'; legacy statuses use 'state'.
-        status = (check.get("status") or "").upper()
-        result = (check.get("conclusion") or check.get("state") or "").upper()
-        name = check.get("name") or check.get("context") or "check"
-        if status and status != "COMPLETED" and not result or result in in_progress:
+    for name in sorted(current):
+        if (name or "").lower() in ADVISORY_CHECK_CONTEXTS:
+            # Advisory review bots are not build checks; a stuck PENDING status
+            # from one must not hold the CI gate (see ADVISORY_CHECK_CONTEXTS).
+            continue
+        verdict, detail = _check_verdict(current[name])
+        if verdict == "pending":
             pending.append(name)
-        elif result not in passing:
-            failing.append(f"{name}={result.lower() or 'unknown'}")
+        elif verdict == "failing":
+            failing.append(f"{name}={detail}")
     if failing:
         return False, f"CI is red: {', '.join(failing)}."
     if pending:
         return False, f"CI has not finished: {', '.join(pending)}."
-    return True, f"CI green ({len(rollup)} checks)."
+    return True, f"CI green ({len(current)} checks)."
 
 
 def label_values(pr, prefix):
@@ -951,17 +1082,33 @@ def latest_state_per_reviewer(reviews):
     return {who: state for who, (_, state) in latest.items()}
 
 
+def configured_review_app_logins():
+    """Operator-configured GitHub App logins trusted as independent reviewers."""
+    raw = os.environ.get(REVIEW_APP_LOGIN_ENV, "")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def is_configured_review_app(login):
+    """True when ``login`` is the installed reviewer App from #123."""
+    normalized = (login or "").lower()
+    return bool(normalized) and normalized in configured_review_app_logins()
+
+
 def is_advisory_review_account(login):
     """Whether a GitHub reviewer identity belongs to review automation."""
+    if is_configured_review_app(login):
+        return False
     normalized = (login or "").lower()
     return normalized.endswith("[bot]") or normalized in ADVISORY_REVIEW_ACCOUNTS
 
 
 def is_advisory_review_actor(review):
-    """Whether a review's GraphQL actor cannot provide human attestation."""
+    """Whether a review's GraphQL actor cannot provide independent attestation."""
     author = review.get("author") or {}
     actor_type = author.get("__typename")
     login = author.get("login") or ""
+    if is_configured_review_app(login):
+        return False
     return (
         actor_type is not None and actor_type != "User"
     ) or is_advisory_review_account(login)
@@ -984,13 +1131,135 @@ def _current_head_reviewers(evidence):
         body = review.get("body")
         if (
             oid == head
-            and actor_type == "User"
+            and (actor_type == "User" or is_configured_review_app(login))
             and not is_advisory_review_actor(review)
             and state not in {"PENDING", "DISMISSED"}
             and (state != "COMMENTED" or isinstance(body, str) and body.strip())
         ):
             reviewers.add(login)
     return sorted(reviewers)
+
+
+def identity_values(pr, prefix):
+    """Label values that actually name an agent: trimmed, empties dropped.
+
+    A bare `author:` label parses to "", which no reviewer id can equal, so
+    every reviewer read as an independent peer and a self-review satisfied the
+    review gate -- an authorization bypass in the one check that exists to prove
+    independence. A bare `reviewed-by:` fails open the same way from the other
+    side. Neither names an agent, so neither may take part in the comparison.
+    """
+    return [value for value in
+            (raw.strip() for raw in label_values(pr, prefix)) if value]
+
+
+def reviewer_families(pr):
+    """Map reviewer id -> the distinct families stamped for it.
+
+    A list rather than a single value on purpose. Two conflicting
+    reviewer-family labels for one id are themselves evidence of the id-reissue
+    defect this module exists to detect, so letting the last one win would hide
+    the very signal worth reporting.
+    """
+    families = {}
+    for value in label_values(pr, REVIEWER_FAMILY_LABEL):
+        agent_id, _, family = value.partition(":")
+        if agent_id and family:
+            families.setdefault(agent_id, [])
+            if family not in families[agent_id]:
+                families[agent_id].append(family)
+    return {agent_id: sorted(values) for agent_id, values in families.items()}
+
+
+def classify_reviewers(pr, reviewers, author):
+    """Split reviewers into genuine peers, id collisions, and unresolvable ones.
+
+    Identity in this framework is the pair (id, family). Agents all authenticate
+    as one GitHub user, so the labels are the only thing that tells them apart,
+    and the gate previously compared the id alone. That makes a
+    same-id/different-family reviewer -- which is evidence of the #304 id-reissue
+    defect, not a self-review -- indistinguishable from the author reviewing its
+    own work.
+
+    Family is consulted only where identity is actually contested. A reviewer
+    whose id differs from the author's is a peer whatever its family, so PRs
+    predating family stamping keep merging exactly as before. Where the ids do
+    match, a missing family is reported rather than guessed at.
+
+    Returns (peers, collisions, unresolved):
+      peers       reviewer ids that are genuinely somebody else
+      collisions  (id, author_family, reviewer_family) - one id, two agents
+      unresolved  (id, [what is missing]) - cannot be decided, fails closed
+    """
+    author_families = sorted(set(label_values(pr, FAMILY_LABEL)))
+    families = reviewer_families(pr)
+    peers, collisions, unresolved = [], [], []
+    for agent_id in reviewers:
+        if agent_id != author:
+            peers.append(agent_id)
+            continue
+        reviewer_values = families.get(agent_id, [])
+        # An identity stamped with two different families is not a family we can
+        # compare; it is an ambiguity, and reporting it as one beats picking
+        # either and describing the wrong situation.
+        if len(author_families) > 1 or len(reviewer_values) > 1:
+            ambiguous = (f"the PR ({', '.join(author_families)})"
+                         if len(author_families) > 1
+                         else f"reviewer '{agent_id}' ({', '.join(reviewer_values)})")
+            collisions.append((agent_id, f"ambiguous on {ambiguous}", "unresolvable"))
+            continue
+        author_family = author_families[0] if author_families else ""
+        reviewer_family = reviewer_values[0] if reviewer_values else ""
+        if not author_family or not reviewer_family:
+            missing = []
+            if not author_family:
+                missing.append(f"{FAMILY_LABEL}<family> on the PR")
+            if not reviewer_family:
+                missing.append(
+                    f"{REVIEWER_FAMILY_LABEL}{agent_id}:<family> for the review"
+                )
+            unresolved.append((agent_id, missing))
+        elif reviewer_family != author_family:
+            collisions.append((agent_id, author_family, reviewer_family))
+    return peers, collisions, unresolved
+
+
+def id_collision_message(collisions):
+    """Refusal text for one agent id stamped as both author and reviewer.
+
+    Deliberately neither an acceptance nor a self-review rejection: the two
+    families prove two different agents are answering to one id, so the honest
+    report is that the id namespace broke, not that somebody reviewed its own
+    work. Blocking here is what stops the #304 collision from merging.
+    """
+    agent_id, author_family, reviewer_family = collisions[0]
+    return (
+        f"Agent id '{agent_id}' is stamped as both the author "
+        f"(family:{author_family}) and a reviewer (family:{reviewer_family}) of "
+        "this PR. Two agents are sharing one id, so no attribution on it can be "
+        "trusted - this is neither a self-review nor a valid peer review. "
+        "Reissue one of them a distinct id (see #304) and re-review."
+    )
+
+
+def self_review_message(author, unresolved):
+    """Refusal text when the author's id is the only attribution on the PR.
+
+    When the family labels needed to rule out an id collision are absent, the
+    gate says so instead of quietly assuming the two are the same agent. It
+    still refuses either way, so the caveat costs nothing and names exactly what
+    an operator must stamp to tell the two situations apart.
+    """
+    message = (f"The only review is from '{author}', who wrote this PR. "
+               "A self-review does not satisfy the gate.")
+    if unresolved:
+        _agent_id, missing = unresolved[0]
+        message += (
+            f" Note: {' and '.join(missing)} is missing, so a second agent "
+            "sharing this id (#304) cannot be ruled out - stamp the family "
+            "labels if that is what happened. The gate will not assume a family."
+        )
+    return message
 
 
 def _attested_head_peers(evidence, peers):
@@ -1020,7 +1289,7 @@ def _evidence_note(evidence):
     head_reviewers = _current_head_reviewers(evidence)
     if head and head_reviewers:
         head_note = (
-            f"current head {head[:12]} has substantive human review from "
+            f"current head {head[:12]} has substantive independent review from "
             f"{', '.join(head_reviewers)}"
         )
     else:
@@ -1044,7 +1313,7 @@ def _evidence_note(evidence):
     return ", ".join(parts) + "."
 
 
-def check_reviews(pr, evidence):
+def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # Prefer the same explicitly paginated review history used for current-head
     # evidence. The PR snapshot remains a compatibility fallback for pure
     # unit-level callers that supply handcrafted evidence.
@@ -1118,9 +1387,9 @@ def check_reviews(pr, evidence):
     # the same person who opened the PR. The agent identity labels are the only
     # thing that distinguishes them.
     # A review from a different non-automation GitHub account is provably not a
-    # self-review, but only its latest APPROVED verdict counts. Review apps are
-    # advisory: their comments and approvals can inform an agent review, but
-    # cannot satisfy the independent-review gate themselves.
+    # self-review, but only its latest APPROVED verdict counts. Unconfigured
+    # review apps stay advisory. An App login named in ARU_REVIEW_APP_LOGIN is
+    # the #123 reviewer identity and counts as that external account.
     pr_login = ((pr.get("author") or {}).get("login") or "").lower()
     other_accounts = sorted({
         ((r.get("author") or {}).get("login") or "").lower()
@@ -1131,13 +1400,22 @@ def check_reviews(pr, evidence):
     # governed author stamp, even a genuine external approval cannot prove the
     # PR did not bypass create_pr.py or establish who must be excluded from
     # same-account agent review.
-    authors = label_values(pr, "author:")
+    authors = identity_values(pr, AUTHOR_LABEL)
     if not authors:
         return False, (
             "PR has no author:<id> label, so the gate cannot prove that the "
             "reviewer is independent. Create PRs with "
             "`scripts/create_pr.py --issue <n> --agent <id>`; stamp the verified "
             "author on a legacy PR before retrying."
+        )
+    if len(set(authors)) > 1:
+        # Resolving this by position would pick an author arbitrarily, and the
+        # whole peer comparison below rests on knowing who wrote the PR.
+        return False, (
+            f"PR carries {len(set(authors))} different {AUTHOR_LABEL} labels "
+            f"({', '.join(sorted(set(authors)))}), so who wrote it cannot be "
+            "established. Two agents likely adopted it concurrently; remove the "
+            "stale label before merging."
         )
     author = authors[0]
 
@@ -1166,11 +1444,15 @@ def check_reviews(pr, evidence):
     # GitHub user, so only the identity labels can tell them apart.
     # Only completed attribution counts. Active reviewer claims were rejected
     # above because they represent work still in progress, not attestation.
-    reviewers = label_values(pr, REVIEWED_BY_LABEL)
-    peers = [r for r in reviewers if r != author]
+    reviewers = identity_values(pr, REVIEWED_BY_LABEL)
+    peers, collisions, unresolved = classify_reviewers(pr, reviewers, author)
+    # A collision blocks even when a genuine peer also reviewed: the operator
+    # needs to know the id namespace broke. A merely unstamped family does not,
+    # or every PR predating family stamping would stop merging.
+    if collisions:
+        return False, id_collision_message(collisions)
     if reviewers and not peers:
-        return False, (f"The only review is from '{author}', who wrote this PR. "
-                       "A self-review does not satisfy the gate.")
+        return False, self_review_message(author, unresolved)
     if not reviewers:
         advisory = sorted(a for a in advisory_accounts if a and a != pr_login)
         if advisory:
@@ -1221,7 +1503,31 @@ def check_reviews(pr, evidence):
     return True, note
 
 
-def check_rebased(pr):
+def _behind_by(base_ref, head_sha):
+    """Commits `head_sha` is behind `base_ref`, or None if it cannot be determined.
+
+    GitHub only sets mergeStateStatus to BEHIND when the base branch has
+    protection requiring branches to be up to date. On an unprotected repo --
+    the default for a newly governed project -- that field never expresses
+    staleness at all, so a gate reading it alone can never fail. The compare
+    API reports behind_by unconditionally.
+    """
+    if not base_ref or not head_sha:
+        return None
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    data = _gh_json(["gh", "api", f"repos/{slug}/compare/{base_ref}...{head_sha}"])
+    if not isinstance(data, dict):
+        return None
+    behind = data.get("behind_by")
+    # bool is an int subclass; True would otherwise read as "1 commit behind".
+    if isinstance(behind, bool) or not isinstance(behind, int) or behind < 0:
+        return None
+    return behind
+
+
+def check_rebased(pr, behind_resolver=None):
     state = (pr.get("mergeStateStatus") or "").upper()
     if state == "BEHIND":
         return False, "Branch is behind the base. Rebase on main and re-run."
@@ -1229,6 +1535,29 @@ def check_rebased(pr):
         return False, "Branch has merge conflicts with the base."
     if (pr.get("mergeable") or "").upper() == "CONFLICTING":
         return False, "Branch conflicts with the base."
+    # The checks above are a fast path, not the authority: they only fire on
+    # repos configured to surface staleness. Ask for ancestry directly, and
+    # treat unknown as not-current. A gate that cannot fail is worse than an
+    # absent one, because the Definition of Done then asserts a property
+    # nothing verified.
+    resolve = behind_resolver or _behind_by
+    try:
+        behind = resolve(pr.get("baseRefName"), pr.get("headRefOid"))
+    except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
+        return False, (
+            f"Could not determine whether the branch is current with the base "
+            f"({type(exc).__name__}: {exc}). Refusing to merge on unverified ancestry."
+        )
+    if behind is None:
+        return False, (
+            "Could not determine whether the branch is current with the base. "
+            "Refusing to merge on unverified ancestry."
+        )
+    if behind > 0:
+        plural = "commit" if behind == 1 else "commits"
+        return False, (
+            f"Branch is {behind} {plural} behind the base. Rebase on main and re-run."
+        )
     return True, "Branch is current with the base."
 
 
@@ -1239,7 +1568,7 @@ def check_issue_link(pr):
     return True, "Linked to " + ", ".join(f"#{i}" for i in issues) + "."
 
 
-def parse_verification_evidence(body):
+def parse_verification_evidence(body):  # noqa: C901
     """Parses the marker-delimited verification JSON without scraping prose."""
     body = body or ""
     start_count = body.count(VERIFICATION_EVIDENCE_START)
@@ -1284,7 +1613,7 @@ def parse_verification_evidence(body):
     return evidence, None
 
 
-def check_verification(pr):
+def check_verification(pr):  # noqa: C901, PLR0912
     """Validates recorded commands while warning on legacy or not-run PRs."""
     evidence, error = parse_verification_evidence(pr.get("body") or "")
     if error == "missing":
@@ -1523,7 +1852,7 @@ def check_review_rounds(pr):
     return True, f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD})."
 
 
-def fetch_unresolved_finding_summaries(pr_id, limit=8):
+def fetch_unresolved_finding_summaries(pr_id, limit=8):  # noqa: C901, PLR0912
     """Load short unresolved review-thread summaries for split guidance."""
     slug = get_repo_slug()
     if not slug:
@@ -1807,7 +2136,7 @@ def _attach_follow_up_to_board(issue_num):
     return update_status(issue_num, "Backlog", require_board=True)
 
 
-def emit_review_round_split(pr, findings=None, *, apply=True):
+def emit_review_round_split(pr, findings=None, *, apply=True):  # noqa: C901, PLR0912
     """Post split guidance and file follow-up issues when the threshold is crossed.
 
     Idempotent: if ``REVIEW_ROUND_SPLIT_MARKER`` is already present on the PR,
@@ -1957,6 +2286,38 @@ def check_test_coverage(pr):
             "test file under tests/."
         )
     return True, f"Production changes include test coverage in {len(tests)} test file(s)."
+
+
+def check_spec_sync(pr, repo_dir=None):
+    """Require specifications and CLI arguments to remain synchronized with implementation on PR head."""
+    merge_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(merge_dir, "sync_spec.py"),
+        os.path.join(os.environ.get("ARU_SDLC_HOME", ""), "scripts", "sync_spec.py"),
+        os.path.join(repo_dir or ".", "scripts", "sync_spec.py"),
+    ]
+    sync_script = next((c for c in candidates if c and os.path.exists(c)), None)
+    if not sync_script:
+        return False, "Required sync_spec.py engine is missing; cannot audit specification synchronization."
+
+    head_sha = (pr or {}).get("headRefOid") if isinstance(pr, dict) else None
+    cmd = [sys.executable, sync_script, "--check"]
+    if repo_dir:
+        cmd.extend(["--repo-dir", repo_dir])
+    if head_sha:
+        check_proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{head_sha}^{{commit}}"],
+            cwd=repo_dir or ".",
+            capture_output=True,
+            check=False,
+        )
+        if check_proc.returncode == 0:
+            cmd.extend(["--head", head_sha])
+
+    code, out, err = run_cmd(cmd, check=False)
+    if code == 0:
+        return True, "Specifications and code are synchronized."
+    return False, f"Specification drift detected: {out or err}"
 
 
 def is_merged(pr):
@@ -2115,7 +2476,7 @@ def find_branch_worktree(porcelain, branch):
     return None, None
 
 
-def prune_worktree(repo_root, branch, expected_sha):
+def prune_worktree(repo_root, branch, expected_sha):  # noqa: C901, PLR0912, PLR0915
     """Deregisters the exact worktree after atomically retaining its directory."""
     if not branch or not expected_sha:
         return False, "Branch and gated head SHA are required; no worktree removed."
@@ -2228,7 +2589,7 @@ def prune_worktree(repo_root, branch, expected_sha):
             remove_retain_manifest,
             write_retain_manifest,
         )
-        if porcelain_blocks_prune(status):
+        if porcelain_blocks_prune(status, path):
             return False, (
                 f"Worktree {path} has tracked or untracked files; left untouched."
             )
@@ -2249,7 +2610,7 @@ def prune_worktree(repo_root, branch, expected_sha):
         if status_code != 0:
             remove_retain_manifest(path)
             return False, f"Could not inspect worktree {path}: {status_err.strip()}"
-        blocked = porcelain_dirty_except_manifest(status)
+        blocked = porcelain_dirty_except_manifest(status, path)
         if blocked is not False:
             remove_retain_manifest(path)
             if blocked is None:
@@ -2402,12 +2763,17 @@ def clear_merger_claims(pr_num, cwd=None):
     return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL, cwd=cwd)
 
 
-def evaluate_dod(pr, issue_bodies, evidence):
+def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None):
     """Runs every Definition-of-Done check without merging.
 
     Returns ``(ok, gates)`` where ``gates`` is a list of
     ``(name, passed, message)`` in evaluation order. Shared by ``--dry-run``
     and the merge work picker so eligibility cannot drift from the gate.
+
+    ``behind_resolver`` is threaded to :func:`check_rebased` so a caller with no
+    repository to interrogate -- a hermetic fleet simulation -- can state
+    ancestry directly. Production callers omit it and get the fail-closed git
+    path, which is the point of the gate.
     """
     issue_nums = linked_issues(pr.get("body"))
     gates = [
@@ -2416,9 +2782,10 @@ def evaluate_dod(pr, issue_bodies, evidence):
         ("verification", *check_verification(pr)),
         ("ci", *check_ci(pr)),
         ("review", *check_reviews(pr, evidence)),
-        ("rebased", *check_rebased(pr)),
+        ("rebased", *check_rebased(pr, behind_resolver)),
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
+        ("spec-sync", *check_spec_sync(pr)),
         ("review rounds", *check_review_rounds(pr)),
     ]
     for num in issue_nums:
@@ -2481,7 +2848,7 @@ def dod_status(pr_id):
     return False, f"unmet: {', '.join(blocked)}"
 
 
-def run_closeout(pr, issue_nums, repo_root, failures=None):
+def run_closeout(pr, issue_nums, repo_root, failures=None):  # noqa: C901, PLR0912
     """Runs every idempotent close-out step, even after an earlier failure."""
     try:
         os.chdir(repo_root)
@@ -2885,7 +3252,7 @@ def write_checkpoint_tag(repo_root, pr, issue_nums, gates, gated_head, merged_sh
         return False, f"Unexpected checkpoint error: {exc}"
 
 
-def main():
+def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Merge a PR only if the Definition of Done is met.")
     parser.add_argument("--pr", type=int, required=True, help="Pull request number")
     parser.add_argument("--dry-run", action="store_true", help="Run every check, merge nothing")

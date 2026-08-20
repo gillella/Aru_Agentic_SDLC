@@ -89,14 +89,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Enforce architectural layer contracts via import-linter
       - name: Enforce module boundaries
         run: |
-          if [ -f .importlinter ] || grep -q "importlinter" pyproject.toml 2>/dev/null; then
-            pip install import-linter
-            lint-imports
-          else
-            echo "No import-linter contracts configured yet; skipping."
-          fi
+          pip install -r requirements-dev.txt
+          lint-imports
 
   # Documentation drift here accumulated in days (issue #115). A convention
   # that docs stay accurate is followed probabilistically; this job is the
@@ -180,6 +177,13 @@ jobs:
         run: |
           ruff check .
 
+      # Enforce the per-file line ceiling. New files must be <= 400 lines;
+      # legacy files over that carry their own allowance as a `line-ceiling:`
+      # marker comment in the file itself, so raising one file's allowance does
+      # not require editing a file shared with unrelated work.
+      - name: Enforce File Line Ceilings
+        run: python3 scripts/check_line_ceilings.py
+
       # Covers hooks/ and tests/ as well as scripts/. hooks/enforce_touches.py
       # is the write-time enforcement gate and was previously reached only
       # because an unrelated test imports it - coverage by accident, not by a
@@ -207,6 +211,14 @@ jobs:
               py_compile.compile(f, doraise=True)
           "
 
+      # This playbook is a guidelines/meta project: most PRs change docs, skills,
+      # and review prose rather than Python the CI needs to re-prove. Running the
+      # full unit test suite on every pull request is expensive for little signal
+      # here, so it is deferred to the end of the pipeline instead - when a commit
+      # lands on main, on the weekly schedule, or on manual dispatch. PRs still
+      # get every fast, cheap static gate above (secret scan, dependency audit,
+      # import boundaries, docs freshness, lint, line ceilings, syntax).
       - name: Execute Tests
+        if: github.event_name != 'pull_request'
         run: |
           python -m unittest discover tests

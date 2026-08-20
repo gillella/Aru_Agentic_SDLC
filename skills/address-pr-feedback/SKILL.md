@@ -66,6 +66,9 @@ No unresolved threads exist. Act on each name in `work.unmet_gates`:
   current-head evidence with `create_pr.py --refresh-pr`; if malformed or
   duplicate markers prevent the helper from refreshing, repair the marker
   structure first, then run the helper rather than fabricating its JSON.
+- **`spec-sync`** — the code and spec table diverged. Update the spec table or
+  the code so they agree, run `python3 "$ARU_SDLC_HOME/scripts/sync_spec.py"`
+  (or the PR's documented sync command), and push the new head.
 
 Then refresh evidence for the new head:
 

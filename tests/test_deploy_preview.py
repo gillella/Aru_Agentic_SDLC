@@ -1,3 +1,4 @@
+# line-ceiling: 1017
 import json
 import subprocess
 import sys
@@ -28,7 +29,7 @@ class DeployPreviewSkillTests(unittest.TestCase):
         self.assertIn("deploy preview", content)
 
     def test_install_cursor_integration_includes_deploy_preview(self):
-        # install_cursor_integration dynamically discovers all skills under skills/ that define SKILL.md
+        # install_agent_integration dynamically discovers all skills under skills/ that define SKILL.md
         self.assertTrue((self.root_dir / "skills" / "deploy-preview" / "SKILL.md").is_file())
 
     def test_skill_requires_governed_helper_and_rejects_raw_gh_mutations(self):

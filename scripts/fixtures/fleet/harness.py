@@ -1,3 +1,4 @@
+# line-ceiling: 513
 """Hermetic board and local-agent adapters for the full fleet lifecycle.
 
 The fixture deliberately models GitHub as the durable queue while exercising
@@ -15,6 +16,7 @@ from typing import Any, Sequence
 from unittest.mock import patch
 
 import claim_issue as claim_helpers
+import fetch_next_issue
 import fetch_next_work
 import merge_pr
 import run_fleet
@@ -25,6 +27,10 @@ class Issue:
     number: int
     touches: tuple[str, ...]
     depends_on: tuple[int, ...] = ()
+    # The picker's priority-integrity gate fails an issue closed when it carries
+    # no priority:pN label, so a fixture issue without one is never claimable and
+    # every scenario silently reports idle. Default it; scenarios may override.
+    priority: str = "p1"
     high_risk: bool = False
     unresolved_decision: str = ""
     status: str = "Ready"
@@ -64,6 +70,7 @@ class HermeticFleet:
                 number=item["number"],
                 touches=tuple(item["touches"]),
                 depends_on=tuple(item.get("depends_on", ())),
+                priority=item.get("priority", "p1"),
                 high_risk=item.get("high_risk", False),
                 unresolved_decision=item.get("unresolved_decision", ""),
                 status="Blocked" if item.get("unresolved_decision") else "Ready",
@@ -134,7 +141,8 @@ class HermeticFleet:
         }[status]
 
     def _issue_record(self, issue: Issue) -> dict[str, Any]:
-        labels = [{"name": self._status_label(issue.status)}]
+        labels = [{"name": self._status_label(issue.status)},
+                  {"name": f"priority:{issue.priority}"}]
         if issue.claim:
             labels.append({"name": f"agent:{issue.claim}"})
         dependencies = "\n".join(f"depends-on: #{number}" for number in issue.depends_on)
@@ -144,6 +152,7 @@ class HermeticFleet:
             "title": f"fixture issue {issue.number}",
             "body": f"{dependencies}\ntouches: {touches}\nparallel-eligible: true",
             "labels": labels,
+            "author": {"login": "fixture-account"},
             "assignees": [],
             "state": "OPEN",
             "updatedAt": "2026-08-14T09:00:00Z",
@@ -226,6 +235,10 @@ class HermeticFleet:
         issue_body = "## Acceptance Criteria\n- [x] fixture acceptance"
         ok, gates = merge_pr.evaluate_dod(
             self._pr_record(pr), {pr.issue: issue_body}, evidence,
+            # The rebased gate resolves ancestry through git and the compare
+            # API, and fails closed when it cannot. There is no repository here,
+            # so state the fixture's own truth: simulated branches are current.
+            behind_resolver=lambda _base, _head: 0,
         )
         blocked = [name for name, passed, _message in gates if not passed]
         return ok, "every Definition-of-Done gate passed" if ok else f"unmet: {', '.join(blocked)}"
@@ -237,6 +250,14 @@ class HermeticFleet:
             patch.object(fetch_next_work, "list_work_prs", side_effect=self._pr_records),
             patch.object(fetch_next_work, "list_open_issues", side_effect=self._issue_records),
             patch.object(fetch_next_work, "dod_status", side_effect=self.dod_status),
+            patch.object(
+                fetch_next_issue, "repository_owner_login",
+                return_value="fixture-account",
+            ),
+            patch.object(
+                fetch_next_issue, "repository_trusted_logins",
+                return_value={"fixture-account"},
+            ),
         ):
             return fetch_next_work.select(agent, family, round_cap=3, cross_family_wait=30)
 
@@ -244,7 +265,7 @@ class HermeticFleet:
         self.issues[issue_number].status = status
         return True
 
-    def _transport_command(self, argv: Sequence[str], **_kwargs: Any) -> tuple[int, str, str]:
+    def _transport_command(self, argv: Sequence[str], **_kwargs: Any) -> tuple[int, str, str]:  # noqa: C901, PLR0912
         command = list(argv)
         if len(command) < 4 or command[0] != "gh":
             raise AssertionError(f"unexpected claim transport command: {command}")
@@ -288,6 +309,13 @@ class HermeticFleet:
             stack.enter_context(patch.object(claim_helpers, "ensure_label", return_value=True))
             stack.enter_context(patch.object(claim_helpers, "run_cmd", self._transport_command))
             stack.enter_context(patch.object(claim_helpers.time, "sleep", return_value=None))
+            stack.enter_context(patch.object(
+                claim_helpers, "repository_owner_login", return_value="fixture-account",
+            ))
+            stack.enter_context(patch.object(
+                claim_helpers, "repository_trusted_logins",
+                return_value={"fixture-account"},
+            ))
             stack.enter_context(patch.object(
                 claim_helpers, "_pr_labels",
                 side_effect=lambda number: self._pr_labels(self.pull_requests[number]),

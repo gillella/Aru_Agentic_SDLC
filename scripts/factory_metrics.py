@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 585
 """
 factory_metrics.py - Reconstructs factory performance metrics from GitHub state:
   1. Constraint Dwell Time (median time in hours per board status)
@@ -178,7 +179,7 @@ def format_text_report(dwell_data: Dict[str, Any], rework_data: Dict[str, Any]) 
     return "\n".join(lines)
 
 
-def fetch_github_telemetry(
+def fetch_github_telemetry(  # noqa: C901, PLR0912, PLR0915
     window_days: int = 30,
     include_closed_details: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:

@@ -57,6 +57,8 @@ and the release state is separate from the increment lifecycle: acceptance
 does not authorize deployment. A second accepted-but-undeployed increment is
 refused unless the operator explicitly records risk acceptance.
 
+When an increment reaches the `accepted` state, `scripts/increment_release.py` tags the exact accepted default-branch commit (`ckpt/<project_id>/<increment_id>`) with structured metadata (increment ID, project identity, committed issue set, acceptance decision URL, timestamp, and concise message) and publishes a formal release record linking evidence, demo artifacts, and deployment state without triggering production deployment.
+
 ---
 
 ## 🌳 Git Worktree Isolation Guidelines
@@ -64,7 +66,7 @@ refused unless the operator explicitly records risk acceptance.
 1. **Clean Workspace Isolation**:
    To prevent dirtying the main working directory during multi-agent or multi-branch development, all feature implementations and PR reviews MUST be run inside dedicated worktrees under `.worktrees/`.
 2. **Worktree Creation**:
-   Execute `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --worktree` to generate `.worktrees/feat-issue-<ID>-<slug>`.
+   Execute `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --worktree --agent <AGENT_ID>` to generate `.worktrees/feat-issue-<ID>-<slug>__<agent>`.
 3. **Worktree Cleanup**:
    Upon PR merge or review completion, remove temporary worktree directories with `git worktree remove .worktrees/<dir>`.
 
@@ -195,6 +197,12 @@ Two consequences worth knowing before you hit them:
 - **The audit line records which signal let the PR through** — reviewed at
   head, no unresolved threads, and how many findings were withdrawn rather
   than fixed — so a later reader can reconstruct why.
+
+GitHub **required approving reviews** stay disabled until issue #123's
+reviewer App is live. Set `ARU_REVIEW_APP_LOGIN` to that App's login
+(provisionally `aru-reviewer[bot]`). Unconfigured bots remain advisory.
+Same-account fleet reviews still use `reviewer:` as the claim and
+`reviewed-by:` as completion; those labels are not interchangeable.
 
 ---
 

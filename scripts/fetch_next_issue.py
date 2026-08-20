@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 969
 """
 fetch_next_issue.py - Selects the next actionable issue for one agent.
 
@@ -28,14 +29,123 @@ from common import (
     claimed_by,
     get_current_branch,
     get_issue,
+    get_issue_priority_field,
     get_repo_slug,
+    is_trusted_metadata_author,
     list_open_issues,
+    metadata_line_is_command_like,
     parse_touches,
+    repository_owner_login,
+    set_issue_priority_field,
+    strip_code_blocks,
+    repository_trusted_logins,
     run_cmd,
     run_gh_json,
     touches_conflict,
 )
+from delivery_increments import DeliveryIncrementStore
 from update_issue_status import update_status
+
+# Canonical Priority ranking: `priority:p0` is the highest. The governance
+# label is the canonical source; the Project Board Priority field is a
+# synchronized mirror (see common.get_issue_priority_field).
+PRIORITY_RANK = {
+    "priority:p0": 0,
+    "priority:p1": 1,
+    "priority:p2": 2,
+    "priority:p3": 3,
+}
+
+
+def priority_rank(labels: List[Dict[str, Any]]) -> "tuple[Optional[int], Optional[str]]":
+    """Returns (rank, None) when exactly one priority:pN label is present.
+
+    Fails closed with (None, reason) on missing, duplicate, or contradictory
+    priority metadata so the picker reports the issue for grooming instead of
+    guessing.
+    """
+    found = [
+        (label.get("name") or "").lower()
+        for label in labels
+        if (label.get("name") or "").lower() in PRIORITY_RANK
+    ]
+    if not found:
+        return None, "missing priority:pN label"
+    unique = sorted(set(found))
+    if len(unique) > 1:
+        return None, f"contradictory priority labels: {', '.join(unique)}"
+    if len(found) > 1:
+        return None, f"duplicate priority label: {found[0]}"
+    return PRIORITY_RANK[unique[0]], None
+
+
+def active_increment_scope(project_id: Optional[str] = None) -> Optional[set]:
+    """Resolves the active operator-authorized increment's issue scope.
+
+    Returns the set of in-scope issue numbers, or ``None`` when no active
+    increment exists or its state cannot be resolved unambiguously (callers
+    fail closed on ``IncrementError``). The store is the durable record
+    authorized by the operator through the #205 flow.
+    """
+    try:
+        store = DeliveryIncrementStore()
+        if project_id is None:
+            project_id = repo_project_id()
+        increment = store.active(project_id) if project_id else None
+    except Exception:
+        return None
+    if not increment:
+        return None
+    scope = increment.get("issue_scope") or []
+    return {int(num) for num in scope}
+
+
+def repo_project_id() -> Optional[str]:
+    """Deterministic project id for this repository, or None when unknown."""
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        return None
+    owner, repo = slug.split("/", 1)
+    return f"proj_{owner}_{repo}".replace("-", "_")
+
+
+def canonical_priority_display(labels: List[Dict[str, Any]]) -> Optional[str]:
+    """The canonical board-field spelling ('P0'..'P3') of an issue's label."""
+    rank, _ = priority_rank(labels)
+    if rank is None:
+        return None
+    name = next(
+        (label.get("name") for label in labels
+         if (label.get("name") or "").lower() in PRIORITY_RANK),
+        None,
+    )
+    if not name:
+        return None
+    return name[len("priority:"):].upper()
+
+
+def sync_board_priority(issue: Dict[str, Any]) -> Optional[str]:
+    """Enforces the Project Priority field mirror for one issue.
+
+    The ``priority:pN`` label is the canonical source. The board Priority
+    field must agree; when it disagrees the field is deterministically synced
+    from the label. Returns the canonical display value ('P0'..'P3') on
+    agreement or successful sync, else ``None`` (fail closed - never guess).
+    """
+    labels = issue.get("labels", [])
+    canonical = canonical_priority_display(labels)
+    if canonical is None:
+        return None
+    field_value = get_issue_priority_field(issue.get("number"))
+    if field_value == canonical:
+        return canonical
+    if field_value is None:
+        # Field unreadable is not a disagreement we can prove or fix; fail
+        # closed rather than guess.
+        return None
+    if set_issue_priority_field(issue.get("number"), canonical):
+        return canonical
+    return None
 
 
 ISSUE_IN_BRANCH = re.compile(r"issue-(\d+)", re.IGNORECASE)
@@ -287,6 +397,8 @@ def list_open_pr_files_by_issue() -> Dict[int, List[str]]:
 def reservation_paths(
     issue: Dict[str, Any],
     pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
+    repo_owner: Optional[str] = None,
+    trusted_logins: Optional[set] = None,
 ) -> List[str]:
     """Paths this in-flight issue currently locks.
 
@@ -294,7 +406,14 @@ def reservation_paths(
     lock because the branch has an open PR and merge-time conflict gates are
     authoritative. ``pr_files_by_issue`` remains accepted for caller
     compatibility but cannot extend the pre-PR reservation window.
+    Untrusted authors contribute no reservation; they cannot lock the board.
     """
+    owner = repo_owner if repo_owner is not None else repository_owner_login()
+    logins = trusted_logins
+    if logins is None and repo_owner is None:
+        logins = repository_trusted_logins()
+    if not is_trusted_metadata_author(issue, owner, trusted_logins=logins):
+        return []
     names = {label.get("name", "").lower() for label in issue.get("labels", [])}
     if "status:in-review" in names:
         return []
@@ -305,14 +424,19 @@ def parse_dependencies(body: str) -> List[int]:
     """Parses 'depends-on: #12, #14' pattern from issue body."""
     if not body:
         return []
+    # A fenced or indented template example would otherwise supply its example
+    # 'depends-on: none', masking this issue's real prerequisites (issue #294).
     match = re.search(
         r"^\s*depends-on\s*:\s*(.*?)\s*$",
-        body,
+        strip_code_blocks(body),
         re.IGNORECASE | re.MULTILINE,
     )
     if not match:
         return []
-    return [int(d) for d in re.findall(r"#(\d+)", match.group(1))]
+    raw = match.group(1)
+    if metadata_line_is_command_like(raw):
+        return []
+    return [int(d) for d in re.findall(r"#(\d+)", raw)]
 
 
 def is_epic(labels: List[Dict[str, Any]]) -> bool:
@@ -338,13 +462,116 @@ def is_parallel_eligible(body: str, labels: List[Dict[str, Any]]) -> bool:
     return bool(body) and "parallel-eligible: true" in body.lower()
 
 
-def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
+def parse_remote_branches(text: str) -> Dict[str, str]:
+    """Map branch name -> tip sha from `git ls-remote --heads` output."""
+    branches: Dict[str, str] = {}
+    for line in (text or "").splitlines():
+        sha, _, ref = line.partition("\t")
+        ref = ref.strip()
+        if ref.startswith("refs/heads/"):
+            branches[ref[len("refs/heads/"):]] = sha.strip()
+    return branches
+
+
+def _parse_github_time(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def branch_tip_time(branch: str) -> Optional[datetime]:
+    """When a remote branch was last committed to, or None if unreadable."""
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    payload = run_gh_json(
+        ["gh", "api", f"repos/{slug}/branches/{branch}",
+         "--jq", "{date: .commit.commit.committer.date}"])
+    if not isinstance(payload, dict):
+        return None
+    return _parse_github_time(payload.get("date"))
+
+
+def work_is_abandoned(num: int, cutoff: datetime, open_prs: List[Dict[str, Any]],
+                      branches: Dict[str, str]) -> Optional[bool]:
+    """Whether an issue's *work* has gone quiet, not just its issue record.
+
+    The old rule skipped any issue that had a branch or an open PR outright, so
+    the reaper could only recover work from an agent that vanished having done
+    nothing. The moment an agent pushed -- which it does early, long before the
+    work is reviewable -- its claim became permanent, and an agent that stopped
+    mid-task stranded the issue, the branch, and the PR with no way back (#311).
+
+    Evidence of work should raise the bar for reclaiming a claim, not make it
+    permanent. Returns True when branch and PR are both quiet past the cutoff,
+    False when either is active, and None when recency cannot be established --
+    the caller retains the claim on None, because absence of evidence is not
+    evidence of abandonment.
+    """
+    linked = [pr for pr in open_prs if pr_addresses_issue(pr, num)]
+    for pr in linked:
+        updated = _parse_github_time(pr.get("updatedAt"))
+        if updated is None:
+            return None
+        if updated > cutoff:
+            return False
+
+    for branch in sorted(b for b in branches if f"issue-{num}-" in b):
+        tip = branch_tip_time(branch)
+        if tip is None:
+            return None
+        if tip > cutoff:
+            return False
+    return True
+
+
+def pr_addresses_issue(pr: Dict[str, Any], num: int) -> bool:
+    pattern = re.compile(rf"closes\s+#{num}\b", re.IGNORECASE)
+    return bool(pattern.search(pr.get("body") or "")
+                or f"issue-{num}-" in (pr.get("headRefName") or ""))
+
+
+def abandoned_work_note(num: int, holders: List[str], hours: int,
+                        open_prs: List[Dict[str, Any]],
+                        branches: Dict[str, str]) -> str:
+    """Audit comment so the successor continues instead of starting over."""
+    lines = [
+        f"♻️ Claim released after {hours}h with no activity on the issue, "
+        "its branch, or its pull request.",
+        "",
+        f"Previously held by: {', '.join(holders) or 'unknown'}",
+    ]
+    linked = [pr for pr in open_prs if pr_addresses_issue(pr, num)]
+    if linked:
+        refs = ", ".join(f"#{pr.get('number')}" for pr in linked)
+        lines.append(f"Abandoned pull request(s): {refs}")
+        lines.append(
+            "Adopt one with `python3 scripts/claim_issue.py --pr <n> --adopt "
+            "--agent <id> --model-family <family>` to keep its commits, CI "
+            "history, and review threads.")
+    owned = sorted(b for b in branches if f"issue-{num}-" in b)
+    if owned:
+        lines.append(f"Abandoned branch(es): {', '.join(owned)}")
+    if not linked and not owned:
+        lines.append("No branch or pull request was left behind.")
+    return "\n".join(lines)
+
+
+def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  # noqa: C901, PLR0912, PLR0915
     """Releases claims that have gone quiet.
 
     An agent that crashes mid-issue leaves it In Progress forever, and once
     claimed issues are excluded from selection nothing would ever pick it up
-    again. An issue is stale when it has been untouched for `hours`, has no
-    open PR, and has no remote branch carrying commits.
+    again. An issue is stale when it, its branch, and its pull request have all
+    been untouched for `hours`. Evidence of work no longer makes a claim
+    permanent -- it only has to be quiet too (#311).
     """
     if hours <= 0:
         return []
@@ -352,7 +579,7 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     pr_code, prs, pr_err = run_cmd(
         ["gh", "pr", "list", "--state", "open", "--limit", "200",
-         "--json", "number,body,headRefName"],
+         "--json", "number,body,headRefName,updatedAt"],
         check=False,
     )
     if pr_code != 0:
@@ -375,13 +602,7 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
         )
         return []
 
-    def has_open_pr(num: int) -> bool:
-        pat = re.compile(rf"closes\s+#{num}\b", re.IGNORECASE)
-        return any(pat.search(p.get("body") or "") or f"issue-{num}-" in p.get("headRefName", "")
-                   for p in open_prs)
-
-    def has_remote_branch(num: int) -> bool:
-        return f"issue-{num}-" in remote_branches
+    branches = parse_remote_branches(remote_branches)
 
     released = []
     for issue in issues:
@@ -396,7 +617,14 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
             ts = datetime.fromisoformat(updated.replace("Z", "+00:00"))
         except ValueError:
             continue
-        if ts > cutoff or has_open_pr(num) or has_remote_branch(num):
+        if ts > cutoff:
+            continue
+        abandoned = work_is_abandoned(num, cutoff, open_prs, branches)
+        if abandoned is None:
+            print(f"[WARN] Could not establish activity for #{num}; claim retained.",
+                  file=sys.stderr)
+            continue
+        if not abandoned:
             continue
 
         current = get_issue(num)
@@ -445,8 +673,13 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
             cmd += ["--remove-label", lbl]
         if run_cmd(cmd, check=False)[0] == 0:
             released.append(num)
-            print(f"♻️  Released stale claim on #{num} (idle > {hours}h, no PR, no branch).",
-                  file=sys.stderr)
+            # Name the branch and PR the departing agent left, so the successor
+            # adopts the work instead of rediscovering or repeating it.
+            run_cmd(["gh", "issue", "comment", str(num), "--body",
+                     abandoned_work_note(num, original_holders, hours, open_prs, branches)],
+                    check=False)
+            print(f"♻️  Released stale claim on #{num} "
+                  f"(issue, branch, and PR all idle > {hours}h).", file=sys.stderr)
         else:
             update_status(num, "In Progress", require_board=True)
             print(
@@ -456,23 +689,44 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:
     return released
 
 
-def build_candidates(
+def build_candidates(  # noqa: C901, PLR0912, PLR0915
     issues: List[Dict[str, Any]],
     agent: Optional[str],
     pr_files_by_issue: Optional[Dict[int, List[str]]] = None,
+    repo_owner: Optional[str] = None,
+    trusted_logins: Optional[set] = None,
+    increment_scope: Optional[set] = None,
 ) -> Dict[str, Any]:
-    """Partitions open issues into in-flight, blocked, and claimable."""
+    """Partitions open issues into in-flight, blocked, and claimable.
+
+    ``increment_scope`` (set of issue numbers from the active authorized
+    Delivery Increment) restricts claimable candidates to the active sprint:
+    Ready, dependency-unblocked, path-safe issues outside the scope are
+    returned as ``future_inventory`` and cannot be claimed. Issues with
+    missing, duplicate, or contradictory ``priority:pN`` metadata fail closed
+    and are returned as ``integrity_issues`` for grooming. Claimable
+    candidates sort by priority (P0 > P1 > P2 > P3) then ascending issue
+    number as the deterministic tie-break."""
     open_numbers = {i["number"] for i in issues}
 
     in_flight_paths: List[str] = []
     my_in_flight_issues: List[Dict[str, Any]] = []
+    if trusted_logins is None and repo_owner is None:
+        trusted_logins = repository_trusted_logins()
+    if repo_owner is None:
+        repo_owner = repository_owner_login()
 
     for issue in issues:
         labels = issue.get("labels", [])
         names = {label.get("name", "").lower() for label in labels}
         holder = claimed_by(issue)
         if holder or "status:in-progress" in names or "status:in-review" in names:
-            in_flight_paths.extend(reservation_paths(issue, pr_files_by_issue))
+            in_flight_paths.extend(
+                reservation_paths(
+                    issue, pr_files_by_issue,
+                    repo_owner=repo_owner, trusted_logins=trusted_logins,
+                )
+            )
         if needs_human(labels):
             continue
         if holder:
@@ -481,6 +735,8 @@ def build_candidates(
 
     candidates, blocked, conflicted, not_ready, missing_touches = [], [], [], [], []
     operator_only = []
+    future_inventory = []
+    integrity_issues = []
 
     for issue in issues:
         num = issue["number"]
@@ -499,6 +755,12 @@ def build_candidates(
             not_ready.append(num)
             continue
 
+        if not is_trusted_metadata_author(
+            issue, repo_owner, trusted_logins=trusted_logins,
+        ):
+            missing_touches.append(num)
+            continue
+
         unresolved = [d for d in parse_dependencies(body) if d in open_numbers]
         if unresolved:
             blocked.append({"number": num, "blocked_by": unresolved})
@@ -513,11 +775,32 @@ def build_candidates(
             conflicted.append({"number": num, "conflict": list(clash)})
             continue
 
+        # Priority integrity gate: missing/duplicate/contradictory priority
+        # fails closed for this issue and is reported for grooming.
+        rank, reason = priority_rank(labels)
+        if rank is None:
+            integrity_issues.append({"number": num, "reason": reason})
+            continue
+
+        # Active-increment gate: only stories inside the operator-authorized
+        # sprint may be claimed. Ready stories outside it stay visible as
+        # future inventory (never claimable as new implementation).
+        if increment_scope is not None and num not in increment_scope:
+            future_inventory.append(issue)
+            continue
+
         candidates.append(issue)
 
-    candidates.sort(key=lambda x: x["number"])
+    # Priority sort: P0..P3 then lowest issue number as deterministic tie-break.
+    def _sort_key(item: Dict[str, Any]) -> tuple:
+        rank, _ = priority_rank(item.get("labels", []))
+        return (rank if rank is not None else 99, item["number"])
+
+    candidates.sort(key=_sort_key)
     return {
         "candidates": candidates,
+        "future_inventory": future_inventory,
+        "integrity_issues": integrity_issues,
         "blocked": blocked,
         "conflicted": conflicted,
         "not_ready": not_ready,
@@ -528,7 +811,7 @@ def build_candidates(
     }
 
 
-def main():
+def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Fetch the next actionable issue for one agent.")
     parser.add_argument("--json", action="store_true", help="Output result in JSON format")
     parser.add_argument("--agent", type=str, default=None,
@@ -550,7 +833,10 @@ def main():
             issues = list_open_issues()
 
     pr_files = list_open_pr_files_by_issue()
-    parts = build_candidates(issues, args.agent, pr_files_by_issue=pr_files)
+    parts = build_candidates(
+        issues, args.agent, pr_files_by_issue=pr_files,
+        increment_scope=active_increment_scope(),
+    )
     candidates = parts["candidates"]
     my_in_flight = parts["my_in_flight"]
 

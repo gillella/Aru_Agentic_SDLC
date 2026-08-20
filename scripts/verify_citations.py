@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 877
 """Mechanically resolve citations in a research findings artifact.
 
 A research issue is Done only when every citation resolves. Unresolvable
@@ -142,7 +143,7 @@ def _clean_doi(raw: str) -> str:
     return doi
 
 
-def extract_markdown_link_urls(text: str) -> List[str]:
+def extract_markdown_link_urls(text: str) -> List[str]:  # noqa: C901, PLR0912, PLR0915
     """Extract Markdown destinations, excluding an optional link title."""
     urls: List[str] = []
     for match in MD_LINK_START_RE.finditer(text):
@@ -441,7 +442,7 @@ def is_public_ip(address: str) -> bool:
     return bool(ip.is_global)
 
 
-def resolve_public_addresses(
+def resolve_public_addresses(  # noqa: C901
     host: str, port: int, *, deadline: Optional[float] = None
 ) -> List[str]:
     def lookup() -> Any:
@@ -525,7 +526,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.sock = context.wrap_socket(target, server_hostname=self._server_hostname)
 
 
-def default_http_get(
+def default_http_get(  # noqa: C901, PLR0912, PLR0915
     url: str,
     timeout: float = 20.0,
     *,

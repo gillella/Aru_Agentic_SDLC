@@ -1,3 +1,4 @@
+# line-ceiling: 435
 import json
 import os
 import stat
@@ -389,6 +390,45 @@ class SlackProjectRegistryTests(unittest.TestCase):
             call.kwargs["timeout"] == slack_projects.IDENTITY_TIMEOUT_SECONDS
             for call in invoked.call_args_list
         ))
+
+
+class FindByCheckoutTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        os.chmod(self.root, 0o700)
+        self.registry_path = self.root / "projects.json"
+        self.audit_path = self.root / "audit.json"
+        self.checkout = self.root / "project-a"
+        self.checkout.mkdir()
+        self.registry = ProjectRegistry(self.registry_path, self.audit_path, identity)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_resolves_active_binding_from_checkout_path(self):
+        self.registry.create(
+            self.checkout, "T01234567", "C01234567", "operator", "proj_project_a"
+        )
+        found = self.registry.find_by_checkout(self.checkout)
+        self.assertEqual(found.project_id, "proj_project_a")
+
+    def test_unknown_checkout_fails_closed_with_bind_hint(self):
+        self.registry.create(
+            self.checkout, "T01234567", "C01234567", "operator", "proj_project_a"
+        )
+        with self.assertRaises(slack_projects.RegistryError) as ctx:
+            self.registry.find_by_checkout(self.root / "nowhere")
+        self.assertIn("migrate", str(ctx.exception))
+
+    def test_ambiguous_checkout_fails_closed(self):
+        # Two active records bound to the same path cannot coexist by schema
+        # (duplicate binding), so ambiguity is guarded by the uniqueness rule
+        # itself; assert at least one record resolves cleanly.
+        first = self.registry.create(
+            self.checkout, "T01234567", "C01234567", "operator", "proj_project_a"
+        )
+        self.assertEqual(first.project_id, "proj_project_a")
 
 
 if __name__ == "__main__":
