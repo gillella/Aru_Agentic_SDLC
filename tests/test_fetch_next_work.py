@@ -1,4 +1,4 @@
-# line-ceiling: 1396
+# line-ceiling: 1399
 import json
 import sys
 import unittest
@@ -1203,7 +1203,7 @@ class AgentResolutionTests(unittest.TestCase):
         out, err = self._capture()
         with patch.object(fnw, "select", return_value=idle) as select_mock, \
              self._board({}), \
-             patch("sys.argv", ["fetch_next_work.py"]), out as _o, err as _e:
+             patch("sys.argv", ["fetch_next_work.py", "--agent-pool"]), out as _o, err as _e:
             rc = fnw.main()
         self.assertEqual(rc, None)  # success
         # A free agent from the pool was assigned and passed to select.
@@ -1266,6 +1266,9 @@ class BoardIdentityUniquenessTests(unittest.TestCase):
                 "mergeable_detail": [], "reviewable_detail": []}
 
     def _run(self, argv, holders, readable=True):
+        argv = list(argv)
+        if "--agent" not in argv:
+            argv.append("--agent-pool")
         import io
         value = (holders if readable else None, "" if readable else "boom")
         out = patch("sys.stdout", new_callable=io.StringIO)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1175
+# line-ceiling: 1241
 """fetch_next_work.py - answers "what should I do next?" for one agent.
 
 The issue picker only ever answered "which issue do I implement?", so a fleet
@@ -92,13 +92,75 @@ from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 from merge_pr import _attested_head_peers, review_evidence
 
 
+# Seats disambiguate concurrent sessions sharing one checkout -- the only case a
+# fingerprint alone cannot separate. Small on purpose: more than a handful of
+# agents in one working copy is a misconfiguration, not a fleet.
+MAX_WORKER_SEATS = 8
+
+
+def _fingerprint_assign_identity(args, session_id):
+    """Derive this worker's identity from where it runs (#310).
+
+    The pool model assigned a name per *process*, so a restart -- a new PID with
+    no link to the worker that had been running -- took a different name, and two
+    machines each arbitrating from their own local registry both took ring[0].
+    A fingerprint over machine, checkout, and family is stable across restarts
+    and distinct across machines, so an id can never be reissued to a different
+    worker.
+
+    No board query is needed here: a board claim carrying this id is, by
+    construction, this worker's own earlier work. That is what makes a restart
+    reclaim its issue instead of treating it as somebody else's.
+    """
+    from agent_presence import (
+        DEFAULT_PRESENCE_PATH,
+        PresenceError,
+        PresenceStore,
+        fingerprint_agent_id,
+    )
+    family = (args.family or "").lower()
+    # The seat ladder is the pool. resolve_free_identity skips seats held by
+    # another *live* session and records the claim atomically, so a restart
+    # (whose old claim has aged out) lands back on seat 1, while a genuinely
+    # concurrent second session on the same checkout gets seat 2.
+    ladder = [fingerprint_agent_id(family, seat=seat)
+              for seat in range(1, MAX_WORKER_SEATS + 1)]
+    store = PresenceStore(DEFAULT_PRESENCE_PATH)
+    try:
+        args.agent = store.resolve_free_identity(ladder, session_id)
+    except PresenceError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    print(f"[presence] worker identity '{args.agent}' for session '{session_id}'",
+          file=sys.stderr)
+    return None
+
+
 def _auto_assign_identity(args, session_id):
-    """Pick a free identity, consulting GitHub before the local registry.
+    """Settle an identity when none was named on the command line.
+
+    An operator-pinned ARU_AGENT_ID wins, then the fingerprint, then the legacy
+    named pool for fleets that want fixed readable names.
+    """
+    from agent_presence import configured_agent_id
+
+    pinned = configured_agent_id()
+    if pinned:
+        args.agent = pinned
+        return _explicit_identity(args, session_id)
+    if not getattr(args, "agent_pool", False):
+        return _fingerprint_assign_identity(args, session_id)
+    return _pool_assign_identity(args, session_id)
+
+
+def _pool_assign_identity(args, session_id):
+    """Pick a free identity from the named pool, consulting GitHub first.
 
     The registry alone was never enough: its 300-second heartbeat TTL freed an
     id that the board still showed holding an issue claim and authoring an open
     PR, so a live agent's id was reissued to a second session (#304). The
-    registry stays as fast-path advisory state; GitHub decides liveness.
+    registry stays as fast-path advisory state; GitHub decides liveness. Only
+    reachable via --agent-pool now that #310 makes derived ids the default.
     """
     from agent_presence import (
         DEFAULT_AGENT_RING,
@@ -1030,6 +1092,10 @@ def main():  # noqa: C901, PLR0912, PLR0915
     parser.add_argument("--family", default=None,
                         help="This agent's model family (anthropic, openai, ...). "
                              "Omitting it means every PR looks cross-family.")
+    parser.add_argument("--agent-pool", action="store_true",
+                        help="Assign an id from the named pool (claude-1, ...) "
+                             "instead of deriving one from this worker. Legacy "
+                             "path for fleets that want fixed readable names.")
     parser.add_argument("--claim", action="store_true", help="Claim the selected work item")
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument(
