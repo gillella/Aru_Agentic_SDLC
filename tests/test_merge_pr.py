@@ -1047,18 +1047,98 @@ class ClaimIsNotAttestationTests(unittest.TestCase):
         self.assertIn("self-review", msg.lower())
 
 
+def _pr(state="CLEAN", mergeable="MERGEABLE", base="main", head="deadbeef"):
+    return {"mergeStateStatus": state, "mergeable": mergeable,
+            "baseRefName": base, "headRefOid": head}
+
+
+def _behind(n):
+    """Resolver stub returning a fixed behind_by, so no test touches the network."""
+    return lambda base, head: n
+
+
 class RebaseGateTests(unittest.TestCase):
     def test_behind_blocks(self):
-        ok, msg = merge_pr.check_rebased({"mergeStateStatus": "BEHIND"})
+        ok, msg = merge_pr.check_rebased({"mergeStateStatus": "BEHIND"}, _behind(0))
         self.assertFalse(ok)
         self.assertIn("Rebase", msg)
 
     def test_conflicts_block(self):
-        self.assertFalse(merge_pr.check_rebased({"mergeStateStatus": "DIRTY"})[0])
-        self.assertFalse(merge_pr.check_rebased({"mergeable": "CONFLICTING"})[0])
+        self.assertFalse(merge_pr.check_rebased({"mergeStateStatus": "DIRTY"}, _behind(0))[0])
+        self.assertFalse(merge_pr.check_rebased({"mergeable": "CONFLICTING"}, _behind(0))[0])
 
-    def test_clean_passes(self):
-        self.assertTrue(merge_pr.check_rebased({"mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"})[0])
+    def test_clean_and_current_passes(self):
+        self.assertTrue(merge_pr.check_rebased(_pr(), _behind(0))[0])
+
+    def test_clean_but_behind_blocks(self):
+        """The case GitHub's status cannot express on an unprotected repo."""
+        ok, msg = merge_pr.check_rebased(_pr(state="CLEAN"), _behind(3))
+        self.assertFalse(ok)
+        self.assertIn("3 commits behind", msg)
+        self.assertIn("Rebase", msg)
+
+    def test_unstable_and_behind_blocks(self):
+        """Regression: hermes-trading-automation PR #17, 18 behind, reported current."""
+        ok, msg = merge_pr.check_rebased(_pr(state="UNSTABLE"), _behind(18))
+        self.assertFalse(ok)
+        self.assertIn("18 commits behind", msg)
+
+    def test_one_commit_behind_is_singular(self):
+        self.assertIn("1 commit behind", merge_pr.check_rebased(_pr(), _behind(1))[1])
+
+    def test_unknown_ancestry_fails_closed(self):
+        ok, msg = merge_pr.check_rebased(_pr(), lambda base, head: None)
+        self.assertFalse(ok)
+        self.assertIn("unverified ancestry", msg)
+
+    def test_resolver_exception_fails_closed(self):
+        def boom(base, head):
+            raise RuntimeError("api exploded")
+        ok, msg = merge_pr.check_rebased(_pr(), boom)
+        self.assertFalse(ok)
+        self.assertIn("unverified ancestry", msg)
+        self.assertIn("api exploded", msg)
+
+    def test_fast_path_rejections_do_not_consult_the_resolver(self):
+        """Protected repos keep working, and the fast path costs no API call."""
+        calls = []
+
+        def spy(base, head):
+            calls.append((base, head))
+            return 0
+
+        for pr in ({"mergeStateStatus": "BEHIND"}, {"mergeStateStatus": "DIRTY"},
+                   {"mergeable": "CONFLICTING"}):
+            self.assertFalse(merge_pr.check_rebased(pr, spy)[0])
+        self.assertEqual(calls, [])
+
+    def test_resolver_receives_base_and_head(self):
+        seen = []
+        merge_pr.check_rebased(_pr(base="release/v2", head="abc123"),
+                               lambda base, head: seen.append((base, head)) or 0)
+        self.assertEqual(seen, [("release/v2", "abc123")])
+
+
+class BehindByTests(unittest.TestCase):
+    def test_missing_refs_return_none(self):
+        self.assertIsNone(merge_pr._behind_by("", "abc"))
+        self.assertIsNone(merge_pr._behind_by("main", ""))
+
+    def test_valid_payload_returns_count(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "_gh_json", return_value={"behind_by": 7}):
+            self.assertEqual(merge_pr._behind_by("main", "abc"), 7)
+
+    def test_malformed_payloads_return_none(self):
+        for payload in (None, [], {}, {"behind_by": "3"}, {"behind_by": True},
+                        {"behind_by": -1}, {"behind_by": None}):
+            with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+                 patch.object(merge_pr, "_gh_json", return_value=payload):
+                self.assertIsNone(merge_pr._behind_by("main", "abc"), f"{payload!r}")
+
+    def test_missing_slug_returns_none(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value=None):
+            self.assertIsNone(merge_pr._behind_by("main", "abc"))
 
 
 class SizeGateTests(unittest.TestCase):
@@ -1500,6 +1580,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
+    @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_successful_merge_with_branch_delete_failure_is_resumable(
         self, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
         _remote, _close, _done, _issue_claim, _review_claim, merger_claim,
@@ -1562,6 +1643,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
+    @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_default_merge_method_is_merge(
         self, fetch, _json, _sync, _threads, execute, _root, closeout
     ):
@@ -3252,6 +3334,7 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
             code = merge_pr.main()
         return code, tag
 
+    @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_the_merge_path_writes_the_checkpoint_with_real_verdicts(self):
         code, tag = self._main(["merge_pr.py", "--pr", "9"])
         self.assertEqual(code, merge_pr.EXIT_OK)
@@ -3264,6 +3347,7 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
         self.assertEqual(code, merge_pr.EXIT_OK)
         tag.assert_not_called()
 
+    @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_a_failed_closeout_on_the_merge_path_writes_no_checkpoint(self):
         code, tag = self._main(["merge_pr.py", "--pr", "9"], closeout_ok=False)
         self.assertEqual(code, merge_pr.EXIT_ERROR)
