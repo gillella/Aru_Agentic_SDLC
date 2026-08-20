@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 460
 """smoke_preview.py — Governed smoke and E2E preview validation helper.
 
 Executes post-deployment smoke and scenario verification against a running preview

@@ -1,3 +1,4 @@
+# line-ceiling: 503
 """Hermetic board and local-agent adapters for the full fleet lifecycle.
 
 The fixture deliberately models GitHub as the durable queue while exercising

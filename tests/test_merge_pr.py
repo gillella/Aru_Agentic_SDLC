@@ -1,3 +1,4 @@
+# line-ceiling: 3684
 from contextlib import nullcontext
 import json
 import os
@@ -696,6 +697,14 @@ class CiGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("not finished", msg)
 
+    def test_advisory_bot_status_does_not_gate_ci(self):
+        pr = {"statusCheckRollup": [
+            {"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"context": "CodeRabbit", "state": "PENDING"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertTrue(ok, msg)
+
     def test_unknown_conclusions_fail_closed(self):
         # STARTUP_FAILURE and STALE are neither in the old failure list nor the
         # pending list, so a denylist reported them as green and merged an
@@ -712,6 +721,111 @@ class CiGateTests(unittest.TestCase):
             pr = {"statusCheckRollup": [
                 {"name": "verify", "status": "COMPLETED", "conclusion": conclusion}]}
             self.assertTrue(merge_pr.check_ci(pr)[0], f"{conclusion} should pass")
+
+    # --- Superseded runs (#306) ---------------------------------------------
+    # The rollup holds every run recorded against the head commit, so a check
+    # that failed and was re-run green appears twice. Judging both kept the PR
+    # red forever, with re-running powerless to clear it.
+
+    @staticmethod
+    def _run(name, conclusion, completed_at):
+        return {"name": name, "status": "COMPLETED",
+                "conclusion": conclusion, "completedAt": completed_at}
+
+    def test_stale_failure_superseded_by_newer_success_is_green(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "FAILURE", "2026-08-20T01:00:00Z"),
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertTrue(ok, msg)
+        # Deduplicated: one check name, not two runs.
+        self.assertIn("1 checks", msg)
+
+    def test_array_order_does_not_decide_recency(self):
+        # GitHub gives no ordering guarantee, so the newest-last arrangement
+        # above must not be what makes the previous test pass.
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+            self._run("test", "FAILURE", "2026-08-20T01:00:00Z"),
+        ]}
+        self.assertTrue(merge_pr.check_ci(pr)[0])
+
+    def test_stale_success_superseded_by_newer_failure_is_red(self):
+        # Recency has to cut both ways, or the fix becomes a way to merge red.
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T01:00:00Z"),
+            self._run("test", "FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("test=failure", msg)
+
+    def test_distinct_check_names_are_not_collapsed(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+            self._run("lint", "FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("lint=failure", msg)
+
+    def test_started_at_is_used_when_a_run_has_not_completed(self):
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE",
+             "completedAt": "2026-08-20T01:00:00Z"},
+            {"name": "test", "status": "IN_PROGRESS", "conclusion": None,
+             "startedAt": "2026-08-20T02:00:00Z"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("not finished", msg)
+
+    def test_contested_name_without_timestamps_fails_closed(self):
+        # Two runs of one name and no way to order them: refuse rather than
+        # assume either is current.
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("undecidable", msg)
+
+    def test_unparsable_timestamp_on_a_contested_name_fails_closed(self):
+        pr = {"statusCheckRollup": [
+            self._run("test", "FAILURE", "not-a-time"),
+            self._run("test", "SUCCESS", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("undecidable", msg)
+
+    def test_uncontested_name_without_a_timestamp_still_judged(self):
+        # A single run needs no ordering; it is the run. Requiring a timestamp
+        # here would break every ordinary pending check.
+        pr = {"statusCheckRollup": [
+            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+        self.assertTrue(merge_pr.check_ci(pr)[0])
+
+    def test_allowlist_survives_deduplication(self):
+        # The newest run being an unknown conclusion must still fail closed.
+        pr = {"statusCheckRollup": [
+            self._run("test", "SUCCESS", "2026-08-20T01:00:00Z"),
+            self._run("test", "STARTUP_FAILURE", "2026-08-20T02:00:00Z"),
+        ]}
+        ok, msg = merge_pr.check_ci(pr)
+        self.assertFalse(ok)
+        self.assertIn("startup_failure", msg)
+
+    def test_legacy_status_context_entries_group_by_context(self):
+        pr = {"statusCheckRollup": [
+            {"context": "ci/legacy", "state": "FAILURE",
+             "completedAt": "2026-08-20T01:00:00Z"},
+            {"context": "ci/legacy", "state": "SUCCESS",
+             "completedAt": "2026-08-20T02:00:00Z"},
+        ]}
+        self.assertTrue(merge_pr.check_ci(pr)[0])
 
     def test_no_checks_at_all_blocks(self):
         # A PR with zero checks is unverified, not verified-by-default. This is
@@ -947,6 +1061,88 @@ class SelfReviewTests(unittest.TestCase):
             labelled("author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
         self.assertTrue(ok)
         self.assertIn("agent-3", msg)
+
+    # --- Identity as the pair (id, family) (#307) ---------------------------
+    # Agents authenticate as one GitHub user, so the labels are all that
+    # distinguish them. Comparing the id alone cannot tell a genuine
+    # cross-family reviewer apart from the author reviewing its own work.
+
+    def test_same_id_same_family_is_still_a_self_review(self):
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1", "reviewer-family:agent-1:anthropic"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
+        # Families were present, so no missing-label caveat is warranted.
+        self.assertNotIn("cannot be ruled out", msg)
+
+    def test_same_id_different_family_is_reported_as_an_id_collision(self):
+        # Two agents answering to one id (#304). Not a peer review, and not
+        # honestly a self-review either -- the namespace broke.
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1", "reviewer-family:agent-1:google"), 0)
+        self.assertFalse(ok)
+        self.assertIn("sharing one id", msg)
+        self.assertIn("anthropic", msg)
+        self.assertIn("google", msg)
+        self.assertNotIn("A self-review does not satisfy", msg)
+
+    def test_id_collision_blocks_even_with_a_genuine_peer(self):
+        # A broken id namespace is reportable regardless of who else reviewed:
+        # no attribution carrying that id can be trusted.
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic",
+            "reviewed-by:agent-1", "reviewer-family:agent-1:google",
+            "reviewed-by:agent-9"), 0)
+        self.assertFalse(ok)
+        self.assertIn("sharing one id", msg)
+
+    def test_distinct_id_review_passes_without_any_family_labels(self):
+        # Unchanged from today: family is consulted only where the ids collide,
+        # so PRs predating family stamping keep merging.
+        ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-2"), 0)
+        self.assertTrue(ok)
+        self.assertIn("agent-2", msg)
+
+    def test_missing_family_on_a_same_id_review_names_what_is_missing(self):
+        ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("self-review", msg.lower())
+        self.assertIn("family:<family> on the PR", msg)
+        self.assertIn("reviewer-family:agent-1:<family>", msg)
+
+    def test_missing_reviewer_family_alone_is_named(self):
+        ok, msg = _gate(labelled(
+            "author:agent-1", "family:anthropic", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("reviewer-family:agent-1:<family>", msg)
+        self.assertNotIn("family:<family> on the PR", msg)
+
+    def test_missing_family_does_not_block_a_genuine_peer(self):
+        ok, _ = _gate(labelled(
+            "author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
+        self.assertTrue(ok)
+
+    def test_classifier_partitions_reviewers(self):
+        pr = labelled("author:a1", "family:anthropic",
+                      "reviewed-by:a1", "reviewer-family:a1:google",
+                      "reviewed-by:a2")
+        peers, collisions, unresolved = merge_pr.classify_reviewers(
+            pr, ["a1", "a2"], "a1")
+        self.assertEqual(peers, ["a2"])
+        self.assertEqual(collisions, [("a1", "anthropic", "google")])
+        self.assertEqual(unresolved, [])
+
+    def test_reviewer_families_ignores_malformed_labels(self):
+        pr = labelled("reviewer-family:a1:google", "reviewer-family:nofamily",
+                      "reviewer-family:")
+        self.assertEqual(merge_pr.reviewer_families(pr), {"a1": "google"})
+
+    def test_reviewer_family_label_is_not_read_as_the_author_family(self):
+        # family: and reviewer-family: must not be confused by prefix matching.
+        pr = labelled("reviewer-family:a1:google")
+        self.assertEqual(merge_pr.label_values(pr, merge_pr.FAMILY_LABEL), [])
 
     def test_review_without_attribution_is_refused(self):
         # Unattributable on a stamped PR: it cannot be told apart from a

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 730
 """triage_backlog.py - promotes Backlog issues to Ready, and sizes the fleet.
 
 Triage is the throughput cap nobody owns. The picker cannot hand out a Backlog

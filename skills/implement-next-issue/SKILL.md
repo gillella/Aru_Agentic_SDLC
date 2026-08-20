@@ -99,7 +99,10 @@ releases automatically.
    - Bug fix: `fix/issue-<ISSUE_ID>-<short-description>`
    - Chore: `chore/issue-<ISSUE_ID>-<short-description>`
 2. **Worktree Isolation**: Create a dedicated git worktree for the branch in `.worktrees/<branch-name>` so the main working directory remains pristine.
-3. Execute: `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ISSUE_ID> --worktree`
+3. Execute: `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ISSUE_ID> --worktree --agent <AGENT_ID>`
+   Pass `--agent`: it scopes the worktree directory to you. Without it, two
+   agents sharing one clone land in the same directory and one commits the
+   other's uncommitted files.
 
 ### Step 4b: Plan Gate Before the First Edit
 

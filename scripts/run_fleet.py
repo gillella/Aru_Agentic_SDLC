@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1055
 """Optional headless worker for one Aru factory CLI agent identity.
 
 The GitHub Project Board remains the queue.  This process only decides when to

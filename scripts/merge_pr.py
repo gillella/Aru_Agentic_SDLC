@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 3524
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -33,7 +34,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import acceptance_runner
@@ -74,6 +75,12 @@ CHECKPOINT_PREFIX = "ckpt/"
 # Completed-review attribution, written by claim_issue.py --complete-review.
 # This is the only label that satisfies the gate.
 REVIEWED_BY_LABEL = "reviewed-by:"
+# The authoring agent's model family, stamped on the PR by create_pr.py.
+FAMILY_LABEL = "family:"
+# reviewer-family:<id>:<family> - the reviewing agent's model family, stamped by
+# claim_issue.py --complete-review. Needed because the framework's identity is
+# the pair (id, family) and only the PR's own family was ever recorded (#307).
+REVIEWER_FAMILY_LABEL = "reviewer-family:"
 REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
 # The transient claim, written by claim_review. Deliberately NOT accepted here:
 # it records that an agent took the PR off the queue, not that it read anything.
@@ -89,6 +96,10 @@ MERGER_CLAIM_LABEL = "merger:"
 # (#123). GitHub exposes some bot logins with a ``[bot]`` suffix and the
 # Codex connector without one, so both forms must be recognized explicitly.
 ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
+# Advisory review-bot commit-status contexts that must never gate CI. A bot
+# review (e.g. CodeRabbit) posts a StatusContext that stays PENDING while it
+# re-reads the diff; it is not a build check and cannot certify the head.
+ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
 # review evidence; all other known actor kinds are automation or identities
@@ -902,6 +913,64 @@ def check_open(pr):
     return True, "PR is open."
 
 
+def _check_name(check):
+    """Check runs carry 'name'; legacy commit statuses carry 'context'."""
+    return check.get("name") or check.get("context") or "check"
+
+
+def _check_time(check):
+    """When this run finished, for ordering runs of the same check.
+
+    Falls back to the start time when a run has not completed. Returns None
+    when neither timestamp is usable, which the caller treats as "cannot be
+    ordered" rather than "is current".
+    """
+    raw = check.get("completedAt") or check.get("startedAt")
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _current_runs(rollup):
+    """Reduce the rollup to the live run of each check name.
+
+    GitHub keeps every run recorded against the head commit: the push-triggered
+    run, the pull_request-triggered run, and every re-run. Judging all of them
+    means one superseded failure holds the gate red forever, so re-running a
+    job green cannot unblock a PR and only an operator can (#306).
+
+    Array order carries no recency guarantee, so ordering comes from the
+    timestamps. A name with a single entry needs no ordering - that entry is
+    the run. A name with several entries where any timestamp is unusable is
+    reported as unorderable and fails closed: guessing which run is live is
+    exactly the mistake being fixed.
+    """
+    groups = {}
+    for check in rollup:
+        groups.setdefault(_check_name(check), []).append(check)
+
+    current, unorderable = {}, []
+    for name, runs in groups.items():
+        if len(runs) == 1:
+            current[name] = runs[0]
+            continue
+        stamped = [(_check_time(run), run) for run in runs]
+        if any(when is None for when, _ in stamped):
+            unorderable.append(name)
+            continue
+        current[name] = max(stamped, key=lambda pair: pair[0])[1]
+    return current, sorted(unorderable)
+
+
 def check_ci(pr):
     rollup = pr.get("statusCheckRollup") or []
     if not rollup:
@@ -913,12 +982,24 @@ def check_ci(pr):
     passing = {"SUCCESS", "NEUTRAL", "SKIPPED"}
     in_progress = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
+    current, unorderable = _current_runs(rollup)
+    if unorderable:
+        return False, (
+            f"CI recency is undecidable for: {', '.join(unorderable)}. "
+            "Several runs of one check carry no usable timestamp, so which one "
+            "is current cannot be established."
+        )
+
     failing, pending = [], []
-    for check in rollup:
+    for name in sorted(current):
+        if (name or "").lower() in ADVISORY_CHECK_CONTEXTS:
+            # Advisory review bots are not build checks; a stuck PENDING status
+            # from one must not hold the CI gate (see ADVISORY_CHECK_CONTEXTS).
+            continue
+        check = current[name]
         # Check runs use 'conclusion'; legacy statuses use 'state'.
         status = (check.get("status") or "").upper()
         result = (check.get("conclusion") or check.get("state") or "").upper()
-        name = check.get("name") or check.get("context") or "check"
         if status and status != "COMPLETED" and not result or result in in_progress:
             pending.append(name)
         elif result not in passing:
@@ -927,7 +1008,7 @@ def check_ci(pr):
         return False, f"CI is red: {', '.join(failing)}."
     if pending:
         return False, f"CI has not finished: {', '.join(pending)}."
-    return True, f"CI green ({len(rollup)} checks)."
+    return True, f"CI green ({len(current)} checks)."
 
 
 def label_values(pr, prefix):
@@ -1027,6 +1108,96 @@ def _current_head_reviewers(evidence):
         ):
             reviewers.add(login)
     return sorted(reviewers)
+
+
+def reviewer_families(pr):
+    """Map reviewer id -> model family from reviewer-family:<id>:<family> labels."""
+    families = {}
+    for value in label_values(pr, REVIEWER_FAMILY_LABEL):
+        agent_id, _, family = value.partition(":")
+        if agent_id and family:
+            families[agent_id] = family
+    return families
+
+
+def classify_reviewers(pr, reviewers, author):
+    """Split reviewers into genuine peers, id collisions, and unresolvable ones.
+
+    Identity in this framework is the pair (id, family). Agents all authenticate
+    as one GitHub user, so the labels are the only thing that tells them apart,
+    and the gate previously compared the id alone. That makes a
+    same-id/different-family reviewer -- which is evidence of the #304 id-reissue
+    defect, not a self-review -- indistinguishable from the author reviewing its
+    own work.
+
+    Family is consulted only where identity is actually contested. A reviewer
+    whose id differs from the author's is a peer whatever its family, so PRs
+    predating family stamping keep merging exactly as before. Where the ids do
+    match, a missing family is reported rather than guessed at.
+
+    Returns (peers, collisions, unresolved):
+      peers       reviewer ids that are genuinely somebody else
+      collisions  (id, author_family, reviewer_family) - one id, two agents
+      unresolved  (id, [what is missing]) - cannot be decided, fails closed
+    """
+    author_family = next(iter(label_values(pr, FAMILY_LABEL)), "")
+    families = reviewer_families(pr)
+    peers, collisions, unresolved = [], [], []
+    for agent_id in reviewers:
+        if agent_id != author:
+            peers.append(agent_id)
+            continue
+        reviewer_family = families.get(agent_id, "")
+        if not author_family or not reviewer_family:
+            missing = []
+            if not author_family:
+                missing.append(f"{FAMILY_LABEL}<family> on the PR")
+            if not reviewer_family:
+                missing.append(
+                    f"{REVIEWER_FAMILY_LABEL}{agent_id}:<family> for the review"
+                )
+            unresolved.append((agent_id, missing))
+        elif reviewer_family != author_family:
+            collisions.append((agent_id, author_family, reviewer_family))
+    return peers, collisions, unresolved
+
+
+def id_collision_message(collisions):
+    """Refusal text for one agent id stamped as both author and reviewer.
+
+    Deliberately neither an acceptance nor a self-review rejection: the two
+    families prove two different agents are answering to one id, so the honest
+    report is that the id namespace broke, not that somebody reviewed its own
+    work. Blocking here is what stops the #304 collision from merging.
+    """
+    agent_id, author_family, reviewer_family = collisions[0]
+    return (
+        f"Agent id '{agent_id}' is stamped as both the author "
+        f"(family:{author_family}) and a reviewer (family:{reviewer_family}) of "
+        "this PR. Two agents are sharing one id, so no attribution on it can be "
+        "trusted - this is neither a self-review nor a valid peer review. "
+        "Reissue one of them a distinct id (see #304) and re-review."
+    )
+
+
+def self_review_message(author, unresolved):
+    """Refusal text when the author's id is the only attribution on the PR.
+
+    When the family labels needed to rule out an id collision are absent, the
+    gate says so instead of quietly assuming the two are the same agent. It
+    still refuses either way, so the caveat costs nothing and names exactly what
+    an operator must stamp to tell the two situations apart.
+    """
+    message = (f"The only review is from '{author}', who wrote this PR. "
+               "A self-review does not satisfy the gate.")
+    if unresolved:
+        _agent_id, missing = unresolved[0]
+        message += (
+            f" Note: {' and '.join(missing)} is missing, so a second agent "
+            "sharing this id (#304) cannot be ruled out - stamp the family "
+            "labels if that is what happened. The gate will not assume a family."
+        )
+    return message
 
 
 def _attested_head_peers(evidence, peers):
@@ -1207,10 +1378,14 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # Only completed attribution counts. Active reviewer claims were rejected
     # above because they represent work still in progress, not attestation.
     reviewers = label_values(pr, REVIEWED_BY_LABEL)
-    peers = [r for r in reviewers if r != author]
+    peers, collisions, unresolved = classify_reviewers(pr, reviewers, author)
+    # A collision blocks even when a genuine peer also reviewed: the operator
+    # needs to know the id namespace broke. A merely unstamped family does not,
+    # or every PR predating family stamping would stop merging.
+    if collisions:
+        return False, id_collision_message(collisions)
     if reviewers and not peers:
-        return False, (f"The only review is from '{author}', who wrote this PR. "
-                       "A self-review does not satisfy the gate.")
+        return False, self_review_message(author, unresolved)
     if not reviewers:
         advisory = sorted(a for a in advisory_accounts if a and a != pr_login)
         if advisory:

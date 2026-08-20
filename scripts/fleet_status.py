@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1674
 """
 fleet_status.py - Authoritative state calculation for Aru_Agentic_SDLC factory.
 

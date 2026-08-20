@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 559
 """Translate a production signal into a governed GitHub issue.
 
 Firing opens or updates one board issue. Resolved comments, closes unclaimed

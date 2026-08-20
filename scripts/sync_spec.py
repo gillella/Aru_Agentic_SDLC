@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 546
 """Bi-directional specification-to-code synchronization engine and DoD validator.
 
 Statically parses Python AST across scripts/*.py to extract CLI argument contracts

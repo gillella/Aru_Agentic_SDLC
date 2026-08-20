@@ -102,7 +102,30 @@ Helper inventory:
 * `python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" [--capacity]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --agent <AGENT_ID>` — claim a PR for review
-* `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree]`
+* `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree] [--agent <id>]`
+* `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --adopt --agent <id> --model-family <family>` — take over an abandoned PR
+
+## Agent identity
+
+An agent's id is derived from where it runs: `<product>-<fingerprint>`, e.g.
+`claude-a3f19c`, where the fingerprint hashes machine, checkout, and model
+family. It is therefore **stable across restarts** — a restarted session
+recomputes the same id and reclaims its own board work — and **distinct across
+machines**, so two agents can never be issued the same id.
+
+Override with `ARU_AGENT_ID`, or name one explicitly with `--agent`. Fleets that
+want fixed readable names (`claude-1`, `codex-1`) can pass `--agent-pool`.
+
+## When an agent disappears
+
+Claims are not permanent. An issue whose record, branch, and pull request have
+all been quiet longer than `--reap-after` (default 4h) is released back to
+Ready, with an audit comment naming the branch and PR that were left behind.
+
+A successor **adopts** the abandoned PR rather than restarting it: `author:` and
+`family:` move to the adopting agent, `adopted-from:<previous>` is recorded, and
+the commits, CI history, and review threads are preserved. Adoption refuses a PR
+updated inside the abandonment window, so live work cannot be taken.
 * `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> [--model-family <family>] --title "<Title>" --body "<body>"`
   — `--agent` is required. It stamps `author:<id>`, which is the only thing
   that lets the merge gate tell a peer review from a self-review, since every

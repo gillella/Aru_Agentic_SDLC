@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 1906
 """
 init_project.py - Automation script for bootstrapping a brand-new repository under
 Aru_Agentic_SDLC governance, scaffolding AGENTS.md, CI workflows, issue/PR templates,

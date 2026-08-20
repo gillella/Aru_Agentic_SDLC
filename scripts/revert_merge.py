@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 498
 """
 revert_merge.py - Governed reverse gear for Aru_Agentic_SDLC.
 
