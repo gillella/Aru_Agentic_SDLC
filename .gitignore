@@ -21,6 +21,10 @@ venv/
 # Agent-tool session state, not project state
 .planning/
 scripts/.planning/
+# claude-mem's generated session-context cache. The exact path, not a CLAUDE.md
+# glob: templates/integrations/claude/CLAUDE.md is a tracked template this
+# framework ships, and a glob would misrepresent it as ignorable.
+scripts/CLAUDE.md
 
 # Local bootstrap test-bed: has its own .git, would commit as a broken gitlink
 dummy_calculator_app/
