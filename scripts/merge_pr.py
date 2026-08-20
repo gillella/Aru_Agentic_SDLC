@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3592
+# line-ceiling: 3605
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1156,6 +1156,19 @@ def _current_head_reviewers(evidence):
     return sorted(reviewers)
 
 
+def identity_values(pr, prefix):
+    """Label values that actually name an agent: trimmed, empties dropped.
+
+    A bare `author:` label parses to "", which no reviewer id can equal, so
+    every reviewer read as an independent peer and a self-review satisfied the
+    review gate -- an authorization bypass in the one check that exists to prove
+    independence. A bare `reviewed-by:` fails open the same way from the other
+    side. Neither names an agent, so neither may take part in the comparison.
+    """
+    return [value for value in
+            (raw.strip() for raw in label_values(pr, prefix)) if value]
+
+
 def reviewer_families(pr):
     """Map reviewer id -> the distinct families stamped for it.
 
@@ -1407,7 +1420,7 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # governed author stamp, even a genuine external approval cannot prove the
     # PR did not bypass create_pr.py or establish who must be excluded from
     # same-account agent review.
-    authors = label_values(pr, AUTHOR_LABEL)
+    authors = identity_values(pr, AUTHOR_LABEL)
     if not authors:
         return False, (
             "PR has no author:<id> label, so the gate cannot prove that the "
@@ -1451,7 +1464,7 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # GitHub user, so only the identity labels can tell them apart.
     # Only completed attribution counts. Active reviewer claims were rejected
     # above because they represent work still in progress, not attestation.
-    reviewers = label_values(pr, REVIEWED_BY_LABEL)
+    reviewers = identity_values(pr, REVIEWED_BY_LABEL)
     peers, collisions, unresolved = classify_reviewers(pr, reviewers, author)
     # A collision blocks even when a genuine peer also reviewed: the operator
     # needs to know the id namespace broke. A merely unstamped family does not,

@@ -1,4 +1,4 @@
-# line-ceiling: 3756
+# line-ceiling: 3777
 from contextlib import nullcontext
 import json
 import os
@@ -1206,6 +1206,27 @@ class SelfReviewTests(unittest.TestCase):
         # family: and reviewer-family: must not be confused by prefix matching.
         pr = labelled("reviewer-family:a1:google")
         self.assertEqual(merge_pr.label_values(pr, merge_pr.FAMILY_LABEL), [])
+
+    def test_an_empty_author_label_does_not_make_every_reviewer_a_peer(self):
+        # A bare `author:` label parses to "", which no reviewer id equals, so
+        # a self-review read as an independent peer and satisfied the gate.
+        ok, msg = _gate(labelled("author:", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+        self.assertIn("author:", msg)
+
+    def test_a_whitespace_only_author_label_is_also_rejected(self):
+        ok, _msg = _gate(labelled("author:   ", "reviewed-by:agent-1"), 0)
+        self.assertFalse(ok)
+
+    def test_an_empty_reviewed_by_label_is_not_a_peer(self):
+        ok, _msg = _gate(labelled("author:agent-1", "reviewed-by:"), 0)
+        self.assertFalse(ok)
+
+    def test_author_label_whitespace_is_trimmed_not_treated_as_distinct(self):
+        # " agent-1" and "agent-1" are one identity, not an ambiguity.
+        ok, _msg = _gate(labelled("author: agent-1", "author:agent-1",
+                                  "reviewed-by:agent-2"), 0)
+        self.assertTrue(ok)
 
     def test_two_different_author_labels_fail_closed(self):
         # Concurrent adoption can leave two author: stamps. Picking one by
