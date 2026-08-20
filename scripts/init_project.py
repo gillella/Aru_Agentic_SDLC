@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1906
+# line-ceiling: 1923
 """
 init_project.py - Automation script for bootstrapping a brand-new repository under
 Aru_Agentic_SDLC governance, scaffolding AGENTS.md, CI workflows, issue/PR templates,
@@ -419,7 +419,19 @@ def render_ci_workflow(stack: str, test_runner: str) -> str:
         steps = NODE_CI_STEPS
     else:
         steps = GO_CI_STEPS
-    return CI_WORKFLOW_HEADER + steps.format(test_runner=test_runner.strip())
+    return (CI_WORKFLOW_HEADER + steps.format(test_runner=test_runner.strip())
+            + LINE_CEILING_CI_STEP)
+
+# Runs for every stack. The ceiling governs .py, .sh, .js/.jsx/.ts/.tsx, .go,
+# .css and .html, so a node or go project needs it as much as a python one, and
+# a bootstrapped repo previously inherited none of the anti-bloat ratchet the
+# framework enforces on itself (#319). ubuntu-latest ships python3, so the
+# non-python stacks need no setup step for this.
+LINE_CEILING_CI_STEP = """
+      - name: Enforce file line ceilings
+        run: python3 scripts/check_line_ceilings.py
+"""
+
 
 PR_TEMPLATE = """## What
 
@@ -1143,6 +1155,24 @@ def scaffold_directory_structure(target_dir: str):
     print("✅ Standard directory structure scaffolded.")
 
 
+def _vendor_helper(name: str, target_scripts_dir: str) -> str:
+    """Copy a framework helper verbatim into a generated project's scripts/.
+
+    Verbatim, not regenerated: the consumer runs the same file this repository
+    runs, so the two cannot drift into different behaviour. Any `line-ceiling:`
+    marker the source carries travels with it, which is why a new project passes
+    its own ceiling guard on day one without a manual baseline step.
+    """
+    source_path = os.path.join(os.path.dirname(__file__), name)
+    target_path = os.path.join(target_scripts_dir, name)
+    with open(source_path, "r", encoding="utf-8") as source:
+        content = source.read()
+    with open(target_path, "w", encoding="utf-8") as target:
+        target.write(content)
+    os.chmod(target_path, 0o755)
+    return target_path
+
+
 def write_governance_scripts(  # noqa: PLR0915
     target_dir: str,
     stack: str = "python",
@@ -1157,21 +1187,8 @@ def write_governance_scripts(  # noqa: PLR0915
     os.makedirs(workflows_dir, exist_ok=True)
     os.makedirs(project_scripts_dir, exist_ok=True)
 
-    build_preview_source = os.path.join(os.path.dirname(__file__), "build_preview.py")
-    build_preview_target = os.path.join(project_scripts_dir, "build_preview.py")
-    with open(build_preview_source, "r", encoding="utf-8") as source:
-        build_preview_content = source.read()
-    with open(build_preview_target, "w", encoding="utf-8") as target:
-        target.write(build_preview_content)
-    os.chmod(build_preview_target, 0o755)
-
-    smoke_preview_source = os.path.join(os.path.dirname(__file__), "smoke_preview.py")
-    smoke_preview_target = os.path.join(project_scripts_dir, "smoke_preview.py")
-    with open(smoke_preview_source, "r", encoding="utf-8") as source:
-        smoke_preview_content = source.read()
-    with open(smoke_preview_target, "w", encoding="utf-8") as target:
-        target.write(smoke_preview_content)
-    os.chmod(smoke_preview_target, 0o755)
+    for helper in ("build_preview.py", "smoke_preview.py", "check_line_ceilings.py"):
+        _vendor_helper(helper, project_scripts_dir)
 
     scenarios_dir = os.path.join(github_dir, "scenarios")
     os.makedirs(scenarios_dir, exist_ok=True)
