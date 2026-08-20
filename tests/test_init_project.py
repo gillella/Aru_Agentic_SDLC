@@ -1,5 +1,8 @@
-# line-ceiling: 713
+# line-ceiling: 768
+import contextlib
+import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -707,6 +710,58 @@ class DogfoodCiParityTests(unittest.TestCase):
                 else:
                     self.assertIn("actions/setup-go", deploy_wf.read_text())
                     self.assertIn("go build", release_wf.read_text())
+
+
+class LineCeilingBootstrapTests(unittest.TestCase):
+    """A bootstrapped project inherits the anti-bloat ratchet (#319).
+
+    Before this, init generated CI for python, node and go with no ceiling step
+    at all, so a project this framework created was governed by none of it.
+    """
+
+    def _bootstrap(self, stack, runner):
+        target = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, target, True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            init_project.write_governance_scripts(target, stack=stack, project_name="Demo")
+            init_project.write_ci_workflow(target, runner, stack)
+        return target
+
+    def test_every_stack_gets_the_ceiling_step(self):
+        for stack, runner in (("python", "pytest -q"),
+                              ("typescript", "npm test"),
+                              ("go", "go test ./...")):
+            with self.subTest(stack=stack):
+                target = self._bootstrap(stack, runner)
+                workflow = Path(target, ".github/workflows/ci.yml").read_text(encoding="utf-8")
+                self.assertIn("Enforce file line ceilings", workflow)
+                self.assertIn("python3 scripts/check_line_ceilings.py", workflow)
+
+    def test_the_guard_is_vendored_verbatim_not_reimplemented(self):
+        # A regenerated copy could drift; the same file cannot.
+        target = self._bootstrap("python", "pytest -q")
+        vendored = Path(target, "scripts/check_line_ceilings.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1]
+                  / "scripts" / "check_line_ceilings.py").read_text(encoding="utf-8")
+        self.assertEqual(vendored, source)
+
+    def test_a_new_project_passes_its_own_guard_immediately(self):
+        # No manual baseline step: any marker the source carries is vendored too,
+        # which is what keeps the 460-line smoke_preview.py from failing day one.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import check_line_ceilings as guard
+        for stack, runner in (("python", "pytest -q"),
+                              ("typescript", "npm test"),
+                              ("go", "go test ./...")):
+            with self.subTest(stack=stack):
+                self.assertEqual(guard.check_tree(self._bootstrap(stack, runner)), [])
+
+    def test_the_generated_workflow_is_valid_yaml(self):
+        yaml = __import__("yaml")
+        target = self._bootstrap("go", "go test ./...")
+        parsed = yaml.safe_load(Path(target, ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+        names = [s.get("name") for s in parsed["jobs"]["verify"]["steps"]]
+        self.assertIn("Enforce file line ceilings", names)
 
 
 if __name__ == "__main__":
