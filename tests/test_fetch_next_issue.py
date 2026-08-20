@@ -10,11 +10,16 @@ import triage_backlog  # noqa: E402
 
 
 def issue(number, status, touches, author="owner"):
+    labels = [{"name": status}]
+    if status == "status:ready":
+        # Priority metadata is required to be claimable; default to P3 in
+        # fixtures that are not exercising priority behavior.
+        labels.append({"name": "priority:p3"})
     record = {
         "number": number,
         "title": f"Issue {number}",
         "body": f"touches: {touches}\n",
-        "labels": [{"name": status}],
+        "labels": labels,
         "author": {"login": author},
     }
     return record
