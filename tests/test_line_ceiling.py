@@ -108,8 +108,7 @@ class LineCeilingTests(unittest.TestCase):
         """#316: the bootstrap offers node, typescript, react and go stacks, so a
         guard that scans only .py/.js/.sh/.css/.html lets those grow unbounded."""
         for name in ("a.ts", "b.tsx", "c.jsx", "d.go"):
-            with self.subTest(name=name):
-                root = tempfile.mkdtemp()
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
                 write(root, name, 401)
                 self.assertEqual(
                     {os.path.relpath(p, root) for p, _, _ in guard.check_tree(root)},
