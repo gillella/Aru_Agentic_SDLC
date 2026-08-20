@@ -102,7 +102,7 @@ Helper inventory:
 * `python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" [--capacity]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --agent <AGENT_ID>` — claim a PR for review
-* `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree]`
+* `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree] [--agent <id>]`
 * `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> [--model-family <family>] --title "<Title>" --body "<body>"`
   — `--agent` is required. It stamps `author:<id>`, which is the only thing
   that lets the merge gate tell a peer review from a self-review, since every

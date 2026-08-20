@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1341
+# line-ceiling: 1429
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -309,17 +309,105 @@ def get_current_branch() -> str:
     return stdout or "main"
 
 
-def create_worktree(branch_name: str, path: str = None, attempts: int = 5) -> str:
+WORKTREE_ROOT = ".worktrees"
+# Separator between the branch slug and the owning agent in a worktree path.
+# Doubled so it cannot occur inside a sanitised branch slug or agent id.
+WORKTREE_AGENT_SEP = "__"
+# Path length matters on macOS and Linux, and branch slugs are already long.
+WORKTREE_AGENT_MAXLEN = 24
+
+
+def worktree_agent_component(agent: str) -> str:
+    """Filesystem-safe, short form of an agent id for use in a path.
+
+    Dots are not preserved: an agent id is untrusted enough that leaving '..'
+    intact in a path component invites a traversal for no benefit.
+    """
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", str(agent))
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    return slug[:WORKTREE_AGENT_MAXLEN].strip("-")
+
+
+def worktree_path_for(branch_name: str, agent: str = "") -> str:
+    """The directory this agent uses for this branch.
+
+    The owning agent is encoded in the path rather than recorded inside the
+    worktree, so ownership cannot be read wrong and no marker file can be swept
+    into somebody's commit. Two agents in one clone therefore never derive the
+    same directory (#305). Calls that name no agent keep the historical
+    unscoped path, so worktrees created before this change still resolve.
+    """
+    base = os.path.join(WORKTREE_ROOT, branch_name.replace("/", "-"))
+    component = worktree_agent_component(agent) if agent else ""
+    return f"{base}{WORKTREE_AGENT_SEP}{component}" if component else base
+
+
+def worktree_agent_of(path: str) -> str:
+    """The agent encoded in a worktree path, or '' for an unscoped one."""
+    tail = os.path.basename(os.path.normpath(path))
+    _, sep, component = tail.rpartition(WORKTREE_AGENT_SEP)
+    return component if sep else ""
+
+
+def worktree_holding_branch(branch_name: str) -> Optional[str]:
+    """Path of the worktree that currently has ``branch_name`` checked out.
+
+    Returns None when no worktree holds it, or when the listing cannot be read
+    -- callers treat an unreadable listing as "no known holder" and let git
+    itself refuse, rather than blocking on a transient failure.
+    """
+    code, out, _ = run_cmd(["git", "worktree", "list", "--porcelain"], check=False)
+    if code != 0:
+        return None
+    current = None
+    for line in (out or "").splitlines():
+        if line.startswith("worktree "):
+            current = line[len("worktree "):].strip()
+        elif line.startswith("branch "):
+            ref = line[len("branch "):].strip()
+            if ref in (f"refs/heads/{branch_name}", branch_name):
+                return current
+    return None
+
+
+def _describe_worktree_holder(holder: str) -> str:
+    agent = worktree_agent_of(holder)
+    return f"'{holder}' (agent '{agent}')" if agent else f"'{holder}' (no agent recorded)"
+
+
+def create_worktree(branch_name: str, path: str = None, attempts: int = 5,
+                    agent: str = "") -> Optional[str]:
     """Creates a git worktree for isolated feature development/review.
+
+    Returns the worktree path, or None if one could not be established. The old
+    contract returned the path unconditionally, so a caller that lost the race
+    for a shared directory was handed another agent's checkout and committed
+    out of it -- the #305 data-integrity defect, where one agent's commit
+    carried another's uncommitted files.
 
     Retries with backoff: concurrent agents in one clone contend on
     .git/index.lock, and `git worktree add` fails transiently rather than
     waiting.
     """
     if not path:
-        path = os.path.join(".worktrees", branch_name.replace("/", "-"))
+        path = worktree_path_for(branch_name, agent)
+
+    # Never adopt a directory we did not resolve for ourselves. git allows only
+    # one worktree per branch, so a holder at any other path is somebody else's
+    # working directory -- refuse and name it instead of silently sharing it.
+    holder = worktree_holding_branch(branch_name)
+    if holder and os.path.realpath(holder) != os.path.realpath(path):
+        print(f"[ERROR] Branch '{branch_name}' is already checked out at "
+              f"{_describe_worktree_holder(holder)}, not at '{path}'. Refusing to "
+              "share another agent's worktree.", file=sys.stderr)
+        return None
+    if holder:
+        print(f"✅ Reattached to existing worktree at: '{path}'")
+        return path
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
+    stderr = ""
     for attempt in range(attempts):
         code, _, stderr = run_cmd(["git", "worktree", "add", "-b", branch_name, path], check=False)
         if code == 0:
@@ -340,7 +428,7 @@ def create_worktree(branch_name: str, path: str = None, attempts: int = 5) -> st
         time.sleep(sleep_s)
 
     print(f"[ERROR] Could not create worktree at '{path}': {stderr}", file=sys.stderr)
-    return path
+    return None
 
 
 def query_open_issues() -> Optional[List[Dict[str, Any]]]:

@@ -202,7 +202,8 @@ def has_implementation_plan(
     return False
 
 
-def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool = False, fetch_remote: bool = True) -> str:
+def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool = False,
+                  fetch_remote: bool = True, agent: str = "") -> str:
     issue = get_issue(issue_id) if fetch_remote else None
 
     if requires_plan(issue, branch_type):
@@ -240,7 +241,13 @@ def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool =
     branch_name = f"{branch_type}/issue-{issue_id}-{title_slug}"
 
     if use_worktree:
-        path = create_worktree(branch_name)
+        path = create_worktree(branch_name, agent=agent)
+        if path is None:
+            # A refused worktree means another agent holds this branch's
+            # checkout. Continuing would put work in somebody else's directory,
+            # which is exactly how one agent's commit acquired another's
+            # uncommitted files (#305).
+            sys.exit(1)
         print(f"✅ Isolated worktree ready at: {path}")
         return path
     else:
@@ -258,9 +265,13 @@ def main():
     parser.add_argument("--issue", type=int, required=True, help="GitHub Issue Number")
     parser.add_argument("--type", type=str, default="feat", choices=["feat", "fix", "chore", "docs"], help="Branch type prefix")
     parser.add_argument("--worktree", action="store_true", help="Create isolated git worktree directory")
+    parser.add_argument("--agent", type=str, default="",
+                        help="Agent id owning this worktree. Scopes the worktree "
+                             "path so two agents sharing one clone never land in "
+                             "the same directory.")
     args = parser.parse_args()
 
-    create_branch(args.issue, args.type, args.worktree)
+    create_branch(args.issue, args.type, args.worktree, agent=args.agent)
 
 
 if __name__ == "__main__":
