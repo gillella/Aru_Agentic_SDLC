@@ -1,4 +1,4 @@
-# line-ceiling: 1529
+# line-ceiling: 1565
 import sys
 import tempfile
 import unittest
@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = "gillella/Aru_Agentic_SDLC"
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import slack_notify as sn  # noqa: E402
+import slack_projects as sp  # noqa: E402
 from slack_notify import (  # noqa: E402
     DedupeCache,
     FileDedupeCache,
@@ -50,6 +52,40 @@ def sample_config(**kwargs):
 
 
 class SlackNotifyTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.default_root = Path(self.temporary.name)
+
+        cache_path = self.default_root / "slack-notify-dedupe.json"
+        cache_patcher = patch.object(
+            sn,
+            "FileDedupeCache",
+            side_effect=lambda path=None: FileDedupeCache(path or cache_path),
+        )
+        cache_patcher.start()
+        self.addCleanup(cache_patcher.stop)
+
+        for module, name, value in (
+            (sn, "ENV_PATH", self.default_root / "slack.env"),
+            (sn, "DEDUPE_PATH", cache_path),
+            (sn, "AUDIT_PATH", self.default_root / "slack-notify-audit.json"),
+            (sp, "DEFAULT_REGISTRY_PATH", self.default_root / "projects.json"),
+            (sp, "DEFAULT_AUDIT_PATH", self.default_root / "slack-audit.json"),
+        ):
+            patcher = patch.object(module, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        original_defaults = dict(notify_alert.__kwdefaults__ or {})
+        notify_alert.__kwdefaults__ = {
+            **original_defaults,
+            "audit_path": self.default_root / "slack-notify-audit.json",
+        }
+        self.addCleanup(
+            setattr, notify_alert, "__kwdefaults__", original_defaults
+        )
+
     def test_redact_strips_configured_secrets(self):
         secret = "arbitrary-signing-secret-value"
         config = sample_config(signing_secret=secret)

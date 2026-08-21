@@ -10,5 +10,6 @@
 
 ruff==0.16.2
 pytest==9.1.1
+PyYAML==6.0.3
 vulture==2.16
 import-linter==2.13

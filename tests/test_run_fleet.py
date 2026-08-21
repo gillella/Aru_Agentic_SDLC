@@ -1,4 +1,4 @@
-# line-ceiling: 753
+# line-ceiling: 766
 import io
 import json
 import sys
@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_fleet as rf
+import agent_presence as ap
 
 
 def fleet(state="waiting", issues=1, prs=0):
@@ -59,6 +60,17 @@ class RunnerFixture(unittest.TestCase):
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.state_dir = self.root / "state"
+        self.presence_path = self.root / "agent-presence.json"
+        state_patcher = patch.object(
+            rf, "default_state_dir", return_value=self.state_dir
+        )
+        presence_patcher = patch.object(
+            ap, "DEFAULT_PRESENCE_PATH", self.presence_path
+        )
+        state_patcher.start()
+        presence_patcher.start()
+        self.addCleanup(state_patcher.stop)
+        self.addCleanup(presence_patcher.stop)
 
     def config(self, **overrides):
         values = {
@@ -608,6 +620,7 @@ class LifecycleTests(RunnerFixture):
             code = rf.main([
                 "once", "--repo", str(self.repo), "--agent", "codex-1",
                 "--family", "openai", "--cooldown-recheck", "600",
+                "--project-id", "proj_test",
             ])
         self.assertEqual(code, 0)
         self.assertEqual(captured["seconds"], 300.0)

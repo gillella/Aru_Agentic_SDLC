@@ -1,4 +1,4 @@
-# line-ceiling: 1374
+# line-ceiling: 1403
 import os
 import stat
 import sys
@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import fleet_status  # noqa: E402
+import agent_presence as ap  # noqa: E402
+import slack_projects as sp  # noqa: E402
 from fleet_status import (  # noqa: E402
     EXIT_BLOCKED,
     EXIT_COMPLETE,
@@ -38,6 +40,33 @@ from fleet_status import (  # noqa: E402
     resolve_fleet_size,
     resolve_ready_target,
 )
+
+
+_STATE_TEMPORARY = None
+_PRESENCE_PATCHER = None
+_REGISTRY_DEFAULTS = None
+
+
+def setUpModule():
+    global _STATE_TEMPORARY, _PRESENCE_PATCHER, _REGISTRY_DEFAULTS
+    _STATE_TEMPORARY = tempfile.TemporaryDirectory()
+    root = Path(_STATE_TEMPORARY.name)
+    _PRESENCE_PATCHER = patch.object(
+        ap, "DEFAULT_PRESENCE_PATH", root / "agent-presence.json"
+    )
+    _PRESENCE_PATCHER.start()
+    _REGISTRY_DEFAULTS = sp.ProjectRegistry.__init__.__defaults__
+    sp.ProjectRegistry.__init__.__defaults__ = (
+        root / "projects.json",
+        root / "slack-audit.json",
+        _REGISTRY_DEFAULTS[2],
+    )
+
+
+def tearDownModule():
+    sp.ProjectRegistry.__init__.__defaults__ = _REGISTRY_DEFAULTS
+    _PRESENCE_PATCHER.stop()
+    _STATE_TEMPORARY.cleanup()
 
 
 def mock_issue(num, *labels, body="touches: src/a.py\n", title="Test Issue", **extra):
