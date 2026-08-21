@@ -63,7 +63,7 @@ Aru_Agentic_SDLC/
 
 **Which project board?** [`docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md) compares GitHub Issues, Linear, Jira, Azure Boards, and others for agentic coding factories — and recommends keeping GitHub as Aru’s coordinator.
 
-**Explore the lifecycle:** open the no-build [interactive SDLC factory flow visualizer](sdlc_flow_visualizer/index.html) locally to inspect the current claim, worktree, review, merge, and remediation mechanics. Solid cards are shipped, amber cards are audit-only, and dashed cards are open work.
+**Explore the lifecycle:** open the no-build [interactive SDLC factory flow visualizer](sdlc_flow_visualizer/index.html) locally to inspect claim, worktree, review, merge, and remediation mechanics. Issue #342 is the Current status-legend correction; until it merges, the visualizer may lag this vocabulary, so use roadmap epic #335 and the Project Board for live status.
 
 > **Research authority.** `AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md` is the
 > single research and evidence guide. `ARU-SOFTWARE-FACTORY.md` is the

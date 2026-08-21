@@ -10,7 +10,7 @@ severe merge or close-out failure.
 
 **Strategy briefing:** [`agentic-software-factory-briefing.html`](agentic-software-factory-briefing.html) is a self-contained, tool-neutral tour of the factory thesis, operating path, maturity, and trust model. [`AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md) provides the supporting industry evidence (OpenAI harness, BCG factory, Spec Kit, Mastra, CodeRabbit). Both explain this plan without creating another roadmap. Board choice: [`PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](PROJECT-BOARD-FOR-AGENTIC-FACTORY.md).
 
-**Interactive flow:** [`../sdlc_flow_visualizer/index.html`](../sdlc_flow_visualizer/index.html) is a no-build explorer of the current lifecycle and remediation loops. Solid cards are shipped, amber cards are audit-only, and dashed cards are open work.
+**Interactive flow:** [`../sdlc_flow_visualizer/index.html`](../sdlc_flow_visualizer/index.html) is a no-build explorer of lifecycle and remediation mechanics. Issue #342 is the Current status-legend correction; until it merges, the visualizer may lag this document and must not be used as live status authority.
 
 ---
 
@@ -54,7 +54,7 @@ Three claims in the source document are stale or wrong. They matter because two 
 
 The source lists "land in-flight review/stamp fixes (#19, #24, #27, #25)" as P0. PR #25's **first revision** rested on a false premise and introduced a security hole in the only merge gate. It has since been reworked; this section is kept because the failure shape is instructive, not because the work is outstanding.
 
-#24 originally asserted that nothing writes `reviewed-by:`. Something does: `prompts/fleet-worker.md:104`, step 6 of the documented review workflow. The two labels are not a mismatch — they are two distinct states that the first revision collapsed into one:
+Issue #24 originally asserted that nothing writes `reviewed-by:`. Something does: `prompts/fleet-worker.md:104`, step 6 of the documented review workflow. The two labels are not a mismatch — they are two distinct states that the first revision collapsed into one:
 
 | label | meaning | lifetime |
 |---|---|---|
@@ -87,7 +87,7 @@ Historical note: before that alignment, defects were found by humans/Codex rathe
 
 At the snapshot, `author:`/`reviewer:` stamping was written but opt-in and
 therefore absent in practice: `create_pr.py --agent` defaulted to empty, so PR
-#18 was opened through the sanctioned path with no labels. The shipped helper
+PR #18 was opened through the sanctioned path with no labels. The shipped helper
 now requires the author identity and stamps the PR mechanically (#19 / PR #27).
 
 ### 2.4 The `create_pr.py` call-site survey, corrected
@@ -259,7 +259,7 @@ Done state.
 Phase 0's exact dependency graph and exit gate live in #336. The durable policy
 is focused, issue-declared verification for each story, followed by the complete
 Python 3.11 suite on the exact phase-exit commit and again before release. Issue
-#341 is the Current implementation of that verification contract; issue #357 is
+Issue #341 is the Current implementation of that verification contract; issue #357 is
 the Current fail-closed release-checkpoint enforcement. Until their PRs merge,
 their presence on the roadmap is not a Shipped claim.
 

@@ -19,6 +19,21 @@ STATUS_ROWS = (
     "| **Historical** | Dated evidence about an earlier state; never a current capability claim. |",
     "| **Audit-only** | Records governance evidence but does not prove a runnable artifact or environment. |",
 )
+PHASE_ROWS = (
+    "| 0 | **Current** | Restore a trustworthy baseline and prove one real external deployment | #336 |",
+    "| 1 | **Deferred** | Define and enforce the governed kernel boundary after Phase 0 evidence | #337 |",
+    "| 2 | **Deferred** | Specify and enforce capability admission after Phase 1 and an approved PRD | #338 |",
+    "| 3 | **Deferred** | Compose clarification and convergence stations after the kernel/admission gates | #339 |",
+    "| 4 | **Deferred** | Generalize real delivery, observation, rollback, and learning from provider proof | #84 |",
+    "| 5 | **Deferred** | Prove, measure, and release the isolated multi-project factory | #186 |",
+)
+
+
+def section(document, start, end):
+    """Return one named document section, failing loudly if boundaries drift."""
+    start_index = document.index(start)
+    end_index = document.index(end, start_index + len(start))
+    return document[start_index:end_index]
 
 
 class FactoryDocsFreshnessTests(unittest.TestCase):
@@ -39,13 +54,37 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
     def test_live_roadmap_authority_is_board_backed(self):
         for path, document in self.documents.items():
             with self.subTest(path=path):
-                self.assertIn("#335", document)
-                self.assertIn("Project Board", document)
+                introduction = section(
+                    document, document.splitlines()[0], "## Lifecycle status vocabulary"
+                )
+                self.assertRegex(
+                    introduction,
+                    re.compile(
+                        r"roadmap epic #335.{0,240}Project Board.{0,120}live authority",
+                        re.IGNORECASE | re.DOTALL,
+                    ),
+                )
         plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
-        for issue in ("#336", "#337", "#338", "#339", "#84", "#186"):
-            self.assertIn(issue, plan)
-        self.assertIn("| 0 | **Current** |", plan)
-        self.assertEqual(plan.count("| **Deferred** |"), 6)
+        roadmap = section(plan, "### 5.1 Current governed roadmap", "### 5.2")
+        for row in PHASE_ROWS:
+            self.assertEqual(roadmap.count(row), 1)
+
+    def test_visualizer_status_claim_waits_for_its_own_issue(self):
+        for path in (Path("README.md"), Path("docs/ARU-SOFTWARE-FACTORY.md")):
+            introduction = section(
+                self.documents[path],
+                self.documents[path].splitlines()[0],
+                "## Lifecycle status vocabulary",
+            )
+            with self.subTest(path=path):
+                self.assertRegex(
+                    introduction,
+                    re.compile(
+                        r"Issue #342 is the Current status-legend correction; "
+                        r"until it merges, the visualizer may lag",
+                        re.IGNORECASE,
+                    ),
+                )
 
     def test_historical_roadmap_cannot_look_current(self):
         plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
@@ -65,13 +104,24 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
             Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md")
         ]
         plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
-        for stale in (
-            "front of factory gap",
-            "**Weak / partial**",
-            "**Missing / weak**",
-            "Ship `fleet_status.py` early in Phase 4",
-        ):
-            self.assertNotIn(stale, research)
+        for path, document in self.documents.items():
+            with self.subTest(path=path):
+                for stale in (
+                    "front of factory gap",
+                    "**Weak / partial**",
+                    "**Missing / weak**",
+                    "Ship `fleet_status.py` early in Phase 4",
+                ):
+                    self.assertNotIn(stale, document)
+                for capability in ("intake", "telemetry"):
+                    self.assertRegex(
+                        document,
+                        re.compile(
+                            rf"(?:Shipped.{{0,160}}{capability}|"
+                            rf"{capability}.{{0,160}}Shipped)",
+                            re.IGNORECASE | re.DOTALL,
+                        ),
+                    )
         self.assertIn("#101–#103", research)
         self.assertIn("#106–#108", research)
         self.assertIn("#106–#108", plan)
@@ -88,12 +138,31 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
             "promotion",
             "rollback",
         )
-        for path, document in self.documents.items():
+        scopes = {
+            Path("README.md"): section(
+                self.documents[Path("README.md")],
+                "Current delivery truth",
+                "\n---\n",
+            ),
+            Path("docs/ARU-SOFTWARE-FACTORY.md"): section(
+                self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")],
+                "#### Deployment truth",
+                "### 5.2",
+            ),
+            Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md"): section(
+                self.documents[
+                    Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md")
+                ],
+                "## 5. Where Aru stands today",
+                "**Strategic read:**",
+            ),
+        }
+        for path, deployment in scopes.items():
             with self.subTest(path=path):
                 for phrase in required:
-                    self.assertIn(phrase, document)
+                    self.assertIn(phrase, deployment)
                 self.assertRegex(
-                    document,
+                    deployment,
                     re.compile(
                         r"Audit-only.{0,180}(does not|not hosting|no runnable)",
                         re.IGNORECASE | re.DOTALL,
@@ -101,13 +170,36 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                 )
 
     def test_merge_default_matches_the_shipped_helper(self):
-        for path, document in self.documents.items():
+        scopes = {
+            Path("README.md"): section(
+                self.documents[Path("README.md")],
+                "Current delivery truth",
+                "\n---\n",
+            ),
+            Path("docs/ARU-SOFTWARE-FACTORY.md"): section(
+                self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")],
+                "### 5.1 Current governed roadmap",
+                "### 5.2",
+            ),
+            Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md"): section(
+                self.documents[
+                    Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md")
+                ],
+                "## 5. Where Aru stands today",
+                "**Strategic read:**",
+            ),
+        }
+        merge_source = (ROOT / "scripts" / "merge_pr.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('parser.add_argument("--merge-method", default="merge"', merge_source)
+        for path, merge_claim in scopes.items():
             with self.subTest(path=path):
-                self.assertIn("merge_pr.py", document)
-                self.assertIn("squash", document.lower())
-                self.assertIn("opt-in", document.lower())
+                self.assertIn("merge_pr.py", merge_claim)
+                self.assertIn("squash", merge_claim.lower())
+                self.assertIn("opt-in", merge_claim.lower())
                 self.assertRegex(
-                    document,
+                    merge_claim,
                     re.compile(
                         r"defaults? to\s+(?:a\s+)?merge\s+commits?",
                         re.IGNORECASE,
