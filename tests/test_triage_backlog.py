@@ -1,4 +1,4 @@
-# line-ceiling: 862
+# line-ceiling: 867
 import io
 import os
 import sys
@@ -639,6 +639,12 @@ class ReadyDocstringContractTests(unittest.TestCase):
                            "labels": []}, set()),
             [],
         )
+
+    def test_canonical_triage_skill_has_no_scope_override(self):
+        skill = (Path(__file__).resolve().parents[1] / "skills" /
+                 "triage-backlog" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertNotIn("--force", skill)
+        self.assertIn("Split or narrow every held issue", skill)
 
 
 class PartitionTests(TrustedOwnerTests):
