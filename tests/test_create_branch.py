@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -154,6 +155,66 @@ class CreateBranchPlanGateTests(unittest.TestCase):
         )
         self.assertEqual(cb.validate_plan_depth(filled_low_risk, is_risk=False), [])
         self.assertTrue(cb.is_substantive_plan(filled_low_risk, is_risk=False))
+
+
+class MergedBranchReuseTests(unittest.TestCase):
+    """#344 AC5: a legitimate new issue must not resurrect a branch name a
+    governed merge already spent (modeled on
+    gillella/hermes-trading-automation PR #89).
+    """
+
+    @staticmethod
+    def _list_response(candidates):
+        return 0, json.dumps(candidates), ""
+
+    def test_refuses_when_branch_name_already_merged(self):
+        with patch("create_branch.run_cmd", return_value=self._list_response([
+            {"number": 87, "state": "MERGED", "labels": []},
+        ])) as run:
+            refusal = cb._merged_branch_refusal("fix/issue-87-example")
+        self.assertIsNotNone(refusal)
+        self.assertIn("already used by merged PR #87", refusal)
+        self.assertIn("state MERGED", refusal)
+        run.assert_called_once()
+
+    def test_refuses_when_branch_carries_terminal_lease(self):
+        with patch("create_branch.run_cmd", return_value=self._list_response([
+            {"number": 87, "state": "CLOSED",
+             "labels": [{"name": "terminal-lease:abcdef123456"}]},
+        ])):
+            refusal = cb._merged_branch_refusal("fix/issue-87-example")
+        self.assertIsNotNone(refusal)
+        self.assertIn("terminal lease abcdef123456", refusal)
+
+    def test_allows_a_branch_never_used_before(self):
+        with patch("create_branch.run_cmd", return_value=self._list_response([])):
+            self.assertIsNone(cb._merged_branch_refusal("fix/issue-87-example"))
+
+    def test_unreadable_pr_list_fails_open_rather_than_blocking_every_branch(self):
+        with patch("create_branch.run_cmd", return_value=(1, "", "gh: rate limited")):
+            self.assertIsNone(cb._merged_branch_refusal("fix/issue-87-example"))
+
+    @patch("create_branch._merged_branch_refusal")
+    @patch("create_branch.get_issue")
+    @patch("create_branch.has_implementation_plan")
+    def test_create_branch_refuses_to_recreate_a_merged_branch(
+        self, mock_has_plan, mock_get_issue, mock_refusal
+    ):
+        mock_get_issue.return_value = {"title": "fix: example", "labels": []}
+        mock_has_plan.return_value = True
+        mock_refusal.return_value = (
+            "Branch 'fix/issue-87-example' was already used by merged PR "
+            "#87 (state MERGED); it cannot be recreated or reused. Open a "
+            "new governed issue so a fresh, issue-specific branch is derived."
+        )
+
+        with patch("sys.stderr.write") as mock_stderr:
+            with self.assertRaises(SystemExit) as ctx:
+                cb.create_branch(87, branch_type="fix", fetch_remote=True)
+            self.assertEqual(ctx.exception.code, 1)
+            written = "".join(call.args[0] for call in mock_stderr.call_args_list)
+            self.assertIn("[BLOCKED]", written)
+            self.assertIn("already used by merged PR #87", written)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# line-ceiling: 462
+# line-ceiling: 580
 import json
 import sys
 import unittest
@@ -456,6 +456,89 @@ class VerificationEvidenceTests(unittest.TestCase):
         parsed, error = merge_pr.parse_verification_evidence(evidence + evidence)
         self.assertIsNone(parsed)
         self.assertIn("duplicated", error)
+
+
+class TerminalLeaseBranchReuseTests(unittest.TestCase):
+    """#344 AC2: a stale writer must not be able to open a new PR on -- or
+    keep refreshing evidence against -- a branch a governed merge already
+    spent (modeled on gillella/hermes-trading-automation PR #89).
+    """
+
+    @staticmethod
+    def _list_response(candidates):
+        return 0, json.dumps(candidates), ""
+
+    @patch.object(create_pr, "get_issue", return_value={"title": "t"})
+    @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
+    def test_create_pr_refuses_when_branch_already_merged(self, _branch, _issue):
+        def fake_run_cmd(cmd, check=False, **_kwargs):
+            if cmd[:3] == ["gh", "pr", "list"]:
+                return self._list_response(
+                    [{"number": 5, "state": "MERGED", "labels": []}]
+                )
+            return 0, "", ""
+
+        with patch.object(create_pr, "run_cmd", side_effect=fake_run_cmd) as run:
+            opened = create_pr.create_pr(7, "t", "body")
+
+        self.assertFalse(opened)
+        self.assertFalse(
+            any(c.args[0][:3] == ["gh", "pr", "create"] for c in run.call_args_list)
+        )
+
+    @patch.object(create_pr, "get_issue", return_value={"title": "t"})
+    @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
+    def test_create_pr_refuses_when_branch_carries_terminal_lease(self, _branch, _issue):
+        def fake_run_cmd(cmd, check=False, **_kwargs):
+            if cmd[:3] == ["gh", "pr", "list"]:
+                return self._list_response([{
+                    "number": 5, "state": "CLOSED",
+                    "labels": [{"name": "terminal-lease:abcdef123456"}],
+                }])
+            return 0, "", ""
+
+        with patch.object(create_pr, "run_cmd", side_effect=fake_run_cmd) as run:
+            opened = create_pr.create_pr(7, "t", "body")
+
+        self.assertFalse(opened)
+        self.assertFalse(
+            any(c.args[0][:3] == ["gh", "pr", "create"] for c in run.call_args_list)
+        )
+
+    @patch.object(create_pr, "get_issue", return_value={"title": "t"})
+    @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
+    def test_create_pr_allows_a_branch_never_used_before(self, _branch, _issue):
+        def fake_run_cmd(cmd, check=False, **_kwargs):
+            if cmd[:3] == ["gh", "pr", "list"]:
+                return self._list_response([])
+            if cmd[:3] == ["gh", "pr", "create"]:
+                return 0, "https://x/pull/7", ""
+            return 0, "", ""
+
+        with patch.object(create_pr, "run_cmd", side_effect=fake_run_cmd), \
+                patch.object(create_pr, "apply_identity", return_value=True), \
+                patch.object(create_pr, "enqueue_review", return_value=True):
+            self.assertTrue(create_pr.create_pr(7, "t", "b", "agent-1", "anthropic"))
+
+    @patch.object(create_pr, "get_current_commit", return_value="head-7")
+    def test_refresh_refuses_a_merged_pr(self, _head):
+        responses = [(0, json.dumps({
+            "body": "Closes #7", "headRefOid": "head-7",
+            "state": "MERGED", "labels": [],
+        }), "")]
+        with patch.object(create_pr, "run_cmd", side_effect=responses) as run:
+            self.assertFalse(create_pr.refresh_pr_evidence("7", ["true"]))
+        run.assert_called_once()
+
+    @patch.object(create_pr, "get_current_commit", return_value="head-7")
+    def test_refresh_refuses_a_terminally_leased_pr(self, _head):
+        responses = [(0, json.dumps({
+            "body": "Closes #7", "headRefOid": "head-7", "state": "OPEN",
+            "labels": [{"name": "terminal-lease:abcdef123456"}],
+        }), "")]
+        with patch.object(create_pr, "run_cmd", side_effect=responses) as run:
+            self.assertFalse(create_pr.refresh_pr_evidence("7", ["true"]))
+        run.assert_called_once()
 
 
 if __name__ == "__main__":
