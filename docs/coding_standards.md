@@ -48,7 +48,7 @@ python -m pip install -r requirements-dev.txt
 
 Python 3.11 is the authoritative development and CI verification baseline.
 Newer local interpreters are best-effort until they are explicitly added to
-the hosted matrix. PyYAML is part of the required pinned toolchain because the
+the hosted matrix. PyYAML is a required part of the pinned toolchain because the
 generated-workflow checks must parse YAML rather than skip when the parser is
 missing.
 
