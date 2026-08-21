@@ -1,4 +1,4 @@
-# line-ceiling: 916
+# line-ceiling: 1050
 import json
 import sys
 import unittest
@@ -910,6 +910,95 @@ class ClaimIssueTests(unittest.TestCase):
             self.assertIn("Released stale review claim on PR #42", output)
             self.assertIn("absent from presence registry", output)
             self.assertIn("claim age > 2h", output)
+
+
+class TerminalLeaseGuardTests(unittest.TestCase):
+    """#344 AC2: a terminally-leased PR refuses continuation of review/merge
+    claims rather than letting a stale worker race the completed merge.
+    """
+
+    @patch.object(claim_issue, "_pr_labels", return_value=["terminal-lease:abcdef123456"])
+    def test_claim_review_refuses_terminally_leased_pr(self, _labels):
+        self.assertEqual(
+            claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_CONFLICT
+        )
+
+    @patch.object(claim_issue, "_pr_labels", return_value=[
+        "reviewer:agent-2", "terminal-lease:abcdef123456",
+    ])
+    def test_complete_review_refuses_terminally_leased_pr(self, _labels):
+        self.assertEqual(
+            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT
+        )
+
+    @patch.object(claim_issue, "_pr_labels", return_value=["terminal-lease:abcdef123456"])
+    def test_claim_merge_refuses_terminally_leased_pr(self, _labels):
+        self.assertEqual(
+            claim_issue.claim_merge(7, "agent-2"), claim_issue.EXIT_CONFLICT
+        )
+
+
+class TerminalLeaseReapTests(unittest.TestCase):
+    """#344 AC4: a terminal lease releases the merger claim immediately --
+    the claim exists only to make an incomplete close-out discoverable, and a
+    recorded lease already proves the merge is complete -- while the lease
+    label itself is never touched, so it stays queryable indefinitely.
+    """
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_terminal_lease_releases_merger_claim_regardless_of_claim_age(
+        self, run_cmd, fetch_timeline
+    ):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        pr = {
+            "number": 21,
+            "labels": [
+                {"name": "merger:done"},
+                {"name": "terminal-lease:abcdef123456"},
+            ],
+            "reviews": [],
+        }
+        run_cmd.side_effect = [
+            ClaimAgeReaperTests._list_result([pr]),
+            ClaimAgeReaperTests._list_result([]),
+            (0, "", ""),
+        ]
+        fetch_timeline.return_value = ClaimAgeReaperTests._timeline(
+            "merger:done", recent
+        )
+
+        self.assertEqual(claim_issue.reap_stale_merges(4), [21])
+        removal_calls = [
+            call.args[0] for call in run_cmd.call_args_list
+            if call.args[0][:3] == ["gh", "pr", "edit"]
+        ]
+        self.assertEqual(len(removal_calls), 1)
+        self.assertIn("--remove-label", removal_calls[0])
+        removed_label = removal_calls[0][removal_calls[0].index("--remove-label") + 1]
+        self.assertEqual(removed_label, "merger:done")
+        self.assertNotIn("terminal-lease:abcdef123456", removal_calls[0])
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_non_terminal_claim_still_uses_the_normal_age_threshold(
+        self, run_cmd, fetch_timeline
+    ):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        pr = {
+            "number": 22,
+            "labels": [{"name": "merger:busy"}],
+            "reviews": [],
+        }
+        run_cmd.side_effect = [
+            ClaimAgeReaperTests._list_result([pr]),
+            ClaimAgeReaperTests._list_result([]),
+        ]
+        fetch_timeline.return_value = ClaimAgeReaperTests._timeline(
+            "merger:busy", recent
+        )
+
+        self.assertEqual(claim_issue.reap_stale_merges(4), [])
 
 
 if __name__ == "__main__":
