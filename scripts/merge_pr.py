@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3630
+# line-ceiling: 3645
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -2679,8 +2679,16 @@ def cleanup_local_branch(repo_root, branch, expected_sha):
             f"Local branch {branch} was reused at {actual_sha.strip() or 'unknown'}; "
             "lease mismatch -- unrelated ref retained."
         )
-    from cleanup_worktrees import attached_branches
-    if branch in attached_branches(repo_root):
+    list_code, porcelain, list_err = run_cmd(
+        ["git", "worktree", "list", "--porcelain"],
+        check=False, cwd=repo_root,
+    )
+    if list_code != 0:
+        return False, (
+            f"Could not enumerate worktrees to prove {branch} is unattached: "
+            f"{list_err.strip()}"
+        )
+    if find_branch_worktree(porcelain, branch)[0]:
         return False, (
             f"Retained local branch {branch}; branch is attached to a worktree."
         )
@@ -2703,7 +2711,16 @@ def cleanup_local_branch(repo_root, branch, expected_sha):
             f"Local branch {branch} lease failed on {expected_sha} "
             f"(now at {current_sha.strip() or 'unknown'}): {err.strip()}; ref retained."
         )
-    return False, f"Could not delete local branch {branch}: {err.strip()}"
+    return False, (
+        f"Orphan local branch {branch} deletion failed after unattached validation: "
+        f"{err.strip()}"
+    )
+
+
+def is_harmless_orphan_branch_failure(failure: str) -> bool:
+    """True only for bounded fallback-safe orphan local-branch deletion failures."""
+    prefix = "local branch: Orphan local branch "
+    return failure.startswith(prefix) and "unattached validation" in failure
 
 
 def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
@@ -2982,11 +2999,9 @@ def run_closeout_with_retries(pr, issue_nums, repo_root, sleep_fn=None):
             return True, failed_attempts
         last_failures = failures or ["close-out returned failure without step evidence"]
         failed_attempts.append(last_failures)
-    if last_failures and all(item.startswith("local branch:") for item in last_failures):
-        if not any(
-            "attached" in item or "lease" in item or "reused" in item or "invalid" in item
-            for item in last_failures
-        ):
+    if last_failures and all(
+        is_harmless_orphan_branch_failure(item) for item in last_failures
+    ):
             try:
                 ok, message = clear_merger_claims(pr.get("number"))
             except Exception as exc:

@@ -2184,7 +2184,9 @@ class HumanInterventionTests(unittest.TestCase):
         human-intervention evidence.
         """
         def fail(_pr, _issues, _root, failures=None):
-            failures.append("local branch: Could not delete local branch fix/x: locked")
+            failures.append(
+                "local branch: Orphan local branch fix/x deletion failed after unattached validation: locked"
+            )
             return False
 
         with patch.object(merge_pr, "run_closeout", side_effect=fail) as closeout, \
@@ -2202,7 +2204,9 @@ class HumanInterventionTests(unittest.TestCase):
         merger.assert_called_once_with(9)
         self.assertEqual(
             attempts,
-            [["local branch: Could not delete local branch fix/x: locked"]] * 4,
+            [[
+                "local branch: Orphan local branch fix/x deletion failed after unattached validation: locked"
+            ]] * 4,
         )
 
     def test_local_branch_fail_safe_does_not_mask_other_unresolved_failures(self):
@@ -2216,7 +2220,9 @@ class HumanInterventionTests(unittest.TestCase):
         """
         def fail(_pr, _issues, _root, failures=None):
             failures.append("worktree: still attached, dirty")
-            failures.append("local branch: Could not delete local branch fix/x: locked")
+            failures.append(
+                "local branch: Orphan local branch fix/x deletion failed after unattached validation: locked"
+            )
             return False
 
         with patch.object(merge_pr, "run_closeout", side_effect=fail) as closeout, \
@@ -2234,7 +2240,9 @@ class HumanInterventionTests(unittest.TestCase):
     def test_local_branch_fail_safe_reports_failure_when_claim_release_fails(self):
         """If clearing the claim itself fails, the fail-safe must not claim success."""
         def fail(_pr, _issues, _root, failures=None):
-            failures.append("local branch: Could not delete local branch fix/x: locked")
+            failures.append(
+                "local branch: Orphan local branch fix/x deletion failed after unattached validation: locked"
+            )
             return False
 
         with patch.object(merge_pr, "run_closeout", side_effect=fail), \
@@ -2426,11 +2434,11 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         self.assertIn("lease mismatch", message)
         self.assertEqual(run.call_count, 1)
 
-    @patch.object(cleanup_worktrees, "attached_branches", return_value=set())
     @patch.object(merge_pr, "run_cmd")
-    def test_unattached_local_branch_at_gated_sha_is_deleted(self, run, _attached):
+    def test_unattached_local_branch_at_gated_sha_is_deleted(self, run):
         run.side_effect = [
             (0, "gated-sha\n", ""),  # rev-parse --verify
+            (0, "worktree /repo\nbranch refs/heads/main\n", ""),  # worktree list
             (0, "", ""),  # git update-ref -d
         ]
         ok, message = merge_pr.cleanup_local_branch(
@@ -2439,15 +2447,15 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("Deleted local branch", message)
         self.assertEqual(
-            run.call_args_list[1].args[0],
+            run.call_args_list[2].args[0],
             ["git", "update-ref", "-d", "refs/heads/fix/issue-7-x", "gated-sha"],
         )
 
-    @patch.object(cleanup_worktrees, "attached_branches", return_value=set())
     @patch.object(merge_pr, "run_cmd")
-    def test_unattached_local_branch_delete_failure_is_reported(self, run, _attached):
+    def test_unattached_local_branch_delete_failure_is_reported(self, run):
         run.side_effect = [
             (0, "gated-sha\n", ""),  # rev-parse --verify
+            (0, "worktree /repo\nbranch refs/heads/main\n", ""),  # worktree list
             (1, "", "unable to lock ref"),  # git update-ref -d
             (0, "gated-sha\n", ""),  # post-failure rev-parse check
         ]
@@ -2455,8 +2463,24 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
             "/repo", "fix/issue-7-x", "gated-sha"
         )
         self.assertFalse(ok)
-        self.assertIn("Could not delete local branch", message)
+        self.assertIn("Orphan local branch", message)
         self.assertIn("unable to lock ref", message)
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_local_branch_cleanup_fails_closed_when_worktree_enumeration_fails(self, run):
+        run.side_effect = [
+            (0, "gated-sha\n", ""),  # rev-parse --verify
+            (1, "", "worktree listing failed"),  # worktree list
+        ]
+        ok, message = merge_pr.cleanup_local_branch(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertFalse(ok)
+        self.assertIn("Could not enumerate worktrees", message)
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["git", "worktree", "list", "--porcelain"],
+        )
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/base")
     @patch.object(merge_pr, "run_cmd", return_value=(0, "new-sha\trefs/heads/fix/x\n", ""))
