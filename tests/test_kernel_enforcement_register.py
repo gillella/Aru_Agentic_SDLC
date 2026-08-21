@@ -227,6 +227,28 @@ class KernelEnforcementRegisterTests(unittest.TestCase):
         self.assertIn("incorrectly report complete", fleet["Failure behavior"])
         self.assertIn("cannot enter the TCB", fleet["Recovery path"])
 
+    def test_merge_claim_is_coordination_only_not_merge_gate_authority(self):
+        row = self.by_id["ARU-MERGE-CLAIM"]
+        self.assertIn("coordination-only merger lease", row["Protected transition or invariant"])
+        self.assertIn("peer review attribution", row["Trusted inputs"])
+        self.assertIn("merger-label exclusivity", row["Failure behavior"])
+        self.assertIn("does not evaluate CI", row["Failure behavior"])
+        self.assertIn("open threads", row["Failure behavior"])
+        self.assertIn("DoD", row["Failure behavior"])
+        self.assertIn("scripts/merge_pr.py", row["Recovery path"])
+        self.assertIn("independently re-reads", row["Recovery path"])
+
+    def test_pr_admission_records_focused_evidence_not_completeness(self):
+        row = self.by_id["ARU-PR-ADMISSION"]
+        self.assertIn("focused current-head", row["Protected transition or invariant"])
+        self.assertIn("exact head SHA", row["Trusted inputs"])
+        self.assertIn("focused local verification", row["Trusted inputs"])
+        self.assertIn("does not certify complete issue acceptance", row["Failure behavior"])
+        normalized = re.sub(r"\s+", " ", self.text)
+        self.assertIn("evidence admission, not a completeness verdict", normalized)
+        self.assertIn("complete supported suite runs at each roadmap phase exit", normalized)
+        self.assertIn("framework release gate under #357", normalized)
+
     def test_every_stable_id_has_its_exact_owner_binding(self):
         self.assertEqual(set(EXPECTED_OWNERS), set(EXPECTED_CLASSES))
         for stable_id, expected_owner in EXPECTED_OWNERS.items():
