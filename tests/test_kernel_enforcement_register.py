@@ -154,6 +154,19 @@ class KernelEnforcementRegisterTests(unittest.TestCase):
         self.assertIn("always returns success", row["Failure behavior"])
         self.assertIn("[WARN] Framework version mismatch", row["Audit evidence"])
 
+    def test_partial_queue_and_worktree_gaps_remain_advisory(self):
+        dispatch = self.by_id["ARU-WORK-DISPATCH"]
+        self.assertEqual(dispatch["Authority class"], "Advisory")
+        self.assertIn("issue-query failure", dispatch["Failure behavior"])
+        self.assertIn("empty list", dispatch["Failure behavior"])
+        self.assertIn("cannot enter the TCB", dispatch["Recovery path"])
+
+        fleet = self.by_id["ARU-FLEET-STATUS"]
+        self.assertEqual(fleet["Authority class"], "Advisory")
+        self.assertIn("worktree enumeration failure", fleet["Failure behavior"])
+        self.assertIn("incorrectly report complete", fleet["Failure behavior"])
+        self.assertIn("cannot enter the TCB", fleet["Recovery path"])
+
     def test_required_lifecycle_surfaces_are_owned(self):
         required_owner_fragments = {
             "ARU-BOARD-STATE": "update_issue_status.py --require-board",
