@@ -9,7 +9,7 @@ from typing import Optional
 from urllib.parse import quote, urlsplit
 
 from common import run_cmd
-from deploy_preview import get_default_branch, get_repo_slug
+from deploy_preview import get_repo_slug
 from promote import _valid_run_url
 
 
@@ -53,8 +53,12 @@ def run_id_from_url(run_url: str, repo_slug: str) -> Optional[int]:
 
 def resolve_default_head(repo_slug: str) -> str:
     """Resolve the live GitHub default-branch head, or return an empty refusal."""
-    branch = get_default_branch()
-    if not branch:
+    code, out, _ = run_cmd(
+        ["gh", "api", f"repos/{repo_slug}", "--jq", ".default_branch"],
+        check=False,
+    )
+    branch = out.strip() if code == 0 else ""
+    if not branch or len(branch) > 255:
         return ""
     code, out, _ = run_cmd(
         [

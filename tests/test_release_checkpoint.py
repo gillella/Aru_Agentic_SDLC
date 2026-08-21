@@ -119,20 +119,31 @@ class CheckpointValidationTests(unittest.TestCase):
 
 
 class DefaultHeadTests(unittest.TestCase):
-    @patch.object(checkpoint, "get_default_branch", return_value="release/v1")
     @patch.object(checkpoint, "run_cmd")
-    def test_live_default_head_uses_argv_and_supports_slash_branch(self, run_cmd, _branch):
-        run_cmd.return_value = (0, SHA, "")
+    def test_explicit_repository_controls_default_branch_lookup(self, run_cmd):
+        run_cmd.side_effect = ((0, "release/v1", ""), (0, SHA, ""))
         self.assertEqual(checkpoint.resolve_default_head(REPO), SHA)
         self.assertEqual(
-            run_cmd.call_args.args[0],
-            ["gh", "api", f"repos/{REPO}/commits/release%2Fv1", "--jq", ".sha"],
+            [call.args[0] for call in run_cmd.call_args_list],
+            [
+                ["gh", "api", f"repos/{REPO}", "--jq", ".default_branch"],
+                [
+                    "gh", "api", f"repos/{REPO}/commits/release%2Fv1",
+                    "--jq", ".sha",
+                ],
+            ],
         )
-        self.assertFalse(run_cmd.call_args.kwargs["check"])
+        self.assertTrue(
+            all(not call.kwargs["check"] for call in run_cmd.call_args_list)
+        )
 
-    @patch.object(checkpoint, "get_default_branch", return_value="main")
     @patch.object(checkpoint, "run_cmd", return_value=(1, "", "network"))
-    def test_live_default_head_failure_is_not_a_fallback(self, _run, _branch):
+    def test_default_branch_lookup_failure_is_not_a_local_fallback(self, _run):
+        self.assertEqual(checkpoint.resolve_default_head(REPO), "")
+
+    @patch.object(checkpoint, "run_cmd")
+    def test_target_commit_lookup_failure_is_not_a_fallback(self, run_cmd):
+        run_cmd.side_effect = ((0, "main", ""), (1, "", "network"))
         self.assertEqual(checkpoint.resolve_default_head(REPO), "")
 
 
