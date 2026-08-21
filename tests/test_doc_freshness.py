@@ -1,4 +1,4 @@
-# line-ceiling: 646
+# line-ceiling: 655
 import json
 import os
 import subprocess
@@ -556,6 +556,15 @@ class RepositoryDocumentationTests(unittest.TestCase):
         findings = check_docs.check_documents(ROOT, offline=True)
         self.assertEqual([f.render() for f in findings], [])
 
+    def test_required_yaml_verifier_is_exactly_pinned(self):
+        requirements = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+        yaml_pins = [
+            line.strip()
+            for line in requirements.splitlines()
+            if line.strip().lower().startswith("pyyaml")
+        ]
+        self.assertEqual(yaml_pins, ["PyYAML==6.0.3"])
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -564,9 +573,9 @@ if __name__ == "__main__":
 class WorkflowCredentialBoundaryTests(unittest.TestCase):
     """The checker is PR-controlled code; it must never be handed a token.
 
-    Parsed as text rather than YAML on purpose: pyyaml is not a declared
-    dependency of this repo, and adding one so a test can read CI config
-    would be a worse trade than string matching.
+    Parsed as text rather than YAML on purpose: this credential-boundary test
+    should assert the exact token-bearing step instead of an equivalent YAML
+    structure that could hide where the credential is exposed.
     """
 
     WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"

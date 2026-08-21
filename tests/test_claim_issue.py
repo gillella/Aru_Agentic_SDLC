@@ -1,6 +1,7 @@
-# line-ceiling: 916
+# line-ceiling: 938
 import json
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,27 @@ from unittest.mock import call, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import claim_issue  # noqa: E402
+import agent_presence as ap  # noqa: E402
+
+
+_PRESENCE_TEMPORARY = None
+_PRESENCE_PATCHER = None
+
+
+def setUpModule():
+    global _PRESENCE_TEMPORARY, _PRESENCE_PATCHER
+    _PRESENCE_TEMPORARY = tempfile.TemporaryDirectory()
+    _PRESENCE_PATCHER = patch.object(
+        ap,
+        "DEFAULT_PRESENCE_PATH",
+        Path(_PRESENCE_TEMPORARY.name) / "agent-presence.json",
+    )
+    _PRESENCE_PATCHER.start()
+
+
+def tearDownModule():
+    _PRESENCE_PATCHER.stop()
+    _PRESENCE_TEMPORARY.cleanup()
 
 
 def issue_with_labels(*names, author="owner", number=7):

@@ -1,6 +1,7 @@
-# line-ceiling: 1450
+# line-ceiling: 1461
 import json
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1386,6 +1387,17 @@ class BoardIdentityUniquenessTests(unittest.TestCase):
 
 
 class WorkPickerTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        patcher = patch.object(
+            ap,
+            "DEFAULT_PRESENCE_PATH",
+            Path(self.temporary.name) / "agent-presence.json",
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _dummy_select(self):
         return {
             "work": {"type": "idle", "skill": None},
@@ -1447,4 +1459,3 @@ class WorkPickerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,5 +1,6 @@
-# line-ceiling: 605
+# line-ceiling: 627
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,8 +8,29 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import claim_issue
+import agent_presence as ap
 import fetch_pr_feedback
 import merge_pr
+
+
+_PRESENCE_TEMPORARY = None
+_PRESENCE_PATCHER = None
+
+
+def setUpModule():
+    global _PRESENCE_TEMPORARY, _PRESENCE_PATCHER
+    _PRESENCE_TEMPORARY = tempfile.TemporaryDirectory()
+    _PRESENCE_PATCHER = patch.object(
+        ap,
+        "DEFAULT_PRESENCE_PATH",
+        Path(_PRESENCE_TEMPORARY.name) / "agent-presence.json",
+    )
+    _PRESENCE_PATCHER.start()
+
+
+def tearDownModule():
+    _PRESENCE_PATCHER.stop()
+    _PRESENCE_TEMPORARY.cleanup()
 
 
 def feedback_page(nodes, has_next=False, cursor=None, head="head-oid", errors=None,

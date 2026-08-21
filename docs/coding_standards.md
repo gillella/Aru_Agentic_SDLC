@@ -46,12 +46,18 @@ Install the toolchain once per checkout:
 python -m pip install -r requirements-dev.txt
 ```
 
+Python 3.11 is the authoritative development and CI verification baseline.
+Newer local interpreters are best-effort until they are explicitly added to
+the hosted matrix. PyYAML is a required part of the pinned toolchain because the
+generated-workflow checks must parse YAML rather than skip when the parser is
+missing.
+
 Then the two commands `prompts/fleet-worker.md` requires before every push run
 as written:
 
 ```bash
 ruff check .
-pytest -q
+python3 -m unittest discover tests
 ```
 
 **The toolchain is pinned, and that is the point.** Versions live in

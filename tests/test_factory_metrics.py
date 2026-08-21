@@ -97,7 +97,10 @@ class FactoryMetricsUnitTests(unittest.TestCase):
             return []
 
         mock_api.side_effect = side_effect
-        issue_events, pr_list = fm.fetch_github_telemetry(window_days=7)
+        fixed_now = fm.parse_iso("2026-08-14T12:00:00Z")
+        with patch("factory_metrics.datetime", wraps=fm.datetime) as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            issue_events, pr_list = fm.fetch_github_telemetry(window_days=7)
         self.assertEqual(len(pr_list), 1)
         self.assertEqual(pr_list[0]["pr_number"], 1)
         # N root threads under 1 review session must equal 1 rework round (not N)
@@ -125,7 +128,12 @@ class FactoryMetricsUnitTests(unittest.TestCase):
             return []
 
         mock_api.side_effect = side_effect
-        events, _ = fm.fetch_github_telemetry(window_days=7, include_closed_details=True)
+        fixed_now = fm.parse_iso("2026-08-14T12:00:00Z")
+        with patch("factory_metrics.datetime", wraps=fm.datetime) as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            events, _ = fm.fetch_github_telemetry(
+                window_days=7, include_closed_details=True
+            )
         detail = next(event for event in events if event.get("event_type") == "closed_issue")
         self.assertEqual(detail["agents"], ["codex-1"])
         self.assertEqual(detail["claim_started_at"], "2026-08-14T01:05:00Z")
@@ -155,7 +163,12 @@ class FactoryMetricsUnitTests(unittest.TestCase):
             return []
 
         mock_api.side_effect = side_effect
-        events, _ = fm.fetch_github_telemetry(window_days=7, include_closed_details=True)
+        fixed_now = fm.parse_iso("2026-08-14T12:00:00Z")
+        with patch("factory_metrics.datetime", wraps=fm.datetime) as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            events, _ = fm.fetch_github_telemetry(
+                window_days=7, include_closed_details=True
+            )
         detail = next(event for event in events if event.get("event_type") == "closed_issue")
         self.assertEqual(detail["agents"], ["claude-1"])
 

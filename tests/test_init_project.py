@@ -10,14 +10,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-
-try:  # PyYAML is optional: the suite must stay runnable with the stdlib alone.
-    import yaml as _yaml  # noqa: F401
-    _HAS_YAML = True
-except ImportError:
-    _HAS_YAML = False
 
 import init_project  # noqa: E402
 from init_project import (  # noqa: E402
@@ -406,16 +402,8 @@ class CiGateTests(unittest.TestCase):
                         indent = len(line) - len(line.lstrip(" "))
                         self.assertEqual(indent % 2, 0, f"odd indent: {line!r}")
 
-    @unittest.skipUnless(_HAS_YAML, "PyYAML not installed")
     def test_generated_workflow_parses_as_yaml(self):
-        """The real parse, where the parser is available.
-
-        The suite is deliberately stdlib-only and the repo ships no
-        requirements.txt, so PyYAML cannot be a hard dependency without
-        changing how CI installs. Verified against PyYAML for all three
-        stacks during development; this pins it wherever the lib exists.
-        """
-        import yaml
+        """The declared YAML verifier parses every generated workflow."""
 
         for stack, runner in self.STACKS:
             with self.subTest(stack=stack):
@@ -757,7 +745,6 @@ class LineCeilingBootstrapTests(unittest.TestCase):
                 self.assertEqual(guard.check_tree(self._bootstrap(stack, runner)), [])
 
     def test_the_generated_workflow_is_valid_yaml(self):
-        yaml = __import__("yaml")
         target = self._bootstrap("go", "go test ./...")
         parsed = yaml.safe_load(Path(target, ".github/workflows/ci.yml").read_text(encoding="utf-8"))
         names = [s.get("name") for s in parsed["jobs"]["verify"]["steps"]]
