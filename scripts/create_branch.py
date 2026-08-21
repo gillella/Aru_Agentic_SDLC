@@ -9,7 +9,18 @@ import re
 import sys
 from typing import Any, Optional
 
-from common import create_worktree, fetch_issue_comments, get_issue, run_cmd
+from common import (
+    agent_labels,
+    create_worktree,
+    fetch_issue_comments,
+    get_agent_id,
+    get_issue,
+    get_repo_slug,
+    label_names,
+    query_issue_project_items,
+    run_cmd,
+    select_governed_project_items,
+)
 
 HIGH_RISK_TERMS = {
     "money",
@@ -202,14 +213,91 @@ def has_implementation_plan(
     return False
 
 
+def worktree_admission_gaps(
+    issue: Optional[dict[str, Any]],
+    agent: str,
+    project_items: Optional[list[dict[str, Any]]],
+    repo_slug: Optional[str],
+) -> list[str]:
+    """Returns every fail-closed claim and board admission gap."""
+    gaps = []
+    agent = agent.strip()
+    if not agent:
+        gaps.append("an explicit --agent or agent environment identity is required")
+
+    if not issue:
+        gaps.append("the live issue is missing or unreadable")
+    else:
+        if str(issue.get("state", "")).upper() != "OPEN":
+            gaps.append("the issue is not verifiably open")
+
+        expected_claim = f"agent:{agent}" if agent else ""
+        claims = agent_labels(issue)
+        if not expected_claim or claims != [expected_claim]:
+            rendered = ", ".join(claims) or "none"
+            gaps.append(
+                "exactly one matching settled claim is required "
+                f"(expected {expected_claim or 'agent:<id>'}; found {rendered})"
+            )
+
+        statuses = sorted({
+            name.lower()
+            for name in label_names(issue)
+            if name.lower().startswith("status:")
+        })
+        if statuses != ["status:in-progress"]:
+            rendered = ", ".join(statuses) or "none"
+            gaps.append(
+                "the canonical status label must be exactly "
+                f"status:in-progress (found {rendered})"
+            )
+
+    if not repo_slug or "/" not in repo_slug:
+        gaps.append("the repository identity is missing or unreadable")
+    if project_items is None:
+        gaps.append("the issue Project Board state is unreadable")
+    elif repo_slug and "/" in repo_slug:
+        governed = select_governed_project_items(project_items, repo_slug)
+        if len(governed) != 1:
+            gaps.append("exactly one governed Project Board item is required")
+        else:
+            board_status = str(
+                (governed[0].get("status") or {}).get("name", "")
+            ).strip()
+            if board_status.lower() != "in progress":
+                gaps.append(
+                    "the governed Project Board status must be In Progress "
+                    f"(found {board_status or 'none'})"
+                )
+    return gaps
+
+
+def require_worktree_admission(issue_id: int, agent: str) -> dict[str, Any]:
+    """Resolve and verify live claim/board authority before any Git mutation."""
+    issue = get_issue(issue_id)
+    repo_slug = get_repo_slug()
+    project_items = query_issue_project_items(issue_id) if repo_slug else None
+    gaps = worktree_admission_gaps(issue, agent, project_items, repo_slug)
+    if gaps:
+        print(
+            f"[BLOCKED] Worktree admission failed for issue #{issue_id}:",
+            file=sys.stderr,
+        )
+        for gap in gaps:
+            print(f"  - {gap}", file=sys.stderr)
+        raise SystemExit(1)
+    assert issue is not None
+    return issue
+
+
 def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool = False,
-                  fetch_remote: bool = True, agent: str = "") -> str:
-    issue = get_issue(issue_id) if fetch_remote else None
+                  agent: str = "") -> str:
+    issue = require_worktree_admission(issue_id, agent)
 
     if requires_plan(issue, branch_type):
         is_risk = is_high_risk(issue)
         if not has_implementation_plan(issue_id, issue=issue, is_risk=is_risk):
-            comments = fetch_issue_comments(issue_id) if fetch_remote else []
+            comments = fetch_issue_comments(issue_id)
             candidate_texts = [c.get("body", "") for c in comments] + ([issue.get("body", "")] if issue else [])
             plan_attempts = [t for t in candidate_texts if re.search(r"^\s*#{1,4}\s*implementation\s+plan\b", t, re.I | re.M)]
             if plan_attempts:
@@ -265,10 +353,10 @@ def main():
     parser.add_argument("--issue", type=int, required=True, help="GitHub Issue Number")
     parser.add_argument("--type", type=str, default="feat", choices=["feat", "fix", "chore", "docs"], help="Branch type prefix")
     parser.add_argument("--worktree", action="store_true", help="Create isolated git worktree directory")
-    parser.add_argument("--agent", type=str, default="",
-                        help="Agent id owning this worktree. Scopes the worktree "
-                             "path so two agents sharing one clone never land in "
-                             "the same directory.")
+    parser.add_argument("--agent", type=str, default=get_agent_id() or "",
+                        help="Claimed agent id owning this worktree. Defaults to an "
+                             "explicit agent environment identity; admission fails "
+                             "if neither is set.")
     args = parser.parse_args()
 
     create_branch(args.issue, args.type, args.worktree, agent=args.agent)
