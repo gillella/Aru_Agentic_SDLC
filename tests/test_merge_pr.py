@@ -1875,12 +1875,13 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         self.assertIsNone(final)
         self.assertIn("still reports OPEN", message)
 
+    @patch.object(merge_pr, "record_terminal_lease", return_value=(True, "leased"))
     @patch.object(merge_pr, "run_closeout", return_value=True)
     @patch.object(merge_pr, "repository_root", return_value="/repo")
     @patch.object(merge_pr, "execute_merge")
     @patch.object(merge_pr, "fetch_pr", return_value=merged_pr())
     def test_rerun_of_merged_pr_skips_second_merge(
-        self, _fetch, execute, _root, closeout
+        self, _fetch, execute, _root, closeout, _lease
     ):
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
@@ -1888,6 +1889,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         execute.assert_not_called()
         closeout.assert_called_once()
 
+    @patch.object(merge_pr, "record_terminal_lease", return_value=(True, "leased"))
     @patch.object(merge_pr, "post_human_intervention", return_value=False)
     @patch.object(merge_pr.time, "sleep")
     @patch.object(merge_pr, "clear_merger_claims")
@@ -1916,7 +1918,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     def test_successful_merge_with_branch_delete_failure_is_resumable(
         self, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
         _remote, _close, _done, _issue_claim, _review_claim, merger_claim,
-        sleep, intervention,
+        sleep, intervention, _lease,
     ):
         fetch.return_value = {
             "number": 9,
@@ -1976,8 +1978,9 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
     @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
+    @patch.object(merge_pr, "record_terminal_lease", return_value=(True, "leased"))
     def test_default_merge_method_is_merge(
-        self, fetch, _json, _sync, _threads, execute, _root, closeout
+        self, _lease, fetch, _json, _sync, _threads, execute, _root, closeout
     ):
         fetch.return_value = {
             "number": 9,
@@ -3966,6 +3969,8 @@ class CheckpointCallSiteTests(unittest.TestCase):
         with patch.object(sys, "argv", argv), \
              patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "record_terminal_lease",
+                          return_value=(True, "leased")), \
              patch.object(merge_pr, "run_closeout", return_value=closeout_ok), \
              patch.object(merge_pr.time, "sleep"), \
              patch.object(merge_pr, "post_human_intervention", return_value=True), \
@@ -3994,6 +3999,8 @@ class CheckpointCallSiteTests(unittest.TestCase):
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
              patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "record_terminal_lease",
+                          return_value=(True, "leased")), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
              patch.object(merge_pr, "write_checkpoint_tag",
                           return_value=(False, "git tag failed")):
@@ -4124,6 +4131,8 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
              patch.object(merge_pr, "execute_merge",
                           return_value=(merged_pr(), "merged")), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "record_terminal_lease",
+                          return_value=(True, "leased")), \
              patch.object(merge_pr, "save_gate_verdicts", return_value=True), \
              patch.object(merge_pr, "load_gate_verdicts", return_value=None), \
              patch.object(merge_pr, "discard_gate_verdicts"), \
@@ -4158,6 +4167,8 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
              patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "record_terminal_lease",
+                          return_value=(True, "leased")), \
              patch.object(merge_pr, "load_gate_verdicts",
                           return_value=list(CHECKPOINT_GATES)) as load, \
              patch.object(merge_pr, "discard_gate_verdicts"), \

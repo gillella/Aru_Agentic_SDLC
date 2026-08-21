@@ -105,10 +105,13 @@ class CreateBranchPlanGateTests(unittest.TestCase):
             self.assertIn("[BLOCKED] Plan gate", written)
             self.assertIn("gh issue comment 999", written)
 
+    @patch("create_branch._merged_branch_refusal", return_value=None)
     @patch("create_branch.create_worktree")
     @patch("create_branch.get_issue")
     @patch("create_branch.has_implementation_plan")
-    def test_create_branch_succeeds_for_planned_feature(self, mock_has_plan, mock_get_issue, mock_worktree):
+    def test_create_branch_succeeds_for_planned_feature(
+        self, mock_has_plan, mock_get_issue, mock_worktree, _refusal
+    ):
         mock_get_issue.return_value = {"title": "feat: planned feature", "labels": [{"name": "type:feat"}]}
         mock_has_plan.return_value = True
         mock_worktree.return_value = ".worktrees/feat-issue-999-planned-feature"
