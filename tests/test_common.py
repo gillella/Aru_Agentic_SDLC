@@ -1,3 +1,4 @@
+# line-ceiling: 427
 import sys
 import unittest
 from pathlib import Path
@@ -74,6 +75,38 @@ class GovernedProjectSelectionTests(unittest.TestCase):
         selected = select_governed_projects(projects, "octocat/widgets")
 
         self.assertEqual([project["title"] for project in selected], ["widgets Board"])
+
+
+class ProjectItemPaginationTests(unittest.TestCase):
+    @staticmethod
+    def page(nodes, has_next, cursor):
+        return {
+            "data": {"repository": {"issue": {"projectItems": {
+                "nodes": nodes,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            }}}},
+        }
+
+    @patch.object(common, "run_gh_json")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_reads_every_project_item_page(self, _slug, run):
+        run.side_effect = [
+            self.page([{"id": "FIRST"}], True, "CURSOR_1"),
+            self.page([{"id": "GOVERNED"}], False, None),
+        ]
+        items = common.query_issue_project_items(42)
+        self.assertEqual([item["id"] for item in items], ["FIRST", "GOVERNED"])
+        self.assertNotIn("cursor=", " ".join(run.call_args_list[0].args[0]))
+        self.assertIn("cursor=CURSOR_1", run.call_args_list[1].args[0])
+
+    @patch.object(common, "run_gh_json")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_later_page_failure_discards_partial_authority(self, _slug, run):
+        run.side_effect = [
+            self.page([{"id": "FIRST"}], True, "CURSOR_1"),
+            {"errors": [{"message": "scope denied"}]},
+        ]
+        self.assertIsNone(common.query_issue_project_items(42))
 
 
 class GovernedProjectAttachmentTests(unittest.TestCase):

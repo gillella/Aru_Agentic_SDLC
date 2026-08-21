@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1482
+# line-ceiling: 1504
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -987,19 +987,19 @@ def get_repo_slug() -> Optional[str]:
 def query_issue_project_items(
     issue_number: int,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Returns project items while preserving GraphQL failures as ``None``."""
+    """Returns every project item while preserving any page failure as ``None``."""
     slug = get_repo_slug()
     if not slug or "/" not in slug:
         return None
     owner, repo = slug.split("/", 1)
 
     query = """
-    query($owner:String!, $repo:String!, $number:Int!) {
+    query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
       repository(owner:$owner, name:$repo) {
         issue(number:$number) {
           id
           url
-          projectItems(first:10) {
+          projectItems(first:100, after:$cursor) {
             nodes {
               id
               status: fieldValueByName(name:"Status") {
@@ -1023,25 +1023,47 @@ def query_issue_project_items(
                 }
               }
             }
+            pageInfo { hasNextPage endCursor }
           }
         }
       }
     }
     """
-    cmd = [
-        "gh", "api", "graphql",
-        "-f", f"query={query}",
-        "-F", f"owner={owner}",
-        "-F", f"repo={repo}",
-        "-F", f"number={issue_number}",
-    ]
-    res = run_gh_json(cmd)
-    if not isinstance(res, dict) or res.get("errors"):
-        return None
-    try:
-        return res["data"]["repository"]["issue"]["projectItems"]["nodes"]
-    except (KeyError, TypeError):
-        return None
+    items: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+    seen_cursors = set()
+    while True:
+        cmd = [
+            "gh", "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}",
+            "-F", f"repo={repo}",
+            "-F", f"number={issue_number}",
+        ]
+        if cursor is not None:
+            cmd += ["-F", f"cursor={cursor}"]
+        res = run_gh_json(cmd)
+        if not isinstance(res, dict) or res.get("errors"):
+            return None
+        try:
+            connection = res["data"]["repository"]["issue"]["projectItems"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            if not isinstance(nodes, list) or not isinstance(page_info, dict):
+                return None
+            items.extend(nodes)
+            has_next = page_info["hasNextPage"]
+            if not isinstance(has_next, bool):
+                return None
+            if not has_next:
+                return items
+            next_cursor = page_info["endCursor"]
+        except (KeyError, TypeError):
+            return None
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+            return None
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
 
 
 def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
