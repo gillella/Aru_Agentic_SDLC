@@ -42,12 +42,11 @@
         <input type="text" id="search-input" placeholder="Search mechanisms, scripts, gates (e.g. touches:, worktree, merge_pr)..." aria-label="Search pipeline components">
       </div>
       <div class="stat-pills">
-        <div class="snapshot-label">Repository snapshot · 2026-08-13</div>
+        <div class="snapshot-label">Current committed lifecycle contract</div>
         <div class="stat-pill"><span class="stat-num">4</span> Stages</div>
-        <div class="stat-pill"><span class="stat-num">17</span> Helper Scripts</div>
-        <div class="stat-pill"><span class="stat-num">9</span> Skills</div>
-        <div class="stat-pill status-green"><span class="stat-dot"></span> 511 Local Tests Passing</div>
-        <div class="stat-pill planned-legend">Dashed = planned</div>
+        <div class="stat-pill status-green"><span class="stat-dot"></span> Solid = shipped</div>
+        <div class="stat-pill scope-legend">Amber = audit-only scope</div>
+        <div class="stat-pill planned-legend">Dashed = open work</div>
       </div>
     </div>
   </section>
@@ -73,15 +72,15 @@
           <p>Operator intent, bug report, or product requirement submitted.</p>
         </div>
 
-        <div class="flow-card planned-card" id="node-prd" data-id="prd">
-          <div class="card-tag planned-tag">Planned: #102</div>
+        <div class="flow-card" id="node-prd" data-id="prd">
+          <div class="card-tag">Skill: idea-to-prd</div>
           <div class="card-icon">📄</div>
           <h3>PRD & Architecture Spec</h3>
           <p>Interrogation flow shapes requirements & acceptance criteria.</p>
         </div>
 
-        <div class="flow-card planned-card" id="node-dag" data-id="dag">
-          <div class="card-tag planned-tag">Planned: #103</div>
+        <div class="flow-card" id="node-dag" data-id="dag">
+          <div class="card-tag">Skill: prd-to-issues</div>
           <div class="card-icon">🔀</div>
           <h3>Issue DAG Generator</h3>
           <p>Splits epics into tasks declaring <code>touches:</code> & <code>depends-on:</code>.</p>
@@ -145,7 +144,7 @@
           <div class="card-tag">Verification</div>
           <div class="card-icon">🧪</div>
           <h3>Local Verification</h3>
-          <p>Runs local test suite & <code>ruff check .</code> before pushing.</p>
+          <p>Runs issue predicates and the tests/checks required by current governance.</p>
         </div>
 
         <div class="flow-card" id="node-pr" data-id="pr">
@@ -199,7 +198,7 @@
           <div class="card-tag">Script: merge_pr.py</div>
           <div class="card-icon">🛡️</div>
           <h3>Definition-of-Done Gate</h3>
-          <p>7-point fail-closed validation before any merge occurs.</p>
+          <p>Fail-closed lifecycle, evidence, review, and acceptance gates before merge.</p>
         </div>
       </div>
     </section>
@@ -210,7 +209,7 @@
         <div class="stage-num">04</div>
         <div class="stage-meta">
           <h2>Close-Out & Deployment</h2>
-          <span class="stage-subtitle">Current Close-Out → Planned Delivery</span>
+          <span class="stage-subtitle">Close-Out → Preview → Audited Promotion → Provider Proof</span>
         </div>
       </div>
       <div class="stage-cards">
@@ -228,18 +227,32 @@
           <p>Closes issue, moves board item to <code>Done</code>, prunes worktree.</p>
         </div>
 
-        <div class="flow-card planned-card" id="node-deploy" data-id="deploy">
-          <div class="card-tag planned-tag">Planned: #109</div>
+        <div class="flow-card" id="node-preview" data-id="preview">
+          <div class="card-tag">Skill: deploy-preview</div>
           <div class="card-icon">🌐</div>
-          <h3>Deploy Preview & Release</h3>
-          <p>Planned path from merged code to preview, staging, and production.</p>
+          <h3>Runnable Preview &amp; Smoke</h3>
+          <p>GitHub Pages first-stack preview records its exact commit, URL, and smoke evidence.</p>
+        </div>
+
+        <div class="flow-card scope-card" id="node-deploy" data-id="deploy">
+          <div class="card-tag scope-tag">Script: promote.py · audit-only</div>
+          <div class="card-icon">🧾</div>
+          <h3>Promotion Evidence Record</h3>
+          <p>Records GitHub environment state; no runnable artifact movement is claimed.</p>
+        </div>
+
+        <div class="flow-card planned-card" id="node-provider" data-id="provider">
+          <div class="card-tag planned-tag">Open: #345 · Vercel proof</div>
+          <div class="card-icon">🚧</div>
+          <h3>Real Provider Delivery</h3>
+          <p>Must prove immutable deployment identity, hosted URLs, smoke, promotion, and rollback.</p>
         </div>
 
         <div class="flow-card" id="node-telemetry" data-id="telemetry">
-          <div class="card-tag">Script: fleet_status.py</div>
+          <div class="card-tag">Scripts: fleet_status.py + factory_metrics.py</div>
           <div class="card-icon">📊</div>
           <h3>Telemetry & Operator View</h3>
-          <p>Current board-state evaluator; richer metrics are planned in #106–#108.</p>
+          <p>Reports queue health, dwell, rework, CI failure, cycle time, and available cost evidence.</p>
         </div>
       </div>
     </section>

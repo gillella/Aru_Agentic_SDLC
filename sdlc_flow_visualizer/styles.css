@@ -1,4 +1,4 @@
-/* line-ceiling: 616 */
+/* line-ceiling: 625 */
 /* ==========================================================================
    Aru Agentic SDLC — Modern Web Visualizer Stylesheet
    Design System: Slate Dark Theme with HSL Accent Palettes, Glassmorphism,
@@ -241,6 +241,15 @@ body {
 }
 
 .card-tag.planned-tag {
+  color: var(--amber-warning);
+}
+
+.scope-card {
+  border-color: color-mix(in srgb, var(--amber-warning) 55%, var(--border-subtle));
+}
+
+.card-tag.scope-tag,
+.scope-legend {
   color: var(--amber-warning);
 }
 

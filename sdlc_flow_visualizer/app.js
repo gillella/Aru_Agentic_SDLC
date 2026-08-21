@@ -1,4 +1,4 @@
-// line-ceiling: 442
+// line-ceiling: 468
 /**
  * Aru Agentic SDLC — Interactive Graphical Visualizer Logic
  * Provides component metadata, drawer inspection, search filtering,
@@ -19,14 +19,14 @@ document.addEventListener('DOMContentLoaded', () => {
         'Issue must define summary, background context, and clear acceptance criteria checkboxes.',
         'Must specify declared touches: paths and depends-on: DAG tags.'
       ],
-      remediation: 'If intent is underspecified, triage keeps it in Backlog; the planned #102 idea-to-prd skill will formalize this shaping step.'
+      remediation: 'If intent is underspecified, use skills/idea-to-prd/SKILL.md; it keeps the governed artifact in Backlog until operator approval.'
     },
     prd: {
-      tag: 'Planned: #102 idea-to-prd',
+      tag: 'Skill: idea-to-prd',
       title: 'PRD & Architecture Spec',
-      subtitle: 'Roadmap capability — not yet shipped',
-      description: 'Issue #102 will translate high-level intent into structured product requirements, architectural contracts, and verifiable acceptance criteria. Today this shaping is manual.',
-      code: 'Planned in GitHub issue #102',
+      subtitle: 'Shipped intake capability — issue #102 closed',
+      description: 'The shipped idea-to-prd skill wraps Grill-Aru discovery, publishes an operator-approved PRD as a governed Backlog artifact, and preserves product decisions before implementation.',
+      code: 'skills/idea-to-prd/SKILL.md',
       rules: [
         'Defines clear boundaries for what is in-scope and out-of-scope.',
         'Identifies money, PII, schema, or migration risks early.',
@@ -35,11 +35,11 @@ document.addEventListener('DOMContentLoaded', () => {
       remediation: 'If PRD lacks technical decisions, issues remain blocked until clarified.'
     },
     dag: {
-      tag: 'Planned: #103 prd-to-issues',
+      tag: 'Skill: prd-to-issues',
       title: 'Issue DAG Generator',
-      subtitle: 'Roadmap capability — not yet shipped',
-      description: 'Issue #103 will decompose PRDs into claimable GitHub issues with explicit depends-on: links and touches: file footprints. Today agents create and triage those issues directly.',
-      code: 'Planned in GitHub issue #103',
+      subtitle: 'Shipped decomposition capability — issue #103 closed',
+      description: 'The shipped prd-to-issues skill decomposes an approved PRD into small governed issues with explicit depends-on links, repository-backed touches, and computed parallel eligibility.',
+      code: 'skills/prd-to-issues/SKILL.md',
       rules: [
         'Declares touches: src/a/*, tests/b.py footprint so the picker detects path collisions.',
         'Establishes dependency ordering so dependent tasks stay blocked until parent PRs merge.',
@@ -129,8 +129,8 @@ document.addEventListener('DOMContentLoaded', () => {
       tag: 'Verification',
       title: 'Local Verification',
       subtitle: 'Test Discipline',
-      description: 'Executes pytest and ruff check . locally inside the worktree prior to committing or pushing code. Never claims success without empirical proof.',
-      code: 'ruff check . && pytest -q',
+      description: 'Executes the issue acceptance predicates, directly affected tests, and every lint, syntax, documentation, or build check required by current governance. Never claims success without empirical proof.',
+      code: 'Use the exact verify: commands declared on the issue',
       rules: [
         'Never commit or push code with failing local unit tests or lint errors.',
         'Preserves existing docstrings, public API contracts, and formatting.',
@@ -207,7 +207,7 @@ document.addEventListener('DOMContentLoaded', () => {
       tag: 'Script: merge_pr.py',
       title: 'Definition-of-Done Gate',
       subtitle: 'Automation Script: merge_pr.py',
-      description: 'The single sanctioned merge gate. Validates 7 strict checks: 1. Open/non-draft, 2. Green CI, 3. Independent reviewed-by stamp, 4. Zero unfixed threads, 5. Rebased on main, 6. Closes #X linked, 7. 100% checked acceptance criteria.',
+      description: 'The single sanctioned merge gate validates PR state and issue linkage, current-head verification, CI, independent review, rebase state, size and test coverage, spec sync, review rounds, and live acceptance predicates.',
       code: 'python3 scripts/merge_pr.py --pr 42',
       rules: [
         'Fail-closed: any failed check aborts merge with non-zero exit code.',
@@ -221,11 +221,11 @@ document.addEventListener('DOMContentLoaded', () => {
       title: 'Mechanical Merge & Tag',
       subtitle: 'Git Server Merge & Audit',
       description: 'The gated merge helper executes the server merge and writes an annotated checkpoint tag named ckpt/<PR>-<short-SHA> with the PR, issue, author, reviewer, and gate evidence.',
-      code: 'python3 scripts/merge_pr.py --pr 42 --expected-head <SHA> --merge-method squash',
+      code: 'python3 scripts/merge_pr.py --pr 42 --expected-head <SHA>',
       rules: [
-        'Current default is squash; issue #89 tracks changing the default to a merge commit.',
+        'Current default is a merge commit; #89 is closed and squash is opt-in.',
         'Creates immutable audit trail checkpoint tag.',
-        'Use --merge-method merge explicitly when preserving branch commit ancestry is required.'
+        'Use --merge-method squash only as an explicit exception when its history loss is acceptable.'
       ],
       remediation: 'If remote server merge fails, merge_pr.py reports error without corrupting local state.'
     },
@@ -242,31 +242,57 @@ document.addEventListener('DOMContentLoaded', () => {
       ],
       remediation: 'If close-out fails mid-way, running merge_pr.py again resumes close-out safely.'
     },
-    deploy: {
-      tag: 'Planned: #109 deploy-preview',
-      title: 'Deploy Preview & Release',
-      subtitle: 'Roadmap capability — not yet shipped',
-      description: 'Issue #109 will add a deploy-preview skill gated on a merged commit. Staging and production promotion remain follow-on work in #110.',
-      code: 'Planned in GitHub issues #109 and #110',
+    preview: {
+      tag: 'Skill: deploy-preview',
+      title: 'Runnable Preview & Smoke',
+      subtitle: 'Shipped GitHub Pages first-stack preview',
+      description: 'The governed preview helper deploys an exact merged commit to the configured GitHub Pages target, verifies exact-run metadata and its authoritative Pages URL, and records smoke/E2E evidence for runnable products.',
+      code: 'python3 scripts/deploy_preview.py --commit <SHA> --issue <N>',
       rules: [
         'Begins only from a governed merged commit.',
-        'Keeps deployment and promotion linked to issues and PRs.',
-        'Adds smoke and E2E stages through follow-on issue #111.'
+        'Binds the successful run, source commit, repository, and Pages URL.',
+        'Visibly skips libraries with no runnable preview surface.'
       ],
-      remediation: 'Until #109 lands, deployment is outside the implemented factory loop.'
+      remediation: 'A failed preview files a governed remediation issue; it never records a false success.'
+    },
+    deploy: {
+      tag: 'Script: promote.py · audit-only',
+      title: 'Promotion Evidence Record',
+      subtitle: 'Shipped GitHub state trail — not runnable hosting',
+      description: 'The promotion helper records adjacent preview, staging, and production GitHub Environment/Deployment state with checkpoint and issue evidence. It does not deploy, copy, rebuild, or prove movement of a runnable artifact.',
+      code: 'python3 scripts/promote.py --commit <SHA> --checkpoint <TAG> ...',
+      rules: [
+        'A workflow run URL is an audit log link, not an application URL.',
+        'No immutable provider artifact, staging URL, or production URL is claimed.',
+        'Reversal records GitHub state; source rollback uses revert_merge.py.'
+      ],
+      remediation: 'Do not report staging or production availability from this record alone.'
+    },
+    provider: {
+      tag: 'Open: #345 · Vercel proof',
+      title: 'Real Provider Delivery',
+      subtitle: 'Deferred Phase 0 external proof',
+      description: 'Issue #345 must deploy the calculator tracer to Vercel and record immutable deployment identity, commit-specific preview URL, live smoke results, production promotion without a rebuild, and governed rollback evidence.',
+      code: 'Tracked by GitHub issue #345',
+      rules: [
+        'Provider deployment identity and authoritative hosted URLs are required.',
+        'Preview smoke covers health, operations, and invalid input.',
+        'Production promotion and rollback must preserve and prove deployment identity.'
+      ],
+      remediation: 'Until #345 closes with live evidence, Aru must not claim real provider delivery.'
     },
     telemetry: {
-      tag: 'Script: fleet_status.py',
+      tag: 'Scripts: fleet_status.py + factory_metrics.py',
       title: 'Telemetry & Operator View',
       subtitle: 'Monitoring Dashboard',
-      description: 'Currently evaluates complete, waiting, blocked, and error states from live issues, PRs, claims, board drift, and worktrees. Dwell time, cycle time, and spend metrics are planned in #106–#108.',
-      code: 'python3 scripts/fleet_status.py',
+      description: 'fleet_status.py evaluates live issues, PRs, claims, board drift, and worktrees. factory_metrics.py supplies shipped dwell, rework, CI failure, cycle-time, and cost measurements, reporting unavailable evidence instead of inventing it.',
+      code: 'python3 scripts/fleet_status.py; python3 scripts/factory_metrics.py',
       rules: [
         'Fails closed when GitHub or board queries are ambiguous.',
         'Reports open governed work, claims, drift, and orphan worktrees.',
-        'Does not yet report spend or full cycle-time telemetry.'
+        'Marks missing cost or timing evidence unavailable rather than zero.'
       ],
-      remediation: 'Use triage_backlog.py --capacity beside fleet_status.py until the planned operator metrics land.'
+      remediation: 'Use triage_backlog.py --capacity beside fleet_status.py when the Ready queue is constrained.'
     }
   };
 
@@ -368,7 +394,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // 2. Search & Filter Logic
-  const macroIds = new Set(['idea', 'triage', 'picker', 'pr', 'review', 'dodgate', 'deploy']);
+  const macroIds = new Set(['idea', 'triage', 'picker', 'pr', 'review', 'dodgate', 'preview', 'deploy', 'provider']);
   const remediationIds = new Set(['triage', 'claim', 'plangate', 'implementation', 'ci', 'threads', 'freshhead', 'dodgate']);
 
   function applyFilters() {
@@ -407,7 +433,7 @@ document.addEventListener('DOMContentLoaded', () => {
   applyFilters();
 
   // 4. Animated Flow Simulation
-  const SIM_SEQUENCE = ['idea', 'prd', 'dag', 'triage', 'picker', 'claim', 'worktree', 'plangate', 'implementation', 'localtest', 'pr', 'ci', 'review', 'threads', 'freshhead', 'dodgate', 'merge', 'closeout', 'deploy', 'telemetry'];
+  const SIM_SEQUENCE = ['idea', 'prd', 'dag', 'triage', 'picker', 'claim', 'worktree', 'plangate', 'implementation', 'localtest', 'pr', 'ci', 'review', 'threads', 'freshhead', 'dodgate', 'merge', 'closeout', 'preview', 'deploy', 'provider', 'telemetry'];
   let simIndex = 0;
 
   function runSimulationStep() {
