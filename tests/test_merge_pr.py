@@ -4291,5 +4291,205 @@ class DryRunJsonTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
 
 
+class TerminalLeaseRecordingTests(unittest.TestCase):
+    """#344 AC1: a durable, queryable terminal lease is recorded for
+    (repo, pr, head branch, gated SHA) once GitHub accepts the merge.
+    """
+
+    def test_records_label_and_marker_comment_on_first_call(self):
+        pr = merged_pr()
+        pr["labels"] = []
+        calls = []
+
+        def fake_run_cmd(cmd, check=False, **_kwargs):
+            calls.append(cmd)
+            return 0, "", ""
+
+        with patch.object(merge_pr, "run_cmd", side_effect=fake_run_cmd), \
+             patch.object(merge_pr, "ensure_label", return_value=True) as ensure:
+            ok, message = merge_pr.record_terminal_lease(
+                pr, "abcdef1234567890", "merge-sha-full"
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("Terminal lease recorded", message)
+        ensure.assert_called_once_with(
+            "terminal-lease:abcdef123456", "b60205",
+            "Terminal lease: merged at abcdef123456",
+        )
+        label_calls = [c for c in calls if c[:3] == ["gh", "pr", "edit"]]
+        self.assertEqual(len(label_calls), 1)
+        self.assertIn("terminal-lease:abcdef123456", label_calls[0])
+        comment_calls = [c for c in calls if c[:3] == ["gh", "pr", "comment"]]
+        self.assertEqual(len(comment_calls), 1)
+        body = comment_calls[0][comment_calls[0].index("--body") + 1]
+        self.assertIn(merge_pr.TERMINAL_LEASE_MARKER_VERSION, body)
+        self.assertIn('"gated_sha":"abcdef1234567890"', body)
+        self.assertIn('"merged_sha":"merge-sha-full"', body)
+        self.assertIn("fix/issue-7-example", body)
+
+    def test_idempotent_when_label_already_recorded(self):
+        pr = merged_pr()
+        pr["labels"] = [{"name": "terminal-lease:abcdef123456"}]
+        with patch.object(merge_pr, "run_cmd") as run, \
+             patch.object(merge_pr, "ensure_label") as ensure:
+            ok, message = merge_pr.record_terminal_lease(
+                pr, "abcdef1234567890", "merge-sha-full"
+            )
+        self.assertTrue(ok)
+        self.assertIn("already recorded", message)
+        run.assert_not_called()
+        ensure.assert_not_called()
+
+    def test_label_provision_failure_is_reported_and_stops_early(self):
+        pr = merged_pr()
+        pr["labels"] = []
+        with patch.object(merge_pr, "ensure_label", return_value=False), \
+             patch.object(merge_pr, "run_cmd") as run:
+            ok, message = merge_pr.record_terminal_lease(
+                pr, "abcdef1234567890", "merge-sha-full"
+            )
+        self.assertFalse(ok)
+        self.assertIn("Could not provision", message)
+        run.assert_not_called()
+
+    def test_comment_failure_after_label_applied_is_reported(self):
+        pr = merged_pr()
+        pr["labels"] = []
+
+        def fake_run_cmd(cmd, check=False, **_kwargs):
+            if cmd[:3] == ["gh", "pr", "comment"]:
+                return 1, "", "network blip"
+            return 0, "", ""
+
+        with patch.object(merge_pr, "run_cmd", side_effect=fake_run_cmd), \
+             patch.object(merge_pr, "ensure_label", return_value=True):
+            ok, message = merge_pr.record_terminal_lease(
+                pr, "abcdef1234567890", "merge-sha-full"
+            )
+        self.assertFalse(ok)
+        self.assertIn("comment failed", message)
+
+
+class StaleWriterEscalationTests(unittest.TestCase):
+    """#344 AC3: a recreated remote branch escalates as a structured P0
+    finding (PR, gated SHA, new SHA, branch, holder) instead of the generic
+    close-out warning `delete_remote_branch` already returns.
+    """
+
+    def _pr(self):
+        pr = merged_pr()
+        pr["labels"] = [{"name": "author:agent-stale"}]
+        return pr
+
+    @patch.object(merge_pr, "set_issue_priority_field", return_value=True)
+    @patch.object(merge_pr, "ensure_label", return_value=True)
+    def test_mismatch_escalates_with_pr_gated_new_holder(self, _ensure, set_priority):
+        pr = self._pr()
+        comments = []
+
+        def fake_run_cmd(cmd, check=False, **_kwargs):
+            if cmd[:2] in (["gh", "pr"], ["gh", "issue"]) and "comment" in cmd:
+                comments.append(cmd)
+            return 0, "", ""
+
+        with patch.object(
+            merge_pr, "delete_remote_branch",
+            return_value=(False, (
+                "Remote branch owner/repo:fix/issue-7-example now points to "
+                "new-sha-999, not gated head gated-sha; left untouched."
+            )),
+        ), patch.object(merge_pr, "run_cmd", side_effect=fake_run_cmd):
+            ok, message = merge_pr._close_out_remote_branch(
+                pr, "/repo", "fix/issue-7-example", "gated-sha", "owner/repo",
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("left untouched", message)
+        pr_comments = [c for c in comments if c[:2] == ["gh", "pr"]]
+        issue_comments = [c for c in comments if c[:2] == ["gh", "issue"]]
+        self.assertEqual(len(pr_comments), 1)
+        self.assertEqual(len(issue_comments), 1)
+        body = pr_comments[0][pr_comments[0].index("--body") + 1]
+        self.assertIn("P0 Stale-Writer Escalation", body)
+        self.assertIn("PR: #9", body)
+        self.assertIn("gated-sha", body)
+        self.assertIn("new-sha-999", body)
+        self.assertIn("fix/issue-7-example", body)
+        self.assertIn("agent-stale", body)
+        set_priority.assert_called_once_with(7, "P0")
+
+    def test_generic_failure_does_not_escalate(self):
+        pr = self._pr()
+        with patch.object(
+            merge_pr, "delete_remote_branch",
+            return_value=(False, "Could not inspect owner/repo branch x: boom"),
+        ), patch.object(merge_pr, "run_cmd") as run, \
+           patch.object(merge_pr, "escalate_stale_writer") as escalate:
+            ok, _message = merge_pr._close_out_remote_branch(
+                pr, "/repo", "fix/issue-7-example", "gated-sha", "owner/repo",
+            )
+        self.assertFalse(ok)
+        escalate.assert_not_called()
+        run.assert_not_called()
+
+    def test_success_does_not_escalate(self):
+        pr = self._pr()
+        with patch.object(
+            merge_pr, "delete_remote_branch",
+            return_value=(True, "Deleted remote branch owner/repo:fix/issue-7-example."),
+        ), patch.object(merge_pr, "escalate_stale_writer") as escalate:
+            ok, _message = merge_pr._close_out_remote_branch(
+                pr, "/repo", "fix/issue-7-example", "gated-sha", "owner/repo",
+            )
+        self.assertTrue(ok)
+        escalate.assert_not_called()
+
+
+class Pr89StaleWriterRegressionTests(unittest.TestCase):
+    """Models gillella/hermes-trading-automation PR #89 end-to-end at the
+    close-out layer (#344 AC6): the remote branch is recreated at a new SHA
+    after a governed merge; close-out must refuse the destructive delete,
+    retain the merger claim so recovery stays discoverable, and escalate as
+    P0 instead of a generic warning.
+    """
+
+    @patch.object(merge_pr, "set_issue_priority_field", return_value=True)
+    @patch.object(merge_pr, "ensure_label", return_value=True)
+    @patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor ok"))
+    @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
+    @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
+    @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
+    @patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed"))
+    @patch.object(merge_pr, "cleanup_local_branch", return_value=(True, "local gone"))
+    @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree gone"))
+    @patch.object(merge_pr.os, "chdir")
+    @patch.object(merge_pr, "clear_merger_claims")
+    def test_recreated_branch_refuses_deletion_and_escalates_p0(
+        self, merger_claim, _chdir, _prune, _local, _close, _done,
+        _issue_claim, _review_claim, _janitor, _ensure, set_priority,
+    ):
+        pr = merged_pr()
+        pr["labels"] = [{"name": "author:agent-stale"}]
+        escalations = []
+
+        def fake_run_cmd(cmd, check=False, cwd=None):
+            if cmd[:2] == ["git", "ls-remote"]:
+                return 0, "new-sha-999\trefs/heads/fix/issue-7-example", ""
+            if cmd[:2] in (["gh", "pr"], ["gh", "issue"]) and "comment" in cmd:
+                escalations.append(cmd)
+            return 0, "", ""
+
+        with patch.object(merge_pr, "run_cmd", side_effect=fake_run_cmd), \
+             patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"):
+            ok = merge_pr.run_closeout(pr, [7], "/repo")
+
+        self.assertFalse(ok)
+        merger_claim.assert_not_called()
+        self.assertTrue(any(c[:2] == ["gh", "pr"] for c in escalations))
+        self.assertTrue(any(c[:2] == ["gh", "issue"] for c in escalations))
+        set_priority.assert_called_once_with(7, "P0")
+
+
 if __name__ == "__main__":
     unittest.main()
