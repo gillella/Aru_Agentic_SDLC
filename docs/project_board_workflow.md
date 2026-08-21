@@ -122,8 +122,10 @@ commit being accepted. Failure or stale/missing evidence blocks phase closure.
 
 Repeat the same exact-commit checkpoint before release and record its commit
 and Actions run URL on the release authority issue. Missing, stale, or failing
-evidence blocks release. The lifecycle traversal from issue #293 remains the
-named focused predicate for changes to lifecycle-kernel behavior
+evidence blocks release. Both supported release helpers must enforce that
+contract mechanically; issue #357 is the blocking implementation, and this
+policy change must not merge before it. The lifecycle traversal from issue
+#293 remains the named focused predicate for changes to lifecycle-kernel behavior
 (`python3 -m unittest tests.test_pipeline_traversal`); it is included again in
 every complete phase and release checkpoint, while unrelated documentation-only
 stories do not run it by default.
