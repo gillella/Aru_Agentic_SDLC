@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3600
+# line-ceiling: 3630
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -2642,43 +2642,67 @@ def prune_worktree(repo_root, branch, expected_sha):  # noqa: C901, PLR0912, PLR
             os.unlink(head_lock)
 
 
-def cleanup_local_branch(repo_root, branch, expected_sha):
-    """Deletes the local branch once its worktree registration is confirmed gone.
+def is_valid_branch_name(branch: str) -> bool:
+    """Validates that branch is a safe, non-empty Git branch name."""
+    if not branch or branch.startswith("-") or branch.endswith((".lock", "/")):
+        return False
+    if any(c in branch for c in " ~^:?*[\t\r\n\\") or ".." in branch or "@{" in branch or "//" in branch:
+        return False
+    return True
 
-    A compare-and-delete can protect the ref OID, but it cannot atomically stop
-    another process from attaching a new worktree to that ref, so any
-    attachment observed here -- including one that races in after the SHA
-    check below -- leaves the branch untouched; a live or dirty worktree is
-    never force-deleted. Once the ref is confirmed unattached, deletion is
-    safe without an ancestor-of-default check: ``expected_sha`` is the exact
-    head GitHub already confirmed was merged, and a squash or rebase merge is
-    never a literal git ancestor of its source branch, which is why the
-    janitor's generic ``stale_merged_branch`` heuristic can never claim it.
+
+def cleanup_local_branch(repo_root, branch, expected_sha):
+    """Deletes the local branch using an atomic compare-and-delete leased to expected_sha.
+
+    A compare-and-delete protects the ref OID against reuse races, but it cannot
+    atomically stop another process from attaching a new worktree to that ref. Any
+    worktree attachment observed here leaves the branch untouched and returns a
+    failure so close-out remains incomplete and the merger claim remains discoverable.
+    When unattached, deletion uses ``git update-ref -d refs/heads/<branch> <expected_sha>``
+    to guarantee the ref is only deleted if it still equals the exact gated head SHA.
+    If the lease fails because the ref moved or was recreated, the ref is preserved
+    and a close-out failure is returned.
     """
     if not branch or not expected_sha:
         return False, "Branch and gated head SHA are required; local branch state is unknown."
+    if not is_valid_branch_name(branch):
+        return False, f"Invalid local branch ref name: {branch!r}."
+    ref = f"refs/heads/{branch}"
     code, actual_sha, _ = run_cmd(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        ["git", "rev-parse", "--verify", "--quiet", ref],
         check=False, cwd=repo_root,
     )
     if code != 0:
         return True, "Local branch already absent."
     if actual_sha.strip() != expected_sha:
-        return True, (
+        return False, (
             f"Local branch {branch} was reused at {actual_sha.strip() or 'unknown'}; "
-            "unrelated ref retained."
+            "lease mismatch -- unrelated ref retained."
         )
     from cleanup_worktrees import attached_branches
     if branch in attached_branches(repo_root):
-        return True, (
-            f"Retained local branch {branch}; Git cannot atomically lease worktree "
-            "attachment during ref deletion."
+        return False, (
+            f"Retained local branch {branch}; branch is attached to a worktree."
         )
     code, _, err = run_cmd(
-        ["git", "branch", "-D", branch], check=False, cwd=repo_root,
+        ["git", "update-ref", "-d", ref, expected_sha],
+        check=False, cwd=repo_root,
     )
     if code == 0:
         return True, f"Deleted local branch {branch}; worktree registration was already gone."
+    # If update-ref failed, check if another process deleted it concurrently
+    # or if the ref moved / was recreated with a different SHA.
+    check_code, current_sha, _ = run_cmd(
+        ["git", "rev-parse", "--verify", "--quiet", ref],
+        check=False, cwd=repo_root,
+    )
+    if check_code != 0:
+        return True, "Local branch already absent."
+    if current_sha.strip() != expected_sha:
+        return False, (
+            f"Local branch {branch} lease failed on {expected_sha} "
+            f"(now at {current_sha.strip() or 'unknown'}): {err.strip()}; ref retained."
+        )
     return False, f"Could not delete local branch {branch}: {err.strip()}"
 
 
@@ -2942,7 +2966,8 @@ def run_closeout_with_retries(pr, issue_nums, repo_root, sleep_fn=None):
     ``merger:`` claim or a human-intervention report. Once the bounded
     retries below are exhausted, a last attempt whose only recorded failure
     is the "local branch" step releases the claim directly and reports a
-    non-blocking warning instead.
+    non-blocking warning instead. Active worktree attachment or a lease
+    mismatch (reused/moved ref) are never waived.
     """
     sleep_fn = sleep_fn or time.sleep
     failed_attempts = []
@@ -2958,14 +2983,18 @@ def run_closeout_with_retries(pr, issue_nums, repo_root, sleep_fn=None):
         last_failures = failures or ["close-out returned failure without step evidence"]
         failed_attempts.append(last_failures)
     if last_failures and all(item.startswith("local branch:") for item in last_failures):
-        ok, message = clear_merger_claims(pr.get("number"))
-        print(f"  {'✅' if ok else '❌'} {'merger claim':<18} {message}")
-        print(
-            f"  ⚠️  {'local cleanup':<18} {last_failures[0]}; "
-            "non-blocking -- remote lifecycle already verified complete"
-        )
-        if ok:
-            return True, failed_attempts
+        if not any(
+            "attached" in item or "lease" in item or "reused" in item or "invalid" in item
+            for item in last_failures
+        ):
+            ok, message = clear_merger_claims(pr.get("number"))
+            print(f"  {'✅' if ok else '❌'} {'merger claim':<18} {message}")
+            print(
+                f"  ⚠️  {'local cleanup':<18} {last_failures[0]}; "
+                "non-blocking -- remote lifecycle already verified complete"
+            )
+            if ok:
+                return True, failed_attempts
     return False, failed_attempts
 
 
