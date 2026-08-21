@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1482
+# line-ceiling: 1540
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -552,6 +552,39 @@ def ensure_label(name: str, color: str = "5319e7", description: str = "") -> boo
         check=False,
     )
     return code == 0
+
+
+# A PR merge_pr.py has already merged is not just "claimable" state gone
+# quiet - it is terminal, and a stale author/reviewer process that keeps
+# writing to its head branch after close-out deletes it must be refused, not
+# merely raced with (#344, modeled on gillella/hermes-trading-automation #89).
+# The label is written once, right after GitHub accepts the merge, and is
+# never included in any claim-clearing or reap path, so its mere presence is
+# both the "recorded" and the "still queryable" half of the lease.
+TERMINAL_LEASE_LABEL_PREFIX = "terminal-lease:"
+
+
+def terminal_lease_label(gated_sha: str) -> str:
+    """Label name for the durable post-merge terminal lease on a PR.
+
+    Truncated to 12 hex characters: short enough to stay a valid GitHub label
+    (50-char limit) alongside the prefix, long enough that two distinct merges
+    cannot plausibly collide.
+    """
+    return f"{TERMINAL_LEASE_LABEL_PREFIX}{(gated_sha or '').strip().lower()[:12]}"
+
+
+def terminal_lease_sha(labels: Iterable[str]) -> Optional[str]:
+    """The gated-SHA prefix recorded by a terminal-lease label, or None.
+
+    Presence means a governed merge already accepted this PR at the named
+    head; every claim, branch-creation, or PR-continuation helper must treat
+    it as stale rather than trusting labels that still look open.
+    """
+    for name in labels or []:
+        if name.startswith(TERMINAL_LEASE_LABEL_PREFIX):
+            return name[len(TERMINAL_LEASE_LABEL_PREFIX):]
+    return None
 
 
 # Issue metadata is data, not a shell. Globs (`scripts/*`) are valid touches;

@@ -5,11 +5,18 @@ Standard naming format: <type>/issue-<ID>-<short-description>
 """
 
 import argparse
+import json
 import re
 import sys
 from typing import Any, Optional
 
-from common import create_worktree, fetch_issue_comments, get_issue, run_cmd
+from common import (
+    create_worktree,
+    fetch_issue_comments,
+    get_issue,
+    run_cmd,
+    terminal_lease_sha,
+)
 
 HIGH_RISK_TERMS = {
     "money",
@@ -202,6 +209,49 @@ def has_implementation_plan(
     return False
 
 
+def _merged_branch_refusal(branch_name: str) -> Optional[str]:
+    """Refusal text when `branch_name` was already spent by a merged PR.
+
+    Branch names are deterministic from the issue id and title, so a stale
+    writer recreating a branch a governed merge already deleted, or a
+    would-be re-run of `create_branch.py` for an issue whose PR already
+    merged, must never silently switch onto (or recreate) that old ref
+    (#344, modeled on gillella/hermes-trading-automation PR #89). A merged
+    PR for this exact head branch means the branch is spent, whether or not
+    it also carries the newer terminal-lease label (older merges predate it).
+    """
+    code, out, _err = run_cmd(
+        ["gh", "pr", "list", "--head", branch_name, "--state", "all",
+         "--json", "number,state,labels"],
+        check=False,
+    )
+    if code != 0:
+        # Best-effort: an unreadable PR list must not block every branch
+        # creation on a transient gh/API failure.
+        return None
+    try:
+        candidates = json.loads(out) if out else []
+    except json.JSONDecodeError:
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        label_names = [
+            (lab.get("name") or "") for lab in candidate.get("labels") or []
+            if isinstance(lab, dict)
+        ]
+        lease_sha = terminal_lease_sha(label_names)
+        if lease_sha or (candidate.get("state") or "").upper() == "MERGED":
+            number = candidate.get("number")
+            detail = f"terminal lease {lease_sha}" if lease_sha else "state MERGED"
+            return (
+                f"Branch '{branch_name}' was already used by merged PR #{number} "
+                f"({detail}); it cannot be recreated or reused. Open a new "
+                "governed issue so a fresh, issue-specific branch is derived."
+            )
+    return None
+
+
 def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool = False,
                   fetch_remote: bool = True, agent: str = "") -> str:
     issue = get_issue(issue_id) if fetch_remote else None
@@ -239,6 +289,11 @@ def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool =
         title_slug = sanitize_slug(clean_title)
 
     branch_name = f"{branch_type}/issue-{issue_id}-{title_slug}"
+
+    refusal = _merged_branch_refusal(branch_name)
+    if refusal:
+        print(f"[BLOCKED] {refusal}", file=sys.stderr)
+        sys.exit(1)
 
     if use_worktree:
         path = create_worktree(branch_name, agent=agent)

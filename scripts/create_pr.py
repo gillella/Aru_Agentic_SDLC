@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 520
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -30,6 +31,7 @@ from common import (
     get_current_commit,
     get_issue,
     run_cmd,
+    terminal_lease_sha,
 )
 
 NEEDS_REVIEW_LABEL = "needs-review"
@@ -113,11 +115,38 @@ def replace_verification_evidence(body: str, evidence: Dict) -> Optional[str]:
     )
 
 
+def _terminal_lease_refusal(pr_ref: str, pr: Optional[Dict]) -> Optional[str]:
+    """Refusal text when `pr` is merged or carries a terminal lease, else None.
+
+    A stale author process must not be able to keep refreshing evidence or
+    reopening a PR that a governed merge already closed out (#344, modeled on
+    gillella/hermes-trading-automation PR #89).
+    """
+    if not isinstance(pr, dict):
+        return None
+    label_names = [
+        (lab.get("name") or "") for lab in pr.get("labels") or [] if isinstance(lab, dict)
+    ]
+    lease_sha = terminal_lease_sha(label_names)
+    if lease_sha:
+        return (
+            f"[ERROR] PR #{pr_ref} carries a terminal lease (merged at "
+            f"{lease_sha}); this claim is terminally merged and cannot be "
+            "continued. Open a new governed issue and branch for further work."
+        )
+    if (pr.get("state") or "").upper() == "MERGED":
+        return (
+            f"[ERROR] PR #{pr_ref} is already merged; refusing to continue a "
+            "terminally merged claim. Open a new governed issue and branch."
+        )
+    return None
+
+
 def refresh_pr_evidence(pr_ref: str, verification_commands: List[str]) -> bool:
     """Reruns verification and refreshes evidence for the exact live PR head."""
     local_head = get_current_commit()
     code, out, err = run_cmd(
-        ["gh", "pr", "view", str(pr_ref), "--json", "body,headRefOid"],
+        ["gh", "pr", "view", str(pr_ref), "--json", "body,headRefOid,state,labels"],
         check=False,
     )
     if code != 0:
@@ -127,6 +156,10 @@ def refresh_pr_evidence(pr_ref: str, verification_commands: List[str]) -> bool:
         pr = json.loads(out)
     except json.JSONDecodeError:
         print(f"[ERROR] Could not parse PR #{pr_ref} metadata.", file=sys.stderr)
+        return False
+    refusal = _terminal_lease_refusal(pr_ref, pr)
+    if refusal:
+        print(refusal, file=sys.stderr)
         return False
     if not local_head or pr.get("headRefOid") != local_head:
         print(
@@ -141,13 +174,17 @@ def refresh_pr_evidence(pr_ref: str, verification_commands: List[str]) -> bool:
         print("[ERROR] HEAD changed while verification was running.", file=sys.stderr)
         return False
     code, fresh_out, err = run_cmd(
-        ["gh", "pr", "view", str(pr_ref), "--json", "body,headRefOid"],
+        ["gh", "pr", "view", str(pr_ref), "--json", "body,headRefOid,state,labels"],
         check=False,
     )
     try:
         fresh_pr = json.loads(fresh_out) if code == 0 else {}
     except json.JSONDecodeError:
         fresh_pr = {}
+    refusal = _terminal_lease_refusal(pr_ref, fresh_pr)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return False
     if fresh_pr.get("headRefOid") != local_head:
         print(
             "[ERROR] The remote PR head changed while verification was running; rerun refresh.",
@@ -252,6 +289,50 @@ def enqueue_review(pr_ref: str) -> bool:
     return True
 
 
+def _branch_reuse_refusal(branch: str) -> Optional[str]:
+    """Refusal text when `branch` was already spent by a merged PR, else None.
+
+    Branch names are deterministic from the issue id, so the PR #89 scenario
+    -- a stale writer recreating a deleted head branch after governed merge --
+    would otherwise let `create_pr.py` open a brand-new PR on that same
+    resurrected branch. A merged PR for this exact head branch, terminal-lease
+    label or not (older merges predate the label), means the branch is spent.
+    """
+    if not branch:
+        return None
+    code, out, _err = run_cmd(
+        ["gh", "pr", "list", "--head", branch, "--state", "all",
+         "--json", "number,state,labels"],
+        check=False,
+    )
+    if code != 0:
+        # An unreadable PR list must not block every PR creation on a
+        # transient gh/API failure; this check is defense-in-depth, not the
+        # only gate against branch reuse.
+        return None
+    try:
+        candidates = json.loads(out) if out else []
+    except json.JSONDecodeError:
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        label_names = [
+            (lab.get("name") or "") for lab in candidate.get("labels") or []
+            if isinstance(lab, dict)
+        ]
+        lease_sha = terminal_lease_sha(label_names)
+        if lease_sha or (candidate.get("state") or "").upper() == "MERGED":
+            number = candidate.get("number")
+            detail = f"terminal lease {lease_sha}" if lease_sha else "state MERGED"
+            return (
+                f"[ERROR] Branch '{branch}' was already used by merged PR "
+                f"#{number} ({detail}); it cannot be reused for a new PR. "
+                "Open a new governed issue and branch for further work."
+            )
+    return None
+
+
 def create_pr(issue_id: int, title: str = "", body: str = "",
               agent: str = "", family: str = "",
               verification_commands: Optional[List[str]] = None) -> bool:
@@ -268,6 +349,10 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
             "[ERROR] PR body contains reserved verification evidence markers.",
             file=sys.stderr,
         )
+        return False
+    reuse_refusal = _branch_reuse_refusal(current_branch)
+    if reuse_refusal:
+        print(reuse_refusal, file=sys.stderr)
         return False
     head_sha = get_current_commit()
     if not head_sha:

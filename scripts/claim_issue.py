@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1413
+# line-ceiling: 1480
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.
@@ -47,6 +47,7 @@ from common import (
     repository_trusted_logins,
     run_cmd,
     run_gh_json,
+    terminal_lease_sha,
 )
 from factory_metrics import fetch_paginated_gh_api, parse_iso
 from update_issue_status import update_status
@@ -667,6 +668,13 @@ def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
 
+    lease_sha = terminal_lease_sha(labels)
+    if lease_sha:
+        print(f"[CONFLICT] PR #{pr_id} carries a terminal lease (merged at "
+              f"{lease_sha}); it cannot be claimed for review. Open a new "
+              "governed issue and branch for further work.", file=sys.stderr)
+        return EXIT_CONFLICT
+
     # Refuse the PR's own author here, not only in the picker. fetch_next_work
     # filters own-authored PRs when it hands out review work, but a direct
     # `--pr <n> --agent <me>` bypasses that, and merge_pr.py now treats this
@@ -821,6 +829,14 @@ def complete_review(pr_id: int, agent: str, family: str = "") -> int:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
 
+    lease_sha = terminal_lease_sha(labels)
+    if lease_sha:
+        print(f"[CONFLICT] PR #{pr_id} carries a terminal lease (merged at "
+              f"{lease_sha}); review completion cannot continue against a "
+              "terminally merged claim. Open a new governed issue and branch "
+              "for further work.", file=sys.stderr)
+        return EXIT_CONFLICT
+
     # Attribution is not something a passer-by may write. Requiring the claim
     # keeps "who reviewed this" tied to the agent that actually took the work.
     holder = review_claimant(labels)
@@ -950,6 +966,14 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+
+    lease_sha = terminal_lease_sha(labels)
+    if lease_sha:
+        print(f"[CONFLICT] PR #{pr_id} carries a terminal lease (merged at "
+              f"{lease_sha}); it is already merged and cannot be claimed for "
+              "merge again. Open a new governed issue and branch for further "
+              "work.", file=sys.stderr)
+        return EXIT_CONFLICT
 
     author = pr_author(labels)
     if author and author == agent and not _has_peer_reviewer(labels, author):
@@ -1247,6 +1271,23 @@ def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[
     released = []
     for pr, holder, claimed_at in claims:
         number = pr["number"]
+        names = [
+            lab.get("name", "") for lab in pr.get("labels", []) if isinstance(lab, dict)
+        ]
+        lease_sha = terminal_lease_sha(names)
+        if lease_sha is not None:
+            # A terminal lease already proves the merge is complete; the
+            # merger:<id> claim exists only to make an incomplete close-out
+            # discoverable, so once the lease is recorded there is nothing
+            # left for it to guard. Release immediately rather than waiting
+            # out the normal reap window (#344). The lease label itself is
+            # never touched here, so it stays queryable indefinitely.
+            if _remove_merger_label(number, holder):
+                released.append(number)
+                print(f"♻️  Released merger claim on PR #{number} (held by "
+                      f"'{holder}'); terminal lease {lease_sha} already "
+                      "recorded.", file=sys.stderr)
+            continue
         eff_hours, reason = _effective_reap_threshold(holder, hours, store, now=current_now)
         if eff_hours <= 0:
             continue

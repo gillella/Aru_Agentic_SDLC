@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3645
+# line-ceiling: 3800
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -42,8 +42,12 @@ from common import (
     VERIFICATION_EVIDENCE_END,
     VERIFICATION_EVIDENCE_SCHEMA,
     VERIFICATION_EVIDENCE_START,
+    ensure_label,
     get_repo_slug,
     run_cmd,
+    set_issue_priority_field,
+    terminal_lease_label,
+    terminal_lease_sha,
 )
 from create_pr import render_verification_evidence, replace_verification_evidence
 from update_issue_status import update_status
@@ -67,6 +71,11 @@ FAMILY_LABEL = "family:"
 # the pair (id, family) and only the PR's own family was ever recorded (#307).
 REVIEWER_FAMILY_LABEL = "reviewer-family:"
 REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
+# Durable marker for the post-merge terminal lease (#344): written once a
+# governed merge is accepted, alongside the terminal-lease:<sha12> label, so a
+# human or another agent can read the exact gated/merged SHAs and branch that
+# were leased without re-deriving them from close-out logs.
+TERMINAL_LEASE_MARKER_VERSION = "aru-terminal-lease:v1"
 # The transient claim, written by claim_review. Deliberately NOT accepted here:
 # it records that an agent took the PR off the queue, not that it read anything.
 # Treating it as attestation would let an author's own same-account review plus
@@ -2767,6 +2776,114 @@ def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
     )
 
 
+# Matches only delete_remote_branch's own SHA-mismatch refusal (the exact PR
+# #89 condition: the gated branch was recreated at a different commit). Never
+# matches "already absent", "could not inspect", or the force-with-lease
+# failure, so those stay generic close-out failures rather than P0 escalations.
+STALE_WRITER_MISMATCH_RE = re.compile(
+    r"^Remote branch \S+:(?P<branch>\S+) now points to (?P<actual>\S+), "
+    r"not gated head (?P<expected>\S+); left untouched\.$"
+)
+
+
+def escalate_stale_writer(pr, branch, gated_sha, actual_sha):
+    """P0 escalation for a branch recreated at a new SHA after governed merge.
+
+    ``delete_remote_branch`` already refuses the deletion above -- fail-closed
+    and unchanged. This only replaces the generic close-out warning with a
+    structured PR + issue escalation naming exactly what #344 requires (PR,
+    gated SHA, new SHA, branch, holder), so it reads as the distinct P0
+    condition it is instead of an ordinary transient cleanup hiccup.
+    """
+    pr_number = pr.get("number")
+    holder = next(
+        (
+            (lab.get("name") or "")[len(AUTHOR_LABEL):]
+            for lab in pr.get("labels") or []
+            if (lab.get("name") or "").startswith(AUTHOR_LABEL)
+        ),
+        "unknown",
+    )
+    body = (
+        "## 🚨 P0 Stale-Writer Escalation\n\n"
+        "A remote branch already accepted into a governed merge was recreated "
+        "at a different commit after close-out. It has **not** been deleted -- "
+        "mismatched branches are never force-deleted. Do not open a new issue "
+        "assuming this merge was missed; it was not.\n\n"
+        f"- PR: #{pr_number}\n"
+        f"- Branch: `{branch}`\n"
+        f"- Gated SHA: `{gated_sha}`\n"
+        f"- New SHA: `{actual_sha}`\n"
+        f"- Holder: `{holder}`\n"
+    )
+    run_cmd(["gh", "pr", "comment", str(pr_number), "--body", body], check=False)
+    for num in linked_issues(pr.get("body")):
+        run_cmd(["gh", "issue", "comment", str(num), "--body", body], check=False)
+        ensure_label("priority:p0", "b60205", "Blocking; drop everything")
+        run_cmd(["gh", "issue", "edit", str(num), "--add-label", "priority:p0"], check=False)
+        set_issue_priority_field(num, "P0")
+
+
+def _close_out_remote_branch(pr, repo_root, branch, expected_sha, head_repo_slug):
+    """``delete_remote_branch``, escalating a stale-writer mismatch as P0."""
+    ok, message = delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug)
+    if not ok:
+        match = STALE_WRITER_MISMATCH_RE.match(message)
+        if match:
+            escalate_stale_writer(pr, branch, expected_sha, match.group("actual"))
+    return ok, message
+
+
+def record_terminal_lease(pr, gated_sha, merged_sha):
+    """Stamps the durable, queryable terminal lease once GitHub accepts a merge.
+
+    Written immediately after ``execute_merge`` succeeds -- before close-out
+    runs -- so the lease exists even if close-out itself later fails, crashes,
+    or is resumed in a different process/clone. Idempotent: a label already
+    present (a prior attempt, or a resumed close-out) is left alone rather
+    than reposting the marker comment (#344).
+    """
+    pr_number = pr.get("number")
+    label = terminal_lease_label(gated_sha)
+    current_labels = [lab.get("name") or "" for lab in pr.get("labels") or []]
+    if label in current_labels:
+        return True, f"Terminal lease already recorded ({label})."
+    if not ensure_label(
+        label, "b60205", f"Terminal lease: merged at {(gated_sha or '')[:12]}",
+    ):
+        return False, f"Could not provision terminal-lease label '{label}'."
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_number), "--add-label", label], check=False,
+    )
+    if code != 0:
+        return False, f"Could not apply terminal-lease label: {err.strip()}"
+    branch = pr.get("headRefName") or "unknown"
+    payload = json.dumps(
+        {
+            "pr": pr_number, "branch": branch,
+            "gated_sha": gated_sha, "merged_sha": merged_sha,
+        },
+        sort_keys=True, separators=(",", ":"),
+    )
+    body = (
+        f"<!-- {TERMINAL_LEASE_MARKER_VERSION} {payload} -->\n"
+        "## Terminal lease recorded\n\n"
+        f"- PR: #{pr_number}\n"
+        f"- Branch: `{branch}`\n"
+        f"- Gated SHA: `{gated_sha}`\n"
+        f"- Merged SHA: `{merged_sha}`\n\n"
+        "This PR is merged and terminal. Any further push, review claim, or "
+        "PR-creation activity against this branch is stale; open a new "
+        "governed issue and branch for further work."
+    )
+    code, _, err = run_cmd(
+        ["gh", "pr", "comment", str(pr_number), "--body", body], check=False,
+    )
+    if code != 0:
+        return False, f"Terminal-lease label set but comment failed: {err.strip()}"
+    return True, f"Terminal lease recorded ({label})."
+
+
 def ensure_issue_closed(issue_num):
     issue = _gh_json(["gh", "issue", "view", str(issue_num), "--json", "state"])
     if issue is None:
@@ -2918,8 +3035,8 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):  # noqa: C901, PLR09
     steps = [
         ("worktree", lambda: prune_worktree(repo_root, branch, expected_sha)),
         ("local branch", lambda: cleanup_local_branch(repo_root, branch, expected_sha)),
-        ("remote branch", lambda: delete_remote_branch(
-            repo_root, branch, expected_sha, head_repo_slug
+        ("remote branch", lambda: _close_out_remote_branch(
+            pr, repo_root, branch, expected_sha, head_repo_slug
         )),
     ]
     for num in issue_nums:
@@ -3592,6 +3709,13 @@ def main():  # noqa: C901, PLR0912, PLR0915
             file=sys.stderr,
         )
         return EXIT_ERROR
+
+    # Recorded before close-out runs, so the lease exists even if close-out
+    # itself fails or crashes; a stale writer must never get a window where
+    # the merge is real but nothing yet says so (#344).
+    lease_ok, lease_message = record_terminal_lease(final_pr, gated_head, merged_sha)
+    print(f"  {'✅' if lease_ok else '⚠️ '} {'terminal lease':<18} {lease_message}")
+
     # Park the verdicts the moment we hold them, and read them back on a
     # resumed close-out. Re-deriving them post-merge is not an option:
     # check_open fails on a closed PR, so a re-evaluated block would record
