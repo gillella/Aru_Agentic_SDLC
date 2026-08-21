@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 411
+# line-ceiling: 423
 """Execute issue-sourced acceptance-criteria `verify:` commands.
 
 Trust boundary
@@ -50,7 +50,7 @@ PYTHON_SCRIPT_FLAGS = frozenset({"-q", "-v", "--check"})
 PYTEST_FLAGS = frozenset({"-q", "-v", "--tb=short", "--quiet"})
 RUFF_SUBCOMMANDS = frozenset({"check", "format"})
 RUFF_FLAGS = frozenset({"-q", "--quiet", "-v", "--verbose", "--no-fix", "--diff"})
-VERIFY_TIMEOUT_SECONDS = 120
+VERIFY_TIMEOUT_SECONDS = 300
 UNITTEST_MODULE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$"
 )
@@ -271,6 +271,7 @@ def _run_verify(
     """Runs one issue-sourced command with a bounded timeout and no shell."""
     del check
     started = time.monotonic()
+    timed_out = False
     try:
         result = subprocess.run(
             argv,
@@ -282,6 +283,7 @@ def _run_verify(
         )
         code, stdout, stderr = result.returncode, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
+        timed_out = True
         code, stdout, stderr = 124, "", f"timed out after {timeout}s"
     except Exception as exc:
         code, stdout, stderr = 1, "", str(exc)
@@ -292,6 +294,8 @@ def _run_verify(
             "exit_code": code,
             "status": "passed" if code == 0 else "failed",
         })
+        if timed_out:
+            evidence[-1]["failure_reason"] = "timeout"
     return code, stdout, stderr
 
 
@@ -310,9 +314,17 @@ def run_parsed(
             continue
         if not item.argv:
             continue
+        record_count = len(records)
         code, _, _ = runner(item.argv, check=False, cwd=cwd, evidence=records)
+        timed_out = any(
+            record.get("failure_reason") == "timeout"
+            for record in records[record_count:]
+        )
         if code != 0:
-            errors.append(("failed", item.text))
+            detail = item.text
+            if code == 124 and timed_out:
+                detail = f"{detail} (timed out after {VERIFY_TIMEOUT_SECONDS}s)"
+            errors.append(("failed", detail))
     return {"criteria": criteria, "records": records, "errors": errors}
 
 

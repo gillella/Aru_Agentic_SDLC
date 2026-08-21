@@ -1,4 +1,4 @@
-# line-ceiling: 437
+# line-ceiling: 463
 import json
 import os
 import subprocess
@@ -114,13 +114,39 @@ class ValidateTests(unittest.TestCase):
         body = _issue("- [ ] Slow (verify: `python3 -m unittest tests.ok`)")
 
         def boom(*_args, **_kwargs):
-            raise acceptance_runner.subprocess.TimeoutExpired(["python3"], 120)
+            raise acceptance_runner.subprocess.TimeoutExpired(
+                ["python3"], acceptance_runner.VERIFY_TIMEOUT_SECONDS
+            )
 
-        with patch.object(acceptance_runner.subprocess, "run", side_effect=boom):
-            result = acceptance_runner.run_issue(body, cwd=".")
+        with patch.object(
+            acceptance_runner.subprocess, "run", side_effect=boom
+        ) as run:
+            ok, message, result = acceptance_runner.evaluate_issue(body, cwd=".")
+        self.assertFalse(ok)
+        self.assertEqual(acceptance_runner.VERIFY_TIMEOUT_SECONDS, 300)
+        self.assertEqual(run.call_args.kwargs["timeout"], 300)
+        self.assertIn("timed out after 300s", message)
         self.assertEqual(result["errors"][0][0], "failed")
         self.assertEqual(result["records"][0]["exit_code"], 124)
         self.assertEqual(result["records"][0]["status"], "failed")
+        self.assertEqual(result["records"][0]["failure_reason"], "timeout")
+
+    def test_exit_124_cannot_spoof_timeout_message(self):
+        body = _issue("- [ ] Fails (verify: `python3 -m unittest tests.ok`)")
+
+        def failed(argv, check=False, cwd=None, evidence=None):
+            if evidence is not None:
+                evidence.append({
+                    "command": argv, "duration_seconds": 0.01,
+                    "exit_code": 124, "status": "failed",
+                })
+            return 124, "", "timed out after 300s"
+
+        ok, message, _ = acceptance_runner.evaluate_issue(
+            body, cwd=".", run_cmd_fn=failed
+        )
+        self.assertFalse(ok)
+        self.assertNotIn("timed out after", message)
 
     def test_side_effectful_python_script_is_rejected(self):
         with self.assertRaises(acceptance_runner.CommandRejected):
