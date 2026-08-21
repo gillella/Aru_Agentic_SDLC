@@ -57,17 +57,45 @@ Aru_Agentic_SDLC/
     └── golden-path-demo.md          # Companion demo: idea through preview
 ```
 
-**Where the project is going:** [`docs/ARU-SOFTWARE-FACTORY.md`](docs/ARU-SOFTWARE-FACTORY.md) is the working plan — what is settled, what is being corrected, and the sequenced roadmap from here to idea-to-deployment. Read it before proposing structural changes.
+**Where the project is going:** [`docs/ARU-SOFTWARE-FACTORY.md`](docs/ARU-SOFTWARE-FACTORY.md) is the narrative plan. [Roadmap epic #335](https://github.com/gillella/Aru_Agentic_SDLC/issues/335) and the governed GitHub Project Board are the live authority for phases, issue state, and delivery order. Read both before proposing structural changes.
 
 **Strategy & industry research:** [`docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md) maps a classical idea→research→requirements→sprint SDLC onto an agentic software factory (harness engineering, Spec Kit, board-as-orchestrator) and positions Aru against that landscape.
 
 **Which project board?** [`docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md) compares GitHub Issues, Linear, Jira, Azure Boards, and others for agentic coding factories — and recommends keeping GitHub as Aru’s coordinator.
 
-**Explore the lifecycle:** open the no-build [interactive SDLC factory flow visualizer](sdlc_flow_visualizer/index.html) locally to inspect the current claim, worktree, review, merge, and remediation mechanics. Roadmap-only mechanisms are labelled as planned in the visualizer.
+**Explore the lifecycle:** open the no-build [interactive SDLC factory flow visualizer](sdlc_flow_visualizer/index.html) locally to inspect the current claim, worktree, review, merge, and remediation mechanics. Solid cards are shipped, amber cards are audit-only, and dashed cards are open work.
 
 > **Research authority.** `AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md` is the
-> single research and evidence guide. `ARU-SOFTWARE-FACTORY.md` remains the
-> sole authority for sequencing, implementation status, and non-goals.
+> single research and evidence guide. `ARU-SOFTWARE-FACTORY.md` is the
+> canonical narrative plan; roadmap epic #335 and the Project Board are the
+> live authority for sequencing and implementation status.
+
+## Lifecycle status vocabulary
+
+These six terms have one meaning across the README and both canonical factory
+guides. A document never infers live issue state from prose; the board wins.
+
+| Status | Meaning |
+|---|---|
+| **Shipped** | Present in the repository with linked implementation evidence. |
+| **Current** | The live roadmap slice represented by open board work; consult the board for item state. |
+| **Deferred** | Intentionally sequenced after an unmet phase entry gate; not available now. |
+| **Blocked** | Cannot start or finish until an explicit dependency or operator decision is satisfied. |
+| **Historical** | Dated evidence about an earlier state; never a current capability claim. |
+| **Audit-only** | Records governance evidence but does not prove a runnable artifact or environment. |
+
+Current delivery truth is deliberately narrower than “idea to production”:
+
+- **Shipped:** governed intake, issue-to-merge execution, telemetry, and the
+  GitHub Pages runnable preview path in `scripts/deploy_preview.py`.
+- **Audit-only:** `scripts/promote.py` records GitHub environment/deployment
+  evidence; it does not move or prove a runnable artifact.
+- **Deferred:** real provider delivery remains issue #345 until an immutable
+  deployment identity, authoritative URLs, smoke evidence, promotion without a
+  rebuild, and rollback are demonstrated.
+
+`scripts/merge_pr.py` defaults to a merge commit. Squash is an explicit opt-in,
+not the shipped default (issue #89).
 
 ---
 

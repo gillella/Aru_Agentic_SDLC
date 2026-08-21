@@ -13,17 +13,32 @@
 
 > **Authority boundary.** This document is evidence, not plan. It explains the
 > research, industry patterns, and operating-model implications behind Aru.
-> [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md) is the sole authority
-> for roadmap phases, sequencing, implementation status, and non-goals. If an
-> example or historical recommendation here appears to conflict with that
-> plan, the plan wins.
+> [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md) is the canonical
+> narrative plan; [roadmap epic #335](https://github.com/gillella/Aru_Agentic_SDLC/issues/335)
+> and the Project Board are the live authority for phases, sequencing, and
+> implementation status. If an example or Historical recommendation here
+> conflicts with that authority, the board-backed roadmap wins.
 > **Interactive briefing.**
 > [`agentic-software-factory-briefing.html`](agentic-software-factory-briefing.html)
 > provides a self-contained, tool-neutral tour of this evidence. It requires no
 > editor, build, server, or network connection. The briefing summarizes this
-> guide; it does not create a second roadmap, and the plan remains authoritative.
+> guide; it does not create a second roadmap, and #335 remains authoritative.
 
 ---
+
+## Lifecycle status vocabulary
+
+These terms are normative across the README and both canonical factory guides.
+Research examples do not confer implementation status.
+
+| Status | Meaning |
+|---|---|
+| **Shipped** | Present in the repository with linked implementation evidence. |
+| **Current** | The live roadmap slice represented by open board work; consult the board for item state. |
+| **Deferred** | Intentionally sequenced after an unmet phase entry gate; not available now. |
+| **Blocked** | Cannot start or finish until an explicit dependency or operator decision is satisfied. |
+| **Historical** | Dated evidence about an earlier state; never a current capability claim. |
+| **Audit-only** | Records governance evidence but does not prove a runnable artifact or environment. |
 
 ## 0. One-sentence thesis
 
@@ -83,7 +98,12 @@ Five mature patterns keep recurring. They are not mutually exclusive; the best f
 
 Microsoft Azure demos wire Spec Kit → GitHub issues → Copilot coding agent → quality review → Actions deploy → SRE agent — a full idea→ops loop ([Microsoft Tech Community](https://techcommunity.microsoft.com/blog/appsonazureblog/an-ai-led-sdlc-building-an-end-to-end-agentic-software-development-lifecycle-wit/4491896)).
 
-**Implication for you:** This is your **front of factory** gap (`idea-to-prd` / `prd-to-issues` in the Aru roadmap). Spec Kit is a ready intake harness; Aru’s board is the durable execution harness. Bridge them — do not replace the board with markdown task files.
+**Implication for you:** The base front-of-factory path is **Shipped** through
+claimable research, `idea-to-prd`, and `prd-to-issues` (#101–#103). Spec Kit
+remains a useful intake reference, but Aru's board is the durable execution
+harness. Clarification and convergence stations are **Deferred** to roadmap
+Phase 3 (#339); they extend the shipped capabilities rather than rebuilding
+them or replacing the board with Markdown task files.
 
 ### 2.3 Pattern C — Board / ticket as orchestrator (your Aru design; industry converging)
 
@@ -169,7 +189,8 @@ These show up across OpenAI, BCG, GitHub, CodeRabbit, Mastra, and your own facto
                              │
          ┌───────────────────▼─────────────────────────────────────────┐
          │                   SHIP (Back)                               │
-         │  Preview → Staging → Prod · smoke · observe · incident→issue│
+         │  Pages preview [Shipped] · promotion record [Audit-only]   │
+         │  provider delivery + rollback [Deferred: #345 / #84]       │
          └───────────────────┬─────────────────────────────────────────┘
                              │
          ┌───────────────────▼─────────────────────────────────────────┐
@@ -193,40 +214,48 @@ These show up across OpenAI, BCG, GitHub, CodeRabbit, Mastra, and your own facto
 | Verify | PR | Evidence in PR body | Local suite + CI |
 | Review | Open PR | `reviewed-by:` + threads | Distinct agent; claimable work |
 | Merge | Green PR | Main + Done | `merge_pr.py` only |
-| Deploy | Merged SHA | Preview/prod URL | Deterministic CD skill |
+| Deploy | Merged SHA | GitHub Pages preview URL | `deploy-preview` — **Shipped** |
+| Record promotion | Checkpoint evidence | GitHub state trail, not hosting | `promote.py` — **Audit-only** |
+| Prove provider delivery | Immutable deployment | Authoritative URLs, smoke, promotion, rollback | #345 then #84 — **Deferred** |
 | Observe | Telemetry | New board issues | SRE/monitoring agent |
 
 ---
 
 ## 5. Where Aru stands today (honest placement)
 
-From your own factory docs and audits:
+This is a capability summary, not a replacement for live board state:
 
-| Factory segment | Maturity | Notes |
+| Factory segment | Status | Evidence boundary |
 |---|---|---|
-| Middle (claim → worktree → PR → review → merge) | **Strong / best-in-class direction** | Board-as-orchestrator; mechanical merge gate |
-| Front (idea → Ready) | **Weak / partial** | Roadmap S3; Spec Kit / grill-aru bridge |
-| Back (deploy → observe → learn) | **Missing / weak** | Roadmap S4 |
-| Review throughput | **Binding constraint** | Needs evidence trail + AC runner + identity split |
-| Dogfooding CI | **Closed (verified 2026-08-15)** | Playbook CI runs the gates it ships (ruff, gitleaks, pip-audit, import-linter, tests) |
-| Unit economics | **Missing** | Tokens, wall time, review rounds per issue |
-| History / versioning | **Hardened (verified 2026-08-15)** | Default merge commits (not squash); `ckpt/*` + SemVer tags; `ARU_SDLC_REF` pinning. Squash-as-default was the historical failure mode. |
+| Governed middle: claim → worktree → PR → review → merge | **Shipped** | Board orchestration, exact-head review evidence, acceptance runner, and mechanical merge gate |
+| Base intake: research → PRD → issue DAG | **Shipped** | #101–#103; Phase 3 clarification/convergence remains **Deferred** (#339) |
+| Runnable preview | **Shipped** | `scripts/deploy_preview.py` records exact commit, GitHub Pages URL, and smoke evidence (#109/#111) |
+| Promotion record | **Audit-only** | `scripts/promote.py` records GitHub state; it does not prove artifact movement or hosted staging/production (#110) |
+| Real provider delivery | **Deferred** | #345 must prove immutable identity, authoritative URLs, live smoke, promotion without rebuild, and rollback before Phase 4 (#84) generalizes it |
+| Operator telemetry | **Shipped** | #106–#108 provide dwell, rework, cycle time, available cost evidence, and `fleet_status.py` |
+| Dogfooding CI | **Historical** evidence; capability **Shipped** | Verified 2026-08-15; the current workflow remains the code authority |
+| History / versioning | **Shipped** | `merge_pr.py` defaults to merge commits; squash is opt-in (#89); checkpoint/SemVer tags and consumer pinning exist |
+| Governed kernel and capability admission | **Current** / **Deferred** | Phase 0 is Current (#336); kernel boundary and capability admission wait for their entry gates (#337/#338) |
 
-**Strategic read:** You are not starting from zero. You are mid-build on the rarest part — a **vendor-neutral governance factory**. Most public “software factories” either (a) lock to one agent runtime (Mastra/TS), (b) stay IDE-prompt-only, or (c) demo Spec→Copilot without durable multi-agent claim protocols. Aru’s differentiator should stay: **any agent, one board, mechanisms over vibes.**
+**Strategic read:** Aru already ships the governed middle, base intake, preview,
+telemetry, and history spine. The Current program is making that baseline
+truthful and proving one real provider delivery before extracting a governed
+kernel. Aru's differentiator remains: **any agent, one board, mechanisms over
+vibes.**
 
 ---
 
 ## 6. Relationship to the canonical plan
 
-The evidence above supports a trust-first sequence: harden the execution spine,
-close verification constraints, then extend the factory toward intake and
-deployment. It does not define or duplicate that sequence.
+The evidence above supports the trust-first sequence now recorded in #335:
+restore the baseline and prove external delivery, define the kernel, admit
+optional capabilities, add clarification/convergence, then generalize delivery
+and multi-project release. It does not define or duplicate that sequence.
 
-For the current phases, issue mapping, order, status, and non-goals, use only
-[`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md). Historical roadmap
-restatements from the two predecessor research guides were consolidated into
-that plan and intentionally removed here so agents cannot choose among
-competing versions.
+For the current phases, issue mapping, order, status, and non-goals, use
+[`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md), roadmap epic #335, and
+the Project Board. Historical roadmap restatements from the predecessor guides
+remain evidence only, so agents cannot choose among competing schedules.
 
 ---
 
@@ -262,13 +291,20 @@ competing versions.
 Layered verification (industry consensus + your lessons):
 
 1. **Spec / AC** — what “done” means, in the issue.
-2. **Local suite** — agent must run before push; evidence attached.
-3. **CI** — lint, secrets, deps, tests, boundaries (dogfood the template).
+2. **Focused local verification** — each story runs its issue-declared tests,
+   affected checks, and static/build predicates before push; exact evidence is
+   attached to the PR.
+3. **CI and checkpoints** — PRs run the fast repository gates; the complete
+   supported Python 3.11 suite runs on an exact phase-exit commit and before
+   release. #341 and #357 are the Current enforcement work for this approved
+   policy, so their open state must not be described as Shipped.
 4. **Independent agent review** — claimable work; mechanical `reviewed-by:`.
 5. **Scenario / E2E** — behavioral scenarios derived from requirements; prefer paths agents cannot silently rewrite.
 6. **Architecture contracts** — import-linter / ArchUnit-style gates (agents erode boundaries).
 7. **Merge gate** — single sanctioned merge path.
-8. **Deploy safety** — preview, canary, rollback (`revert_merge.py`).
+8. **Deploy safety** — runnable GitHub Pages preview is Shipped; promotion
+   records are Audit-only; real provider promotion/rollback is Deferred to #345
+   and #84. `revert_merge.py` remains the governed source rollback path.
 9. **Production loop** — alerts → new issues → factory again.
 10. **Harness learning** — defects become gate/heuristic upgrades (your “narrower-than-reality” class).
 
@@ -291,7 +327,10 @@ Without these, you cannot prioritize harness work:
 | Time idea→Ready and Ready→Done | Where friction lives |
 | % work with board origin | Issue-First compliance |
 
-Ship `fleet_status.py` early in Phase 4 — operator visibility is the difference between steering and archaeology.
+The baseline is **Shipped** in `fleet_status.py` and `factory_metrics.py`
+(#106–#108). Phase 5 (#186) is Deferred proof that the multi-project factory can
+use those measures consistently; absent producer evidence must stay visibly
+unavailable rather than being estimated as fact.
 
 ---
 
@@ -315,9 +354,10 @@ Ship `fleet_status.py` early in Phase 4 — operator visibility is the differenc
 ## 11. Evidence-to-plan boundary
 
 Use this guide to evaluate claims, choose mechanisms, and understand tradeoffs.
-Use the canonical build plan to decide what happens next. A research finding
-may justify changing the plan, but that change must be reconciled in the plan
-and its governed issues rather than introduced here as a parallel schedule.
+Use the canonical build plan, #335, and the Project Board to decide what happens
+next. A research finding may justify changing the plan, but that change must be
+reconciled in governed issues rather than introduced here as a parallel
+schedule.
 
 Evidence that the factory is functioning includes: ideas becoming durable
 board work, agents sharing one lifecycle contract, merges passing the governed
@@ -356,7 +396,7 @@ sequence.
 | [Mastra — AI Software Factory](https://mastra.ai/blog/software-factory) | Six-agent station model (typed handoffs) |
 | [Agentic SDLC Handbook (Meppiel)](https://danielmeppiel.github.io/agentic-sdlc-handbook/) | Methodology / PROSE for orgs |
 | Forrester — State of Agentic Software Development 2026 | Market frame: assistants → orchestrated SDLC agents |
-| Your [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md) | Local truth — sequencing & non-goals |
+| [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md) + #335 | Narrative plan plus live board-governed sequencing and non-goals |
 
 ### Academic evidence index
 
@@ -419,7 +459,7 @@ the Art & Guide*. Nothing was silently discarded:
 | Academic findings and all ten arXiv identifiers | Sections 3 and 13 |
 | Board, claim, worktree, path-budget, merge, and plan patterns | Sections 3-5 and 8 |
 | Constraints, metrics, and anti-patterns | Sections 5 and 7-10 |
-| Roadmap and non-goal restatements | Solely [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md) |
+| Roadmap and non-goal restatements | [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md), with #335 and the Project Board as live authority |
 
 The deleted predecessor filename was
 `AGENTIC-SOFTWARE-FACTORY-GUIDE.md`. Git history preserves its exact prose;
@@ -434,6 +474,11 @@ You are not trying to invent “AI that codes.” That commodity already exists 
 
 You are building what the industry now names and proves at the highest levels: an **agentic software factory** — harness + intent + board + mechanical trust — that turns a 25-year craft process into a governed production system.
 
-**Aru’s middle is already the hard part most teams skip.** Finish making it trustworthy, close the review constraint, then extend **forward** into idea/spec and **backward** into deploy/observe. Resist a second orchestrator. Measure unit economics. Keep Issue-First absolute.
+**Aru's governed middle and base intake are Shipped.** The Current program
+restores a trustworthy baseline and proves real external delivery; governed
+kernel extraction, capability admission, clarification/convergence, generalized
+delivery, and multi-project release remain Deferred behind explicit phase
+gates. Resist a second orchestrator. Measure unit economics. Keep Issue-First
+absolute.
 
 When those pieces lock, the factory does what you want: **idea in, quality software out** — sprint by sprint, agent by agent, every action logged on the board first.
