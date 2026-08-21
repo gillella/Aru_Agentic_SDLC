@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -12,6 +13,10 @@ from increment_release import (  # noqa: E402
     create_checkpoint_tag,
     publish_increment_release,
 )
+import increment_release  # noqa: E402
+
+
+RUN_URL = "https://github.com/gillella/Aru_Agentic_SDLC/actions/runs/12345"
 
 
 def make_sample_increment(
@@ -271,6 +276,31 @@ class DeploymentSeparationTests(GitRepoTestBase):
         self.assertEqual(record["deployment_state"], "unreleased")
         self.assertEqual(rec["release_state"], "unreleased")
         self.assertIn("Production deployment remains separate & held", outcome["markdown"])
+
+
+class CommandCheckpointTests(unittest.TestCase):
+    @patch("delivery_increments.DeliveryIncrementStore")
+    @patch.object(increment_release, "publish_increment_release")
+    @patch.object(increment_release, "validate_release_checkpoint")
+    def test_cli_validates_checkpoint_before_publish(self, validate, publish, store_cls):
+        record = make_sample_increment()
+        store_cls.return_value.list.return_value = [record]
+        publish.return_value = {
+            "tag_result": {"tag_name": "ckpt/p/i", "commit_sha": "a" * 40},
+            "markdown": "release",
+        }
+        code = increment_release.main([
+            "--increment", record["increment_id"],
+            "--commit", "a" * 40,
+            "--checkpoint-run-url", RUN_URL,
+        ])
+        self.assertEqual(code, 0)
+        validate.assert_called_once_with(RUN_URL, "a" * 40)
+        publish.assert_called_once()
+
+    def test_cli_requires_checkpoint_run_url(self):
+        with self.assertRaises(SystemExit):
+            increment_release.main(["--increment", "inc_x", "--commit", "a" * 40])
 
 
 class UnacceptedRefusalTests(GitRepoTestBase):

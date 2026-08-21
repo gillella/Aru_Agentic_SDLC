@@ -3,11 +3,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import release  # noqa: E402
+
+
+SHA = "a" * 40
+RUN_URL = "https://github.com/gillella/Aru_Agentic_SDLC/actions/runs/12345"
 
 
 class SemVerValidationTests(unittest.TestCase):
@@ -72,6 +77,17 @@ class ReleaseTaggingTests(unittest.TestCase):
         res = subprocess.run(["git", "cat-file", "-t", "v0.1.0"], cwd=str(self.repo_dir), capture_output=True, text=True)
         self.assertEqual(res.stdout.strip(), "tag")
 
+    @patch.object(release, "run_cmd", return_value=(0, "", ""))
+    def test_create_tag_targets_the_validated_commit_explicitly(self, run_cmd):
+        code = release.create_release_tag(
+            "v0.1.0", target_commit=SHA, dry_run=False
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            run_cmd.call_args.args[0],
+            ["git", "tag", "-a", "v0.1.0", "-m", "Release v0.1.0", SHA],
+        )
+
     def test_breaking_major_bump_enforcement(self):
         release.create_release_tag("v0.1.0", dry_run=False)
         # Minor bump with breaking -> fails
@@ -88,7 +104,29 @@ class ReleaseTaggingTests(unittest.TestCase):
         code_dry = release.main(["--generate-changelog", "--dry-run"])
         self.assertEqual(code_dry, 0)
 
+    @patch.object(release, "validate_release_checkpoint")
+    def test_tag_dry_run_requires_and_validates_checkpoint(self, validate):
+        code = release.main([
+            "--tag", "v0.1.0", "--commit", SHA,
+            "--checkpoint-run-url", RUN_URL, "--dry-run",
+        ])
+        self.assertEqual(code, 0)
+        validate.assert_called_once_with(RUN_URL, SHA)
+
+    @patch.object(release, "validate_release_checkpoint")
+    def test_tag_refuses_missing_checkpoint_inputs(self, validate):
+        self.assertEqual(release.main(["--tag", "v0.1.0", "--dry-run"]), 1)
+        validate.assert_not_called()
+
+    @patch.object(release, "validate_release_checkpoint")
+    def test_tag_refuses_failed_checkpoint_validation(self, validate):
+        validate.side_effect = release.ReleaseCheckpointError("stale")
+        code = release.main([
+            "--tag", "v0.1.0", "--commit", SHA,
+            "--checkpoint-run-url", RUN_URL, "--dry-run",
+        ])
+        self.assertEqual(code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
-

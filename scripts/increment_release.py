@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 412
 """increment_release.py — Tag accepted sprint checkpoints and publish release records for durably accepted Delivery Increments."""
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from release_checkpoint import ReleaseCheckpointError, validate_release_checkpoint
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -351,6 +354,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--commit", type=str, default=None, help="Target default-branch commit SHA (defaults to HEAD)")
     parser.add_argument("--store", type=Path, default=DEFAULT_INCREMENT_PATH, help="Path to delivery increments store JSON")
     parser.add_argument("--output", type=Path, default=None, help="Output file path for release record JSON")
+    parser.add_argument(
+        "--checkpoint-run-url",
+        required=True,
+        help="Successful full-suite GitHub Actions run URL for the target commit",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Preview tag creation and release notes without committing")
 
     args = parser.parse_args(argv)
@@ -374,6 +382,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("[ERROR] Could not resolve HEAD commit SHA.", file=sys.stderr)
             return 1
         commit = stdout
+
+    try:
+        validate_release_checkpoint(args.checkpoint_run_url, commit)
+    except ReleaseCheckpointError as exc:
+        print(f"[ERROR] Release checkpoint refused: {exc}", file=sys.stderr)
+        return 1
 
     try:
         outcome = publish_increment_release(

@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from release_checkpoint import ReleaseCheckpointError, validate_release_checkpoint
+
 ROOT = Path(__file__).resolve().parents[1]
 
 CONSUMED_CLI_SURFACE = [
@@ -101,9 +103,17 @@ def get_latest_release_tag() -> str | None:
     return tags[0] if tags else None
 
 
-def create_release_tag(tag: str, dry_run: bool = False, breaking: bool = False) -> int:
+def create_release_tag(
+    tag: str,
+    dry_run: bool = False,
+    breaking: bool = False,
+    target_commit: str | None = None,
+) -> int:
     if not validate_semver(tag):
         print(f"error: '{tag}' is not a valid SemVer tag (must match vX.Y.Z).", file=sys.stderr)
+        return 1
+    if target_commit is not None and not re.fullmatch(r"^[0-9a-fA-F]{40}$", target_commit):
+        print("error: release target must be a full 40-character SHA.", file=sys.stderr)
         return 1
 
     if breaking:
@@ -116,6 +126,8 @@ def create_release_tag(tag: str, dry_run: bool = False, breaking: bool = False) 
                 return 1
 
     cmd = ["git", "tag", "-a", tag, "-m", f"Release {tag}"]
+    if target_commit is not None:
+        cmd.append(target_commit.lower())
     if dry_run:
         print(f"[DRY-RUN] Would run: {' '.join(cmd)}")
         return 0
@@ -133,11 +145,26 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="SemVer release & CHANGELOG generator for Aru_Agentic_SDLC")
     parser.add_argument("--generate-changelog", action="store_true", help="Generate CHANGELOG.md from checkpoint tags")
     parser.add_argument("--tag", type=str, help="Create an annotated SemVer release tag (e.g. v0.1.0)")
+    parser.add_argument("--commit", type=str, help="Exact default-branch commit to release")
+    parser.add_argument("--checkpoint-run-url", help="Successful full-suite GitHub Actions run URL")
     parser.add_argument("--breaking", action="store_true", help="Assert breaking consumed-CLI change requiring MAJOR version bump")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without modifying disk or git tags")
     parser.add_argument("--check", action="store_true", help="Check current version and release status")
 
     args = parser.parse_args(argv)
+
+    if args.tag:
+        if not args.commit or not args.checkpoint_run_url:
+            print(
+                "error: --tag requires --commit and --checkpoint-run-url",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            validate_release_checkpoint(args.checkpoint_run_url, args.commit)
+        except ReleaseCheckpointError as exc:
+            print(f"error: release checkpoint refused: {exc}", file=sys.stderr)
+            return 1
 
     if args.check:
         code, stdout, stderr = run_cmd(["git", "tag", "-l", "v*", "--sort=-v:refname"])
@@ -157,7 +184,12 @@ def main(argv=None):
             print("✅ Updated CHANGELOG.md")
 
     if args.tag:
-        return create_release_tag(args.tag, dry_run=args.dry_run, breaking=args.breaking)
+        return create_release_tag(
+            args.tag,
+            dry_run=args.dry_run,
+            breaking=args.breaking,
+            target_commit=args.commit,
+        )
 
     if not (args.generate_changelog or args.tag or args.check):
         parser.print_help()
@@ -168,4 +200,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
-
