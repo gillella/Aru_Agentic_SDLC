@@ -42,12 +42,53 @@ The following scripts constitute the supported consumer-facing CLI surface:
 Durably accepted Delivery Increments (sprints) are tagged and recorded via:
 
 ```bash
-python3 scripts/increment_release.py --increment <increment_id> [--commit <sha>]
+python3 scripts/increment_release.py \
+  --increment <increment_id> \
+  --commit <40-character default-branch SHA> \
+  --checkpoint-run-url <canonical GitHub Actions run URL>
 ```
 
 - **Deterministic Tagging**: Tagged as `ckpt/<project_id>/<increment_id>` targeting the exact accepted commit on the default branch.
 - **Immutable Evidence**: Includes increment ID, committed issue scope, durable Slack operator decision URL, timestamp, demo artifacts, and known limitations.
 - **Deployment Separation**: Tagging an accepted sprint checkpoint creates an immutable release record but does **not** authorize or trigger production deployment.
+
+---
+
+## ✅ Qualifying Full-Suite Checkpoint Evidence
+
+Release tags require a successful manual or scheduled run of the repository's
+`.github/workflows/ci.yml` at the exact current default-branch commit. A green
+pull-request run is not qualifying evidence because pull requests intentionally
+run focused and static checks instead of the complete unit suite.
+
+For a manual checkpoint, resolve the current default branch and commit, then
+dispatch the workflow by its file identity:
+
+```bash
+REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)"
+TARGET_COMMIT="$(gh api "repos/$REPO/commits/$DEFAULT_BRANCH" --jq .sha)"
+gh workflow run ci.yml --ref "$DEFAULT_BRANCH"
+```
+
+After the run succeeds, obtain its canonical URL and confirm that GitHub reports
+the same commit and workflow database identity:
+
+```bash
+gh run list \
+  --workflow ci.yml \
+  --event workflow_dispatch \
+  --branch "$DEFAULT_BRANCH" \
+  --commit "$TARGET_COMMIT" \
+  --status success \
+  --limit 1 \
+  --json url,headSha,workflowDatabaseId
+```
+
+Copy the returned `url` as the checkpoint run URL. The release helpers
+independently re-resolve the live default-branch head and the stable workflow ID
+for `.github/workflows/ci.yml`; if the branch advanced, the run is ambiguous, or
+any identity differs, they refuse the release and a fresh checkpoint is needed.
 
 ---
 
@@ -62,12 +103,19 @@ To generate `CHANGELOG.md` and cut a SemVer release tag:
 
 2. **Preview Release Tag**:
    ```bash
-   python3 scripts/release.py --tag v0.1.0 --dry-run
+   python3 scripts/release.py \
+     --tag v0.1.0 \
+     --commit <40-character default-branch SHA> \
+     --checkpoint-run-url <canonical GitHub Actions run URL> \
+     --dry-run
    ```
 
 3. **Cut Release Tag**:
    ```bash
-   python3 scripts/release.py --tag v0.1.0
+   python3 scripts/release.py \
+     --tag v0.1.0 \
+     --commit <40-character default-branch SHA> \
+     --checkpoint-run-url <canonical GitHub Actions run URL>
    ```
 
 4. **Verify Release Hygiene**:

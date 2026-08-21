@@ -1,5 +1,6 @@
 """Fail-closed contract tests for release checkpoint evidence."""
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ import release_checkpoint as checkpoint  # noqa: E402
 SHA = "a" * 40
 REPO = "gillella/Aru_Agentic_SDLC"
 RUN_ID = 12345
+WORKFLOW_ID = 67890
 RUN_URL = f"https://github.com/{REPO}/actions/runs/{RUN_ID}"
 
 
@@ -22,9 +24,8 @@ def run_data(**overrides):
     data = {
         "databaseId": RUN_ID,
         "conclusion": "success",
-        "displayTitle": "CI Pipeline",
         "event": "workflow_dispatch",
-        "workflowName": "CI Pipeline",
+        "workflowDatabaseId": WORKFLOW_ID,
         "url": RUN_URL,
         "headSha": SHA,
     }
@@ -49,8 +50,13 @@ class RunUrlTests(unittest.TestCase):
 
 class CheckpointValidationTests(unittest.TestCase):
     def validate(self, data=None, default_head=SHA, target=SHA, url=RUN_URL):
-        with patch.object(checkpoint, "_read_run", return_value=data or run_data()), \
-             patch.object(checkpoint, "resolve_default_head", return_value=default_head):
+        with patch.object(
+            checkpoint, "_read_checkpoint_run", return_value=data or run_data()
+        ), patch.object(
+            checkpoint, "resolve_checkpoint_workflow_id", return_value=WORKFLOW_ID
+        ), patch.object(
+            checkpoint, "resolve_default_head", return_value=default_head
+        ):
             return checkpoint.validate_release_checkpoint(url, target, REPO)
 
     def test_success_binds_run_requested_commit_and_live_default_head(self):
@@ -58,6 +64,10 @@ class CheckpointValidationTests(unittest.TestCase):
         self.assertEqual(evidence["commit_sha"], SHA)
         self.assertEqual(evidence["run_id"], RUN_ID)
         self.assertEqual(evidence["run_url"], RUN_URL)
+        self.assertEqual(evidence["workflow_database_id"], WORKFLOW_ID)
+        self.assertEqual(
+            evidence["workflow_path"], ".github/workflows/ci.yml"
+        )
 
     def test_schedule_is_also_an_authorized_checkpoint_event(self):
         evidence = self.validate(run_data(event="schedule"))
@@ -70,7 +80,9 @@ class CheckpointValidationTests(unittest.TestCase):
                 checkpoint.validate_release_checkpoint(RUN_URL, target, repo)
 
     def test_unreadable_pending_failed_or_cancelled_run_is_refused(self):
-        with patch.object(checkpoint, "_read_run", return_value=None):
+        with patch.object(
+            checkpoint, "resolve_checkpoint_workflow_id", return_value=WORKFLOW_ID
+        ), patch.object(checkpoint, "_read_checkpoint_run", return_value=None):
             with self.assertRaises(checkpoint.ReleaseCheckpointError):
                 checkpoint.validate_release_checkpoint(RUN_URL, SHA, REPO)
         for conclusion in (None, "", "failure", "cancelled", "in_progress"):
@@ -78,9 +90,9 @@ class CheckpointValidationTests(unittest.TestCase):
                  self.assertRaises(checkpoint.ReleaseCheckpointError):
                 self.validate(run_data(conclusion=conclusion))
 
-    def test_wrong_workflow_event_run_identity_or_url_is_refused(self):
+    def test_wrong_workflow_identity_event_run_identity_or_url_is_refused(self):
         cases = (
-            {"workflowName": "Secret Scan"},
+            {"workflowDatabaseId": WORKFLOW_ID + 1},
             {"event": "pull_request"},
             {"databaseId": RUN_ID + 1},
             {"url": f"https://github.com/{REPO}/actions/runs/999"},
@@ -89,6 +101,13 @@ class CheckpointValidationTests(unittest.TestCase):
             with self.subTest(changes=changes), \
                  self.assertRaises(checkpoint.ReleaseCheckpointError):
                 self.validate(run_data(**changes))
+
+    def test_unresolvable_workflow_identity_is_refused(self):
+        with patch.object(
+            checkpoint, "resolve_checkpoint_workflow_id", return_value=None
+        ):
+            with self.assertRaises(checkpoint.ReleaseCheckpointError):
+                checkpoint.validate_release_checkpoint(RUN_URL, SHA, REPO)
 
     def test_stale_run_or_noncurrent_target_is_refused(self):
         with self.assertRaises(checkpoint.ReleaseCheckpointError):
@@ -115,3 +134,60 @@ class DefaultHeadTests(unittest.TestCase):
     @patch.object(checkpoint, "run_cmd", return_value=(1, "", "network"))
     def test_live_default_head_failure_is_not_a_fallback(self, _run, _branch):
         self.assertEqual(checkpoint.resolve_default_head(REPO), "")
+
+
+class WorkflowIdentityTests(unittest.TestCase):
+    @patch.object(checkpoint, "run_cmd")
+    def test_workflow_id_is_resolved_from_ci_file(self, run_cmd):
+        run_cmd.return_value = (0, str(WORKFLOW_ID), "")
+        self.assertEqual(
+            checkpoint.resolve_checkpoint_workflow_id(REPO), WORKFLOW_ID
+        )
+        self.assertEqual(
+            run_cmd.call_args.args[0],
+            [
+                "gh", "api",
+                f"repos/{REPO}/actions/workflows/ci.yml",
+                "--jq", ".id",
+            ],
+        )
+        self.assertFalse(run_cmd.call_args.kwargs["check"])
+
+    @patch.object(checkpoint, "run_cmd")
+    def test_invalid_workflow_identity_is_not_a_fallback(self, run_cmd):
+        for result in ((1, "", "network"), (0, "0", ""), (0, "01", "")):
+            with self.subTest(result=result):
+                run_cmd.return_value = result
+                self.assertIsNone(
+                    checkpoint.resolve_checkpoint_workflow_id(REPO)
+                )
+
+    @patch.object(checkpoint, "run_cmd")
+    def test_run_read_requests_workflow_database_identity(self, run_cmd):
+        run_cmd.return_value = (0, json.dumps(run_data()), "")
+        self.assertEqual(
+            checkpoint._read_checkpoint_run(RUN_ID, REPO), run_data()
+        )
+        self.assertEqual(
+            run_cmd.call_args.args[0],
+            [
+                "gh", "run", "view", str(RUN_ID), "--json",
+                "databaseId,conclusion,event,workflowDatabaseId,url,headSha",
+                "--repo", REPO,
+            ],
+        )
+        self.assertFalse(run_cmd.call_args.kwargs["check"])
+
+
+class ReleaseProcedureTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.document = (ROOT / "docs" / "releases.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_documented_commands_include_checkpoint_evidence(self):
+        self.assertIn("gh workflow run ci.yml", self.document)
+        self.assertIn("--json url,headSha,workflowDatabaseId", self.document)
+        self.assertGreaterEqual(self.document.count("--checkpoint-run-url"), 3)
+        self.assertGreaterEqual(self.document.count("--commit"), 4)

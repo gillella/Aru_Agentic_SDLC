@@ -3,18 +3,20 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Optional
 from urllib.parse import quote, urlsplit
 
 from common import run_cmd
 from deploy_preview import get_default_branch, get_repo_slug
-from promote import _read_run, _valid_run_url
+from promote import _valid_run_url
 
 
 FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-CHECKPOINT_WORKFLOW = "CI Pipeline"
+CHECKPOINT_WORKFLOW_PATH = ".github/workflows/ci.yml"
+CHECKPOINT_WORKFLOW_FILE = "ci.yml"
 CHECKPOINT_EVENTS = frozenset({"schedule", "workflow_dispatch"})
 
 
@@ -65,20 +67,63 @@ def resolve_default_head(repo_slug: str) -> str:
     return head if FULL_SHA_RE.fullmatch(head) else ""
 
 
+def resolve_checkpoint_workflow_id(repo_slug: str) -> Optional[int]:
+    """Resolve the stable workflow identity for the repository's CI file."""
+    code, out, _ = run_cmd(
+        [
+            "gh", "api",
+            f"repos/{repo_slug}/actions/workflows/{CHECKPOINT_WORKFLOW_FILE}",
+            "--jq", ".id",
+        ],
+        check=False,
+    )
+    raw_id = out.strip() if code == 0 else ""
+    if not raw_id.isdigit() or str(int(raw_id)) != raw_id:
+        return None
+    workflow_id = int(raw_id)
+    return workflow_id if workflow_id > 0 else None
+
+
+def _read_checkpoint_run(run_id: int, repo_slug: str) -> Optional[dict]:
+    """Read exactly the run fields used by checkpoint validation."""
+    fields = (
+        "databaseId,conclusion,event,workflowDatabaseId,url,headSha"
+    )
+    code, out, _ = run_cmd(
+        [
+            "gh", "run", "view", str(run_id), "--json", fields,
+            "--repo", repo_slug,
+        ],
+        check=False,
+    )
+    if code != 0 or not out.strip():
+        return None
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    required = {
+        "databaseId", "conclusion", "event", "workflowDatabaseId", "url",
+        "headSha",
+    }
+    return data if isinstance(data, dict) and set(data) == required else None
+
+
 def _run_evidence_error(
     data: dict,
     run_id: int,
     run_url: str,
     target: str,
     repo_slug: str,
+    workflow_id: int,
 ) -> str:
     """Return the first refusal reason for an already-read Actions run."""
     if data.get("databaseId") != run_id:
         return "checkpoint run identity does not match its URL"
     if data.get("conclusion") != "success":
         return "checkpoint run is not successful"
-    if data.get("workflowName") != CHECKPOINT_WORKFLOW:
-        return "checkpoint run is not the CI Pipeline workflow"
+    if data.get("workflowDatabaseId") != workflow_id:
+        return "checkpoint run is not from .github/workflows/ci.yml"
     if data.get("event") not in CHECKPOINT_EVENTS:
         return "checkpoint run is not scheduled or manually dispatched"
     if data.get("headSha") != target:
@@ -105,10 +150,17 @@ def validate_release_checkpoint(
     run_id = run_id_from_url(run_url, slug)
     if run_id is None:
         raise ReleaseCheckpointError("checkpoint run URL is malformed or foreign")
-    data = _read_run(run_id, slug)
+    workflow_id = resolve_checkpoint_workflow_id(slug)
+    if workflow_id is None:
+        raise ReleaseCheckpointError(
+            "checkpoint workflow identity could not be resolved"
+        )
+    data = _read_checkpoint_run(run_id, slug)
     if data is None:
         raise ReleaseCheckpointError("checkpoint run could not be read unambiguously")
-    run_error = _run_evidence_error(data, run_id, run_url, target, slug)
+    run_error = _run_evidence_error(
+        data, run_id, run_url, target, slug, workflow_id
+    )
     if run_error:
         raise ReleaseCheckpointError(run_error)
 
@@ -123,6 +175,7 @@ def validate_release_checkpoint(
         "run_id": run_id,
         "run_url": run_url,
         "commit_sha": target,
-        "workflow": CHECKPOINT_WORKFLOW,
+        "workflow_path": CHECKPOINT_WORKFLOW_PATH,
+        "workflow_database_id": workflow_id,
         "event": data["event"],
     }
