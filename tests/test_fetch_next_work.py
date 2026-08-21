@@ -1,4 +1,5 @@
 # line-ceiling: 1500
+import io
 import json
 import sys
 import tempfile
@@ -1202,6 +1203,54 @@ class BoardIdentityUniquenessTests(unittest.TestCase):
             holders)
         self.assertIsNone(rc)
         self.assertEqual(select_mock.call_args[0][0], "claude-1")
+
+
+class IssueClaimFailureTests(unittest.TestCase):
+    @staticmethod
+    def selection():
+        return {
+            "agent": "agent-1",
+            "family": "openai",
+            "work": {
+                "type": "issue", "issue": 334, "title": "claim safely",
+                "skill": "implement-next-issue", "resuming": False,
+            },
+            "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
+            "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
+            "escalated_prs": [], "claimable_issues": [334],
+            "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
+            "missing_touches": [], "operator_only_issues": [],
+        }
+
+    def test_json_claim_failures_are_explicit_and_nonzero(self):
+        from claim_issue import EXIT_CONFLICT, EXIT_ERROR
+        for claim_rc, expected in ((EXIT_ERROR, "error"), (EXIT_CONFLICT, "conflict")):
+            with self.subTest(claim_rc=claim_rc):
+                stdout = io.StringIO()
+                with patch.object(fnw, "_resolve_identity", return_value=None), \
+                     patch.object(fnw, "select", return_value=self.selection()), \
+                     patch("claim_issue.claim_issue", return_value=claim_rc), \
+                     patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--claim", "--json", "--reap-after", "0"]), \
+                     patch("sys.stdout", stdout):
+                    result = fnw.main()
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(result, 1)
+                self.assertFalse(payload["work"]["claimed"])
+                self.assertEqual(payload["work"]["claim_result"], expected)
+
+    def test_text_claim_failure_never_prints_implementation_success(self):
+        from claim_issue import EXIT_ERROR
+        stdout = io.StringIO()
+        with patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "select", return_value=self.selection()), \
+             patch("claim_issue.claim_issue", return_value=EXIT_ERROR), \
+             patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--claim", "--reap-after", "0"]), \
+             patch("sys.stdout", stdout):
+            result = fnw.main()
+        self.assertEqual(result, 1)
+        self.assertIn("Could not claim issue #334", stdout.getvalue())
+        self.assertIn("No work was started", stdout.getvalue())
+        self.assertNotIn("Implement issue #334", stdout.getvalue())
 
 
 class WorkPickerTests(unittest.TestCase):

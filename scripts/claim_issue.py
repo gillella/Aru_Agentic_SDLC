@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1425
+# line-ceiling: 1508
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.
@@ -8,15 +8,16 @@ GitHub exposes no compare-and-swap on issue state, so a true lock is not
 available. The protocol here is optimistic:
 
   1. Read the issue. If another agent already holds it, abort (exit 2).
-  2. Write our agent:<id> label.
-  3. Settle: sleep and read back repeatedly. If two agents raced, both see
+  2. Preflight the governed Project item, Ready state, and target Status option.
+  3. Write our agent:<id> label.
+  4. Settle: sleep and read back repeatedly. If two agents raced, both see
      both labels and compute the same winner - the lowest-sorting agent id.
      The loser releases. Multiple settle rounds catch late label writes that
      arrive after an earlier sole-holder readback.
-  4. Move the board item, then verify holders once more; roll back if a
+  5. Move the board item, then verify holders once more; roll back if a
      lower-sorting contender appeared during the status update.
 
-Step 3/4 is what makes this safe. Without settle+confirm, two agents that
+Steps 4/5 are what make this safe. Without settle+confirm, two agents that
 read "unclaimed" in the same instant both proceed and duplicate the work.
 
 Exit codes:
@@ -45,8 +46,10 @@ from common import (
     label_names,
     repository_owner_login,
     repository_trusted_logins,
+    query_issue_project_items,
     run_cmd,
     run_gh_json,
+    select_governed_project_items,
 )
 from factory_metrics import fetch_paginated_gh_api, parse_iso
 from update_issue_status import update_status
@@ -117,6 +120,57 @@ def _status_name(issue: dict) -> str:
 
 def _has_ready(issue: dict) -> bool:
     return _status_labels(issue) == ["status:ready"]
+
+
+def _required_board_preflight(issue_id: int, target_status: str) -> bool:
+    """Verify readable governed-board authority before writing a claim label."""
+    slug = get_repo_slug()
+    if not slug or "/" not in slug:
+        print(
+            f"[ERROR] Cannot resolve repository identity for issue #{issue_id}; "
+            "claim was not started.",
+            file=sys.stderr,
+        )
+        return False
+    items = query_issue_project_items(issue_id)
+    if items is None:
+        print(
+            f"[ERROR] Cannot read the governed Project Board for issue #{issue_id}; "
+            "claim was not started. Verify `gh auth status` and grant "
+            "`read:project` to inspect the board and `project` to mutate it.",
+            file=sys.stderr,
+        )
+        return False
+    governed = select_governed_project_items(items, slug)
+    if len(governed) != 1:
+        print(
+            f"[ERROR] Cannot identify exactly one governed Project Board item "
+            f"for issue #{issue_id}; claim was not started.",
+            file=sys.stderr,
+        )
+        return False
+    item = governed[0]
+    current_status = str((item.get("status") or {}).get("name", "")).strip()
+    if current_status.lower() != "ready":
+        print(
+            f"[ERROR] Governed Project Board state for issue #{issue_id} must be "
+            f"Ready before claim (found {current_status or 'none'}).",
+            file=sys.stderr,
+        )
+        return False
+    field = (item.get("project") or {}).get("field") or {}
+    has_target = any(
+        str(option.get("name", "")).lower() == target_status.lower()
+        for option in field.get("options", [])
+    )
+    if not field.get("id") or not has_target:
+        print(
+            f"[ERROR] Governed Project Board has no readable Status option "
+            f"'{target_status}' for issue #{issue_id}; claim was not started.",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def _metadata_is_trusted(issue: dict, owner=None, trusted_logins=None) -> bool:
@@ -269,11 +323,24 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
     # which resolves against the target project's cwd rather than the
     # framework's, so it silently did nothing from a project repo root.
     if not update_status(issue_id, status, require_board=True):
-        _remove_agent_label(issue_id, agent)
-        run_cmd(
+        print(
+            f"[ERROR] Required Project Board/status mutation failed for issue "
+            f"#{issue_id}; claim is incomplete. Verify `gh auth status`, "
+            "`read:project`/`project` authority, board membership, and the "
+            f"'{status}' Status option before retrying.",
+            file=sys.stderr,
+        )
+        removed = _remove_agent_label(issue_id, agent)
+        cleanup_code, _, cleanup_err = run_cmd(
             ["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee],
             check=False,
         )
+        if not removed or cleanup_code != 0:
+            print(
+                f"[ERROR] Claim rollback incomplete for issue #{issue_id}; "
+                f"manual reconciliation required: {cleanup_err or 'claim label cleanup failed'}",
+                file=sys.stderr,
+            )
         return EXIT_ERROR
 
     # Post-commit verify: a late lexicographically-smaller label write can land
@@ -311,6 +378,36 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
     return EXIT_OK
 
 
+def _start_fresh_issue_claim(
+    issue_id: int,
+    agent: str,
+    status: str,
+    assignee: str,
+    my_label: str,
+    owner: Optional[str],
+    trusted_logins: Optional[set[str]],
+) -> int:
+    """Preflight, write, settle, and finalize one new Ready claim."""
+    if not _required_board_preflight(issue_id, status):
+        return EXIT_ERROR
+    if not ensure_label(my_label, "1d76db", f"Claimed by agent '{agent}'"):
+        print(f"[ERROR] Could not provision claim label '{my_label}'.", file=sys.stderr)
+        return EXIT_ERROR
+    code, _, err = run_cmd(
+        ["gh", "issue", "edit", str(issue_id), "--add-label", my_label], check=False
+    )
+    if code != 0:
+        print(f"[ERROR] Could not apply claim label: {err}", file=sys.stderr)
+        return EXIT_ERROR
+    settled = _settle_as_winner(issue_id, agent, my_label)
+    if settled != EXIT_OK:
+        return settled
+    return _finalize_claim(
+        issue_id, agent, status, assignee, my_label,
+        owner=owner, trusted_logins=trusted_logins,
+    )
+
+
 def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
                 assignee: str = "@me") -> int:
     issue = get_issue(issue_id)
@@ -346,9 +443,13 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
             return EXIT_OK
         if _has_ready(issue):
             print(f"[INFO] Completing interrupted claim on #{issue_id}...")
-            return _finalize_claim(
-                issue_id, agent, status, assignee, my_label,
-                owner=owner, trusted_logins=trusted_logins,
+            return (
+                _finalize_claim(
+                    issue_id, agent, status, assignee, my_label,
+                    owner=owner, trusted_logins=trusted_logins,
+                )
+                if _required_board_preflight(issue_id, status)
+                else EXIT_ERROR
             )
         print(
             f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready or "
@@ -369,27 +470,9 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
         )
         return EXIT_CONFLICT
 
-    # --- Step 2: write our claim ------------------------------------------
-    if not ensure_label(my_label, "1d76db", f"Claimed by agent '{agent}'"):
-        print(f"[ERROR] Could not provision claim label '{my_label}'.", file=sys.stderr)
-        return EXIT_ERROR
-
-    code, _, err = run_cmd(
-        ["gh", "issue", "edit", str(issue_id), "--add-label", my_label], check=False
-    )
-    if code != 0:
-        print(f"[ERROR] Could not apply claim label: {err}", file=sys.stderr)
-        return EXIT_ERROR
-
-    # --- Step 3: settle and resolve any race ------------------------------
-    settled = _settle_as_winner(issue_id, agent, my_label)
-    if settled != EXIT_OK:
-        return settled
-
-    # --- Step 4: commit the claim + post-verify ---------------------------
-    return _finalize_claim(
+    return _start_fresh_issue_claim(
         issue_id, agent, status, assignee, my_label,
-        owner=owner, trusted_logins=trusted_logins,
+        owner, trusted_logins,
     )
 
 
