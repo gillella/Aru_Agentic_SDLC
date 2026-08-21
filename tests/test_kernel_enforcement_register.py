@@ -18,7 +18,7 @@ EXPECTED_HEADERS = [
     "Operator remedy",
     "Recovery path",
 ]
-REQUIRED_IDS = {
+AUTHORITATIVE_IDS = {
     "ARU-PROJECT-BOOTSTRAP",
     "ARU-INTAKE-PRD",
     "ARU-INCIDENT-INTAKE",
@@ -27,7 +27,6 @@ REQUIRED_IDS = {
     "ARU-ISSUE-CLAIM",
     "ARU-REVIEW-CLAIM",
     "ARU-MERGE-CLAIM",
-    "ARU-WORK-DISPATCH",
     "ARU-WORKTREE-ADMISSION",
     "ARU-PR-ADMISSION",
     "ARU-CI-PROTECTION",
@@ -44,6 +43,10 @@ REQUIRED_IDS = {
     "ARU-INCREMENT-RELEASE",
     "ARU-FRAMEWORK-RELEASE",
     "ARU-SPEC-SYNC",
+    "ARU-WORKTREE-JANITOR",
+}
+ADVISORY_IDS = {
+    "ARU-WORK-DISPATCH",
     "ARU-TOUCHES-HOOK",
     "ARU-PRE-PUSH-HOOK",
     "ARU-COMMIT-ATTRIBUTION",
@@ -52,8 +55,48 @@ REQUIRED_IDS = {
     "ARU-FEEDBACK-OBSERVER",
     "ARU-PRESENCE-STATUS",
     "ARU-FLEET-STATUS",
-    "ARU-WORKTREE-JANITOR",
     "ARU-SLACK-NOTIFICATION",
+}
+EXPECTED_CLASSES = {
+    **{stable_id: "Authoritative" for stable_id in AUTHORITATIVE_IDS},
+    **{stable_id: "Advisory" for stable_id in ADVISORY_IDS},
+}
+EXPECTED_OWNERS = {
+    "ARU-PROJECT-BOOTSTRAP": "`scripts/init_project.py`",
+    "ARU-INTAKE-PRD": "`scripts/prd_to_issues.py`",
+    "ARU-INCIDENT-INTAKE": "`scripts/incident_intake.py`",
+    "ARU-READY-ADMISSION": "`scripts/triage_backlog.py`",
+    "ARU-BOARD-STATE": "`scripts/update_issue_status.py --require-board`",
+    "ARU-ISSUE-CLAIM": "`scripts/claim_issue.py --issue`",
+    "ARU-REVIEW-CLAIM": "`scripts/claim_issue.py --pr`",
+    "ARU-MERGE-CLAIM": "`scripts/claim_issue.py --merge`",
+    "ARU-WORK-DISPATCH": "`scripts/fetch_next_work.py`, `scripts/fetch_next_issue.py`, `scripts/common.py` candidate policy",
+    "ARU-WORKTREE-ADMISSION": "`scripts/create_branch.py`, `scripts/common.py` worktree helpers",
+    "ARU-PR-ADMISSION": "`scripts/create_pr.py`",
+    "ARU-CI-PROTECTION": "`.github/workflows/ci.yml`, `scripts/enable_main_ruleset.py`, GitHub ruleset `aru-protect-main`",
+    "ARU-ACCEPTANCE-EXECUTION": "`scripts/acceptance_runner.py` as invoked by `scripts/merge_pr.py`",
+    "ARU-REVIEW-ATTESTATION": "`scripts/claim_issue.py --complete-review`, GitHub review, `scripts/merge_pr.py` review evidence",
+    "ARU-DOD": "`scripts/merge_pr.py` gate evaluation",
+    "ARU-MERGE-EXECUTION": "`scripts/merge_pr.py --expected-head <SHA>` and GitHub merge API",
+    "ARU-CLOSEOUT": "`scripts/merge_pr.py` close-out and checkpoint path",
+    "ARU-PREVIEW-DEPLOYMENT": "`scripts/deploy_preview.py`, `.github/workflows/deploy-preview.yml`",
+    "ARU-PROMOTION": "`scripts/promote.py`, `.github/workflows/promote.yml`",
+    "ARU-REVERT": "`scripts/revert_merge.py` plus ordinary PR, review, and merge gates",
+    "ARU-INCREMENT-DECISION": "`scripts/slack_control_room.py`, `scripts/slack_projects.py`, `scripts/delivery_increments.py`",
+    "ARU-LOOP-CONTROL": "`skills/run-aru-factory/SKILL.md`, `scripts/run_fleet.py`, `scripts/slack_control_room.py` stop store",
+    "ARU-INCREMENT-RELEASE": "`scripts/increment_release.py`",
+    "ARU-FRAMEWORK-RELEASE": "`scripts/release.py`",
+    "ARU-SPEC-SYNC": "`scripts/sync_spec.py` as a DoD gate",
+    "ARU-TOUCHES-HOOK": "`hooks/enforce_touches.py`",
+    "ARU-PRE-PUSH-HOOK": "`hooks/pre-push`",
+    "ARU-COMMIT-ATTRIBUTION": "`hooks/prepare_commit_msg.py`",
+    "ARU-FRAMEWORK-COMPAT": "`scripts/common.py` `check_version_compatibility`",
+    "ARU-CI-OBSERVER": "`scripts/check_ci.py`",
+    "ARU-FEEDBACK-OBSERVER": "`scripts/fetch_pr_feedback.py`",
+    "ARU-PRESENCE-STATUS": "`scripts/agent_presence.py`",
+    "ARU-FLEET-STATUS": "`scripts/fleet_status.py`",
+    "ARU-WORKTREE-JANITOR": "`scripts/cleanup_worktrees.py` deletion predicates",
+    "ARU-SLACK-NOTIFICATION": "`scripts/slack_notify.py` and status messages from `scripts/slack_control_room.py`",
 }
 PLACEHOLDERS = re.compile(r"\b(?:tbd|todo|placeholder|unknown owner)\b", re.I)
 
@@ -93,7 +136,7 @@ class KernelEnforcementRegisterTests(unittest.TestCase):
     def test_register_has_complete_unique_stable_id_inventory(self):
         ids = [row["Stable ID"] for row in self.rows]
         self.assertEqual(len(ids), len(set(ids)), "stable IDs must be unique")
-        self.assertEqual(set(ids), REQUIRED_IDS)
+        self.assertEqual(set(ids), set(EXPECTED_CLASSES))
         for stable_id in ids:
             self.assertRegex(stable_id, r"^ARU-[A-Z0-9]+(?:-[A-Z0-9]+)*$")
 
@@ -107,26 +150,40 @@ class KernelEnforcementRegisterTests(unittest.TestCase):
                     row["Authority class"], {"Authoritative", "Advisory"}
                 )
 
+    def test_authority_class_is_fixed_for_every_stable_id(self):
+        self.assertEqual(set(AUTHORITATIVE_IDS), set(EXPECTED_OWNERS) - ADVISORY_IDS)
+        self.assertEqual(set(ADVISORY_IDS), set(EXPECTED_OWNERS) - AUTHORITATIVE_IDS)
+        for stable_id, expected in EXPECTED_CLASSES.items():
+            with self.subTest(stable_id=stable_id):
+                self.assertEqual(self.by_id[stable_id]["Authority class"], expected)
+
     def test_authoritative_controls_fail_closed(self):
-        authoritative = [
-            row for row in self.rows
-            if row["Authority class"] == "Authoritative"
-        ]
-        self.assertGreater(len(authoritative), 15)
-        for row in authoritative:
-            with self.subTest(stable_id=row["Stable ID"]):
-                self.assertIn("fail closed", row["Failure behavior"].lower())
+        for stable_id in AUTHORITATIVE_IDS:
+            failure = self.by_id[stable_id]["Failure behavior"].lower()
+            with self.subTest(stable_id=stable_id):
+                self.assertTrue(
+                    failure.startswith("fail closed"),
+                    f"authoritative failure contract is not fail-closed: {failure}",
+                )
 
     def test_fail_open_advice_names_its_audit_diagnostic(self):
+        normalized = re.sub(r"\s+", " ", self.text)
+        self.assertIn("schema `aru.advisory.v1`", normalized)
+        self.assertIn("persist that exact event in a durable run or session audit", normalized)
+        self.assertIn("retain a locator", normalized)
         for row in self.rows:
             if "fail open" not in row["Failure behavior"].lower():
                 continue
             with self.subTest(stable_id=row["Stable ID"]):
                 self.assertEqual(row["Authority class"], "Advisory")
-                self.assertRegex(
-                    row["Audit evidence"].lower(),
-                    r"diagnostic|report|result|record|stderr|exit|json|metadata",
+                evidence = row["Audit evidence"]
+                compliant = evidence.startswith(
+                    "COMPLIANT aru.advisory.v1 durable sink:"
                 )
+                noncompliant = evidence.startswith("NONCOMPLIANT:")
+                self.assertNotEqual(compliant, noncompliant)
+                self.assertIn("aru.advisory.v1", evidence)
+                self.assertRegex(evidence.lower(), r"durable.*(?:audit|locator)|audit locator")
 
     def test_advisory_controls_cannot_authorize_or_enter_tcb(self):
         authority_rules = re.sub(r"\s+", " ", self.text.lower())
@@ -135,7 +192,10 @@ class KernelEnforcementRegisterTests(unittest.TestCase):
         for row in self.rows:
             if row["Authority class"] != "Advisory":
                 continue
-            combined = " ".join(row.values()).lower()
+            combined = " ".join(
+                value for key, value in row.items()
+                if key not in {"Stable ID", "Authority class"}
+            ).lower()
             self.assertRegex(combined, r"cannot|never|outside|advisory")
 
     def test_touches_hook_is_explicitly_fail_open_and_advisory(self):
@@ -167,21 +227,11 @@ class KernelEnforcementRegisterTests(unittest.TestCase):
         self.assertIn("incorrectly report complete", fleet["Failure behavior"])
         self.assertIn("cannot enter the TCB", fleet["Recovery path"])
 
-    def test_required_lifecycle_surfaces_are_owned(self):
-        required_owner_fragments = {
-            "ARU-BOARD-STATE": "update_issue_status.py --require-board",
-            "ARU-WORK-DISPATCH": "fetch_next_work.py",
-            "ARU-REVIEW-ATTESTATION": "claim_issue.py --complete-review",
-            "ARU-DOD": "merge_pr.py",
-            "ARU-MERGE-EXECUTION": "merge_pr.py --expected-head",
-            "ARU-PROMOTION": ".github/workflows/promote.yml",
-            "ARU-CLOSEOUT": "merge_pr.py",
-            "ARU-INCREMENT-DECISION": "slack_projects.py",
-            "ARU-LOOP-CONTROL": "run_fleet.py",
-        }
-        for stable_id, fragment in required_owner_fragments.items():
+    def test_every_stable_id_has_its_exact_owner_binding(self):
+        self.assertEqual(set(EXPECTED_OWNERS), set(EXPECTED_CLASSES))
+        for stable_id, expected_owner in EXPECTED_OWNERS.items():
             with self.subTest(stable_id=stable_id):
-                self.assertIn(fragment, self.by_id[stable_id]["Owner"])
+                self.assertEqual(self.by_id[stable_id]["Owner"], expected_owner)
 
     def test_phase_one_adr_must_consume_registered_authority_only(self):
         lower = re.sub(r"\s+", " ", self.text.lower())
