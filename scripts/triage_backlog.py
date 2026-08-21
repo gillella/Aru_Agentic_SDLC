@@ -28,8 +28,9 @@ Oversized-scope recommendation (either signal is sufficient):
   * touches: spans more than one top-level area
 
 These SPLIT warnings are the upstream half of review-death-spiral prevention
-(issue #98 / S2.5). They hold automatic Ready promotion unless ``--force`` is
-used. They do not create a human approval gate — they ask for a smaller issue.
+(issue #98 / S2.5). They hold Ready promotion until the issue is split or
+narrowed. They do not create a human approval gate — they ask for a smaller
+issue.
 """
 
 import argparse
@@ -451,9 +452,8 @@ def hub_path_contention(issues: list[dict[str, Any]]) -> list[tuple[str, int]]:
 def split_reasons(issue: dict[str, Any]) -> list[str]:  # noqa: C901, PLR0912
     """Returns concrete reasons a Ready-contract issue should be split.
 
-    This is deliberately advisory: each visible oversize signal is enough to
-    hold automatic promotion, while ``--force`` lets a triager record an
-    explicit exception.
+    Each visible oversize signal is enough to hold Ready promotion until the
+    issue contract is split or narrowed.
     """
     body = issue.get("body") or ""
     criteria_count = len(acceptance_criteria(body))
@@ -621,11 +621,6 @@ def _print_hub_contention(issues: list[dict[str, Any]]) -> None:
 def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Verify the Ready contract and promote Backlog issues.")
     parser.add_argument("--promote", action="store_true", help="Promote qualifying issues to Ready")
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="With --promote, override SPLIT recommendations (never Ready-contract gaps or epics)",
-    )
     parser.add_argument("--issue", type=int, action="append", default=[],
                         help="Restrict to specific issue numbers (repeatable)")
     parser.add_argument("--capacity", action="store_true", help="Print only the fleet-capacity summary")
@@ -698,7 +693,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
             print(f"\n{EXAMPLE_CONFORMING_ISSUE.strip()}\n")
 
     promoted = 0
-    promotable = qualified + (split_recommended if args.force else [])
+    promotable = qualified
     if args.promote and promotable:
         print()
         for issue, _ in promotable:
@@ -712,10 +707,10 @@ def main():  # noqa: C901, PLR0912, PLR0915
     elif qualified:
         print(f"\n  {len(qualified)} issue(s) would be promoted. Re-run with --promote.")
 
-    if split_recommended and not (args.promote and args.force):
+    if split_recommended:
         print(
             f"\n  {len(split_recommended)} issue(s) held for splitting. "
-            "Use --promote --force to override the recommendation."
+            "Split or narrow each issue before promotion."
         )
 
     print_capacity(
