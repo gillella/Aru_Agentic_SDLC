@@ -55,6 +55,17 @@ class SuiteHermeticityTests(unittest.TestCase):
                         for path in sorted(aru_state.rglob("*"))
                     )
                 )
+            xdg_state = Path(environment["XDG_STATE_HOME"])
+            xdg_entries = (
+                sorted(xdg_state.rglob("*")) if xdg_state.exists() else []
+            )
+            if xdg_entries:
+                failures.append(
+                    "child suite created persistent XDG state: "
+                    + ", ".join(
+                        str(path.relative_to(xdg_state)) for path in xdg_entries
+                    )
+                )
             self.assertEqual(failures, [])
 
     def test_canonical_ci_verification_baseline_is_python_311(self):
