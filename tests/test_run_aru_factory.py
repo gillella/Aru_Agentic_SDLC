@@ -385,6 +385,13 @@ class WiringTests(unittest.TestCase):
         text = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
         self.assertIn("authority on what the loop does", text)
 
+    def test_the_fleet_prompt_requires_focused_story_evidence(self):
+        text = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
+        self.assertIn("every `verify:` predicate", text)
+        self.assertIn("directly affected tests", text)
+        self.assertIn("behavioral evidence", text)
+        self.assertIn("phase and pre-release checkpoints", text)
+
     def test_every_desktop_adapter_preserves_the_current_project_task(self):
         for adapter in DESKTOP_ADAPTERS:
             text = flat(adapter.read_text(encoding="utf-8"))

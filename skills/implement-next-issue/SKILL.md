@@ -185,9 +185,19 @@ or other irreversible work from the plan gate.
 4. Perform source code modifications while preserving existing docstrings, formatting, and public API contracts.
 
 ### Step 6: Run Local Tests & Verification
-1. Execute the project's test runner, build system, and syntax/lint checks inside the worktree directory.
-2. Verify that all existing unit tests pass without regressions.
-3. If tests fail, resolve failures locally before proceeding.
+1. Run every acceptance-criteria `verify:` predicate from the issue inside the
+   worktree directory.
+2. Run the directly affected tests and every relevant lint, syntax,
+   documentation, and build check. Focused scope never means zero behavioral
+   evidence for changed behavior.
+3. Do not run the repository's complete test suite
+   (`python3 -m unittest discover tests`) by default for an ordinary story.
+   Run it when the issue explicitly requires it for high-risk or cross-cutting
+   work, and at the phase-exit and pre-release checkpoints in
+   `docs/project_board_workflow.md`.
+4. Resolve every focused-verification failure locally before proceeding.
+5. Pass the exact successful commands to `create_pr.py`; its current-head
+   verification record and `merge_pr.py` acceptance gate remain mandatory.
 
 ### Step 7: Commit & Push Changes
 1. Create atomic, conventional git commits:

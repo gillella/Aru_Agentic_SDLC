@@ -96,6 +96,40 @@ the options and block for clarification rather than inventing requirements.
 
 ---
 
+## Focused Verification and Phase Checkpoints
+
+An ordinary story proves its own change rather than re-running every unrelated
+test in the repository. Its mandatory focused evidence is the union of:
+
+1. every acceptance-criteria `verify:` predicate in the issue;
+2. tests directly affected by the changed behavior; and
+3. every relevant lint, syntax, documentation, and build check.
+
+Focused verification never permits zero behavioral evidence for changed
+behavior. `create_pr.py` records the exact commands against the current PR head,
+and `merge_pr.py` continues to reject missing, failing, or stale verification.
+High-risk or cross-cutting issues may name the complete suite as one of their
+own explicit predicates.
+
+The complete repository suite, `python3 -m unittest discover tests`, is a
+separate checkpoint gate. It runs through CI on `schedule` and
+`workflow_dispatch`, not on every pull request or push. Before closing each
+roadmap phase, run or select a successful checkpoint whose tested commit is the
+exact current default-branch commit. Record both that full 40-character commit
+SHA and the successful GitHub Actions run URL on the phase epic. A scheduled
+run counts only when its recorded commit is still the exact default-branch
+commit being accepted. Failure or stale/missing evidence blocks phase closure.
+
+Repeat the same exact-commit checkpoint before release and record its commit
+and Actions run URL on the release authority issue. Missing, stale, or failing
+evidence blocks release. The lifecycle traversal from issue #293 remains the
+named focused predicate for changes to lifecycle-kernel behavior
+(`python3 -m unittest tests.test_pipeline_traversal`); it is included again in
+every complete phase and release checkpoint, while unrelated documentation-only
+stories do not run it by default.
+
+---
+
 ## 🔗 Issue Dependencies & Progressive Claiming
 
 1. **Dependency Syntax**:

@@ -32,6 +32,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           # fetch-depth: 0 is required so a PR-range scan can resolve base^..head.
           # push/pull_request: the action scans that event's commits, not the
           # whole repo. schedule/workflow_dispatch: full-history detect.
@@ -48,6 +49,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -83,6 +86,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -155,6 +160,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           # Match the secret-scan checkout so a shallow tip cannot hide
           # history-dependent checks if more are added to this job later.
           fetch-depth: 0
@@ -211,14 +217,12 @@ jobs:
               py_compile.compile(f, doraise=True)
           "
 
-      # This playbook is a guidelines/meta project: most PRs change docs, skills,
-      # and review prose rather than Python the CI needs to re-prove. Running the
-      # full unit test suite on every pull request is expensive for little signal
-      # here, so it is deferred to the end of the pipeline instead - when a commit
-      # lands on main, on the weekly schedule, or on manual dispatch. PRs still
-      # get every fast, cheap static gate above (secret scan, dependency audit,
-      # import boundaries, docs freshness, lint, line ceilings, syntax).
+      # This guidelines/meta project records focused story tests in current-head
+      # PR evidence. The complete suite is a separate phase/pre-release
+      # checkpoint, triggered weekly or manually and bound to the exact tested
+      # default-branch commit in the governing epic. Pull requests and pushes
+      # still get every fast static gate above.
       - name: Execute Tests
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           python -m unittest discover tests

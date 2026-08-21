@@ -29,11 +29,19 @@ All git commit messages MUST follow Conventional Commits formatting:
 
 ## 🧪 Testing & Quality Standards
 
-1. **Local Test Execution**:
-   Before committing, agents MUST run the full test suite and confirm 100% pass rate.
-2. **Zero Masked Errors**:
+1. **Focused Story Verification**:
+   Before committing, agents MUST run every acceptance-criteria `verify:`
+   predicate, the directly affected tests, and every relevant lint, syntax,
+   documentation, and build check. Changed behavior always needs behavioral
+   evidence; a focused scope is never permission to record zero tests.
+2. **Complete-Suite Checkpoints**:
+   `python3 -m unittest discover tests` is not a default per-story gate. It is
+   mandatory when an issue explicitly requires it for high-risk or
+   cross-cutting work, at every phase exit, and before release, using the
+   evidence contract in `docs/project_board_workflow.md`.
+3. **Zero Masked Errors**:
    Never resolve failures by swallowing exceptions, adding dummy fallbacks, or deleting failing assertions. Always address the root cause.
-3. **CI Pipeline Gatekeeper**:
+4. **CI Pipeline Gatekeeper**:
    No code is merged without passing automated CI runs. If CI fails, inspect logs using `python3 "$ARU_SDLC_HOME/scripts/check_ci.py"` and submit fix commits.
 
 ---
@@ -52,12 +60,13 @@ the hosted matrix. PyYAML is a required part of the pinned toolchain because the
 generated-workflow checks must parse YAML rather than skip when the parser is
 missing.
 
-Then the two commands `prompts/fleet-worker.md` requires before every push run
-as written:
+Ruff is a fast baseline for every story. Pair it with the exact focused tests
+and other predicates declared by the issue:
 
 ```bash
 ruff check .
-python3 -m unittest discover tests
+# Example only; use the modules named by the issue.
+python3 -m unittest tests.test_affected_module
 ```
 
 **The toolchain is pinned, and that is the point.** Versions live in
