@@ -1252,6 +1252,11 @@ class IssueClaimFailureTests(unittest.TestCase):
         self.assertIn("No work was started", stdout.getvalue())
         self.assertNotIn("Implement issue #334", stdout.getvalue())
 
+    def test_cli_exits_with_the_main_result(self):
+        with patch.object(fnw, "main", return_value=1):
+            with self.assertRaisesRegex(SystemExit, "1"):
+                fnw.cli()
+
 
 class WorkPickerTests(unittest.TestCase):
     def setUp(self):

@@ -1024,5 +1024,9 @@ def main():  # noqa: C901, PLR0912, PLR0915
     return 1 if claim_failed else None
 
 
+def cli() -> None:
+    raise SystemExit(main())
+
+
 if __name__ == "__main__":
-    main()
+    cli()
