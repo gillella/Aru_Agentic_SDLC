@@ -1,4 +1,4 @@
-# line-ceiling: 1072
+# line-ceiling: 1090
 import os
 import subprocess
 import tempfile
@@ -954,15 +954,14 @@ class CloseoutJanitorHookTests(unittest.TestCase):
     def test_run_closeout_calls_sweep_leftovers(self):
         with patch.object(merge_pr.os, "chdir"), \
              patch.object(merge_pr, "prune_worktree", return_value=(True, "w")), \
-             patch.object(merge_pr, "retain_local_branch", return_value=(True, "l")), \
+             patch.object(merge_pr, "cleanup_local_branch", return_value=(True, "l")), \
              patch.object(merge_pr, "delete_remote_branch", return_value=(True, "r")), \
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
              patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
              patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")) as merger, \
-             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor, \
-             patch.object(cleanup_worktrees, "local_ref_exists", return_value=False):
+             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor:
             pr = {
                 "number": 9,
                 "headRefName": "feat/x",
@@ -976,15 +975,14 @@ class CloseoutJanitorHookTests(unittest.TestCase):
     def test_failed_closeout_retains_current_merger_claim(self):
         with patch.object(merge_pr.os, "chdir"), \
              patch.object(merge_pr, "prune_worktree", return_value=(False, "w")), \
-             patch.object(merge_pr, "retain_local_branch", return_value=(True, "l")), \
+             patch.object(merge_pr, "cleanup_local_branch", return_value=(True, "l")), \
              patch.object(merge_pr, "delete_remote_branch", return_value=(True, "r")), \
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
              patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
              patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")) as merger, \
-             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor, \
-             patch.object(cleanup_worktrees, "local_ref_exists", return_value=False):
+             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor:
             pr = {
                 "number": 9,
                 "headRefName": "feat/x",
@@ -995,18 +993,26 @@ class CloseoutJanitorHookTests(unittest.TestCase):
             janitor.assert_called_once_with("/repo", retain_merger_pr=9)
             merger.assert_not_called()
 
-    def test_closeout_retains_merger_when_local_branch_remains(self):
+    def test_closeout_retains_merger_when_local_branch_deletion_fails(self):
+        """A local-branch leftover no longer double-gates on ``local_ref_exists``.
+
+        The "local branch" step's own return value is the single source of
+        truth; when it fails, the merger claim is retained exactly as any
+        other failing step would (#343).
+        """
         with patch.object(merge_pr.os, "chdir"), \
              patch.object(merge_pr, "prune_worktree", return_value=(True, "w")), \
-             patch.object(merge_pr, "retain_local_branch", return_value=(True, "l")), \
+             patch.object(
+                 merge_pr, "cleanup_local_branch",
+                 return_value=(False, "Could not delete local branch feat/x: locked"),
+             ), \
              patch.object(merge_pr, "delete_remote_branch", return_value=(True, "r")), \
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
              patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
              patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")) as merger, \
-             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")), \
-             patch.object(cleanup_worktrees, "local_ref_exists", return_value=True):
+             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")):
             pr = {
                 "number": 9,
                 "headRefName": "feat/x",
@@ -1020,7 +1026,7 @@ class CloseoutJanitorHookTests(unittest.TestCase):
         failures = []
         with patch.object(merge_pr.os, "chdir"), \
              patch.object(merge_pr, "prune_worktree", return_value=(True, "w")), \
-             patch.object(merge_pr, "retain_local_branch", return_value=(True, "l")), \
+             patch.object(merge_pr, "cleanup_local_branch", return_value=(True, "l")), \
              patch.object(merge_pr, "delete_remote_branch", return_value=(True, "r")), \
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
@@ -1030,8 +1036,7 @@ class CloseoutJanitorHookTests(unittest.TestCase):
              patch.object(
                  merge_pr, "sweep_leftovers",
                  return_value=(False, "could not list worktrees"),
-             ), \
-             patch.object(cleanup_worktrees, "local_ref_exists", return_value=False):
+             ):
             pr = {
                 "number": 9,
                 "headRefName": "feat/x",
@@ -1047,15 +1052,17 @@ class CloseoutJanitorHookTests(unittest.TestCase):
         failures = []
         with patch.object(merge_pr.os, "chdir"), \
              patch.object(merge_pr, "prune_worktree", return_value=(True, "w")), \
-             patch.object(merge_pr, "retain_local_branch", return_value=(True, "l")), \
+             patch.object(
+                 merge_pr, "cleanup_local_branch",
+                 return_value=(False, "Could not delete local branch feat/x: locked"),
+             ), \
              patch.object(merge_pr, "delete_remote_branch", return_value=(True, "r")), \
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
              patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
              patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")), \
-             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")), \
-             patch.object(cleanup_worktrees, "local_ref_exists", return_value=True):
+             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")):
             pr = {
                 "number": 9,
                 "headRefName": "feat/x",
@@ -1065,7 +1072,10 @@ class CloseoutJanitorHookTests(unittest.TestCase):
             self.assertFalse(
                 merge_pr.run_closeout(pr, [7], "/repo", failures=failures)
             )
-        self.assertEqual(failures, ["local branch remaining: feat/x"])
+        self.assertEqual(
+            failures,
+            ["local branch: Could not delete local branch feat/x: locked"],
+        )
 
 
 if __name__ == "__main__":

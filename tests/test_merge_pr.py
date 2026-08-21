@@ -1,4 +1,4 @@
-# line-ceiling: 3815
+# line-ceiling: 4300
 from contextlib import nullcontext
 import json
 import os
@@ -1896,7 +1896,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
     @patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed"))
     @patch.object(merge_pr, "delete_remote_branch", return_value=(False, "delete failed"))
-    @patch.object(merge_pr, "retain_local_branch", return_value=(True, "local retained"))
+    @patch.object(merge_pr, "cleanup_local_branch", return_value=(True, "local retained"))
     @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree pruned"))
     @patch.object(merge_pr.os, "chdir")
     @patch.object(merge_pr, "repository_root", return_value="/repo")
@@ -2074,7 +2074,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
     def _run(self, failing):
         outcomes = {
             "prune_worktree": (True, "worktree ok"),
-            "retain_local_branch": (True, "local ok"),
+            "cleanup_local_branch": (True, "local ok"),
             "delete_remote_branch": (True, "remote ok"),
             "ensure_issue_closed": (True, "closed"),
             "reconcile_issue_done": (True, "done"),
@@ -2090,8 +2090,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
         }
         mocks = {name: item.start() for name, item in patches.items()}
         try:
-            with patch.object(merge_pr.os, "chdir"), \
-                 patch.object(cleanup_worktrees, "local_ref_exists", return_value=False):
+            with patch.object(merge_pr.os, "chdir"):
                 ok = merge_pr.run_closeout(merged_pr(), [7], "/repo")
         finally:
             for item in patches.values():
@@ -2110,7 +2109,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
     def test_worktree_failure_does_not_skip_branch_or_board_cleanup(self):
         ok, mocks = self._run("prune_worktree")
         self.assertFalse(ok)
-        mocks["retain_local_branch"].assert_called_once()
+        mocks["cleanup_local_branch"].assert_called_once()
         mocks["delete_remote_branch"].assert_called_once()
         mocks["reconcile_issue_done"].assert_called_once_with(7)
 
@@ -2126,6 +2125,13 @@ class CloseOutRecoveryTests(unittest.TestCase):
         self.assertFalse(ok)
         mocks["sweep_leftovers"].assert_called_once_with("/repo", retain_merger_pr=9)
 
+    def test_local_branch_deletion_failure_does_not_skip_remaining_closeout(self):
+        ok, mocks = self._run("cleanup_local_branch")
+        self.assertFalse(ok)
+        mocks["delete_remote_branch"].assert_called_once()
+        mocks["reconcile_issue_done"].assert_called_once_with(7)
+        mocks["clear_merger_claims"].assert_not_called()
+
     @patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor ok"))
     @patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear"))
     @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
@@ -2133,7 +2139,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
     @patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed"))
     @patch.object(merge_pr, "delete_remote_branch", return_value=(True, "remote"))
-    @patch.object(merge_pr, "retain_local_branch", return_value=(True, "local"))
+    @patch.object(merge_pr, "cleanup_local_branch", return_value=(True, "local"))
     @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree"))
     @patch.object(merge_pr.os, "chdir")
     def test_changes_to_surviving_root_before_pruning_caller_worktree(
@@ -2144,8 +2150,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
             return True, "worktree"
 
         prune.side_effect = after_chdir
-        with patch.object(cleanup_worktrees, "local_ref_exists", return_value=False):
-            self.assertTrue(merge_pr.run_closeout(merged_pr(), [7], "/repo"))
+        self.assertTrue(merge_pr.run_closeout(merged_pr(), [7], "/repo"))
         chdir.assert_called_once_with("/repo")
 
 
@@ -2168,6 +2173,129 @@ class HumanInterventionTests(unittest.TestCase):
             attempts,
             [["remote branch: delete failed"]] * 4,
         )
+
+    def test_harmless_orphan_local_branch_releases_claim_after_bounded_retries(self):
+        """#343: a local-branch-only leftover must never deadlock the claim.
+
+        Remote branch, issues, board, and review/janitor scaffolding all
+        succeed on every attempt; only the local branch step keeps failing.
+        Once the bounded retry budget is exhausted, the merger claim is
+        released directly with a non-blocking warning instead of routing to
+        human-intervention evidence.
+        """
+        def fail(_pr, _issues, _root, failures=None):
+            failures.append(
+                "local branch: Orphan local branch fix/x deletion failed after unattached validation: locked"
+            )
+            return False
+
+        with patch.object(merge_pr, "run_closeout", side_effect=fail) as closeout, \
+             patch.object(merge_pr.time, "sleep") as sleep, \
+             patch.object(
+                 merge_pr, "clear_merger_claims", return_value=(True, "cleared"),
+             ) as merger:
+            ok, attempts = merge_pr.run_closeout_with_retries(
+                merged_pr(), [7], "/repo"
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(closeout.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 15, 45])
+        merger.assert_called_once_with(9)
+        self.assertEqual(
+            attempts,
+            [[
+                "local branch: Orphan local branch fix/x deletion failed after unattached validation: locked"
+            ]] * 4,
+        )
+
+    def test_local_branch_fail_safe_does_not_mask_other_unresolved_failures(self):
+        """A mixed failure (e.g. worktree still dirty) must keep retrying/HITL.
+
+        The fail-safe only fires when the local branch step is the *sole*
+        recorded failure -- never when a real, unresolved lifecycle failure
+        (like a still-attached worktree) is also present (#343 decision
+        boundary: never silently wave through a genuinely unmerged/live
+        worktree situation).
+        """
+        def fail(_pr, _issues, _root, failures=None):
+            failures.append("worktree: still attached, dirty")
+            failures.append(
+                "local branch: Orphan local branch fix/x deletion failed after unattached validation: locked"
+            )
+            return False
+
+        with patch.object(merge_pr, "run_closeout", side_effect=fail) as closeout, \
+             patch.object(merge_pr.time, "sleep"), \
+             patch.object(merge_pr, "clear_merger_claims") as merger:
+            ok, attempts = merge_pr.run_closeout_with_retries(
+                merged_pr(), [7], "/repo"
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(closeout.call_count, 4)
+        merger.assert_not_called()
+        self.assertEqual(len(attempts), 4)
+
+    def test_local_branch_fail_safe_reports_failure_when_claim_release_fails(self):
+        """If clearing the claim itself fails, the fail-safe must not claim success."""
+        def fail(_pr, _issues, _root, failures=None):
+            failures.append(
+                "local branch: Orphan local branch fix/x deletion failed after unattached validation: locked"
+            )
+            return False
+
+        with patch.object(merge_pr, "run_closeout", side_effect=fail), \
+             patch.object(merge_pr.time, "sleep"), \
+             patch.object(
+                 merge_pr, "clear_merger_claims",
+                 return_value=(False, "gh api rate limited"),
+             ) as merger:
+            ok, attempts = merge_pr.run_closeout_with_retries(
+                merged_pr(), [7], "/repo"
+            )
+
+        self.assertFalse(ok)
+        merger.assert_called_once_with(9)
+        self.assertEqual(len(attempts), 4)
+
+    def test_bounded_fallback_does_not_clear_claim_when_local_branch_is_attached(self):
+        """Bounded fallback must NOT release merger claim if the failure is worktree attachment."""
+        def fail(_pr, _issues, _root, failures=None):
+            failures.append("local branch: Retained local branch fix/x; branch is attached to a worktree.")
+            return False
+
+        with patch.object(merge_pr, "run_closeout", side_effect=fail) as closeout, \
+             patch.object(merge_pr.time, "sleep"), \
+             patch.object(merge_pr, "clear_merger_claims") as merger:
+            ok, attempts = merge_pr.run_closeout_with_retries(
+                merged_pr(), [7], "/repo"
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(closeout.call_count, 4)
+        merger.assert_not_called()
+        self.assertEqual(len(attempts), 4)
+
+    def test_bounded_fallback_does_not_clear_claim_when_local_branch_has_lease_mismatch(self):
+        """Bounded fallback must NOT release merger claim if the failure is a lease mismatch."""
+        def fail(_pr, _issues, _root, failures=None):
+            failures.append(
+                "local branch: Local branch fix/x lease failed on gated-sha (now at new-sha): lock failed; ref retained."
+            )
+            return False
+
+        with patch.object(merge_pr, "run_closeout", side_effect=fail) as closeout, \
+             patch.object(merge_pr.time, "sleep"), \
+             patch.object(merge_pr, "clear_merger_claims") as merger:
+            ok, attempts = merge_pr.run_closeout_with_retries(
+                merged_pr(), [7], "/repo"
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(closeout.call_count, 4)
+        merger.assert_not_called()
+        self.assertEqual(len(attempts), 4)
 
     def test_comment_contains_command_artifacts_attempts_and_one_action(self):
         pr = merged_pr()
@@ -2244,7 +2372,7 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
 
     @patch.object(merge_pr, "run_cmd", return_value=(1, "", "missing"))
     def test_absent_local_branch_is_already_done(self, run):
-        ok, message = merge_pr.retain_local_branch(
+        ok, message = merge_pr.cleanup_local_branch(
             "/repo", "fix/issue-7-x", "gated-sha"
         )
         self.assertTrue(ok)
@@ -2298,12 +2426,61 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
 
     @patch.object(merge_pr, "run_cmd", return_value=(0, "new-sha\n", ""))
     def test_reused_local_branch_at_new_sha_is_preserved(self, run):
-        ok, message = merge_pr.retain_local_branch(
+        ok, message = merge_pr.cleanup_local_branch(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertFalse(ok)
+        self.assertIn("unrelated ref retained", message)
+        self.assertIn("lease mismatch", message)
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_unattached_local_branch_at_gated_sha_is_deleted(self, run):
+        run.side_effect = [
+            (0, "gated-sha\n", ""),  # rev-parse --verify
+            (0, "worktree /repo\nbranch refs/heads/main\n", ""),  # worktree list
+            (0, "", ""),  # git update-ref -d
+        ]
+        ok, message = merge_pr.cleanup_local_branch(
             "/repo", "fix/issue-7-x", "gated-sha"
         )
         self.assertTrue(ok)
-        self.assertIn("unrelated ref retained", message)
-        self.assertEqual(run.call_count, 1)
+        self.assertIn("Deleted local branch", message)
+        self.assertEqual(
+            run.call_args_list[2].args[0],
+            ["git", "update-ref", "-d", "refs/heads/fix/issue-7-x", "gated-sha"],
+        )
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_unattached_local_branch_delete_failure_is_reported(self, run):
+        run.side_effect = [
+            (0, "gated-sha\n", ""),  # rev-parse --verify
+            (0, "worktree /repo\nbranch refs/heads/main\n", ""),  # worktree list
+            (1, "", "unable to lock ref"),  # git update-ref -d
+            (0, "gated-sha\n", ""),  # post-failure rev-parse check
+        ]
+        ok, message = merge_pr.cleanup_local_branch(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertFalse(ok)
+        self.assertIn("Orphan local branch", message)
+        self.assertIn("unable to lock ref", message)
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_local_branch_cleanup_fails_closed_when_worktree_enumeration_fails(self, run):
+        run.side_effect = [
+            (0, "gated-sha\n", ""),  # rev-parse --verify
+            (1, "", "worktree listing failed"),  # worktree list
+        ]
+        ok, message = merge_pr.cleanup_local_branch(
+            "/repo", "fix/issue-7-x", "gated-sha"
+        )
+        self.assertFalse(ok)
+        self.assertIn("Could not enumerate worktrees", message)
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["git", "worktree", "list", "--porcelain"],
+        )
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/base")
     @patch.object(merge_pr, "run_cmd", return_value=(0, "new-sha\trefs/heads/fix/x\n", ""))
@@ -2365,12 +2542,12 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
                 return result
 
             with patch.object(merge_pr, "run_cmd", side_effect=inject_attachment):
-                ok, message = merge_pr.retain_local_branch(
+                ok, message = merge_pr.cleanup_local_branch(
                     repo, branch, expected_sha
                 )
 
             self.assertTrue(raced)
-            self.assertTrue(ok)
+            self.assertFalse(ok)
             self.assertIn("Retained local branch", message)
             self.assertTrue(worktree.exists())
             self.assertEqual(
@@ -2446,12 +2623,12 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
             dirty_file.write_text("user change\n")
 
             pruned, _ = merge_pr.prune_worktree(repo, branch, expected_sha)
-            retained, message = merge_pr.retain_local_branch(
+            retained, message = merge_pr.cleanup_local_branch(
                 repo, branch, expected_sha
             )
 
             self.assertFalse(pruned)
-            self.assertTrue(retained)
+            self.assertFalse(retained)
             self.assertIn("Retained local branch", message)
             self.assertEqual(dirty_file.read_text(), "user change\n")
             self.assertEqual(
@@ -2737,6 +2914,298 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         self.assertTrue(merge_pr.clear_issue_claims(7)[0])
         self.assertTrue(merge_pr.clear_review_claims(9)[0])
 
+
+class OrphanLocalBranchRegressionTests(unittest.TestCase):
+    """Models the PR #79/#85 incident (#343): a merged PR whose worktree is
+    pruned but the local branch lags one close-out pass behind must still
+    reach Done without a stuck ``merger:`` claim, and a genuinely attached or
+    reused branch must still never be force-deleted.
+    """
+
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True, text=True, capture_output=True,
+        ).stdout.strip()
+
+    def _seed_merged_branch(self, directory):
+        repo = Path(directory) / "repo"
+        worktree = repo / ".worktrees" / "fix-79"
+        branch = "fix/issue-79-example"
+        self._git(directory, "init", "--initial-branch=main", str(repo))
+        self._git(repo, "config", "user.name", "Aru Test")
+        self._git(repo, "config", "user.email", "aru@example.invalid")
+        self._git(repo, "commit", "--allow-empty", "-m", "seed")
+        worktree.parent.mkdir()
+        self._git(repo, "worktree", "add", "-b", branch, str(worktree))
+        expected_sha = self._git(worktree, "rev-parse", "HEAD")
+        return repo, worktree, branch, expected_sha
+
+    def _remote_lifecycle_patches(self):
+        return [
+            patch.object(merge_pr, "delete_remote_branch", return_value=(True, "remote gone")),
+            patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed")),
+            patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done")),
+            patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue claim clear")),
+            patch.object(merge_pr, "clear_review_claims", return_value=(True, "review claim clear")),
+            patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor ok")),
+        ]
+
+    def test_worktree_pruned_first_pass_branch_deleted_on_retry_after_transient_failure(self):
+        """Pass 1 prunes the worktree registration but the delete attempt hits
+        a transient failure (real PR #79/#85 symptom); pass 2 -- with no
+        worktree and the local branch still present -- succeeds without any
+        regression to the already-complete remote/board state.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            repo, worktree, branch, expected_sha = self._seed_merged_branch(directory)
+            pr = dict(merged_pr(), headRefName=branch, headRefOid=expected_sha, number=79)
+
+            remote_patches = self._remote_lifecycle_patches()
+            for item in remote_patches:
+                item.start()
+            self.addCleanup(lambda: [item.stop() for item in remote_patches])
+
+            real_run_cmd = merge_pr.run_cmd
+            first_delete_seen = False
+
+            def fail_first_branch_delete(command, **kwargs):
+                nonlocal first_delete_seen
+                if command[:3] == ["git", "update-ref", "-d"] and not first_delete_seen:
+                    first_delete_seen = True
+                    return 1, "", "simulated transient lock"
+                return real_run_cmd(command, **kwargs)
+
+            with patch.object(merge_pr, "run_cmd", side_effect=fail_first_branch_delete), \
+                 patch.object(merge_pr.os, "chdir"), \
+                 patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear")) as merger:
+                failures_pass1 = []
+                ok1 = merge_pr.run_closeout(pr, [7], str(repo), failures=failures_pass1)
+
+            # Pass 1: worktree registration is gone, but the branch delete failed.
+            self.assertFalse(ok1)
+            self.assertFalse(worktree.exists())
+            self.assertNotIn(
+                f"refs/heads/{branch}",
+                self._git(repo, "worktree", "list", "--porcelain"),
+            )
+            self.assertTrue(any(f.startswith("local branch:") for f in failures_pass1))
+            merger.assert_not_called()
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"), expected_sha,
+            )
+
+            with patch.object(merge_pr.os, "chdir"), \
+                 patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear")) as merger2:
+                failures_pass2 = []
+                ok2 = merge_pr.run_closeout(pr, [7], str(repo), failures=failures_pass2)
+
+            # Pass 2 (the bounded follow-up): no worktree, branch now deletes cleanly.
+            self.assertTrue(ok2)
+            self.assertEqual(failures_pass2, [])
+            merger2.assert_called_once_with(79)
+            branch_code, _, _ = merge_pr.run_cmd(
+                ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                check=False, cwd=str(repo),
+            )
+            self.assertNotEqual(branch_code, 0)
+
+    def test_idempotent_rerun_after_worktree_already_absent_does_not_retain_claim(self):
+        """Re-running close-out once everything -- including the local branch
+        -- is already gone must not re-retain the merger claim (#343 AC3).
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            repo, worktree, branch, expected_sha = self._seed_merged_branch(directory)
+            pr = dict(merged_pr(), headRefName=branch, headRefOid=expected_sha, number=85)
+
+            remote_patches = self._remote_lifecycle_patches()
+            for item in remote_patches:
+                item.start()
+            self.addCleanup(lambda: [item.stop() for item in remote_patches])
+
+            with patch.object(merge_pr.os, "chdir"), \
+                 patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear")) as merger:
+                ok = merge_pr.run_closeout(pr, [7], str(repo))
+
+            self.assertTrue(ok)
+            self.assertFalse(worktree.exists())
+            merger.assert_called_once_with(85)
+
+            # A second, fully independent close-out call (e.g. operator reruns
+            # merge_pr.py) must find everything already clean and idempotent.
+            with patch.object(merge_pr.os, "chdir"), \
+                 patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear")) as merger2:
+                failures = []
+                ok2 = merge_pr.run_closeout(pr, [7], str(repo), failures=failures)
+
+            self.assertTrue(ok2)
+            self.assertEqual(failures, [])
+            merger2.assert_called_once_with(85)
+
+    def test_live_dirty_worktree_branch_is_never_force_deleted_across_retries(self):
+        """A branch still attached to a genuinely dirty worktree must survive
+        every close-out attempt -- the fail-safe must never paper over a real,
+        unresolved live-worktree condition (#343 decision boundary).
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            repo, worktree, branch, expected_sha = self._seed_merged_branch(directory)
+            (worktree / "dirty.txt").write_text("uncommitted\n")
+            pr = dict(merged_pr(), headRefName=branch, headRefOid=expected_sha, number=79)
+
+            remote_patches = self._remote_lifecycle_patches()
+            for item in remote_patches:
+                item.start()
+            self.addCleanup(lambda: [item.stop() for item in remote_patches])
+
+            with patch.object(merge_pr.os, "chdir"), \
+                 patch.object(merge_pr, "clear_merger_claims") as merger:
+                failures = []
+                ok = merge_pr.run_closeout(pr, [7], str(repo), failures=failures)
+
+            self.assertFalse(ok)
+            merger.assert_not_called()
+            self.assertTrue(worktree.exists())
+            self.assertTrue((worktree / "dirty.txt").exists())
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"), expected_sha,
+            )
+            self.assertTrue(any(f.startswith("worktree:") for f in failures))
+
+    def test_real_atomic_lease_delete_success(self):
+        """Verifies that an unattached branch matching expected_sha is atomically deleted."""
+        with tempfile.TemporaryDirectory() as directory:
+            repo, worktree, branch, expected_sha = self._seed_merged_branch(directory)
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+            ok, message = merge_pr.cleanup_local_branch(repo, branch, expected_sha)
+            self.assertTrue(ok)
+            self.assertIn("Deleted local branch", message)
+            code, _, _ = merge_pr.run_cmd(
+                ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                check=False, cwd=str(repo),
+            )
+            self.assertNotEqual(code, 0)
+
+    def test_real_ref_moved_between_observation_and_delete_fails_lease_and_preserves_new_ref(self):
+        """If the branch moves/advances between observation and update-ref,
+        the lease fails, the new ref is preserved, and close-out returns failure.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            repo, worktree, branch, expected_sha = self._seed_merged_branch(directory)
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+            real_run_cmd = merge_pr.run_cmd
+            raced = False
+            new_sha = None
+
+            def inject_ref_advance(command, **kwargs):
+                nonlocal raced, new_sha
+                result = real_run_cmd(command, **kwargs)
+                if command[:3] == ["git", "rev-parse", "--verify"] and not raced:
+                    self._git(repo, "commit", "--allow-empty", "-m", "concurrent commit")
+                    new_sha = self._git(repo, "rev-parse", "HEAD")
+                    self._git(repo, "update-ref", f"refs/heads/{branch}", new_sha)
+                    raced = True
+                return result
+
+            with patch.object(merge_pr, "run_cmd", side_effect=inject_ref_advance):
+                ok, message = merge_pr.cleanup_local_branch(repo, branch, expected_sha)
+
+            self.assertTrue(raced)
+            self.assertFalse(ok)
+            self.assertIn("lease failed", message)
+            current = self._git(repo, "rev-parse", f"refs/heads/{branch}")
+            self.assertEqual(current, new_sha)
+
+    def test_real_ref_recreated_at_different_sha_fails_lease_and_preserves_ref(self):
+        """If a branch was deleted and recreated at a new commit, cleanup_local_branch
+        detects the lease mismatch, preserves the new ref, and returns failure.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            repo, worktree, branch, expected_sha = self._seed_merged_branch(directory)
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+            self._git(repo, "commit", "--allow-empty", "-m", "unrelated commit")
+            unrelated_sha = self._git(repo, "rev-parse", "HEAD")
+            self._git(repo, "update-ref", f"refs/heads/{branch}", unrelated_sha)
+
+            ok, message = merge_pr.cleanup_local_branch(repo, branch, expected_sha)
+            self.assertFalse(ok)
+            self.assertIn("lease mismatch", message)
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"),
+                unrelated_sha,
+            )
+
+    def test_real_reattached_worktree_between_prune_and_cleanup_blocks_and_retains_merger_claim(self):
+        """If a new worktree attaches to the branch after prune_worktree finishes
+        but before cleanup_local_branch runs, cleanup_local_branch returns failure
+        so the merger claim is retained.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            repo, worktree, branch, expected_sha = self._seed_merged_branch(directory)
+            new_worktree = repo / ".worktrees" / "new-attacher"
+
+            pr = dict(merged_pr(), headRefName=branch, headRefOid=expected_sha, number=79)
+            remote_patches = self._remote_lifecycle_patches()
+            for item in remote_patches:
+                item.start()
+            self.addCleanup(lambda: [item.stop() for item in remote_patches])
+
+            real_prune = merge_pr.prune_worktree
+
+            def prune_and_reattach(r, b, sha):
+                res = real_prune(r, b, sha)
+                # Race occurs: another process creates a worktree attached to this branch
+                self._git(repo, "worktree", "add", str(new_worktree), branch)
+                return res
+
+            with patch.object(merge_pr.os, "chdir"), \
+                 patch.object(merge_pr, "prune_worktree", side_effect=prune_and_reattach), \
+                 patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear")) as merger:
+                failures = []
+                ok = merge_pr.run_closeout(pr, [7], str(repo), failures=failures)
+
+            self.assertFalse(ok)
+            merger.assert_not_called()
+            self.assertTrue(new_worktree.exists())
+            self.assertEqual(
+                self._git(repo, "rev-parse", f"refs/heads/{branch}"),
+                expected_sha,
+            )
+            self.assertTrue(any("attached to a worktree" in f for f in failures))
+
+    def test_invalid_branch_name_rejected_safely(self):
+        """Invalid branch names fail ref validation without invoking git update-ref."""
+        for invalid in ["-leading-dash", "has..dotdot", "has:colon", "has?glob", "has space", "ends.lock", "ends/"]:
+            ok, message = merge_pr.cleanup_local_branch("/repo", invalid, "gated-sha")
+            self.assertFalse(ok)
+            self.assertIn("Invalid local branch ref name", message)
+
+    def test_concurrent_deletion_during_update_ref_reports_already_absent(self):
+        """If another process deletes the branch concurrently during the race window
+        before update-ref -d, cleanup_local_branch detects it is absent and reports success.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            repo, worktree, branch, expected_sha = self._seed_merged_branch(directory)
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+            real_run_cmd = merge_pr.run_cmd
+            raced = False
+
+            def inject_concurrent_deletion(command, **kwargs):
+                nonlocal raced
+                result = real_run_cmd(command, **kwargs)
+                if command[:3] == ["git", "rev-parse", "--verify"] and not raced:
+                    self._git(repo, "branch", "-D", branch)
+                    raced = True
+                return result
+
+            with patch.object(merge_pr, "run_cmd", side_effect=inject_concurrent_deletion):
+                ok, message = merge_pr.cleanup_local_branch(repo, branch, expected_sha)
+
+            self.assertTrue(raced)
+            self.assertTrue(ok)
+            self.assertIn("already absent", message)
 
 
 class ExpectedHeadGateTests(unittest.TestCase):
