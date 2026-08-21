@@ -48,6 +48,14 @@ class FactoryStatusFreshnessTests(unittest.TestCase):
         for stale in ("Planned: #102", "Planned: #103", "not yet shipped"):
             self.assertNotIn(stale, self.index + self.app)
 
+    def test_prd_approval_precedes_backlog_publication(self):
+        self.assertIn("marks the draft BLOCKED", self.app)
+        self.assertIn("stops before GitHub publication", self.app)
+        self.assertIn("After explicit operator approval", self.app)
+        self.assertIn("publishes the exact approved PRD", self.app)
+        self.assertIn("approved BLOCKED PRD may be published", self.app)
+        self.assertNotIn("keeps the governed artifact in Backlog until", self.app)
+
     def test_deployment_cards_separate_runnable_audit_and_open_provider_work(self):
         self.assertIn('id="node-preview" data-id="preview"', self.index)
         self.assertIn("Runnable Preview &amp; Smoke", self.index)
@@ -91,6 +99,15 @@ class FactoryStatusFreshnessTests(unittest.TestCase):
         self.assertIn("fleet_status.py + factory_metrics.py", self.index)
         for metric in ("dwell", "rework", "CI failure", "cycle time", "cost"):
             self.assertIn(metric, self.index)
+        self.assertIn("worktrees, and CI failure rate", self.app)
+        self.assertIn(
+            "dwell, rework, cycle-time, CI-run counts, and available cost evidence",
+            self.app,
+        )
+        self.assertNotIn(
+            "factory_metrics.py supplies shipped dwell, rework, CI failure",
+            self.app,
+        )
         self.assertNotIn("metrics are planned in #106", self.index + self.app)
 
     def test_every_visual_card_has_drawer_metadata(self):

@@ -19,20 +19,20 @@ document.addEventListener('DOMContentLoaded', () => {
         'Issue must define summary, background context, and clear acceptance criteria checkboxes.',
         'Must specify declared touches: paths and depends-on: DAG tags.'
       ],
-      remediation: 'If intent is underspecified, use skills/idea-to-prd/SKILL.md; it keeps the governed artifact in Backlog until operator approval.'
+      remediation: 'If intent is underspecified, idea-to-prd marks the draft BLOCKED, keeps its questions visible, and stops before GitHub publication until the operator explicitly approves the exact draft.'
     },
     prd: {
       tag: 'Skill: idea-to-prd',
       title: 'PRD & Architecture Spec',
       subtitle: 'Shipped intake capability — issue #102 closed',
-      description: 'The shipped idea-to-prd skill wraps Grill-Aru discovery, publishes an operator-approved PRD as a governed Backlog artifact, and preserves product decisions before implementation.',
+      description: 'The shipped idea-to-prd skill wraps Grill-Aru discovery and preserves product decisions before implementation. After explicit operator approval, it publishes the exact approved PRD as a governed Backlog artifact.',
       code: 'skills/idea-to-prd/SKILL.md',
       rules: [
         'Defines clear boundaries for what is in-scope and out-of-scope.',
         'Identifies money, PII, schema, or migration risks early.',
         'Requires clear, testable verification commands.'
       ],
-      remediation: 'If PRD lacks technical decisions, issues remain blocked until clarified.'
+      remediation: 'An approved BLOCKED PRD may be published to Backlog for visibility, but its blocking questions remain explicit and decomposition waits for READY_FOR_PLANNING.'
     },
     dag: {
       tag: 'Skill: prd-to-issues',
@@ -285,7 +285,7 @@ document.addEventListener('DOMContentLoaded', () => {
       tag: 'Scripts: fleet_status.py + factory_metrics.py',
       title: 'Telemetry & Operator View',
       subtitle: 'Monitoring Dashboard',
-      description: 'fleet_status.py evaluates live issues, PRs, claims, board drift, and worktrees. factory_metrics.py supplies shipped dwell, rework, CI failure, cycle-time, and cost measurements, reporting unavailable evidence instead of inventing it.',
+      description: 'fleet_status.py evaluates live issues, PRs, claims, board drift, worktrees, and CI failure rate. factory_metrics.py supplies dwell, rework, cycle-time, CI-run counts, and available cost evidence, reporting unavailable measurements instead of inventing them.',
       code: 'python3 scripts/fleet_status.py; python3 scripts/factory_metrics.py',
       rules: [
         'Fails closed when GitHub or board queries are ambiguous.',
