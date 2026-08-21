@@ -2987,7 +2987,10 @@ def run_closeout_with_retries(pr, issue_nums, repo_root, sleep_fn=None):
             "attached" in item or "lease" in item or "reused" in item or "invalid" in item
             for item in last_failures
         ):
-            ok, message = clear_merger_claims(pr.get("number"))
+            try:
+                ok, message = clear_merger_claims(pr.get("number"))
+            except Exception as exc:
+                ok, message = False, f"Unexpected claim clearance error: {exc}"
             print(f"  {'✅' if ok else '❌'} {'merger claim':<18} {message}")
             print(
                 f"  ⚠️  {'local cleanup':<18} {last_failures[0]}; "
