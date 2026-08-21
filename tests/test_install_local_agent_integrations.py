@@ -1,3 +1,4 @@
+# line-ceiling: 425
 import hashlib
 import json
 import os
@@ -23,13 +24,13 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def run_installer(self, *args):
+    def run_installer(self, *args, env=None):
         cmd = [
             str(INSTALLER),
             "--aru-home", str(ROOT),
             "--target-home", str(self.target_home),
         ] + list(args)
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, env=env)
         return res
 
     def test_detect_and_install_all_agents(self):
@@ -67,6 +68,40 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
 
         # Shared .agents/skills
         self.assertTrue((self.target_home / ".agents" / "skills" / "run-aru-factory").is_symlink())
+
+    def test_all_flag_cannot_be_narrowed_by_detected_subset(self):
+        (self.target_home / ".codex").mkdir(parents=True)
+
+        res = self.run_installer("--all", env=dict(os.environ, PATH="/usr/bin:/bin"))
+
+        self.assertEqual(res.returncode, 0, f"Installer failed: {res.stderr}")
+        for relative in (
+            ".codex/skills/run-aru-factory",
+            ".claude/skills/run-aru-factory",
+            ".cursor/skills/run-aru-factory",
+            ".gemini/antigravity/skills/run-aru-factory",
+        ):
+            self.assertTrue((self.target_home / relative).is_symlink(), relative)
+        self.assertNotIn("not requested/detected", res.stdout)
+
+    def test_auto_detection_recognizes_cursor_agent_and_agy(self):
+        fake_bin = self.target_home / "fake-bin"
+        fake_bin.mkdir()
+        for executable in ("cursor-agent", "agy"):
+            stub = fake_bin / executable
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+        env = dict(os.environ, PATH=f"{fake_bin}:/usr/bin:/bin")
+
+        res = self.run_installer(env=env)
+
+        self.assertEqual(res.returncode, 0, f"Installer failed: {res.stderr}")
+        self.assertTrue((self.target_home / ".cursor" / "skills" / "run-aru-factory").is_symlink())
+        self.assertTrue(
+            (self.target_home / ".gemini" / "antigravity" / "skills" / "run-aru-factory").is_symlink()
+        )
+        self.assertFalse((self.target_home / ".codex" / "skills").exists())
+        self.assertFalse((self.target_home / ".claude" / "skills").exists())
 
     def test_dry_run_mode(self):
         (self.target_home / ".codex").mkdir(parents=True)
@@ -377,4 +412,3 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

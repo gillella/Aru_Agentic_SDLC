@@ -100,6 +100,7 @@ Options:
   --dry-run          Preview changes without writing to disk
   --check            Check status of agent integrations
   --repair           Repair broken or stale Aru symlinks
+  --all              Target every supported agent integration
   --codex-only       Target Codex integration only
   --claude-only      Target Claude Code integration only
   --cursor-only      Target Cursor integration only
@@ -124,30 +125,28 @@ EOF
 
 parse_args "$@"
 
-# Auto-detect agents if no explicit agent flag was passed
+# `--all` is an explicit public contract, not a fallback for an empty
+# auto-detection result.  Host state must never narrow it to a detected subset.
+# Without `--all` or a single-agent selector, retain the lower-level optional
+# auto-detection mode.
 detect_agents() {
-  if [[ "${EXPLICIT_AGENT}" == false ]]; then
+  if [[ "${ALL_AGENTS}" == true ]]; then
+    TARGET_CODEX=true
+    TARGET_CLAUDE=true
+    TARGET_CURSOR=true
+    TARGET_ANTIGRAVITY=true
+  elif [[ "${EXPLICIT_AGENT}" == false ]]; then
     if [[ -d "${TARGET_HOME}/.codex" ]] || command -v codex >/dev/null 2>&1; then
       TARGET_CODEX=true
     fi
     if [[ -d "${TARGET_HOME}/.claude" ]] || command -v claude >/dev/null 2>&1; then
       TARGET_CLAUDE=true
     fi
-    if [[ -d "${TARGET_HOME}/.cursor" ]] || command -v cursor >/dev/null 2>&1; then
+    if [[ -d "${TARGET_HOME}/.cursor" ]] || command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1; then
       TARGET_CURSOR=true
     fi
-    if [[ -d "${TARGET_HOME}/.gemini/antigravity" || -d "${TARGET_HOME}/.antigravity" ]] || command -v antigravity >/dev/null 2>&1; then
+    if [[ -d "${TARGET_HOME}/.gemini/antigravity" || -d "${TARGET_HOME}/.antigravity" ]] || command -v antigravity >/dev/null 2>&1 || command -v agy >/dev/null 2>&1; then
       TARGET_ANTIGRAVITY=true
-    fi
-
-    # If no specific agent directory/binary detected at all, default all to true only when ALL_AGENTS is set
-    if [[ "${TARGET_CODEX}" == false && "${TARGET_CLAUDE}" == false && "${TARGET_CURSOR}" == false && "${TARGET_ANTIGRAVITY}" == false ]]; then
-      if [[ "${ALL_AGENTS}" == true ]]; then
-        TARGET_CODEX=true
-        TARGET_CLAUDE=true
-        TARGET_CURSOR=true
-        TARGET_ANTIGRAVITY=true
-      fi
     fi
   fi
 }

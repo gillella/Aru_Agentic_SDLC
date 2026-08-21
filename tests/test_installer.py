@@ -39,7 +39,7 @@ def skills_on_disk():
     return {d.name for d in SKILLS_DIR.iterdir() if d.is_dir() and (d / "SKILL.md").is_file()}
 
 
-def run_installer(home, script=None, cwd=None):
+def run_installer(home, *args, script=None, cwd=None, extra_env=None):
     """Runs the installer with HOME redirected at a scratch directory.
 
     Every path the script writes is HOME-relative (~/.cursor, ~/.agents,
@@ -47,8 +47,10 @@ def run_installer(home, script=None, cwd=None):
     containment this test would rewrite the developer's own shell profile.
     """
     env = dict(os.environ, HOME=str(home))
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
-        ["bash", str(script or installer_path())],
+        ["bash", str(script or installer_path()), *args],
         env=env,
         cwd=str(cwd or ROOT),
         capture_output=True,
@@ -80,6 +82,32 @@ def forensics(result, script, home):
 
 
 class InstallerParityTest(unittest.TestCase):
+    def test_default_and_explicit_all_install_every_supported_surface(self):
+        """Host detection cannot narrow the wrapper's documented all target."""
+        for label, args in (("default", ()), ("explicit-all", ("--agent", "all"))):
+            with self.subTest(selection=label), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                (home / ".codex").mkdir()
+
+                result = run_installer(
+                    home,
+                    *args,
+                    extra_env={"PATH": "/usr/bin:/bin"},
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for relative in (
+                    ".codex/skills/run-aru-factory",
+                    ".claude/skills/run-aru-factory",
+                    ".cursor/skills/run-aru-factory",
+                    ".gemini/antigravity/skills/run-aru-factory",
+                ):
+                    self.assertTrue(
+                        (home / relative).is_symlink(),
+                        f"{label} install omitted {relative}" + forensics(result, installer_path(), home),
+                    )
+                self.assertNotIn("not requested/detected", result.stdout)
+
     def test_every_skill_on_disk_is_installed(self):
         """The regression that shipped: a skill exists but is unreachable."""
         expected = skills_on_disk()

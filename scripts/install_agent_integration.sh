@@ -124,7 +124,7 @@ agent_flag() {
     codex) echo "--codex-only" ;;
     antigravity) echo "--antigravity-only" ;;
     claude) echo "--claude-only" ;;
-    all) echo "" ;;
+    all) echo "--all" ;;
     *) echo "__invalid__" ;;
   esac
 }
