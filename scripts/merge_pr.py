@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3910
+# line-ceiling: 3917
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1629,6 +1629,14 @@ def _base_advance_time(base_ref, head_sha):
     demand fresher CI, never accept staler CI. Any commit whose dates are
     missing or unparseable returns None, because a merge must not be approved
     against an advance whose age is unknown.
+
+    The same rule governs a short list. This request sends no `per_page`, so
+    GitHub caps `commits` at 250 while `total_commits` keeps counting the whole
+    advance. Truncation is the dangerous direction here --
+    the endpoint returns commits in chronological order, so the entries dropped
+    are the newest ones, and the newest stamp is the entire answer. A truncated
+    array would silently lower the freshness bar and admit CI that predates the
+    advance. Refuse unless GitHub's own count matches what it actually sent.
     """
     if not base_ref or not head_sha:
         return None
@@ -1642,6 +1650,12 @@ def _base_advance_time(base_ref, head_sha):
     # A branch reported behind must have something on the other side. An empty
     # or absent list contradicts that, so it is malformed data, not "no advance".
     if not isinstance(commits, list) or not commits:
+        return None
+    total = data.get("total_commits")
+    # bool is an int subclass; True would otherwise satisfy a one-commit
+    # advance. An absent, non-integer, or negative count fails the equality
+    # too, so every unreadable form lands on the same refusal.
+    if isinstance(total, bool) or not isinstance(total, int) or total != len(commits):
         return None
     newest = None
     for entry in commits:

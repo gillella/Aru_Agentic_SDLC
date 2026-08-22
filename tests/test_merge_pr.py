@@ -1,4 +1,4 @@
-# line-ceiling: 4825
+# line-ceiling: 4860
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -1426,7 +1426,7 @@ def _advance(when=_ADVANCE_AT, base="main", head="deadbeef"):
     return resolve
 
 
-def _run(name, started, conclusion="SUCCESS"):
+def _check_run(name, started, conclusion="SUCCESS"):
     """One completed check run in the shape `gh pr view` emits.
 
     The completion stamp mirrors the start stamp so recency ordering follows
@@ -1475,7 +1475,7 @@ class RebaseGateTests(unittest.TestCase):
         carries has to postdate the advance as well.
         """
         ok, msg = merge_pr.check_rebased(
-            _ci_pr([_run("Lint", _AFTER_ADVANCE)], state="CLEAN"), _behind(3),
+            _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], state="CLEAN"), _behind(3),
             _paths(["scripts/merge_pr.py"], ["docs/releases.md"]), _advance())
         self.assertTrue(ok)
         self.assertIn("3 commits behind", msg)
@@ -1490,7 +1490,7 @@ class RebaseGateTests(unittest.TestCase):
 
     def test_behind_status_is_no_longer_a_fast_path_rejection(self):
         """A BEHIND branch still merges when it does not overlap the base."""
-        pr = _ci_pr([_run("Lint", _AFTER_ADVANCE)], state="BEHIND")
+        pr = _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], state="BEHIND")
         ok, _ = merge_pr.check_rebased(pr, _behind(2), _paths(["a.py"], ["b.py"]),
                                        _advance())
         self.assertTrue(ok)
@@ -1595,14 +1595,14 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
             pr, _behind(behind), _paths(list(ours), list(theirs)), _advance(when))
 
     def test_stale_pre_advance_ci_does_not_pass(self):
-        ok, msg = self._check(_ci_pr([_run("Lint", _BEFORE_ADVANCE)]))
+        ok, msg = self._check(_ci_pr([_check_run("Lint", _BEFORE_ADVANCE)]))
         self.assertFalse(ok)
         self.assertIn("Lint", msg)
         self.assertIn("superseded base", msg)
 
     def test_fresh_post_advance_ci_passes(self):
         ok, msg = self._check(_ci_pr([
-            _run("Lint", _AFTER_ADVANCE), _run("Secret Scan", _AFTER_ADVANCE)]))
+            _check_run("Lint", _AFTER_ADVANCE), _check_run("Secret Scan", _AFTER_ADVANCE)]))
         self.assertTrue(ok)
         self.assertIn("disjoint", msg)
         self.assertIn("after the base advance", msg)
@@ -1610,36 +1610,36 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
     def test_one_stale_check_among_fresh_ones_blocks(self):
         """Freshness is a property of the whole rollup, not of its best member."""
         ok, msg = self._check(_ci_pr([
-            _run("Lint", _AFTER_ADVANCE), _run("Secret Scan", _BEFORE_ADVANCE)]))
+            _check_run("Lint", _AFTER_ADVANCE), _check_run("Secret Scan", _BEFORE_ADVANCE)]))
         self.assertFalse(ok)
         self.assertIn("Secret Scan", msg)
 
     def test_check_started_in_the_same_second_as_the_advance_fails_closed(self):
         """One-second API granularity cannot order these, so it must not try."""
-        ok, msg = self._check(_ci_pr([_run("Lint", "2026-08-22T12:00:00Z")]))
+        ok, msg = self._check(_ci_pr([_check_run("Lint", "2026-08-22T12:00:00Z")]))
         self.assertFalse(ok)
         self.assertIn("superseded base", msg)
 
     def test_stale_message_asks_for_a_re_run_and_not_a_rebase(self):
         """#371: rebasing would destroy the head-bound review attestation."""
-        msg = self._check(_ci_pr([_run("Lint", _BEFORE_ADVANCE)]))[1]
+        msg = self._check(_ci_pr([_check_run("Lint", _BEFORE_ADVANCE)]))[1]
         self.assertIn("Re-run this PR's CI", msg)
         self.assertIn("Do not rebase", msg)
         self.assertNotIn("Rebase on main", msg)
 
     def test_missing_start_time_fails_closed(self):
         """completedAt is not a substitute: a run can finish after it read."""
-        ok, msg = self._check(_ci_pr([_run("Lint", None)]))
+        ok, msg = self._check(_ci_pr([_check_run("Lint", None)]))
         self.assertFalse(ok)
         self.assertIn("no usable start time", msg)
 
     def test_malformed_start_time_fails_closed(self):
-        ok, msg = self._check(_ci_pr([_run("Lint", "yesterday-ish")]))
+        ok, msg = self._check(_ci_pr([_check_run("Lint", "yesterday-ish")]))
         self.assertFalse(ok)
         self.assertIn("no usable start time", msg)
 
     def test_unresolvable_base_advance_fails_closed(self):
-        ok, msg = self._check(_ci_pr([_run("Lint", _AFTER_ADVANCE)]), when=None)
+        ok, msg = self._check(_ci_pr([_check_run("Lint", _AFTER_ADVANCE)]), when=None)
         self.assertFalse(ok)
         self.assertIn("could not be determined", msg)
 
@@ -1647,7 +1647,7 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
         def explode(_first, _second):
             raise RuntimeError("compare exploded")
         ok, msg = merge_pr.check_rebased(
-            _ci_pr([_run("Lint", _AFTER_ADVANCE)]), _behind(2),
+            _ci_pr([_check_run("Lint", _AFTER_ADVANCE)]), _behind(2),
             _paths(["a.py"], ["b.py"]), explode)
         self.assertFalse(ok)
         self.assertIn("compare exploded", msg)
@@ -1668,7 +1668,7 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
     def test_a_stale_advisory_bot_does_not_block_fresh_required_checks(self):
         """Advisory bots are not build checks here, so they prove nothing either."""
         ok, _ = self._check(_ci_pr([
-            _run("Lint", _AFTER_ADVANCE),
+            _check_run("Lint", _AFTER_ADVANCE),
             {"context": "CodeRabbit", "state": "SUCCESS", "startedAt": _BEFORE_ADVANCE}]))
         self.assertTrue(ok)
 
@@ -1682,21 +1682,21 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
     def test_undecidable_recency_fails_closed(self):
         """Two runs of one name that cannot be ordered have no knowable age."""
         ok, msg = self._check(_ci_pr([
-            _run("Lint", None), _run("Lint", None)]))
+            _check_run("Lint", None), _check_run("Lint", None)]))
         self.assertFalse(ok)
         self.assertIn("undecidable", msg)
 
     def test_a_superseded_stale_run_does_not_block_a_fresh_current_one(self):
         """#306 semantics hold: the newest run of a name is the one judged."""
         ok, _ = self._check(_ci_pr([
-            _run("Lint", _BEFORE_ADVANCE), _run("Lint", _AFTER_ADVANCE)]))
+            _check_run("Lint", _BEFORE_ADVANCE), _check_run("Lint", _AFTER_ADVANCE)]))
         self.assertTrue(ok)
 
     def test_a_fresh_run_superseded_by_a_stale_one_blocks(self):
         """The mirror of the case above, so neither is passing by array order."""
-        stale = _run("Lint", _BEFORE_ADVANCE)
+        stale = _check_run("Lint", _BEFORE_ADVANCE)
         stale["completedAt"] = "2026-08-22T23:00:00Z"
-        fresh = _run("Lint", _AFTER_ADVANCE)
+        fresh = _check_run("Lint", _AFTER_ADVANCE)
         fresh["completedAt"] = "2026-08-22T12:00:02Z"
         ok, msg = self._check(_ci_pr([fresh, stale]))
         self.assertFalse(ok)
@@ -1705,13 +1705,13 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
     def test_zero_behind_never_consults_the_freshness_resolver(self):
         """Compatibility: a current branch has no advance to be stale against."""
         ok, msg = merge_pr.check_rebased(
-            _ci_pr([_run("Lint", _BEFORE_ADVANCE)]), _behind(0), _boom, _boom)
+            _ci_pr([_check_run("Lint", _BEFORE_ADVANCE)]), _behind(0), _boom, _boom)
         self.assertTrue(ok)
         self.assertIn("current with the base", msg)
 
     def test_overlap_is_decided_before_freshness_and_costs_no_lookup(self):
         ok, msg = merge_pr.check_rebased(
-            _ci_pr([_run("Lint", _AFTER_ADVANCE)]), _behind(2),
+            _ci_pr([_check_run("Lint", _AFTER_ADVANCE)]), _behind(2),
             _paths(["a.py"], ["a.py"]), _boom)
         self.assertFalse(ok)
         self.assertIn("a.py", msg)
@@ -1734,7 +1734,7 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
             seen.append((first, second))
             return _ADVANCE_AT
 
-        pr = _ci_pr([_run("Lint", _BEFORE_ADVANCE)], state="CLEAN")
+        pr = _ci_pr([_check_run("Lint", _BEFORE_ADVANCE)], state="CLEAN")
         pr["body"] = "Closes #369"
         with patch.object(merge_pr, "_compare_paths", _paths(["a.py"], ["b.py"])):
             _, gates = merge_pr.evaluate_dod(
@@ -1753,6 +1753,15 @@ class BaseAdvanceTimeTests(unittest.TestCase):
     def _commit(committer, author=None):
         return {"commit": {"committer": {"date": committer},
                            "author": {"date": author or committer}}}
+
+    @staticmethod
+    def _compare(commits):
+        """A compare payload whose `total_commits` matches what it carries.
+
+        Every honest fixture is built here, so a test that gets None back gets
+        it for the reason that test names rather than for a missing count.
+        """
+        return {"commits": commits, "total_commits": len(commits)}
 
     def _resolve(self, payload):
         with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
@@ -1773,7 +1782,7 @@ class BaseAdvanceTimeTests(unittest.TestCase):
 
         def spy(args):
             seen.append(args[-1])
-            return {"commits": [self._commit("2026-08-22T12:00:00Z")]}
+            return self._compare([self._commit("2026-08-22T12:00:00Z")])
 
         with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
              patch.object(merge_pr, "_gh_json", side_effect=spy):
@@ -1781,47 +1790,81 @@ class BaseAdvanceTimeTests(unittest.TestCase):
         self.assertEqual(seen, ["repos/o/r/compare/abc...main"])
 
     def test_newest_commit_wins(self):
-        got = self._resolve({"commits": [
+        got = self._resolve(self._compare([
             self._commit("2026-08-22T01:00:00Z"),
             self._commit("2026-08-22T09:00:00Z"),
             self._commit("2026-08-22T04:00:00Z"),
-        ]})
+        ]))
         self.assertEqual(got, datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc))
 
     def test_a_later_author_date_raises_the_bar_rather_than_lowering_it(self):
         """A fabricated stamp can only demand fresher CI, never accept staler."""
-        got = self._resolve({"commits": [
-            self._commit("2026-08-22T01:00:00Z", author="2026-08-22T20:00:00Z")]})
+        got = self._resolve(self._compare([
+            self._commit("2026-08-22T01:00:00Z", author="2026-08-22T20:00:00Z")]))
         self.assertEqual(got, datetime(2026, 8, 22, 20, 0, tzinfo=timezone.utc))
 
     def test_naive_timestamps_are_read_as_utc(self):
-        got = self._resolve({"commits": [self._commit("2026-08-22T09:00:00")]})
+        got = self._resolve(self._compare([self._commit("2026-08-22T09:00:00")]))
         self.assertEqual(got, datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc))
 
     def test_malformed_payloads_return_none(self):
+        """Each fixture carries an honest count, so only the named flaw refuses."""
         for payload in (
             None, [], "nope", {}, {"commits": None}, {"commits": {}},
             # A branch reported behind must have commits on the other side; an
             # empty list is contradictory data, not a clean bill of health.
-            {"commits": []},
-            {"commits": ["not-a-dict"]},
-            {"commits": [{}]},
-            {"commits": [{"commit": "not-a-dict"}]},
-            {"commits": [{"commit": {"author": {"date": "2026-08-22T09:00:00Z"}}}]},
-            {"commits": [{"commit": {"committer": "x",
-                                     "author": {"date": "2026-08-22T09:00:00Z"}}}]},
-            {"commits": [{"commit": {"committer": {"date": None},
-                                     "author": {"date": "2026-08-22T09:00:00Z"}}}]},
-            {"commits": [{"commit": {"committer": {"date": "not-a-date"},
-                                     "author": {"date": "2026-08-22T09:00:00Z"}}}]},
+            self._compare([]),
+            self._compare(["not-a-dict"]),
+            self._compare([{}]),
+            self._compare([{"commit": "not-a-dict"}]),
+            self._compare([{"commit": {"author": {"date": "2026-08-22T09:00:00Z"}}}]),
+            self._compare([{"commit": {"committer": "x",
+                                       "author": {"date": "2026-08-22T09:00:00Z"}}}]),
+            self._compare([{"commit": {"committer": {"date": None},
+                                       "author": {"date": "2026-08-22T09:00:00Z"}}}]),
+            self._compare([{"commit": {"committer": {"date": "not-a-date"},
+                                       "author": {"date": "2026-08-22T09:00:00Z"}}}]),
             # One unreadable commit poisons the whole answer: the advance's age
             # is the maximum, so a skipped member could hide the newest stamp.
-            {"commits": [{"commit": {"committer": {"date": "2026-08-22T09:00:00Z"},
-                                     "author": {"date": "2026-08-22T09:00:00Z"}}},
-                         {"commit": {"committer": {"date": "not-a-date"},
-                                     "author": {"date": "2026-08-22T09:00:00Z"}}}]},
+            self._compare([{"commit": {"committer": {"date": "2026-08-22T09:00:00Z"},
+                                       "author": {"date": "2026-08-22T09:00:00Z"}}},
+                           {"commit": {"committer": {"date": "not-a-date"},
+                                       "author": {"date": "2026-08-22T09:00:00Z"}}}]),
         ):
             self.assertIsNone(self._resolve(payload), f"{payload!r}")
+
+    def test_a_truncated_commit_array_is_refused(self):
+        """The compare is unpaginated, so GitHub caps `commits` at 250.
+
+        `total_commits` keeps counting past the cap. Commits come back in
+        chronological order, so truncation drops the *newest* ones -- exactly
+        the stamp this helper exists to find. Reading a short array would move
+        the freshness bar backwards and admit CI that predates the advance.
+        """
+        self.assertIsNone(self._resolve({
+            "commits": [self._commit("2026-08-22T01:00:00Z")] * 250,
+            "total_commits": 251}))
+
+    def test_an_unreadable_commit_count_returns_none(self):
+        """Absent, mistyped, or disagreeing counts all fail closed.
+
+        `1.0` and `True` both compare equal to a one-commit array, so the
+        isinstance guards -- not the equality -- are what refuse them.
+        """
+        commits = [self._commit("2026-08-22T09:00:00Z")]
+        for total in (None, "1", 1.0, True, False, -1, 0, 2):
+            self.assertIsNone(
+                self._resolve({"commits": list(commits), "total_commits": total}),
+                f"total_commits={total!r}")
+        # Absent entirely, not merely unreadable.
+        self.assertIsNone(self._resolve({"commits": list(commits)}))
+
+    def test_a_matching_commit_count_is_accepted(self):
+        got = self._resolve({
+            "commits": [self._commit("2026-08-22T01:00:00Z"),
+                        self._commit("2026-08-22T09:00:00Z")],
+            "total_commits": 2})
+        self.assertEqual(got, datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc))
 
 
 class CheckStartTimeTests(unittest.TestCase):
@@ -2543,7 +2586,7 @@ class SerializedMergeExecutionTests(unittest.TestCase):
             "baseRefName": "main",
             "headRefOid": "gated-sha",
             "mergeStateStatus": "BEHIND",
-            "statusCheckRollup": [_run("Lint", started)],
+            "statusCheckRollup": [_check_run("Lint", started)],
         })
         return pr
 
