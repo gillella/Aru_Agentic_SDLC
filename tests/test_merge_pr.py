@@ -1,5 +1,6 @@
-# line-ceiling: 4460
+# line-ceiling: 4825
 from contextlib import nullcontext
+from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -1406,6 +1407,49 @@ def _paths(ours, theirs, base="main", head="deadbeef"):
     return resolve
 
 
+# The moment the base advance landed, for the freshness gate. Every check below
+# is placed either side of it, so "stale" and "fresh" are never ambiguous.
+_ADVANCE_AT = datetime(2026, 8, 22, 12, 0, 0, tzinfo=timezone.utc)
+_BEFORE_ADVANCE = "2026-08-22T11:59:59Z"
+_AFTER_ADVANCE = "2026-08-22T12:00:01Z"
+
+
+def _advance(when=_ADVANCE_AT, base="main", head="deadbeef"):
+    """Base-advance-time resolver stub, asserting the direction it is asked for.
+
+    ``when`` is the resolved timestamp, or None for "could not determine".
+    """
+    def resolve(first, second):
+        if (first, second) != (base, head):
+            raise AssertionError(f"unexpected advance lookup {first}...{second}")
+        return when
+    return resolve
+
+
+def _run(name, started, conclusion="SUCCESS"):
+    """One completed check run in the shape `gh pr view` emits.
+
+    The completion stamp mirrors the start stamp so recency ordering follows
+    the timeline a reader expects; tests that need the two to disagree set
+    ``completedAt`` themselves.
+    """
+    run = {"name": name, "status": "COMPLETED", "conclusion": conclusion}
+    if started is not None:
+        run["startedAt"] = started
+        run["completedAt"] = started
+    return run
+
+
+def _ci_pr(runs, **kwargs):
+    pr = dict(_pr(**kwargs))
+    pr["statusCheckRollup"] = list(runs)
+    return pr
+
+
+def _boom(*_args):
+    raise AssertionError("resolver must not be consulted on this path")
+
+
 class RebaseGateTests(unittest.TestCase):
     def test_conflicts_block(self):
         self.assertFalse(merge_pr.check_rebased({"mergeStateStatus": "DIRTY"}, _behind(0))[0])
@@ -1425,10 +1469,14 @@ class RebaseGateTests(unittest.TestCase):
         self.assertIn("Rebase", msg)
 
     def test_behind_with_disjoint_changes_passes(self):
-        """Issue #369: a rebase here would only destroy the review attestation."""
+        """Issue #369: a rebase here would only destroy the review attestation.
+
+        Disjointness alone is no longer enough (#371), so the CI this branch
+        carries has to postdate the advance as well.
+        """
         ok, msg = merge_pr.check_rebased(
-            _pr(state="CLEAN"), _behind(3),
-            _paths(["scripts/merge_pr.py"], ["docs/releases.md"]))
+            _ci_pr([_run("Lint", _AFTER_ADVANCE)], state="CLEAN"), _behind(3),
+            _paths(["scripts/merge_pr.py"], ["docs/releases.md"]), _advance())
         self.assertTrue(ok)
         self.assertIn("3 commits behind", msg)
         self.assertIn("disjoint", msg)
@@ -1442,8 +1490,9 @@ class RebaseGateTests(unittest.TestCase):
 
     def test_behind_status_is_no_longer_a_fast_path_rejection(self):
         """A BEHIND branch still merges when it does not overlap the base."""
-        pr = dict(_pr(state="BEHIND"))
-        ok, _ = merge_pr.check_rebased(pr, _behind(2), _paths(["a.py"], ["b.py"]))
+        pr = _ci_pr([_run("Lint", _AFTER_ADVANCE)], state="BEHIND")
+        ok, _ = merge_pr.check_rebased(pr, _behind(2), _paths(["a.py"], ["b.py"]),
+                                       _advance())
         self.assertTrue(ok)
 
     def test_one_commit_behind_is_singular(self):
@@ -1528,6 +1577,273 @@ class RebaseGateTests(unittest.TestCase):
         merge_pr.check_rebased(_pr(base="release/v2", head="abc123"),
                                lambda base, head: seen.append((base, head)) or 0)
         self.assertEqual(seen, [("release/v2", "abc123")])
+
+
+class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
+    """Issue #371 / PR #370 review: disjoint paths do not make old CI fresh.
+
+    The false-pass being closed, exactly as reported: PR A goes green; an
+    unrelated PR B merges to main; A is now behind; GitHub triggers no new
+    pull_request run, so A still advertises the same green rollup; the path
+    sets are disjoint; the final base-OID lock sees a base that did not move
+    *during* the merge command. Before this gate, A merged on checks that were
+    computed against the superseded base.
+    """
+
+    def _check(self, pr, behind=2, ours=("a.py",), theirs=("b.py",), when=_ADVANCE_AT):
+        return merge_pr.check_rebased(
+            pr, _behind(behind), _paths(list(ours), list(theirs)), _advance(when))
+
+    def test_stale_pre_advance_ci_does_not_pass(self):
+        ok, msg = self._check(_ci_pr([_run("Lint", _BEFORE_ADVANCE)]))
+        self.assertFalse(ok)
+        self.assertIn("Lint", msg)
+        self.assertIn("superseded base", msg)
+
+    def test_fresh_post_advance_ci_passes(self):
+        ok, msg = self._check(_ci_pr([
+            _run("Lint", _AFTER_ADVANCE), _run("Secret Scan", _AFTER_ADVANCE)]))
+        self.assertTrue(ok)
+        self.assertIn("disjoint", msg)
+        self.assertIn("after the base advance", msg)
+
+    def test_one_stale_check_among_fresh_ones_blocks(self):
+        """Freshness is a property of the whole rollup, not of its best member."""
+        ok, msg = self._check(_ci_pr([
+            _run("Lint", _AFTER_ADVANCE), _run("Secret Scan", _BEFORE_ADVANCE)]))
+        self.assertFalse(ok)
+        self.assertIn("Secret Scan", msg)
+
+    def test_check_started_in_the_same_second_as_the_advance_fails_closed(self):
+        """One-second API granularity cannot order these, so it must not try."""
+        ok, msg = self._check(_ci_pr([_run("Lint", "2026-08-22T12:00:00Z")]))
+        self.assertFalse(ok)
+        self.assertIn("superseded base", msg)
+
+    def test_stale_message_asks_for_a_re_run_and_not_a_rebase(self):
+        """#371: rebasing would destroy the head-bound review attestation."""
+        msg = self._check(_ci_pr([_run("Lint", _BEFORE_ADVANCE)]))[1]
+        self.assertIn("Re-run this PR's CI", msg)
+        self.assertIn("Do not rebase", msg)
+        self.assertNotIn("Rebase on main", msg)
+
+    def test_missing_start_time_fails_closed(self):
+        """completedAt is not a substitute: a run can finish after it read."""
+        ok, msg = self._check(_ci_pr([_run("Lint", None)]))
+        self.assertFalse(ok)
+        self.assertIn("no usable start time", msg)
+
+    def test_malformed_start_time_fails_closed(self):
+        ok, msg = self._check(_ci_pr([_run("Lint", "yesterday-ish")]))
+        self.assertFalse(ok)
+        self.assertIn("no usable start time", msg)
+
+    def test_unresolvable_base_advance_fails_closed(self):
+        ok, msg = self._check(_ci_pr([_run("Lint", _AFTER_ADVANCE)]), when=None)
+        self.assertFalse(ok)
+        self.assertIn("could not be determined", msg)
+
+    def test_advance_resolver_exception_fails_closed(self):
+        def explode(_first, _second):
+            raise RuntimeError("compare exploded")
+        ok, msg = merge_pr.check_rebased(
+            _ci_pr([_run("Lint", _AFTER_ADVANCE)]), _behind(2),
+            _paths(["a.py"], ["b.py"]), explode)
+        self.assertFalse(ok)
+        self.assertIn("compare exploded", msg)
+        self.assertIn("Do not rebase", msg)
+
+    def test_empty_rollup_fails_closed(self):
+        """A behind branch with no checks has proved nothing about any base."""
+        ok, msg = self._check(_ci_pr([]))
+        self.assertFalse(ok)
+        self.assertIn("no required check", msg)
+
+    def test_a_rollup_of_only_advisory_bots_fails_closed(self):
+        ok, msg = self._check(_ci_pr([
+            {"context": "CodeRabbit", "state": "SUCCESS", "startedAt": _AFTER_ADVANCE}]))
+        self.assertFalse(ok)
+        self.assertIn("no required check", msg)
+
+    def test_a_stale_advisory_bot_does_not_block_fresh_required_checks(self):
+        """Advisory bots are not build checks here, so they prove nothing either."""
+        ok, _ = self._check(_ci_pr([
+            _run("Lint", _AFTER_ADVANCE),
+            {"context": "CodeRabbit", "state": "SUCCESS", "startedAt": _BEFORE_ADVANCE}]))
+        self.assertTrue(ok)
+
+    def test_a_legacy_status_context_is_a_required_check(self):
+        """Freshness must not be dodged by reporting through the older API."""
+        ok, msg = self._check(_ci_pr([
+            {"context": "buildkite", "state": "SUCCESS", "startedAt": _BEFORE_ADVANCE}]))
+        self.assertFalse(ok)
+        self.assertIn("buildkite", msg)
+
+    def test_undecidable_recency_fails_closed(self):
+        """Two runs of one name that cannot be ordered have no knowable age."""
+        ok, msg = self._check(_ci_pr([
+            _run("Lint", None), _run("Lint", None)]))
+        self.assertFalse(ok)
+        self.assertIn("undecidable", msg)
+
+    def test_a_superseded_stale_run_does_not_block_a_fresh_current_one(self):
+        """#306 semantics hold: the newest run of a name is the one judged."""
+        ok, _ = self._check(_ci_pr([
+            _run("Lint", _BEFORE_ADVANCE), _run("Lint", _AFTER_ADVANCE)]))
+        self.assertTrue(ok)
+
+    def test_a_fresh_run_superseded_by_a_stale_one_blocks(self):
+        """The mirror of the case above, so neither is passing by array order."""
+        stale = _run("Lint", _BEFORE_ADVANCE)
+        stale["completedAt"] = "2026-08-22T23:00:00Z"
+        fresh = _run("Lint", _AFTER_ADVANCE)
+        fresh["completedAt"] = "2026-08-22T12:00:02Z"
+        ok, msg = self._check(_ci_pr([fresh, stale]))
+        self.assertFalse(ok)
+        self.assertIn("superseded base", msg)
+
+    def test_zero_behind_never_consults_the_freshness_resolver(self):
+        """Compatibility: a current branch has no advance to be stale against."""
+        ok, msg = merge_pr.check_rebased(
+            _ci_pr([_run("Lint", _BEFORE_ADVANCE)]), _behind(0), _boom, _boom)
+        self.assertTrue(ok)
+        self.assertIn("current with the base", msg)
+
+    def test_overlap_is_decided_before_freshness_and_costs_no_lookup(self):
+        ok, msg = merge_pr.check_rebased(
+            _ci_pr([_run("Lint", _AFTER_ADVANCE)]), _behind(2),
+            _paths(["a.py"], ["a.py"]), _boom)
+        self.assertFalse(ok)
+        self.assertIn("a.py", msg)
+
+    def test_conflicts_are_decided_before_freshness_and_cost_no_lookup(self):
+        for pr in ({"mergeStateStatus": "DIRTY"}, {"mergeable": "CONFLICTING"}):
+            self.assertFalse(merge_pr.check_rebased(pr, _boom, _boom, _boom)[0])
+
+    def test_unverifiable_ancestry_is_decided_before_freshness(self):
+        ok, msg = merge_pr.check_rebased(
+            _ci_pr([]), lambda _b, _h: None, _boom, _boom)
+        self.assertFalse(ok)
+        self.assertIn("unverified ancestry", msg)
+
+    def test_evaluate_dod_threads_the_freshness_resolver(self):
+        """The gate the picker and --dry-run read is the same one, not a copy."""
+        seen = []
+
+        def record(first, second):
+            seen.append((first, second))
+            return _ADVANCE_AT
+
+        pr = _ci_pr([_run("Lint", _BEFORE_ADVANCE)], state="CLEAN")
+        pr["body"] = "Closes #369"
+        with patch.object(merge_pr, "_compare_paths", _paths(["a.py"], ["b.py"])):
+            _, gates = merge_pr.evaluate_dod(
+                pr, {369: "- [x] done\n"}, evidence={},
+                behind_resolver=_behind(2), advance_resolver=record)
+        rebased = [g for g in gates if g[0] == "rebased"][0]
+        self.assertFalse(rebased[1])
+        self.assertIn("superseded base", rebased[2])
+        self.assertEqual(seen, [("main", "deadbeef")])
+
+
+class BaseAdvanceTimeTests(unittest.TestCase):
+    """`_base_advance_time` must answer None for anything it cannot read."""
+
+    @staticmethod
+    def _commit(committer, author=None):
+        return {"commit": {"committer": {"date": committer},
+                           "author": {"date": author or committer}}}
+
+    def _resolve(self, payload):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "_gh_json", return_value=payload):
+            return merge_pr._base_advance_time("main", "abc")
+
+    def test_missing_refs_return_none(self):
+        self.assertIsNone(merge_pr._base_advance_time("", "abc"))
+        self.assertIsNone(merge_pr._base_advance_time("main", ""))
+
+    def test_missing_slug_returns_none(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value=None):
+            self.assertIsNone(merge_pr._base_advance_time("main", "abc"))
+
+    def test_the_compare_direction_is_head_to_base(self):
+        """Swapped arguments would time this branch instead of the advance."""
+        seen = []
+
+        def spy(args):
+            seen.append(args[-1])
+            return {"commits": [self._commit("2026-08-22T12:00:00Z")]}
+
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "_gh_json", side_effect=spy):
+            merge_pr._base_advance_time("main", "abc")
+        self.assertEqual(seen, ["repos/o/r/compare/abc...main"])
+
+    def test_newest_commit_wins(self):
+        got = self._resolve({"commits": [
+            self._commit("2026-08-22T01:00:00Z"),
+            self._commit("2026-08-22T09:00:00Z"),
+            self._commit("2026-08-22T04:00:00Z"),
+        ]})
+        self.assertEqual(got, datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc))
+
+    def test_a_later_author_date_raises_the_bar_rather_than_lowering_it(self):
+        """A fabricated stamp can only demand fresher CI, never accept staler."""
+        got = self._resolve({"commits": [
+            self._commit("2026-08-22T01:00:00Z", author="2026-08-22T20:00:00Z")]})
+        self.assertEqual(got, datetime(2026, 8, 22, 20, 0, tzinfo=timezone.utc))
+
+    def test_naive_timestamps_are_read_as_utc(self):
+        got = self._resolve({"commits": [self._commit("2026-08-22T09:00:00")]})
+        self.assertEqual(got, datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc))
+
+    def test_malformed_payloads_return_none(self):
+        for payload in (
+            None, [], "nope", {}, {"commits": None}, {"commits": {}},
+            # A branch reported behind must have commits on the other side; an
+            # empty list is contradictory data, not a clean bill of health.
+            {"commits": []},
+            {"commits": ["not-a-dict"]},
+            {"commits": [{}]},
+            {"commits": [{"commit": "not-a-dict"}]},
+            {"commits": [{"commit": {"author": {"date": "2026-08-22T09:00:00Z"}}}]},
+            {"commits": [{"commit": {"committer": "x",
+                                     "author": {"date": "2026-08-22T09:00:00Z"}}}]},
+            {"commits": [{"commit": {"committer": {"date": None},
+                                     "author": {"date": "2026-08-22T09:00:00Z"}}}]},
+            {"commits": [{"commit": {"committer": {"date": "not-a-date"},
+                                     "author": {"date": "2026-08-22T09:00:00Z"}}}]},
+            # One unreadable commit poisons the whole answer: the advance's age
+            # is the maximum, so a skipped member could hide the newest stamp.
+            {"commits": [{"commit": {"committer": {"date": "2026-08-22T09:00:00Z"},
+                                     "author": {"date": "2026-08-22T09:00:00Z"}}},
+                         {"commit": {"committer": {"date": "not-a-date"},
+                                     "author": {"date": "2026-08-22T09:00:00Z"}}}]},
+        ):
+            self.assertIsNone(self._resolve(payload), f"{payload!r}")
+
+
+class CheckStartTimeTests(unittest.TestCase):
+    def test_only_the_start_stamp_is_read(self):
+        """A completion stamp cannot bound what a run checked out."""
+        self.assertIsNone(merge_pr._check_start_time({"completedAt": _AFTER_ADVANCE}))
+
+    def test_start_stamp_is_parsed(self):
+        self.assertEqual(
+            merge_pr._check_start_time({"startedAt": "2026-08-22T12:00:01Z",
+                                        "completedAt": "2026-08-22T13:00:00Z"}),
+            datetime(2026, 8, 22, 12, 0, 1, tzinfo=timezone.utc))
+
+    def test_unparseable_start_stamp_is_none(self):
+        self.assertIsNone(merge_pr._check_start_time({"startedAt": "soon"}))
+
+    def test_ordering_still_prefers_the_completion_stamp(self):
+        """`_check_time` is unchanged; the two helpers answer different questions."""
+        self.assertEqual(
+            merge_pr._check_time({"startedAt": "2026-08-22T12:00:01Z",
+                                  "completedAt": "2026-08-22T13:00:00Z"}),
+            datetime(2026, 8, 22, 13, 0, tzinfo=timezone.utc))
 
 
 class BehindByTests(unittest.TestCase):
@@ -2220,6 +2536,54 @@ class SerializedMergeExecutionTests(unittest.TestCase):
 
         self.assertEqual(code, merge_pr.EXIT_BLOCKED)
         execute.assert_not_called()
+
+    def _behind_pr(self, started):
+        pr = self._open_pr()
+        pr.update({
+            "baseRefName": "main",
+            "headRefOid": "gated-sha",
+            "mergeStateStatus": "BEHIND",
+            "statusCheckRollup": [_run("Lint", started)],
+        })
+        return pr
+
+    def _final_window(self, started):
+        """Drive main() to the serialized re-read with a behind, disjoint PR."""
+        pr = self._behind_pr(started)
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr", side_effect=[pr, dict(pr)]), \
+             patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": "gated-sha"}), \
+             patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
+             patch.object(merge_pr, "_behind_by", new=lambda _base, _head: 2), \
+             patch.object(merge_pr, "_compare_paths", _paths(["a.py"], ["b.py"],
+                                                             head="gated-sha")), \
+             patch.object(merge_pr, "_base_advance_time",
+                          _advance(head="gated-sha")), \
+             patch.object(merge_pr, "run_closeout", return_value=True), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
+             patch.object(merge_pr, "execute_merge",
+                          return_value=(merged_pr(), "merged")) as execute:
+            return merge_pr.main(), execute
+
+    def test_stale_ci_blocks_at_the_final_reread_even_when_the_base_held_still(self):
+        """The reported false-pass: the base moved *before* the merge command.
+
+        The base-OID lock only proves nothing moved during this command, so it
+        cannot see an advance that already happened. The final rebased check is
+        what has to catch it, and it runs on the freshly re-read PR.
+        """
+        code, execute = self._final_window(_BEFORE_ADVANCE)
+        self.assertEqual(code, merge_pr.EXIT_BLOCKED)
+        execute.assert_not_called()
+
+    def test_fresh_ci_still_merges_through_the_final_reread(self):
+        code, execute = self._final_window(_AFTER_ADVANCE)
+        self.assertEqual(code, merge_pr.EXIT_OK)
+        execute.assert_called_once()
 
     def test_unavailable_repository_lock_fails_closed(self):
         initial = self._open_pr()
