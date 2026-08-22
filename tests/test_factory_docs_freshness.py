@@ -37,7 +37,6 @@ def section(document, start, end):
     return document[start_index:end_index]
 
 
-
 def display_width(text):
     """Rendered column count, not character count.
 
@@ -360,62 +359,41 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
 class DocumentParserTests(unittest.TestCase):
     """Focused coverage for the helpers the freshness contract leans on."""
 
-    def test_complete_box_parses_without_unpaired_evidence(self):
-        boxes, unpaired = ascii_boxes("\u250c\u2500\u2500\u2510\nok\n\u2514\u2500\u2500\u2518\n")
-        self.assertEqual(len(boxes), 1)
-        self.assertEqual(boxes[0][0], "\u250c\u2500\u2500\u2510")
-        self.assertEqual(boxes[0][-1], "\u2514\u2500\u2500\u2518")
-        self.assertEqual(unpaired, [])
+    # The final `\u2514` turns a flow line rather than standing on a box wall.
+    GLUE = """\
+┌───┐   ┌───┐
+│ a │   │ b │
+└─┬─┘   └─┬─┘
+  │       │
+  └───┬───┘
+"""
 
-    def test_unclosed_opener_is_reported_with_its_line(self):
-        boxes, unpaired = ascii_boxes("intro\n\u250c\u2500\u2500\u2510\nok\n")
-        self.assertEqual(boxes, [])
-        self.assertEqual(unpaired, [2])
+    def test_ascii_boxes_pairs_borders_and_reports_the_unpaired(self):
+        box = ["┌──┐", "ok", "└──┘"]
+        cases = {
+            "complete box": ("┌──┐\nok\n└──┘\n", [box], []),
+            "unclosed opener": ("intro\n┌──┐\nok\n", [], [2]),
+            "orphan foot after a box": ("┌──┐\nok\n└──┘\n\n└──┘\n", [box], [5]),
+            "foot before any opener": ("└──┘\n", [], [1]),
+            "foot on a wall rising to nothing": ("│ok│\n└──┘\n", [], [2]),
+            "arrow glue turning a flow line": (self.GLUE, [self.GLUE.splitlines()[:3]], []),
+        }
+        for name, (document, boxes, unpaired) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(ascii_boxes(document), (boxes, unpaired))
 
-    def test_orphan_closing_border_is_reported_with_its_line(self):
-        document = "\u250c\u2500\u2500\u2510\nok\n\u2514\u2500\u2500\u2518\n\n\u2514\u2500\u2500\u2518\n"
-        boxes, unpaired = ascii_boxes(document)
-        self.assertEqual(len(boxes), 1)
-        self.assertEqual(unpaired, [5])
-
-    def test_closing_border_before_any_opener_is_reported(self):
-        boxes, unpaired = ascii_boxes("\u2514\u2500\u2500\u2518\n")
-        self.assertEqual(boxes, [])
-        self.assertEqual(unpaired, [1])
-
-    def test_arrow_glue_between_boxes_is_not_a_broken_box(self):
-        document = (
-            "\u250c\u2500\u2500\u2500\u2510   \u250c\u2500\u2500\u2500\u2510\n"
-            "\u2502 a \u2502   \u2502 b \u2502\n"
-            "\u2514\u2500\u252c\u2500\u2518   \u2514\u2500\u252c\u2500\u2518\n"
-            "  \u2502       \u2502\n"
-            "  \u2514\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2518\n"
-            "      \u2502\n"
-        )
-        boxes, unpaired = ascii_boxes(document)
-        self.assertEqual(len(boxes), 1)
-        self.assertEqual(unpaired, [])
-
-    def test_foot_whose_wall_rises_to_nothing_is_reported(self):
-        boxes, unpaired = ascii_boxes("\u2502ok\u2502\n\u2514\u2500\u2500\u2518\n")
-        self.assertEqual(boxes, [])
-        self.assertEqual(unpaired, [2])
-
-    def test_combining_mark_adds_no_rendered_column(self):
+    def test_marks_and_wide_characters_get_their_rendered_width(self):
         self.assertEqual(display_width("e\u0301"), display_width("e"))
         self.assertEqual(display_width("\u3042"), 2)
 
-    def test_tilde_fence_hides_its_contents_like_a_backtick_fence(self):
-        document = "~~~\nword\nword\n~~~\n"
-        self.assertEqual(list(prose_wraps(document)), [])
-
-    def test_backtick_inside_a_tilde_fence_does_not_close_it(self):
-        document = "~~~\n```\nword\nword\n```\n~~~\n"
-        self.assertEqual(list(prose_wraps(document)), [])
-
-    def test_prose_around_a_tilde_fence_is_still_inspected(self):
-        document = "alpha beta\nbeta gamma\n\n~~~\ncode\n~~~\n"
-        self.assertEqual(list(prose_wraps(document)), [("alpha beta", "beta gamma")])
+    def test_prose_wraps_reads_a_tilde_fence_like_a_backtick_fence(self):
+        for document in ("~~~\nword\nword\n~~~\n", "~~~\n```\nword\nword\n```\n~~~\n"):
+            with self.subTest(document=document):
+                self.assertEqual(list(prose_wraps(document)), [])
+        self.assertEqual(
+            list(prose_wraps("alpha beta\nbeta gamma\n\n~~~\ncode\n~~~\n")),
+            [("alpha beta", "beta gamma")],
+        )
 
 
 if __name__ == "__main__":
