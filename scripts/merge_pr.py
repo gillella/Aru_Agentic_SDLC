@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3740
+# line-ceiling: 3755
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1600,9 +1600,22 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None):
     zero-behind branch deadlocks the factory, because a rebase rewrites the head
     SHA and the review gate binds its attestation to an exact SHA -- so rebasing
     destroys the review evidence of the very PR it was run on, and every merge
-    forces every other open PR to do it. What the gate actually needs to protect
-    is that CI and review evidence describe the merged content. That holds as
-    long as the base changed no file this branch also changed (issue #369).
+    forces every other open PR to do it (issue #369).
+
+    Be precise about what this rule buys, because it is narrower than "the
+    evidence describes the merged content". It establishes that no file was
+    changed on both sides, so the merge is textually non-interfering. It does
+    NOT establish semantic independence: the base can change a signature in one
+    file while this branch changes a caller in another, and the paths stay
+    disjoint.
+
+    What bounds that residual risk is that CI here runs on `refs/pull/N/merge`,
+    a genuine two-parent merge commit -- no job in ci.yml overrides the checkout
+    ref -- so a green check already describes a merged tree rather than this
+    branch alone. What it does not describe is a merge against a base that
+    advanced *after* the check ran. Closing that remaining gap is issue #371,
+    and the fix there is a CI re-run rather than a rebase, so it costs no head
+    SHA and therefore no review evidence.
     """
     state = (pr.get("mergeStateStatus") or "").upper()
     if state == "DIRTY":
