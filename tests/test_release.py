@@ -43,6 +43,22 @@ class ChangelogGeneratorTests(unittest.TestCase):
         self.assertIn("# CHANGELOG", content)
 
 
+class ReleaseDocumentationTests(unittest.TestCase):
+    def test_release_procedure_documents_exact_checkpoint_commands(self):
+        content = (ROOT / "docs" / "releases.md").read_text(encoding="utf-8")
+        required_fragments = (
+            "python3 scripts/increment_release.py",
+            "gh workflow run ci.yml --ref \"$DEFAULT_BRANCH\"",
+            "--commit \"$TARGET_COMMIT\"",
+            "--json url,headSha,workflowDatabaseId",
+            "python3 scripts/release.py \\",
+            "--checkpoint-run-url <canonical GitHub Actions run URL>",
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, content)
+
+
 class ReleaseTaggingTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
