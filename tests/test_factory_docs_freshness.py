@@ -42,35 +42,59 @@ def display_width(text):
     """Rendered column count, not character count.
 
     Box-drawing borders line up by rendered width, so a wide or fullwidth
-    character occupies two columns while `len()` would count it as one.
+    character occupies two columns while `len()` would count it as one, and
+    a nonspacing or enclosing mark stacks onto the preceding character for
+    zero columns while `len()` would count it as one.
     """
-    return sum(
-        2 if unicodedata.east_asian_width(char) in "WF" else 1
-        for char in text
-    )
+    width = 0
+    for char in text:
+        if unicodedata.category(char) in ("Mn", "Me"):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in "WF" else 1
+    return width
+
+
+def turns_a_flow_line(lines, index, column):
+    """True when a bottom-left corner is arrow glue rather than a box foot.
+
+    A box foot stands at the bottom of a wall that rises to the box's own
+    top-left corner. The arrows drawn between boxes reuse the same corner
+    glyph to turn a flow line sideways, and those strokes rise to a tee
+    instead, so reading the column upward tells the two apart.
+    """
+    for above in range(index - 1, -1, -1):
+        line = lines[above]
+        char = line[column] if column < len(line) else " "
+        if char != "\u2502":
+            return char in "\u252c\u2534\u253c\u251c\u2524"
+    return False
 
 
 def ascii_boxes(document):
-    """Return complete box-drawing rectangles and any unclosed opener lines.
+    """Return complete box-drawing rectangles and any unpaired border lines.
 
-    An unclosed opener is reported rather than skipped: dropping a closing
-    border would otherwise leave the width check with nothing to inspect and
-    pass vacuously.
+    A border missing its partner -- an opener never closed, or a foot with no
+    opener -- is reported by line number rather than skipped: dropping it
+    would otherwise leave the width check with nothing to inspect and pass
+    vacuously on genuinely broken box-drawing output.
     """
     lines = document.splitlines()
-    boxes, unclosed, start = [], [], None
+    boxes, unpaired, start = [], [], None
     for index, line in enumerate(lines):
         stripped = line.rstrip()
         if "\u250c" in stripped and stripped.endswith("\u2510"):
             if start is not None:
-                unclosed.append(start + 1)
+                unpaired.append(start + 1)
             start = index
-        elif start is not None and "\u2514" in stripped and stripped.endswith("\u2518"):
-            boxes.append(lines[start:index + 1])
-            start = None
+        elif "\u2514" in stripped and stripped.endswith("\u2518"):
+            if start is not None:
+                boxes.append(lines[start:index + 1])
+                start = None
+            elif not turns_a_flow_line(lines, index, stripped.index("\u2514")):
+                unpaired.append(index + 1)
     if start is not None:
-        unclosed.append(start + 1)
-    return boxes, unclosed
+        unpaired.append(start + 1)
+    return boxes, unpaired
 
 
 def prose_wraps(document):
@@ -86,20 +110,30 @@ def prose_wraps(document):
     *first* line also ends the block. List items and blockquotes are not:
     prose after them is a lazy continuation of the same block, and a wrap
     there is a real one worth catching.
+
+    Markdown spells a code fence with either backticks or tildes, and only
+    the character that opened a fence can close it, so both markers are
+    tracked and a `~~~` block is skipped exactly like a ``` one.
     """
     opens_block = re.compile(r"^\s*(?:[#>|]|[-*+]\s|\d+[.)]\s)")
     ends_block = re.compile(r"^\s*[#|]")
+    fence = re.compile(r"^\s*(`{3,}|~{3,})")
     lines = document.splitlines()
-    fenced = False
+    open_fence = None
     for index in range(len(lines) - 1):
         first, second = lines[index], lines[index + 1]
-        if first.lstrip().startswith("```"):
-            fenced = not fenced
-        if fenced or not first.strip() or not second.strip():
+        first_fence = fence.match(first)
+        if first_fence:
+            marker = first_fence.group(1)[0]
+            if open_fence is None:
+                open_fence = marker
+            elif open_fence == marker:
+                open_fence = None
+        if open_fence is not None or not first.strip() or not second.strip():
             continue
-        if ends_block.match(first) or first.lstrip().startswith("```"):
+        if ends_block.match(first) or first_fence:
             continue
-        if opens_block.match(second) or second.lstrip().startswith("```"):
+        if opens_block.match(second) or fence.match(second):
             continue
         yield first, second
 
@@ -304,11 +338,11 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
     def test_ascii_box_borders_align(self):
         inspected = 0
         for path, document in self.documents.items():
-            boxes, unclosed = ascii_boxes(document)
+            boxes, unpaired = ascii_boxes(document)
             with self.subTest(path=path):
                 self.assertEqual(
-                    unclosed, [],
-                    f"box opened at line(s) {unclosed} is never closed",
+                    unpaired, [],
+                    f"box border(s) at line(s) {unpaired} have no partner",
                 )
             inspected += len(boxes)
             for box in boxes:
@@ -321,6 +355,67 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                     )
         # Guards the whole assertion against passing on zero rectangles.
         self.assertGreater(inspected, 0)
+
+
+class DocumentParserTests(unittest.TestCase):
+    """Focused coverage for the helpers the freshness contract leans on."""
+
+    def test_complete_box_parses_without_unpaired_evidence(self):
+        boxes, unpaired = ascii_boxes("\u250c\u2500\u2500\u2510\nok\n\u2514\u2500\u2500\u2518\n")
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0][0], "\u250c\u2500\u2500\u2510")
+        self.assertEqual(boxes[0][-1], "\u2514\u2500\u2500\u2518")
+        self.assertEqual(unpaired, [])
+
+    def test_unclosed_opener_is_reported_with_its_line(self):
+        boxes, unpaired = ascii_boxes("intro\n\u250c\u2500\u2500\u2510\nok\n")
+        self.assertEqual(boxes, [])
+        self.assertEqual(unpaired, [2])
+
+    def test_orphan_closing_border_is_reported_with_its_line(self):
+        document = "\u250c\u2500\u2500\u2510\nok\n\u2514\u2500\u2500\u2518\n\n\u2514\u2500\u2500\u2518\n"
+        boxes, unpaired = ascii_boxes(document)
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(unpaired, [5])
+
+    def test_closing_border_before_any_opener_is_reported(self):
+        boxes, unpaired = ascii_boxes("\u2514\u2500\u2500\u2518\n")
+        self.assertEqual(boxes, [])
+        self.assertEqual(unpaired, [1])
+
+    def test_arrow_glue_between_boxes_is_not_a_broken_box(self):
+        document = (
+            "\u250c\u2500\u2500\u2500\u2510   \u250c\u2500\u2500\u2500\u2510\n"
+            "\u2502 a \u2502   \u2502 b \u2502\n"
+            "\u2514\u2500\u252c\u2500\u2518   \u2514\u2500\u252c\u2500\u2518\n"
+            "  \u2502       \u2502\n"
+            "  \u2514\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2518\n"
+            "      \u2502\n"
+        )
+        boxes, unpaired = ascii_boxes(document)
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(unpaired, [])
+
+    def test_foot_whose_wall_rises_to_nothing_is_reported(self):
+        boxes, unpaired = ascii_boxes("\u2502ok\u2502\n\u2514\u2500\u2500\u2518\n")
+        self.assertEqual(boxes, [])
+        self.assertEqual(unpaired, [2])
+
+    def test_combining_mark_adds_no_rendered_column(self):
+        self.assertEqual(display_width("e\u0301"), display_width("e"))
+        self.assertEqual(display_width("\u3042"), 2)
+
+    def test_tilde_fence_hides_its_contents_like_a_backtick_fence(self):
+        document = "~~~\nword\nword\n~~~\n"
+        self.assertEqual(list(prose_wraps(document)), [])
+
+    def test_backtick_inside_a_tilde_fence_does_not_close_it(self):
+        document = "~~~\n```\nword\nword\n```\n~~~\n"
+        self.assertEqual(list(prose_wraps(document)), [])
+
+    def test_prose_around_a_tilde_fence_is_still_inspected(self):
+        document = "alpha beta\nbeta gamma\n\n~~~\ncode\n~~~\n"
+        self.assertEqual(list(prose_wraps(document)), [("alpha beta", "beta gamma")])
 
 
 if __name__ == "__main__":
