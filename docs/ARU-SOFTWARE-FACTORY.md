@@ -86,7 +86,7 @@ Historical note: before that alignment, defects were found by humans/Codex rathe
 ### 2.3 "Recently hardened" overstated the review layer — **historical; fixed**
 
 At the snapshot, `author:`/`reviewer:` stamping was written but opt-in and
-therefore absent in practice: `create_pr.py --agent` defaulted to empty, so PR
+therefore absent in practice: `create_pr.py --agent` defaulted to empty, so
 PR #18 was opened through the sanctioned path with no labels. The shipped helper
 now requires the author identity and stamps the PR mechanically (#19 / PR #27).
 
@@ -258,7 +258,7 @@ Done state.
 
 Phase 0's exact dependency graph and exit gate live in #336. The durable policy
 is focused, issue-declared verification for each story, followed by the complete
-Python 3.11 suite on the exact phase-exit commit and again before release. Issue
+Python 3.11 suite on the exact phase-exit commit and again before release.
 Issue #341 is the Current implementation of that verification contract; issue #357 is
 the Current fail-closed release-checkpoint enforcement. Until their PRs merge,
 their presence on the roadmap is not a Shipped claim.
