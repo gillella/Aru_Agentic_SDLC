@@ -57,7 +57,7 @@ conservatively the same way. An explicit whole-repository declaration (`.`,
 `./`, or `/`) is always held for splitting. The output prints the observed
 checkbox count, area names, or wildcard roots so the scope can be decomposed
 deliberately. Epics remain blocked by the Ready contract rather than entering
-this overrideable recommendation path.
+this scope-recommendation path.
 
 ## Step 3: Judge readiness beyond the contract
 
@@ -81,12 +81,10 @@ The contract is necessary, not sufficient. Before promoting, ask:
 ```
 python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --promote
 python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --promote --issue 24 --issue 25
-python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --promote --force
 ```
 
-`--promote` skips `SPLIT` recommendations. `--force` explicitly overrides only
-that recommendation; it never overrides missing Ready-contract elements or
-the rule that epics are unpromotable.
+`--promote` skips `SPLIT` recommendations. Split or narrow every held issue,
+then rerun triage; no scope override can promote it around that correction.
 
 ## Step 5: Size the fleet from the capacity number, not the Ready count
 

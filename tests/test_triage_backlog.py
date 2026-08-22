@@ -1,5 +1,6 @@
-# line-ceiling: 862
+# line-ceiling: 867
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -306,16 +307,12 @@ touches: scripts/foo.py
             ["needs-human (operator-only; factory agents must not claim)"],
         )
 
-        for force in (False, True):
-            argv = ["triage_backlog.py", "--promote"]
-            if force:
-                argv.append("--force")
-            with patch("triage_backlog.list_open_issues", return_value=[operator_issue]), \
-                 patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
-                 patch("triage_backlog.update_status") as update, \
-                 patch("sys.argv", argv):
-                self.assertEqual(tb.main(), 0)
-            update.assert_not_called()
+        with patch("triage_backlog.list_open_issues", return_value=[operator_issue]), \
+             patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
+             patch("triage_backlog.update_status") as update, \
+             patch("sys.argv", ["triage_backlog.py", "--promote"]):
+            self.assertEqual(tb.main(), 0)
+        update.assert_not_called()
 
     def test_main_refusal_emits_example_conforming_issue(self):
         issues_list = [issue(200, "type:feat", "status:backlog", body=READY_BODY)]
@@ -358,7 +355,8 @@ class SplitRecommendationTests(unittest.TestCase):
 
     def test_wide_touches_plus_many_criteria_is_held_for_split(self):
         wide = issue(11, "type:chore", "status:backlog", body=self.oversized_body())
-        with patch("triage_backlog.list_open_issues", return_value=[wide]), \
+        with patch.dict(os.environ, {"ARU_TRIAGE_FORCE": "1"}), \
+             patch("triage_backlog.list_open_issues", return_value=[wide]), \
              patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
              patch("triage_backlog.update_status") as update, \
              patch("sys.argv", ["triage_backlog.py", "--promote"]), \
@@ -540,23 +538,24 @@ class SplitRecommendationTests(unittest.TestCase):
                     ["touches span 2 top-level areas: AnotherDir, FutureDir"],
                 )
 
-    def test_force_promotes_split_recommended_issue(self):
+    def test_force_flag_is_rejected_without_mutation(self):
         wide = issue(12, "type:chore", "status:backlog", body=self.oversized_body())
-        with patch("triage_backlog.list_open_issues", return_value=[wide]), \
-             patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
-             patch("triage_backlog.update_status", return_value=True) as update, \
-             patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]):
-            self.assertEqual(tb.main(), 0)
-        update.assert_called_once_with(12, "Ready")
-
-    def test_force_does_not_promote_epic(self):
-        epic = issue(13, "type:epic", "status:backlog", body=self.oversized_body())
-        with patch("triage_backlog.list_open_issues", return_value=[epic]), \
-             patch("triage_backlog.list_open_pr_files_by_issue", return_value={}), \
+        with patch("triage_backlog.list_open_issues", return_value=[wide]) as listing, \
              patch("triage_backlog.update_status") as update, \
-             patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]):
-            self.assertEqual(tb.main(), 0)
+             patch("sys.argv", ["triage_backlog.py", "--promote", "--force"]), \
+             patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaisesRegex(SystemExit, "2"):
+                tb.main()
+        self.assertIn("unrecognized arguments: --force", stderr.getvalue())
+        listing.assert_not_called()
         update.assert_not_called()
+
+    def test_help_does_not_advertise_a_scope_override(self):
+        with patch("sys.argv", ["triage_backlog.py", "--help"]), \
+             patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            with self.assertRaisesRegex(SystemExit, "0"):
+                tb.main()
+        self.assertNotIn("--force", stdout.getvalue())
 
     def test_companion_areas_do_not_widen_scope(self):
         """tests/ and docs/ accompany production work instead of widening it."""
@@ -640,6 +639,12 @@ class ReadyDocstringContractTests(unittest.TestCase):
                            "labels": []}, set()),
             [],
         )
+
+    def test_canonical_triage_skill_has_no_scope_override(self):
+        skill = (Path(__file__).resolve().parents[1] / "skills" /
+                 "triage-backlog" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertNotIn("--force", skill)
+        self.assertIn("Split or narrow every held issue", skill)
 
 
 class PartitionTests(TrustedOwnerTests):
