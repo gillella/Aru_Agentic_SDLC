@@ -51,16 +51,50 @@ def display_width(text):
 
 
 def ascii_boxes(document):
-    """Yield the line spans of each complete box-drawing rectangle."""
+    """Return complete box-drawing rectangles and any unclosed opener lines.
+
+    An unclosed opener is reported rather than skipped: dropping a closing
+    border would otherwise leave the width check with nothing to inspect and
+    pass vacuously.
+    """
     lines = document.splitlines()
-    start = None
+    boxes, unclosed, start = [], [], None
     for index, line in enumerate(lines):
         stripped = line.rstrip()
         if "\u250c" in stripped and stripped.endswith("\u2510"):
+            if start is not None:
+                unclosed.append(start + 1)
             start = index
         elif start is not None and "\u2514" in stripped and stripped.endswith("\u2518"):
-            yield lines[start:index + 1]
+            boxes.append(lines[start:index + 1])
             start = None
+    if start is not None:
+        unclosed.append(start + 1)
+    return boxes, unclosed
+
+
+def prose_wraps(document):
+    """Yield (line, next_line) pairs joined only by a soft wrap.
+
+    Duplicated words are an artifact of rewrapping one paragraph, so the pair
+    must sit inside a single prose block. Blank lines, fenced code, and any
+    line that opens a new structural element (heading, table row, quote, list
+    item) end a block -- joining across those would flag a document whose one
+    block ends with a word the next block happens to begin with.
+    """
+    opens_block = re.compile(r"^\s*(?:[#>|]|[-*+]\s|\d+[.)]\s)")
+    lines = document.splitlines()
+    fenced = False
+    for index in range(len(lines) - 1):
+        first, second = lines[index], lines[index + 1]
+        if first.lstrip().startswith("```"):
+            fenced = not fenced
+        if fenced or not first.strip() or not second.strip():
+            continue
+        if opens_block.match(second) or second.lstrip().startswith("```"):
+            continue
+        yield first, second
+
 
 class FactoryDocsFreshnessTests(unittest.TestCase):
     @classmethod
@@ -249,13 +283,27 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
     def test_no_duplicated_word_survives_a_line_rewrap(self):
         """A rewrap once left "so PR / PR #18" reading as "so PR PR #18"."""
         for path, document in self.documents.items():
-            with self.subTest(path=path):
-                collapsed = " ".join(document.split())
-                self.assertNotRegex(collapsed, r"\bPR PR\b")
+            for first, second in prose_wraps(document):
+                tail = first.split()[-1]
+                head = second.split()[0]
+                with self.subTest(path=path, wrap=f"{tail} / {head}"):
+                    self.assertNotEqual(
+                        tail, head,
+                        f"'{tail}' is duplicated across a line wrap:\n"
+                        f"{first}\n{second}",
+                    )
 
     def test_ascii_box_borders_align(self):
+        inspected = 0
         for path, document in self.documents.items():
-            for box in ascii_boxes(document):
+            boxes, unclosed = ascii_boxes(document)
+            with self.subTest(path=path):
+                self.assertEqual(
+                    unclosed, [],
+                    f"box opened at line(s) {unclosed} is never closed",
+                )
+            inspected += len(boxes)
+            for box in boxes:
                 widths = {display_width(line.rstrip()) for line in box}
                 with self.subTest(path=path, top=box[0].strip()[:40]):
                     self.assertEqual(
@@ -263,6 +311,8 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                         f"box lines render at differing widths {sorted(widths)}:\n"
                         + "\n".join(box),
                     )
+        # Guards the whole assertion against passing on zero rectangles.
+        self.assertGreater(inspected, 0)
 
 
 if __name__ == "__main__":

@@ -258,7 +258,7 @@ Done state.
 
 Phase 0's exact dependency graph and exit gate live in #336. The durable policy
 is focused, issue-declared verification for each story, followed by the complete
-Python 3.11 suite on the exact phase-exit commit and again before release. Issue
+Python 3.11 suite on the exact phase-exit commit and again before release.
 Issue #341 is the Current implementation of that verification contract; issue #357 is
 the Current fail-closed release-checkpoint enforcement. Until their PRs merge,
 their presence on the roadmap is not a Shipped claim.
