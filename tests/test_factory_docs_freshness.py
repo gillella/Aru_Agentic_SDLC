@@ -81,8 +81,14 @@ def prose_wraps(document):
     line that opens a new structural element (heading, table row, quote, list
     item) end a block -- joining across those would flag a document whose one
     block ends with a word the next block happens to begin with.
+
+    Headings and table rows are single-line blocks, so one appearing as the
+    *first* line also ends the block. List items and blockquotes are not:
+    prose after them is a lazy continuation of the same block, and a wrap
+    there is a real one worth catching.
     """
     opens_block = re.compile(r"^\s*(?:[#>|]|[-*+]\s|\d+[.)]\s)")
+    ends_block = re.compile(r"^\s*[#|]")
     lines = document.splitlines()
     fenced = False
     for index in range(len(lines) - 1):
@@ -90,6 +96,8 @@ def prose_wraps(document):
         if first.lstrip().startswith("```"):
             fenced = not fenced
         if fenced or not first.strip() or not second.strip():
+            continue
+        if ends_block.match(first) or first.lstrip().startswith("```"):
             continue
         if opens_block.match(second) or second.lstrip().startswith("```"):
             continue
