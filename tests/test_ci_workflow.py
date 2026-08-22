@@ -38,6 +38,14 @@ def named_step(job_name, step_name):
 
 
 class FocusedStoryContractTests(unittest.TestCase):
+    def test_focused_only_rule_is_explicitly_limited_to_aru_code_factory(self):
+        for path in (PROMPT_PATH, SKILL_PATH, STANDARDS_PATH, BOARD_PATH):
+            text = flat(path)
+            self.assertIn("aru code factory", text, str(path))
+            self.assertIn("aru_agentic_sdlc", text, str(path))
+        for path in (PROMPT_PATH, SKILL_PATH, BOARD_PATH):
+            self.assertIn("consumer repositor", flat(path), str(path))
+
     def test_all_operator_guidance_defines_the_focused_story_contract(self):
         for path in (PROMPT_PATH, SKILL_PATH, STANDARDS_PATH):
             text = flat(path)
@@ -66,6 +74,13 @@ class FocusedStoryContractTests(unittest.TestCase):
             self.assertIn("not", text, str(path))
             self.assertIn("default", text, str(path))
             self.assertIn("python3 -m unittest discover tests", text, str(path))
+
+    def test_complete_suite_is_never_an_ordinary_aru_issue_or_pr_gate(self):
+        for path in (SKILL_PATH, STANDARDS_PATH, BOARD_PATH):
+            text = flat(path).replace("pull-request", "pull request")
+            self.assertIn("ordinary", text, str(path))
+            self.assertIn("issue", text, str(path))
+            self.assertIn("pull request", text, str(path))
 
 
 class WorkflowContractTests(unittest.TestCase):

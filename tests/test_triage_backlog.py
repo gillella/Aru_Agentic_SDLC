@@ -326,9 +326,6 @@ touches: scripts/foo.py
             self.assertIn("## Decision Boundaries", output)
             self.assertIn("## Non-Goals", output)
             self.assertIn("## Dependencies", output)
-            self.assertIn("python3 -m unittest tests.test_foo", output)
-            self.assertIn("ruff check .", output)
-            self.assertNotIn("python3 -m unittest discover tests", output)
 
 
 class SplitRecommendationTests(unittest.TestCase):

@@ -98,8 +98,14 @@ the options and block for clarification rather than inventing requirements.
 
 ## Focused Verification and Phase Checkpoints
 
-An ordinary story proves its own change rather than re-running every unrelated
-test in the repository. Its mandatory focused evidence is the union of:
+> [!IMPORTANT]
+> This section is a repository-specific exception for the **Aru Code Factory**
+> (`Aru_Agentic_SDLC`) itself. It must not be copied into or imposed upon
+> consumer repositories governed by Aru; those repositories follow their own
+> `AGENTS.md` and testing policy.
+
+An ordinary Aru Code Factory story proves its own change rather than re-running
+every unrelated test in the repository. Its mandatory focused evidence is the union of:
 
 1. every acceptance-criteria `verify:` predicate in the issue;
 2. tests directly affected by the changed behavior; and
@@ -108,8 +114,7 @@ test in the repository. Its mandatory focused evidence is the union of:
 Focused verification never permits zero behavioral evidence for changed
 behavior. `create_pr.py` records the exact commands against the current PR head,
 and `merge_pr.py` continues to reject missing, failing, or stale verification.
-High-risk or cross-cutting issues may name the complete suite as one of their
-own explicit predicates.
+The complete suite is never an ordinary Aru issue or pull-request predicate.
 
 The complete repository suite, `python3 -m unittest discover tests`, is a
 separate checkpoint gate. It runs through CI on `schedule` and

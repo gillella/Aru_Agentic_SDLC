@@ -1,4 +1,4 @@
-# line-ceiling: 783
+# line-ceiling: 780
 import contextlib
 import io
 import os
@@ -28,14 +28,11 @@ from init_project import (  # noqa: E402
 
 
 class ProjectBootstrapTests(unittest.TestCase):
-    def test_generated_governance_uses_focused_story_verification(self):
+    def test_generated_governance_does_not_export_aru_focused_only_exception(self):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
-        flat_rules = " ".join(rules.split())
-        self.assertIn("every issue acceptance-criteria `verify:` predicate", rules)
-        self.assertIn("directly affected tests", flat_rules)
-        self.assertIn("behavioral evidence", flat_rules)
-        self.assertIn("Do not run the complete `{test_runner}` suite", flat_rules)
-        self.assertIn("roadmap phase exit", flat_rules)
+        self.assertNotIn("ARU CODE FACTORY REPOSITORY RULE", rules)
+        self.assertNotIn("focused-only exception", rules)
+        self.assertIn("Run `{test_runner}` and confirm all tests pass", rules)
 
     def test_generated_plan_gate_requires_reuse_audit_with_names_and_locations(self):
         """Generated governance must carry the canonical reuse audit contract."""
@@ -365,17 +362,13 @@ class CiGateTests(unittest.TestCase):
 
     STACKS = (("python", "pytest -q"), ("node", "npm test"), ("go", "go test ./..."))
 
-    def test_complete_suite_is_only_a_schedule_or_manual_checkpoint(self):
+    def test_generated_consumer_ci_does_not_inherit_aru_checkpoint_schedule(self):
         for stack, runner in self.STACKS:
             with self.subTest(stack=stack):
                 parsed = yaml.safe_load(render_ci_workflow(stack, runner))
                 steps = parsed["jobs"]["verify"]["steps"]
                 tests_step = next(step for step in steps if step.get("name") == "Tests")
-                condition = tests_step.get("if", "")
-                self.assertIn("github.event_name == 'schedule'", condition)
-                self.assertIn("github.event_name == 'workflow_dispatch'", condition)
-                self.assertNotIn("pull_request", condition)
-                self.assertNotIn("push", condition)
+                self.assertNotIn("if", tests_step)
 
     def test_generated_checkout_does_not_persist_credentials(self):
         for stack, runner in self.STACKS:

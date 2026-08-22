@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1938
+# line-ceiling: 1924
 """
 init_project.py - Automation script for bootstrapping a brand-new repository under
 Aru_Agentic_SDLC governance, scaffolding AGENTS.md, CI workflows, issue/PR templates,
@@ -146,13 +146,8 @@ governed remediation.
    - PR Review Feedback: `address-pr-feedback/SKILL.md`
 2. **Worktree Isolation**:
    - Always run feature work inside `.worktrees/` directories to keep the main workspace clean.
-3. **Focused Local Verification First**:
-   - Run every issue acceptance-criteria `verify:` predicate, the directly
-     affected tests, and every relevant lint, syntax, documentation, and build
-     check before committing. Changed behavior always needs behavioral evidence.
-   - Do not run the complete `{test_runner}` suite by default for an ordinary
-     story. Run it when the issue explicitly requires broader verification,
-     at every roadmap phase exit, and before release.
+3. **Local Test Verification First**:
+   - Run `{test_runner}` and confirm all tests pass before committing.
 4. **Mandatory Issue Linking**:
    - Every Pull Request MUST include `Closes #<issue_number>` in its body.
 5. **Cursor**: Prefer installed personal skills / slash commands from the
@@ -290,10 +285,7 @@ PYTHON_CI_STEPS = """
         run: |
           """ + PYTHON_IMPORT_LINTER_SCRIPT + """
 
-      # Focused story predicates are executed from the issue by Aru's merge
-      # gate. This complete suite is the phase/pre-release checkpoint only.
       - name: Tests
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           # Keyed on source, not on tests. Keying on tests is self-defeating:
           # a repo with code and no tests takes the skip branch and reports
@@ -340,10 +332,7 @@ NODE_CI_STEPS = """
         run: |
           if [ -f package.json ]; then npm run lint --if-present; fi
 
-      # Focused story predicates are executed from the issue by Aru's merge
-      # gate. This complete suite is the phase/pre-release checkpoint only.
       - name: Tests
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           # See the Python job: the gate keys on source, not on tests.
           has_src=$(find src -type f \\( -name '*.js' -o -name '*.ts' -o -name '*.jsx' -o -name '*.tsx' \\) -print -quit 2>/dev/null)
@@ -383,10 +372,7 @@ GO_CI_STEPS = """
         run: |
           if [ -f go.mod ]; then go vet ./...; fi
 
-      # Focused story predicates are executed from the issue by Aru's merge
-      # gate. This complete suite is the phase/pre-release checkpoint only.
       - name: Tests
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           # See the Python job: the gate keys on source, not on tests.
           has_src=$(find . -type f -name '*.go' ! -name '*_test.go' -print -quit 2>/dev/null)

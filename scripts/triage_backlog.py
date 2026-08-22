@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 731
+# line-ceiling: 730
 """triage_backlog.py - promotes Backlog issues to Ready, and sizes the fleet.
 
 Triage is the throughput cap nobody owns. The picker cannot hand out a Backlog
@@ -229,8 +229,7 @@ Describe the problem and intended change.
 - Modifying third-party dependencies
 
 ## Verification
-- `python3 -m unittest tests.test_foo`
-- `ruff check .`
+`python3 -m unittest discover tests` exits 0.
 
 ## Dependencies
 depends-on: none
