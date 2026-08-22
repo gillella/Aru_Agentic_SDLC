@@ -86,7 +86,7 @@ Historical note: before that alignment, defects were found by humans/Codex rathe
 ### 2.3 "Recently hardened" overstated the review layer — **historical; fixed**
 
 At the snapshot, `author:`/`reviewer:` stamping was written but opt-in and
-therefore absent in practice: `create_pr.py --agent` defaulted to empty, so PR
+therefore absent in practice: `create_pr.py --agent` defaulted to empty, so
 PR #18 was opened through the sanctioned path with no labels. The shipped helper
 now requires the author identity and stamps the PR mechanically (#19 / PR #27).
 

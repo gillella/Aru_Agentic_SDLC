@@ -1,6 +1,7 @@
 """Mechanical truth contract for the canonical factory documentation."""
 
 import re
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -35,6 +36,31 @@ def section(document, start, end):
     end_index = document.index(end, start_index + len(start))
     return document[start_index:end_index]
 
+
+
+def display_width(text):
+    """Rendered column count, not character count.
+
+    Box-drawing borders line up by rendered width, so a wide or fullwidth
+    character occupies two columns while `len()` would count it as one.
+    """
+    return sum(
+        2 if unicodedata.east_asian_width(char) in "WF" else 1
+        for char in text
+    )
+
+
+def ascii_boxes(document):
+    """Yield the line spans of each complete box-drawing rectangle."""
+    lines = document.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        stripped = line.rstrip()
+        if "\u250c" in stripped and stripped.endswith("\u2510"):
+            start = index
+        elif start is not None and "\u2514" in stripped and stripped.endswith("\u2518"):
+            yield lines[start:index + 1]
+            start = None
 
 class FactoryDocsFreshnessTests(unittest.TestCase):
     @classmethod
@@ -218,6 +244,25 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIsNone(inventory.search(document))
                 self.assertNotIn("Repository snapshot", document)
+
+
+    def test_no_duplicated_word_survives_a_line_rewrap(self):
+        """A rewrap once left "so PR / PR #18" reading as "so PR PR #18"."""
+        for path, document in self.documents.items():
+            with self.subTest(path=path):
+                collapsed = " ".join(document.split())
+                self.assertNotRegex(collapsed, r"\bPR PR\b")
+
+    def test_ascii_box_borders_align(self):
+        for path, document in self.documents.items():
+            for box in ascii_boxes(document):
+                widths = {display_width(line.rstrip()) for line in box}
+                with self.subTest(path=path, top=box[0].strip()[:40]):
+                    self.assertEqual(
+                        len(widths), 1,
+                        f"box lines render at differing widths {sorted(widths)}:\n"
+                        + "\n".join(box),
+                    )
 
 
 if __name__ == "__main__":

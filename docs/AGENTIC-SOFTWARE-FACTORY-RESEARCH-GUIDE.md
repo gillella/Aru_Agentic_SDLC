@@ -159,7 +159,7 @@ These show up across OpenAI, BCG, GitHub, CodeRabbit, Mastra, and your own facto
 ```
                          ┌─────────────────────────────────────┐
                          │         HUMAN OPERATOR              │
-                         │  Intent · Exception · Harness design │
+                         │ Intent · Exception · Harness design │
                          └──────────────┬──────────────────────┘
                                         │
          ┌──────────────────────────────▼──────────────────────────────┐
@@ -189,8 +189,8 @@ These show up across OpenAI, BCG, GitHub, CodeRabbit, Mastra, and your own facto
                              │
          ┌───────────────────▼─────────────────────────────────────────┐
          │                   SHIP (Back)                               │
-         │  Pages preview [Shipped] · promotion record [Audit-only]   │
-         │  provider delivery + rollback [Deferred: #345 / #84]       │
+         │  Pages preview [Shipped] · promotion record [Audit-only]    │
+         │  provider delivery + rollback [Deferred: #345 / #84]        │
          └───────────────────┬─────────────────────────────────────────┘
                              │
          ┌───────────────────▼─────────────────────────────────────────┐
