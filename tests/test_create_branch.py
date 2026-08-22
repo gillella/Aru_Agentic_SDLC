@@ -52,11 +52,19 @@ class WorktreeAdmissionTests(unittest.TestCase):
         issue.assert_called_once_with(999)
         worktree.assert_not_called()
 
-    def test_generated_fleet_command_passes_the_claimed_agent(self):
-        prompt = (Path(__file__).resolve().parents[1] / "prompts" /
-                  "fleet-worker.md").read_text(encoding="utf-8")
-        self.assertIn("create_branch.py\" --issue <N>", prompt)
-        self.assertIn("--worktree --agent <AGENT_ID>", prompt)
+    def test_picker_routed_branch_commands_pass_agent_and_use_reported_path(self):
+        root = Path(__file__).resolve().parents[1]
+        prompt = (root / "prompts" / "fleet-worker.md").read_text(
+            encoding="utf-8"
+        )
+        research = (root / "skills" / "research" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        for document in (prompt, research):
+            with self.subTest(document=document.splitlines()[0]):
+                normalized = " ".join(document.split())
+                self.assertIn("--worktree --agent <AGENT_ID>", normalized)
+                self.assertIn("cd <reported-worktree-path>", normalized)
 
     def test_missing_ambiguous_or_divergent_authority_fails_closed(self):
         valid_issue = self.issue("agent:agent-1", "status:in-progress")

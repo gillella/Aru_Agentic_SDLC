@@ -40,7 +40,7 @@ isolated docs branch and worktree **before the first repository write**:
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/create_branch.py" \
-  --issue <N> --type docs --worktree
+  --issue <N> --type docs --worktree --agent <AGENT_ID>
 cd <reported-worktree-path>
 ```
 

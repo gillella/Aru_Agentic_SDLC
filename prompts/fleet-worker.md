@@ -304,7 +304,7 @@ below. Never collapse research into this implementation branch.
    ```
    git fetch origin && git checkout main && git pull --ff-only
    python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <N> --type <feat|fix|chore|docs> --worktree --agent <AGENT_ID>
-   cd .worktrees/<branch-with-slashes-as-dashes>
+   cd <reported-worktree-path>
    ```
    Everything from here happens inside the worktree.
 4. **Implement.** Minimal and targeted. Match the surrounding idiom. Do not
