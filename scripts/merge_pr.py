@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3645
+# line-ceiling: 3740
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1527,10 +1527,84 @@ def _behind_by(base_ref, head_sha):
     return behind
 
 
-def check_rebased(pr, behind_resolver=None):
+# GitHub's compare endpoint returns at most this many file entries. A response
+# sitting exactly at the cap may have been truncated, and truncation can only
+# ever make two change sets look *more* disjoint than they really are -- which
+# is the one direction this gate must never be wrong in. Treat it as unknown.
+COMPARE_FILE_LIMIT = 300
+
+
+def _compare_paths(base_ref, head_sha):
+    """Paths changed from the merge-base of the two refs up to `head_sha`.
+
+    This is GitHub's three-dot compare, the same endpoint and direction
+    `_behind_by` already uses. Calling it with the arguments swapped yields the
+    other side of the fork -- what the base advanced by -- so both sides of the
+    overlap test come from one code path, with one rename rule and one
+    truncation rule rather than two of each.
+
+    Returns None for "could not determine", which every caller must treat as
+    unverifiable rather than as an empty set. Renamed entries contribute both
+    their old and new path, so a rename can never hide an overlap.
+    """
+    if not base_ref or not head_sha:
+        return None
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    data = _gh_json(["gh", "api", f"repos/{slug}/compare/{base_ref}...{head_sha}"])
+    if not isinstance(data, dict):
+        return None
+    files = data.get("files")
+    if not isinstance(files, list) or len(files) >= COMPARE_FILE_LIMIT:
+        return None
+    paths = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            return None
+        name = entry.get("filename")
+        if not isinstance(name, str) or not name:
+            return None
+        paths.add(name)
+        previous = entry.get("previous_filename")
+        if isinstance(previous, str) and previous:
+            paths.add(previous)
+    # An empty set means the compare reported no files at all. A real branch
+    # always changes something, so this is malformed data, not a clean pass.
+    return paths or None
+
+
+def _overlap_with_base_advance(pr, paths_resolver=None):
+    """Paths this branch and the base both changed since their merge-base.
+
+    Returns a sorted list (empty when the two change sets are disjoint), or
+    None when either side could not be determined.
+    """
+    resolve = paths_resolver or _compare_paths
+    base_ref = pr.get("baseRefName")
+    head_sha = pr.get("headRefOid")
+    ours = resolve(base_ref, head_sha)
+    if ours is None:
+        return None
+    # Swapped arguments: merge-base -> base tip, i.e. what the base advanced by.
+    theirs = resolve(head_sha, base_ref)
+    if theirs is None:
+        return None
+    return sorted(ours & theirs)
+
+
+def check_rebased(pr, behind_resolver=None, paths_resolver=None):
+    """Staleness gate.
+
+    A branch behind the base is not automatically stale. Requiring a literal
+    zero-behind branch deadlocks the factory, because a rebase rewrites the head
+    SHA and the review gate binds its attestation to an exact SHA -- so rebasing
+    destroys the review evidence of the very PR it was run on, and every merge
+    forces every other open PR to do it. What the gate actually needs to protect
+    is that CI and review evidence describe the merged content. That holds as
+    long as the base changed no file this branch also changed (issue #369).
+    """
     state = (pr.get("mergeStateStatus") or "").upper()
-    if state == "BEHIND":
-        return False, "Branch is behind the base. Rebase on main and re-run."
     if state == "DIRTY":
         return False, "Branch has merge conflicts with the base."
     if (pr.get("mergeable") or "").upper() == "CONFLICTING":
@@ -1555,8 +1629,30 @@ def check_rebased(pr, behind_resolver=None):
         )
     if behind > 0:
         plural = "commit" if behind == 1 else "commits"
-        return False, (
-            f"Branch is {behind} {plural} behind the base. Rebase on main and re-run."
+        try:
+            overlap = _overlap_with_base_advance(pr, paths_resolver)
+        except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
+            return False, (
+                f"Branch is {behind} {plural} behind the base and the overlap with "
+                f"the base advance could not be determined "
+                f"({type(exc).__name__}: {exc}). Rebase on main and re-run."
+            )
+        if overlap is None:
+            return False, (
+                f"Branch is {behind} {plural} behind the base and its changed-file "
+                f"data is unavailable or truncated, so the overlap with the base "
+                f"advance is unverified. Rebase on main and re-run."
+            )
+        if overlap:
+            shown = ", ".join(overlap[:3])
+            more = f" (+{len(overlap) - 3} more)" if len(overlap) > 3 else ""
+            return False, (
+                f"Branch is {behind} {plural} behind the base and both changed "
+                f"{shown}{more}. Rebase on main and re-run."
+            )
+        return True, (
+            f"Branch is {behind} {plural} behind the base, but its changes are "
+            f"disjoint from the base advance."
         )
     return True, "Branch is current with the base."
 
@@ -2818,17 +2914,18 @@ def clear_merger_claims(pr_num, cwd=None):
     return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL, cwd=cwd)
 
 
-def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None):
+def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None, paths_resolver=None):
     """Runs every Definition-of-Done check without merging.
 
     Returns ``(ok, gates)`` where ``gates`` is a list of
     ``(name, passed, message)`` in evaluation order. Shared by ``--dry-run``
     and the merge work picker so eligibility cannot drift from the gate.
 
-    ``behind_resolver`` is threaded to :func:`check_rebased` so a caller with no
-    repository to interrogate -- a hermetic fleet simulation -- can state
-    ancestry directly. Production callers omit it and get the fail-closed git
-    path, which is the point of the gate.
+    ``behind_resolver`` and ``paths_resolver`` are threaded to
+    :func:`check_rebased` so a caller with no repository to interrogate -- a
+    hermetic fleet simulation -- can state ancestry and changed paths directly.
+    Production callers omit both and get the fail-closed git path, which is the
+    point of the gate.
     """
     issue_nums = linked_issues(pr.get("body"))
     gates = [
@@ -2837,7 +2934,7 @@ def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None):
         ("verification", *check_verification(pr)),
         ("ci", *check_ci(pr)),
         ("review", *check_reviews(pr, evidence)),
-        ("rebased", *check_rebased(pr, behind_resolver)),
+        ("rebased", *check_rebased(pr, behind_resolver, paths_resolver)),
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
         ("spec-sync", *check_spec_sync(pr)),

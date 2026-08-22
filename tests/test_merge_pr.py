@@ -1,4 +1,4 @@
-# line-ceiling: 4300
+# line-ceiling: 4460
 from contextlib import nullcontext
 import json
 import os
@@ -1389,12 +1389,24 @@ def _behind(n):
     return lambda base, head: n
 
 
-class RebaseGateTests(unittest.TestCase):
-    def test_behind_blocks(self):
-        ok, msg = merge_pr.check_rebased({"mergeStateStatus": "BEHIND"}, _behind(0))
-        self.assertFalse(ok)
-        self.assertIn("Rebase", msg)
+def _paths(ours, theirs, base="main", head="deadbeef"):
+    """Changed-path resolver stub for both sides of the fork.
 
+    Asserts the three-dot direction as a side effect: `ours` is only served for
+    ``compare(base, head)`` and `theirs` only for the swapped ``compare(head,
+    base)``, so a transposed call fails loudly instead of silently comparing a
+    side against itself. ``None`` models "could not determine".
+    """
+    def resolve(first, second):
+        if (first, second) == (base, head):
+            return None if ours is None else set(ours)
+        if (first, second) == (head, base):
+            return None if theirs is None else set(theirs)
+        raise AssertionError(f"unexpected compare {first}...{second}")
+    return resolve
+
+
+class RebaseGateTests(unittest.TestCase):
     def test_conflicts_block(self):
         self.assertFalse(merge_pr.check_rebased({"mergeStateStatus": "DIRTY"}, _behind(0))[0])
         self.assertFalse(merge_pr.check_rebased({"mergeable": "CONFLICTING"}, _behind(0))[0])
@@ -1402,21 +1414,78 @@ class RebaseGateTests(unittest.TestCase):
     def test_clean_and_current_passes(self):
         self.assertTrue(merge_pr.check_rebased(_pr(), _behind(0))[0])
 
-    def test_clean_but_behind_blocks(self):
-        """The case GitHub's status cannot express on an unprotected repo."""
-        ok, msg = merge_pr.check_rebased(_pr(state="CLEAN"), _behind(3))
+    def test_behind_with_overlapping_changes_blocks(self):
+        """The case the gate exists for: the base moved a file this branch moved."""
+        ok, msg = merge_pr.check_rebased(
+            _pr(state="CLEAN"), _behind(3),
+            _paths(["scripts/merge_pr.py"], ["scripts/merge_pr.py", "docs/x.md"]))
         self.assertFalse(ok)
         self.assertIn("3 commits behind", msg)
+        self.assertIn("scripts/merge_pr.py", msg)
         self.assertIn("Rebase", msg)
 
-    def test_unstable_and_behind_blocks(self):
+    def test_behind_with_disjoint_changes_passes(self):
+        """Issue #369: a rebase here would only destroy the review attestation."""
+        ok, msg = merge_pr.check_rebased(
+            _pr(state="CLEAN"), _behind(3),
+            _paths(["scripts/merge_pr.py"], ["docs/releases.md"]))
+        self.assertTrue(ok)
+        self.assertIn("3 commits behind", msg)
+        self.assertIn("disjoint", msg)
+
+    def test_unstable_and_behind_with_overlap_blocks(self):
         """Regression: hermes-trading-automation PR #17, 18 behind, reported current."""
-        ok, msg = merge_pr.check_rebased(_pr(state="UNSTABLE"), _behind(18))
+        ok, msg = merge_pr.check_rebased(
+            _pr(state="UNSTABLE"), _behind(18), _paths(["a.py"], ["a.py"]))
         self.assertFalse(ok)
         self.assertIn("18 commits behind", msg)
 
+    def test_behind_status_is_no_longer_a_fast_path_rejection(self):
+        """A BEHIND branch still merges when it does not overlap the base."""
+        pr = dict(_pr(state="BEHIND"))
+        ok, _ = merge_pr.check_rebased(pr, _behind(2), _paths(["a.py"], ["b.py"]))
+        self.assertTrue(ok)
+
     def test_one_commit_behind_is_singular(self):
-        self.assertIn("1 commit behind", merge_pr.check_rebased(_pr(), _behind(1))[1])
+        msg = merge_pr.check_rebased(_pr(), _behind(1), _paths(["a.py"], ["a.py"]))[1]
+        self.assertIn("1 commit behind", msg)
+
+    def test_rename_on_our_side_cannot_hide_an_overlap(self):
+        """We renamed a.py -> b.py; the base edited a.py. Not disjoint."""
+        ok, msg = merge_pr.check_rebased(
+            _pr(), _behind(2), _paths(["a.py", "b.py"], ["a.py"]))
+        self.assertFalse(ok)
+        self.assertIn("a.py", msg)
+
+    def test_rename_on_the_base_side_cannot_hide_an_overlap(self):
+        ok, msg = merge_pr.check_rebased(
+            _pr(), _behind(2), _paths(["a.py"], ["a.py", "renamed.py"]))
+        self.assertFalse(ok)
+        self.assertIn("a.py", msg)
+
+    def test_overlap_message_truncates_long_lists(self):
+        shared = ["a.py", "b.py", "c.py", "d.py", "e.py"]
+        msg = merge_pr.check_rebased(_pr(), _behind(2), _paths(shared, shared))[1]
+        self.assertIn("+2 more", msg)
+
+    def test_unknown_our_side_fails_closed(self):
+        ok, msg = merge_pr.check_rebased(_pr(), _behind(3), _paths(None, ["a.py"]))
+        self.assertFalse(ok)
+        self.assertIn("unverified", msg)
+        self.assertIn("Rebase", msg)
+
+    def test_unknown_base_side_fails_closed(self):
+        ok, msg = merge_pr.check_rebased(_pr(), _behind(3), _paths(["a.py"], None))
+        self.assertFalse(ok)
+        self.assertIn("unverified", msg)
+
+    def test_paths_resolver_exception_fails_closed(self):
+        def boom(first, second):
+            raise RuntimeError("compare exploded")
+        ok, msg = merge_pr.check_rebased(_pr(), _behind(3), boom)
+        self.assertFalse(ok)
+        self.assertIn("compare exploded", msg)
+        self.assertIn("Rebase", msg)
 
     def test_unknown_ancestry_fails_closed(self):
         ok, msg = merge_pr.check_rebased(_pr(), lambda base, head: None)
@@ -1431,18 +1500,28 @@ class RebaseGateTests(unittest.TestCase):
         self.assertIn("unverified ancestry", msg)
         self.assertIn("api exploded", msg)
 
-    def test_fast_path_rejections_do_not_consult_the_resolver(self):
-        """Protected repos keep working, and the fast path costs no API call."""
+    def test_conflict_rejections_do_not_consult_any_resolver(self):
+        """Conflicts are decided before ancestry, and cost no API call."""
         calls = []
 
         def spy(base, head):
             calls.append((base, head))
             return 0
 
-        for pr in ({"mergeStateStatus": "BEHIND"}, {"mergeStateStatus": "DIRTY"},
-                   {"mergeable": "CONFLICTING"}):
-            self.assertFalse(merge_pr.check_rebased(pr, spy)[0])
+        def paths_spy(first, second):
+            calls.append((first, second))
+            return set()
+
+        for pr in ({"mergeStateStatus": "DIRTY"}, {"mergeable": "CONFLICTING"}):
+            self.assertFalse(merge_pr.check_rebased(pr, spy, paths_spy)[0])
         self.assertEqual(calls, [])
+
+    def test_current_branch_does_not_consult_the_paths_resolver(self):
+        """Zero-behind short-circuits: no reason to pay for two compare calls."""
+        def paths_spy(first, second):
+            raise AssertionError("must not be called when the branch is current")
+
+        self.assertTrue(merge_pr.check_rebased(_pr(), _behind(0), paths_spy)[0])
 
     def test_resolver_receives_base_and_head(self):
         seen = []
@@ -1471,6 +1550,96 @@ class BehindByTests(unittest.TestCase):
     def test_missing_slug_returns_none(self):
         with patch.object(merge_pr, "get_repo_slug", return_value=None):
             self.assertIsNone(merge_pr._behind_by("main", "abc"))
+
+
+class ComparePathsTests(unittest.TestCase):
+    @staticmethod
+    def _payload(files):
+        return {"files": files}
+
+    def _resolve(self, payload):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "_gh_json", return_value=payload):
+            return merge_pr._compare_paths("main", "abc")
+
+    def test_missing_refs_return_none(self):
+        self.assertIsNone(merge_pr._compare_paths("", "abc"))
+        self.assertIsNone(merge_pr._compare_paths("main", ""))
+
+    def test_missing_slug_returns_none(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value=None):
+            self.assertIsNone(merge_pr._compare_paths("main", "abc"))
+
+    def test_filenames_are_collected(self):
+        got = self._resolve(self._payload([{"filename": "a.py"}, {"filename": "b.py"}]))
+        self.assertEqual(got, {"a.py", "b.py"})
+
+    def test_rename_contributes_both_paths(self):
+        got = self._resolve(self._payload(
+            [{"filename": "new.py", "previous_filename": "old.py"}]))
+        self.assertEqual(got, {"new.py", "old.py"})
+
+    def test_response_at_the_file_cap_is_unverifiable(self):
+        """Truncation can only ever make two change sets look more disjoint."""
+        files = [{"filename": f"f{i}.py"} for i in range(merge_pr.COMPARE_FILE_LIMIT)]
+        self.assertIsNone(self._resolve(self._payload(files)))
+
+    def test_one_under_the_cap_still_resolves(self):
+        files = [{"filename": f"f{i}.py"} for i in range(merge_pr.COMPARE_FILE_LIMIT - 1)]
+        self.assertEqual(len(self._resolve(self._payload(files))),
+                         merge_pr.COMPARE_FILE_LIMIT - 1)
+
+    def test_empty_file_list_is_unverifiable_not_a_clean_pass(self):
+        self.assertIsNone(self._resolve(self._payload([])))
+
+    def test_malformed_payloads_return_none(self):
+        for payload in (None, [], {}, {"files": None}, {"files": "a.py"},
+                        {"files": [{"filename": ""}]}, {"files": [{"filename": 3}]},
+                        {"files": [{"no_filename": "a.py"}]}, {"files": ["a.py"]}):
+            self.assertIsNone(self._resolve(payload), f"{payload!r}")
+
+
+class OverlapWithBaseAdvanceTests(unittest.TestCase):
+    def test_queries_both_directions_of_the_fork(self):
+        seen = []
+
+        def resolve(first, second):
+            seen.append((first, second))
+            return {"a.py"}
+
+        merge_pr._overlap_with_base_advance(
+            {"baseRefName": "main", "headRefOid": "abc"}, resolve)
+        self.assertEqual(seen, [("main", "abc"), ("abc", "main")])
+
+    def test_disjoint_sets_report_no_overlap(self):
+        got = merge_pr._overlap_with_base_advance(
+            {"baseRefName": "main", "headRefOid": "abc"},
+            _paths(["a.py"], ["b.py"], base="main", head="abc"))
+        self.assertEqual(got, [])
+
+    def test_overlap_is_sorted(self):
+        got = merge_pr._overlap_with_base_advance(
+            {"baseRefName": "main", "headRefOid": "abc"},
+            _paths(["z.py", "a.py"], ["a.py", "z.py"], base="main", head="abc"))
+        self.assertEqual(got, ["a.py", "z.py"])
+
+    def test_either_side_unknown_is_unknown(self):
+        for ours, theirs in ((None, ["a.py"]), (["a.py"], None)):
+            got = merge_pr._overlap_with_base_advance(
+                {"baseRefName": "main", "headRefOid": "abc"},
+                _paths(ours, theirs, base="main", head="abc"))
+            self.assertIsNone(got)
+
+    def test_base_side_is_not_queried_when_our_side_is_unknown(self):
+        calls = []
+
+        def resolve(first, second):
+            calls.append((first, second))
+            return None
+
+        merge_pr._overlap_with_base_advance(
+            {"baseRefName": "main", "headRefOid": "abc"}, resolve)
+        self.assertEqual(calls, [("main", "abc")])
 
 
 class SizeGateTests(unittest.TestCase):
