@@ -307,8 +307,9 @@ corrupts someone else's work, not just yours.
    this on every PR regardless of which tool you are.
 2. **Never touch shared spine files** — `AGENTS.md`, `PROJECT-PLAN.md`,
    `pyproject.toml`, `.github/workflows/*` — unless your issue names them.
-3. **Never review any PR.** CodeRabbit alone reviews. Never remove another
-   agent's `agent:*` or `author:*` label or change another agent's issue status.
+3. **Coding agents never review.** CodeRabbit alone reviews. Never remove
+   another agent's `agent:*` or `author:*` label or change another agent's
+   issue status.
 4. **Never commit to `main`**, never force-push a branch that is not yours.
 5. **One work item at a time.** Finish or release before asking for more.
 6. **Never merge directly.** Only `merge_pr.py` has merge authority, and only

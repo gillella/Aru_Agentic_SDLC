@@ -217,8 +217,9 @@ or other irreversible work from the plan gate.
 ### Step 11: CodeRabbit Review and Handoff
 1. Transition the issue/PR Project Board status to `In Review`:
    `python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" --issue <ISSUE_ID> --status "In Review"`.
-2. Await CodeRabbit's review. Never claim review work, invoke `code-review`, or
-   ask Claude, Codex, Cursor, or Antigravity to review a PR.
+2. Await CodeRabbit's review. Coding agents never review. Never claim review
+   work, invoke `code-review`, or ask Claude, Codex, Cursor, or Antigravity to
+   review a PR.
 3. Route every actionable CodeRabbit finding to the author or adopted
    implementation/remediation agent and use `address-pr-feedback` until the
    authoritative current-head review and thread gates pass.

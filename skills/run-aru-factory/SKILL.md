@@ -104,7 +104,7 @@ It returns one item and claims it. Follow the skill for its type:
 | type | skill |
 |---|---|
 | `feedback` | `address-pr-feedback` |
-| `review` | Forbidden legacy state: release your reviewer claim, then return to picker; CodeRabbit alone reviews |
+| `review` | Forbidden legacy state: release your reviewer claim, then return to picker; CodeRabbit alone reviews. Coding agents never review |
 | `issue` with `skill: research` | `research` |
 | any other `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
@@ -205,8 +205,8 @@ Restated only because skipping one is how each has been broken before.
    `--agent <id>`; `--model-family <family>` is optional.
 7. **Degraded GitHub halts coordination gracefully** — never a secondary local
    task queue or an ungated merge. See `docs/degraded-mode.md`.
-8. **Never review any PR.** CodeRabbit is the sole code-review authority.
-   Coding agents never review. The
+8. **Coding agents never review.** CodeRabbit is the sole code-review
+   authority. The
    merge gate requires its exact-current-head evidence and rejects coding-agent
    comments, approvals, labels, and attestations.
 
