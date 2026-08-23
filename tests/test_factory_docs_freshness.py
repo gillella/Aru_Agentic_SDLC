@@ -1,3 +1,4 @@
+# line-ceiling: 430
 """Mechanical truth contract for the canonical factory documentation."""
 
 import re

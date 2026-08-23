@@ -3,10 +3,10 @@
 > **Current review policy (Issue #373):** CodeRabbit is the sole PR code-review
 > authority. Coding-agent `reviewer:` / `reviewed-by:` workflows described in
 > historical sections below are retired and cannot satisfy the merge gate.
-> Claude, Codex, Cursor, and Antigravity implement, remediate, and
-> mechanically merge only through the governed `merge_pr.py` helper after
-> CodeRabbit completes a substantive exact-head review and every enforced gate
-> passes; they never review.
+> Claude, Codex, Cursor, and Antigravity implement, remediate, and mechanically
+> merge only through the governed `merge_pr.py` helper after CodeRabbit
+> completes a substantive exact-head review and every enforced gate passes;
+> they never review.
 
 **Goal:** idea → deployed software through an autonomous governed loop, with
 operator visibility and exceptional human intervention only for an unresolved
@@ -206,12 +206,12 @@ reported as unavailable rather than converted into a false cost claim.
 
 ## 4. The operator visibility and intervention interface
 
-The factory proceeds autonomously through planning, independent-agent review,
-and mechanical merge. Money, PII, security, schema, migration, diff size, and
-review-round count increase the evidence required but do not create human
-review or merge gates. Product intent still belongs in issue acceptance
-criteria; if a required decision is absent, agents record the options and keep
-the requirement blocked rather than inventing it.
+The factory proceeds autonomously through planning, CodeRabbit review, agent
+remediation, and mechanical merge. Money, PII, security, schema, migration,
+diff size, and review-round count increase the evidence required but do not
+create human review or merge gates. Product intent still belongs in issue
+acceptance criteria; if a required decision is absent, agents record the
+options and keep the requirement blocked rather than inventing it.
 
 ### 4.1 The one mandatory human intervention
 
@@ -219,7 +219,7 @@ Human intervention is required only when a severe merge conflict or merge/
 close-out failure remains unsafe or impossible for agents to resolve through
 governed remediation. The escalation must state the evidence, attempted fixes,
 preserved artifacts, and exact action needed. Everything else stays in the
-agent implementation/review/remediation loop.
+agent implementation/remediation/mechanical-merge loop.
 
 ### 4.2 What the operator must be able to see in one screen
 
