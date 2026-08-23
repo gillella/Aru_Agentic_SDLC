@@ -911,6 +911,53 @@ class ReviewGateTests(unittest.TestCase):
     def coderabbit_pr(*labels):
         return coderabbit_pr(*labels)
 
+    @staticmethod
+    def coderabbit_checkrun_status():
+        return [{
+            "__typename": "CheckRun",
+            "name": "CodeRabbit",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "coderabbitai"}},
+        }]
+
+    def no_findings_full_review_evidence(
+        self,
+        *,
+        head="a" * 40,
+        request_time="2026-08-23T22:58:00Z",
+        review_time="2026-08-23T22:59:55Z",
+        completion_time="2026-08-23T23:00:10Z",
+        head_commit_time="2026-08-23T22:57:00Z",
+        request_author="gillella",
+        request_type="User",
+        completion_author="coderabbitai[bot]",
+        completion_type="Bot",
+        include_request=True,
+        include_completion=True,
+        extra_comments=None,
+    ):
+        evidence = self.coderabbit_evidence(head=head, body="", state="COMMENTED")
+        evidence["reviews"][0]["submittedAt"] = review_time
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        evidence["head_commit_committed_at"] = head_commit_time
+        comments = []
+        if include_request:
+            comments.append({
+                "body": "@coderabbitai full review",
+                "createdAt": request_time,
+                "author": {"login": request_author, "__typename": request_type},
+            })
+        if include_completion:
+            comments.append({
+                "body": "Full review finished.",
+                "createdAt": completion_time,
+                "author": {"login": completion_author, "__typename": completion_type},
+            })
+        comments.extend([] if extra_comments is None else extra_comments)
+        evidence["coderabbit_full_review_comments"] = comments
+        return evidence
+
     def test_coderabbit_current_head_substantive_review_is_sole_authority(self):
         ok, msg = merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1", "reviewed-by:agent-2"),
@@ -980,6 +1027,72 @@ class ReviewGateTests(unittest.TestCase):
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
         }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_valid_no_findings_full_review_passes(self):
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(),
+        )
+        self.assertTrue(ok, msg)
+
+    def test_automatic_empty_review_without_full_review_request_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(include_request=False),
+        )[0])
+
+    def test_empty_review_without_completion_comment_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(include_completion=False),
+        )[0])
+
+    def test_spoofed_full_review_completion_author_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(
+                completion_author="octocat",
+                completion_type="User",
+            ),
+        )[0])
+
+    def test_completion_before_request_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(
+                request_time="2026-08-23T23:00:00Z",
+                completion_time="2026-08-23T22:59:00Z",
+            ),
+        )[0])
+
+    def test_request_before_current_head_commit_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(
+                head_commit_time="2026-08-23T22:58:30Z",
+                request_time="2026-08-23T22:58:00Z",
+            ),
+        )[0])
+
+    def test_tied_full_review_request_events_are_ambiguous(self):
+        evidence = self.no_findings_full_review_evidence(extra_comments=[{
+            "body": "@coderabbitai full review",
+            "createdAt": "2026-08-23T22:58:00Z",
+            "author": {"login": "other-user", "__typename": "User"},
+        }])
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_tied_full_review_completion_events_are_ambiguous(self):
+        evidence = self.no_findings_full_review_evidence(extra_comments=[{
+            "body": "Full review finished.",
+            "createdAt": "2026-08-23T23:00:10Z",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }])
         self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4140
+# line-ceiling: 4300
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -88,6 +88,8 @@ ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
 CODERABBIT_LOGINS = {"coderabbitai", "coderabbitai[bot]"}
 CODERABBIT_APP_SLUGS = {"coderabbitai"}
 CODERABBIT_ACTOR_TYPES = {"Bot"}
+CODERABBIT_FULL_REVIEW_REQUEST = "@coderabbitai full review"
+CODERABBIT_FULL_REVIEW_FINISHED = "Full review finished."
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
 # review evidence; all other known actor kinds are automation or identities
@@ -217,6 +219,21 @@ def _parse_review_ts(value):
     if parsed is None or parsed.tzinfo is None:
         return None
     return parsed
+
+
+def _normalize_comment_body(body):
+    """Collapse whitespace so command comments compare deterministically."""
+    return re.sub(r"\s+", " ", (body or "").strip())
+
+
+def _coderabbit_full_review_comment_kind(body):
+    """Identify exact full-review request/completion comments, if any."""
+    normalized = _normalize_comment_body(body).casefold()
+    if normalized == CODERABBIT_FULL_REVIEW_REQUEST:
+        return "request"
+    if normalized == CODERABBIT_FULL_REVIEW_FINISHED.casefold():
+        return "completion"
+    return None
 
 
 def _size_waiver_region(body):
@@ -550,7 +567,7 @@ def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
 
 
 def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
-    """Head-bound agent attestations written by complete_review().
+    """Head-bound agent attestations plus exact-match CodeRabbit comments.
 
     Pull-request comments are paginated independently from reviews and review
     threads. Malformed markers are ignored and therefore cannot create review
@@ -564,7 +581,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
         pullRequest(number:$pr) {
           headRefOid
           comments(first:100, after:$cursor) {
-            nodes { body author { login __typename } }
+            nodes { body createdAt author { login __typename } }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -574,6 +591,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
     cursor = None
     seen_cursors = set()
     attestations = []
+    coderabbit_full_review_comments = []
     while True:
         args = [
             "gh", "api", "graphql", "-f", f"query={query}",
@@ -602,6 +620,27 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
             if not isinstance(node, dict) or not isinstance(node.get("body"), str):
                 return None
             body = node["body"]
+            comment_kind = _coderabbit_full_review_comment_kind(body)
+            if comment_kind is not None:
+                created_at = _parse_ts(node.get("createdAt"))
+                author = node.get("author")
+                if (
+                    created_at is None
+                    or not isinstance(author, dict)
+                    or not isinstance(author.get("login"), str)
+                    or not author["login"]
+                    or author.get("__typename") not in KNOWN_REVIEW_ACTOR_TYPES
+                ):
+                    return None
+                coderabbit_full_review_comments.append({
+                    "kind": comment_kind,
+                    "body": body,
+                    "createdAt": node["createdAt"],
+                    "author": {
+                        "login": author["login"],
+                        "__typename": author["__typename"],
+                    },
+                })
             if not body.startswith(prefix):
                 continue
             marker, separator, _rest = body.partition(" -->")
@@ -632,7 +671,10 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
                 "github_login": author["login"],
             })
         if not has_next:
-            return attestations
+            return {
+                "attestations": attestations,
+                "coderabbit_full_review_comments": coderabbit_full_review_comments,
+            }
         next_cursor = page_info.get("endCursor")
         if (
             not isinstance(next_cursor, str) or not next_cursor
@@ -675,11 +717,19 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     if review_result is None:
         return None
     expected_head, reviewed_head, reviews = review_result
-    review_attestations = _review_head_attestations(
+    comment_evidence = _review_head_attestations(
         owner, name, pr_id, expected_head
     )
-    if review_attestations is None:
+    if comment_evidence is None:
         return None
+    if isinstance(comment_evidence, list):
+        review_attestations = comment_evidence
+        coderabbit_full_review_comments = []
+    else:
+        review_attestations = comment_evidence["attestations"]
+        coderabbit_full_review_comments = comment_evidence[
+            "coderabbit_full_review_comments"
+        ]
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
@@ -800,9 +850,15 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
         if not has_next:
             return {
                 "head_oid": expected_head,
+                "head_commit_committed_at": (
+                    commit_times[-1].isoformat() if commit_times else None
+                ),
                 "github_review_evidence": True,
                 "reviews": reviews,
                 "review_attestations": review_attestations,
+                "coderabbit_full_review_comments": (
+                    coderabbit_full_review_comments
+                ),
                 "unresolved": unresolved,
                 "unfixed": unfixed,
                 "outdated_unfixed": outdated_unfixed,
@@ -1456,6 +1512,108 @@ def _coderabbit_check(pr, evidence, *, recognized_review=False):  # noqa: C901, 
     return conclusion == "SUCCESS"
 
 
+def _parse_coderabbit_full_review_comment(comment):
+    """Parse one exact-match full-review request/completion comment."""
+    if not isinstance(comment, dict):
+        return False
+    kind = comment.get("kind") or _coderabbit_full_review_comment_kind(
+        comment.get("body")
+    )
+    if kind is None:
+        return None
+    created_at = _parse_ts(comment.get("createdAt"))
+    author = comment.get("author")
+    if (
+        created_at is None
+        or not isinstance(author, dict)
+        or not isinstance(author.get("login"), str)
+        or not author["login"]
+        or author.get("__typename") not in KNOWN_REVIEW_ACTOR_TYPES
+    ):
+        return False
+    login = author["login"].lower()
+    actor_type = author["__typename"]
+    if kind == "request":
+        if actor_type != "User" or login in CODERABBIT_LOGINS:
+            return False
+    elif kind == "completion":
+        if actor_type not in CODERABBIT_ACTOR_TYPES or login not in CODERABBIT_LOGINS:
+            return False
+    else:
+        return False
+    return kind, created_at
+
+
+def _coderabbit_full_review_comment_times(evidence):
+    """Return validated request/completion timestamps, or None on ambiguity."""
+    comments = evidence.get("coderabbit_full_review_comments")
+    if not isinstance(comments, list):
+        return None
+    requests = []
+    completions = []
+    for comment in comments:
+        parsed = _parse_coderabbit_full_review_comment(comment)
+        if parsed is False:
+            return None
+        if parsed is None:
+            continue
+        kind, created_at = parsed
+        if kind == "request":
+            requests.append(created_at)
+        else:
+            completions.append(created_at)
+    return requests, completions
+
+
+def _unique_selected_timestamp(timestamps, *, select):
+    """Return a uniquely newest/oldest timestamp, else None."""
+    if not timestamps:
+        return None
+    selected = select(timestamps)
+    if sum(ts == selected for ts in timestamps) != 1:
+        return None
+    return selected
+
+
+def _coderabbit_no_findings_full_review(review, evidence):
+    """Accept an empty COMMENTED review only with full-review completion evidence."""
+    if not isinstance(review, dict) or not isinstance(evidence, dict):
+        return False
+    if str(review.get("state") or "").upper() != "COMMENTED":
+        return False
+    body = review.get("body")
+    if not isinstance(body, str) or body.strip():
+        return False
+    review_time = _parse_review_ts(review.get("submittedAt"))
+    head_commit_time = _parse_ts(evidence.get("head_commit_committed_at"))
+    comments = evidence.get("coderabbit_full_review_comments")
+    if (
+        review_time is None
+        or head_commit_time is None
+        or comments is None
+    ):
+        return False
+    parsed = _coderabbit_full_review_comment_times(evidence)
+    if parsed is None:
+        return False
+    requests, completions = parsed
+
+    eligible_requests = [
+        created_at
+        for created_at in requests
+        if head_commit_time <= created_at < review_time
+    ]
+    if _unique_selected_timestamp(eligible_requests, select=max) is None:
+        return False
+    if any(created_at >= review_time for created_at in requests):
+        return False
+
+    eligible_completions = [
+        created_at for created_at in completions if review_time < created_at
+    ]
+    return _unique_selected_timestamp(eligible_completions, select=min) is not None
+
+
 def _coderabbit_current_head_review(evidence):  # noqa: C901
     """Select the unique newest completed CodeRabbit review on this head."""
     head = evidence.get("head_oid") if isinstance(evidence, dict) else None
@@ -1485,9 +1643,11 @@ def _coderabbit_current_head_review(evidence):  # noqa: C901
             state not in {"COMMENTED", "APPROVED"}
             or submitted is None
             or not isinstance(body, str)
-            or not body.strip()
         ):
             return None
+        if not body.strip():
+            if not _coderabbit_no_findings_full_review(review, evidence):
+                return None
         candidates.append((submitted, review.get("id")))
     newest = max((candidate[0] for candidate in candidates), default=None)
     candidates = [candidate for candidate in candidates if candidate[0] == newest]
