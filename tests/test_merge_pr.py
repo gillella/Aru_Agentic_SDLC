@@ -1021,8 +1021,8 @@ class ReviewGateTests(unittest.TestCase):
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
 
-    def test_empty_body_exact_head_review_fails_closed_even_with_successful_status(self):
-        evidence = self.coderabbit_evidence(body="")
+    def test_empty_body_commented_exact_head_review_fails_closed_even_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="", state="COMMENTED")
         evidence["coderabbit_status"] = [{
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
@@ -1030,6 +1030,15 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
+
+    def test_empty_body_approved_exact_head_review_passes_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="", state="APPROVED")
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
 
     def test_valid_no_findings_full_review_passes(self):
         ok, msg = merge_pr.check_reviews(
@@ -1097,8 +1106,8 @@ class ReviewGateTests(unittest.TestCase):
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
 
-    def test_whitespace_body_exact_head_review_fails_closed_even_with_successful_status(self):
-        evidence = self.coderabbit_evidence(body="   \n\t")
+    def test_whitespace_body_commented_exact_head_review_fails_closed_even_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="   \n\t", state="COMMENTED")
         evidence["coderabbit_status"] = [{
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
@@ -1106,6 +1115,15 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
+
+    def test_whitespace_body_approved_exact_head_review_passes_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="   \n\t", state="APPROVED")
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
 
     def test_null_status_creator_passes_only_with_recognized_exact_head_review(self):
         evidence = self.coderabbit_evidence(body="Review complete.")

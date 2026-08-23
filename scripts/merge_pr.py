@@ -1645,7 +1645,7 @@ def _coderabbit_current_head_review(evidence):  # noqa: C901
             or not isinstance(body, str)
         ):
             return None
-        if not body.strip():
+        if state == "COMMENTED" and not body.strip():
             if not _coderabbit_no_findings_full_review(review, evidence):
                 return None
         candidates.append((submitted, review.get("id")))
