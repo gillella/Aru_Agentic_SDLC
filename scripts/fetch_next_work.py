@@ -63,7 +63,6 @@ from claim_issue import (
     claim_merge,
     merge_claimant,
     reap_stale_merges,
-    reviewed_by,
 )
 from common import (
     board_agent_identities,
@@ -615,9 +614,8 @@ def _author_can_repair_review(pr: dict[str, Any]) -> bool:
     evidence = review_evidence(pr["number"])
     if not evidence:
         return False
-    if not evidence.get("reviewed_head"):
-        return False
-    if not merge_pr.has_authoritative_coderabbit_review(evidence):
+    evidence = merge_pr._with_coderabbit_status(pr["number"], evidence)
+    if not merge_pr.has_authoritative_coderabbit_review(pr, evidence):
         return False
     if int(evidence.get("unresolved") or 0) > 0:
         return False

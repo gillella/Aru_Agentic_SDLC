@@ -1446,9 +1446,14 @@ def _coderabbit_current_head_review(evidence):
     return candidates[0]
 
 
-def has_authoritative_coderabbit_review(evidence):
-    """Whether GitHub review data proves CodeRabbit reviewed this exact head."""
-    return _coderabbit_current_head_review(evidence) is not None
+def has_authoritative_coderabbit_review(pr, evidence):
+    """True only when CodeRabbit reviewed this head and its hosted check passed."""
+    if not isinstance(pr, dict) or not isinstance(evidence, dict):
+        return False
+    return (
+        _coderabbit_current_head_review(evidence) is not None
+        and _coderabbit_check(pr, evidence) is True
+    )
 
 
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
@@ -1508,9 +1513,7 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
             "withdraw the finding with a reason."
         )
 
-    coderabbit_review = _coderabbit_current_head_review(evidence)
-    coderabbit_check = _coderabbit_check(pr, evidence)
-    if coderabbit_review is None or coderabbit_check is not True:
+    if not has_authoritative_coderabbit_review(pr, evidence):
         return False, (
             "CodeRabbit has not supplied one completed, substantive review on "
             "the exact current head with a successful authoritative CodeRabbit "
