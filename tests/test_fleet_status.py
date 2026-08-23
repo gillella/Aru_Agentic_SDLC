@@ -577,6 +577,33 @@ class FleetStatusTests(unittest.TestCase):
                 mock_pr(
                     33, decision="APPROVED",
                     comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
+                    statusCheckRollup=[{
+                        "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
+                    }],
+                    _review_evidence={
+                        "head_oid": "c" * 40,
+                        "unresolved": 0,
+                        "unfixed": 0,
+                        "outdated_unfixed": 0,
+                        "reviewed_head": True,
+                        "reviews": [{
+                            "id": "coderabbit-review",
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-08-22T00:00:00Z",
+                            "body": "Review complete.",
+                            "commit": {"oid": "c" * 40},
+                            "author": {
+                                "login": "coderabbitai[bot]", "__typename": "Bot",
+                            },
+                        }],
+                        "coderabbit_status": [{
+                            "__typename": "CheckRun",
+                            "name": "CodeRabbit",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "checkSuite": {"app": {"slug": "coderabbit"}},
+                        }],
+                    },
                 ),
             ]
         )
@@ -957,12 +984,13 @@ class FleetStatusTests(unittest.TestCase):
              }):
             self.assertTrue(_pending_review(pr_coderabbit_stale))
 
-        # Approved PR: waiting on merge, not review queue
+        # Generic approval is not authoritative CodeRabbit review evidence.
         pr_approved = {
             "number": 12, "isDraft": False, "reviewDecision": "APPROVED",
             "unresolvedReviewThreadsCount": 0, "labels": [],
+            "_review_evidence": None,
         }
-        self.assertFalse(_pending_review(pr_approved))
+        self.assertTrue(_pending_review(pr_approved))
 
         # Legacy reviewed-by labels do not satisfy the CodeRabbit-only contract.
         pr_reviewed = {
@@ -987,6 +1015,7 @@ class FleetStatusTests(unittest.TestCase):
                  "head_oid": "b" * 40,
                  "unresolved": 0,
                  "unfixed": 0,
+                 "outdated_unfixed": 0,
                  "withdrawn": 0,
                  "reviewed_head": True,
                  "reviews": [{
@@ -997,10 +1026,31 @@ class FleetStatusTests(unittest.TestCase):
                      "commit": {"oid": "b" * 40},
                      "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
                  }],
+                 "coderabbit_status": [{
+                     "__typename": "CheckRun",
+                     "name": "CodeRabbit",
+                     "status": "COMPLETED",
+                     "conclusion": "SUCCESS",
+                     "checkSuite": {"app": {"slug": "coderabbit"}},
+                 }],
              }):
             status = self.evaluate_fixture(prs=[reviewed])
         self.assertIn("PR #18 is reviewed and waiting for merge.", status["reasons"])
         self.assertNotIn("PR #18 is open and pending review.", status["reasons"])
+
+    def test_review_state_keeps_generic_approval_pending_without_authoritative_coderabbit(self):
+        from fleet_status import _review_state
+
+        pr = {
+            "number": 19,
+            "isDraft": False,
+            "reviewDecision": "APPROVED",
+            "unresolvedReviewThreadsCount": 0,
+            "labels": [],
+            "_review_evidence": None,
+        }
+
+        self.assertEqual(_review_state(pr), "pending")
 
     def test_api_failure_still_never_reports_complete(self):
         status = evaluate_fleet_status("/definitely/not/a/repository")

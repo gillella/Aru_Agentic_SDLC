@@ -506,11 +506,8 @@ def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
 def _review_state(pr: Dict[str, Any]) -> str:
     if pr.get("isDraft"):
         return "none"
-    decision = (pr.get("reviewDecision") or "").upper()
     if _has_active_review_feedback(pr):
         return "feedback"
-    if decision == "APPROVED":
-        return "reviewed"
     coderabbit_state = _coderabbit_review_state(pr)
     if coderabbit_state:
         return coderabbit_state
