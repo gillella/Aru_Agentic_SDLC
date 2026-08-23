@@ -1,4 +1,4 @@
-# line-ceiling: 5000
+# line-ceiling: 5100
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -1458,15 +1458,37 @@ def _actions_check_run(name, started, run_id, conclusion="SUCCESS"):
 
 
 def _workflow_run(run_id, *, pr_number=370, base_oid="base-tip", head="deadbeef",
-                  event="pull_request"):
+                  event="pull_request", run_attempt=1, created_at=_AFTER_ADVANCE,
+                  run_started_at=_AFTER_ADVANCE, linked_base_oid=None,
+                  linked_head=None):
+    linked_base = base_oid if linked_base_oid is None else linked_base_oid
+    linked_head_sha = head if linked_head is None else linked_head
     return {
         "id": run_id,
+        "name": "CI Pipeline",
+        "head_branch": "fix/issue-369-fixmerge-accept-behind-branche",
+        "head_sha": head,
+        "display_title": "fix(merge): accept behind branches disjoint from the base advance",
         "event": event,
+        "status": "completed",
+        "conclusion": "success",
+        "workflow_id": 329393520,
+        "url": f"https://api.github.com/repos/owner/repo/actions/runs/{run_id}",
+        "html_url": f"https://github.com/owner/repo/actions/runs/{run_id}",
         "pull_requests": [{
             "number": pr_number,
-            "base": {"sha": base_oid},
-            "head": {"sha": head},
+            "base": {"ref": "main", "sha": linked_base},
+            "head": {"ref": "fix/issue-369-fixmerge-accept-behind-branche",
+                     "sha": linked_head_sha},
         }],
+        "created_at": created_at,
+        "updated_at": run_started_at,
+        "run_attempt": run_attempt,
+        "run_started_at": run_started_at,
+        "previous_attempt_url": None if run_attempt == 1 else (
+            f"https://api.github.com/repos/owner/repo/actions/runs/{run_id}/attempts/"
+            f"{run_attempt - 1}"
+        ),
     }
 
 
@@ -1627,7 +1649,13 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
     def _check(self, pr, behind=2, ours=("a.py",), theirs=("b.py",), when=_ADVANCE_AT,
                run_resolver=None):
         return merge_pr.check_rebased(
-            pr, _behind(behind), _paths(list(ours), list(theirs)), _advance(when),
+            pr, _behind(behind),
+            _paths(list(ours), list(theirs),
+                   base=pr.get("baseRefName", "main"),
+                   head=pr.get("headRefOid", "deadbeef")),
+            _advance(when,
+                     base=pr.get("baseRefName", "main"),
+                     head=pr.get("headRefOid", "deadbeef")),
             run_resolver,
         )
 
@@ -1644,19 +1672,47 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
         self.assertIn("disjoint", msg)
         self.assertIn("after the base advance", msg)
 
-    def test_fresh_pull_request_run_on_the_current_base_passes(self):
+    def test_fresh_attempt_one_current_head_event_after_advance_passes(self):
         pr = _ci_pr(
             [_actions_check_run("Lint", _AFTER_ADVANCE, 91)],
             base_oid="base-now",
+            head="current-head",
         )
         ok, msg = self._check(
             pr,
             run_resolver=_workflow_runs({
-                91: _workflow_run(91, base_oid="base-now"),
+                91: _workflow_run(91, base_oid="base-now", head="current-head"),
             }),
         )
         self.assertTrue(ok)
         self.assertIn("disjoint", msg)
+
+    def test_live_resolved_nested_pr_metadata_cannot_false_pass(self):
+        """Historical run 32576962919 proves nested PR OIDs drift with time."""
+        current_head = "7daca5ded45321bed41aac186fabfcddeb0eee61"
+        current_base = "83309704548b7716d3f71f620762cd3d465d63d9"
+        pr = _ci_pr(
+            [_actions_check_run("Lint", _AFTER_ADVANCE, 32576962919)],
+            base_oid=current_base,
+            head=current_head,
+        )
+        ok, msg = self._check(
+            pr,
+            run_resolver=_workflow_runs({
+                32576962919: _workflow_run(
+                    32576962919,
+                    head="5b727c16387ee350de1cfd559419eb49ab000776",
+                    base_oid=current_base,
+                    created_at="2026-08-22T13:51:04Z",
+                    run_started_at="2026-08-22T13:51:04Z",
+                    linked_base_oid=current_base,
+                    linked_head=current_head,
+                ),
+            }),
+        )
+        self.assertFalse(ok)
+        self.assertIn("event-time head", msg)
+        self.assertIn("5b727c16387ee350de1cfd559419eb49ab000776", msg)
 
     def test_one_stale_check_among_fresh_ones_blocks(self):
         """Freshness is a property of the whole rollup, not of its best member."""
@@ -1683,26 +1739,71 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
         pr = _ci_pr(
             [_actions_check_run("Lint", _AFTER_ADVANCE, 92)],
             base_oid="base-now",
+            head="current-head",
         )
         ok, msg = self._check(
             pr,
             run_resolver=_workflow_runs({
-                92: _workflow_run(92, base_oid="base-before-advance"),
+                92: _workflow_run(
+                    92,
+                    base_oid="base-now",
+                    head="current-head",
+                    run_attempt=2,
+                ),
             }),
         )
         self.assertFalse(ok)
+        self.assertIn("attempt 2", msg)
         self.assertIn("fresh pull_request event", msg)
         self.assertIn("close and reopen", msg)
         self.assertIn("Do not rebase", msg)
 
-    def test_actions_run_without_current_base_proof_fails_closed(self):
+    def test_actions_run_with_wrong_event_time_head_fails_closed(self):
         pr = _ci_pr(
             [_actions_check_run("Lint", _AFTER_ADVANCE, 93)],
             base_oid="base-now",
+            head="current-head",
         )
-        ok, msg = self._check(pr, run_resolver=_workflow_runs({}))
+        ok, msg = self._check(
+            pr,
+            run_resolver=_workflow_runs({
+                93: _workflow_run(93, base_oid="base-now", head="old-head"),
+            }),
+        )
         self.assertFalse(ok)
-        self.assertIn("could not be verified", msg)
+        self.assertIn("event-time head", msg)
+
+    def test_actions_run_without_event_time_head_fails_closed(self):
+        pr = _ci_pr(
+            [_actions_check_run("Lint", _AFTER_ADVANCE, 94)],
+            base_oid="base-now",
+            head="current-head",
+        )
+        payload = _workflow_run(94, base_oid="base-now", head="current-head")
+        del payload["head_sha"]
+        ok, msg = self._check(pr, run_resolver=_workflow_runs({94: payload}))
+        self.assertFalse(ok)
+        self.assertIn("event-time head", msg)
+
+    def test_malformed_actions_event_time_metadata_fails_closed(self):
+        pr = _ci_pr(
+            [_actions_check_run("Lint", _AFTER_ADVANCE, 95)],
+            base_oid="base-now",
+            head="current-head",
+        )
+        ok, msg = self._check(
+            pr,
+            run_resolver=_workflow_runs({
+                95: _workflow_run(
+                    95,
+                    base_oid="base-now",
+                    head="current-head",
+                    created_at="not-a-timestamp",
+                ),
+            }),
+        )
+        self.assertFalse(ok)
+        self.assertIn("event-time timestamps", msg)
 
     def test_missing_start_time_fails_closed(self):
         """completedAt is not a substitute: a run can finish after it read."""

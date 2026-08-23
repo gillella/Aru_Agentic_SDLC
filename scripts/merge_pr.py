@@ -1694,15 +1694,16 @@ def _ci_saw_base_advance(pr, advance_resolver=None, run_resolver=None):
     GitHub documents that a re-run keeps the original event's `GITHUB_SHA` and
     `GITHUB_REF`, so a later `startedAt` alone does not prove that the run saw
     the current synthetic merge ref. For those checks, this function therefore
-    also verifies that the underlying workflow run is a `pull_request` run for
-    this PR's current head and current base.
+    also verifies that the underlying workflow run is an attempt-1
+    `pull_request` run for this PR's current head whose own event-time
+    `created_at` and `run_started_at` both postdate the base advance.
 
     The residual this still does *not* close is GitHub's own merge-ref
     recomputation lag: a fresh `pull_request` event can still begin in the
     seconds before the merge ref itself is rebuilt. That window is orders of
-    magnitude smaller than the unbounded one above, and the run metadata still
+    magnitude smaller than the unbounded one above, but the run metadata still
     does not name the exact merge commit the runner checked out, so the literal
-    tested-merge identity proof cannot be derived from here.
+    tested-merge identity proof still cannot be derived from here.
     """
     resolve = advance_resolver or _base_advance_time
     advanced = resolve(pr.get("baseRefName"), pr.get("headRefOid"))
@@ -1744,7 +1745,7 @@ def _ci_saw_base_advance(pr, advance_resolver=None, run_resolver=None):
     run_cache = {}
     for name in required(current):
         evidence = _github_actions_current_base_evidence(
-            pr, current[name], run_resolver=run_resolver, cache=run_cache,
+            pr, current[name], advanced, run_resolver=run_resolver, cache=run_cache,
         )
         if evidence is None:
             continue
@@ -1778,13 +1779,45 @@ def _github_actions_run(run_id):
     return _gh_json(["gh", "api", f"repos/{slug}/actions/runs/{run_id}"])
 
 
-def _github_actions_current_base_evidence(pr, check, run_resolver=None, cache=None):
+def _github_actions_run_timestamps(data, advanced):
+    """Workflow-run creation/start stamps, validated against the base advance."""
+    created = _utc_stamp(data.get("created_at"))
+    started = _utc_stamp(data.get("run_started_at"))
+    if created is None or started is None:
+        return False, (
+            "does not report usable event-time timestamps for created_at and "
+            "run_started_at"
+        )
+    if started < created:
+        return False, (
+            "reports event-time timestamps out of order: "
+            f"created_at {created.isoformat()}, run_started_at {started.isoformat()}"
+        )
+    if created <= advanced or started <= advanced:
+        return False, (
+            f"was created at {created.isoformat()} and started at "
+            f"{started.isoformat()}, no later than the base advance at "
+            f"{advanced.isoformat()}"
+        )
+    return True, ""
+
+
+def _github_actions_current_base_evidence(pr, check, advanced, run_resolver=None,
+                                          cache=None):
     """Current-base proof for one GitHub Actions check run, or None if not one.
 
     Plain workflow re-runs reuse the original event's `GITHUB_SHA` and
     `GITHUB_REF`, so a later `startedAt` is not enough to prove that a GitHub
-    Actions run tested the current merge ref. For Actions runs, require the
-    recorded workflow run to still name this PR's current head and current base.
+    Actions run tested the current merge ref. For Actions runs, accept only
+    genuine event-time metadata: the workflow run must be an attempt-1
+    `pull_request` run for this PR's current head, and its own creation/start
+    stamps must both land after the base advance.
+
+    Deliberately do *not* read `pull_requests[].base/head` here. GitHub's REST
+    workflow-run payload live-resolves those nested PR objects; historical run
+    32576962919 in this repository reports event-time `head_sha` 5b727c16...,
+    while its nested `pull_requests[0].head.sha` now resolves to a later head.
+    Data that drifts with the current PR cannot prove what happened at run time.
     """
     run_id = _github_actions_run_id(check)
     if run_id is None:
@@ -1795,7 +1828,7 @@ def _github_actions_current_base_evidence(pr, check, run_resolver=None, cache=No
         store[run_id] = resolve(run_id)
     data = store[run_id]
     if not isinstance(data, dict):
-        return False, "comes from a GitHub Actions run whose current-base evidence could not be verified"
+        return False, "comes from a GitHub Actions run whose event-time metadata could not be verified"
     event = data.get("event")
     if event != "pull_request":
         shown = str(event or "unknown")
@@ -1803,35 +1836,29 @@ def _github_actions_current_base_evidence(pr, check, run_resolver=None, cache=No
             f"comes from a GitHub Actions run triggered by {shown!r} rather than "
             "a pull_request event"
         )
-    pr_number = pr.get("number")
-    current_base = pr.get("baseRefOid")
-    current_head = pr.get("headRefOid")
-    pulls = data.get("pull_requests")
-    if (
-        not isinstance(pr_number, int)
-        or not isinstance(current_base, str)
-        or not current_base
-        or not isinstance(current_head, str)
-        or not current_head
-        or not isinstance(pulls, list)
-    ):
-        return False, "comes from a GitHub Actions run whose current-base evidence could not be verified"
-    for linked in pulls:
-        if not isinstance(linked, dict) or linked.get("number") != pr_number:
-            continue
-        base_sha = ((linked.get("base") or {}).get("sha"))
-        head_sha = ((linked.get("head") or {}).get("sha"))
-        if base_sha == current_base and head_sha == current_head:
-            return True, ""
+    attempt = data.get("run_attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int):
+        return False, "comes from a GitHub Actions run whose run_attempt is unreadable"
+    if attempt != 1:
         return False, (
-            f"comes from a GitHub Actions run whose pull_request event still "
-            f"names base {base_sha or '?'} and head {head_sha or '?'} instead "
-            f"of the current base {current_base} and head {current_head}"
+            f"comes from GitHub Actions run attempt {attempt}, and GitHub "
+            "re-runs preserve the original pull_request event SHA/ref"
         )
-    return False, (
-        "comes from a GitHub Actions run whose pull_request metadata does not "
-        "name this PR at all"
-    )
+    current_head = pr.get("headRefOid")
+    if not isinstance(current_head, str) or not current_head:
+        return False, "comes from a GitHub Actions run whose event-time metadata could not be verified"
+    head_sha = data.get("head_sha")
+    if not isinstance(head_sha, str) or not head_sha:
+        return False, (
+            "comes from a GitHub Actions run that does not report a usable "
+            "event-time head SHA"
+        )
+    if head_sha != current_head:
+        return False, (
+            f"records event-time head {head_sha} instead of the current head "
+            f"{current_head}"
+        )
+    return _github_actions_run_timestamps(data, advanced)
 
 
 def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolver=None,
@@ -1926,10 +1953,12 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
             return False, (
                 f"Branch is {behind} {plural} behind the base with disjoint "
                 f"changes, but {reason}. Trigger a fresh pull_request event on "
-                f"this head (for example close and reopen the PR) so the checks "
-                f"describe a merge with the current base. Do not rebase: that "
-                f"rewrites the head SHA and destroys the review attestation "
-                f"bound to it."
+                f"this head (for example close and reopen the PR) so GitHub "
+                f"recomputes the pull-request merge ref against the current "
+                f"base. A small merge-ref lag window remains, because the run "
+                f"metadata still does not identify the exact merge commit the "
+                f"runner checked out. Do not rebase: that rewrites the head "
+                f"SHA and destroys the review attestation bound to it."
             )
         return True, (
             f"Branch is {behind} {plural} behind the base, but its changes are "
