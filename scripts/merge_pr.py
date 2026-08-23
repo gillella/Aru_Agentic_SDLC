@@ -1615,7 +1615,7 @@ def _coderabbit_no_findings_full_review(review, evidence):
     return _unique_selected_timestamp(eligible_completions, select=min) is not None
 
 
-def _coderabbit_latest_review(evidence):  # noqa: C901
+def _coderabbit_latest_review(evidence):  # noqa: C901, PLR0912
     """Select the unique newest completed substantive CodeRabbit review."""
     if not isinstance(evidence, dict):
         return None
