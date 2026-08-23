@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import claim_issue
 import agent_presence as ap
 import fetch_pr_feedback
-import merge_pr
 
 
 _PRESENCE_TEMPORARY = None

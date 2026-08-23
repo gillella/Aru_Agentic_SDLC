@@ -86,7 +86,7 @@ from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # whether a peer's completion stamp names the current head, and a second
 # implementation of that predicate in the picker is exactly the drift that let
 # reviewed-but-since-pushed PRs reach no agent at all.
-from merge_pr import _attested_head_peers, review_evidence
+from merge_pr import review_evidence
 
 
 # Seats disambiguate concurrent sessions sharing one checkout -- the only case a
@@ -717,7 +717,6 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa
     only when close-out is still incomplete.
     """
     labels = label_names(pr)
-    author = _label_value(labels, "author:")
     holder = merge_claimant(labels)
 
     def no(reason):
@@ -811,11 +810,6 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
                 "escalated_prs": [], "claimable_issues": [],
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
                 "missing_touches": [], "operator_only_issues": []}
-
-    # A PR whose review state cannot be read is not a candidate - it is skipped
-    # (with its reason) and selection continues over the rest. A transient read
-    # on one PR must not idle the whole agent for a loop cycle.
-    unreadable = {pr["number"] for pr in prs if review_thread_count(pr) is None}
 
     # 1. Finish what I started.
     mine = [p for p in prs if needs_my_attention(p, agent)]
