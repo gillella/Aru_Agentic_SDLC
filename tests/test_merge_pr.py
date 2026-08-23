@@ -1,4 +1,4 @@
-# line-ceiling: 4860
+# line-ceiling: 5000
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -1380,9 +1380,18 @@ class ClaimIsNotAttestationTests(unittest.TestCase):
         self.assertIn("self-review", msg.lower())
 
 
-def _pr(state="CLEAN", mergeable="MERGEABLE", base="main", head="deadbeef"):
-    return {"mergeStateStatus": state, "mergeable": mergeable,
-            "baseRefName": base, "headRefOid": head}
+def _pr(
+    state="CLEAN", mergeable="MERGEABLE", base="main", head="deadbeef",
+    number=370, base_oid="base-tip",
+):
+    return {
+        "number": number,
+        "mergeStateStatus": state,
+        "mergeable": mergeable,
+        "baseRefName": base,
+        "baseRefOid": base_oid,
+        "headRefOid": head,
+    }
 
 
 def _behind(n):
@@ -1438,6 +1447,31 @@ def _check_run(name, started, conclusion="SUCCESS"):
         run["startedAt"] = started
         run["completedAt"] = started
     return run
+
+
+def _actions_check_run(name, started, run_id, conclusion="SUCCESS"):
+    run = _check_run(name, started, conclusion)
+    run["detailsUrl"] = (
+        f"https://github.com/owner/repo/actions/runs/{run_id}/jobs/{run_id + 1000}"
+    )
+    return run
+
+
+def _workflow_run(run_id, *, pr_number=370, base_oid="base-tip", head="deadbeef",
+                  event="pull_request"):
+    return {
+        "id": run_id,
+        "event": event,
+        "pull_requests": [{
+            "number": pr_number,
+            "base": {"sha": base_oid},
+            "head": {"sha": head},
+        }],
+    }
+
+
+def _workflow_runs(payloads):
+    return lambda run_id: payloads.get(run_id)
 
 
 def _ci_pr(runs, **kwargs):
@@ -1590,9 +1624,12 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
     computed against the superseded base.
     """
 
-    def _check(self, pr, behind=2, ours=("a.py",), theirs=("b.py",), when=_ADVANCE_AT):
+    def _check(self, pr, behind=2, ours=("a.py",), theirs=("b.py",), when=_ADVANCE_AT,
+               run_resolver=None):
         return merge_pr.check_rebased(
-            pr, _behind(behind), _paths(list(ours), list(theirs)), _advance(when))
+            pr, _behind(behind), _paths(list(ours), list(theirs)), _advance(when),
+            run_resolver,
+        )
 
     def test_stale_pre_advance_ci_does_not_pass(self):
         ok, msg = self._check(_ci_pr([_check_run("Lint", _BEFORE_ADVANCE)]))
@@ -1607,6 +1644,20 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
         self.assertIn("disjoint", msg)
         self.assertIn("after the base advance", msg)
 
+    def test_fresh_pull_request_run_on_the_current_base_passes(self):
+        pr = _ci_pr(
+            [_actions_check_run("Lint", _AFTER_ADVANCE, 91)],
+            base_oid="base-now",
+        )
+        ok, msg = self._check(
+            pr,
+            run_resolver=_workflow_runs({
+                91: _workflow_run(91, base_oid="base-now"),
+            }),
+        )
+        self.assertTrue(ok)
+        self.assertIn("disjoint", msg)
+
     def test_one_stale_check_among_fresh_ones_blocks(self):
         """Freshness is a property of the whole rollup, not of its best member."""
         ok, msg = self._check(_ci_pr([
@@ -1620,12 +1671,38 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("superseded base", msg)
 
-    def test_stale_message_asks_for_a_re_run_and_not_a_rebase(self):
+    def test_stale_message_preserves_the_head_and_not_a_rebase(self):
         """#371: rebasing would destroy the head-bound review attestation."""
         msg = self._check(_ci_pr([_check_run("Lint", _BEFORE_ADVANCE)]))[1]
-        self.assertIn("Re-run this PR's CI", msg)
+        self.assertIn("fresh pull_request event", msg)
+        self.assertIn("close and reopen", msg)
         self.assertIn("Do not rebase", msg)
         self.assertNotIn("Rebase on main", msg)
+
+    def test_actions_rerun_of_a_superseded_event_fails_closed(self):
+        pr = _ci_pr(
+            [_actions_check_run("Lint", _AFTER_ADVANCE, 92)],
+            base_oid="base-now",
+        )
+        ok, msg = self._check(
+            pr,
+            run_resolver=_workflow_runs({
+                92: _workflow_run(92, base_oid="base-before-advance"),
+            }),
+        )
+        self.assertFalse(ok)
+        self.assertIn("fresh pull_request event", msg)
+        self.assertIn("close and reopen", msg)
+        self.assertIn("Do not rebase", msg)
+
+    def test_actions_run_without_current_base_proof_fails_closed(self):
+        pr = _ci_pr(
+            [_actions_check_run("Lint", _AFTER_ADVANCE, 93)],
+            base_oid="base-now",
+        )
+        ok, msg = self._check(pr, run_resolver=_workflow_runs({}))
+        self.assertFalse(ok)
+        self.assertIn("could not be verified", msg)
 
     def test_missing_start_time_fails_closed(self):
         """completedAt is not a substitute: a run can finish after it read."""

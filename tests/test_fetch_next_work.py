@@ -1,4 +1,4 @@
-# line-ceiling: 1461
+# line-ceiling: 1500
 import json
 import sys
 import tempfile
@@ -787,6 +787,8 @@ class UnmetGateParsingTests(unittest.TestCase):
         payload = {
             "pr": 7,
             "gates": [
+                {"name": "rebased", "passed": False,
+                 "message": "Fresh pull_request evidence is missing; do not rebase."},
                 {"name": "tests", "passed": False,
                  "message": "Changed-file data is truncated; split the PR."},
                 {"name": "accept #254", "passed": False,
@@ -799,6 +801,7 @@ class UnmetGateParsingTests(unittest.TestCase):
         ):
             details = fnw._dod_gate_details(7)
         self.assertEqual(details, {
+            "rebased": "Fresh pull_request evidence is missing; do not rebase.",
             "tests": "Changed-file data is truncated; split the PR.",
             "accept": "Two criteria remain unticked.",
         })
@@ -814,6 +817,7 @@ class AuthorGateFixTests(unittest.TestCase):
         # full gate is reevaluated only when its action depends on the failure
         # subtype; the dry-run JSON then preserves that detail for the agent.
         details = {
+            "rebased": "Fresh pull_request evidence is missing; do not rebase.",
             "tests": "Changed-file data is truncated; split the PR.",
             "verification": "Verification evidence markers are malformed.",
         }
@@ -824,6 +828,9 @@ class AuthorGateFixTests(unittest.TestCase):
         found = self.fix(stranded(), reason="unmet: rebased")
         self.assertIsNotNone(found)
         self.assertEqual(found["unmet_gates"], ["rebased"])
+        self.assertEqual(found["gate_details"], {
+            "rebased": "Fresh pull_request evidence is missing; do not rebase.",
+        })
 
     def test_size_only_is_offered_to_the_author(self):
         found = self.fix(stranded(), reason="unmet: size")
@@ -852,6 +859,13 @@ class AuthorGateFixTests(unittest.TestCase):
             "tests": "Changed-file data is truncated; split the PR.",
             "verification": "Verification evidence markers are malformed.",
         })
+
+    def test_missing_rebased_detail_fails_closed(self):
+        with patch.object(
+            fnw, "_dod_gate_details",
+            return_value={"verification": "Verification evidence markers are malformed."},
+        ):
+            self.assertIsNone(fnw.author_gate_fix(stranded(), "agent-2", "unmet: rebased"))
 
     def test_non_author_is_never_offered_it(self):
         self.assertIsNone(self.fix(stranded(author="agent-1"), agent="agent-2"))
@@ -923,9 +937,11 @@ class GateFixSelectionTests(unittest.TestCase):
     def select_with(self, candidate, reason="unmet: rebased", agent="agent-2"):
         parts = {"candidates": [], "my_in_flight": None, "blocked": [],
                  "conflicted": [], "missing_touches": [], "not_ready": []}
+        details = {"rebased": "Fresh pull_request evidence is missing; do not rebase."}
         with patch.object(fnw, "list_work_prs", return_value=[candidate]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts), \
+             patch.object(fnw, "_dod_gate_details", return_value=details), \
              patch.object(fnw, "dod_status", return_value=(False, reason)):
             return fnw.select(agent, "openai", 3, 30)
 
@@ -993,9 +1009,11 @@ class GateFixRoutingContractTests(unittest.TestCase):
     def emitted(self):
         parts = {"candidates": [], "my_in_flight": None, "blocked": [],
                  "conflicted": [], "missing_touches": [], "not_ready": []}
+        details = {"rebased": "Fresh pull_request evidence is missing; do not rebase."}
         with patch.object(fnw, "list_work_prs", return_value=[stranded()]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts), \
+             patch.object(fnw, "_dod_gate_details", return_value=details), \
              patch.object(fnw, "dod_status", return_value=(False, "unmet: rebased")):
             return fnw.select("agent-2", "openai", 3, 30)["work"]
 
@@ -1062,6 +1080,13 @@ class GateFixRoutingContractTests(unittest.TestCase):
             for gate, marker in required.items():
                 self.assertIn(marker, text,
                               f"{rel} names '{gate}' but not its action ({marker})")
+
+    def test_rebased_contract_uses_authoritative_detail_to_preserve_head(self):
+        skill = self.contracts()["skills/address-pr-feedback/SKILL.md"]
+        self.assertIn("work.gate_details.rebased", skill)
+        self.assertIn("Do not rebase", skill)
+        self.assertIn("close and reopen", skill)
+        self.assertIn("--force-with-lease", skill)
 
 
 HEAD_SHA = "ABC123DEF456"

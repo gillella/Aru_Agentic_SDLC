@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3917
+# line-ceiling: 4050
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -109,6 +109,7 @@ REVIEW_ROUND_SPLIT_ITEM_FMT = "<!-- aru-review-round-split-item:pr={pr}:idx={idx
 REVIEW_ROUND_SPLIT_ITEM_RE = re.compile(
     r"<!--\s*aru-review-round-split-item:pr=(\d+):idx=(\d+)\s*-->"
 )
+GITHUB_ACTIONS_RUN_RE = re.compile(r"/actions/runs/(\d+)(?:/jobs/\d+)?(?:$|[?#/])")
 _REWORK_BLOCKING_RE = re.compile(
     r"changes[\s_-]*requested|(?<![Nn]o )blocking findings?|\*\*blocking:\*\*",
     re.I,
@@ -1675,7 +1676,7 @@ def _base_advance_time(base_ref, head_sha):
     return newest
 
 
-def _ci_saw_base_advance(pr, advance_resolver=None):
+def _ci_saw_base_advance(pr, advance_resolver=None, run_resolver=None):
     """Whether the CI on this head was produced after the base advance landed.
 
     Returns ``(ok, reason)``; ``reason`` is the fragment `check_rebased` quotes
@@ -1687,15 +1688,21 @@ def _ci_saw_base_advance(pr, advance_resolver=None):
     Disjoint paths do not repair that -- they show the two sides touched no
     common file, not that the older run exercised the newer base.
 
-    A run that started strictly after the newest advance stamp resolved
-    `refs/pull/N/merge` after the advance was already on the base, so it tested
-    a merge that contains it. Equal stamps decide nothing at GitHub's one-second
-    granularity and are refused. The residual this does *not* close is
-    GitHub's own merge-ref recomputation lag: a run starting in the seconds
-    between the base moving and the merge ref being rebuilt could still read a
-    stale ref. That window is orders of magnitude smaller than the unbounded
-    one above, and nothing in the check metadata names the merge commit a run
-    actually used, so it cannot be closed from here.
+    A run that started strictly after the newest advance stamp is the first
+    timing proof: it excludes any check that definitely began before the base
+    changed. GitHub Actions workflow re-runs are a special case, though:
+    GitHub documents that a re-run keeps the original event's `GITHUB_SHA` and
+    `GITHUB_REF`, so a later `startedAt` alone does not prove that the run saw
+    the current synthetic merge ref. For those checks, this function therefore
+    also verifies that the underlying workflow run is a `pull_request` run for
+    this PR's current head and current base.
+
+    The residual this still does *not* close is GitHub's own merge-ref
+    recomputation lag: a fresh `pull_request` event can still begin in the
+    seconds before the merge ref itself is rebuilt. That window is orders of
+    magnitude smaller than the unbounded one above, and the run metadata still
+    does not name the exact merge commit the runner checked out, so the literal
+    tested-merge identity proof cannot be derived from here.
     """
     resolve = advance_resolver or _base_advance_time
     advanced = resolve(pr.get("baseRefName"), pr.get("headRefOid"))
@@ -1734,10 +1741,101 @@ def _ci_saw_base_advance(pr, advance_resolver=None):
             f"{advanced.isoformat()}, so the green result describes a merge "
             f"with the superseded base"
         )
+    run_cache = {}
+    for name in required(current):
+        evidence = _github_actions_current_base_evidence(
+            pr, current[name], run_resolver=run_resolver, cache=run_cache,
+        )
+        if evidence is None:
+            continue
+        ok, reason = evidence
+        if not ok:
+            return False, f"{name} {reason}"
     return True, f"every required check started after the base advance at {advanced.isoformat()}"
 
 
-def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolver=None):
+def _github_actions_run_id(check):
+    """The workflow-run id for a GitHub Actions check, or None when not one."""
+    url = check.get("detailsUrl")
+    if not isinstance(url, str):
+        return None
+    match = GITHUB_ACTIONS_RUN_RE.search(url)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _github_actions_run(run_id):
+    """GitHub Actions workflow-run metadata, or None on any unreadable state."""
+    if not isinstance(run_id, int) or run_id <= 0:
+        return None
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    return _gh_json(["gh", "api", f"repos/{slug}/actions/runs/{run_id}"])
+
+
+def _github_actions_current_base_evidence(pr, check, run_resolver=None, cache=None):
+    """Current-base proof for one GitHub Actions check run, or None if not one.
+
+    Plain workflow re-runs reuse the original event's `GITHUB_SHA` and
+    `GITHUB_REF`, so a later `startedAt` is not enough to prove that a GitHub
+    Actions run tested the current merge ref. For Actions runs, require the
+    recorded workflow run to still name this PR's current head and current base.
+    """
+    run_id = _github_actions_run_id(check)
+    if run_id is None:
+        return None
+    resolve = run_resolver or _github_actions_run
+    store = cache if isinstance(cache, dict) else {}
+    if run_id not in store:
+        store[run_id] = resolve(run_id)
+    data = store[run_id]
+    if not isinstance(data, dict):
+        return False, "comes from a GitHub Actions run whose current-base evidence could not be verified"
+    event = data.get("event")
+    if event != "pull_request":
+        shown = str(event or "unknown")
+        return False, (
+            f"comes from a GitHub Actions run triggered by {shown!r} rather than "
+            "a pull_request event"
+        )
+    pr_number = pr.get("number")
+    current_base = pr.get("baseRefOid")
+    current_head = pr.get("headRefOid")
+    pulls = data.get("pull_requests")
+    if (
+        not isinstance(pr_number, int)
+        or not isinstance(current_base, str)
+        or not current_base
+        or not isinstance(current_head, str)
+        or not current_head
+        or not isinstance(pulls, list)
+    ):
+        return False, "comes from a GitHub Actions run whose current-base evidence could not be verified"
+    for linked in pulls:
+        if not isinstance(linked, dict) or linked.get("number") != pr_number:
+            continue
+        base_sha = ((linked.get("base") or {}).get("sha"))
+        head_sha = ((linked.get("head") or {}).get("sha"))
+        if base_sha == current_base and head_sha == current_head:
+            return True, ""
+        return False, (
+            f"comes from a GitHub Actions run whose pull_request event still "
+            f"names base {base_sha or '?'} and head {head_sha or '?'} instead "
+            f"of the current base {current_base} and head {current_head}"
+        )
+    return False, (
+        "comes from a GitHub Actions run whose pull_request metadata does not "
+        "name this PR at all"
+    )
+
+
+def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolver=None,
+                  run_resolver=None):
     """Staleness gate.
 
     A branch behind the base is not automatically stale. Requiring a literal
@@ -1763,9 +1861,10 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
     (issue #371). GitHub triggers no new run when the base moves, so without
     that second proof a PR that went green and *then* fell behind would merge on
     checks computed against the superseded base -- the disjointness rule would
-    be reading evidence about a tree nobody built. The remedy when it refuses is
-    a CI re-run, never a rebase: re-running recomputes the merge ref and leaves
-    the head SHA alone, so the head-bound review attestation survives.
+    be reading evidence about a tree nobody built. A plain GitHub Actions re-run
+    is not enough, because GitHub replays the original event SHA/ref. The
+    preserving-head remedy when this refuses is a fresh `pull_request` event on
+    the same head, not a rebase.
     """
     state = (pr.get("mergeStateStatus") or "").upper()
     if state == "DIRTY":
@@ -1817,7 +1916,7 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
         # whether the recorded CI ever saw this advance. Prove that too, last,
         # so a branch rejected above costs no extra API call.
         try:
-            fresh, reason = _ci_saw_base_advance(pr, advance_resolver)
+            fresh, reason = _ci_saw_base_advance(pr, advance_resolver, run_resolver)
         except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
             fresh, reason = False, (
                 f"the age of the base advance could not be determined "
@@ -1826,7 +1925,8 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
         if not fresh:
             return False, (
                 f"Branch is {behind} {plural} behind the base with disjoint "
-                f"changes, but {reason}. Re-run this PR's CI so the checks "
+                f"changes, but {reason}. Trigger a fresh pull_request event on "
+                f"this head (for example close and reopen the PR) so the checks "
                 f"describe a merge with the current base. Do not rebase: that "
                 f"rewrites the head SHA and destroys the review attestation "
                 f"bound to it."
