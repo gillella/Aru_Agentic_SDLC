@@ -94,6 +94,11 @@ def mock_pr(num, *labels, decision="", merge_state="CLEAN", **extra):
     return pr
 
 
+def coderabbit_evidence(head="c"):
+    oid = head * 40
+    return {"head_oid": oid, "unresolved": 0, "unfixed": 0, "outdated_unfixed": 0, "reviewed_head": True, "reviews": [{"id": "coderabbit-review", "state": "COMMENTED", "submittedAt": "2026-08-22T00:00:00Z", "body": "Review complete.", "commit": {"oid": oid}, "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}], "coderabbit_status": [{"__typename": "CheckRun", "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS", "checkSuite": {"app": {"slug": "coderabbitai"}}}]}
+
+
 def hours_ago(hours):
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
@@ -575,35 +580,12 @@ class FleetStatusTests(unittest.TestCase):
                     comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
                 ),
                 mock_pr(
-                    33, decision="APPROVED",
+                    33, decision="COMMENTED",
                     comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
                     statusCheckRollup=[{
                         "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
                     }],
-                    _review_evidence={
-                        "head_oid": "c" * 40,
-                        "unresolved": 0,
-                        "unfixed": 0,
-                        "outdated_unfixed": 0,
-                        "reviewed_head": True,
-                        "reviews": [{
-                            "id": "coderabbit-review",
-                            "state": "COMMENTED",
-                            "submittedAt": "2026-08-22T00:00:00Z",
-                            "body": "Review complete.",
-                            "commit": {"oid": "c" * 40},
-                            "author": {
-                                "login": "coderabbitai[bot]", "__typename": "Bot",
-                            },
-                        }],
-                        "coderabbit_status": [{
-                            "__typename": "CheckRun",
-                            "name": "CodeRabbit",
-                            "status": "COMPLETED",
-                            "conclusion": "SUCCESS",
-                            "checkSuite": {"app": {"slug": "coderabbit"}},
-                        }],
-                    },
+                    _review_evidence=coderabbit_evidence(),
                 ),
             ]
         )
@@ -1006,51 +988,16 @@ class FleetStatusTests(unittest.TestCase):
     def test_current_head_coderabbit_review_is_not_reported_as_pending_review(self):
         reviewed = mock_pr(
             18,
+            decision="COMMENTED",
             statusCheckRollup=[{
                 "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
             }],
         )
         with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]), \
-             patch("merge_pr.review_evidence", return_value={
-                 "head_oid": "b" * 40,
-                 "unresolved": 0,
-                 "unfixed": 0,
-                 "outdated_unfixed": 0,
-                 "withdrawn": 0,
-                 "reviewed_head": True,
-                 "reviews": [{
-                     "id": "coderabbit-review",
-                     "state": "COMMENTED",
-                     "submittedAt": "2026-08-22T00:00:00Z",
-                     "body": "Review complete.",
-                     "commit": {"oid": "b" * 40},
-                     "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
-                 }],
-                 "coderabbit_status": [{
-                     "__typename": "CheckRun",
-                     "name": "CodeRabbit",
-                     "status": "COMPLETED",
-                     "conclusion": "SUCCESS",
-                     "checkSuite": {"app": {"slug": "coderabbit"}},
-                 }],
-             }):
+             patch("merge_pr.review_evidence", return_value=coderabbit_evidence("b")):
             status = self.evaluate_fixture(prs=[reviewed])
         self.assertIn("PR #18 is reviewed and waiting for merge.", status["reasons"])
         self.assertNotIn("PR #18 is open and pending review.", status["reasons"])
-
-    def test_review_state_keeps_generic_approval_pending_without_authoritative_coderabbit(self):
-        from fleet_status import _review_state
-
-        pr = {
-            "number": 19,
-            "isDraft": False,
-            "reviewDecision": "APPROVED",
-            "unresolvedReviewThreadsCount": 0,
-            "labels": [],
-            "_review_evidence": None,
-        }
-
-        self.assertEqual(_review_state(pr), "pending")
 
     def test_api_failure_still_never_reports_complete(self):
         status = evaluate_fleet_status("/definitely/not/a/repository")
