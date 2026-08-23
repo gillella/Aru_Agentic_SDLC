@@ -550,7 +550,7 @@ PEER_ROUTABLE_GATES = frozenset({"review"})
 # visibility-only check that always passes. The exhaustiveness test requires a
 # comment-backed entry here when evaluate_dod gains another deliberate non-route.
 DOD_NON_ROUTABLE_GATES = frozenset({"open", "issue link", "review rounds"})
-DETAIL_REQUIRED_GATES = frozenset({"tests", "verification"})
+DETAIL_REQUIRED_GATES = frozenset({"rebased", "tests", "verification"})
 
 
 def _routable_gate_name(name: str) -> str:

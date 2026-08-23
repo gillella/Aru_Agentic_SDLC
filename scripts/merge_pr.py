@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3645
+# line-ceiling: 4050
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -109,6 +109,7 @@ REVIEW_ROUND_SPLIT_ITEM_FMT = "<!-- aru-review-round-split-item:pr={pr}:idx={idx
 REVIEW_ROUND_SPLIT_ITEM_RE = re.compile(
     r"<!--\s*aru-review-round-split-item:pr=(\d+):idx=(\d+)\s*-->"
 )
+GITHUB_ACTIONS_RUN_RE = re.compile(r"/actions/runs/(\d+)(?:/jobs/\d+)?(?:$|[?#/])")
 _REWORK_BLOCKING_RE = re.compile(
     r"changes[\s_-]*requested|(?<![Nn]o )blocking findings?|\*\*blocking:\*\*",
     re.I,
@@ -903,14 +904,14 @@ def _check_name(check):
     return check.get("name") or check.get("context") or "check"
 
 
-def _check_time(check):
-    """When this run finished, for ordering runs of the same check.
+def _utc_stamp(raw):
+    """A GitHub ISO-8601 timestamp as an aware UTC-comparable datetime, or None.
 
-    Falls back to the start time when a run has not completed. Returns None
-    when neither timestamp is usable, which the caller treats as "cannot be
-    ordered" rather than "is current".
+    Naive values are read as UTC, which is what the API emits. Everything that
+    orders runs or compares a run against a commit goes through here, so a
+    format the parser cannot read is "unusable" everywhere rather than usable
+    in one caller and not another.
     """
-    raw = check.get("completedAt") or check.get("startedAt")
     if not raw:
         return None
     text = str(raw).strip()
@@ -923,6 +924,26 @@ def _check_time(check):
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _check_time(check):
+    """When this run finished, for ordering runs of the same check.
+
+    Falls back to the start time when a run has not completed. Returns None
+    when neither timestamp is usable, which the caller treats as "cannot be
+    ordered" rather than "is current".
+    """
+    return _utc_stamp(check.get("completedAt") or check.get("startedAt"))
+
+
+def _check_start_time(check):
+    """When this run began, which is the only stamp that bounds what it read.
+
+    Deliberately not `_check_time`: a run that *finished* after the base moved
+    may well have checked the merge ref out before it moved, so a completion
+    stamp cannot show that a run saw the base advance. The start stamp can.
+    """
+    return _utc_stamp(check.get("startedAt"))
 
 
 # Allowlist, not denylist. Enumerating the failure conclusions let unknown ones -
@@ -1527,10 +1548,352 @@ def _behind_by(base_ref, head_sha):
     return behind
 
 
-def check_rebased(pr, behind_resolver=None):
+# GitHub's compare endpoint returns at most this many file entries. A response
+# sitting exactly at the cap may have been truncated, and truncation can only
+# ever make two change sets look *more* disjoint than they really are -- which
+# is the one direction this gate must never be wrong in. Treat it as unknown.
+COMPARE_FILE_LIMIT = 300
+
+
+def _compare_paths(base_ref, head_sha):
+    """Paths changed from the merge-base of the two refs up to `head_sha`.
+
+    This is GitHub's three-dot compare, the same endpoint and direction
+    `_behind_by` already uses. Calling it with the arguments swapped yields the
+    other side of the fork -- what the base advanced by -- so both sides of the
+    overlap test come from one code path, with one rename rule and one
+    truncation rule rather than two of each.
+
+    Returns None for "could not determine", which every caller must treat as
+    unverifiable rather than as an empty set. Renamed entries contribute both
+    their old and new path, so a rename can never hide an overlap.
+    """
+    if not base_ref or not head_sha:
+        return None
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    data = _gh_json(["gh", "api", f"repos/{slug}/compare/{base_ref}...{head_sha}"])
+    if not isinstance(data, dict):
+        return None
+    files = data.get("files")
+    if not isinstance(files, list) or len(files) >= COMPARE_FILE_LIMIT:
+        return None
+    paths = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            return None
+        name = entry.get("filename")
+        if not isinstance(name, str) or not name:
+            return None
+        paths.add(name)
+        previous = entry.get("previous_filename")
+        if isinstance(previous, str) and previous:
+            paths.add(previous)
+    # An empty set means the compare reported no files at all. A real branch
+    # always changes something, so this is malformed data, not a clean pass.
+    return paths or None
+
+
+def _overlap_with_base_advance(pr, paths_resolver=None):
+    """Paths this branch and the base both changed since their merge-base.
+
+    Returns a sorted list (empty when the two change sets are disjoint), or
+    None when either side could not be determined.
+    """
+    resolve = paths_resolver or _compare_paths
+    base_ref = pr.get("baseRefName")
+    head_sha = pr.get("headRefOid")
+    ours = resolve(base_ref, head_sha)
+    if ours is None:
+        return None
+    # Swapped arguments: merge-base -> base tip, i.e. what the base advanced by.
+    theirs = resolve(head_sha, base_ref)
+    if theirs is None:
+        return None
+    return sorted(ours & theirs)
+
+
+def _base_advance_time(base_ref, head_sha):
+    """When the base advance this PR is behind by landed, or None if unknown.
+
+    The three-dot compare with the arguments swapped -- the same call
+    `_overlap_with_base_advance` uses for the base side -- lists exactly the
+    commits the base gained since the merge-base. The newest stamp among them
+    is the earliest moment a CI run could have seen the whole advance.
+
+    Both the committer and the author date of every commit are read, and the
+    maximum of all of them wins. `main` here only ever advances through
+    GitHub's server-side merge, which sets the committer date to server time,
+    so the committer date is the honest one. Taking the maximum over both means
+    a commit carrying a *later* fabricated stamp than it deserves can only
+    demand fresher CI, never accept staler CI. Any commit whose dates are
+    missing or unparseable returns None, because a merge must not be approved
+    against an advance whose age is unknown.
+
+    The same rule governs a short list. This request sends no `per_page`, so
+    GitHub caps `commits` at 250 while `total_commits` keeps counting the whole
+    advance. Truncation is the dangerous direction here --
+    the endpoint returns commits in chronological order, so the entries dropped
+    are the newest ones, and the newest stamp is the entire answer. A truncated
+    array would silently lower the freshness bar and admit CI that predates the
+    advance. Refuse unless GitHub's own count matches what it actually sent.
+    """
+    if not base_ref or not head_sha:
+        return None
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    data = _gh_json(["gh", "api", f"repos/{slug}/compare/{head_sha}...{base_ref}"])
+    if not isinstance(data, dict):
+        return None
+    commits = data.get("commits")
+    # A branch reported behind must have something on the other side. An empty
+    # or absent list contradicts that, so it is malformed data, not "no advance".
+    if not isinstance(commits, list) or not commits:
+        return None
+    total = data.get("total_commits")
+    # bool is an int subclass; True would otherwise satisfy a one-commit
+    # advance. An absent, non-integer, or negative count fails the equality
+    # too, so every unreadable form lands on the same refusal.
+    if isinstance(total, bool) or not isinstance(total, int) or total != len(commits):
+        return None
+    newest = None
+    for entry in commits:
+        if not isinstance(entry, dict):
+            return None
+        commit = entry.get("commit")
+        if not isinstance(commit, dict):
+            return None
+        for role in ("committer", "author"):
+            who = commit.get(role)
+            if not isinstance(who, dict):
+                return None
+            when = _utc_stamp(who.get("date"))
+            if when is None:
+                return None
+            newest = when if newest is None else max(newest, when)
+    return newest
+
+
+def _ci_saw_base_advance(pr, advance_resolver=None, run_resolver=None):
+    """Whether the CI on this head was produced after the base advance landed.
+
+    Returns ``(ok, reason)``; ``reason`` is the fragment `check_rebased` quotes
+    when this refuses.
+
+    The gap being closed: GitHub triggers no new `pull_request` run when the
+    base moves, so a PR that went green, then fell behind, keeps advertising
+    that same green rollup. Those checks describe a merge with the *old* base.
+    Disjoint paths do not repair that -- they show the two sides touched no
+    common file, not that the older run exercised the newer base.
+
+    A run that started strictly after the newest advance stamp is the first
+    timing proof: it excludes any check that definitely began before the base
+    changed. GitHub Actions workflow re-runs are a special case, though:
+    GitHub documents that a re-run keeps the original event's `GITHUB_SHA` and
+    `GITHUB_REF`, so a later `startedAt` alone does not prove that the run saw
+    the current synthetic merge ref. For those checks, this function therefore
+    also verifies that the underlying workflow run is an attempt-1
+    `pull_request` run for this PR's current head whose own event-time
+    `created_at` and `run_started_at` both postdate the base advance.
+
+    The residual this still does *not* close is GitHub's own merge-ref
+    recomputation lag: a fresh `pull_request` event can still begin in the
+    seconds before the merge ref itself is rebuilt. That window is orders of
+    magnitude smaller than the unbounded one above, but the run metadata still
+    does not name the exact merge commit the runner checked out, so the literal
+    tested-merge identity proof still cannot be derived from here.
+    """
+    resolve = advance_resolver or _base_advance_time
+    advanced = resolve(pr.get("baseRefName"), pr.get("headRefOid"))
+    if advanced is None:
+        return False, "when the base advance landed could not be determined"
+
+    # Advisory review bots are not build checks anywhere else in this file, so
+    # they neither prove freshness nor block on lacking it (see check_ci).
+    def required(names):
+        return sorted(name for name in names
+                      if (name or "").lower() not in ADVISORY_CHECK_CONTEXTS)
+
+    current, unorderable = _current_runs(pr.get("statusCheckRollup") or [])
+    undecidable = required(unorderable)
+    if undecidable:
+        return False, (
+            f"which run is current is undecidable for {', '.join(undecidable)}, "
+            f"so their age is unknown"
+        )
+    started = {name: _check_start_time(current[name]) for name in required(current)}
+    if not started:
+        return False, "no required check is reported on this head at all"
+
+    undated = [name for name, when in started.items() if when is None]
+    if undated:
+        return False, (
+            f"no usable start time is recorded for {', '.join(undated)}, so "
+            f"whether those checks ran after the base advance is unverified"
+        )
+    stale = [name for name, when in started.items() if when <= advanced]
+    if stale:
+        shown = ", ".join(stale[:3])
+        more = f" (+{len(stale) - 3} more)" if len(stale) > 3 else ""
+        return False, (
+            f"{shown}{more} started no later than the base advance at "
+            f"{advanced.isoformat()}, so the green result describes a merge "
+            f"with the superseded base"
+        )
+    run_cache = {}
+    for name in required(current):
+        evidence = _github_actions_current_base_evidence(
+            pr, current[name], advanced, run_resolver=run_resolver, cache=run_cache,
+        )
+        if evidence is None:
+            continue
+        ok, reason = evidence
+        if not ok:
+            return False, f"{name} {reason}"
+    return True, f"every required check started after the base advance at {advanced.isoformat()}"
+
+
+def _github_actions_run_id(check):
+    """The workflow-run id for a GitHub Actions check, or None when not one."""
+    url = check.get("detailsUrl")
+    if not isinstance(url, str):
+        return None
+    match = GITHUB_ACTIONS_RUN_RE.search(url)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _github_actions_run(run_id):
+    """GitHub Actions workflow-run metadata, or None on any unreadable state."""
+    if not isinstance(run_id, int) or run_id <= 0:
+        return None
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    return _gh_json(["gh", "api", f"repos/{slug}/actions/runs/{run_id}"])
+
+
+def _github_actions_run_timestamps(data, advanced):
+    """Workflow-run creation/start stamps, validated against the base advance."""
+    created = _utc_stamp(data.get("created_at"))
+    started = _utc_stamp(data.get("run_started_at"))
+    if created is None or started is None:
+        return False, (
+            "does not report usable event-time timestamps for created_at and "
+            "run_started_at"
+        )
+    if started < created:
+        return False, (
+            "reports event-time timestamps out of order: "
+            f"created_at {created.isoformat()}, run_started_at {started.isoformat()}"
+        )
+    if created <= advanced or started <= advanced:
+        return False, (
+            f"was created at {created.isoformat()} and started at "
+            f"{started.isoformat()}, no later than the base advance at "
+            f"{advanced.isoformat()}"
+        )
+    return True, ""
+
+
+def _github_actions_current_base_evidence(pr, check, advanced, run_resolver=None,
+                                          cache=None):
+    """Current-base proof for one GitHub Actions check run, or None if not one.
+
+    Plain workflow re-runs reuse the original event's `GITHUB_SHA` and
+    `GITHUB_REF`, so a later `startedAt` is not enough to prove that a GitHub
+    Actions run tested the current merge ref. For Actions runs, accept only
+    genuine event-time metadata: the workflow run must be an attempt-1
+    `pull_request` run for this PR's current head, and its own creation/start
+    stamps must both land after the base advance.
+
+    Deliberately do *not* read `pull_requests[].base/head` here. GitHub's REST
+    workflow-run payload live-resolves those nested PR objects; historical run
+    32576962919 in this repository reports event-time `head_sha` 5b727c16...,
+    while its nested `pull_requests[0].head.sha` now resolves to a later head.
+    Data that drifts with the current PR cannot prove what happened at run time.
+    """
+    run_id = _github_actions_run_id(check)
+    if run_id is None:
+        return None
+    resolve = run_resolver or _github_actions_run
+    store = cache if isinstance(cache, dict) else {}
+    if run_id not in store:
+        store[run_id] = resolve(run_id)
+    data = store[run_id]
+    if not isinstance(data, dict):
+        return False, "comes from a GitHub Actions run whose event-time metadata could not be verified"
+    event = data.get("event")
+    if event != "pull_request":
+        shown = str(event or "unknown")
+        return False, (
+            f"comes from a GitHub Actions run triggered by {shown!r} rather than "
+            "a pull_request event"
+        )
+    attempt = data.get("run_attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int):
+        return False, "comes from a GitHub Actions run whose run_attempt is unreadable"
+    if attempt != 1:
+        return False, (
+            f"comes from GitHub Actions run attempt {attempt}, and GitHub "
+            "re-runs preserve the original pull_request event SHA/ref"
+        )
+    current_head = pr.get("headRefOid")
+    if not isinstance(current_head, str) or not current_head:
+        return False, "comes from a GitHub Actions run whose event-time metadata could not be verified"
+    head_sha = data.get("head_sha")
+    if not isinstance(head_sha, str) or not head_sha:
+        return False, (
+            "comes from a GitHub Actions run that does not report a usable "
+            "event-time head SHA"
+        )
+    if head_sha != current_head:
+        return False, (
+            f"records event-time head {head_sha} instead of the current head "
+            f"{current_head}"
+        )
+    return _github_actions_run_timestamps(data, advanced)
+
+
+def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolver=None,
+                  run_resolver=None):
+    """Staleness gate.
+
+    A branch behind the base is not automatically stale. Requiring a literal
+    zero-behind branch deadlocks the factory, because a rebase rewrites the head
+    SHA and the review gate binds its attestation to an exact SHA -- so rebasing
+    destroys the review evidence of the very PR it was run on, and every merge
+    forces every other open PR to do it (issue #369).
+
+    Be precise about what this rule buys, because it is narrower than "the
+    evidence describes the merged content". It establishes that no file was
+    changed on both sides, so the merge is textually non-interfering. It does
+    NOT establish semantic independence: the base can change a signature in one
+    file while this branch changes a caller in another, and the paths stay
+    disjoint.
+
+    What bounds that residual risk is that CI here runs on `refs/pull/N/merge`,
+    a genuine two-parent merge commit -- no job in ci.yml overrides the checkout
+    ref -- so a green check already describes a merged tree rather than this
+    branch alone.
+
+    That only holds for a merge the checks actually saw, which is why accepting
+    a behind branch requires `_ci_saw_base_advance` as well as disjointness
+    (issue #371). GitHub triggers no new run when the base moves, so without
+    that second proof a PR that went green and *then* fell behind would merge on
+    checks computed against the superseded base -- the disjointness rule would
+    be reading evidence about a tree nobody built. A plain GitHub Actions re-run
+    is not enough, because GitHub replays the original event SHA/ref. The
+    preserving-head remedy when this refuses is a fresh `pull_request` event on
+    the same head, not a rebase.
+    """
     state = (pr.get("mergeStateStatus") or "").upper()
-    if state == "BEHIND":
-        return False, "Branch is behind the base. Rebase on main and re-run."
     if state == "DIRTY":
         return False, "Branch has merge conflicts with the base."
     if (pr.get("mergeable") or "").upper() == "CONFLICTING":
@@ -1555,8 +1918,51 @@ def check_rebased(pr, behind_resolver=None):
         )
     if behind > 0:
         plural = "commit" if behind == 1 else "commits"
-        return False, (
-            f"Branch is {behind} {plural} behind the base. Rebase on main and re-run."
+        try:
+            overlap = _overlap_with_base_advance(pr, paths_resolver)
+        except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
+            return False, (
+                f"Branch is {behind} {plural} behind the base and the overlap with "
+                f"the base advance could not be determined "
+                f"({type(exc).__name__}: {exc}). Rebase on main and re-run."
+            )
+        if overlap is None:
+            return False, (
+                f"Branch is {behind} {plural} behind the base and its changed-file "
+                f"data is unavailable or truncated, so the overlap with the base "
+                f"advance is unverified. Rebase on main and re-run."
+            )
+        if overlap:
+            shown = ", ".join(overlap[:3])
+            more = f" (+{len(overlap) - 3} more)" if len(overlap) > 3 else ""
+            return False, (
+                f"Branch is {behind} {plural} behind the base and both changed "
+                f"{shown}{more}. Rebase on main and re-run."
+            )
+        # Disjointness is necessary but not sufficient: it says nothing about
+        # whether the recorded CI ever saw this advance. Prove that too, last,
+        # so a branch rejected above costs no extra API call.
+        try:
+            fresh, reason = _ci_saw_base_advance(pr, advance_resolver, run_resolver)
+        except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
+            fresh, reason = False, (
+                f"the age of the base advance could not be determined "
+                f"({type(exc).__name__}: {exc})"
+            )
+        if not fresh:
+            return False, (
+                f"Branch is {behind} {plural} behind the base with disjoint "
+                f"changes, but {reason}. Trigger a fresh pull_request event on "
+                f"this head (for example close and reopen the PR) so GitHub "
+                f"recomputes the pull-request merge ref against the current "
+                f"base. A small merge-ref lag window remains, because the run "
+                f"metadata still does not identify the exact merge commit the "
+                f"runner checked out. Do not rebase: that rewrites the head "
+                f"SHA and destroys the review attestation bound to it."
+            )
+        return True, (
+            f"Branch is {behind} {plural} behind the base, but its changes are "
+            f"disjoint from the base advance and {reason}."
         )
     return True, "Branch is current with the base."
 
@@ -2818,17 +3224,19 @@ def clear_merger_claims(pr_num, cwd=None):
     return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL, cwd=cwd)
 
 
-def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None):
+def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None,
+                 paths_resolver=None, advance_resolver=None):
     """Runs every Definition-of-Done check without merging.
 
     Returns ``(ok, gates)`` where ``gates`` is a list of
     ``(name, passed, message)`` in evaluation order. Shared by ``--dry-run``
     and the merge work picker so eligibility cannot drift from the gate.
 
-    ``behind_resolver`` is threaded to :func:`check_rebased` so a caller with no
-    repository to interrogate -- a hermetic fleet simulation -- can state
-    ancestry directly. Production callers omit it and get the fail-closed git
-    path, which is the point of the gate.
+    ``behind_resolver``, ``paths_resolver`` and ``advance_resolver`` are
+    threaded to :func:`check_rebased` so a caller with no repository to
+    interrogate -- a hermetic fleet simulation -- can state ancestry, changed
+    paths, and when the base advanced directly. Production callers omit all
+    three and get the fail-closed git path, which is the point of the gate.
     """
     issue_nums = linked_issues(pr.get("body"))
     gates = [
@@ -2837,7 +3245,7 @@ def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None):
         ("verification", *check_verification(pr)),
         ("ci", *check_ci(pr)),
         ("review", *check_reviews(pr, evidence)),
-        ("rebased", *check_rebased(pr, behind_resolver)),
+        ("rebased", *check_rebased(pr, behind_resolver, paths_resolver, advance_resolver)),
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
         ("spec-sync", *check_spec_sync(pr)),
