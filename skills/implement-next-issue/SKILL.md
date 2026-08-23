@@ -223,7 +223,9 @@ or other irreversible work from the plan gate.
 3. Route every actionable CodeRabbit finding to the author or adopted
    implementation/remediation agent and use `address-pr-feedback` until the
    authoritative current-head review and thread gates pass.
-4. Clean up worktree directory if needed and summarize work completed.
+4. Summarize work completed. Keep the active PR worktree until merge or
+   remediation completion; `merge_pr.py` close-out and the governed cleanup
+   helpers own final worktree cleanup.
 
 ### Step 12: Merge Authority and Completion
 
@@ -232,7 +234,8 @@ or other irreversible work from the plan gate.
    current head and resolve every actionable CodeRabbit thread.
 2. After the CodeRabbit oracle passes, any factory agent,
    including the implementation author, may perform the mechanical merge with
-   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID>`. This is the sole
+   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --expected-head <HEAD_SHA>`
+   when the picker supplied `head_sha`. This is the sole
    merge authority; do not use a direct push or ad-hoc `gh pr merge`.
 3. The merge helper must prove green CI, independent review, resolved threads,
    completed acceptance criteria, and an up-to-date branch, then close the

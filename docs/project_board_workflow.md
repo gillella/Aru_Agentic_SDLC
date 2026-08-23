@@ -68,7 +68,11 @@ When an increment reaches the `accepted` state, `scripts/increment_release.py` t
 2. **Worktree Creation**:
    Execute `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --worktree --agent <AGENT_ID>` to generate `.worktrees/feat-issue-<ID>-<slug>__<agent>`.
 3. **Worktree Cleanup**:
-   Upon PR merge or remediation completion, remove temporary worktree directories with `git worktree remove .worktrees/<dir>`.
+   Keep active PR worktrees attached until governed close-out runs. Normal
+   post-merge cleanup belongs to
+   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`, and leftover
+   retained/orphaned copies are reclaimed by the supported janitor sweep:
+   `python3 "$ARU_SDLC_HOME/scripts/cleanup_worktrees.py" --repo <REPO_ROOT>`.
 
 ---
 
@@ -124,7 +128,8 @@ bots cannot replace board state or start a competing lifecycle.
 After CodeRabbit completes a substantive review on the exact current head and
 all Definition-of-Done checks pass, any factory agent, including the implementation
 author, may execute the mechanical merge only through
-`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Direct pushes and
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID> --expected-head <HEAD_SHA>`
+when the picker supplied `head_sha`. Direct pushes and
 ad-hoc merge commands have no merge authority. Coding agents never review.
 Human intervention is exceptional and applies only when a severe
 merge conflict or merge/close-out failure remains unsafe or impossible for

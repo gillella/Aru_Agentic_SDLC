@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "run-aru-factory" / "SKILL.md"
 ROUTER = ROOT / "skills" / "aru-agentic-sdlc" / "SKILL.md"
 FLEET_PROMPT = ROOT / "prompts" / "fleet-worker.md"
+BOARD_WORKFLOW = ROOT / "docs" / "project_board_workflow.md"
+IMPLEMENT_SKILL = ROOT / "skills" / "implement-next-issue" / "SKILL.md"
 DESKTOP_ADAPTERS = (
     ROOT / "templates" / "integrations" / "codex" / "instructions.md",
     ROOT / "templates" / "integrations" / "claude" / "CLAUDE.md",
@@ -242,6 +244,42 @@ class GovernanceTests(unittest.TestCase):
         self.assertIn("report `work.reason`", text)
         self.assertIn("start no work", text)
         self.assertIn("wait/retry path", text)
+
+    def test_picker_claim_semantics_are_work_type_specific(self):
+        for text in (
+            flat(skill_text()),
+            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
+        ):
+            self.assertIn("feedback", text)
+            self.assertIn("error", text)
+            self.assertIn("idle", text)
+            self.assertIn("returned without claims", text)
+            self.assertIn("merge", text)
+            self.assertIn("non-resume issue", text)
+            self.assertIn("claim mutations", text)
+
+    def test_merge_commands_preserve_picker_expected_head(self):
+        for text in (
+            flat(skill_text()),
+            flat(BOARD_WORKFLOW.read_text(encoding="utf-8")),
+            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
+        ):
+            self.assertIn("--expected-head <head_sha>", text)
+            self.assertIn("head_sha", text)
+
+    def test_worktree_cleanup_uses_governed_helpers(self):
+        board = flat(BOARD_WORKFLOW.read_text(encoding="utf-8"))
+        implement = flat(IMPLEMENT_SKILL.read_text(encoding="utf-8"))
+        self.assertIn("cleanup_worktrees.py", board)
+        self.assertIn("--repo <repo_root>", board)
+        self.assertIn("merge_pr.py", board)
+        self.assertNotIn(
+            "remove temporary worktree directories with `git worktree remove .worktrees/<dir>`",
+            board,
+        )
+        self.assertIn("keep the active pr worktree", implement)
+        self.assertIn("merge or remediation completion", implement)
+        self.assertNotIn("clean up worktree directory if needed", implement)
 
 
 class DelegationTests(unittest.TestCase):

@@ -99,7 +99,10 @@ beats starting, and an abandoned claim blocks the board for everyone else.
 python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
 ```
 
-It returns one item and claims it. Follow the skill for its type:
+It returns one item. `feedback`, `error`, and `idle` are returned without
+claims. `merge` and non-resume issue paths perform the claim mutations;
+resume output reports already-held work instead of claiming it again. Follow
+the skill for its type:
 
 | type | skill |
 |---|---|
@@ -213,10 +216,11 @@ Restated only because skipping one is how each has been broken before.
 ### Merging
 
 After CodeRabbit has reviewed the exact current head and every DoD gate passes,
-any factory agent, including the implementation author, may execute:
+any factory agent, including the implementation author, may execute the merge
+helper with the picker-supplied `head_sha` pinned as `--expected-head`:
 
 ```shell
-python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N>
+python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>
 ```
 
 Direct pushes and `gh pr merge` have no merge authority. A finding closes by a

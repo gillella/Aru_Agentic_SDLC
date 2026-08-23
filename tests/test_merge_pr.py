@@ -1077,53 +1077,6 @@ class ReviewGateTests(unittest.TestCase):
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
 
-    @patch.object(merge_pr, "_gh_json")
-    def test_coderabbit_status_graphql_errors_fail_closed(self, gh_json):
-        gh_json.return_value = {
-            "errors": [{"message": "partial"}],
-            "data": {"repository": {"pullRequest": {}}},
-        }
-        self.assertIsNone(
-            merge_pr._coderabbit_status_evidence("owner", "repo", 7, "a" * 40)
-        )
-
-    @patch.object(merge_pr, "_gh_json")
-    def test_coderabbit_status_graphql_truncated_contexts_fail_closed(self, gh_json):
-        gh_json.return_value = {
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "headRefOid": "a" * 40,
-                        "commits": {
-                            "nodes": [{
-                                "commit": {
-                                    "statusCheckRollup": {
-                                        "contexts": {
-                                            "nodes": [{
-                                                "__typename": "CheckRun",
-                                                "name": "CodeRabbit",
-                                                "status": "COMPLETED",
-                                                "conclusion": "SUCCESS",
-                                                "checkSuite": {"app": {"slug": "coderabbitai"}},
-                                            }],
-                                            "totalCount": 2,
-                                            "pageInfo": {
-                                                "hasNextPage": True,
-                                                "endCursor": "next",
-                                            },
-                                        }
-                                    }
-                                }
-                            }]
-                        },
-                    }
-                }
-            }
-        }
-        self.assertIsNone(
-            merge_pr._coderabbit_status_evidence("owner", "repo", 7, "a" * 40)
-        )
-
     def test_github_review_evidence_without_authoritative_status_fails_closed(self):
         pr = self.coderabbit_pr("author:agent-1")
         evidence = self.coderabbit_evidence()

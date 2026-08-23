@@ -117,7 +117,9 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--fami
 ```
 
 It returns one work item of type `feedback`, `merge`, `issue`, `error`, or
-`idle`, and claims it. The priority order is deliberate — **finishing beats
+`idle`. `feedback`, `error`, and `idle` are returned without claims. `merge`
+and non-resume issue paths perform claim mutations; resume results report
+already-held work instead of claiming it again. The priority order is deliberate — **finishing beats
 starting** (feedback → merge → issue). Do the branch below that
 matches, then ask again. The current desktop task remains the loop owner.
 
