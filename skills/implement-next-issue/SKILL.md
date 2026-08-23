@@ -221,8 +221,11 @@ or other irreversible work from the plan gate.
    work, invoke `code-review`, or ask Claude, Codex, Cursor, or Antigravity to
    review a PR.
 3. Route every actionable CodeRabbit finding to the author or adopted
-   implementation/remediation agent and use `address-pr-feedback` until the
-   authoritative current-head review and thread gates pass.
+   implementation/remediation agent. Before resolving a review thread, ensure
+   the finding is addressed by a later commit on the PR branch or by a reply
+   that begins `Withdrawn:` and explains why it no longer applies. Use
+   `address-pr-feedback` until the authoritative current-head review and thread
+   gates pass.
 4. Summarize work completed. Keep the active PR worktree until merge or
    remediation completion; `merge_pr.py` close-out and the governed cleanup
    helpers own final worktree cleanup.
@@ -231,7 +234,9 @@ or other irreversible work from the plan gate.
 
 1. Coding agents never review. Coding-agent reviews and legacy `reviewed-by:` attestations never satisfy
    review. Wait for a completed substantive CodeRabbit review on the exact
-   current head and resolve every actionable CodeRabbit thread.
+   current head. Before invoking `merge_pr.py`, every actionable CodeRabbit
+   finding must have later-commit evidence or an explicit `Withdrawn:` reply;
+   thread resolution alone is never sufficient.
 2. After the CodeRabbit oracle passes, any factory agent,
    including the implementation author, may perform the mechanical merge with
    `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --expected-head <HEAD_SHA>`

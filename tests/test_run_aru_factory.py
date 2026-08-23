@@ -273,13 +273,12 @@ class GovernanceTests(unittest.TestCase):
         self.assertIn("cleanup_worktrees.py", board)
         self.assertIn("--repo <repo_root>", board)
         self.assertIn("merge_pr.py", board)
-        self.assertNotIn(
-            "remove temporary worktree directories with `git worktree remove .worktrees/<dir>`",
-            board,
-        )
+        self.assertNotIn("remove temporary worktree directories with `git worktree remove .worktrees/<dir>`", board)
         self.assertIn("keep the active pr worktree", implement)
         self.assertIn("merge or remediation completion", implement)
         self.assertNotIn("clean up worktree directory if needed", implement)
+        self.assertIn("later commit on the pr branch or by a reply that begins `withdrawn:`", implement)
+        self.assertIn("thread resolution alone is never sufficient", implement)
 
 
 class DelegationTests(unittest.TestCase):
@@ -351,15 +350,14 @@ class WiringTests(unittest.TestCase):
         skill = flat(skill_text())
         self.assertIn("please continue", frontmatter(skill_text()).lower())
         self.assertIn("loop", skill)
-        # The continue row must name run-aru-factory, not implement-next-issue.
-        continue_lines = [
-            line for line in router.splitlines()
-            if "continue" in line.lower() and "|" in line
-        ]
+        continue_lines = [line for line in router.splitlines() if "continue" in line.lower() and "|" in line]
         self.assertTrue(continue_lines, "router has no continue row")
         joined = " ".join(continue_lines).lower()
         self.assertIn("run-aru-factory", joined)
         self.assertNotIn("implement-next-issue", joined)
+        cursor = (ROOT / "docs" / "cursor-integration.md").read_text(encoding="utf-8")
+        self.assertIn("pick feedback → merge → issue", cursor)
+        self.assertNotIn("pick feedback → merge → review → issue", cursor)
 
     def test_loop_pacing_is_dynamic(self):
         text = flat(skill_text())

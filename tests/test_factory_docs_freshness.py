@@ -203,17 +203,12 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                 re.IGNORECASE | re.DOTALL,
             ),
         )
-        operator = section(
-            plan,
-            "## 4. The operator visibility and intervention interface",
-            "### 4.1",
-        )
+        operator = section(plan, "## 4. The operator visibility and intervention interface", "### 4.1")
         self.assertNotIn("independent-agent review", operator)
-        intervention = section(
-            plan,
-            "### 4.1 The one mandatory human intervention",
-            "### 4.2",
-        )
+        principle = section(plan, "### 4.3 The operating principle", "---")
+        self.assertIn("CodeRabbit reviews", principle)
+        self.assertNotIn("A distinct agent reviews", principle)
+        intervention = section(plan, "### 4.1 The one mandatory human intervention", "### 4.2")
         self.assertIn("implementation/remediation/mechanical-merge loop", intervention)
         self.assertNotIn("implementation/review/remediation loop", intervention)
 

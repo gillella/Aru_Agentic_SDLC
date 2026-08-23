@@ -236,12 +236,14 @@ operator screen (#106–#108). They expose:
 
 ### 4.3 The operating principle
 
-> **The issue defines direction. A distinct agent reviews. The gated helper
+> **The issue defines direction. CodeRabbit reviews. The gated helper
 > merges. Human intervention is the last resort for an unresolved severe merge
 > or close-out failure.**
 
-Every proposed automation should be tested against it. A risk label, large
-diff, repeated review, or tool preference is not a human gate.
+Every proposed automation should be tested against it. There is no separate
+coding-agent review lane: implementation/remediation agents fix findings, and
+CodeRabbit is the reviewer of record. A risk label, large diff, repeated
+review, or tool preference is not a human gate.
 
 ---
 
