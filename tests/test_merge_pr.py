@@ -966,6 +966,89 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("CodeRabbit", msg)
 
+    def test_remediation_head_status_can_bind_new_head_after_prior_review(self):
+        old_head = "a" * 40
+        new_head = "b" * 40
+        evidence = self.coderabbit_evidence(head=old_head, state="APPROVED", body="")
+        evidence["head_oid"] = new_head
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+            "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }]
+
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            evidence,
+        )
+
+        self.assertTrue(ok, msg)
+        self.assertIn(new_head[:12], msg)
+
+    def test_current_head_status_without_prior_substantive_coderabbit_review_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["reviews"] = [{
+            "id": "peer-review",
+            "state": "APPROVED",
+            "submittedAt": "2026-08-23T19:00:00Z",
+            "body": "Peer approved.",
+            "author": {"login": "human-reviewer", "__typename": "User"},
+            "commit": {"oid": evidence["head_oid"]},
+        }]
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            evidence,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_latest_completed_coderabbit_changes_requested_blocks_even_with_current_head_status(self):
+        head = "b" * 40
+        evidence = self.coderabbit_evidence(head="a" * 40, state="APPROVED")
+        evidence["head_oid"] = head
+        evidence["reviews"].append({
+            "id": "coderabbit-changes-requested",
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-08-23T21:00:00Z",
+            "body": "Blocking issue remains.",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "commit": {"oid": "a" * 40},
+        })
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            evidence,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit requested changes", msg)
+
+    def test_ambiguous_newest_prior_coderabbit_reviews_fail_closed_even_with_current_head_status(self):
+        evidence = self.coderabbit_evidence(head="a" * 40, state="APPROVED")
+        evidence["reviews"].append({
+            "id": "coderabbit-review-2",
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": evidence["reviews"][0]["submittedAt"],
+            "body": "Blocking issue remains.",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "commit": {"oid": "a" * 40},
+        })
+        evidence["head_oid"] = "b" * 40
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            evidence,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("unambiguous latest review verdict", msg)
+
     def test_graphql_coderabbit_login_without_bot_suffix_is_accepted(self):
         ok, msg = merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"),
@@ -996,20 +1079,16 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("CodeRabbit", msg)
 
-    def test_stale_or_pending_coderabbit_review_fails_closed(self):
-        stale = self.coderabbit_evidence(head="old-head")
-        stale["head_oid"] = "a" * 40
+    def test_pending_coderabbit_review_fails_closed(self):
         pending = self.coderabbit_evidence()
         pending["reviews"].append(dict(
             pending["reviews"][0], id="coderabbit-pending", state="PENDING",
         ))
-        for label, evidence in (("stale", stale), ("pending", pending)):
-            with self.subTest(case=label):
-                ok, msg = merge_pr.check_reviews(
-                    self.coderabbit_pr("author:agent-1"), evidence,
-                )
-                self.assertFalse(ok)
-                self.assertIn("CodeRabbit", msg)
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), pending,
+        )
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", msg)
 
     def test_success_context_from_unknown_producer_fails_closed(self):
         evidence = self.coderabbit_evidence()
@@ -1125,13 +1204,13 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("CodeRabbit", msg)
 
-    def test_null_status_creator_passes_only_with_recognized_exact_head_review(self):
+    def test_null_status_creator_fails_closed(self):
         evidence = self.coderabbit_evidence(body="Review complete.")
         evidence["coderabbit_status"] = [{
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": None,
         }]
-        self.assertTrue(merge_pr.check_reviews(
+        self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
 
@@ -1145,7 +1224,7 @@ class ReviewGateTests(unittest.TestCase):
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
 
-    def test_null_status_creator_fails_without_recognized_review(self):
+    def test_null_status_creator_without_recognized_review_fails_closed(self):
         evidence = self.coderabbit_evidence(login="not-coderabbit", body="")
         evidence["coderabbit_status"] = [{
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",

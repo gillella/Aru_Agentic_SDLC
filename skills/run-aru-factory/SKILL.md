@@ -215,9 +215,11 @@ Restated only because skipping one is how each has been broken before.
 
 ### Merging
 
-After CodeRabbit has reviewed the exact current head and every DoD gate passes,
-any factory agent, including the implementation author, may execute the merge
-helper with the picker-supplied `head_sha` pinned as `--expected-head`:
+After CodeRabbit has a substantive review in the PR's review history and an
+authenticated successful hosted status on the exact current head, and every
+DoD gate passes, any factory agent, including the implementation author, may
+execute the merge helper with the picker-supplied `head_sha` pinned as
+`--expected-head`:
 
 ```shell
 python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>

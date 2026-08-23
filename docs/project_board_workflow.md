@@ -125,8 +125,9 @@ worktree, PR, review, merge, and cleanup. Other installed frameworks may help
 with a step, but their session-resume files, brainstorming flows, memory, or PR
 bots cannot replace board state or start a competing lifecycle.
 
-After CodeRabbit completes a substantive review on the exact current head and
-all Definition-of-Done checks pass, any factory agent, including the implementation
+After CodeRabbit has a substantive review in the PR's review history and an
+authenticated successful hosted CodeRabbit status on the exact current head,
+and all Definition-of-Done checks pass, any factory agent, including the implementation
 author, may execute the mechanical merge only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID> --expected-head <HEAD_SHA>`
 when the picker supplied `head_sha`. Direct pushes and

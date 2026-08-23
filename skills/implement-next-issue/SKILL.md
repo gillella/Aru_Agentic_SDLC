@@ -233,10 +233,13 @@ or other irreversible work from the plan gate.
 ### Step 12: Merge Authority and Completion
 
 1. Coding agents never review. Coding-agent reviews and legacy `reviewed-by:` attestations never satisfy
-   review. Wait for a completed substantive CodeRabbit review on the exact
-   current head. Before invoking `merge_pr.py`, every actionable CodeRabbit
-   finding must have later-commit evidence or an explicit `Withdrawn:` reply;
-   thread resolution alone is never sufficient.
+   review. Wait for a completed substantive CodeRabbit review in the PR's
+   review history plus an authenticated successful CodeRabbit hosted status on
+   the exact current head. The review history supplies findings and verdicts;
+   the hosted status is the per-head attestation after remediation. Before
+   invoking `merge_pr.py`, every actionable CodeRabbit finding must have
+   later-commit evidence or an explicit `Withdrawn:` reply; thread resolution
+   alone is never sufficient.
 2. After the CodeRabbit oracle passes, any factory agent,
    including the implementation author, may perform the mechanical merge with
    `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --expected-head <HEAD_SHA>`

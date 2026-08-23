@@ -297,7 +297,7 @@ Project Board supersede it.
 
 #### Historical Phase 0 — Make the spine trustworthy (days)
 
-Gate correctness first. **Verified 2026-08-15:** the review gate no longer falls open for bot/`[bot]` accounts (`is_advisory_review_account` in `scripts/merge_pr.py`); active `reviewer:` claims block shortcuts; resolved threads need a post-finding commit or an explicit `Withdrawn:` reply; reviews must be at current head (#50, #72, #26).
+Gate correctness first. **Verified 2026-08-15:** the review gate no longer falls open for bot/`[bot]` accounts (`is_advisory_review_account` in `scripts/merge_pr.py`); active `reviewer:` claims block shortcuts; resolved threads need a post-finding commit or an explicit `Withdrawn:` reply; the authenticated hosted CodeRabbit status attests the current head while review history supplies findings and verdicts (#50, #72, #26, #373).
 
 | ID | Work | Rationale | Depends on |
 |---|---|---|---|

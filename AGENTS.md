@@ -42,8 +42,10 @@ the Definition-of-Done gate.
 Routine merge execution is mechanical and may be performed by any factory
 agent, including the implementation author, only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`, after CodeRabbit has
-completed a substantive review on the exact current head and every enforced
-gate passes. No agent or human may bypass the merge helper
+completed a substantive review in the PR's review history, posted an
+authenticated successful hosted status on the exact current head, and every
+enforced gate passes. The review history supplies findings and verdicts; the
+hosted status is the per-head attestation after remediation. No agent or human may bypass the merge helper
 with a direct push or an ad-hoc merge.
 
 Legacy `reviewed-by:<coding-agent>`, `reviewer:<coding-agent>`, and

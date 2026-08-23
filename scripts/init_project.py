@@ -121,8 +121,9 @@ branch, or merge around the Definition-of-Done gate.
   a parallel lifecycle.
 - Memory tools provide context only. **CodeRabbit is the sole PR code-review authority.** Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
 
-After CodeRabbit completes a substantive review on the exact current head and
-every enforced gate passes, any factory agent, including the implementation author,
+After CodeRabbit has a substantive review in the PR's review history and an
+authenticated successful hosted status on the exact current head, and every
+enforced gate passes, any factory agent, including the implementation author,
 may execute the mechanical merge only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. When the picker
 supplies `head_sha`, pass it as `--expected-head <HEAD_SHA>`. Authors must never review.

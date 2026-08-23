@@ -701,9 +701,11 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                       exact size-waiver or current-head verification region.
       ``withdrawn``   threads whose resolution was declared a withdrawal.
       ``reviewed_head``  True when at least one substantive, non-advisory
-                      review was submitted against the current head. A review
-                      of an earlier commit attests to code that is no longer
-                      proposed, so a push after review must invalidate it.
+                      review was submitted against the current head. This is
+                      separate from CodeRabbit's merge attestation: the
+                      authoritative current-head binding for CodeRabbit comes
+                      from its authenticated hosted status on this head, while
+                      the review history supplies findings and verdicts.
 
     Commit ordering is not proof of causation - a commit landing after a
     finding may be unrelated. It is the weaker claim the gate can actually
@@ -1461,13 +1463,13 @@ def _with_coderabbit_status(pr_id, evidence):
     return combined
 
 
-def _coderabbit_check(pr, evidence, *, recognized_review=False):  # noqa: C901, PLR0912
-    """Return the exact CodeRabbit check verdict, or ``None`` if ambiguous.
+def _coderabbit_check(pr, evidence):  # noqa: C901, PLR0912
+    """Return the exact current-head CodeRabbit status verdict, or ``None``.
 
-    A similarly named review is not enough: the GitHub-hosted CodeRabbit status
-    must also say that analysis completed successfully. Duplicate current
-    records, unknown shapes, pending/rate-limited/failing conclusions, and a
-    missing check all fail closed.
+    The review object carries findings and verdict history; the GitHub-hosted
+    CodeRabbit status is the per-head attestation. Duplicate current records,
+    unknown shapes, unauthenticated producers, pending/rate-limited/failing
+    conclusions, and a missing check all fail closed.
     """
     matches = []
     if (
@@ -1496,12 +1498,11 @@ def _coderabbit_check(pr, evidence, *, recognized_review=False):  # noqa: C901, 
                 return None
         elif kind == "StatusContext":
             creator = check.get("creator")
-            if creator is None and not recognized_review:
-                return None
-            if creator is not None and (
+            if (
                 not isinstance(creator, dict)
                 or str(creator.get("login") or "").lower() not in CODERABBIT_LOGINS
-                or creator.get("__typename") not in CODERABBIT_ACTOR_TYPES):
+                or creator.get("__typename") not in CODERABBIT_ACTOR_TYPES
+            ):
                 return None
         else:
             return None
@@ -1614,10 +1615,9 @@ def _coderabbit_no_findings_full_review(review, evidence):
     return _unique_selected_timestamp(eligible_completions, select=min) is not None
 
 
-def _coderabbit_current_head_review(evidence):  # noqa: C901
-    """Select the unique newest completed CodeRabbit review on this head."""
-    head = evidence.get("head_oid") if isinstance(evidence, dict) else None
-    if not isinstance(head, str) or not head:
+def _coderabbit_latest_review(evidence):  # noqa: C901
+    """Select the unique newest completed substantive CodeRabbit review."""
+    if not isinstance(evidence, dict):
         return None
     candidates = []
     for review in evidence.get("reviews") or []:
@@ -1637,10 +1637,14 @@ def _coderabbit_current_head_review(evidence):  # noqa: C901
         oid = (review.get("commit") or {}).get("oid")
         if state == "PENDING":
             return None
-        if oid != head:
+        if not isinstance(oid, str) or not oid:
+            return None
+        if (
+            state == "DISMISSED"
+        ):
             continue
         if (
-            state not in {"COMMENTED", "APPROVED"}
+            state not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
             or submitted is None
             or not isinstance(body, str)
         ):
@@ -1648,22 +1652,27 @@ def _coderabbit_current_head_review(evidence):  # noqa: C901
         if state == "COMMENTED" and not body.strip():
             if not _coderabbit_no_findings_full_review(review, evidence):
                 return None
-        candidates.append((submitted, review.get("id")))
+        review_id = review.get("id")
+        if not isinstance(review_id, str) or not review_id:
+            return None
+        candidates.append((submitted, review_id, review))
     newest = max((candidate[0] for candidate in candidates), default=None)
     candidates = [candidate for candidate in candidates if candidate[0] == newest]
-    if len(candidates) != 1 or not isinstance(candidates[0][1], str):
+    if len(candidates) != 1:
         return None
-    return candidates[0]
+    return candidates[0][2]
 
 
 def has_authoritative_coderabbit_review(pr, evidence):
-    """True only when CodeRabbit reviewed this head and its hosted check passed."""
+    """True only when CodeRabbit reviewed this PR and attested the current head."""
     if not isinstance(pr, dict) or not isinstance(evidence, dict):
         return False
-    recognized_review = _coderabbit_current_head_review(evidence) is not None
-    return recognized_review and _coderabbit_check(
-        pr, evidence, recognized_review=recognized_review,
-    ) is True
+    review = _coderabbit_latest_review(evidence)
+    if not isinstance(review, dict):
+        return False
+    if str(review.get("state") or "").upper() == "CHANGES_REQUESTED":
+        return False
+    return _coderabbit_check(pr, evidence) is True
 
 
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
@@ -1723,15 +1732,26 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
             "withdraw the finding with a reason."
         )
 
+    latest_coderabbit_review = _coderabbit_latest_review(evidence)
+    if latest_coderabbit_review is None:
+        return False, (
+            "CodeRabbit has not supplied one completed, substantive review in "
+            "this PR's review history plus a successful authoritative "
+            "current-head CodeRabbit status. Missing, malformed, pending, "
+            "ambiguous, or spoofed evidence blocks merge."
+        )
+    if str(latest_coderabbit_review.get("state") or "").upper() == "CHANGES_REQUESTED":
+        return False, "CodeRabbit requested changes and has not re-approved."
     if not has_authoritative_coderabbit_review(pr, evidence):
         return False, (
-            "CodeRabbit has not supplied one completed, substantive review on "
-            "the exact current head with a successful authoritative CodeRabbit "
-            "check. Missing, pending, failed, rate-limited, stale, ambiguous, "
-            "or spoofed evidence blocks merge."
+            "CodeRabbit has not supplied a successful authoritative "
+            "current-head CodeRabbit status tied to the latest substantive "
+            "review history for this PR. Missing, pending, failed, "
+            "rate-limited, stale, ambiguous, or spoofed evidence blocks "
+            "merge."
         )
     return True, (
-        f"CodeRabbit review is complete on current head "
+        f"CodeRabbit status is complete on current head "
         f"{evidence['head_oid'][:12]}; {_evidence_note(evidence)}"
     )
 
