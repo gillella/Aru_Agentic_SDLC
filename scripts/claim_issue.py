@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1413
+# line-ceiling: 1442
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.
@@ -71,6 +71,28 @@ SETTLE_ROUNDS = 2
 # this confirm is not detected. Tracked as follow-up, not a regression - this is
 # the behaviour PR #16 was reviewed and tested against.
 CONFIRM_DELAY_S = 4.0
+
+
+def _terminal_current_branch_is_clear(action: str) -> bool:
+    clear, reason = merge_pr.terminal_current_branch_guard(action)
+    if not clear:
+        print(f"[CONFLICT] {reason}", file=sys.stderr)
+    return clear
+
+
+def _terminal_pr_is_clear(pr_id: int, labels, action: str) -> bool:
+    gated_sha, error = merge_pr.terminal_lease_label_sha(labels)
+    if error:
+        print(f"[CONFLICT] PR #{pr_id} {error}; refusing {action}.", file=sys.stderr)
+        return False
+    if gated_sha:
+        print(
+            f"[CONFLICT] PR #{pr_id} has terminal merged lease {gated_sha}; "
+            f"refusing {action}. Use a fresh governed issue branch.",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def _label_for(agent: str) -> str:
@@ -311,8 +333,11 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
     return EXIT_OK
 
 
-def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
-                assignee: str = "@me") -> int:
+def claim_issue(  # noqa: C901
+    issue_id: int, agent: str, status: str = "In Progress", assignee: str = "@me"
+) -> int:
+    if not _terminal_current_branch_is_clear("claiming or creating issue work"):
+        return EXIT_CONFLICT
     issue = get_issue(issue_id)
     if not issue:
         print(f"[ERROR] Issue #{issue_id} not found.", file=sys.stderr)
@@ -660,12 +685,14 @@ def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
     return code == 0
 
 
-def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
+def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901, PLR0912
     """Claims a pull request for review. Same exit codes as claim_issue."""
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+    if not _terminal_pr_is_clear(pr_id, labels, "claiming a review"):
+        return EXIT_CONFLICT
 
     # Refuse the PR's own author here, not only in the picker. fetch_next_work
     # filters own-authored PRs when it hands out review work, but a direct
@@ -820,6 +847,8 @@ def complete_review(pr_id: int, agent: str, family: str = "") -> int:
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+    if not _terminal_pr_is_clear(pr_id, labels, "completing a review"):
+        return EXIT_CONFLICT
 
     # Attribution is not something a passer-by may write. Requiring the claim
     # keeps "who reviewed this" tied to the agent that actually took the work.

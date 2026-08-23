@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 405
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -117,7 +118,7 @@ def refresh_pr_evidence(pr_ref: str, verification_commands: List[str]) -> bool:
     """Reruns verification and refreshes evidence for the exact live PR head."""
     local_head = get_current_commit()
     code, out, err = run_cmd(
-        ["gh", "pr", "view", str(pr_ref), "--json", "body,headRefOid"],
+        ["gh", "pr", "view", str(pr_ref), "--json", "body,headRefOid,headRefName"],
         check=False,
     )
     if code != 0:
@@ -127,6 +128,12 @@ def refresh_pr_evidence(pr_ref: str, verification_commands: List[str]) -> bool:
         pr = json.loads(out)
     except json.JSONDecodeError:
         print(f"[ERROR] Could not parse PR #{pr_ref} metadata.", file=sys.stderr)
+        return False
+    clear, reason = _terminal_branch_is_clear(
+        pr.get("headRefName") or "", "refreshing PR verification evidence"
+    )
+    if not clear:
+        print(f"[CONFLICT] {reason}", file=sys.stderr)
         return False
     if not local_head or pr.get("headRefOid") != local_head:
         print(
@@ -252,10 +259,20 @@ def enqueue_review(pr_ref: str) -> bool:
     return True
 
 
+def _terminal_branch_is_clear(branch: str, action: str) -> tuple[bool, str]:
+    """Lazy import avoids create_pr <-> merge_pr import recursion."""
+    from merge_pr import terminal_branch_guard
+    return terminal_branch_guard(branch, action)
+
+
 def create_pr(issue_id: int, title: str = "", body: str = "",
               agent: str = "", family: str = "",
               verification_commands: Optional[List[str]] = None) -> bool:
     current_branch = get_current_branch()
+    clear, reason = _terminal_branch_is_clear(current_branch, "opening a pull request")
+    if not clear:
+        print(f"[CONFLICT] {reason}", file=sys.stderr)
+        return False
     issue = get_issue(issue_id)
 
     if not title:

@@ -1,4 +1,4 @@
-# line-ceiling: 462
+# line-ceiling: 498
 import json
 import sys
 import unittest
@@ -116,7 +116,8 @@ class IdentityStampTests(unittest.TestCase):
 
     @patch.object(create_pr, "get_issue", return_value={"title": "t"})
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
-    def test_create_pr_propagates_a_failed_stamp(self, _branch, _issue):
+    @patch.object(create_pr, "_terminal_branch_is_clear", return_value=(True, "clear"))
+    def test_create_pr_propagates_a_failed_stamp(self, _guard, _branch, _issue):
         with patch.object(create_pr, "run_cmd", return_value=(0, "https://x/pull/7", "")), \
                 patch.object(create_pr, "apply_identity", return_value=False), \
                 patch.object(create_pr, "enqueue_review") as queued:
@@ -125,7 +126,8 @@ class IdentityStampTests(unittest.TestCase):
 
     @patch.object(create_pr, "get_issue", return_value={"title": "t"})
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
-    def test_successful_open_enqueues_review(self, _branch, _issue):
+    @patch.object(create_pr, "_terminal_branch_is_clear", return_value=(True, "clear"))
+    def test_successful_open_enqueues_review(self, _guard, _branch, _issue):
         with patch.object(create_pr, "run_cmd", return_value=(0, "https://x/pull/7", "")), \
                 patch.object(create_pr, "apply_identity", return_value=True), \
                 patch.object(create_pr, "enqueue_review", return_value=True) as queued:
@@ -399,11 +401,13 @@ class VerificationEvidenceTests(unittest.TestCase):
         }) + "\n\nCloses #7"
         concurrent_body = original.replace("summary", "summary\nconcurrent edit")
         responses = [
-            (0, '{"body": ' + json.dumps(original) + ', "headRefOid": "head-7"}', ""),
+            (0, '{"body": ' + json.dumps(original) + ', "headRefOid": "head-7", "headRefName": "fix/issue-7-x"}', ""),
             (0, '{"body": ' + json.dumps(concurrent_body) + ', "headRefOid": "head-7"}', ""),
             (0, "", ""),
         ]
         with patch.object(create_pr, "run_cmd", side_effect=responses) as run, \
+                patch.object(create_pr, "_terminal_branch_is_clear",
+                             return_value=(True, "clear")), \
                 patch.object(create_pr, "collect_verification_evidence", return_value={
                     "commands": [{"command": ["true"], "duration_seconds": 0.0,
                                   "exit_code": 0, "status": "passed"}],
@@ -420,7 +424,8 @@ class VerificationEvidenceTests(unittest.TestCase):
 
     @patch.object(create_pr, "get_issue", return_value={"title": "t"})
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
-    def test_create_pr_renders_not_run_evidence_into_body(self, _branch, _issue):
+    @patch.object(create_pr, "_terminal_branch_is_clear", return_value=(True, "clear"))
+    def test_create_pr_renders_not_run_evidence_into_body(self, _guard, _branch, _issue):
         with patch.object(
             create_pr,
             "run_cmd",
@@ -436,7 +441,8 @@ class VerificationEvidenceTests(unittest.TestCase):
 
     @patch.object(create_pr, "get_issue", return_value={"title": "t"})
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
-    def test_create_pr_rejects_reserved_evidence_markers(self, _branch, _issue):
+    @patch.object(create_pr, "_terminal_branch_is_clear", return_value=(True, "clear"))
+    def test_create_pr_rejects_reserved_evidence_markers(self, _guard, _branch, _issue):
         with patch.object(create_pr, "run_cmd") as run:
             opened = create_pr.create_pr(
                 7,
@@ -456,6 +462,36 @@ class VerificationEvidenceTests(unittest.TestCase):
         parsed, error = merge_pr.parse_verification_evidence(evidence + evidence)
         self.assertIsNone(parsed)
         self.assertIn("duplicated", error)
+
+
+class TerminalLeaseMutationGuardTests(unittest.TestCase):
+    @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
+    @patch.object(
+        create_pr,
+        "_terminal_branch_is_clear",
+        return_value=(False, "terminal merged lease blocks opening a pull request"),
+    )
+    def test_stale_head_cannot_open_another_pr(self, _guard, _branch):
+        with patch.object(create_pr, "get_issue") as issue, \
+             patch.object(create_pr, "run_cmd") as run:
+            self.assertFalse(create_pr.create_pr(7, "title", "body"))
+        issue.assert_not_called()
+        run.assert_not_called()
+
+    @patch.object(create_pr, "get_current_commit", return_value="head-7")
+    def test_stale_head_cannot_refresh_verification_evidence(self, _head):
+        metadata = json.dumps({
+            "body": "body",
+            "headRefOid": "head-7",
+            "headRefName": "fix/issue-7-x",
+        })
+        with patch.object(create_pr, "run_cmd", return_value=(0, metadata, "")), \
+             patch.object(
+                 create_pr, "_terminal_branch_is_clear",
+                 return_value=(False, "terminal merged lease blocks refresh"),
+             ), patch.object(create_pr, "collect_verification_evidence") as verify:
+            self.assertFalse(create_pr.refresh_pr_evidence("7", ["true"]))
+        verify.assert_not_called()
 
 
 if __name__ == "__main__":

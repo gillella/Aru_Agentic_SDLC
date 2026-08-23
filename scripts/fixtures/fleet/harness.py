@@ -1,4 +1,4 @@
-# line-ceiling: 513
+# line-ceiling: 516
 """Hermetic board and local-agent adapters for the full fleet lifecycle.
 
 The fixture deliberately models GitHub as the durable queue while exercising
@@ -319,6 +319,9 @@ class HermeticFleet:
             stack.enter_context(patch.object(
                 claim_helpers, "_pr_labels",
                 side_effect=lambda number: self._pr_labels(self.pull_requests[number]),
+            ))
+            stack.enter_context(patch.object(
+                claim_helpers, "_terminal_current_branch_is_clear", return_value=True,
             ))
             stack.enter_context(patch.object(
                 claim_helpers, "_reviewed_head_for_completion",

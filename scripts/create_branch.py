@@ -239,6 +239,11 @@ def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool =
         title_slug = sanitize_slug(clean_title)
 
     branch_name = f"{branch_type}/issue-{issue_id}-{title_slug}"
+    from merge_pr import terminal_branch_guard
+    clear, reason = terminal_branch_guard(branch_name, "creating an issue branch")
+    if not clear:
+        print(f"[CONFLICT] {reason}", file=sys.stderr)
+        sys.exit(1)
 
     if use_worktree:
         path = create_worktree(branch_name, agent=agent)

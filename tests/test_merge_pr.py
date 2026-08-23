@@ -1,4 +1,4 @@
-# line-ceiling: 4300
+# line-ceiling: 4438
 from contextlib import nullcontext
 import json
 import os
@@ -1851,6 +1851,120 @@ def merged_pr():
     }
 
 
+def terminal_lease(**overrides):
+    lease = {
+        "schema": merge_pr.TERMINAL_LEASE_SCHEMA,
+        "repo": "owner/repo",
+        "pr": 9,
+        "head_branch": "fix/issue-7-example",
+        "gated_sha": "gated-sha",
+        "merge_sha": "merge-sha",
+        "holder": "agent-merger",
+        "recorded_at": "2026-08-23T00:00:00+00:00",
+    }
+    lease.update(overrides)
+    return lease
+
+
+class TerminalMergeLeaseTests(unittest.TestCase):
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    def test_terminal_lease_remains_queryable_without_live_claim_labels(self, _slug):
+        lease = terminal_lease()
+        comments = [{
+            "author": {"login": "owner"},
+            "authorAssociation": "OWNER",
+            "body": merge_pr.render_terminal_lease(lease),
+        }]
+
+        parsed, error = merge_pr.terminal_lease_from_comments(
+            comments, "fix/issue-7-example"
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(parsed, lease)
+        self.assertEqual(parsed["holder"], "agent-merger")
+
+    def test_duplicate_or_malformed_lease_fails_closed(self):
+        body = merge_pr.render_terminal_lease(terminal_lease())
+        parsed, error = merge_pr.parse_terminal_lease(body + body)
+        self.assertIsNone(parsed)
+        self.assertIn("duplicate", error)
+        parsed, error = merge_pr.parse_terminal_lease(
+            "<!-- aru-terminal-merge-lease:v1 not-json -->"
+        )
+        self.assertIsNone(parsed)
+        self.assertIn("malformed", error)
+
+    @patch.object(merge_pr, "terminal_lease_for_branch")
+    def test_terminal_branch_guard_rejects_stale_continuation(self, lookup):
+        lookup.return_value = (terminal_lease(), None)
+        clear, reason = merge_pr.terminal_branch_guard(
+            "fix/issue-7-example", "refreshing a PR"
+        )
+        self.assertFalse(clear)
+        self.assertIn("PR #9", reason)
+        self.assertIn("fresh governed issue branch", reason)
+
+    def test_merge_records_and_reads_back_lease_before_claim_cleanup(self):
+        pr = merged_pr()
+        pr["labels"] = [{"name": "merger:agent-merger"}]
+        calls = 0
+        with patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(merge_pr, "run_cmd", return_value=(0, "", "")) as run:
+            def lookup(_pr_id, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return None, None
+                return merge_pr.parse_terminal_lease(run.call_args.args[0][-1])
+
+            with patch.object(merge_pr, "terminal_lease_for_pr", side_effect=lookup), \
+                 patch.object(
+                     merge_pr, "ensure_terminal_lease_label",
+                     return_value=(True, "label recorded"),
+                 ):
+                ok, lease, message = merge_pr.ensure_terminal_lease(
+                    pr, "gated-sha", "merge-sha"
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(lease["holder"], "agent-merger")
+        self.assertIn("recorded and verified", message)
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ["gh", "pr", "comment", "9"])
+        self.assertIn(merge_pr.TERMINAL_LEASE_PREFIX, command[-1])
+
+    @patch.object(merge_pr, "ensure_label", return_value=True)
+    @patch.object(merge_pr, "run_cmd", return_value=(0, "", ""))
+    @patch.object(merge_pr, "_gh_json")
+    def test_terminal_label_is_exact_head_bound_and_read_back(
+        self, metadata, run, ensure
+    ):
+        expected = f"{merge_pr.TERMINAL_LEASE_LABEL}abcdef123456"
+        metadata.side_effect = [
+            {"labels": []},
+            {"labels": [{"name": expected}]},
+        ]
+        ok, message = merge_pr.ensure_terminal_lease_label(
+            9, "abcdef1234567890"
+        )
+        self.assertTrue(ok)
+        self.assertIn("verified", message)
+        ensure.assert_called_once_with(
+            expected, "b60205", "Terminal exact-head writer lease"
+        )
+        self.assertIn(expected, run.call_args.args[0])
+
+    @patch.object(merge_pr, "terminal_lease_for_pr", return_value=(None, None))
+    def test_missing_merger_holder_blocks_lease_and_closeout(self, _lookup):
+        ok, lease, message = merge_pr.ensure_terminal_lease(
+            merged_pr(), "gated-sha", "merge-sha"
+        )
+        self.assertFalse(ok)
+        self.assertIsNone(lease)
+        self.assertIn("exactly one merger holder", message)
+
+
 class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "fetch_pr", return_value=merged_pr())
     @patch.object(merge_pr.subprocess, "run")
@@ -1875,12 +1989,13 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         self.assertIsNone(final)
         self.assertIn("still reports OPEN", message)
 
+    @patch.object(merge_pr, "ensure_terminal_lease", return_value=(True, {}, "recorded"))
     @patch.object(merge_pr, "run_closeout", return_value=True)
     @patch.object(merge_pr, "repository_root", return_value="/repo")
     @patch.object(merge_pr, "execute_merge")
     @patch.object(merge_pr, "fetch_pr", return_value=merged_pr())
     def test_rerun_of_merged_pr_skips_second_merge(
-        self, _fetch, execute, _root, closeout
+        self, _fetch, execute, _root, closeout, _lease
     ):
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
@@ -1888,6 +2003,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         execute.assert_not_called()
         closeout.assert_called_once()
 
+    @patch.object(merge_pr, "ensure_terminal_lease", return_value=(True, {}, "recorded"))
     @patch.object(merge_pr, "post_human_intervention", return_value=False)
     @patch.object(merge_pr.time, "sleep")
     @patch.object(merge_pr, "clear_merger_claims")
@@ -1916,7 +2032,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     def test_successful_merge_with_branch_delete_failure_is_resumable(
         self, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
         _remote, _close, _done, _issue_claim, _review_claim, merger_claim,
-        sleep, intervention,
+        sleep, intervention, _lease,
     ):
         fetch.return_value = {
             "number": 9,
@@ -1961,6 +2077,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         self.assertIn("could not be fully recorded", output)
         self.assertNotIn("evidence was recorded", output)
 
+    @patch.object(merge_pr, "ensure_terminal_lease", return_value=(True, {}, "recorded"))
     @patch.object(merge_pr, "run_closeout", return_value=True)
     @patch.object(merge_pr, "repository_root", return_value="/repo")
     @patch.object(merge_pr, "execute_merge", return_value=(merged_pr(), "merged"))
@@ -1977,7 +2094,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "fetch_pr")
     @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_default_merge_method_is_merge(
-        self, fetch, _json, _sync, _threads, execute, _root, closeout
+        self, fetch, _json, _sync, _threads, execute, _root, closeout, _lease
     ):
         fetch.return_value = {
             "number": 9,
@@ -2486,13 +2603,42 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
     @patch.object(merge_pr, "run_cmd", return_value=(0, "new-sha\trefs/heads/fix/x\n", ""))
     def test_reused_fork_branch_at_new_sha_is_preserved(self, run, _slug):
         ok, message = merge_pr.delete_remote_branch(
-            "/repo", "fix/x", "gated-sha", "contributor/fork"
+            "/repo", "fix/x", "gated-sha", "contributor/fork",
+            9, "agent-merger",
         )
         self.assertFalse(ok)
         self.assertIn("left untouched", message)
+        self.assertIn("P0 STALE WRITER", message)
+        self.assertIn("PR #9", message)
+        self.assertIn("gated-sha", message)
+        self.assertIn("new-sha", message)
+        self.assertIn("fix/x", message)
+        self.assertIn("agent-merger", message)
         command = run.call_args.args[0]
         self.assertIn("https://github.com/contributor/fork.git", command)
         self.assertEqual(run.call_count, 1)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "run_cmd")
+    def test_pr89_regression_deleted_branch_recreated_by_stale_writer(self, run, _slug):
+        run.side_effect = [
+            (0, "gated-sha\trefs/heads/fix/issue-87-watch\n", ""),
+            (0, "", ""),
+            (0, "new-sha\trefs/heads/fix/issue-87-watch\n", ""),
+        ]
+        first_ok, _ = merge_pr.delete_remote_branch(
+            "/repo", "fix/issue-87-watch", "gated-sha", "owner/repo",
+            89, "codex-writer",
+        )
+        second_ok, message = merge_pr.delete_remote_branch(
+            "/repo", "fix/issue-87-watch", "gated-sha", "owner/repo",
+            89, "codex-writer",
+        )
+        self.assertTrue(first_ok)
+        self.assertFalse(second_ok)
+        self.assertIn("P0 STALE WRITER", message)
+        self.assertIn("new-sha", message)
+        self.assertIn("left untouched", message)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "run_cmd")
@@ -3966,6 +4112,8 @@ class CheckpointCallSiteTests(unittest.TestCase):
         with patch.object(sys, "argv", argv), \
              patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "ensure_terminal_lease",
+                          return_value=(True, {}, "recorded")), \
              patch.object(merge_pr, "run_closeout", return_value=closeout_ok), \
              patch.object(merge_pr.time, "sleep"), \
              patch.object(merge_pr, "post_human_intervention", return_value=True), \
@@ -3994,6 +4142,8 @@ class CheckpointCallSiteTests(unittest.TestCase):
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
              patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "ensure_terminal_lease",
+                          return_value=(True, {}, "recorded")), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
              patch.object(merge_pr, "write_checkpoint_tag",
                           return_value=(False, "git tag failed")):
@@ -4124,6 +4274,8 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
              patch.object(merge_pr, "execute_merge",
                           return_value=(merged_pr(), "merged")), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "ensure_terminal_lease",
+                          return_value=(True, {}, "recorded")), \
              patch.object(merge_pr, "save_gate_verdicts", return_value=True), \
              patch.object(merge_pr, "load_gate_verdicts", return_value=None), \
              patch.object(merge_pr, "discard_gate_verdicts"), \
@@ -4158,6 +4310,8 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
              patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "ensure_terminal_lease",
+                          return_value=(True, {}, "recorded")), \
              patch.object(merge_pr, "load_gate_verdicts",
                           return_value=list(CHECKPOINT_GATES)) as load, \
              patch.object(merge_pr, "discard_gate_verdicts"), \

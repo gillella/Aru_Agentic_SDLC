@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3645
+# line-ceiling: 3988
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -42,7 +42,11 @@ from common import (
     VERIFICATION_EVIDENCE_END,
     VERIFICATION_EVIDENCE_SCHEMA,
     VERIFICATION_EVIDENCE_START,
+    ensure_label,
     get_repo_slug,
+    is_trusted_metadata_author,
+    repository_owner_login,
+    repository_trusted_logins,
     run_cmd,
 )
 from create_pr import render_verification_evidence, replace_verification_evidence
@@ -75,6 +79,17 @@ REVIEW_CLAIM_LABEL = "reviewer:"
 # Transient merge-execution claim from claim_merge. Cleared on close-out; never
 # treated as review attestation.
 MERGER_CLAIM_LABEL = "merger:"
+
+# Durable writer-revocation record. The transient merger label is cleared by
+# close-out, but this marker remains on the merged PR so delayed workers can
+# deterministically refuse the old head branch.
+TERMINAL_LEASE_SCHEMA = "aru.terminal-merge-lease.v1"
+TERMINAL_LEASE_LABEL = "terminal-lease:"
+TERMINAL_LEASE_PREFIX = "<!-- aru-terminal-merge-lease:v1 "
+TERMINAL_LEASE_SUFFIX = " -->"
+TERMINAL_LEASE_RE = re.compile(
+    r"<!--\s*aru-terminal-merge-lease:v1\s+(\{.*?\})\s*-->", re.DOTALL
+)
 
 # Review apps can add useful findings, but their comments are not independent
 # approval unless the factory operator names that App as the reviewer identity
@@ -142,6 +157,299 @@ def _gh_json(args, cwd=None):
 
 def fetch_pr(pr_id):
     return _gh_json(["gh", "pr", "view", str(pr_id), "--json", PR_FIELDS])
+
+
+def parse_terminal_lease(body):
+    """Parse one terminal lease marker, failing closed on ambiguity."""
+    text = body or ""
+    markers = TERMINAL_LEASE_RE.findall(text)
+    mentioned = "aru-terminal-merge-lease:" in text
+    if not markers:
+        return None, "malformed terminal lease marker" if mentioned else None
+    if len(markers) != 1:
+        return None, "duplicate terminal lease markers"
+    try:
+        lease = json.loads(markers[0])
+    except (json.JSONDecodeError, TypeError):
+        return None, "terminal lease payload is not valid JSON"
+    required_strings = (
+        "schema", "repo", "head_branch", "gated_sha", "merge_sha",
+        "holder", "recorded_at",
+    )
+    if not isinstance(lease, dict):
+        return None, "terminal lease payload is not an object"
+    if any(not isinstance(lease.get(key), str) or not lease.get(key).strip()
+           for key in required_strings):
+        return None, "terminal lease payload is missing required string fields"
+    if lease.get("schema") != TERMINAL_LEASE_SCHEMA:
+        return None, "terminal lease schema is unsupported"
+    if not isinstance(lease.get("pr"), int) or lease["pr"] <= 0:
+        return None, "terminal lease PR number is invalid"
+    if not is_valid_branch_name(lease["head_branch"]):
+        return None, "terminal lease branch is invalid"
+    return lease, None
+
+
+def terminal_lease_from_comments(comments, branch=None):
+    """Return the unique durable lease in trusted PR comments."""
+    leases = []
+    slug = get_repo_slug()
+    owner = repository_owner_login(slug)
+    trusted_logins = None
+    if not slug or not owner:
+        return None, "could not establish terminal lease repository identity"
+    for comment in comments or []:
+        body = comment.get("body") or ""
+        if "aru-terminal-merge-lease:" not in body:
+            continue
+        trusted = is_trusted_metadata_author(comment, owner)
+        if not trusted:
+            if trusted_logins is None:
+                trusted_logins = repository_trusted_logins(slug)
+            trusted = trusted_logins is not None and is_trusted_metadata_author(
+                comment, owner, trusted_logins=trusted_logins
+            )
+        if not trusted:
+            author = ((comment.get("author") or {}).get("login") or "").strip()
+            return None, f"terminal lease marker was posted by untrusted author '{author or 'unknown'}'"
+        lease, error = parse_terminal_lease(body)
+        if error:
+            return None, error
+        if lease["repo"].lower() != slug.lower():
+            return None, "terminal lease repository contradicts the active repository"
+        if branch and lease["head_branch"] != branch:
+            return None, "terminal lease branch contradicts the PR head branch"
+        leases.append(lease)
+    if not leases:
+        return None, None
+    canonical = json.dumps(leases[0], sort_keys=True)
+    if any(json.dumps(item, sort_keys=True) != canonical for item in leases[1:]):
+        return None, "conflicting terminal lease records"
+    return leases[0], None
+
+
+def terminal_lease_for_branch(branch):  # noqa: C901
+    """Find a durable merged lease for an exact head branch."""
+    if not is_valid_branch_name(branch):
+        return None, f"invalid branch name {branch!r}"
+    records = _gh_json([
+        "gh", "pr", "list", "--state", "all", "--head", branch,
+        "--json", "number,state,headRefName,comments,labels",
+    ])
+    if records is None:
+        return None, f"could not query terminal leases for branch {branch}"
+    found = []
+    for record in records:
+        if record.get("headRefName") != branch:
+            return None, "terminal lease query returned a contradictory head branch"
+        lease, error = terminal_lease_from_comments(record.get("comments"), branch)
+        if error:
+            return None, error
+        terminal_labels = sorted(
+            lab.get("name", "") for lab in (record.get("labels") or [])
+            if lab.get("name", "").startswith(TERMINAL_LEASE_LABEL)
+        )
+        if len(terminal_labels) > 1:
+            return None, "PR carries conflicting terminal lease labels"
+        if terminal_labels and not lease:
+            return None, "terminal lease label lacks its durable lease record"
+        if (record.get("state") or "").upper() == "MERGED" and not lease:
+            return None, (
+                f"branch {branch} was already used by merged PR "
+                f"#{record.get('number')} without durable terminal lease evidence"
+            )
+        if lease:
+            if lease["pr"] != record.get("number"):
+                return None, "terminal lease PR number contradicts its GitHub record"
+            found.append(lease)
+    if not found:
+        return None, None
+    canonical = json.dumps(found[0], sort_keys=True)
+    if any(json.dumps(item, sort_keys=True) != canonical for item in found[1:]):
+        return None, f"branch {branch} has conflicting terminal leases"
+    return found[0], None
+
+
+def terminal_lease_for_pr(pr_id, allow_missing_merged=False):
+    """Read a terminal lease from one PR without trusting its current labels."""
+    record = _gh_json([
+        "gh", "pr", "view", str(pr_id),
+        "--json", "number,state,headRefName,comments,labels",
+    ])
+    if record is None:
+        return None, f"could not query terminal lease for PR #{pr_id}"
+    lease, error = terminal_lease_from_comments(
+        record.get("comments"), record.get("headRefName")
+    )
+    if error:
+        return None, error
+    if lease and lease["pr"] != record.get("number"):
+        return None, "terminal lease PR number contradicts its GitHub record"
+    terminal_labels = sorted(
+        lab.get("name", "") for lab in (record.get("labels") or [])
+        if lab.get("name", "").startswith(TERMINAL_LEASE_LABEL)
+    )
+    if len(terminal_labels) > 1:
+        return None, "PR carries conflicting terminal lease labels"
+    if terminal_labels and not lease:
+        return None, "terminal lease label lacks its durable lease record"
+    if (record.get("state") or "").upper() == "MERGED" and not lease:
+        if not allow_missing_merged:
+            return None, "merged PR lacks a durable terminal lease record"
+    return lease, error
+
+
+def ensure_terminal_lease_label(pr_id, gated_head):
+    """Idempotently stamp and read back the fast terminal lease fact."""
+    expected = f"{TERMINAL_LEASE_LABEL}{gated_head[:12]}"
+    record = _gh_json(["gh", "pr", "view", str(pr_id), "--json", "labels"])
+    if record is None:
+        return False, "could not read terminal lease labels"
+    current = sorted(
+        lab.get("name", "") for lab in (record.get("labels") or [])
+        if lab.get("name", "").startswith(TERMINAL_LEASE_LABEL)
+    )
+    if current == [expected]:
+        return True, "terminal lease label already recorded"
+    if current:
+        return False, f"conflicting terminal lease label(s): {', '.join(current)}"
+    if not ensure_label(expected, "b60205", "Terminal exact-head writer lease"):
+        return False, "could not provision terminal lease label"
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--add-label", expected], check=False
+    )
+    if code != 0:
+        return False, f"could not stamp terminal lease label: {err.strip()}"
+    verify = _gh_json(["gh", "pr", "view", str(pr_id), "--json", "labels"])
+    labels = {
+        lab.get("name", "") for lab in ((verify or {}).get("labels") or [])
+    }
+    if expected not in labels:
+        return False, "terminal lease label was absent during read-back"
+    return True, "terminal lease label recorded and verified"
+
+
+def terminal_branch_guard(branch, action):
+    """Refuse a mutation on a head branch whose merged writer lease is terminal."""
+    lease, error = terminal_lease_for_branch(branch)
+    if error:
+        return False, f"cannot prove terminal-lease state before {action}: {error}"
+    if lease:
+        return False, (
+            f"terminal merged lease blocks {action}: PR #{lease['pr']} branch "
+            f"{lease['head_branch']} was merged at gated SHA {lease['gated_sha']} "
+            f"by {lease['holder']}; use a fresh governed issue branch"
+        )
+    return True, "no terminal merged lease"
+
+
+def terminal_pr_guard(pr_id, action):
+    """Refuse reviewer/author continuation after a PR's terminal merge."""
+    lease, error = terminal_lease_for_pr(pr_id)
+    if error:
+        return False, f"cannot prove terminal-lease state before {action}: {error}"
+    if lease:
+        return False, (
+            f"terminal merged lease blocks {action}: PR #{lease['pr']} was merged "
+            f"at gated SHA {lease['gated_sha']} by {lease['holder']}"
+        )
+    return True, "no terminal merged lease"
+
+
+def terminal_lease_label_sha(labels):
+    """Return the unique short gated SHA carried by terminal PR labels."""
+    values = sorted(
+        name[len(TERMINAL_LEASE_LABEL):]
+        for name in [lab.get("name", "") if isinstance(lab, dict) else str(lab)
+                     for lab in (labels or [])]
+        if name.startswith(TERMINAL_LEASE_LABEL)
+    )
+    if not values:
+        return None, None
+    if len(values) != 1 or not re.fullmatch(r"[0-9a-f]{12}", values[0]):
+        return None, "terminal lease labels are malformed or conflicting"
+    return values[0], None
+
+
+def terminal_current_branch_guard(action):
+    """Apply the lease guard to a stale worker's checked-out feature branch."""
+    code, branch, err = run_cmd(["git", "branch", "--show-current"], check=False)
+    if code != 0:
+        return False, f"could not determine current branch before {action}: {err.strip()}"
+    branch = branch.strip()
+    if branch in {"", "main", "master"}:
+        return True, "protected/default checkout is not a PR head continuation"
+    return terminal_branch_guard(branch, action)
+
+
+def render_terminal_lease(lease):
+    payload = json.dumps(lease, sort_keys=True, separators=(",", ":"))
+    return (
+        f"{TERMINAL_LEASE_PREFIX}{payload}{TERMINAL_LEASE_SUFFIX}\n\n"
+        "## Terminal merged writer lease\n"
+        f"PR #{lease['pr']} permanently closed writer continuation for "
+        f"`{lease['head_branch']}` at `{lease['gated_sha']}`.\n"
+    )
+
+
+def ensure_terminal_lease(pr, gated_head, merged_sha):
+    """Idempotently record and read back the terminal lease after merge."""
+    pr_id = pr.get("number")
+    branch = pr.get("headRefName") or ""
+    existing, error = terminal_lease_for_pr(pr_id, allow_missing_merged=True)
+    if error:
+        return False, None, error
+    if existing:
+        expected = {
+            "pr": pr_id,
+            "head_branch": branch,
+            "gated_sha": gated_head,
+            "merge_sha": merged_sha,
+        }
+        mismatches = [key for key, value in expected.items() if existing.get(key) != value]
+        if mismatches:
+            return False, existing, (
+                "existing terminal lease contradicts " + ", ".join(mismatches)
+            )
+        label_ok, label_message = ensure_terminal_lease_label(pr_id, gated_head)
+        return label_ok, existing, (
+            f"terminal lease already recorded; {label_message}"
+        )
+    holders = sorted(
+        name[len(MERGER_CLAIM_LABEL):]
+        for name in [lab.get("name", "") for lab in (pr.get("labels") or [])]
+        if name.startswith(MERGER_CLAIM_LABEL) and name[len(MERGER_CLAIM_LABEL):]
+    )
+    if len(holders) != 1:
+        return False, None, "terminal lease requires exactly one merger holder"
+    repo = get_repo_slug()
+    if not repo or not pr_id or not branch or not gated_head or not merged_sha:
+        return False, None, "terminal lease inputs are incomplete"
+    lease = {
+        "schema": TERMINAL_LEASE_SCHEMA,
+        "repo": repo,
+        "pr": pr_id,
+        "head_branch": branch,
+        "gated_sha": gated_head,
+        "merge_sha": merged_sha,
+        "holder": holders[0],
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    code, _, err = run_cmd(
+        ["gh", "pr", "comment", str(pr_id), "--body", render_terminal_lease(lease)],
+        check=False,
+    )
+    if code != 0:
+        return False, None, f"could not record terminal lease: {err.strip()}"
+    recorded, error = terminal_lease_for_pr(pr_id, allow_missing_merged=True)
+    if error:
+        return False, None, f"could not verify terminal lease: {error}"
+    if recorded != lease:
+        return False, recorded, "terminal lease read-back did not match the written record"
+    label_ok, label_message = ensure_terminal_lease_label(pr_id, gated_head)
+    if not label_ok:
+        return False, lease, label_message
+    return True, lease, f"terminal lease recorded and verified; {label_message}"
 
 
 def linked_issues(body):
@@ -2723,7 +3031,8 @@ def is_harmless_orphan_branch_failure(failure: str) -> bool:
     return failure.startswith(prefix) and "unattached validation" in failure
 
 
-def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
+def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug,
+                         pr_number=None, holder="unknown"):
     if not branch or not expected_sha or not head_repo_slug:
         return False, (
             "Branch, gated head SHA, and head repository are required; "
@@ -2748,8 +3057,10 @@ def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
     actual_sha = out.split()[0] if out.split() else ""
     if actual_sha != expected_sha:
         return False, (
-            f"Remote branch {head_repo_slug}:{branch} now points to "
-            f"{actual_sha or 'unknown'}, not gated head {expected_sha}; left untouched."
+            f"P0 STALE WRITER: PR #{pr_number or 'unknown'} remote branch "
+            f"{head_repo_slug}:{branch} was recreated at {actual_sha or 'unknown'} "
+            f"after terminal merge of gated SHA {expected_sha}; holder "
+            f"{holder or 'unknown'}; left untouched."
         )
     code, _, err = run_cmd(
         [
@@ -2915,11 +3226,27 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):  # noqa: C901, PLR09
     branch = pr.get("headRefName") or ""
     expected_sha = pr.get("headRefOid") or ""
     head_repo_slug = head_repository_slug(pr)
+    merger_holders = sorted(
+        name[len(MERGER_CLAIM_LABEL):]
+        for name in [lab.get("name", "") for lab in (pr.get("labels") or [])]
+        if name.startswith(MERGER_CLAIM_LABEL)
+    )
+    author_holders = sorted(
+        name[len(AUTHOR_LABEL):]
+        for name in [lab.get("name", "") for lab in (pr.get("labels") or [])]
+        if name.startswith(AUTHOR_LABEL)
+    )
+    writer_holder = (
+        author_holders[0] if len(author_holders) == 1
+        else merger_holders[0] if len(merger_holders) == 1
+        else "unknown"
+    )
     steps = [
         ("worktree", lambda: prune_worktree(repo_root, branch, expected_sha)),
         ("local branch", lambda: cleanup_local_branch(repo_root, branch, expected_sha)),
         ("remote branch", lambda: delete_remote_branch(
-            repo_root, branch, expected_sha, head_repo_slug
+            repo_root, branch, expected_sha, head_repo_slug,
+            pr.get("number"), writer_holder,
         )),
     ]
     for num in issue_nums:
@@ -3408,6 +3735,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
     # Stays None on the resume path, where no gate is evaluated. The checkpoint
     # records that gap rather than inventing a verdict set.
     gates = None
+    terminal_lease_result = None
     if args.expected_head and not is_merged(pr):
         if not heads_match(gated_head, args.expected_head):
             print(
@@ -3556,6 +3884,10 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 print(f"  ❌ not merged          {outcome}", file=sys.stderr)
                 return EXIT_ERROR
             print(f"  ✅ server merge        {outcome}")
+            accepted_merge_sha = merge_commit_oid(final_pr) or "unknown"
+            terminal_lease_result = ensure_terminal_lease(
+                final_pr, gated_head, accepted_merge_sha
+            )
 
     merged_sha = merge_commit_oid(final_pr) or "unknown"
     audit_ok = merged_sha != "unknown"
@@ -3589,6 +3921,24 @@ def main():  # noqa: C901, PLR0912, PLR0915
         print(
             "[ERROR] Merge audit is incomplete; intervention evidence "
             f"{'was recorded' if evidence_ok else 'could not be fully recorded'}.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    if terminal_lease_result is None:
+        terminal_lease_result = ensure_terminal_lease(
+            final_pr, gated_head, merged_sha
+        )
+    lease_ok, _terminal_lease, lease_message = terminal_lease_result
+    print(f"  {'✅' if lease_ok else '❌'} {'terminal lease':<18} {lease_message}")
+    if not lease_ok:
+        failure = f"terminal lease: {lease_message}"
+        evidence_ok = post_human_intervention(
+            final_pr, issue_nums, root, gated_head, merged_sha, [], command,
+            blocked_before_closeout=failure,
+        )
+        print(
+            "[ERROR] Merge succeeded but the terminal writer lease could not be "
+            f"proven; intervention evidence {'was recorded' if evidence_ok else 'could not be fully recorded'}.",
             file=sys.stderr,
         )
         return EXIT_ERROR

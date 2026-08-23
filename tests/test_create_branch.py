@@ -108,7 +108,10 @@ class CreateBranchPlanGateTests(unittest.TestCase):
     @patch("create_branch.create_worktree")
     @patch("create_branch.get_issue")
     @patch("create_branch.has_implementation_plan")
-    def test_create_branch_succeeds_for_planned_feature(self, mock_has_plan, mock_get_issue, mock_worktree):
+    @patch("merge_pr.terminal_branch_guard", return_value=(True, "clear"))
+    def test_create_branch_succeeds_for_planned_feature(
+        self, _guard, mock_has_plan, mock_get_issue, mock_worktree
+    ):
         mock_get_issue.return_value = {"title": "feat: planned feature", "labels": [{"name": "type:feat"}]}
         mock_has_plan.return_value = True
         mock_worktree.return_value = ".worktrees/feat-issue-999-planned-feature"
@@ -151,6 +154,25 @@ class CreateBranchPlanGateTests(unittest.TestCase):
         )
         self.assertEqual(cb.validate_plan_depth(filled_low_risk, is_risk=False), [])
         self.assertTrue(cb.is_substantive_plan(filled_low_risk, is_risk=False))
+
+    @patch("create_branch.create_worktree")
+    @patch("create_branch.get_issue")
+    @patch(
+        "merge_pr.terminal_branch_guard",
+        return_value=(False, "terminal merged lease blocks branch reuse"),
+    )
+    def test_merged_issue_branch_name_cannot_be_reused(
+        self, _guard, get_issue, worktree
+    ):
+        get_issue.return_value = {
+            "title": "fix: old merged work",
+            "labels": [{"name": "type:fix"}],
+            "body": "routine parser fix",
+        }
+        with self.assertRaises(SystemExit) as caught:
+            cb.create_branch(7, branch_type="fix", use_worktree=True)
+        self.assertEqual(caught.exception.code, 1)
+        worktree.assert_not_called()
 
 
 if __name__ == "__main__":

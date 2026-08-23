@@ -1,4 +1,4 @@
-# line-ceiling: 938
+# line-ceiling: 970
 import json
 import sys
 import tempfile
@@ -15,10 +15,13 @@ import agent_presence as ap  # noqa: E402
 
 _PRESENCE_TEMPORARY = None
 _PRESENCE_PATCHER = None
+_TERMINAL_CURRENT_PATCHER = None
+_TERMINAL_PR_PATCHER = None
 
 
 def setUpModule():
     global _PRESENCE_TEMPORARY, _PRESENCE_PATCHER
+    global _TERMINAL_CURRENT_PATCHER, _TERMINAL_PR_PATCHER
     _PRESENCE_TEMPORARY = tempfile.TemporaryDirectory()
     _PRESENCE_PATCHER = patch.object(
         ap,
@@ -26,9 +29,19 @@ def setUpModule():
         Path(_PRESENCE_TEMPORARY.name) / "agent-presence.json",
     )
     _PRESENCE_PATCHER.start()
+    _TERMINAL_CURRENT_PATCHER = patch.object(
+        claim_issue, "_terminal_current_branch_is_clear", return_value=True
+    )
+    _TERMINAL_PR_PATCHER = patch.object(
+        claim_issue, "_terminal_pr_is_clear", return_value=True
+    )
+    _TERMINAL_CURRENT_PATCHER.start()
+    _TERMINAL_PR_PATCHER.start()
 
 
 def tearDownModule():
+    _TERMINAL_PR_PATCHER.stop()
+    _TERMINAL_CURRENT_PATCHER.stop()
     _PRESENCE_PATCHER.stop()
     _PRESENCE_TEMPORARY.cleanup()
 
@@ -932,6 +945,25 @@ class ClaimIssueTests(unittest.TestCase):
             self.assertIn("Released stale review claim on PR #42", output)
             self.assertIn("absent from presence registry", output)
             self.assertIn("claim age > 2h", output)
+
+
+class TerminalLeaseClaimGuardTests(unittest.TestCase):
+    def test_stale_feature_branch_cannot_claim_new_issue_work(self):
+        with patch.object(
+            claim_issue, "_terminal_current_branch_is_clear", return_value=False
+        ), patch.object(claim_issue, "get_issue") as get_issue:
+            result = claim_issue.claim_issue(90, "stale-worker")
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        get_issue.assert_not_called()
+
+    def test_terminally_merged_pr_cannot_complete_delayed_review(self):
+        with patch.object(
+            claim_issue, "_terminal_pr_is_clear", return_value=False
+        ), patch.object(claim_issue, "_pr_labels") as labels:
+            labels.return_value = [{"name": "terminal-lease:abcdef123456"}]
+            result = claim_issue.complete_review(89, "stale-reviewer", "openai")
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        labels.assert_called_once_with(89)
 
 
 if __name__ == "__main__":
