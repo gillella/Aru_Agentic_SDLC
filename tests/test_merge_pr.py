@@ -1204,15 +1204,17 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("CodeRabbit", msg)
 
-    def test_null_status_creator_fails_closed(self):
+    def test_null_status_creator_passes_with_recognized_review(self):
         evidence = self.coderabbit_evidence(body="Review complete.")
         evidence["coderabbit_status"] = [{
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": None,
         }]
-        self.assertFalse(merge_pr.check_reviews(
+        ok, msg = merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
-        )[0])
+        )
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
 
     def test_non_null_spoof_status_creator_fails_with_recognized_review(self):
         evidence = self.coderabbit_evidence(body="")

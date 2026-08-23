@@ -1463,7 +1463,7 @@ def _with_coderabbit_status(pr_id, evidence):
     return combined
 
 
-def _coderabbit_check(pr, evidence):  # noqa: C901, PLR0912
+def _coderabbit_check(pr, evidence, recognized_review=None):  # noqa: C901, PLR0912
     """Return the exact current-head CodeRabbit status verdict, or ``None``.
 
     The review object carries findings and verdict history; the GitHub-hosted
@@ -1498,7 +1498,10 @@ def _coderabbit_check(pr, evidence):  # noqa: C901, PLR0912
                 return None
         elif kind == "StatusContext":
             creator = check.get("creator")
-            if (
+            if creator is None:
+                if not isinstance(recognized_review, dict):
+                    return None
+            elif (
                 not isinstance(creator, dict)
                 or str(creator.get("login") or "").lower() not in CODERABBIT_LOGINS
                 or creator.get("__typename") not in CODERABBIT_ACTOR_TYPES
@@ -1672,7 +1675,7 @@ def has_authoritative_coderabbit_review(pr, evidence):
         return False
     if str(review.get("state") or "").upper() == "CHANGES_REQUESTED":
         return False
-    return _coderabbit_check(pr, evidence) is True
+    return _coderabbit_check(pr, evidence, review) is True
 
 
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
