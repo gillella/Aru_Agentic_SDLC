@@ -31,26 +31,27 @@ the skill wins.
 
 Canonical home: `$ARU_SDLC_HOME`.
 
-## Identity — required before any claim
+## Identity
 
-Every claim and PR needs an **agent id** and a **model family**:
+The picker auto-assigns an **agent id** when `--agent` is omitted, and its
+model family is optional:
 
-```
---agent <AGENT_ID> --family <FAMILY>
+```text
+[--agent <AGENT_ID>] [--family <FAMILY>]
 ```
 
 Every agent authenticates as the same GitHub user, so these labels provide
 durable author/remediator routing and audit attribution.
 
-`--agent` is **optional**. Omit it and the picker derives a stable id from where
+Omit `--agent` and the picker derives a stable id from where
 this agent runs — `<product>-<fingerprint>`, e.g. `claude-a3f19c`. The same
 machine, checkout, and family always resolve to the same id, so a restarted
 session reclaims its own board work, and two machines can never be issued one
 id. `ARU_AGENT_ID` pins an id explicitly; `--agent-pool` selects the older
 named ring (`claude-1`, `codex-1`, …) for fleets that want fixed names.
 
-```
-python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --claim --json
+```shell
+python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
 ```
 
 ## Modes
@@ -94,9 +95,8 @@ report the state and its reasons rather than acting on them.
 you already hold, marked `resuming`, before offering anything new. Finishing
 beats starting, and an abandoned claim blocks the board for everyone else.
 
-```
-python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
-  --agent <AGENT_ID> --family <FAMILY> --claim --json
+```shell
+python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
 ```
 
 It returns one item and claims it. Follow the skill for its type:
@@ -140,7 +140,7 @@ flag below.
 an operator mention; idle ticks and heartbeats never notify. Examples:
 `prompts/fleet-worker.md`.
 
-```
+```text
 --project-id <PROJECT_ID> --agent <AGENT_ID> --family <FAMILY>
 --event <blocked|waiting-on|hitl> --repo <OWNER/REPO> --repo-dir <CONSUMER_REPO_ROOT>
 ```
@@ -160,7 +160,7 @@ never use UI scripting. Details: [fleet runner](../../docs/fleet-runner.md) and
 
 Read-only. It must never claim, label, branch, commit, or open anything.
 
-```
+```shell
 python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py"
 python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py" --json \
   --project /absolute/path/to/repo
@@ -195,8 +195,8 @@ Restated only because skipping one is how each has been broken before.
 5. **Verify locally before pushing.** `ruff check .` and the test suite, both
    clean. Report failures with their output; never claim a check you did not
    run.
-6. **Every PR carries `Closes #<issue>`** and is opened through
-   `create_pr.py --agent <id> --model-family <family>`.
+6. **Every PR carries `Closes #<issue>`**. `create_pr.py` requires a non-empty
+   `--agent <id>`; `--model-family <family>` is optional.
 7. **Degraded GitHub halts coordination gracefully** — never a secondary local
    task queue or an ungated merge. See `docs/degraded-mode.md`.
 8. **Never review any PR.** CodeRabbit is the sole code-review authority. The
@@ -205,9 +205,10 @@ Restated only because skipping one is how each has been broken before.
 
 ### Merging
 
-Merge only through the gated close-out, and never a PR you authored:
+After CodeRabbit has reviewed the exact current head and every DoD gate passes,
+any factory agent, including the implementation author, may execute:
 
-```
+```shell
 python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N>
 ```
 

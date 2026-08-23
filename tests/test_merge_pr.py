@@ -1031,10 +1031,30 @@ class ReviewGateTests(unittest.TestCase):
                 pr["statusCheckRollup"] = checks
                 self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
 
-    def test_multiple_current_head_coderabbit_reviews_are_ambiguous(self):
+    def test_tied_newest_current_head_coderabbit_reviews_are_ambiguous(self):
         evidence = self.coderabbit_evidence()
         second = dict(evidence["reviews"][0], id="coderabbit-review-2")
         evidence["reviews"].append(second)
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_distinct_timestamp_newest_current_head_coderabbit_review_wins(self):
+        evidence = self.coderabbit_evidence()
+        evidence["reviews"].append(dict(
+            evidence["reviews"][0], id="coderabbit-review-2",
+            submittedAt="2026-08-23T21:00:00Z",
+        ))
+        self.assertTrue(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_invalid_newest_current_head_coderabbit_review_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["reviews"].append(dict(
+            evidence["reviews"][0], id="coderabbit-review-2",
+            submittedAt="not-a-time",
+        ))
         self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])

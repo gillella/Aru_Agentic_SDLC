@@ -930,40 +930,23 @@ class FleetStatusTests(unittest.TestCase):
                 "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
             }],
         }
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]), \
-             patch("merge_pr.review_evidence", return_value={
-                 "head_oid": "a" * 40,
-                 "unresolved": 0,
-                 "unfixed": 0,
-                 "withdrawn": 0,
-                 "reviewed_head": True,
-                 "reviews": [{
-                     "id": "coderabbit-review",
-                     "state": "COMMENTED",
-                     "submittedAt": "2026-08-22T00:00:00Z",
-                     "body": "Review complete.",
-                     "commit": {"oid": "a" * 40},
-                     "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
-                 }],
-             }):
+        pr_coderabbit_reviewed["_active_review_feedback"] = []
+        pr_coderabbit_reviewed["_review_evidence"] = coderabbit_evidence("a")
+        with patch(
+            "merge_pr._with_coderabbit_status",
+            side_effect=AssertionError("seeded evidence should stay hermetic"),
+        ):
             self.assertFalse(_pending_review(pr_coderabbit_reviewed))
 
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]), \
-             patch("merge_pr.review_evidence", return_value={
-                 "head_oid": "a" * 40,
-                 "unresolved": 0,
-                 "unfixed": 0,
-                 "withdrawn": 0,
-                 "reviewed_head": False,
-                 "reviews": [{
-                     "id": "coderabbit-review",
-                     "state": "COMMENTED",
-                     "submittedAt": "2026-08-22T00:00:00Z",
-                     "body": "Review complete.",
-                     "commit": {"oid": "old" * 10},
-                     "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
-                 }],
-             }):
+        stale = coderabbit_evidence("a")
+        stale["reviewed_head"] = False
+        stale["reviews"][0]["commit"] = {"oid": "old" * 10}
+        pr_coderabbit_stale["_active_review_feedback"] = []
+        pr_coderabbit_stale["_review_evidence"] = stale
+        with patch(
+            "merge_pr._with_coderabbit_status",
+            side_effect=AssertionError("seeded evidence should stay hermetic"),
+        ):
             self.assertTrue(_pending_review(pr_coderabbit_stale))
 
         # Generic approval is not authoritative CodeRabbit review evidence.
@@ -977,7 +960,9 @@ class FleetStatusTests(unittest.TestCase):
         # Legacy reviewed-by labels do not satisfy the CodeRabbit-only contract.
         pr_reviewed = {
             "number": 13, "isDraft": False, "reviewDecision": None,
+            "unresolvedReviewThreadsCount": 0,
             "labels": [{"name": "author:claude-1"}, {"name": "reviewed-by:codex-1"}],
+            "_active_review_feedback": [], "_review_evidence": None,
         }
         self.assertTrue(_pending_review(pr_reviewed))
 
@@ -1207,6 +1192,7 @@ class MergeQueueViewTests(unittest.TestCase):
         self.assertEqual(row["first_blocking"], "review")
         self.assertEqual(row["next_action"], "review")
         self.assertEqual(row["threads"], "unknown")
+        self.assertIn("evidence unavailable", row["verdict"])
         # CI still surfaces from the fetched PR even when evidence is missing.
         self.assertIn(row["ci"], {"none", "red", "pending", "green", "—"})
 

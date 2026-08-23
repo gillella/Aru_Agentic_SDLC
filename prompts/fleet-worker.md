@@ -99,8 +99,10 @@ unavailable.
 
 ### Setup
 
-- Pass `--agent <AGENT_ID> --family <FAMILY>` on **every** picker command. A
-  command without them is a bug.
+- Pass `--agent <AGENT_ID>` when this task is operating as a named fleet
+  member; otherwise the picker derives a stable id from this runtime. Pass
+  `--family <FAMILY>` when it is known. `create_pr.py` still requires
+  `--agent`.
 - Your clone is the current working directory. Invoke helper scripts by
   absolute path so they act on this repo:
   `python3 "$ARU_SDLC_HOME/scripts/<script>.py"`.
@@ -111,8 +113,8 @@ unavailable.
 
 **Ask what to do:**
 
-```
-python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID> --family <FAMILY> --claim --json
+```bash
+python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
 ```
 
 It returns one work item of type `feedback`, `merge`, `issue`, or
@@ -213,8 +215,9 @@ gate. Your claim is `merger:<AGENT_ID>` (already applied when `--claim` ran).
    hitl`, and stop; never repeat the retry policy outside the helper or report
    success.
 
-The PR author may perform this mechanical merge once the exact-current-head
-CodeRabbit oracle and every other Definition-of-Done gate pass.
+Any factory agent, including the implementation author, may perform this
+mechanical merge once the exact-current-head CodeRabbit oracle and every other
+Definition-of-Done gate pass.
 
 ---
 
@@ -288,8 +291,9 @@ below. Never collapse research into this implementation branch.
    remains only as a legacy authorship backstop until Done; `author:<id>` is the
    PR's authoritative attribution.
    Do not review. CodeRabbit owns review; route its findings back through
-   `address-pr-feedback`. Once all gates pass, the author or another factory
-   agent may perform the mechanical merge through `merge_pr.py`. Loop.
+   `address-pr-feedback`. Once all gates pass, any factory agent, including the
+   implementation author, may perform the mechanical merge through
+   `merge_pr.py`. Loop.
 
 ---
 

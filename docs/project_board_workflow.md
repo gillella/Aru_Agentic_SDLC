@@ -64,11 +64,11 @@ When an increment reaches the `accepted` state, `scripts/increment_release.py` t
 ## 🌳 Git Worktree Isolation Guidelines
 
 1. **Clean Workspace Isolation**:
-   To prevent dirtying the main working directory during multi-agent or multi-branch development, all feature implementations and PR reviews MUST be run inside dedicated worktrees under `.worktrees/`.
+   To prevent dirtying the main working directory during multi-agent or multi-branch development, all feature implementations and PR remediation work MUST be run inside dedicated worktrees under `.worktrees/`.
 2. **Worktree Creation**:
    Execute `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --worktree --agent <AGENT_ID>` to generate `.worktrees/feat-issue-<ID>-<slug>__<agent>`.
 3. **Worktree Cleanup**:
-   Upon PR merge or review completion, remove temporary worktree directories with `git worktree remove .worktrees/<dir>`.
+   Upon PR merge or remediation completion, remove temporary worktree directories with `git worktree remove .worktrees/<dir>`.
 
 ---
 

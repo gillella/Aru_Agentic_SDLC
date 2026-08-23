@@ -23,6 +23,8 @@ DESKTOP_ADAPTERS = (
     ROOT / "templates" / "cursor" / "commands" / "run-aru-factory.md",
     ROOT / "templates" / "cursor" / "commands" / "continue.md",
 )
+CURSOR_CODE_REVIEW = ROOT / "templates" / "cursor" / "commands" / "code-review.md"
+CURSOR_USER_RULES = ROOT / "templates" / "cursor" / "user-rules-aru-agentic-sdlc.md"
 
 MODES = ("adopt", "status", "next", "loop", "doctor")
 
@@ -140,10 +142,13 @@ class ContinuityContractTests(unittest.TestCase):
 
 
 class IdentityTests(unittest.TestCase):
-    def test_agent_id_and_family_are_required(self):
-        text = skill_text()
+    def test_identity_examples_match_helper_contracts(self):
+        text = flat(skill_text())
+        self.assertIn("picker derives a stable id", text)
+        self.assertIn("model family is optional", text)
+        self.assertIn("`create_pr.py` requires", text)
         self.assertIn("--agent", text)
-        self.assertIn("--family", text)
+        self.assertNotIn("every claim and pr needs", text)
 
     def test_the_reason_identity_matters_is_stated(self):
         """Without the why, the flags read as ceremony and get dropped."""
@@ -172,6 +177,26 @@ class GovernanceTests(unittest.TestCase):
         self.assertIn("merge_pr.py", text)
         self.assertIn("gh pr merge", text)  # named as forbidden
         self.assertNotIn("gh pr merge --", text)
+        self.assertIn("including the implementation author", text)
+        self.assertNotIn("never a PR you authored", text)
+
+    def test_retired_review_skill_is_self_contained(self):
+        review = (ROOT / "skills" / "code-review" / "SKILL.md").read_text()
+        self.assertNotIn("SKILL.md", review)
+        self.assertNotIn("skills/address-pr-feedback", review)
+
+    def test_cursor_code_review_command_is_a_refusal_router(self):
+        text = CURSOR_CODE_REVIEW.read_text(encoding="utf-8").lower()
+        self.assertIn("coderabbit", text)
+        self.assertIn("remediate", text)
+        self.assertNotIn("approve", text)
+        self.assertNotIn("request changes", text)
+        self.assertNotIn("review worktree", text)
+
+    def test_cursor_user_rules_route_review_to_remediation(self):
+        text = CURSOR_USER_RULES.read_text(encoding="utf-8").lower()
+        self.assertIn("agents remediate findings", text)
+        self.assertNotIn("auto-assign a free identity", text)
 
 
 class DelegationTests(unittest.TestCase):
@@ -276,6 +301,15 @@ class WiringTests(unittest.TestCase):
             text = flat(adapter.read_text(encoding="utf-8"))
             self.assertIn("desktop app", text, str(adapter))
             self.assertIn("do not replace", text, str(adapter))
+
+
+class CursorRuleTests(unittest.TestCase):
+    def test_cursor_rule_uses_remediation_wording(self):
+        rule = (
+            ROOT / "templates" / "cursor" / "rules" / "aru-agentic-sdlc.mdc"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Feature and remediation work", rule)
+        self.assertNotIn("Feature and review work", rule)
 
 
 if __name__ == "__main__":

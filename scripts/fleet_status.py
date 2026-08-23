@@ -455,7 +455,8 @@ def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
         evidence = mp.review_evidence(pr["number"])
         evidence = mp._with_coderabbit_status(pr["number"], evidence)
-    except (ImportError, Exception):
+    except Exception as exc:
+        print(f"[WARN] Could not load review evidence for PR #{pr['number']}: {exc}", file=sys.stderr)
         evidence = None
     pr["_review_evidence"] = evidence
     return evidence
@@ -480,7 +481,8 @@ def _has_active_review_feedback(pr: Dict[str, Any]) -> bool:
         feedback = fetch_active_review_feedback(pr["number"])
         pr["_active_review_feedback"] = feedback
         return feedback is not None and len(feedback) > 0
-    except (ImportError, Exception):
+    except Exception as exc:
+        print(f"[WARN] Could not load active review feedback for PR #{pr['number']}: {exc}", file=sys.stderr)
         return False
 
 
@@ -1160,9 +1162,8 @@ def evaluate_queue_row(
         ok = False
         # Keep review as the sole blocking gate so first_blocking stays
         # review-evidence failure; CI still surfaces via queue_ci_label(full).
-        gates: List[Any] = [
-            ("review", False, "Could not determine review-thread state; refusing rather than guessing."),
-        ]
+        reason = evidence.get("error") if isinstance(evidence, dict) else "no evidence returned"
+        gates: List[Any] = [("review", False, f"review evidence unavailable: {reason}")]
     else:
         unresolved = int(evidence.get("unresolved") or 0)
         threads_known = True

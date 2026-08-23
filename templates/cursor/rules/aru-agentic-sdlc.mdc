@@ -23,7 +23,7 @@ This repository is governed by **Aru_Agentic_SDLC**.
 ## Hard constraints
 
 - No direct pushes to `main` / `master`
-- Feature and review work runs in `.worktrees/`
+- Feature and remediation work runs in `.worktrees/`
 - Local tests must pass before commit/push
 - Every PR body includes `Closes #<issue_number>`
 - Resume in-flight issues for this agent id before claiming new work

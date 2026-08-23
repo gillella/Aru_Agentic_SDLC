@@ -38,21 +38,32 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertIn("is not an audit", rules)
 
     def test_generated_plan_gate_triggers_on_new_helper_module_or_script(self):
-        """A new helper/module/script is an independent Plan Gate trigger."""
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
         self.assertIn("introduces a new helper function, module, or script", rules)
 
-    def test_generated_governance_uses_agent_review_and_mechanical_merge(self):
+    def test_generated_governance_uses_coderabbit_review_and_mechanical_merge(self):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
-
-        self.assertIn("distinct agent", rules)
+        self.assertIn("CodeRabbit is the sole PR code-review authority", rules)
         self.assertIn("including the implementation author", rules)
         self.assertIn("merge_pr.py", rules)
-        self.assertIn("must never\nself-review", rules)
+        self.assertIn("Coding agents never review", rules)
         self.assertIn("severe merge", rules)
         self.assertIn("merge/close-out failure", rules)
         self.assertNotIn("--require-plan-ack", rules)
         self.assertNotIn("human-acknowledgement", rules)
+
+    def test_author_merge_and_no_agent_review_are_consistent(self):
+        paths = [
+            "AGENTS.md", "docs/project_board_workflow.md",
+            "skills/run-aru-factory/SKILL.md", "skills/implement-next-issue/SKILL.md",
+            "prompts/fleet-worker.md"]
+        copies = [init_project.DEFAULT_AGENTS_TEMPLATE] + [
+            (ROOT / path).read_text(encoding="utf-8") for path in paths]
+        for copy in copies:
+            normalized = " ".join(copy.split()).lower()
+            self.assertIn("including the implementation author", normalized)
+            self.assertIn("coderabbit", normalized)
+            self.assertRegex(normalized, r"never.*review")
 
     def test_active_factory_guidance_has_no_legacy_human_only_rule(self):
         paths = [
@@ -423,11 +434,13 @@ class CursorProjectRuleTests(unittest.TestCase):
 
     def test_rule_is_written_into_a_fresh_repo(self):
         with tempfile.TemporaryDirectory() as target:
-            init_project.create_cursor_project_rule(target)
+            with patch.dict(os.environ, {"ARU_SDLC_HOME": str(ROOT)}):
+                init_project.create_cursor_project_rule(target)
 
             rule = Path(target) / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
             self.assertTrue(rule.is_file())
             self.assertIn("alwaysApply: true", rule.read_text())
+            self.assertIn("Feature and remediation work", rule.read_text())
 
     def test_an_existing_rule_is_left_untouched(self):
         with tempfile.TemporaryDirectory() as target:

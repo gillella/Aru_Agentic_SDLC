@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3690
+# line-ceiling: 3694
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1414,8 +1414,8 @@ def _coderabbit_check(pr, evidence, *, recognized_review=False):  # noqa: C901, 
     return conclusion == "SUCCESS"
 
 
-def _coderabbit_current_head_review(evidence):
-    """Prove one unambiguous, completed CodeRabbit review on this head."""
+def _coderabbit_current_head_review(evidence):  # noqa: C901
+    """Select the unique newest completed CodeRabbit review on this head."""
     head = evidence.get("head_oid") if isinstance(evidence, dict) else None
     if not isinstance(head, str) or not head:
         return None
@@ -1437,14 +1437,13 @@ def _coderabbit_current_head_review(evidence):
         oid = (review.get("commit") or {}).get("oid")
         if state == "PENDING":
             return None
-        if (
-            state not in {"COMMENTED", "APPROVED"}
-            or submitted is None
-            or not isinstance(body, str)
-            or oid != head
-        ):
+        if oid != head:
             continue
+        if state not in {"COMMENTED", "APPROVED"} or submitted is None or not isinstance(body, str):
+            return None
         candidates.append((submitted, review.get("id")))
+    newest = max((candidate[0] for candidate in candidates), default=None)
+    candidates = [candidate for candidate in candidates if candidate[0] == newest]
     if len(candidates) != 1 or not isinstance(candidates[0][1], str):
         return None
     return candidates[0]
