@@ -80,6 +80,7 @@ from fetch_next_issue import (
     reap_stale_claims,
 )
 from fetch_pr_feedback import fetch_active_review_feedback
+import merge_pr
 from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # _attested_head_peers is private, and importing it across modules is normally a
 # smell. It is imported deliberately: merge_pr is the single source of truth for
@@ -616,16 +617,7 @@ def _author_can_repair_review(pr: dict[str, Any]) -> bool:
         return False
     if not evidence.get("reviewed_head"):
         return False
-    labels = label_names(pr)
-    author = _label_value(labels, "author:")
-    peers = [
-        name[len("reviewed-by:"):]
-        for name in labels
-        if name.startswith("reviewed-by:")
-        and name[len("reviewed-by:"):]
-        and name[len("reviewed-by:"):] != author
-    ]
-    if not peers:
+    if not merge_pr.has_authoritative_coderabbit_review(evidence):
         return False
     if int(evidence.get("unresolved") or 0) > 0:
         return False
@@ -735,10 +727,6 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa
             return no(reason)
         return {"eligible": True, "reason": reason}
 
-    review_holder = reviewed_by(labels)
-    if review_holder:
-        return no(f"review still in progress by '{review_holder}'")
-
     threads = review_thread_count(pr)
     if threads is None:
         return no("review thread state is unavailable")
@@ -826,17 +814,9 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         if verdict["eligible"]:
             mergeable.append(pr)
         else:
-            # Only surface skips that looked like merge candidates, otherwise
-            # every unreviewed PR pollutes the report with "no independent review".
+            # Retired review labels are neither routing evidence nor queue state.
             labels = label_names(pr)
-            author = _label_value(labels, "author:")
-            has_peer = any(
-                name.startswith("reviewed-by:")
-                and name[len("reviewed-by:"):]
-                and name[len("reviewed-by:"):] != author
-                for name in labels
-            )
-            if has_peer or merge_claimant(labels) == agent:
+            if merge_claimant(labels) == agent:
                 merge_skipped.append({"number": pr["number"], "why": verdict["reason"]})
 
     # 2b. My own PR blocked only by a gate I can clear alone. It matches neither

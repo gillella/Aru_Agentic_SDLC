@@ -85,7 +85,8 @@ ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
 # review (e.g. CodeRabbit) posts a StatusContext that stays PENDING while it
 # re-reads the diff; it is not a build check and cannot certify the head.
 ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
-CODERABBIT_LOGINS = {"coderabbitai[bot]"}
+CODERABBIT_LOGINS = {"coderabbitai", "coderabbitai[bot]"}
+CODERABBIT_APP_SLUGS = {"coderabbitai"}
 CODERABBIT_ACTOR_TYPES = {"Bot"}
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
@@ -798,6 +799,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
         if not has_next:
             return {
                 "head_oid": expected_head,
+                "github_review_evidence": True,
                 "reviews": reviews,
                 "review_attestations": review_attestations,
                 "unresolved": unresolved,
@@ -1315,7 +1317,59 @@ def _evidence_note(evidence):
     return ", ".join(parts) + "."
 
 
-def _coderabbit_check(pr):
+def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
+    """Read status producer identity from GitHub's typed commit rollup."""
+    query = """
+    query($owner:String!, $name:String!, $pr:Int!) {
+      repository(owner:$owner, name:$name) {
+        pullRequest(number:$pr) {
+          headRefOid
+          commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
+            nodes {
+              __typename
+              ... on CheckRun { name status conclusion app { slug } }
+              ... on StatusContext { context state creator { login __typename } }
+            }
+          } } } } }
+        }
+      }
+    }"""
+    data = _gh_json([
+        "gh", "api", "graphql", "-f", f"query={query}",
+        "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
+    ])
+    try:
+        pull = data["data"]["repository"]["pullRequest"]
+        nodes = pull["commits"]["nodes"]
+        contexts = nodes[0]["commit"]["statusCheckRollup"]["contexts"]["nodes"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if pull.get("headRefOid") != expected_head or not isinstance(contexts, list):
+        return None
+    return contexts
+
+
+def _with_coderabbit_status(pr_id, evidence):
+    """Bind review evidence to an authoritative, producer-identified status."""
+    if not isinstance(evidence, dict):
+        return None
+    # Pure unit callers use compact handcrafted evidence; live evidence always
+    # carries this marker from review_evidence().
+    if not evidence.get("github_review_evidence"):
+        return evidence
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    owner, name = slug.split("/", 1)
+    statuses = _coderabbit_status_evidence(owner, name, pr_id, evidence.get("head_oid"))
+    if statuses is None:
+        return None
+    combined = dict(evidence)
+    combined["coderabbit_status"] = statuses
+    return combined
+
+
+def _coderabbit_check(pr, evidence):
     """Return the exact CodeRabbit check verdict, or ``None`` if ambiguous.
 
     A similarly named review is not enough: the GitHub-hosted CodeRabbit status
@@ -1324,7 +1378,9 @@ def _coderabbit_check(pr):
     missing check all fail closed.
     """
     matches = []
-    for item in pr.get("statusCheckRollup") or []:
+    authoritative = evidence.get("coderabbit_status") if isinstance(evidence, dict) else None
+    rollup = authoritative if authoritative is not None else pr.get("statusCheckRollup") or []
+    for item in rollup:
         if not isinstance(item, dict):
             return None
         name = item.get("name") or item.get("context")
@@ -1333,6 +1389,20 @@ def _coderabbit_check(pr):
     if len(matches) != 1:
         return None
     check = matches[0]
+    if authoritative is not None:
+        kind = check.get("__typename") or check.get("type")
+        if kind == "CheckRun":
+            slug = str((check.get("app") or {}).get("slug") or "").lower()
+            if slug not in CODERABBIT_APP_SLUGS:
+                return None
+        elif kind == "StatusContext":
+            creator = check.get("creator") or {}
+            if str(creator.get("login") or "").lower() not in CODERABBIT_LOGINS:
+                return None
+            if creator.get("__typename") not in CODERABBIT_ACTOR_TYPES:
+                return None
+        else:
+            return None
     status = str(check.get("status") or "").upper()
     conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
     if status and status != "COMPLETED":
@@ -1374,6 +1444,11 @@ def _coderabbit_current_head_review(evidence):
     if len(candidates) != 1 or not isinstance(candidates[0][1], str):
         return None
     return candidates[0]
+
+
+def has_authoritative_coderabbit_review(evidence):
+    """Whether GitHub review data proves CodeRabbit reviewed this exact head."""
+    return _coderabbit_current_head_review(evidence) is not None
 
 
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
@@ -1434,7 +1509,7 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
         )
 
     coderabbit_review = _coderabbit_current_head_review(evidence)
-    coderabbit_check = _coderabbit_check(pr)
+    coderabbit_check = _coderabbit_check(pr, evidence)
     if coderabbit_review is None or coderabbit_check is not True:
         return False, (
             "CodeRabbit has not supplied one completed, substantive review on "
@@ -2833,7 +2908,7 @@ def dod_status(pr_id):
         if issue is None:
             return False, f"could not read issue #{num}"
         issue_bodies[num] = issue.get("body") or ""
-    evidence = review_evidence(pr_id)
+    evidence = _with_coderabbit_status(pr_id, review_evidence(pr_id))
     evidence_head = evidence.get("head_oid") if evidence else None
     snapshot_head = pr.get("headRefOid")
     if not heads_match(snapshot_head, evidence_head):
@@ -3389,7 +3464,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 return EXIT_ERROR
             issue_bodies[num] = issue.get("body") or ""
 
-        evidence = review_evidence(args.pr)
+        evidence = _with_coderabbit_status(args.pr, review_evidence(args.pr))
         evidence_head = evidence.get("head_oid") if evidence else None
         if not heads_match(gated_head, evidence_head):
             reason = (
@@ -3488,6 +3563,31 @@ def main():  # noqa: C901, PLR0912, PLR0915
             if not rebased:
                 print(
                     f"[ERROR] Final rebased check failed: {rebased_message}",
+                    file=sys.stderr,
+                )
+                return EXIT_BLOCKED
+            # Review, status, and thread evidence can change without moving the
+            # head. Re-read it under the merge lock immediately before the
+            # server-side mutation, then rerun every gate that consumes it.
+            final_evidence = _with_coderabbit_status(
+                args.pr, review_evidence(args.pr)
+            )
+            final_head = final_evidence.get("head_oid") if final_evidence else None
+            if not heads_match(live, final_head):
+                print(
+                    "[ERROR] Final review evidence is unavailable or stale. "
+                    "No merge command was run.",
+                    file=sys.stderr,
+                )
+                return EXIT_BLOCKED
+            final_ok, final_gates = evaluate_dod(fresh, issue_bodies, final_evidence)
+            if not final_ok:
+                final_blocked = ", ".join(
+                    name for name, passed, _ in final_gates if not passed
+                )
+                print(
+                    f"[ERROR] Final Definition-of-Done reread failed: {final_blocked}. "
+                    "No merge command was run.",
                     file=sys.stderr,
                 )
                 return EXIT_BLOCKED

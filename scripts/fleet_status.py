@@ -620,6 +620,13 @@ def _pending_review(pr: Dict[str, Any]) -> bool:  # noqa: C901, PLR0912
                 return False
         except (ImportError, Exception):
             pass
+    try:
+        import merge_pr
+        evidence = merge_pr.review_evidence(pr["number"])
+        if evidence and merge_pr.check_reviews(pr, evidence)[0]:
+            return False
+    except (ImportError, Exception):
+        pass
     return True
 
 
@@ -1421,6 +1428,8 @@ def _evaluate_current_repo(  # noqa: C901, PLR0912, PLR0915
             waiting_reasons.append(f"PR #{num} has requested changes.")
         elif decision == "APPROVED":
             waiting_reasons.append(f"PR #{num} is approved and waiting for merge.")
+        elif not _pending_review(pr):
+            waiting_reasons.append(f"PR #{num} is reviewed and waiting for merge.")
         else:
             waiting_reasons.append(f"PR #{num} is open and pending review.")
 

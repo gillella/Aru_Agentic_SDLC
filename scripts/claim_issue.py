@@ -1311,6 +1311,11 @@ def reap_stale_reviews(hours: int = 4, presence_store: Any = None, now: Optional
     current_now = now or datetime.now(timezone.utc)
     released = []
     for pr, holder, claimed_at in claims:
+        labels = [str((item or {}).get("name") or "") for item in pr.get("labels") or []]
+        if f"{REVIEWED_BY_LABEL_PREFIX}{holder}" in labels:
+            if _remove_reviewer_label(pr["number"], holder):
+                released.append(pr["number"])
+            continue
         eff_hours, reason = _effective_reap_threshold(holder, hours, store, now=current_now)
         if eff_hours <= 0:
             continue

@@ -117,7 +117,7 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID> --family 
 
 It returns one work item of type `feedback`, `merge`, `issue`, or
 `idle`, and claims it. The priority order is deliberate — **finishing beats
-starting** (feedback → merge → review → issue). Do the branch below that
+starting** (feedback → merge → issue). Do the branch below that
 matches, then ask again. The current desktop task remains the loop owner.
 
 ---
