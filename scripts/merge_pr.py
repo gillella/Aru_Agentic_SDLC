@@ -85,6 +85,8 @@ ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
 # review (e.g. CodeRabbit) posts a StatusContext that stays PENDING while it
 # re-reads the diff; it is not a build check and cannot certify the head.
 ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
+CODERABBIT_LOGINS = {"coderabbitai[bot]"}
+CODERABBIT_ACTOR_TYPES = {"Bot"}
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
 # review evidence; all other known actor kinds are automation or identities
@@ -1313,6 +1315,67 @@ def _evidence_note(evidence):
     return ", ".join(parts) + "."
 
 
+def _coderabbit_check(pr):
+    """Return the exact CodeRabbit check verdict, or ``None`` if ambiguous.
+
+    A similarly named review is not enough: the GitHub-hosted CodeRabbit status
+    must also say that analysis completed successfully. Duplicate current
+    records, unknown shapes, pending/rate-limited/failing conclusions, and a
+    missing check all fail closed.
+    """
+    matches = []
+    for item in pr.get("statusCheckRollup") or []:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name") or item.get("context")
+        if isinstance(name, str) and name.strip().lower() == "coderabbit":
+            matches.append(item)
+    if len(matches) != 1:
+        return None
+    check = matches[0]
+    status = str(check.get("status") or "").upper()
+    conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
+    if status and status != "COMPLETED":
+        return False
+    return conclusion == "SUCCESS"
+
+
+def _coderabbit_current_head_review(evidence):
+    """Prove one unambiguous, substantive CodeRabbit review on this head."""
+    head = evidence.get("head_oid") if isinstance(evidence, dict) else None
+    if not isinstance(head, str) or not head:
+        return None
+    candidates = []
+    for review in evidence.get("reviews") or []:
+        if not isinstance(review, dict):
+            return None
+        author = review.get("author") or {}
+        if not isinstance(author, dict):
+            return None
+        login = str(author.get("login") or "").lower()
+        if login not in CODERABBIT_LOGINS:
+            continue
+        if author.get("__typename") not in CODERABBIT_ACTOR_TYPES:
+            return None
+        state = str(review.get("state") or "").upper()
+        submitted = _parse_review_ts(review.get("submittedAt"))
+        body = review.get("body")
+        oid = (review.get("commit") or {}).get("oid")
+        if state == "PENDING":
+            return None
+        if (
+            state not in {"COMMENTED", "APPROVED"}
+            or submitted is None
+            or not isinstance(body, str) or not body.strip()
+            or oid != head
+        ):
+            continue
+        candidates.append((submitted, review.get("id")))
+    if len(candidates) != 1 or not isinstance(candidates[0][1], str):
+        return None
+    return candidates[0]
+
+
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # Prefer the same explicitly paginated review history used for current-head
     # evidence. The PR snapshot remains a compatibility fallback for pure
@@ -1370,137 +1433,19 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
             "withdraw the finding with a reason."
         )
 
-    # A claim means an independent agent is still reviewing. It must block
-    # before any external-account or completed-attribution shortcut, otherwise
-    # a bot comment can make the PR mergeable while that reviewer is working.
-    claimants = label_values(pr, REVIEW_CLAIM_LABEL)
-    if claimants:
+    coderabbit_review = _coderabbit_current_head_review(evidence)
+    coderabbit_check = _coderabbit_check(pr)
+    if coderabbit_review is None or coderabbit_check is not True:
         return False, (
-            f"Review is still in progress: {', '.join(claimants)} holds a "
-            f"{REVIEW_CLAIM_LABEL}<agent> claim. Complete the review with "
-            "`claim_issue.py --pr <n> --agent <id> --complete-review`, or "
-            "release the claim if no review was performed."
+            "CodeRabbit has not supplied one completed, substantive review on "
+            "the exact current head with a successful authoritative CodeRabbit "
+            "check. Missing, pending, failed, rate-limited, stale, ambiguous, "
+            "or spoofed evidence blocks merge."
         )
-
-    # GitHub cannot tell a self-review from a peer review here: every agent
-    # authenticates as the same user, so every review looks like it came from
-    # the same person who opened the PR. The agent identity labels are the only
-    # thing that distinguishes them.
-    # A review from a different non-automation GitHub account is provably not a
-    # self-review, but only its latest APPROVED verdict counts. Unconfigured
-    # review apps stay advisory. An App login named in ARU_REVIEW_APP_LOGIN is
-    # the #123 reviewer identity and counts as that external account.
-    pr_login = ((pr.get("author") or {}).get("login") or "").lower()
-    other_accounts = sorted({
-        ((r.get("author") or {}).get("login") or "").lower()
-        for r in substantive if not is_advisory_review_actor(r)
-    } - {"", pr_login})
-
-    # Authorship is required before any approval path can pass. Without the
-    # governed author stamp, even a genuine external approval cannot prove the
-    # PR did not bypass create_pr.py or establish who must be excluded from
-    # same-account agent review.
-    authors = identity_values(pr, AUTHOR_LABEL)
-    if not authors:
-        return False, (
-            "PR has no author:<id> label, so the gate cannot prove that the "
-            "reviewer is independent. Create PRs with "
-            "`scripts/create_pr.py --issue <n> --agent <id>`; stamp the verified "
-            "author on a legacy PR before retrying."
-        )
-    if len(set(authors)) > 1:
-        # Resolving this by position would pick an author arbitrarily, and the
-        # whole peer comparison below rests on knowing who wrote the PR.
-        return False, (
-            f"PR carries {len(set(authors))} different {AUTHOR_LABEL} labels "
-            f"({', '.join(sorted(set(authors)))}), so who wrote it cannot be "
-            "established. Two agents likely adopted it concurrently; remove the "
-            "stale label before merging."
-        )
-    author = authors[0]
-
-    current_head_reviewers = set(_current_head_reviewers(evidence))
-    legacy_head_evidence = (
-        "review_attestations" not in evidence and evidence.get("reviewed_head")
+    return True, (
+        f"CodeRabbit review is complete on current head "
+        f"{evidence['head_oid'][:12]}; {_evidence_note(evidence)}"
     )
-    external_approvers = sorted(
-        who for who, state in verdicts.items()
-        if who.lower() in other_accounts
-        and (who in current_head_reviewers or legacy_head_evidence)
-        and state == "APPROVED"
-        and not is_advisory_review_account(who)
-    )
-    if external_approvers:
-        note = (
-            f"Approved by external reviewer(s) {', '.join(external_approvers)}, "
-            f"{_evidence_note(evidence)}"
-        )
-        if any((lab.get("name") or "") == "same-family-review"
-               for lab in (pr.get("labels") or [])):
-            note += " ⚠️  Same-family review: no cross-family agent was available."
-        return True, note
-
-    # Everything below is the same-account case: agents all authenticate as one
-    # GitHub user, so only the identity labels can tell them apart.
-    # Only completed attribution counts. Active reviewer claims were rejected
-    # above because they represent work still in progress, not attestation.
-    reviewers = identity_values(pr, REVIEWED_BY_LABEL)
-    peers, collisions, unresolved = classify_reviewers(pr, reviewers, author)
-    # A collision blocks even when a genuine peer also reviewed: the operator
-    # needs to know the id namespace broke. A merely unstamped family does not,
-    # or every PR predating family stamping would stop merging.
-    if collisions:
-        return False, id_collision_message(collisions)
-    if reviewers and not peers:
-        return False, self_review_message(author, unresolved)
-    if not reviewers:
-        advisory = sorted(a for a in advisory_accounts if a and a != pr_login)
-        if advisory:
-            return False, (
-                f"Automated review from {', '.join(advisory)} is advisory; no "
-                f"{REVIEWED_BY_LABEL}<agent> label attributes a completed independent "
-                "agent review."
-            )
-        return False, (f"A review exists but no {REVIEWED_BY_LABEL}<agent> label identifies "
-                       f"who left it, so it cannot be distinguished from a self-review by "
-                       f"'{author}'. The reviewing agent must finish with "
-                       f"`claim_issue.py --pr <n> --agent <id> --complete-review`.")
-
-    attested_peers = _attested_head_peers(evidence, peers)
-    if attested_peers is not None and not attested_peers:
-        head = evidence.get("head_oid")
-        head_text = (
-            f"current head {head[:12]}"
-            if isinstance(head, str) and head else "the current head"
-        )
-        return False, (
-            f"Completed peer attribution exists for {', '.join(peers)}, but "
-            f"none is bound to {head_text}. The attribution may be stale; "
-            "the peer must re-review and complete the current commit."
-        )
-    if attested_peers and not evidence.get("reviewed_head"):
-        return False, (
-            f"Peer attribution for {', '.join(attested_peers)} names the current "
-            "head, but no substantive review targets that commit. Re-review the "
-            "current commit."
-        )
-
-    # Compatibility for pure unit callers predating the attestation field.
-    # Live review_evidence always includes it, so the production merge path
-    # cannot fall back to an unbound reviewed-by label.
-    if attested_peers is None and not evidence["reviewed_head"]:
-        return False, (
-            "Every review predates the current head, so no reviewer has seen "
-            "what would merge. Re-review the current commit."
-        )
-
-    note = (
-        f"Peer attribution: {', '.join(attested_peers or peers)}; "
-        f"{_evidence_note(evidence)}"
-    )
-    if any((lab.get("name") or "") == "same-family-review" for lab in (pr.get("labels") or [])):
-        note += " ⚠️  Same-family review: no cross-family agent was available."
-    return True, note
 
 
 def _behind_by(base_ref, head_sha):

@@ -28,8 +28,10 @@ the Definition-of-Done gate.
   non-authoritative in Aru-governed repositories.
 - Brainstorming workflows such as Superpowers supply input to Aru's plan gate;
   they do not run a parallel implementation process.
-- Memory tools provide context only. PR bots and review tools are reviewers,
-  not workflow owners or merge authorities.
+- Memory tools provide context only. **CodeRabbit is the sole PR code-review
+  authority.** Claude, Codex, Cursor, and Antigravity implement and remediate
+  findings only; they must never claim, perform, or be dispatched for review.
+  CodeRabbit is not workflow owner or merge authority.
 - If lifecycle instructions conflict, follow Aru. Higher-priority explicit
   system, developer, or user instructions still take precedence.
 - During GitHub outages, coordination stops gracefully; agents may continue local
@@ -38,15 +40,16 @@ the Definition-of-Done gate.
 
 Routine merge execution is mechanical and may be performed by any factory
 agent, including the implementation author, only through
-`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`, after a distinct agent
-has completed the independent review and every enforced gate passes. An author
-must never review their own PR. No agent or human may bypass the merge helper
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`, after CodeRabbit has
+completed a substantive review on the exact current head and every enforced
+gate passes. No agent or human may bypass the merge helper
 with a direct push or an ad-hoc merge.
 
-GitHub required-approval rulesets stay **off** until the #123 reviewer App
-(`ARU_REVIEW_APP_LOGIN`, provisionally `aru-reviewer[bot]`) is installed and
-can `gh pr review --approve` a fleet-authored PR. Until then, `author:` /
-`reviewed-by:` labels remain the independent-review authority.
+Legacy `reviewed-by:<coding-agent>`, `reviewer:<coding-agent>`, and
+`aru-review-head:v1` evidence never satisfies the current review gate.
+CodeRabbit identity, completed status, substantive review, current-head commit,
+and thread disposition come from authoritative GitHub data and fail closed on
+missing, pending, failed, rate-limited, stale, ambiguous, or spoofed evidence.
 
 Money, PII, security, schema, migration, irreversible behavior, large diffs,
 and repeated review rounds increase the required planning, testing, and review
@@ -55,6 +58,10 @@ is exceptional and is needed only when a severe merge conflict or merge/
 close-out failure remains unsafe or impossible for agents to resolve through
 the governed remediation path. Record the exact failure and attempted
 remediation when that exception occurs.
+
+Code review never supplies operational authorization. Existing human gates for
+real-money execution, production cutover, destructive migration, credential
+use, and external-account mutation remain separate and mandatory.
 
 ---
 
@@ -74,7 +81,9 @@ when working from another repository.
 - **Issue creation**: [`skills/create-github-issue/SKILL.md`](skills/create-github-issue/SKILL.md)
 - **Backlog triage**: [`skills/triage-backlog/SKILL.md`](skills/triage-backlog/SKILL.md)
   - Promotes `Backlog` → `Ready` so the picker has work to hand out
-- **Code review**: [`skills/code-review/SKILL.md`](skills/code-review/SKILL.md)
+- **Code review**: CodeRabbit only; coding agents use
+  [`skills/address-pr-feedback/SKILL.md`](skills/address-pr-feedback/SKILL.md)
+  to remediate its findings.
 - **CI remediation**: [`skills/remediate-ci-failure/SKILL.md`](skills/remediate-ci-failure/SKILL.md)
 - **PR feedback**: [`skills/address-pr-feedback/SKILL.md`](skills/address-pr-feedback/SKILL.md)
 
@@ -101,7 +110,6 @@ Helper inventory:
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_next_issue.py" --agent <AGENT_ID>` — issues only
 * `python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" [--capacity]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID>`
-* `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --agent <AGENT_ID>` — claim a PR for review
 * `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree] [--agent <id>]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --adopt --agent <id> --model-family <family>` — take over an abandoned PR
 
@@ -127,9 +135,7 @@ A successor **adopts** the abandoned PR rather than restarting it: `author:` and
 the commits, CI history, and review threads are preserved. Adoption refuses a PR
 updated inside the abandonment window, so live work cannot be taken.
 * `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> [--model-family <family>] --title "<Title>" --body "<body>"`
-  — `--agent` is required. It stamps `author:<id>`, which is the only thing
-  that lets the merge gate tell a peer review from a self-review, since every
-  agent authenticates as the same GitHub user.
+  — `--agent` is required for author/remediator routing and audit attribution.
 * `python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr <ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" --issue <ID> --status "<Status>"`

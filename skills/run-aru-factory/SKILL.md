@@ -33,16 +33,14 @@ Canonical home: `$ARU_SDLC_HOME`.
 
 ## Identity — required before any claim
 
-Every claim, review, and PR needs an **agent id** and a **model family**:
+Every claim and PR needs an **agent id** and a **model family**:
 
 ```
 --agent <AGENT_ID> --family <FAMILY>
 ```
 
-Every agent authenticates as the same GitHub user, so these labels are the only
-identity the board has. They are what lets the picker route a PR to someone who
-did not write it, and what lets the merge gate tell a peer review from a
-self-review.
+Every agent authenticates as the same GitHub user, so these labels provide
+durable author/remediator routing and audit attribution.
 
 `--agent` is **optional**. Omit it and the picker derives a stable id from where
 this agent runs — `<product>-<fingerprint>`, e.g. `claude-a3f19c`. The same
@@ -106,7 +104,7 @@ It returns one item and claims it. Follow the skill for its type:
 | type | skill |
 |---|---|
 | `feedback` | `address-pr-feedback` |
-| `review` | `code-review` |
+| `review` | Forbidden legacy state: return to picker; CodeRabbit alone reviews |
 | `issue` with `skill: research` | `research` |
 | any other `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
@@ -188,7 +186,7 @@ Restated only because skipping one is how each has been broken before.
 2. **GitHub is `gh` plus helpers, not MCP.** Lifecycle mutations go through
    `$ARU_SDLC_HOME/scripts/*.py`. `gh auth status` is the identity check.
    Slack is not a queue; direct `gh` only when no helper exists (`gh issue comment`).
-3. **Worktree isolation.** Feature work and reviews happen under `.worktrees/`,
+3. **Worktree isolation.** Feature and remediation work happens under `.worktrees/`,
    in a directory scoped to your agent id. Run helpers by absolute path and `cd`
    into the worktree before editing.
 4. **Stay inside `touches:`.** To write outside it, widen the declaration on the
@@ -201,24 +199,9 @@ Restated only because skipping one is how each has been broken before.
    `create_pr.py --agent <id> --model-family <family>`.
 7. **Degraded GitHub halts coordination gracefully** — never a secondary local
    task queue or an ungated merge. See `docs/degraded-mode.md`.
-8. **Never review your own PR.** The merge gate reads `author:` against
-   `reviewed-by:` and refuses a self-review — posting one does not unblock
-   anything.
-
-### Reviewing, in a same-account fleet
-
-GitHub rejects `--approve` and `--request-changes` from the PR's own account,
-and the whole fleet shares one account. Use `gh pr review --comment` and state
-the verdict in the body, with each blocking finding in its own **unresolved**
-inline thread so the picker routes the PR back to its author. Then:
-
-```
-python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> \
-  --model-family <FAMILY> --complete-review
-```
-
-Only on a review with no blocking findings; otherwise release the claim and
-leave the threads open. Full procedure: `skills/code-review/SKILL.md`.
+8. **Never review any PR.** CodeRabbit is the sole code-review authority. The
+   merge gate requires its exact-current-head evidence and rejects coding-agent
+   comments, approvals, labels, and attestations.
 
 ### Merging
 

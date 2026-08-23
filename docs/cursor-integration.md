@@ -116,7 +116,7 @@ All four agents auto-discover the symlinked skills. The installer links:
 - `implement-next-issue`
 - `init-agent-project`
 - `create-github-issue`
-- `code-review`
+- `code-review` (policy refusal; CodeRabbit alone reviews)
 - `remediate-ci-failure`
 - `address-pr-feedback`
 

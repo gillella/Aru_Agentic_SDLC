@@ -1,5 +1,10 @@
 # Aru Software Factory — Build Plan
 
+> **Current review policy (Issue #373):** CodeRabbit is the sole PR code-review
+> authority. Coding-agent `reviewer:` / `reviewed-by:` workflows described in
+> historical sections below are retired and cannot satisfy the merge gate.
+> Claude, Codex, Cursor, and Antigravity implement and remediate only.
+
 **Goal:** idea → deployed software through an autonomous governed loop, with
 operator visibility and exceptional human intervention only for an unresolved
 severe merge or close-out failure.

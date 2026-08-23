@@ -157,18 +157,14 @@ class GovernanceTests(unittest.TestCase):
         for rule in ("issue-first", "worktree", "touches:", "closes #"):
             self.assertIn(rule, text, f"guarantee missing: {rule}")
 
-    def test_self_review_is_refused(self):
+    def test_coding_agent_review_is_refused(self):
         text = flat(skill_text())
-        self.assertIn("never review your own pr", text)
+        self.assertIn("never review any pr", text)
 
-    def test_the_same_account_review_path_is_the_documented_one(self):
-        """`--approve` is rejected by GitHub for the fleet's shared account.
-
-        Regression guard: the skill must not drift back to advising it.
-        """
+    def test_coderabbit_is_the_only_review_path(self):
         text = skill_text()
-        self.assertIn("--comment", text)
-        self.assertIn("reviewed-by", text)
+        self.assertIn("CodeRabbit", text)
+        self.assertIn("rejects coding-agent", text)
         self.assertNotIn("gh pr review --approve", text)
 
     def test_merging_goes_through_the_gate_only(self):
@@ -191,7 +187,6 @@ class DelegationTests(unittest.TestCase):
         for skill in (
             "init-agent-project",
             "implement-next-issue",
-            "code-review",
             "address-pr-feedback",
         ):
             self.assertIn(skill, text, f"unreferenced route: {skill}")

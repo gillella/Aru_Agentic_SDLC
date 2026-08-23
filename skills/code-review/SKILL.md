@@ -1,153 +1,21 @@
 ---
 name: code-review
-description: Reviews an open pull request in an isolated git worktree for correctness, security, tests, and Closes #N linkage under Aru_Agentic_SDLC. Use when the user says code review, review PR, audit pull request, or review code.
-triggers:
-  - "code review"
-  - "review PR #<ID>"
-  - "audit pull request"
-  - "review code"
-do_not_trigger_for:
-  - "implementing an unassigned issue (use implement-next-issue instead)"
-  - "addressing reviewer comments on your own PR (use address-pr-feedback instead)"
+description: Refuses coding-agent PR review because CodeRabbit is the sole review authority.
 ---
 
-# Code Review Procedure
+# Code Review Policy
 
-This skill defines the declarative code review procedure for evaluating Pull Requests submitted by human developers or AI agents.
+CodeRabbit is the sole PR code-review authority in every Factory-governed
+project. Claude, Codex, Cursor, and Antigravity must never claim, perform, or be
+dispatched for review, and their comments, approvals, `reviewed-by:` labels, or
+head attestations cannot satisfy the merge gate.
 
----
+When invoked, do not review the PR. If CodeRabbit has findings, route them to
+the PR author or adopted implementation/remediation agent and follow
+`skills/address-pr-feedback/SKILL.md`. If CodeRabbit is missing, pending,
+failed, rate-limited, stale, ambiguous, or unavailable, leave the PR blocked;
+there is no coding-agent fallback.
 
-## Procedure Steps
-
-### Step 1: Fetch PR & Create Review Worktree
-1. Capture the reviewed repository root before changing directories:
-   `REVIEW_REPO_ROOT="$(git rev-parse --show-toplevel)"`. Fetch PR details,
-   title, body, diffs, and linked issue (`Closes #X`) from that repository.
-2. Create an isolated worktree at
-   `$REVIEW_REPO_ROOT/.worktrees/review-pr-<PR_ID>` to perform local
-   verification without disturbing the primary checkout.
-
-### Step 2: Goal Alignment & Issue Tracing
-- Verify that the PR links to an open issue (`Closes #X`).
-- Confirm that the PR changes directly address all acceptance criteria outlined in the issue.
-
-### Step 3: Code Quality & Architecture Audit
-- Check for subtle bugs, logic flaws, race conditions, or unhandled edge cases.
-- Ensure public API signatures, schema types, and data models remain consistent.
-- Verify zero unused imports, dead code, or debug statements.
-- Apply the **narrower-than-reality** heuristic below to every new or changed
-  rule or assumption whose effective scope can be narrower than the reality it
-  governs.
-
-### Step 4: Test Coverage & Verification
-- Verify that new feature logic or bug fixes are accompanied by unit/integration tests.
-- Run the test suite locally inside the review worktree directory.
-- Confirm CI pipeline checks pass cleanly.
-
-### Step 5: Security & Performance Audit
-- Audit for security vulnerabilities (e.g., input sanitization, exposed credentials, unsafe SQL/shell calls).
-- Ensure no unnecessary performance bottlenecks, memory leaks, or high-complexity loops.
-
-### Step 6: Submit Review & Cleanup Worktree
-- Submit a substantive GitHub review. A chat summary is not review evidence.
-  - With a GitHub account distinct from the PR owner, use `gh pr review
-    --approve` when no blocking findings remain, or `--request-changes` with
-    constructive inline findings when changes are required.
-  - In the normal same-account fleet, GitHub rejects both verdicts as
-    self-review. Use `gh pr review --comment` and state the verdict in the body.
-    Put each blocking finding in an unresolved inline thread so the picker
-    routes the PR back to its author.
-- If the review has no blocking findings, complete its independent-agent
-  attribution and release the claim with
-  `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent
-  <AGENT_ID> --complete-review`. The helper verifies that a substantive human
-  review covers the current head, records a machine-readable attestation that
-  binds `<AGENT_ID>` to that exact commit, then writes the `reviewed-by:<id>`
-  label. Those three facts together are the same-account approval-equivalent
-  read by `merge_pr.py`; the durable attribution label alone is never proof
-  that a later head was reviewed.
-- If blocking findings remain, release the reviewer claim with `--release`
-  without adding `reviewed-by:`. The author/reviewer loop continues until every
-  thread is resolved; review-round count alone is never a human gate.
-- Do not move the issue directly to Done. Only the gated `merge_pr.py` close-out
-  performs the merge and Done transition after independent review, green CI,
-  resolved threads, and the remaining Definition-of-Done checks pass.
-- Return to the exact captured reviewed repository root
-  (`cd "$REVIEW_REPO_ROOT"`) and remove its temporary review worktree safely
-  without `--force`:
-  `git -C "$REVIEW_REPO_ROOT" worktree remove "$REVIEW_REPO_ROOT/.worktrees/review-pr-<PR_ID>"`.
-  Never substitute `$ARU_SDLC_HOME`; it may identify the canonical framework,
-  not the repository being reviewed. If Git refuses because untracked or
-  modified files exist, inspect the worktree, remove only known generated
-  build/test caches, or retain it for diagnostic recovery rather than
-  discarding uninspected material.
-
----
-
-## Review Checklist
-
-Apply every pre-submission item before submitting the review, submit the review with clear line comments and verdict, and complete the post-submission close-out after submission. A chat summary that skips this list is not review evidence.
-
-### Pre-Submission Checklist
-- [ ] Linked issue (`Closes #N`) is open; every acceptance criterion is met or
-      explicitly deferred with a follow-up issue (do not close incomplete work).
-- [ ] Diff matches the claim in the PR body **and** the gate/script's actual
-      behaviour (state machine, not narrative — see below).
-- [ ] **Narrower-than-reality:** for every new or changed rule or assumption in
-      the diff, answer: *What reality does this govern, and can its effective
-      scope be narrower than that reality?*
-- [ ] Tests cover the new behaviour; local suite is green in the review worktree.
-- [ ] CI is green (or failures are classified and already under remediation).
-- [ ] No secrets, unsafe shell interpolation, or trust-boundary holes introduced.
-- [ ] Blocking findings are each prepared as an unresolved inline thread; non-blocking notes
-      stay in the review body.
-
-### Review Submission Checklist
-- [ ] Submit substantive GitHub review (`gh pr review --comment` for same-account fleet, or `--approve` / `--request-changes` across distinct accounts).
-- [ ] For changes requested, create unresolved inline review comment threads on specific diff lines for all blocking findings (so the picker routes the PR back to the author).
-- [ ] State overall review verdict and summary in the review body.
-
-### Post-Submission Close-Out
-- [ ] Review claim released via `claim_issue.py --pr <PR_ID> --agent <AGENT_ID> --complete-review`
-      (if no blocking findings remain) or `--release` (if changes requested).
-- [ ] Return to the captured `$REVIEW_REPO_ROOT` and clean up that repository's
-      temporary review worktree safely without `--force`, inspecting or
-      retaining any uncertain files.
-
----
-
-## Narrower-Than-Reality Heuristic
-
-**Core principle:** For every new or changed rule or assumption, ask:
-
-> *What reality does this govern, and can its effective scope be narrower than
-> that reality?*
-
-The enforcement layer's design is usually sound. What keeps breaking is the gap
-between what a check or assumption *believes* and what the system *actually does*. When the
-logic is narrower, it either false-passes (misses the real write / real test /
-real label) or false-fails (blocks legitimate layouts or formats the runner accepts).
-
-### Worked examples
-
-| Check | Narrower than | Failure shape |
-|---|---|---|
-| Redirect / write scan | Shell quoting and expansion rules | Misses quoted/redirected writes, or treats `$TMP/out` as a repo path |
-| Test-discovery glob | pytest's `python_files` defaults (`test_*.py` **and** `*_test.py`) | Fails projects whose suite the runner would collect |
-| Jest test glob | Jest's `testMatch` (incl. `__tests__/`) | Same false-positive against a passing suite |
-| Merge-gate label read | The labels the framework actually writes (`author:` / `reviewed-by:`) | Accepts the wrong stamp, or requires a stamp nothing applies |
-| `_git_write_to_protected` | Git's real pre-subcommand options (`-C`, `--git-dir`, `--work-tree`, quoting) | Historical defect (#117, fixed in PR #119 / commit `0d1b6d2`): `git -C <main> commit` escaped or legitimate worktree commits got refused |
-
-Recent issues in this family: #69 (hook governed the shell's cwd, not the
-file), #73 (widening `touches:` had no effect until a cache expired), #76
-(redirect target starting with a variable read as a repo path), #117
-(protected-branch guard keyed to the shell's branch — fixed in PR #119 / commit `0d1b6d2`).
-
-### State machine, not narrative
-
-Standing lesson from the #24 / #25 near-miss: review the diff against the
-**gate's actual behaviour**, not against the claim in the PR body. Both halves
-of a two-state protocol (e.g. `reviewer:` claim vs `reviewed-by:` completion)
-must be checked against the state machine the merge helper reads. A PR that
-*says* it stamps completion while the script still accepts the transient claim
-label is a security hole dressed as a fix.
+Human operational authorization for money, production cutover, destructive
+migration, credentials, or external-account mutations remains a separate gate
+and is never supplied by CodeRabbit review.

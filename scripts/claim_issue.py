@@ -661,7 +661,16 @@ def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
 
 
 def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
-    """Claims a pull request for review. Same exit codes as claim_issue."""
+    """Reject retired coding-agent review claims."""
+    print(
+        "[CONFLICT] CodeRabbit is the sole PR code-review authority; coding "
+        "agents may implement or remediate findings but cannot claim review.",
+        file=sys.stderr,
+    )
+    return EXIT_CONFLICT
+
+    # Retained unreachable implementation documents the legacy label protocol
+    # for release/reaping compatibility with already-open PRs.
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
@@ -804,7 +813,7 @@ def _stamp_reviewer_family(pr_id: int, agent: str, family: str) -> None:
 
 
 def complete_review(pr_id: int, agent: str, family: str = "") -> int:
-    """Attributes a finished review, then releases the claim.
+    """Reject retired coding-agent review completion.
 
     This exists because the step had no command. `fleet-worker.md` told the
     reviewing agent to "label the PR reviewed-by:<id>" in prose and gave a
@@ -816,6 +825,15 @@ def complete_review(pr_id: int, agent: str, family: str = "") -> int:
     a window where the PR is neither claimed nor attributed, and another agent
     could pick it up for a review that had already happened.
     """
+    print(
+        "[CONFLICT] Coding-agent review completion is retired; only "
+        "authoritative CodeRabbit evidence can satisfy merge review.",
+        file=sys.stderr,
+    )
+    return EXIT_CONFLICT
+
+    # Legacy implementation remains unreachable so old claims can still be
+    # understood and explicitly released without becoming merge authority.
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
@@ -929,34 +947,16 @@ def _remove_merger_label(pr_id: int, agent: str) -> bool:
     return code == 0
 
 
-def _has_peer_reviewer(labels, author: str | None) -> bool:
-    for name in labels or []:
-        if not name.startswith(REVIEWED_BY_LABEL_PREFIX):
-            continue
-        who = name[len(REVIEWED_BY_LABEL_PREFIX):]
-        if who and who != author:
-            return True
-    return False
-
-
 def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     """Claims a pull request for mechanical merge. Same exit codes as claim_issue.
 
-    The PR author may hold this claim only when a distinct completed peer review
-    is already attributed. Self-review remains impossible because this path never
-    writes reviewed-by:<id>.
+    The author may hold this coordination claim. ``merge_pr.py`` remains the
+    authority and independently requires exact-current-head CodeRabbit review.
     """
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
-
-    author = pr_author(labels)
-    if author and author == agent and not _has_peer_reviewer(labels, author):
-        print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}' and has no "
-              f"distinct {REVIEWED_BY_LABEL_PREFIX}<peer> attribution yet. "
-              "Self-review cannot unlock mechanical merge.", file=sys.stderr)
-        return EXIT_CONFLICT
 
     holder = merge_claimant(labels)
     if holder and holder != agent:

@@ -42,9 +42,9 @@ eligible reviewers, nothing gets reviewed, and merge_pr.py blocks everything -
 a deadlock. After a PR has waited past the threshold, any *different agent* may
 review it and the PR is labelled `same-family-review` so the degradation shows.
 
-A different agent is worth a great deal on its own: a fresh session has no
-memory of writing the code and no attachment to its choices. A different family
-adds diverse blind spots on top of that; it is not the whole value.
+CodeRabbit is the sole PR code-review authority. Coding-agent work is limited
+to implementation, remediation, and mechanical merge execution after every
+Definition-of-Done gate passes.
 """
 
 import argparse
@@ -61,10 +61,8 @@ from claim_issue import (
     EXIT_CONFLICT,
     EXIT_OK,
     claim_merge,
-    claim_review,
     merge_claimant,
     reap_stale_merges,
-    reap_stale_reviews,
     reviewed_by,
 )
 from common import (
@@ -525,7 +523,7 @@ def needs_my_attention(pr: dict[str, Any], agent: str) -> bool:
     Deliberately based on current thread state rather than reviewDecision.  A
     same-account COMMENTED review has no decision, while GitHub can retain an
     old CHANGES_REQUESTED decision after every actionable thread is resolved.
-    A PR merely sitting unreviewed is someone else's work to review.
+    A PR merely awaiting CodeRabbit is not coding-agent work.
     """
     if _label_value(label_names(pr), "author:") != agent:
         return False
@@ -696,123 +694,18 @@ def author_gate_fix(pr: dict[str, Any], agent: str,
     return work
 
 
-def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,  # noqa: C901, PLR0912
+def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
                        round_cap: int, cross_family_wait: int,
                        merge_reason: str | None = None) -> dict[str, Any]:
-    """Decides whether `agent` may review this PR, and why not if not.
-
-    Returns {eligible, reason, cross_family, degraded}. `degraded` marks a
-    same-family review taken only because the wait threshold passed.
-    """
-    def no(reason):
-        return {"eligible": False, "reason": reason, "cross_family": False,
-                "degraded": False, "stale_attribution": False}
-
-    # Recovery queries may include merged PRs while close-out state is being
-    # rebuilt. They belong only to merge/close-out recovery; never let stale
-    # reviewer attribution route a closed PR back through review.
-    if is_merged(pr):
-        return no("merged PRs are not reviewable")
-
-    labels = label_names(pr)
-    author = _label_value(labels, "author:")
-    pr_family = _label_value(labels, "family:")
-    holder = reviewed_by(labels)
-
-    # Set when a peer's completion stamp no longer names the head, so the report
-    # can explain why an already-reviewed PR reappeared in the review queue.
-    stale_attribution = False
-
-    if pr.get("isDraft"):
-        return no("draft")
-    if holder and holder != agent:
-        return no(f"already being reviewed by '{holder}'")
-    if author and author == agent:
-        return no("you wrote it")
-    if not author and _authored_via_branch(pr, agent):
-        # Unstamped PR - stamping is best-effort and legacy PRs predate it.
-        # The branch still names the issue, and the issue still carries the
-        # agent:<id> claim of whoever implemented it, so authorship is
-        # recoverable without the label. Refusing outright would make every
-        # legacy PR unreviewable; this refuses only the ones provably mine.
-        return no("you wrote it (inferred from the linked issue's claim)")
-
-    threads = review_thread_count(pr)
-    if threads is None:
-        return no("review thread state is unavailable")
-    if threads:
-        return no(f"{threads} active review feedback item(s); waiting on author")
-
-    peer_reviewers = [
-        name[len("reviewed-by:"):]
-        for name in labels
-        if name.startswith("reviewed-by:")
-        and name[len("reviewed-by:"):]
-        and name[len("reviewed-by:"):] != author
-    ]
-    if peer_reviewers:
-        if not author:
-            # Another review cannot repair missing authorship: merge_pr cannot
-            # prove that any reviewed-by stamp is independent until the PR is
-            # bound to its verified author. Reassigning the review would spin
-            # forever while leaving the actual gate unchanged.
-            return no(
-                "independent review exists, but the PR has no author stamp"
-            )
-        gates = _unmet_gates(merge_reason or "")
-        if merge_reason == "every Definition-of-Done gate passed" or (
-            gates and "review" not in gates
-        ):
-            return no("independent review complete; waiting on gated merge")
-        if "review" in gates:
-            stale_attribution = True
-        else:
-            # Direct callers and cheap merge filters have no current-head DoD
-            # verdict to reuse, so retain the authoritative fallback query.
-            evidence = review_evidence(pr["number"])
-            if evidence is None:
-                return no("review attestation state is unavailable")
-            attested = _attested_head_peers(evidence, peer_reviewers)
-            # None means legacy evidence carrying no attestation records; keep the
-            # existing verdict rather than reopening every historical PR.
-            if attested is None or attested:
-                return no("independent review complete; waiting on gated merge")
-            stale_attribution = True
-
-    decision = (pr.get("reviewDecision") or "").upper()
-    if decision == "APPROVED" and not stale_attribution:
-        # An approved PR is waiting on gated mechanical merge. A historical
-        # CHANGES_REQUESTED decision with no current feedback instead needs a
-        # fresh review so the latest verdict can unblock the merge gate.
-        #
-        # Stale attribution overrides this. GitHub does not dismiss a stale
-        # approval unless branch protection is configured to, so a
-        # distinct-account approval survives a push that it never covered.
-        # merge_pr rejects such an approval for the same reason it rejects the
-        # stale stamp, so suppressing here would restore the exact deadlock
-        # above one branch later.
-        return no("already approved")
-
-    state = ci_state(pr)
-    if state == "red":
-        return no(f"CI is {state}")
-
-    cross = bool(family and pr_family and pr_family != family)
-    if cross or not family or not pr_family:
-        # Unknown family on either side is treated as cross: there is no
-        # evidence of overlap, and blocking on missing metadata would idle the
-        # fleet for a labelling gap.
-        return {"eligible": True, "reason": "", "cross_family": True,
-                "degraded": False, "stale_attribution": stale_attribution}
-
-    waited = waiting_minutes(pr)
-    if waited >= cross_family_wait:
-        return {"eligible": True,
-                "reason": f"same family '{family}', waited {waited:.0f}m",
-                "cross_family": False, "degraded": True,
-                "stale_attribution": stale_attribution}
-    return no(f"same family '{family}'; waiting {cross_family_wait - waited:.0f}m more "
-              "for a cross-family reviewer")
+    """Legacy API that always refuses coding-agent review work."""
+    return {
+        "eligible": False,
+        "reason": ("CodeRabbit is the sole code-review authority; coding agents "
+                   "implement and remediate findings only"),
+        "cross_family": False,
+        "degraded": False,
+        "stale_attribution": False,
+    }
 
 
 def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa: C901, PLR0912
@@ -859,18 +752,6 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa
             return no("unmet: ci")
         if state != "none":
             return no(f"CI is {state}")
-
-    peers = [
-        name[len("reviewed-by:"):]
-        for name in labels
-        if name.startswith("reviewed-by:")
-        and name[len("reviewed-by:"):]
-        and name[len("reviewed-by:"):] != author
-    ]
-    if not peers and (pr.get("reviewDecision") or "").upper() != "APPROVED":
-        return no("no independent review attribution yet")
-    if author and author == agent and not peers:
-        return no("author cannot merge without a distinct peer reviewer")
 
     ok, reason = dod_status(pr["number"])
     if not ok:
@@ -920,7 +801,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     prs = list_work_prs()
     if prs is None:
         # Fail closed. Treating an unreadable queue as empty makes the selector
-        # claim new implementation work as though no feedback or review were
+        # claim new implementation work as though no feedback or remediation were
         # waiting - growing the queue precisely while it cannot be observed.
         return {"agent": agent, "family": family,
                 "work": {"type": "error", "skill": None,
@@ -974,27 +855,9 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         if gate_fix:
             break
 
-    # 3. Review someone else's work.
+    # CodeRabbit owns PR review. Coding-agent queue state deliberately contains
+    # no review candidates; findings are surfaced through `feedback` above.
     reviewable, skipped = [], []
-    for pr in sorted(prs, key=lambda p: p["number"]):
-        verdict = review_eligibility(
-            pr,
-            agent,
-            family,
-            round_cap,
-            cross_family_wait,
-            dod_reasons.get(pr["number"]),
-        )
-        if verdict["eligible"]:
-            reviewable.append((pr, verdict))
-        else:
-            reason = verdict["reason"]
-            if pr["number"] in unreadable:
-                reason = "review thread state is unreadable"
-            skipped.append({"number": pr["number"], "why": reason})
-
-    # Cross-family first, then degraded same-family, oldest PR first within each.
-    reviewable.sort(key=lambda pair: (not pair[1]["cross_family"], -waiting_minutes(pair[0])))
 
     # 4. Otherwise start something new - unchanged issue selection.
     issues = list_open_issues()
@@ -1019,11 +882,6 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
                 "unmet_gates": gate_fix["unmet_gates"], "reason": gate_fix["reason"]}
         if gate_fix.get("gate_details"):
             work["gate_details"] = gate_fix["gate_details"]
-    elif reviewable:
-        pr, verdict = reviewable[0]
-        work = {"type": "review", "pr": pr["number"], "title": pr["title"],
-                "skill": "code-review", "cross_family": verdict["cross_family"],
-                "degraded": verdict["degraded"]}
     elif parts["my_in_flight"]:
         issue = parts["my_in_flight"]
         work = {"type": "issue", "issue": issue["number"], "title": issue["title"],
@@ -1100,7 +958,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
 
     if args.reap_after > 0:
         try:
-            reap_stale_reviews(args.reap_after)
             reap_stale_merges(args.reap_after)
             reap_stale_claims(list_open_issues(), args.reap_after)
         except Exception as err:
@@ -1127,59 +984,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
             break
         if not work["claimed"] and "claim_result" not in work:
             work["claim_result"] = "all_taken"
-    elif args.claim and work["type"] == "review":
-        # Walk the candidates: another agent claiming the top one first should
-        # cost a retry, not a wasted cycle through the whole picker.
-        work["claimed"] = False
-        for candidate in res["reviewable_detail"]:
-            rc = claim_review(candidate["pr"], args.agent)
-            if rc == EXIT_OK:
-                work.update({"pr": candidate["pr"], "title": candidate["title"],
-                             "cross_family": candidate["cross_family"],
-                             "degraded": candidate["degraded"], "claimed": True})
-                record_review_claim(
-                    candidate["pr"], args.agent, candidate.get("created_at"),
-                )
-                if candidate["degraded"]:
-                    mark(candidate["pr"], "same-family-review", "fbca40",
-                         "Reviewed by the author's own model family; no cross-family agent was free")
-                break
-            if rc == EXIT_CONFLICT:
-                print(f"[INFO] PR #{candidate['pr']} was taken; trying the next one.",
-                      file=sys.stderr)
-                continue
-            work["claim_result"] = "error"
-            break
-        if not work["claimed"] and "claim_result" not in work:
-            # Every candidate was taken while we were deciding. Fall through to
-            # implementation work rather than idling.
-            work["claim_result"] = "all_taken"
-            if res["claimable_issues"]:
-                from claim_issue import claim_issue
-                from common import get_issue
-                for number in res["claimable_issues"]:
-                    issue_meta = get_issue(number)
-                    if not issue_meta:
-                        print(
-                            f"[WARN] Could not read issue #{number}; skipping claim.",
-                            file=sys.stderr,
-                        )
-                        continue
-                    if claim_issue(number, args.agent) == EXIT_OK:
-                        work = {
-                            "type": "issue",
-                            "issue": number,
-                            "skill": skill_for_issue(issue_meta),
-                            "title": issue_meta.get("title") or "",
-                            "resuming": False,
-                            "claimed": True,
-                        }
-                        # Rebind the result too. Rebinding only the local name
-                        # left --json reporting the unclaimed review while the
-                        # issue was claimed and In Progress, so the agent would
-                        # work the wrong item and strand the real claim.
-                        res["work"] = work
-                        break
     elif args.claim and work["type"] == "issue" and not work.get("resuming"):
         from claim_issue import claim_issue
         work["claimed"] = claim_issue(work["issue"], args.agent) == EXIT_OK
@@ -1197,10 +1001,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
         print(f"🔀 Merge PR #{work['pr']} (Definition of Done passed)")
         print(f"   → merge_pr.py --pr {work['pr']}  (never gh pr merge)")
         print(f"   → {work['skill']}: {work['title']}")
-    elif work["type"] == "review":
-        tag = "cross-family" if work["cross_family"] else "SAME FAMILY (degraded)"
-        print(f"🔍 Review PR #{work['pr']} [{tag}]")
-        print(f"   → {work['skill']}: {work['title']}")
     elif work["type"] == "issue":
         verb = "Resume" if work.get("resuming") else "Implement"
         print(f"🛠️  {verb} issue #{work['issue']}")
@@ -1208,7 +1008,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
     elif work["type"] == "error":
         print(f"⛔ Picker error: {work.get('reason')}")
     else:
-        print("✨ Nothing to do: no mergeable/reviewable PR and no claimable issue.")
+        print("✨ Nothing to do: no mergeable PR, remediation, or claimable issue.")
 
     if res.get("merge_skipped"):
         print("\nMerge candidates not offered to you:")

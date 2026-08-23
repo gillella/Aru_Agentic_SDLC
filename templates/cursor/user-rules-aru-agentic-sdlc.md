@@ -20,7 +20,7 @@ Aru_Agentic_SDLC governance:
    - implement next issue / a named issue → `implement-next-issue`
    - new governed repo → `init-agent-project`
    - file bug/feature/task → `create-github-issue`
-   - review a PR → `code-review`
+   - review a PR → refuse; CodeRabbit alone reviews, agents remediate findings
    - red CI → `remediate-ci-failure`
    - PR review comments → `address-pr-feedback`
 5. Use worktrees under `.worktrees/`, never push straight to main/master,

@@ -39,7 +39,7 @@ flowchart TD
     J --> K[9. Poll CI Run Status]
     K --> L{CI Passing?}
     L -- No --> M[10. Execute remediate-ci-failure] --> I
-    L -- Yes --> N[11. Request Review & Set Status: In Review]
+    L -- Yes --> N[11. Await CodeRabbit & Remediate Findings]
 ```
 
 ---
@@ -214,17 +214,22 @@ or other irreversible work from the plan gate.
    c. Apply fix edits in the worktree directory.
    d. Push updates and re-verify CI.
 
-### Step 11: Request Code Review & Handoff
+### Step 11: CodeRabbit Review and Handoff
 1. Transition the issue/PR Project Board status to `In Review`.
-2. Assign relevant maintainers or peer agents for code review.
+2. Await CodeRabbit's review. Never claim review work, invoke `code-review`, or
+   ask Claude, Codex, Cursor, or Antigravity to review a PR.
+3. Route every actionable CodeRabbit finding to the author or adopted
+   implementation/remediation agent and use `address-pr-feedback` until the
+   authoritative current-head review and thread gates pass.
 3. Execute: `python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" --issue <ISSUE_ID> --status "In Review"`
 4. Clean up worktree directory if needed and summarize work completed.
 
 ### Step 12: Merge Authority and Completion
 
-1. The implementation author cannot satisfy the independent-review gate with a
-   self-review. Wait for the peer review and resolve every review thread.
-2. After a distinct agent completes the independent review, any factory agent,
+1. Coding-agent reviews and legacy `reviewed-by:` attestations never satisfy
+   review. Wait for a completed substantive CodeRabbit review on the exact
+   current head and resolve every actionable CodeRabbit thread.
+2. After the CodeRabbit oracle passes, any factory agent,
    including the implementation author, may perform the mechanical merge with
    `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID>`. This is the sole
    merge authority; do not use a direct push or ad-hoc `gh pr merge`.

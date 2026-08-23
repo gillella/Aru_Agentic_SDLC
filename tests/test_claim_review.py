@@ -271,170 +271,15 @@ class ReviewLabelParsingTests(unittest.TestCase):
 
 
 class ClaimReviewTests(unittest.TestCase):
-    @patch.object(claim_issue.time, "sleep")
-    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
-    @patch.object(claim_issue, "ensure_label", return_value=True)
-    @patch.object(claim_issue, "_pr_labels")
-    def test_uncontested_claim_succeeds(self, labels, _ensure, _run, _sleep):
-        labels.side_effect = [[], ["reviewer:agent-2"], ["reviewer:agent-2"]]
-        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
+    def test_claim_review_is_retired(self):
+        with patch.object(claim_issue, "_pr_labels") as labels:
+            self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
+        labels.assert_not_called()
 
-    @patch.object(claim_issue, "_pr_labels", return_value=["reviewer:agent-9"])
-    def test_already_held_by_another_agent_is_a_conflict(self, _labels):
-        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
-
-    @patch.object(claim_issue, "_pr_labels", return_value=["reviewer:agent-2"])
-    def test_already_mine_resumes(self, _labels):
-        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
-
-    @patch.object(claim_issue, "_pr_labels", return_value=["author:agent-2"])
-    def test_the_prs_own_author_may_not_claim_review(self, _labels):
-        """The guarantee has to live where the label is written.
-
-        fetch_next_work filters own-authored PRs when handing out review work,
-        but `--pr <n> --agent <me>` goes straight past the picker. merge_pr
-        now reads this claim as the reviewer's identity, so allowing the
-        author to write it would hand back the self-review the gate exists to
-        refuse.
-        """
-        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
-
-    @patch.object(claim_issue.time, "sleep")
-    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
-    @patch.object(claim_issue, "ensure_label", return_value=True)
-    @patch.object(claim_issue, "_pr_labels")
-    def test_a_different_agent_may_claim_a_stamped_pr(self, labels, _ensure, _run, _sleep):
-        labels.side_effect = [
-            ["author:agent-1"],
-            ["author:agent-1", "reviewer:agent-2"],
-            ["author:agent-1", "reviewer:agent-2"],
-        ]
-        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
-
-    @patch.object(claim_issue, "_remove_reviewer_label", return_value=True)
-    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
-    @patch.object(claim_issue, "ensure_label", return_value=True)
-    @patch.object(claim_issue, "_reviewed_head_for_completion", return_value="a" * 40)
-    @patch.object(claim_issue, "_pr_labels",
-                  return_value=["author:agent-1", "reviewer:agent-2"])
-    def test_completing_a_held_review_attributes_and_releases(
-            self, _labels, _head, _ensure, run, remove):
-        """The step that had no command.
-
-        fleet-worker.md told the reviewer to label the PR in prose and gave a
-        command only for the release, so the prose half got skipped and PRs
-        arrived claimed but unattributed.
-        """
-        self.assertEqual(
-            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_OK)
-        stamped = " ".join(" ".join(c.args[0]) for c in run.call_args_list)
-        self.assertIn("reviewed-by:agent-2", stamped)
-        self.assertIn("aru-review-head:v1", stamped)
-        self.assertIn('"head":"' + "a" * 40 + '"', stamped)
-        remove.assert_called_once()
-
-    @patch.object(claim_issue, "_reviewed_head_for_completion", return_value=None)
-    @patch.object(claim_issue, "_pr_labels",
-                  return_value=["author:agent-1", "reviewer:agent-2"])
-    def test_completion_refuses_without_current_head_review(self, _labels, _head):
-        self.assertEqual(
-            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
-
-    @patch.object(claim_issue, "_pr_labels",
-                  return_value=["author:agent-1", "reviewer:agent-9"])
-    def test_completing_a_review_you_do_not_hold_is_refused(self, _labels):
-        # Attribution is not something a passer-by may write.
-        self.assertEqual(
-            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
-
-    @patch.object(claim_issue, "_pr_labels", return_value=["author:agent-1"])
-    def test_completing_without_any_claim_is_refused(self, _labels):
-        self.assertEqual(
-            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
-
-    @patch.object(claim_issue, "_pr_labels",
-                  return_value=["author:agent-2", "reviewer:agent-2"])
-    def test_the_author_may_not_attribute_a_review_of_its_own_pr(self, _labels):
-        self.assertEqual(
-            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
-
-    @patch.object(claim_issue, "_remove_reviewer_label", return_value=False)
-    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
-    @patch.object(claim_issue, "ensure_label", return_value=True)
-    @patch.object(claim_issue, "_reviewed_head_for_completion", return_value="b" * 40)
-    @patch.object(claim_issue, "_pr_labels",
-                  return_value=["author:agent-1", "reviewer:agent-2"])
-    def test_a_failed_release_is_retryable_and_remains_merge_blocking(
-            self, _labels, _head, _ensure, _run, _remove):
-        # A completed attribution and a live claim deliberately leave the gate
-        # blocked. Completion must report failure so the reviewer retries the
-        # idempotent command instead of unknowingly stranding the PR.
-        self.assertEqual(
-            claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_ERROR)
-        pr = {
-            "author": {"login": "gillella"},
-            "reviews": [{"state": "COMMENTED", "author": {"login": "gillella"}}],
-            "labels": [
-                {"name": "author:agent-1"},
-                {"name": "reviewer:agent-2"},
-                {"name": "reviewed-by:agent-2"},
-            ],
-        }
-        ok, msg = merge_pr.check_reviews(
-            pr,
-            {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True},
-        )
-        self.assertFalse(ok)
-        self.assertIn("still in progress", msg)
-
-    @patch.object(claim_issue.time, "sleep")
-    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
-    @patch.object(claim_issue, "ensure_label", return_value=True)
-    @patch.object(claim_issue, "_pr_labels")
-    def test_an_unstamped_pr_can_still_be_claimed(self, labels, _ensure, _run, _sleep):
-        # No author: label means nothing to compare against; refusing would
-        # strand every PR opened before stamping existed.
-        labels.side_effect = [[], ["reviewer:agent-2"], ["reviewer:agent-2"]]
-        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_OK)
-
-    @patch.object(claim_issue.time, "sleep")
-    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
-    @patch.object(claim_issue, "ensure_label", return_value=True)
-    @patch.object(claim_issue, "_pr_labels")
-    def test_race_loser_releases_only_its_own_label(self, labels, _ensure, run_cmd, _sleep):
-        # Both agents saw "unclaimed" and both wrote. Lowest-sorting id wins,
-        # and the loser must not touch the winner's label.
-        labels.side_effect = [[], ["reviewer:agent-a", "reviewer:agent-b"]]
-        result = claim_issue.claim_review(7, "agent-b")
-        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
-        cleanup = run_cmd.call_args_list[-1].args[0]
-        self.assertEqual(
-            cleanup, ["gh", "pr", "edit", "7", "--remove-label", "reviewer:agent-b"])
-
-    @patch.object(claim_issue.time, "sleep")
-    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
-    @patch.object(claim_issue, "ensure_label", return_value=True)
-    @patch.object(claim_issue, "_pr_labels")
-    def test_race_winner_keeps_the_claim(self, labels, _ensure, _run, _sleep):
-        labels.side_effect = [[], ["reviewer:agent-a", "reviewer:agent-b"],
-                              ["reviewer:agent-a", "reviewer:agent-b"]]
-        self.assertEqual(claim_issue.claim_review(7, "agent-a"), claim_issue.EXIT_OK)
-
-    @patch.object(claim_issue, "_pr_labels", return_value=None)
-    def test_unreadable_pr_is_an_error(self, _labels):
-        self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_ERROR)
-
-    @patch.object(claim_issue.time, "sleep")
-    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
-    @patch.object(claim_issue, "ensure_label", return_value=True)
-    @patch.object(claim_issue, "_pr_labels")
-    def test_claiming_a_review_never_moves_the_board(self, labels, _ensure, _run, _sleep):
-        # The linked issue stays In Review while its PR is reviewed; a review
-        # is not separate board work.
-        labels.side_effect = [[], ["reviewer:agent-2"], ["reviewer:agent-2"]]
-        with patch.object(claim_issue, "update_status") as update:
-            claim_issue.claim_review(7, "agent-2")
-            update.assert_not_called()
+    def test_complete_review_is_retired(self):
+        with patch.object(claim_issue, "_pr_labels") as labels:
+            self.assertEqual(claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
+        labels.assert_not_called()
 
 
 class ReleaseReviewTests(unittest.TestCase):
@@ -574,10 +419,17 @@ class MergeClaimTests(unittest.TestCase):
         ]
         self.assertEqual(claim_issue.claim_merge(7, "agent-a"), claim_issue.EXIT_OK)
 
+    @patch.object(claim_issue, "CONFIRM_DELAY_S", 0)
+    @patch.object(claim_issue, "READBACK_DELAY_S", 0)
+    @patch.object(claim_issue, "ensure_label", return_value=True)
     @patch.object(claim_issue, "run_cmd")
-    def test_author_cannot_claim_merge_without_peer_review(self, run_cmd):
-        run_cmd.return_value = (0, "author:agent-a\nreviewed-by:agent-a\n", "")
-        self.assertEqual(claim_issue.claim_merge(7, "agent-a"), claim_issue.EXIT_CONFLICT)
+    def test_author_may_claim_merge_without_legacy_peer_label(self, run_cmd, _ensure):
+        run_cmd.side_effect = [
+            (0, "author:agent-a\n", ""), (0, "", ""),
+            (0, "author:agent-a\nmerger:agent-a\n", ""),
+            (0, "author:agent-a\nmerger:agent-a\n", ""),
+        ]
+        self.assertEqual(claim_issue.claim_merge(7, "agent-a"), claim_issue.EXIT_OK)
 
     @patch.object(claim_issue, "run_cmd")
     def test_stale_merge_claims_are_reaped(self, run_cmd):
