@@ -116,7 +116,7 @@ unavailable.
 python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
 ```
 
-It returns one work item of type `feedback`, `merge`, `issue`, or
+It returns one work item of type `feedback`, `merge`, `issue`, `error`, or
 `idle`, and claims it. The priority order is deliberate — **finishing beats
 starting** (feedback → merge → issue). Do the branch below that
 matches, then ask again. The current desktop task remains the loop owner.
@@ -226,7 +226,17 @@ The picker must never emit this work type. CodeRabbit is the sole PR code-review
 
 ---
 
-#### D. `issue` — follow the picker-selected skill
+#### D. `error` — report and retry
+
+When `work.type=\`error\``, this is a recoverable picker or GitHub failure,
+not work to start. Report
+`work.reason`, start no work, and follow the existing wait/retry path. Return
+to the picker after the normal delay; do not invent a claim, branch, PR, or
+merge attempt from an error item.
+
+---
+
+#### E. `issue` — follow the picker-selected skill
 
 Read `work.skill` from the claimed picker result.
 

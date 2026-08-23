@@ -1,4 +1,4 @@
-# line-ceiling: 1490
+# line-ceiling: 1550
 import os
 import stat
 import sys
@@ -540,6 +540,7 @@ class FleetStatusTests(unittest.TestCase):
                     createdAt=hours_ago(10),
                     comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
                     reviews=[{"state": "CHANGES_REQUESTED"}, {"state": "CHANGES_REQUESTED"}],
+                    _active_review_feedback=[],
                 )
             ]
         )
@@ -585,6 +586,9 @@ class FleetStatusTests(unittest.TestCase):
                     statusCheckRollup=[{
                         "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
                     }],
+                    _active_review_feedback=[],
+                    unresolvedReviewThreadsCount=0,
+                    reviewThreads={"nodes": []},
                     _review_evidence=coderabbit_evidence(),
                 ),
             ]
@@ -600,6 +604,7 @@ class FleetStatusTests(unittest.TestCase):
                     34,
                     createdAt=hours_ago(48),
                     comments=[{"body": f"review-queued-at: {hours_ago(1)}"}],
+                    _active_review_feedback=[],
                 )
             ]
         )
@@ -610,7 +615,7 @@ class FleetStatusTests(unittest.TestCase):
 
     def test_review_age_without_queue_stamp_is_unavailable(self):
         status = self.evaluate_fixture(
-            prs=[mock_pr(35, createdAt=hours_ago(48))]
+            prs=[mock_pr(35, createdAt=hours_ago(48), _active_review_feedback=[])]
         )
         asked = questions(status)["review_age"]
         self.assertEqual(asked["pending"][0]["age_availability"], "unavailable")
@@ -828,7 +833,7 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(ready_q["claimable"], 2)
 
     def test_review_queue_depth_reported_and_marks_flooded_queue(self):
-        prs = [mock_pr(i) for i in range(101, 107)]  # 6 open PRs awaiting review
+        prs = [mock_pr(i, _active_review_feedback=[]) for i in range(101, 107)]  # 6 open PRs awaiting review
         status = self.evaluate_fixture(
             issues=[
                 mock_issue(51, "status:ready", body="touches: src/a.py\n"),
@@ -970,6 +975,21 @@ class FleetStatusTests(unittest.TestCase):
         pr_draft = {"number": 14, "isDraft": True, "labels": []}
         self.assertFalse(_pending_review(pr_draft))
 
+    def test_pr_without_coderabbit_hint_skips_review_evidence_lookup(self):
+        pr = {
+            "number": 21,
+            "isDraft": False,
+            "reviewDecision": "COMMENTED",
+            "labels": [],
+            "_active_review_feedback": [],
+            "statusCheckRollup": [],
+        }
+        with patch(
+            "merge_pr.review_evidence",
+            side_effect=AssertionError("review evidence should stay unloaded"),
+        ):
+            self.assertTrue(fleet_status._pending_review(pr))
+
     def test_current_head_coderabbit_review_is_not_reported_as_pending_review(self):
         reviewed = mock_pr(
             18,
@@ -983,6 +1003,24 @@ class FleetStatusTests(unittest.TestCase):
             status = self.evaluate_fixture(prs=[reviewed])
         self.assertIn("PR #18 is reviewed and waiting for merge.", status["reasons"])
         self.assertNotIn("PR #18 is open and pending review.", status["reasons"])
+
+    def test_unknown_feedback_result_keeps_pr_in_feedback_state(self):
+        pr = mock_pr(19, decision="COMMENTED", statusCheckRollup=[{
+            "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
+        }])
+        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=None), \
+             patch("merge_pr.review_evidence", side_effect=AssertionError("feedback state should short-circuit")):
+            status = self.evaluate_fixture(prs=[pr])
+        self.assertIn("PR #19 has active review feedback.", status["reasons"])
+
+    def test_feedback_lookup_exception_keeps_pr_in_feedback_state(self):
+        pr = mock_pr(20, decision="COMMENTED", statusCheckRollup=[{
+            "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
+        }])
+        with patch("fetch_pr_feedback.fetch_active_review_feedback", side_effect=RuntimeError("boom")), \
+             patch("merge_pr.review_evidence", side_effect=AssertionError("feedback state should short-circuit")):
+            status = self.evaluate_fixture(prs=[pr])
+        self.assertIn("PR #20 has active review feedback.", status["reasons"])
 
     def test_api_failure_still_never_reports_complete(self):
         status = evaluate_fleet_status("/definitely/not/a/repository")
@@ -1195,6 +1233,41 @@ class MergeQueueViewTests(unittest.TestCase):
         self.assertIn("evidence unavailable", row["verdict"])
         # CI still surfaces from the fetched PR even when evidence is missing.
         self.assertIn(row["ci"], {"none", "red", "pending", "green", "—"})
+
+    def test_queue_row_wraps_github_review_evidence_with_authoritative_status(self):
+        pr = self._full_pr(31, "author:agent-a")
+        pr["reviewDecision"] = "COMMENTED"
+        pr["statusCheckRollup"] = [{
+            "name": "CodeRabbit",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }]
+        raw = {
+            "head_oid": "abc123",
+            "github_review_evidence": True,
+            "reviews": [],
+            "unresolved": 0,
+            "unfixed": 0,
+            "withdrawn": 0,
+        }
+        with patch("merge_pr.fetch_pr", return_value=pr), \
+             patch("merge_pr.linked_issues", return_value=[1]), \
+             patch("merge_pr.review_evidence", return_value=raw), \
+             patch(
+                 "merge_pr._with_coderabbit_status",
+                 return_value=None,
+             ) as refresh, \
+             patch(
+                 "merge_pr.evaluate_dod",
+                 side_effect=AssertionError("DoD should not run without authoritative status"),
+             ):
+            row = evaluate_queue_row(pr)
+
+        refresh.assert_called_once_with(31, raw)
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["first_blocking"], "review")
+        self.assertEqual(row["next_action"], "review")
+        self.assertIn("evidence unavailable", row["verdict"])
 
     def test_open_pr_list_failure_does_not_look_empty(self):
         payload = build_merge_queue(list_prs_fn=lambda: None)

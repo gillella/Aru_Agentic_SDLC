@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4097
+# line-ceiling: 4140
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1346,6 +1346,8 @@ def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
         pullRequest(number:$pr) {
           headRefOid
           commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
+            totalCount
+            pageInfo { hasNextPage endCursor }
             nodes {
               __typename
               ... on CheckRun { name status conclusion checkSuite { app { slug } } }
@@ -1359,13 +1361,26 @@ def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
         "gh", "api", "graphql", "-f", f"query={query}",
         "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
     ])
+    if not data or (isinstance(data, dict) and data.get("errors")):
+        return None
     try:
         pull = data["data"]["repository"]["pullRequest"]
         nodes = pull["commits"]["nodes"]
-        contexts = nodes[0]["commit"]["statusCheckRollup"]["contexts"]["nodes"]
+        connection = nodes[0]["commit"]["statusCheckRollup"]["contexts"]
+        contexts = connection["nodes"]
+        total_count = connection["totalCount"]
+        page_info = connection["pageInfo"]
+        has_next = page_info["hasNextPage"]
     except (KeyError, IndexError, TypeError):
         return None
     if pull.get("headRefOid") != expected_head or not isinstance(contexts, list):
+        return None
+    if (
+        not isinstance(total_count, int)
+        or not isinstance(has_next, bool)
+        or has_next
+        or total_count != len(contexts)
+    ):
         return None
     return contexts
 
@@ -1399,6 +1414,12 @@ def _coderabbit_check(pr, evidence, *, recognized_review=False):  # noqa: C901, 
     missing check all fail closed.
     """
     matches = []
+    if (
+        isinstance(evidence, dict)
+        and evidence.get("github_review_evidence")
+        and "coderabbit_status" not in evidence
+    ):
+        return None
     authoritative = evidence.get("coderabbit_status") if isinstance(evidence, dict) else None
     rollup = authoritative if authoritative is not None else pr.get("statusCheckRollup") or []
     for item in rollup:
@@ -1460,7 +1481,12 @@ def _coderabbit_current_head_review(evidence):  # noqa: C901
             return None
         if oid != head:
             continue
-        if state not in {"COMMENTED", "APPROVED"} or submitted is None or not isinstance(body, str):
+        if (
+            state not in {"COMMENTED", "APPROVED"}
+            or submitted is None
+            or not isinstance(body, str)
+            or not body.strip()
+        ):
             return None
         candidates.append((submitted, review.get("id")))
     newest = max((candidate[0] for candidate in candidates), default=None)

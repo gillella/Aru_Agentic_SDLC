@@ -202,25 +202,28 @@ class GovernanceTests(unittest.TestCase):
         self.assertNotIn("skills/address-pr-feedback", review)
 
     def test_cursor_code_review_command_is_a_refusal_router(self):
-        text = flat(CURSOR_CODE_REVIEW.read_text(encoding="utf-8"))
-        self.assertIn("coderabbit", text)
-        self.assertIn("remediate", text)
-        self.assertIn(
-            "do not inspect the pr, open a review workspace, or submit review comments",
-            text,
+        text = CURSOR_CODE_REVIEW.read_text(encoding="utf-8")
+        self.assertEqual(
+            text.strip(),
+            "\n".join([
+                "Refuse coding-agent pull-request review under Aru_Agentic_SDLC.",
+                "",
+                "CodeRabbit alone reviews pull requests in this repository; coding agents never review.",
+                "Route review findings back to the factory picker to remediate them instead.",
+                "Do not inspect the PR, run `gh pr review`, open a review workspace, or submit review comments.",
+            ]),
         )
-        self.assertIn("coderabbit alone reviews", text)
-        self.assertIn("route findings back to the factory picker to remediate", text)
-        self.assertNotIn("approve", text)
-        self.assertNotIn("request changes", text)
-        self.assertNotIn("review worktree", text)
-        self.assertNotIn("gh pr review", text)
-        self.assertNotIn("submit review", text.replace("submit review comments", ""))
+        lowered = text.lower()
+        self.assertNotIn("approve", lowered)
+        self.assertNotIn("request changes", lowered)
+        self.assertNotIn("inspect the pr and", lowered)
+        self.assertNotIn("review worktree", lowered)
 
     def test_cursor_user_rules_route_review_to_remediation(self):
         text = CURSOR_USER_RULES.read_text(encoding="utf-8").lower()
         self.assertIn("agents remediate findings", text)
         self.assertNotIn("auto-assign a free identity", text)
+        self.assertIn("helper-specific contracts", text)
 
     def test_legacy_review_state_releases_claim_before_looping(self):
         for text in (
@@ -231,6 +234,14 @@ class GovernanceTests(unittest.TestCase):
             self.assertIn("claim_issue.py", text)
             self.assertIn("--release", text)
             self.assertIn("return to the picker", text)
+
+    def test_error_work_state_reports_reason_and_retries(self):
+        text = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
+        self.assertIn("work.type", text)
+        self.assertIn("`error`", text)
+        self.assertIn("report `work.reason`", text)
+        self.assertIn("start no work", text)
+        self.assertIn("wait/retry path", text)
 
 
 class DelegationTests(unittest.TestCase):

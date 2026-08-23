@@ -1210,18 +1210,6 @@ def write_governance_scripts(  # noqa: PLR0915
     with open(check_touches_wf_path, "w", encoding="utf-8") as f:
         f.write(CHECK_TOUCHES_WORKFLOW)
 
-    review_script_path = os.path.join(scripts_dir, "review.py")
-    with open(review_script_path, "w", encoding="utf-8") as f:
-        f.write(REVIEW_SCRIPT)
-
-    review_wf_path = os.path.join(workflows_dir, "review.yml")
-    with open(review_wf_path, "w", encoding="utf-8") as f:
-        f.write(REVIEW_WORKFLOW)
-
-    reviewers_config_path = os.path.join(github_dir, "reviewers.yml")
-    with open(reviewers_config_path, "w", encoding="utf-8") as f:
-        f.write(REVIEWERS_CONFIG)
-
     deploy_preview_wf_path = os.path.join(workflows_dir, "deploy-preview.yml")
     with open(deploy_preview_wf_path, "w", encoding="utf-8") as f:
         f.write(render_deploy_preview_workflow(stack))

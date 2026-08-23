@@ -1,4 +1,4 @@
-# line-ceiling: 768
+# line-ceiling: 790
 import contextlib
 import io
 import os
@@ -232,18 +232,12 @@ class ProjectBootstrapTests(unittest.TestCase):
 
             check_touches = Path(temp_dir) / ".github" / "scripts" / "check_touches.py"
             check_touches_wf = Path(temp_dir) / ".github" / "workflows" / "check_touches.yml"
-            review_py = Path(temp_dir) / ".github" / "scripts" / "review.py"
-            review_wf = Path(temp_dir) / ".github" / "workflows" / "review.yml"
-            reviewers_yml = Path(temp_dir) / ".github" / "reviewers.yml"
             promote_workflow = Path(temp_dir) / ".github" / "workflows" / "promote.yml"
             build_preview = Path(temp_dir) / "scripts" / "build_preview.py"
             smoke_preview = Path(temp_dir) / "scripts" / "smoke_preview.py"
 
             self.assertTrue(check_touches.is_file())
             self.assertTrue(check_touches_wf.is_file())
-            self.assertTrue(review_py.is_file())
-            self.assertTrue(review_wf.is_file())
-            self.assertTrue(reviewers_yml.is_file())
             self.assertTrue(promote_workflow.is_file())
             self.assertEqual(
                 promote_workflow.read_text(),
@@ -271,16 +265,33 @@ class ProjectBootstrapTests(unittest.TestCase):
                 (ROOT / ".github" / "scenarios" / "smoke.json").read_text(),
             )
 
-            # Test review.py degrades to notice without API keys
-            env = {k: v for k, v in os.environ.items() if not k.endswith("_API_KEY")}
-            res = subprocess.run(
-                [sys.executable, str(review_py)],
-                capture_output=True,
-                text=True,
-                env=env,
+    def test_generated_governance_omits_legacy_model_reviewer_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_project.scaffold_directory_structure(temp_dir)
+            init_project.write_governance_scripts(temp_dir)
+
+            self.assertFalse((Path(temp_dir) / ".github" / "scripts" / "review.py").exists())
+            self.assertFalse((Path(temp_dir) / ".github" / "workflows" / "review.yml").exists())
+            self.assertFalse((Path(temp_dir) / ".github" / "reviewers.yml").exists())
+
+    def test_generated_governance_has_no_provider_key_review_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_project.scaffold_directory_structure(temp_dir)
+            init_project.write_governance_scripts(temp_dir)
+
+            workflow_text = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in sorted((Path(temp_dir) / ".github" / "workflows").glob("*.yml"))
             )
-            self.assertEqual(res.returncode, 0)
-            self.assertIn("::notice::", res.stderr)
+            for forbidden in (
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "GEMINI_API_KEY",
+                "GOOGLE_API_KEY",
+                "MISTRAL_API_KEY",
+                ".github/scripts/review.py",
+            ):
+                self.assertNotIn(forbidden, workflow_text)
 
     def test_check_touches_fails_closed_when_unlinked_or_unreadable(self):
         with tempfile.TemporaryDirectory() as temp_dir:

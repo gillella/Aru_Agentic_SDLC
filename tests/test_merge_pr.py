@@ -974,18 +974,28 @@ class ReviewGateTests(unittest.TestCase):
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
 
-    def test_clean_empty_body_exact_head_review_passes_with_successful_status(self):
+    def test_empty_body_exact_head_review_fails_closed_even_with_successful_status(self):
         evidence = self.coderabbit_evidence(body="")
         evidence["coderabbit_status"] = [{
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
         }]
-        self.assertTrue(merge_pr.check_reviews(
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_whitespace_body_exact_head_review_fails_closed_even_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="   \n\t")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }]
+        self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
 
     def test_null_status_creator_passes_only_with_recognized_exact_head_review(self):
-        evidence = self.coderabbit_evidence(body="")
+        evidence = self.coderabbit_evidence(body="Review complete.")
         evidence["coderabbit_status"] = [{
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": None,
@@ -1032,6 +1042,13 @@ class ReviewGateTests(unittest.TestCase):
                 pr["statusCheckRollup"] = checks
                 self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
 
+    def test_github_review_evidence_without_authoritative_status_never_uses_pr_rollup(self):
+        evidence = self.coderabbit_evidence()
+        evidence["github_review_evidence"] = True
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
     def test_tied_newest_current_head_coderabbit_reviews_are_ambiguous(self):
         evidence = self.coderabbit_evidence()
         second = dict(evidence["reviews"][0], id="coderabbit-review-2")
@@ -1059,6 +1076,104 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_coderabbit_status_graphql_errors_fail_closed(self, gh_json):
+        gh_json.return_value = {
+            "errors": [{"message": "partial"}],
+            "data": {"repository": {"pullRequest": {}}},
+        }
+        self.assertIsNone(
+            merge_pr._coderabbit_status_evidence("owner", "repo", 7, "a" * 40)
+        )
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_coderabbit_status_graphql_truncated_contexts_fail_closed(self, gh_json):
+        gh_json.return_value = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": "a" * 40,
+                        "commits": {
+                            "nodes": [{
+                                "commit": {
+                                    "statusCheckRollup": {
+                                        "contexts": {
+                                            "nodes": [{
+                                                "__typename": "CheckRun",
+                                                "name": "CodeRabbit",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "checkSuite": {"app": {"slug": "coderabbitai"}},
+                                            }],
+                                            "totalCount": 2,
+                                            "pageInfo": {
+                                                "hasNextPage": True,
+                                                "endCursor": "next",
+                                            },
+                                        }
+                                    }
+                                }
+                            }]
+                        },
+                    }
+                }
+            }
+        }
+        self.assertIsNone(
+            merge_pr._coderabbit_status_evidence("owner", "repo", 7, "a" * 40)
+        )
+
+    def test_github_review_evidence_without_authoritative_status_fails_closed(self):
+        pr = self.coderabbit_pr("author:agent-1")
+        evidence = self.coderabbit_evidence()
+        evidence["github_review_evidence"] = True
+        self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
+
+
+class CodeRabbitStatusEvidenceTests(unittest.TestCase):
+    @patch.object(merge_pr, "_gh_json")
+    def test_errors_field_rejects_partial_status_payload(self, gh_json):
+        gh_json.return_value = {
+            "errors": [{"message": "partial result"}],
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                    "contexts": {"totalCount": 1, "nodes": []},
+                }}}]},
+            }}},
+        }
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_missing_context_total_count_rejects_status_payload(self, gh_json):
+        gh_json.return_value = {
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                    "contexts": {"nodes": []},
+                }}}]},
+            }}},
+        }
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_truncated_context_page_rejects_status_payload(self, gh_json):
+        gh_json.return_value = {
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                    "contexts": {"totalCount": 2, "nodes": [{
+                        "__typename": "CheckRun",
+                        "name": "CodeRabbit",
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "checkSuite": {"app": {"slug": "coderabbitai"}},
+                    }]},
+                }}}]},
+            }}},
+        }
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
 
 
 
@@ -4026,6 +4141,13 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
             "P1 — size waiver or split required. Add `size-waiver:` to the body.",
             "P1 — verification evidence is stale. Run `--refresh-pr`.",
         ], {"size-waiver": True, "verification": True})
+        evidence["coderabbit_status"] = [{
+            "__typename": "CheckRun",
+            "name": "CodeRabbit",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "coderabbitai"}},
+        }]
 
         self.assertEqual(evidence["unfixed"], 0)
         self.assertEqual(evidence["body_addressed"], 2)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1710
+# line-ceiling: 1760
 """
 fleet_status.py - Authoritative state calculation for Aru_Agentic_SDLC factory.
 
@@ -447,9 +447,44 @@ def _has_reviewed_by(pr: Dict[str, Any]) -> bool:
     )
 
 
-def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # noqa: C901
     if "_review_evidence" in pr:
         return pr["_review_evidence"]
+    # Review evidence is the expensive path: several GraphQL pages per PR.
+    # Cheap snapshot fields can already prove these PRs are not review-ready.
+    if pr.get("isDraft"):
+        pr["_review_evidence"] = None
+        return None
+    cached_feedback = pr.get("_active_review_feedback")
+    if cached_feedback is not None and len(cached_feedback) > 0:
+        pr["_review_evidence"] = None
+        return None
+    unresolved = pr.get("unresolvedReviewThreadsCount")
+    if unresolved is not None:
+        try:
+            if int(unresolved) > 0:
+                pr["_review_evidence"] = None
+                return None
+        except (TypeError, ValueError):
+            pass
+    threads = pr.get("reviewThreads")
+    if isinstance(threads, dict) and isinstance(threads.get("nodes"), list):
+        if any(not node.get("isResolved") for node in threads["nodes"] if isinstance(node, dict)):
+            pr["_review_evidence"] = None
+            return None
+    elif isinstance(threads, list):
+        if any(not node.get("isResolved") for node in threads if isinstance(node, dict)):
+            pr["_review_evidence"] = None
+            return None
+    rollup = pr.get("statusCheckRollup") or []
+    if not any(
+        isinstance(item, dict)
+        and isinstance(item.get("name") or item.get("context"), str)
+        and (item.get("name") or item.get("context")).strip().lower() == "coderabbit"
+        for item in rollup
+    ):
+        pr["_review_evidence"] = None
+        return None
     try:
         import merge_pr as mp
 
@@ -465,7 +500,7 @@ def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def _has_active_review_feedback(pr: Dict[str, Any]) -> bool:
     if "_active_review_feedback" in pr:
         feedback = pr["_active_review_feedback"]
-        return feedback is not None and len(feedback) > 0
+        return feedback is None or len(feedback) > 0
     if "unresolvedReviewThreadsCount" in pr:
         unresolved = pr.get("unresolvedReviewThreadsCount")
         return unresolved is not None and unresolved > 0
@@ -479,11 +514,15 @@ def _has_active_review_feedback(pr: Dict[str, Any]) -> bool:
         from fetch_pr_feedback import fetch_active_review_feedback
 
         feedback = fetch_active_review_feedback(pr["number"])
+        if feedback is None:
+            pr["_active_review_feedback"] = None
+            return True
         pr["_active_review_feedback"] = feedback
-        return feedback is not None and len(feedback) > 0
+        return len(feedback) > 0
     except Exception as exc:
         print(f"[WARN] Could not load active review feedback for PR #{pr['number']}: {exc}", file=sys.stderr)
-        return False
+        pr["_active_review_feedback"] = None
+        return True
 
 
 def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
@@ -1154,6 +1193,8 @@ def evaluate_queue_row(
             }
 
     evidence = review_evidence_fn(number)
+    if evidence is not None:
+        evidence = mp._with_coderabbit_status(number, evidence)
     # None means the GraphQL/auth query failed — fail closed for this row.
     # Do not coerce to {} or check_reviews will KeyError on missing keys.
     if evidence is None or evidence.get("error"):
@@ -1452,7 +1493,7 @@ def _evaluate_current_repo(  # noqa: C901, PLR0912, PLR0915
 
         review_state = _review_state(pr)
         if review_state == "feedback":
-            waiting_reasons.append(f"PR #{num} has requested changes.")
+            waiting_reasons.append(f"PR #{num} has active review feedback.")
         elif review_state == "reviewed":
             waiting_reasons.append(f"PR #{num} is reviewed and waiting for merge.")
         else:
