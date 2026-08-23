@@ -20,15 +20,19 @@ Aru_Agentic_SDLC governance:
    - implement next issue / a named issue → `implement-next-issue`
    - new governed repo → `init-agent-project`
    - file bug/feature/task → `create-github-issue`
-   - review a PR → `code-review`
+   - review a PR → refuse; CodeRabbit alone reviews. Coding agents never review, agents remediate findings
    - red CI → `remediate-ci-failure`
    - PR review comments → `address-pr-feedback`
 5. Use worktrees under `.worktrees/`, never push straight to main/master,
    run local tests before commit, and put `Closes #<n>` in every PR body.
 6. Run GitHub/git automation via
-   `python3 "$ARU_SDLC_HOME/scripts/<script>.py"`. Omit `--agent` to
-   auto-assign a free identity from the presence registry, or pass a stable
-   `--agent` id (for example `cursor-1`) for this session.
+   `python3 "$ARU_SDLC_HOME/scripts/<script>.py"`. Picker helpers may derive
+   this runtime's stable identity when `--agent` is omitted, but helpers such
+   as `create_pr.py`, `claim_issue.py --pr <ID> --adopt`, and revert flows
+   require an explicit `--agent`. Follow the helper-specific contracts rather
+   than assuming omitted `--agent` is interchangeable everywhere. Pass
+   `--family` only when the helper accepts it; for `create_pr.py` it remains
+   optional.
 7. If a project lacks `AGENTS.md` but the user wants this process, offer to
    bootstrap with `init-agent-project` rather than inventing a parallel workflow.
 8. Before continuing a factory loop, check `$HOME/.aru/factory-loop.stop`. If it

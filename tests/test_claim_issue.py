@@ -1,4 +1,4 @@
-# line-ceiling: 938
+# line-ceiling: 960
 import json
 import sys
 import tempfile
@@ -682,6 +682,27 @@ class ClaimAgeReaperTests(unittest.TestCase):
         fetch_timeline.return_value = self._timeline("reviewer:done", self.OLD)
 
         self.assertEqual(claim_issue.reap_stale_reviews(4), [])
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_completed_legacy_review_claim_is_cleared_immediately(
+        self, run_cmd, fetch_timeline
+    ):
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.side_effect = [
+            self._list_result([{
+                "number": 21,
+                "labels": [
+                    {"name": "reviewer:done"},
+                    {"name": "reviewed-by:done"},
+                ],
+                "reviews": [{"submittedAt": recent}],
+            }]),
+            (0, "", ""),
+        ]
+        fetch_timeline.return_value = self._timeline("reviewer:done", self.OLD)
+
+        self.assertEqual(claim_issue.reap_stale_reviews(4), [21])
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")

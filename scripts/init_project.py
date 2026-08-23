@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1923
+# line-ceiling: 1927
 """
 init_project.py - Automation script for bootstrapping a brand-new repository under
 Aru_Agentic_SDLC governance, scaffolding AGENTS.md, CI workflows, issue/PR templates,
@@ -119,14 +119,14 @@ branch, or merge around the Definition-of-Done gate.
   non-authoritative here.
 - Brainstorming frameworks supply input to Aru's plan gate rather than running
   a parallel lifecycle.
-- Memory tools provide context only. PR bots are reviewers, not merge
-  authorities.
+- Memory tools provide context only. **CodeRabbit is the sole PR code-review authority.** Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
 
-After a distinct agent completes the independent review and every enforced
-gate passes, any factory agent, including the implementation author, may
-execute the mechanical merge only through
-`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Authors must never
-self-review. Direct pushes and ad-hoc merge commands are forbidden. Money,
+After CodeRabbit completes a substantive review on the exact current head and
+every enforced gate passes, any factory agent, including the implementation author,
+may execute the mechanical merge only through
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. When the picker
+supplies `head_sha`, pass it as `--expected-head <HEAD_SHA>`. Authors must never review.
+Direct pushes and ad-hoc merge commands are forbidden. Money,
 PII, security, schema, migration, irreversible behavior, large diffs, and
 review-round count increase planning, testing, and review depth but do not
 create a human gate. Human intervention is reserved for a severe merge
@@ -141,11 +141,11 @@ governed remediation.
    - Router: `aru-agentic-sdlc/SKILL.md`
    - Primary Skill: `implement-next-issue/SKILL.md`
    - Issue Creation: `create-github-issue/SKILL.md`
-   - Code Review Skill: `code-review/SKILL.md`
+   - Code Review Skill: `code-review/SKILL.md` (refusal; CodeRabbit alone reviews)
    - CI Failure Remediation: `remediate-ci-failure/SKILL.md`
    - PR Review Feedback: `address-pr-feedback/SKILL.md`
 2. **Worktree Isolation**:
-   - Always run feature work inside `.worktrees/` directories to keep the main workspace clean.
+   - Always run feature and remediation work inside `.worktrees/` directories.
 3. **Local Test Verification First**:
    - Run `{test_runner}` and confirm all tests pass before committing.
 4. **Mandatory Issue Linking**:
@@ -153,7 +153,8 @@ governed remediation.
 5. **Cursor**: Prefer installed personal skills / slash commands from the
    machine-level Cursor integration (`docs/cursor-integration.md` in
    `$ARU_SDLC_HOME`). Do not vendor a second copy of SDLC skills into this repo.
-6. **Plan Gate**: Before the first edit, `type:feat`, `needs-design`, money,
+6. **Helper Identity Contracts**: Pickers may derive a stable identity when `--agent` is omitted; PR stamping, adoption, and revert helpers require it; model family is helper-specific.
+7. **Plan Gate**: Before the first edit, `type:feat`, `needs-design`, money,
    PII, schema, migration, and other irreversible work — and any change that
    introduces a new helper function, module, or script — posts the
    implementation plan required by `implement-next-issue`. High-risk scope
@@ -1209,18 +1210,6 @@ def write_governance_scripts(  # noqa: PLR0915
     check_touches_wf_path = os.path.join(workflows_dir, "check_touches.yml")
     with open(check_touches_wf_path, "w", encoding="utf-8") as f:
         f.write(CHECK_TOUCHES_WORKFLOW)
-
-    review_script_path = os.path.join(scripts_dir, "review.py")
-    with open(review_script_path, "w", encoding="utf-8") as f:
-        f.write(REVIEW_SCRIPT)
-
-    review_wf_path = os.path.join(workflows_dir, "review.yml")
-    with open(review_wf_path, "w", encoding="utf-8") as f:
-        f.write(REVIEW_WORKFLOW)
-
-    reviewers_config_path = os.path.join(github_dir, "reviewers.yml")
-    with open(reviewers_config_path, "w", encoding="utf-8") as f:
-        f.write(REVIEWERS_CONFIG)
 
     deploy_preview_wf_path = os.path.join(workflows_dir, "deploy-preview.yml")
     with open(deploy_preview_wf_path, "w", encoding="utf-8") as f:

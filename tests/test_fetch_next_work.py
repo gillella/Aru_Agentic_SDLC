@@ -151,146 +151,21 @@ class CiStateTests(unittest.TestCase):
 
 
 class EligibilityTests(unittest.TestCase):
-    def test_cross_family_pr_is_eligible(self):
+    def test_coding_agents_are_never_eligible_for_review(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic"))
-        self.assertTrue(verdict["eligible"])
-        self.assertTrue(verdict["cross_family"])
-        self.assertFalse(verdict["degraded"])
-
-    def test_own_pr_is_never_eligible(self):
-        verdict = eligible(pr(1, "author:agent-2", "family:openai"))
         self.assertFalse(verdict["eligible"])
-        self.assertIn("you wrote it", verdict["reason"])
+        self.assertIn("CodeRabbit", verdict["reason"])
 
-    def test_own_pr_rejected_even_when_it_has_waited_forever(self):
-        # The family fallback must never soften the self-review rule.
-        verdict = eligible(pr(1, "author:agent-2", "family:openai", minutes_old=6000))
-        self.assertFalse(verdict["eligible"])
-
-    def test_pr_claimed_by_another_reviewer_is_skipped(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:anthropic", "reviewer:agent-9"))
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("agent-9", verdict["reason"])
-
-    def test_resuming_my_own_review_claim_is_allowed(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:anthropic", "reviewer:agent-2"))
-        self.assertTrue(verdict["eligible"])
-
-    def test_draft_is_skipped(self):
-        self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", draft=True))["eligible"])
-
-    def test_red_ci_is_skipped_pending_and_none_are_claimable(self):
-        self.assertFalse(eligible(pr(1, "author:agent-1", "family:anthropic", checks="red"))["eligible"])
-        self.assertTrue(eligible(pr(1, "author:agent-1", "family:anthropic", checks="pending"))["eligible"])
-        self.assertTrue(eligible(pr(1, "author:agent-1", "family:anthropic", checks="none"))["eligible"])
-
-    def test_review_round_count_never_blocks_an_independent_agent(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:anthropic", reviews=10))
-        self.assertTrue(verdict["eligible"])
-
-    def test_unresolved_commented_findings_wait_on_the_author(self):
-        candidate = pr(1, "author:agent-1", "family:anthropic", reviews=1)
-        candidate["_active_review_feedback"] = [{"body": "fix"}, {"body": "also fix"}]
-
-        verdict = eligible(candidate)
-
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("waiting on author", verdict["reason"])
-
-    def test_completed_same_account_review_is_not_offered_again(self):
-        # "Completed" now means the attribution names the current head, so this
-        # scenario must supply that evidence to still describe a finished review.
-        candidate = pr(
-            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-2",
-            reviews=1,
-        )
-        evidence = {"head_oid": "FEEDFACE",
-                    "review_attestations": [{"agent": "agent-2",
-                                             "head": "feedface"}]}
-        with patch.object(fnw, "review_evidence", return_value=evidence):
-            verdict = eligible(candidate)
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("waiting on gated merge", verdict["reason"])
-
-    def test_merge_gate_current_review_skips_duplicate_evidence_query(self):
-        candidate = pr(
-            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-2",
-            reviews=1,
-        )
-        with patch.object(fnw, "review_evidence") as evidence:
-            verdict = fnw.review_eligibility(
-                candidate, "agent-3", "openai", 3, 30, "unmet: rebased"
-            )
-
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("waiting on gated merge", verdict["reason"])
-        evidence.assert_not_called()
-
-    def test_merge_gate_stale_review_skips_duplicate_evidence_query(self):
-        candidate = pr(
-            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-2",
-            reviews=1, decision="APPROVED",
-        )
-        with patch.object(fnw, "review_evidence") as evidence:
-            verdict = fnw.review_eligibility(
-                candidate, "agent-3", "openai", 3, 30, "unmet: review"
-            )
-
-        self.assertTrue(verdict["eligible"])
-        self.assertTrue(verdict["stale_attribution"])
-        evidence.assert_not_called()
-
-    def test_merge_gate_missing_author_does_not_request_another_review(self):
-        candidate = pr(
-            1, "family:anthropic", "reviewed-by:agent-2", reviews=1,
-        )
-        with patch.object(fnw, "review_evidence") as evidence:
-            verdict = fnw.review_eligibility(
-                candidate, "agent-3", "openai", 3, 30, "unmet: review"
-            )
-
-        self.assertFalse(verdict["eligible"])
-        self.assertFalse(verdict["stale_attribution"])
-        self.assertIn("no author stamp", verdict["reason"])
-        evidence.assert_not_called()
-
-    def test_self_attribution_does_not_hide_pr_from_a_real_peer(self):
-        verdict = eligible(pr(
-            1, "author:agent-1", "family:anthropic", "reviewed-by:agent-1",
-            reviews=1,
-        ))
-        self.assertTrue(verdict["eligible"])
-
-    def test_unknown_thread_state_fails_closed(self):
-        candidate = pr(1, "author:agent-1", "family:anthropic")
-        candidate["_active_review_feedback"] = None
-
-        verdict = eligible(candidate)
-
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("unavailable", verdict["reason"])
-
-    def test_same_family_waits_before_it_is_offered(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:openai", minutes_old=5))
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("same family", verdict["reason"])
-
-    def test_same_family_is_offered_after_the_wait(self):
-        # An all-one-family fleet must not deadlock with nothing reviewable.
-        verdict = eligible(pr(1, "author:agent-1", "family:openai", minutes_old=45))
-        self.assertTrue(verdict["eligible"])
-        self.assertTrue(verdict["degraded"])
-        self.assertFalse(verdict["cross_family"])
-
-    def test_unstamped_pr_is_reviewable(self):
-        # Legacy PRs predate author stamping; refusing would make them
-        # permanently unreviewable. merge_pr.py catches self-review separately.
-        self.assertTrue(eligible(pr(1))["eligible"])
-
-    def test_agent_without_a_declared_family_treats_everything_as_cross(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:anthropic"), family=None)
-        self.assertTrue(verdict["eligible"])
-        self.assertTrue(verdict["cross_family"])
+    def test_picker_json_top_level_agent_is_resolved_identity(self):
+        parts = {
+            "candidates": [], "my_in_flight": None, "blocked": [],
+            "conflicted": [], "missing_touches": [], "not_ready": [],
+        }
+        with patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
+             patch.object(fnw, "build_candidates", return_value=parts):
+            result = fnw.select("resolved-agent", "openai", 3, 30)
+        self.assertEqual(result["agent"], "resolved-agent")
 
 
 class FeedbackTests(unittest.TestCase):
@@ -340,10 +215,6 @@ class PriorityTests(unittest.TestCase):
         self.assertEqual(res["work"]["type"], "feedback")
         self.assertEqual(res["work"]["pr"], 1)
 
-    def test_review_outranks_new_work(self):
-        res = self._select([pr(2, "author:agent-1", "family:anthropic")], candidates=[7])
-        self.assertEqual(res["work"]["type"], "review")
-        self.assertEqual(res["work"]["pr"], 2)
 
     def test_issue_when_nothing_to_review(self):
         res = self._select([pr(2, "author:agent-2", "family:openai")], candidates=[7])
@@ -386,31 +257,8 @@ class PriorityTests(unittest.TestCase):
         self.assertEqual(result["claimable_issues"], [2])
         self.assertEqual(result["operator_only_issues"], [1])
 
-    def test_pending_ci_cross_family_pr_is_offered_immediately(self):
-        candidate = pr(4, "author:agent-1", "family:anthropic", checks="pending")
-        res = self._select([candidate], candidates=[7])
-        self.assertEqual(res["work"]["type"], "review")
-        self.assertEqual(res["work"]["pr"], 4)
-        self.assertEqual(res["reviewable_detail"][0]["created_at"], candidate["createdAt"])
 
-    def test_cross_family_pr_is_preferred_over_a_degraded_one(self):
-        res = self._select([
-            pr(1, "author:agent-1", "family:openai", minutes_old=600),   # same family, waited
-            pr(2, "author:agent-1", "family:anthropic", minutes_old=5),  # cross family, fresh
-        ])
-        self.assertEqual(res["work"]["pr"], 2)
-        self.assertTrue(res["work"]["cross_family"])
 
-    def test_skipped_prs_are_reported_with_reasons(self):
-        res = self._select([pr(3, "author:agent-2", "family:openai")])
-        self.assertEqual(res["skipped_prs"][0]["number"], 3)
-        self.assertIn("you wrote it", res["skipped_prs"][0]["why"])
-
-    def test_many_review_rounds_remain_reviewable_without_escalation(self):
-        res = self._select([pr(5, "author:agent-1", "family:anthropic", reviews=4)])
-        self.assertEqual(res["work"]["type"], "review")
-        self.assertEqual(res["work"]["pr"], 5)
-        self.assertEqual(res["escalated_prs"], [])
 
 
 class MergeWorkTests(unittest.TestCase):
@@ -435,14 +283,11 @@ class MergeWorkTests(unittest.TestCase):
              patch.object(fnw, "dod_status", return_value=(dod_ok, dod_reason)):
             return fnw.select(agent, family, 3, 30)
 
-    def test_merge_outranks_review_and_new_work(self):
+    def test_merge_outranks_new_work(self):
         ready = pr(9, "author:agent-1", "family:anthropic", "reviewed-by:agent-9",
                    reviews=1, title="ready to merge")
         ready["headRefOid"] = "abc123"
-        res = self._select(
-            [ready, pr(2, "author:agent-1", "family:anthropic")],
-            candidates=[7],
-        )
+        res = self._select([ready], candidates=[7])
         self.assertEqual(res["work"]["type"], "merge")
         self.assertEqual(res["work"]["pr"], 9)
         self.assertEqual(res["work"]["skill"], "merge-pr")
@@ -464,12 +309,11 @@ class MergeWorkTests(unittest.TestCase):
         self.assertEqual(res["work"]["type"], "merge")
         self.assertEqual(res["work"]["pr"], 9)
 
-    def test_author_cannot_merge_without_peer_reviewer(self):
-        # GitHub APPROVED alone is not enough for the author path without peers.
+    def test_author_may_execute_merge_after_coderabbit_dod_passes(self):
         own = pr(9, "author:agent-2", "family:openai", decision="APPROVED", reviews=1)
-        verdict = fnw.merge_eligibility(own, "agent-2")
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("distinct peer", verdict["reason"])
+        with patch.object(fnw, "dod_status", return_value=(True, "all gates passed")):
+            verdict = fnw.merge_eligibility(own, "agent-2")
+        self.assertTrue(verdict["eligible"])
 
     def test_blocked_gates_do_not_offer_merge(self):
         ready = pr(9, "author:agent-1", "family:anthropic", "reviewed-by:agent-9",
@@ -477,8 +321,7 @@ class MergeWorkTests(unittest.TestCase):
         res = self._select([ready], candidates=[7], dod_ok=False,
                            dod_reason="unmet: ci")
         self.assertEqual(res["work"]["type"], "issue")
-        self.assertEqual(res["merge_skipped"][0]["number"], 9)
-        self.assertIn("unmet: ci", res["merge_skipped"][0]["why"])
+        self.assertEqual(res["merge_skipped"], [])
 
     def test_other_merger_claim_blocks_eligibility(self):
         ready = pr(9, "author:agent-1", "family:anthropic", "reviewed-by:agent-9",
@@ -528,124 +371,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ReviewDecisionTests(unittest.TestCase):
-    """Only a current approval suppresses a fresh review."""
-
-    def test_approved_pr_is_not_offered_again(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:anthropic", decision="APPROVED"))
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("already approved", verdict["reason"])
-
-    def test_changes_requested_without_current_feedback_is_offered_for_rereview(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:anthropic",
-                              decision="CHANGES_REQUESTED"))
-        self.assertTrue(verdict["eligible"])
-
-    def test_undecided_pr_is_still_offered(self):
-        self.assertTrue(eligible(pr(1, "author:agent-1", "family:anthropic"))["eligible"])
-
-
-class MergedReviewEligibilityTests(unittest.TestCase):
-    def test_merged_pr_is_rejected_before_review_state_queries(self):
-        candidate = pr(
-            71,
-            "author:agent-1",
-            "family:anthropic",
-            "reviewed-by:stale-agent",
-            "reviewer:agent-2",
-            decision="CHANGES_REQUESTED",
-        )
-        candidate["state"] = "MERGED"
-        candidate["mergedAt"] = "2026-08-11T00:00:00Z"
-
-        with patch.object(fnw, "review_thread_count") as thread_count, \
-             patch.object(fnw, "review_evidence") as review_evidence:
-            verdict = eligible(candidate)
-
-        self.assertFalse(verdict["eligible"])
-        self.assertEqual(verdict["reason"], "merged PRs are not reviewable")
-        thread_count.assert_not_called()
-        review_evidence.assert_not_called()
-
-    def test_merged_at_is_authoritative_even_when_state_is_stale(self):
-        candidate = pr(71, "author:agent-1", "family:anthropic")
-        candidate["state"] = "OPEN"
-        candidate["mergedAt"] = "2026-08-11T00:00:00Z"
-
-        verdict = eligible(candidate)
-
-        self.assertFalse(verdict["eligible"])
-        self.assertEqual(verdict["reason"], "merged PRs are not reviewable")
-
-
-class ParkedInReviewTests(unittest.TestCase):
-    """Proves Issue #39: handing off to In Review parks the issue and progresses to next work."""
-
-    @patch.object(fnw, "list_work_prs")
-    @patch.object(fnw, "list_open_issues")
-    def test_parked_in_review_issue_is_not_resumed_and_next_ready_issue_is_taken(
-        self, mock_issues, mock_prs
-    ):
-        # Reproduces #20 / #36: Issue #20 is In Review with PR #36 waiting.
-        # Worker agent-1 hands off #20 to In Review and runs fetch_next_work.
-        # Issue #20 must not be returned as resumable implementation; #21 must be selected.
-        mock_prs.return_value = [
-            pr(36, "author:agent-1", "family:openai", title="PR for #20")
-        ]
-        mock_issues.return_value = [
-            {
-                "number": 20,
-                "title": "fix issue 20",
-                "body": "touches: src/a.py\n",
-                "labels": [{"name": "status:in-review"}],
-                "author": {"login": "owner"},
-            },
-            {
-                "number": 21,
-                "title": "feat issue 21",
-                "body": "touches: src/b.py\n",
-                "labels": [{"name": "status:ready"}, {"name": "priority:p3"}],
-                "author": {"login": "owner"},
-            },
-        ]
-        with patch.object(fetch_next_issue, "repository_owner_login", return_value="owner"), \
-             patch.object(fetch_next_issue, "repository_trusted_logins", return_value={"owner"}):
-            res = fnw.select("agent-1", "openai", round_cap=3, cross_family_wait=30)
-        self.assertEqual(res["work"]["type"], "issue")
-        self.assertEqual(res["work"]["issue"], 21)
-        self.assertFalse(res["work"]["resuming"])
-
-    @patch.object(fnw, "run_cmd")
-    def test_authored_via_branch_uses_retained_agent_label_on_unstamped_pr(
-        self, mock_run_cmd
-    ):
-        # GitHub assignees identify the shared account, not the implementing
-        # agent. The retained issue label is the legacy authorship backstop.
-        mock_run_cmd.return_value = (
-            0,
-            "status:in-review\nagent:agent-1\n",
-            "",
-        )
-        test_pr = pr(36, title="Unstamped PR")
-        test_pr["headRefName"] = "fix/issue-20-something"
-        self.assertTrue(fnw._authored_via_branch(test_pr, "agent-1"))
-        self.assertFalse(fnw._authored_via_branch(test_pr, "agent-2"))
-
-
-class ReviewClaimTelemetryTests(unittest.TestCase):
-    def test_record_review_claim_writes_wait_minutes(self):
-        opened = (datetime.now(timezone.utc) - timedelta(minutes=12)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        with patch.object(fnw, "run_cmd", return_value=(0, "", "")) as run:
-            fnw.record_review_claim(9, "agent-2", opened)
-        self.assertEqual(run.call_args.args[0][0:4],
-                         ["gh", "pr", "comment", "9"])
-        body = run.call_args.args[0][run.call_args.args[0].index("--body") + 1]
-        self.assertIn("review-claimed-at:", body)
-        self.assertIn("reviewer: agent-2", body)
-        self.assertRegex(body, r"wait-minutes: 1[12]\.\d")
-
 
 class UnreadableQueueTests(unittest.TestCase):
     def test_selector_fails_closed_when_prs_cannot_be_listed(self):
@@ -671,13 +396,9 @@ class UnreadableQueueTests(unittest.TestCase):
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
             res = fnw.select("agent-2", "openai", 3, 30)
-        # Not an error: peer review is still on offer, and the unreadable PR
-        # surfaces in skipped_prs naming the read failure.
-        self.assertEqual(res["work"]["type"], "review")
-        self.assertEqual(res["work"]["pr"], 58)
-        refused = {s["number"]: s["why"] for s in res["skipped_prs"]}
-        self.assertIn(57, refused)
-        self.assertIn("unreadable", refused[57])
+        self.assertEqual(res["work"]["type"], "issue")
+        self.assertEqual(res["work"]["issue"], 99)
+        self.assertEqual(res["reviewable"], [])
 
     def test_unknown_threads_on_authored_pr_do_not_block_issue_selection(self):
         # With the unreadable PR skipped, a claimable issue is still served.
@@ -888,7 +609,9 @@ class AuthorGateFixTests(unittest.TestCase):
 
     def test_unfixed_resolved_threads_are_author_fixable(self):
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}):
+                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+                          return_value=True):
             found = self.fix(stranded(), reason="unmet: review")
         self.assertIsNotNone(found)
         self.assertEqual(found["unmet_gates"], ["review-evidence"])
@@ -900,19 +623,39 @@ class AuthorGateFixTests(unittest.TestCase):
 
     def test_unfixed_threads_plus_rebase_are_both_author_work(self):
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 1, "reviewed_head": True}):
+                          return_value={"unresolved": 0, "unfixed": 1, "reviewed_head": True}), \
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+                          return_value=True):
             found = self.fix(stranded(), reason="unmet: rebased, review")
         self.assertEqual(found["unmet_gates"], ["rebased", "review-evidence"])
 
     def test_unfixed_without_current_head_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": False}):
+                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": False}), \
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+                          return_value=False):
             self.assertIsNone(self.fix(stranded(), reason="unmet: review"))
 
-    def test_unfixed_without_peer_attribution_stays_a_peer_gate(self):
+    def test_unfixed_without_peer_attribution_is_author_fixable_with_coderabbit(self):
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}):
+                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+                          return_value=True):
+            found = self.fix(stranded(peer=None), reason="unmet: review")
+        self.assertEqual(found["unmet_gates"], ["review-evidence"])
+
+    def test_unfixed_without_authoritative_coderabbit_review_stays_a_peer_gate(self):
+        with patch.object(fnw, "review_evidence",
+                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+                          return_value=False):
             self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
+
+    def test_retired_reviewer_claim_does_not_block_merge(self):
+        candidate = stranded(peer=None)
+        candidate["labels"].append({"name": "reviewer:retired-agent"})
+        with patch.object(fnw, "dod_status", return_value=(True, "every Definition-of-Done gate passed")):
+            self.assertTrue(fnw.merge_eligibility(candidate, "agent-2")["eligible"])
 
     def test_unresolved_threads_stay_ordinary_feedback(self):
         self.assertIsNone(self.fix(stranded(threads=2)))
@@ -982,7 +725,9 @@ class GateFixSelectionTests(unittest.TestCase):
 
     def test_unfixed_review_is_routed_as_author_feedback(self):
         with patch.object(fnw, "review_evidence",
-                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}):
+                          return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+                          return_value=True):
             res = self.select_with(stranded(), reason="unmet: review")
         self.assertEqual(res["work"]["type"], "feedback")
         self.assertEqual(res["work"]["skill"], "address-pr-feedback")
@@ -1114,89 +859,6 @@ def stale_evidence(peer="agent-9"):
             "review_attestations": [{"agent": peer, "head": "0ldc0mm1t"}]}
 
 
-class StaleAttributionRoutingTests(unittest.TestCase):
-    """merge_pr requires attribution bound to the head; the picker must route it.
-
-    Before this, a `reviewed-by:` label alone closed the review queue while the
-    merge gate refused the same PR for stale attribution - so the PR reached
-    neither a reviewer, nor the merger, nor its author (`review` is correctly
-    not an author-clearable gate). It sat holding its issue's touches:
-    reservation.
-    """
-
-    def verdict(self, candidate, evidence, agent="agent-2", family="openai"):
-        with patch.object(fnw, "review_evidence", return_value=evidence):
-            return fnw.review_eligibility(candidate, agent, family, 3, 30)
-
-    def test_attribution_bound_to_head_stays_complete(self):
-        v = self.verdict(reviewed_pr(), bound_evidence())
-        self.assertFalse(v["eligible"])
-        self.assertEqual(v["reason"], COMPLETE)
-
-    def test_stale_attribution_reopens_the_review(self):
-        v = self.verdict(reviewed_pr(), stale_evidence())
-        self.assertTrue(v["eligible"])
-        self.assertTrue(v["stale_attribution"])
-
-    def test_stale_attribution_reopens_even_when_decision_is_approved(self):
-        # GitHub does not dismiss a stale approval unless branch protection is
-        # configured to, so a distinct-account APPROVED survives a push it never
-        # covered. merge_pr rejects that approval for the same reason it rejects
-        # the stale stamp, so "already approved" would rebuild the deadlock one
-        # branch later.
-        v = self.verdict(reviewed_pr(decision="APPROVED"), stale_evidence())
-        self.assertTrue(v["eligible"])
-        self.assertTrue(v["stale_attribution"])
-
-    def test_approved_with_current_attribution_is_still_suppressed(self):
-        v = self.verdict(reviewed_pr(decision="APPROVED"), bound_evidence())
-        self.assertFalse(v["eligible"])
-        self.assertEqual(v["reason"], COMPLETE)
-
-    def test_legacy_evidence_without_attestations_is_unchanged(self):
-        # Records predating attestation must not flood the review queue.
-        v = self.verdict(reviewed_pr(), {"head_oid": HEAD_SHA})
-        self.assertFalse(v["eligible"])
-        self.assertEqual(v["reason"], COMPLETE)
-
-    def test_unreadable_evidence_fails_closed(self):
-        v = self.verdict(reviewed_pr(), None)
-        self.assertFalse(v["eligible"])
-        self.assertIn("unavailable", v["reason"])
-
-    def test_author_never_reviews_own_pr_even_when_stale(self):
-        v = self.verdict(reviewed_pr(author="agent-2"), stale_evidence(),
-                         agent="agent-2")
-        self.assertFalse(v["eligible"])
-        self.assertIn("you wrote it", v["reason"])
-
-    def test_unresolved_threads_still_outrank_re_review(self):
-        v = self.verdict(reviewed_pr(threads=2), stale_evidence())
-        self.assertFalse(v["eligible"])
-        self.assertIn("waiting on author", v["reason"])
-
-    def test_a_fresh_review_is_not_marked_stale(self):
-        v = self.verdict(pr(12, "author:agent-1", "family:anthropic"),
-                         bound_evidence())
-        self.assertTrue(v["eligible"])
-        self.assertFalse(v["stale_attribution"])
-
-
-class StaleAttributionReportTests(unittest.TestCase):
-    def test_select_surfaces_stale_attribution_in_the_report(self):
-        candidate = reviewed_pr()
-        parts = {"candidates": [], "my_in_flight": None, "blocked": [],
-                 "conflicted": [], "missing_touches": [], "not_ready": []}
-        with patch.object(fnw, "list_work_prs", return_value=[candidate]), \
-             patch.object(fnw, "list_open_issues", return_value=[]), \
-             patch.object(fnw, "build_candidates", return_value=parts), \
-             patch.object(fnw, "review_evidence", return_value=stale_evidence()), \
-             patch.object(fnw, "dod_status", return_value=(False, "unmet: review")):
-            res = fnw.select("agent-2", "openai", 3, 30)
-        self.assertEqual(res["work"]["type"], "review")
-        self.assertEqual(res["work"]["pr"], 11)
-        self.assertTrue(res["reviewable_detail"][0]["stale_attribution"])
-
 
 class AgentResolutionTests(unittest.TestCase):
     def setUp(self):
@@ -1295,18 +957,17 @@ class NoFastTrackInThePickerTests(unittest.TestCase):
 
     def test_environment_cannot_waive_review_attribution(self):
         with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}), \
-             patch.object(fnw, "dod_status", return_value=(True, "green")):
+             patch.object(fnw, "dod_status", return_value=(False, "unmet: review")):
             verdict = fnw.merge_eligibility(self._pr(), "codex-1")
         self.assertFalse(verdict["eligible"])
-        self.assertIn("no independent review attribution", verdict["reason"])
+        self.assertIn("unmet: review", verdict["reason"])
 
-    def test_environment_cannot_let_an_author_merge_its_own_pr(self):
+    def test_author_may_mechanically_merge_after_coderabbit_gate(self):
         with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}), \
              patch.object(fnw, "dod_status", return_value=(True, "green")):
             verdict = fnw.merge_eligibility(
                 self._pr(reviewDecision="APPROVED"), "claude-1")
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("distinct peer reviewer", verdict["reason"])
+        self.assertTrue(verdict["eligible"])
 
     def test_a_genuine_peer_still_makes_a_pr_mergeable(self):
         pr = self._pr(labels=[{"name": "author:claude-1"},
@@ -1437,47 +1098,29 @@ class WorkPickerTests(unittest.TestCase):
 
     def test_default_reap_threshold(self):
         with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1"]), \
-             patch.object(fnw, "reap_stale_reviews") as mock_reviews, \
              patch.object(fnw, "reap_stale_merges") as mock_merges, \
              patch.object(fnw, "reap_stale_claims") as mock_claims, \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "select", return_value=self._dummy_select()):
             fnw.main()
-            mock_reviews.assert_called_once_with(4)
             mock_merges.assert_called_once_with(4)
             mock_claims.assert_called_once_with([], 4)
 
     def test_reap_disabled_by_zero(self):
         with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--reap-after", "0"]), \
-             patch.object(fnw, "reap_stale_reviews") as mock_reviews, \
              patch.object(fnw, "reap_stale_merges") as mock_merges, \
              patch.object(fnw, "reap_stale_claims") as mock_claims, \
              patch.object(fnw, "select", return_value=self._dummy_select()):
             fnw.main()
-            mock_reviews.assert_not_called()
             mock_merges.assert_not_called()
             mock_claims.assert_not_called()
-
-    def test_reaped_claim_reported_to_stderr(self):
-        import io
-        fake_stderr = io.StringIO()
-        with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--reap-after", "4"]), \
-             patch("sys.stderr", fake_stderr), \
-             patch.object(fnw, "reap_stale_reviews", side_effect=lambda h: print(f"♻️  Released stale review claim on PR #12 (held by 'agent-old', claim age > {h}h).", file=sys.stderr)), \
-             patch.object(fnw, "reap_stale_merges"), \
-             patch.object(fnw, "reap_stale_claims"), \
-             patch.object(fnw, "list_open_issues", return_value=[]), \
-             patch.object(fnw, "select", return_value=self._dummy_select()):
-            fnw.main()
-            self.assertIn("Released stale review claim on PR #12", fake_stderr.getvalue())
-            self.assertIn("held by 'agent-old'", fake_stderr.getvalue())
 
     def test_reap_exception_handled_gracefully(self):
         import io
         fake_stderr = io.StringIO()
         with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1"]), \
              patch("sys.stderr", fake_stderr), \
-             patch.object(fnw, "reap_stale_reviews", side_effect=RuntimeError("transient network failure")), \
+             patch.object(fnw, "reap_stale_merges", side_effect=RuntimeError("transient network failure")), \
              patch.object(fnw, "select", return_value=self._dummy_select()):
             fnw.main()
             self.assertIn("[WARN] Autonomous claim reap encountered error: transient network failure", fake_stderr.getvalue())
