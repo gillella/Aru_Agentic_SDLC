@@ -69,7 +69,8 @@ reviews:
       instructions: |
         The `aru-protect-main` ruleset pins one required status check derived from this repository's CI workflow, so the workflow name and the ruleset generator must move together.
         Flag any rename or restructure of the CI workflow or its job that would leave the required context pointing at a check that no longer reports.
-        CodeRabbit is advisory only: flag any change that adds a CodeRabbit status context to `required_status_checks`, or that lets a bot check or bot approval satisfy the review, unresolved-thread, CI, exact-head, or acceptance gates.
+        CodeRabbit is the required pull-request review oracle, but it is not a CI job, a substitute for GitHub ruleset approval, a workflow owner, or a merge authority; the Factory merge helper is what validates authoritative exact-head CodeRabbit review, status, and thread evidence.
+        Flag any change that adds a CodeRabbit status context to `required_status_checks`, that hands ruleset or workflow ownership to the bot, or that lets a bot check satisfy an unrelated CI or acceptance gate.
         Flag widened `permissions`, secrets exposed to jobs that run untrusted pull-request code, `pull_request_target` used where the head is checked out, and any reduction in the strictness of the ruleset payload.
 
     - path: "{scripts/**/*.py,hooks/*.py}"
