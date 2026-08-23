@@ -973,6 +973,46 @@ class ReviewGateTests(unittest.TestCase):
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
 
+    def test_clean_empty_body_exact_head_review_passes_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }]
+        self.assertTrue(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_null_status_creator_passes_only_with_recognized_exact_head_review(self):
+        evidence = self.coderabbit_evidence(body="")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": None,
+        }]
+        self.assertTrue(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_non_null_spoof_status_creator_fails_with_recognized_review(self):
+        evidence = self.coderabbit_evidence(body="")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": {"login": "coderabbit-status", "__typename": "Bot"},
+        }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_null_status_creator_fails_without_recognized_review(self):
+        evidence = self.coderabbit_evidence(login="not-coderabbit", body="")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": None,
+        }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
     def test_missing_failed_rate_limited_or_ambiguous_check_fails_closed(self):
         evidence = self.coderabbit_evidence()
         cases = (

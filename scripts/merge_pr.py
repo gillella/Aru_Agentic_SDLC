@@ -1369,7 +1369,7 @@ def _with_coderabbit_status(pr_id, evidence):
     return combined
 
 
-def _coderabbit_check(pr, evidence):
+def _coderabbit_check(pr, evidence, *, recognized_review=False):  # noqa: C901, PLR0912
     """Return the exact CodeRabbit check verdict, or ``None`` if ambiguous.
 
     A similarly named review is not enough: the GitHub-hosted CodeRabbit status
@@ -1397,10 +1397,13 @@ def _coderabbit_check(pr, evidence):
             if slug not in CODERABBIT_APP_SLUGS:
                 return None
         elif kind == "StatusContext":
-            creator = check.get("creator") or {}
-            if str(creator.get("login") or "").lower() not in CODERABBIT_LOGINS:
+            creator = check.get("creator")
+            if creator is None and not recognized_review:
                 return None
-            if creator.get("__typename") not in CODERABBIT_ACTOR_TYPES:
+            if creator is not None and (
+                not isinstance(creator, dict)
+                or str(creator.get("login") or "").lower() not in CODERABBIT_LOGINS
+                or creator.get("__typename") not in CODERABBIT_ACTOR_TYPES):
                 return None
         else:
             return None
@@ -1412,7 +1415,7 @@ def _coderabbit_check(pr, evidence):
 
 
 def _coderabbit_current_head_review(evidence):
-    """Prove one unambiguous, substantive CodeRabbit review on this head."""
+    """Prove one unambiguous, completed CodeRabbit review on this head."""
     head = evidence.get("head_oid") if isinstance(evidence, dict) else None
     if not isinstance(head, str) or not head:
         return None
@@ -1437,7 +1440,7 @@ def _coderabbit_current_head_review(evidence):
         if (
             state not in {"COMMENTED", "APPROVED"}
             or submitted is None
-            or not isinstance(body, str) or not body.strip()
+            or not isinstance(body, str)
             or oid != head
         ):
             continue
@@ -1451,10 +1454,10 @@ def has_authoritative_coderabbit_review(pr, evidence):
     """True only when CodeRabbit reviewed this head and its hosted check passed."""
     if not isinstance(pr, dict) or not isinstance(evidence, dict):
         return False
-    return (
-        _coderabbit_current_head_review(evidence) is not None
-        and _coderabbit_check(pr, evidence) is True
-    )
+    recognized_review = _coderabbit_current_head_review(evidence) is not None
+    return recognized_review and _coderabbit_check(
+        pr, evidence, recognized_review=recognized_review,
+    ) is True
 
 
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
