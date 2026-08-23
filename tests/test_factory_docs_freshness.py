@@ -187,6 +187,35 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                     ),
                 )
 
+    def test_current_review_policy_keeps_agents_out_of_review_role(self):
+        plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
+        introduction = section(
+            plan,
+            plan.splitlines()[0],
+            "## Lifecycle status vocabulary",
+        )
+        normalized_intro = introduction.replace("> ", "")
+        self.assertRegex(
+            normalized_intro,
+            re.compile(
+                r"implement,\s+remediate,\s+and\s+mechanically\s+merge.*they never review",
+                re.IGNORECASE | re.DOTALL,
+            ),
+        )
+        operator = section(
+            plan,
+            "## 4. The operator visibility and intervention interface",
+            "### 4.1",
+        )
+        self.assertNotIn("independent-agent review", operator)
+        intervention = section(
+            plan,
+            "### 4.1 The one mandatory human intervention",
+            "### 4.2",
+        )
+        self.assertIn("implementation/remediation/mechanical-merge loop", intervention)
+        self.assertNotIn("implementation/review/remediation loop", intervention)
+
     def test_historical_roadmap_cannot_look_current(self):
         plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
         marker = "### 5.2 Historical S-roadmap snapshot — verified 2026-08-15"

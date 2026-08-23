@@ -53,6 +53,14 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertNotIn("--require-plan-ack", rules)
         self.assertNotIn("human-acknowledgement", rules)
 
+    def test_generated_governance_preserves_picker_expected_head_on_merge(self):
+        rules = init_project.DEFAULT_AGENTS_TEMPLATE
+        normalized = " ".join(rules.split()).lower()
+        self.assertIn('merge_pr.py" --pr <ID>', rules)
+        self.assertIn("--expected-head <HEAD_SHA>", rules)
+        self.assertIn("Authors must never review.", rules)
+        self.assertIn("when the picker supplies `head_sha`", normalized)
+
     def test_author_merge_and_no_agent_review_are_consistent(self):
         paths = [
             "AGENTS.md", "docs/project_board_workflow.md",
