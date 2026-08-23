@@ -2937,6 +2937,8 @@ class ExpectedHeadGateTests(unittest.TestCase):
         fresh = dict(first)
         fetch_pr.side_effect = [first, fresh]
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
              patch.object(merge_pr, "check_rebased", return_value=(True, "current")):
             rc = merge_pr.main()
 

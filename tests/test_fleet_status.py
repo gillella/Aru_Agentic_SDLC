@@ -1,4 +1,4 @@
-# line-ceiling: 1403
+# line-ceiling: 1490
 import os
 import stat
 import sys
@@ -575,7 +575,7 @@ class FleetStatusTests(unittest.TestCase):
                     comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
                 ),
                 mock_pr(
-                    33, "reviewed-by:codex-1",
+                    33, decision="APPROVED",
                     comments=[{"body": f"review-queued-at: {hours_ago(10)}"}],
                 ),
             ]
@@ -912,6 +912,15 @@ class FleetStatusTests(unittest.TestCase):
                 "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
             }],
         }
+        pr_coderabbit_stale = {
+            "number": 17,
+            "isDraft": False,
+            "reviewDecision": "COMMENTED",
+            "labels": [],
+            "statusCheckRollup": [{
+                "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
+            }],
+        }
         with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]), \
              patch("merge_pr.review_evidence", return_value={
                  "head_oid": "a" * 40,
@@ -946,7 +955,7 @@ class FleetStatusTests(unittest.TestCase):
                      "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
                  }],
              }):
-            self.assertTrue(_pending_review(pr_coderabbit_reviewed))
+            self.assertTrue(_pending_review(pr_coderabbit_stale))
 
         # Approved PR: waiting on merge, not review queue
         pr_approved = {
@@ -955,12 +964,12 @@ class FleetStatusTests(unittest.TestCase):
         }
         self.assertFalse(_pending_review(pr_approved))
 
-        # PR with peer reviewed-by label: already reviewed
+        # Legacy reviewed-by labels do not satisfy the CodeRabbit-only contract.
         pr_reviewed = {
             "number": 13, "isDraft": False, "reviewDecision": None,
             "labels": [{"name": "author:claude-1"}, {"name": "reviewed-by:codex-1"}],
         }
-        self.assertFalse(_pending_review(pr_reviewed))
+        self.assertTrue(_pending_review(pr_reviewed))
 
         # Draft PR: not in review queue
         pr_draft = {"number": 14, "isDraft": True, "labels": []}

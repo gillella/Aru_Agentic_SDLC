@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 3645
+# line-ceiling: 3690
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1327,7 +1327,7 @@ def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
           commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
             nodes {
               __typename
-              ... on CheckRun { name status conclusion app { slug } }
+              ... on CheckRun { name status conclusion checkSuite { app { slug } } }
               ... on StatusContext { context state creator { login __typename } }
             }
           } } } } }
@@ -1392,7 +1392,8 @@ def _coderabbit_check(pr, evidence):
     if authoritative is not None:
         kind = check.get("__typename") or check.get("type")
         if kind == "CheckRun":
-            slug = str((check.get("app") or {}).get("slug") or "").lower()
+            suite = check.get("checkSuite") or {}
+            slug = str((suite.get("app") or {}).get("slug") or "").lower()
             if slug not in CODERABBIT_APP_SLUGS:
                 return None
         elif kind == "StatusContext":
