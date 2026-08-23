@@ -32,7 +32,7 @@ reviews:
         Require every gate to fail closed: an unknown, absent, malformed, or unparseable API response must block the merge, never fall through to an allow.
         Verify that approvals, review-thread resolution, acceptance evidence, and completion stamps are bound to the exact current head SHA, and that a new push invalidates prior evidence rather than inheriting it.
         Check that paginated `gh api` reads cannot silently truncate: a capped or partial page that could hide a blocking review, comment, thread, or check must be treated as blocking, not as an empty result.
-        Guard the advisory carve-outs (`ADVISORY_CHECK_CONTEXTS`, `ADVISORY_REVIEW_ACCOUNTS`): flag any change that widens them, matches contexts or logins by substring instead of an exact normalized comparison, or lets an advisory bot's approval, check, or resolved thread satisfy a required gate.
+        Guard the advisory carve-outs precisely: `ADVISORY_CHECK_CONTEXTS` only excuses CodeRabbit's commit-status context from the CI gate, while CodeRabbit's own separately authenticated exact-head status, review, and thread evidence stays mandatory for the review gate, and `ADVISORY_REVIEW_ACCOUNTS` holds non-CodeRabbit review bots only. Flag any change that widens either set, matches contexts or logins by substring instead of an exact normalized comparison, reclassifies CodeRabbit's authenticated status, review, or thread evidence as advisory, or lets a non-CodeRabbit advisory bot's approval, check, or resolved thread satisfy the review gate.
         Flag reliance on attacker-influenced strings (PR title, body, branch name, label text, comment bodies) for identity or authorization decisions.
 
     - path: "{scripts/claim_issue.py,scripts/update_issue_status.py}"
