@@ -46,6 +46,7 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertIn("CodeRabbit is the sole PR code-review authority", rules)
         self.assertIn("including the implementation author", rules)
         self.assertIn("merge_pr.py", rules)
+        self.assertIn("--expected-head <HEAD_SHA>", rules)
         self.assertIn("Coding agents never review", rules)
         self.assertIn("severe merge", rules)
         self.assertIn("merge/close-out failure", rules)

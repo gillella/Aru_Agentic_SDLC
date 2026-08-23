@@ -1104,7 +1104,10 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
             "data": {"repository": {"pullRequest": {
                 "headRefOid": "head123",
                 "commits": {"nodes": [{"commit": {"statusCheckRollup": {
-                    "contexts": {"nodes": []},
+                    "contexts": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [],
+                    },
                 }}}]},
             }}},
         }
@@ -1116,13 +1119,39 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
             "data": {"repository": {"pullRequest": {
                 "headRefOid": "head123",
                 "commits": {"nodes": [{"commit": {"statusCheckRollup": {
-                    "contexts": {"totalCount": 2, "nodes": [{
-                        "__typename": "CheckRun",
-                        "name": "CodeRabbit",
-                        "status": "COMPLETED",
-                        "conclusion": "SUCCESS",
-                        "checkSuite": {"app": {"slug": "coderabbitai"}},
-                    }]},
+                    "contexts": {
+                        "totalCount": 2,
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [{
+                            "__typename": "CheckRun",
+                            "name": "CodeRabbit",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "checkSuite": {"app": {"slug": "coderabbitai"}},
+                        }],
+                    },
+                }}}]},
+            }}},
+        }
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_has_next_page_rejects_status_payload_even_when_count_matches(self, gh_json):
+        gh_json.return_value = {
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                    "contexts": {
+                        "totalCount": 1,
+                        "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                        "nodes": [{
+                            "__typename": "CheckRun",
+                            "name": "CodeRabbit",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "checkSuite": {"app": {"slug": "coderabbitai"}},
+                        }],
+                    },
                 }}}]},
             }}},
         }

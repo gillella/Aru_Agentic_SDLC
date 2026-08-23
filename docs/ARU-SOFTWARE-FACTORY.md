@@ -3,7 +3,10 @@
 > **Current review policy (Issue #373):** CodeRabbit is the sole PR code-review
 > authority. Coding-agent `reviewer:` / `reviewed-by:` workflows described in
 > historical sections below are retired and cannot satisfy the merge gate.
-> Claude, Codex, Cursor, and Antigravity implement and remediate only.
+> Claude, Codex, Cursor, and Antigravity implement, remediate, and
+> mechanically merge only through the governed `merge_pr.py` helper after
+> CodeRabbit completes a substantive exact-head review and every enforced gate
+> passes; they never review.
 
 **Goal:** idea → deployed software through an autonomous governed loop, with
 operator visibility and exceptional human intervention only for an unresolved

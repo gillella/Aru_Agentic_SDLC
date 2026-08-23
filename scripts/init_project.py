@@ -119,12 +119,13 @@ branch, or merge around the Definition-of-Done gate.
   non-authoritative here.
 - Brainstorming frameworks supply input to Aru's plan gate rather than running
   a parallel lifecycle.
-- Memory tools provide context only. **CodeRabbit is the sole PR code-review authority.** Coding agents never review; they only implement and remediate.
+- Memory tools provide context only. **CodeRabbit is the sole PR code-review authority.** Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
 
 After CodeRabbit completes a substantive review on the exact current head and
 every enforced gate passes, any factory agent, including the implementation author,
 may execute the mechanical merge only through
-`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Authors must never
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. When the picker
+supplies `head_sha`, pass it as `--expected-head <HEAD_SHA>`. Authors must never
 review. Direct pushes and ad-hoc merge commands are forbidden. Money,
 PII, security, schema, migration, irreversible behavior, large diffs, and
 review-round count increase planning, testing, and review depth but do not
