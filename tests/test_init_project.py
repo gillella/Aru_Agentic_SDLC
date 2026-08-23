@@ -63,7 +63,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             normalized = " ".join(copy.split()).lower()
             self.assertIn("including the implementation author", normalized)
             self.assertIn("coderabbit", normalized)
-            self.assertRegex(normalized, r"never.*review")
+            self.assertIn("coding agents never review", normalized)
 
     def test_active_factory_guidance_has_no_legacy_human_only_rule(self):
         paths = [

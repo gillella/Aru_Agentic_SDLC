@@ -46,11 +46,21 @@ No unresolved threads exist. Act on each name in `work.unmet_gates`:
   criterion is genuinely unmet, leave it unticked and record why on the issue.
 - **`ci`** — follow `remediate-ci-failure` with the complete hosted logs; do
   not retry or guess from the check title alone.
-- **`rebased`** — in the PR's worktree: `git fetch origin && git rebase
-  origin/main`, re-run the full local verification, then push with
-  `--force-with-lease`. This **invalidates the prior review by design**
-  (`merge_pr.py` requires a review at the current head), so the PR returns to
-  `review` afterwards. That is correct; do not route around it.
+- **`rebased`** — read `work.gate_details.rebased` before acting.
+  If that detail says the checks describe a merge with the superseded base,
+  or otherwise says `Do not rebase`, preserve the reviewed head: trigger a
+  fresh `pull_request` event on the same head so CI recomputes the merge ref
+  against the current base. In this repo, `close and reopen` is the canonical
+  example because CI runs on `pull_request` for `main`. Do not use a plain
+  GitHub Actions re-run for that case: GitHub documents that re-runs keep the
+  original event SHA/ref, so they can replay stale merge evidence.
+  Otherwise, when `work.gate_details.rebased` reports overlap, truncated or
+  unavailable changed-file evidence, or unverifiable ancestry, rebase in the
+  PR's worktree with `git fetch origin && git rebase origin/main`, re-run the
+  full local verification, then push with `--force-with-lease`. This
+  **invalidates the prior review by design** (`merge_pr.py` requires a review
+  at the current head), so the PR returns to `review` afterwards. That is
+  correct; do not route around it.
 - **`size`** — split the PR, or add `size-waiver: <rationale>` to its body
   explaining why splitting is worse. Never waive silently, and never waive
   purely to clear the gate.

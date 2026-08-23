@@ -30,7 +30,8 @@ the Definition-of-Done gate.
   they do not run a parallel implementation process.
 - Memory tools provide context only. **CodeRabbit is the sole PR code-review
   authority.** Claude, Codex, Cursor, and Antigravity implement and remediate
-  findings only; they must never claim, perform, or be dispatched for review.
+  findings only. Coding agents never review and must never claim, perform, or
+  be dispatched for review.
   CodeRabbit is not workflow owner or merge authority.
 - If lifecycle instructions conflict, follow Aru. Higher-priority explicit
   system, developer, or user instructions still take precedence.

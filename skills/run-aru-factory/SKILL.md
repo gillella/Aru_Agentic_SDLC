@@ -104,15 +104,21 @@ It returns one item and claims it. Follow the skill for its type:
 | type | skill |
 |---|---|
 | `feedback` | `address-pr-feedback` |
-| `review` | Forbidden legacy state: return to picker; CodeRabbit alone reviews |
+| `review` | Forbidden legacy state: release your reviewer claim, then return to picker; CodeRabbit alone reviews |
 | `issue` with `skill: research` | `research` |
 | any other `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
 | `idle` | `next` stops; `loop` waits and asks again |
 
-The picker's `work.skill` field is authoritative — a research issue has its own
+The picker's top-level `agent` field is the resolved identity; use that exact
+value as `<AGENT_ID>` for later `claim_issue.py` and `create_pr.py` calls,
+including unnamed workers. The picker's `work.skill` field is authoritative — a research issue has its own
 close-out contract in `$ARU_SDLC_HOME/skills/research/SKILL.md`, so do not route
 every issue through implementation.
+
+If forbidden legacy state or a caller supplies `work.type=review` after
+`--claim`, coding agents never review. Release this agent's legacy reviewer
+claim with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent <AGENT_ID> --release`, then return to the picker.
 
 **If the claim conflicts**, another agent won the race. That ends the
 iteration, not the session — ask the picker again. Treating a lost race as an
@@ -199,7 +205,8 @@ Restated only because skipping one is how each has been broken before.
    `--agent <id>`; `--model-family <family>` is optional.
 7. **Degraded GitHub halts coordination gracefully** — never a secondary local
    task queue or an ungated merge. See `docs/degraded-mode.md`.
-8. **Never review any PR.** CodeRabbit is the sole code-review authority. The
+8. **Never review any PR.** CodeRabbit is the sole code-review authority.
+   Coding agents never review. The
    merge gate requires its exact-current-head evidence and rejects coding-agent
    comments, approvals, labels, and attestations.
 

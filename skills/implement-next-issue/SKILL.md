@@ -226,7 +226,7 @@ or other irreversible work from the plan gate.
 
 ### Step 12: Merge Authority and Completion
 
-1. Coding-agent reviews and legacy `reviewed-by:` attestations never satisfy
+1. Coding agents never review. Coding-agent reviews and legacy `reviewed-by:` attestations never satisfy
    review. Wait for a completed substantive CodeRabbit review on the exact
    current head and resolve every actionable CodeRabbit thread.
 2. After the CodeRabbit oracle passes, any factory agent,

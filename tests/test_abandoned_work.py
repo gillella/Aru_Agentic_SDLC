@@ -203,6 +203,16 @@ class AdoptPullRequestTests(unittest.TestCase):
         rc, _calls = self._adopt(self.snapshot(), agent="codex-9f21")
         self.assertEqual(rc, claim_issue.EXIT_CONFLICT)
 
+    def test_empty_agent_identity_is_refused_before_mutation(self):
+        snapshot = self.snapshot()
+        with patch.object(claim_issue, "run_gh_json", return_value=snapshot), \
+             patch.object(claim_issue, "ensure_label") as ensure_label, \
+             patch.object(claim_issue, "run_cmd") as run_cmd:
+            rc = claim_issue.adopt_pr(42, "   ", "anthropic")
+        self.assertEqual(rc, claim_issue.EXIT_ERROR)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+
     def test_an_unstamped_pr_cannot_be_adopted(self):
         rc, _calls = self._adopt(self.snapshot(labels=[]))
         self.assertEqual(rc, claim_issue.EXIT_CONFLICT)

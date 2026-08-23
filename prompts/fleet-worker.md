@@ -8,8 +8,9 @@ remains the only shared work queue.
 
 Agents implement issues, remediate CI or CodeRabbit findings, and mechanically
 merge PRs whose Definition-of-Done gates pass. **CodeRabbit is the sole PR
-code-review authority.** Coding agents never claim, perform, or receive review
-work. Missing or blocked CodeRabbit review has no coding-agent fallback.
+code-review authority.** Coding agents never review, claim, perform, or
+receive review work. Missing or blocked CodeRabbit review has no coding-agent
+fallback.
 
 ## Start in a desktop application
 
@@ -100,9 +101,7 @@ unavailable.
 ### Setup
 
 - Pass `--agent <AGENT_ID>` when this task is operating as a named fleet
-  member; otherwise the picker derives a stable id from this runtime. Pass
-  `--family <FAMILY>` when it is known. `create_pr.py` still requires
-  `--agent`.
+  member; otherwise the picker derives a stable id from this runtime. The picker JSON top-level `agent` field is the resolved identity for this session: use that exact value as `<AGENT_ID>` for every later `claim_issue.py` and `create_pr.py` calls, including unnamed workers. Pass `--family <FAMILY>` when it is known. `create_pr.py` still requires `--agent`.
 - Your clone is the current working directory. Invoke helper scripts by
   absolute path so they act on this repo:
   `python3 "$ARU_SDLC_HOME/scripts/<script>.py"`.
@@ -223,7 +222,7 @@ Definition-of-Done gate pass.
 
 #### C. `review` — forbidden for coding agents
 
-The picker must never emit this work type. CodeRabbit is the sole PR code-review authority. If legacy state or a caller supplies `work.type=review`, do not inspect or review the PR; return to the picker. Route existing CodeRabbit findings to the author or adopted remediator with `address-pr-feedback`. Missing, pending, failed, rate-limited, stale, ambiguous, or spoofed CodeRabbit evidence remains blocked.
+The picker must never emit this work type. CodeRabbit is the sole PR code-review authority. If legacy state or a caller supplies `work.type=review` after `--claim`, do not inspect or review the PR; release this agent's legacy reviewer claim with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent <AGENT_ID> --release`, then return to the picker. Route existing CodeRabbit findings to the author or adopted remediator with `address-pr-feedback`. Missing, pending, failed, rate-limited, stale, ambiguous, or spoofed CodeRabbit evidence remains blocked.
 
 ---
 

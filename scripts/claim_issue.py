@@ -581,6 +581,12 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
     peer gate still refuses to let it review its own PR -- which is the correct
     outcome, not a regression.
     """
+    agent = (agent or "").strip()
+    if not agent:
+        print("[ERROR] --agent is empty. Adoption moves author:<id>; an empty id "
+              "would stamp invalid ownership on the PR. If you passed a shell "
+              "variable, it is unset.", file=sys.stderr)
+        return EXIT_ERROR
     snapshot, previous, idle_hours, refusal = _adoption_target(
         pr_id, agent, after_hours)
     if refusal is not None:

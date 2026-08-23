@@ -150,10 +150,23 @@ class IdentityTests(unittest.TestCase):
         self.assertIn("--agent", text)
         self.assertNotIn("every claim and pr needs", text)
 
+    def test_fleet_prompt_names_top_level_agent_handoff(self):
+        text = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
+        self.assertIn("picker json top-level `agent` field is the resolved identity", text)
+        self.assertIn("use that exact value as `<agent_id>`", text)
+        self.assertIn("claim_issue.py", text)
+        self.assertIn("create_pr.py", text)
+
     def test_the_reason_identity_matters_is_stated(self):
         """Without the why, the flags read as ceremony and get dropped."""
         text = flat(skill_text())
         self.assertIn("same github user", text)
+
+    def test_fleet_prompt_reuses_the_picker_resolved_identity(self):
+        text = FLEET_PROMPT.read_text(encoding="utf-8")
+        self.assertIn("top-level `agent` field", text)
+        self.assertIn("resolved identity for this session", text)
+        self.assertIn("later `claim_issue.py` and `create_pr.py` calls", text)
 
 
 class GovernanceTests(unittest.TestCase):
@@ -163,8 +176,11 @@ class GovernanceTests(unittest.TestCase):
             self.assertIn(rule, text, f"guarantee missing: {rule}")
 
     def test_coding_agent_review_is_refused(self):
-        text = flat(skill_text())
-        self.assertIn("never review any pr", text)
+        for text in (
+            flat(skill_text()),
+            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
+        ):
+            self.assertIn("coding agents never review", text)
 
     def test_coderabbit_is_the_only_review_path(self):
         text = skill_text()
@@ -186,17 +202,35 @@ class GovernanceTests(unittest.TestCase):
         self.assertNotIn("skills/address-pr-feedback", review)
 
     def test_cursor_code_review_command_is_a_refusal_router(self):
-        text = CURSOR_CODE_REVIEW.read_text(encoding="utf-8").lower()
+        text = flat(CURSOR_CODE_REVIEW.read_text(encoding="utf-8"))
         self.assertIn("coderabbit", text)
         self.assertIn("remediate", text)
+        self.assertIn(
+            "do not inspect the pr, open a review workspace, or submit review comments",
+            text,
+        )
+        self.assertIn("coderabbit alone reviews", text)
+        self.assertIn("route findings back to the factory picker to remediate", text)
         self.assertNotIn("approve", text)
         self.assertNotIn("request changes", text)
         self.assertNotIn("review worktree", text)
+        self.assertNotIn("gh pr review", text)
+        self.assertNotIn("submit review", text.replace("submit review comments", ""))
 
     def test_cursor_user_rules_route_review_to_remediation(self):
         text = CURSOR_USER_RULES.read_text(encoding="utf-8").lower()
         self.assertIn("agents remediate findings", text)
         self.assertNotIn("auto-assign a free identity", text)
+
+    def test_legacy_review_state_releases_claim_before_looping(self):
+        for text in (
+            flat(skill_text()),
+            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
+        ):
+            self.assertIn("work.type=review", text)
+            self.assertIn("claim_issue.py", text)
+            self.assertIn("--release", text)
+            self.assertIn("return to the picker", text)
 
 
 class DelegationTests(unittest.TestCase):
