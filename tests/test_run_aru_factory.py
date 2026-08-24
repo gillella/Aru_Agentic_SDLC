@@ -1,3 +1,4 @@
+# line-ceiling: 405
 """Contract tests for the run-aru-factory entrypoint skill.
 
 The skill is prose, so these assert the properties a reader depends on rather
@@ -184,10 +185,17 @@ class GovernanceTests(unittest.TestCase):
         ):
             self.assertIn("coding agents never review", text)
 
-    def test_coderabbit_is_the_only_review_path(self):
+    def test_assigned_service_is_the_only_review_path(self):
+        """CodeRabbit is one of three assigned review-pool services, not a
+        standalone policy — the contract must name all three labels, keep the
+        coding-agent-review prohibition, and route findings back through the
+        picker for remediation rather than back to a coding agent."""
         text = skill_text()
-        self.assertIn("CodeRabbit", text)
+        for label in ("review:coderabbit", "review:sourcery", "review:codeant"):
+            self.assertIn(label, text, f"assigned-service label missing: {label}")
+        self.assertIn("Coding agents never review", text)
         self.assertIn("rejects coding-agent", text)
+        self.assertIn("address-pr-feedback", text)
         self.assertNotIn("gh pr review --approve", text)
 
     def test_merging_goes_through_the_gate_only(self):

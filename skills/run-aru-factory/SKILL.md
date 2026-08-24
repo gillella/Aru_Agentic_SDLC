@@ -209,10 +209,13 @@ Restated only because skipping one is how each has been broken before.
 7. **Degraded GitHub halts coordination gracefully** — never a secondary local
    task queue or an ungated merge. See `docs/degraded-mode.md`.
 8. **Coding agents never review.** The assigned review-pool service is the
-   sole code-review authority. CodeRabbit remains one of those assigned
-   services. The merge gate requires exact-current-head assigned-service
-   evidence and rejects coding-agent comments, approvals, labels, and
-   attestations.
+   sole code-review authority. `create_pr.py` deterministically assigns
+   exactly one of `review:coderabbit`, `review:sourcery`, or `review:codeant`
+   to each ordinary PR. The merge gate requires exact-current-head
+   assigned-service evidence and rejects coding-agent comments, approvals,
+   labels, and attestations. Route findings from the assigned service back
+   through the picker's `feedback` work type for remediation — see
+   **next** above.
 
 ### Merging
 

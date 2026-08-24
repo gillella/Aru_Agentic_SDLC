@@ -1,4 +1,4 @@
-# line-ceiling: 5448
+# line-ceiling: 5486
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -1347,6 +1347,35 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("exactly one", msg)
 
+    def test_no_linked_issue_fails_closed(self):
+        """A review: label with no 'Closes #N' has nothing to recompute from."""
+        pr = self.coderabbit_pr("author:agent-1")
+        pr["body"] = "No issue link here."
+        self.assertIsNone(merge_pr.assigned_review_service(pr))
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertFalse(ok)
+        self.assertIn("review:", msg)
+
+    def test_mixed_service_multi_issue_pr_fails_closed(self):
+        """Issue #1 resolves to coderabbit, #2 resolves to sourcery: no single
+        service can be trusted, so the review:coderabbit label must be rejected
+        rather than letting the first issue silently pick the evidence path."""
+        pr = self.coderabbit_pr("author:agent-1")
+        pr["body"] = "Closes #1\nCloses #2"
+        self.assertEqual(merge_pr.review_service_for_issue(1), "coderabbit")
+        self.assertEqual(merge_pr.review_service_for_issue(2), "sourcery")
+        self.assertIsNone(merge_pr.assigned_review_service(pr))
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertFalse(ok)
+        self.assertIn("review:", msg)
+
+    def test_multi_issue_pr_agreeing_on_one_service_resolves(self):
+        """Issues #1 and #4 both recompute to coderabbit, so the label stands."""
+        pr = self.coderabbit_pr("author:agent-1")
+        pr["body"] = "Closes #1\nCloses #4"
+        self.assertEqual(merge_pr.review_service_for_issue(4), "coderabbit")
+        self.assertEqual(merge_pr.assigned_review_service(pr), "coderabbit")
+
     def test_sourcery_successful_assigned_head_check_passes(self):
         pr = labelled("author:agent-1", "review:sourcery")
         pr["statusCheckRollup"] = [{
@@ -1740,10 +1769,18 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
 
 
 def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella"):
-    """A PR whose default reviews come from the same GitHub account."""
+    """A PR whose default reviews come from the same GitHub account.
+
+    The body links whichever issue number recomputes to the review: label in
+    ``names`` (or the default review:coderabbit), so assigned_review_service's
+    fail-closed "every linked issue must resolve to the label" check accepts
+    the fixture the way a real PR created by create_pr.py would.
+    """
     labels = list(names)
     if not any(name.startswith("review:") for name in labels):
         labels.append("review:coderabbit")
+    service = next(name.split(":", 1)[1] for name in labels if name.startswith("review:"))
+    issue_num = next(n for n in range(1, 4) if merge_pr.review_service_for_issue(n) == service)
     default = [{
         "id": "default-review",
         "state": "APPROVED",
@@ -1754,6 +1791,7 @@ def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella")
         "author": {"login": pr_login},
         "reviews": reviews if reviews is not None else default,
         "labels": [{"name": n} for n in labels],
+        "body": f"Closes #{issue_num}",
     }
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4636
+# line-ceiling: 4641
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1177,10 +1177,13 @@ def assigned_review_service(pr):
 
     The label alone is not trusted: create_pr.py assigns
     review_service_for_issue(issue_id) once, deterministically, from the
-    linked issue number. When the PR's linked issue is unambiguous, a label
-    that no longer matches that recomputation - e.g. a relabel after
-    assignment - is rejected rather than trusted, closing the window where an
-    edited label could swap the review oracle after the fact.
+    linked issue number. At least one linked issue is required, and every
+    linked issue must recompute to the same service as the label - a PR with
+    no linked issue, or one whose issues resolve to different services (e.g.
+    a relabel after assignment, or a multi-issue PR spanning services), is
+    rejected rather than trusted. This closes the window where an edited
+    label, or a mixed-service issue set, could swap the review oracle after
+    the fact.
     """
     labels = {
         lab.get("name", "")
@@ -1191,7 +1194,9 @@ def assigned_review_service(pr):
         return None
     service = next(iter(labels)).split(":", 1)[1]
     issue_nums = linked_issues(pr.get("body") or "")
-    if len(issue_nums) == 1 and review_service_for_issue(issue_nums[0]) != service:
+    if not issue_nums:
+        return None
+    if any(review_service_for_issue(num) != service for num in issue_nums):
         return None
     return service
 
