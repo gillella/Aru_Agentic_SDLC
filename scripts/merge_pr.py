@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 5095
+# line-ceiling: 5176
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -143,6 +143,12 @@ _REWORK_BLOCKING_RE = re.compile(
 # in the merge authority prevents desktop clients from disagreeing about when
 # a transient cleanup failure becomes exceptional operator intervention.
 CLOSEOUT_RETRY_DELAYS = (5, 15, 45)
+
+# `execute_merge` prefixes every refusal it reaches *before* running the merge
+# command with this. It lets `main` report a gate refusal as blocked rather
+# than as a merge failure without taking a second base read, which would
+# reopen the very window the refusal exists to close (#371 review).
+MERGE_NOT_ATTEMPTED = "No merge command was run:"
 
 PR_FIELDS = (
     "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,baseRefOid,author,"
@@ -3862,13 +3868,75 @@ def repository_merge_lock():
             handle.close()
 
 
-def execute_merge(pr_id, pr, merge_method):
+def _base_tip_unchanged(pr, expected_base, base_tip_resolver=None):
+    """Fail-closed proof that the base is still the tip the gates were taken against.
+
+    Neither merge API GitHub exposes has a base-side precondition, so there is
+    no server-side compare-and-swap to ask for. GraphQL's `mergePullRequest`
+    input accepts only `expectedHeadOid` -- "OID that the pull request head ref
+    must match to allow merge" -- and REST's
+    `PUT /repos/{slug}/pulls/{n}/merge` only the equivalent `sha`, which is
+    exactly what `gh pr merge --match-head-commit` sends. The head is pinned;
+    the base is whatever the server holds when it runs the merge.
+
+    The intervening base move therefore has to be blocked here instead (#371
+    review). Every gate -- path disjointness, CI freshness, and the tested
+    merge commit's parents -- was computed against one base tip. If the base
+    advanced after that, GitHub would merge the reviewed head into a tree no
+    check ever built, so refuse rather than treat a non-atomic proof as though
+    it still described the merge the server is about to perform.
+
+    Returns `(ok, detail)`. Anything unreadable, absent, or moved is not ok:
+    the caller must never merge on a base it could not re-prove.
+    """
+    if not isinstance(expected_base, str) or not expected_base:
+        return False, (
+            "no proved base tip was supplied to pin the merge against, so an "
+            "advance since the gates ran could not be ruled out."
+        )
+    resolve = base_tip_resolver or _current_base_tip
+    try:
+        live = resolve(pr)
+    except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
+        return False, (
+            f"the base branch tip could not be re-read immediately before the "
+            f"merge ({type(exc).__name__}: {exc})."
+        )
+    if not isinstance(live, str) or not live:
+        return False, (
+            "the base branch tip could not be re-read immediately before the "
+            "merge."
+        )
+    if live != expected_base:
+        return False, (
+            f"the base branch advanced from {expected_base[:12]} to "
+            f"{live[:12]} after the final gate reread, so the merge would "
+            f"combine the reviewed head with a base tip no check ever tested. "
+            f"Re-run the merge so every gate is taken against the current base "
+            f"tip. Do not rebase: that rewrites the head SHA and destroys the "
+            f"review attestation bound to it."
+        )
+    return True, f"base tip still {live[:12]}"
+
+
+def execute_merge(pr_id, pr, merge_method, expected_base, base_tip_resolver=None):
     """Runs only the server-side merge, then re-reads authoritative PR state.
 
     The merge command deliberately does not delete either branch. Cleanup is a
     separate, resumable phase. A non-zero command may still mean GitHub merged
     successfully, so the return code is never interpreted without a re-read.
+
+    `expected_base` is the base tip every gate was proved against. It is
+    re-proved live here, as the last action before the merge command rather
+    than at the caller, because the command can pin only the head and anything
+    interposed between the proof and the command reopens the window it closes
+    (`_base_tip_unchanged`, #371 review). A missing expectation is itself a
+    refusal: unpinned means unverified.
     """
+    unchanged, base_detail = _base_tip_unchanged(pr, expected_base, base_tip_resolver)
+    if not unchanged:
+        return None, f"{MERGE_NOT_ATTEMPTED} {base_detail}"
+
     env = dict(os.environ, ARU_ALLOW_MAIN_PUSH="1")
     merge_cmd = ["gh", "pr", "merge", str(pr_id), f"--{merge_method}"]
     head_sha = pr.get("headRefOid")
@@ -5004,13 +5072,26 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 )
                 return EXIT_BLOCKED
             pr = fresh
+            # Every gate above -- disjointness, CI freshness, the tested merge
+            # commit's parents, review evidence -- was computed against this
+            # exact base tip. execute_merge re-proves it is still live right
+            # before the server merge, because `gh pr merge` pins only the head
+            # and GitHub would otherwise merge into whatever base it holds at
+            # execution time (#371 review).
+            gated_base = fresh.get("baseRefOid")
 
             print(f"  ✅ merge lock          {lock_message}")
             print(f"  ✅ final base check    {rebased_message}")
             print("\n=== Merge execution ===")
-            final_pr, outcome = execute_merge(args.pr, pr, args.merge_method)
+            final_pr, outcome = execute_merge(
+                args.pr, pr, args.merge_method, gated_base
+            )
             if not final_pr:
                 print(f"  ❌ not merged          {outcome}", file=sys.stderr)
+                # A refusal taken before the command ran is a gate block, not a
+                # failed merge: nothing was mutated and re-running is the remedy.
+                if outcome.startswith(MERGE_NOT_ATTEMPTED):
+                    return EXIT_BLOCKED
                 return EXIT_ERROR
             print(f"  ✅ server merge        {outcome}")
 

@@ -1,4 +1,4 @@
-# line-ceiling: 6703
+# line-ceiling: 6870
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -4165,7 +4165,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     def test_nonzero_merge_command_recovers_when_server_reports_merged(self, run, _fetch):
         run.return_value = SimpleNamespace(returncode=1, stdout="", stderr="delete failed")
         final, message = merge_pr.execute_merge(
-            9, {"headRefOid": "gated-sha"}, "squash"
+            9, {"headRefOid": "gated-sha", "baseRefOid": "base-sha"}, "squash",
+            "base-sha", base_tip_resolver=lambda pr: "base-sha",
         )
 
         self.assertEqual(final["state"], "MERGED")
@@ -4178,7 +4179,10 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr.subprocess, "run")
     def test_nonzero_merge_command_distinguishes_not_merged(self, run, _fetch):
         run.return_value = SimpleNamespace(returncode=1, stdout="", stderr="refused")
-        final, message = merge_pr.execute_merge(9, {"headRefOid": "sha"}, "squash")
+        final, message = merge_pr.execute_merge(
+            9, {"headRefOid": "sha", "baseRefOid": "base-sha"}, "squash",
+            "base-sha", base_tip_resolver=lambda pr: "base-sha",
+        )
 
         self.assertIsNone(final)
         self.assertIn("still reports OPEN", message)
@@ -4254,7 +4258,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
              patch("builtins.print") as printer:
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
 
-        execute.assert_called_once_with(9, fetch.return_value, "merge")
+        execute.assert_called_once_with(9, fetch.return_value, "merge", "base-sha")
         self.assertEqual(_close.call_count, 4)
         self.assertEqual(_done.call_count, 4)
         self.assertEqual(_issue_claim.call_count, 4)
@@ -4312,7 +4316,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
                           return_value=nullcontext((True, "serialized"))):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
 
-        execute.assert_called_once_with(9, fetch.return_value, "merge")
+        execute.assert_called_once_with(9, fetch.return_value, "merge", "base-sha")
 
 
 class SerializedMergeExecutionTests(unittest.TestCase):
@@ -4471,6 +4475,169 @@ class SerializedMergeExecutionTests(unittest.TestCase):
 
         self.assertEqual(code, merge_pr.EXIT_BLOCKED)
         execute.assert_not_called()
+
+
+class FinalWindowBaseMovementTests(unittest.TestCase):
+    """The gap between the last identity proof and the server-side merge.
+
+    `gh pr merge` pins only the head: REST's `PUT /pulls/{n}/merge` takes a
+    head `sha` and GraphQL's `mergePullRequest` an `expectedHeadOid`, and
+    neither accepts a base-side precondition, so GitHub will happily merge the
+    reviewed head into whatever the base is when the request lands. Every test
+    here drives a base that advances inside that final window and asserts the
+    merge command is never issued (#371 review).
+    """
+
+    HEAD = "gated-sha"
+
+    def _pr(self, base="base-a"):
+        return {"number": 9, "headRefOid": self.HEAD, "baseRefOid": base,
+                "baseRefName": "main"}
+
+    def _blocked(self, expected_base, resolver):
+        with patch.object(merge_pr.subprocess, "run") as run, \
+             patch.object(merge_pr, "fetch_pr") as fetch:
+            final, message = merge_pr.execute_merge(
+                9, self._pr(), "merge", expected_base, base_tip_resolver=resolver,
+            )
+        run.assert_not_called()
+        fetch.assert_not_called()
+        self.assertIsNone(final)
+        self.assertTrue(message.startswith(merge_pr.MERGE_NOT_ATTEMPTED), message)
+        return message
+
+    def test_base_advance_in_the_final_window_blocks_the_merge_command(self):
+        message = self._blocked("base-a", lambda pr: "base-b")
+        self.assertIn("base-a", message)
+        self.assertIn("base-b", message)
+        self.assertIn("no check ever tested", message)
+
+    def test_the_refusal_never_asks_for_a_rebase(self):
+        message = self._blocked("base-a", lambda pr: "base-b")
+        self.assertIn("Do not rebase", message)
+        self.assertNotIn("Rebase on main", message)
+
+    def test_unreadable_base_tip_before_the_merge_fails_closed(self):
+        message = self._blocked("base-a", lambda pr: None)
+        self.assertIn("could not be re-read", message)
+
+    def test_malformed_base_tip_before_the_merge_fails_closed(self):
+        for live in ("", 0, b"base-a", ["base-a"]):
+            with self.subTest(live=live):
+                message = self._blocked("base-a", lambda pr, live=live: live)
+                self.assertIn("could not be re-read", message)
+
+    def test_raising_base_tip_resolver_before_the_merge_fails_closed(self):
+        def explode(pr):
+            raise RuntimeError("api down")
+
+        message = self._blocked("base-a", explode)
+        self.assertIn("RuntimeError: api down", message)
+
+    def test_unpinned_base_is_itself_a_refusal(self):
+        for expected in (None, "", 0, b"base-a"):
+            with self.subTest(expected=expected):
+                message = self._blocked(expected, lambda pr: "base-a")
+                self.assertIn("no proved base tip", message)
+
+    def test_base_is_reproved_before_the_merge_command_not_after(self):
+        """Ordering is the whole guarantee: anything after the command is too late."""
+        order = []
+
+        def resolver(pr):
+            order.append("base-read")
+            return "base-a"
+
+        def run(cmd, **kwargs):
+            order.append(" ".join(cmd[:3]))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(merge_pr.subprocess, "run", side_effect=run), \
+             patch.object(merge_pr, "fetch_pr", return_value=merged_pr()):
+            final, message = merge_pr.execute_merge(
+                9, self._pr(), "merge", "base-a", base_tip_resolver=resolver,
+            )
+
+        self.assertEqual(order, ["base-read", "gh pr merge"])
+        self.assertEqual(final["state"], "MERGED")
+        self.assertIn("accepted the merge", message)
+
+    def _drive_main(self, base_reads):
+        """Run main() with the real execute_merge and a scripted base ref."""
+        pr = {
+            "number": 9, "title": "open", "body": "Closes #7", "state": "OPEN",
+            "isDraft": False, "headRefName": "fix/issue-7-example",
+            "headRefOid": self.HEAD, "baseRefOid": "base-a", "baseRefName": "main",
+            "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE",
+        }
+        commands = []
+
+        def run(cmd, **kwargs):
+            commands.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr",
+                          side_effect=[pr, dict(pr), merged_pr()]), \
+             patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": self.HEAD}), \
+             patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
+             patch.object(merge_pr, "_behind_by", new=lambda _base, _head: 0), \
+             patch.object(merge_pr, "_current_base_tip", side_effect=base_reads), \
+             patch.object(merge_pr, "run_closeout", return_value=True), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "write_checkpoint_tag",
+                          return_value=(True, "checkpoint written")), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
+             patch.object(merge_pr.subprocess, "run", side_effect=run):
+            code = merge_pr.main()
+        merges = [c for c in commands if c[:3] == ["gh", "pr", "merge"]]
+        return code, merges
+
+    def test_end_to_end_base_move_after_the_final_gates_never_reaches_github(self):
+        """The exact reported race, end to end.
+
+        Every gate passes against base-a, then the base advances to base-b in
+        the instant before the server merge. Nothing downstream can undo a
+        merge, so the only fail-closed outcome is that `gh pr merge` is never
+        run at all.
+        """
+        code, merges = self._drive_main(["base-b"])
+        # Blocked, not error: nothing was mutated, so re-running is the remedy.
+        self.assertEqual(code, merge_pr.EXIT_BLOCKED)
+        self.assertEqual(merges, [])
+
+    def test_end_to_end_held_base_still_merges_with_the_head_pinned(self):
+        code, merges = self._drive_main(["base-a"])
+        self.assertEqual(code, merge_pr.EXIT_OK)
+        self.assertEqual(len(merges), 1)
+        self.assertIn("--match-head-commit", merges[0])
+        self.assertIn(self.HEAD, merges[0])
+
+    def test_a_failed_merge_command_is_still_reported_as_an_error(self):
+        """The blocked classification must not swallow a real merge failure.
+
+        Only refusals taken before the command ran are blocks; a command that
+        ran and left the PR open may have mutated something and stays an error.
+        """
+        with patch.object(merge_pr, "execute_merge",
+                          return_value=(None, "GitHub still reports OPEN; refused")), \
+             patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr",
+                          return_value=dict(self._pr(), title="open",
+                                            body="Closes #7", state="OPEN",
+                                            isDraft=False, mergeStateStatus="CLEAN",
+                                            mergeable="MERGEABLE")), \
+             patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": self.HEAD}), \
+             patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
+             patch.object(merge_pr, "_behind_by", new=lambda _base, _head: 0), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))):
+            self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
 
 
 class CloseOutRecoveryTests(unittest.TestCase):
