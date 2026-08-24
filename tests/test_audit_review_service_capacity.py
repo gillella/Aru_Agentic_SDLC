@@ -128,7 +128,7 @@ class AuditCapacityTests(unittest.TestCase):
         cases = []
         expired = snapshot()
         expired["services"][2]["plan"]["expires_at"] = AS_OF
-        cases.append((expired, "trial_expired", "expired", "future"))
+        cases.append((expired, "trial_expired", "expired", "expired"))
         suspended = snapshot()
         suspended["services"][2]["account_state"] = "suspended"
         cases.append((suspended, "account_unavailable", "active", "future"))
@@ -142,6 +142,7 @@ class AuditCapacityTests(unittest.TestCase):
             self.assertFalse(report["ok"])
             self.assertIn(expected, mismatch_codes(report))
             self.assertEqual(report["services"][1]["trial_state"], trial_state)
+            self.assertEqual(report["services"][1]["expiry_state"], _expiry)
 
     def test_inconsistent_or_malformed_service_fields_fail_closed(self):
         cases = []
