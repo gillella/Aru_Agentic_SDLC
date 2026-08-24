@@ -117,6 +117,31 @@ All three additionally require every blocker enforced by `check_reviews`
   CodeAnt-assigned PR still blocks on an unaddressed human
   `CHANGES_REQUESTED`.
 
+### Audit artifacts
+
+For a pilot or spot-check of the above, capture each artifact below and
+record the exact head (`headRefOid`) it was captured against; an artifact
+read against a different head does not satisfy the audit:
+
+- **Event/label** — `gh pr view <PR_ID> --json isDraft,labels` and
+  `gh api repos/{owner}/{repo}/issues/<PR_ID>/events --paginate` confirm the
+  assigned `review:<service>` label was applied while the PR was still draft
+  (§1), before it was marked ready.
+- **Review/head** — `gh pr view <PR_ID> --json reviews,headRefOid` binds the
+  assigned service's review to the recorded head SHA.
+- **GraphQL threads** —
+  `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <PR_ID> --json`
+  lists unresolved threads at the current head; empty output plus a zero
+  aggregate count from the gate output below confirms none remain.
+- **Gate output** —
+  `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --dry-run
+  --expected-head <SHA> --json` (§5) records the full Definition-of-Done
+  gate results, including the `review` gate, for the expected head.
+- **Checks/reviews/comments** —
+  `gh pr view <PR_ID> --json reviews,statusCheckRollup,comments` confirms no
+  non-assigned review service produced an authoritative check, review, or
+  comment.
+
 ## 4. Remediation
 
 Follow `skills/address-pr-feedback/SKILL.md`:
@@ -200,6 +225,9 @@ dry-run is evidence the PR is mergeable, not a merge —
       is fixed, explicitly withdrawn, or supported by the required
       size-waiver/verification-refresh evidence.
 - [ ] No non-advisory human reviewer's latest verdict is `CHANGES_REQUESTED`.
+- [ ] For a pilot or spot-check: event/label, review/head, GraphQL-thread,
+      gate-output, and checks/reviews/comments audit artifacts were captured
+      per "Audit artifacts" (§3) and match the recorded exact head.
 - [ ] `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --dry-run
       --expected-head <SHA>` exits `0` before requesting merge, using the
       recorded exact head.
