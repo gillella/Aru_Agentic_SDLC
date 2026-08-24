@@ -1604,13 +1604,12 @@ def _with_authoritative_review_status(pr_id, evidence):
     """Attach every live GitHub review artifact the gate trusts."""
     if not isinstance(evidence, dict):
         return None
-    combined = dict(evidence)
-    coderabbit = _with_coderabbit_status(pr_id, combined)
-    if isinstance(coderabbit, dict):
-        combined = coderabbit
-    sourcery = _with_sourcery_status(pr_id, combined)
-    if isinstance(sourcery, dict):
-        combined = sourcery
+    combined = _with_coderabbit_status(pr_id, dict(evidence))
+    if not isinstance(combined, dict):
+        return None
+    combined = _with_sourcery_status(pr_id, combined)
+    if not isinstance(combined, dict):
+        return None
     return combined
 
 

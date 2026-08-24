@@ -723,6 +723,45 @@ class AuthorGateFixTests(unittest.TestCase):
                 self.assertEqual(coderabbit.call_count, int(service == "coderabbit"))
                 self.assertEqual(sourcery.call_count, int(service == "sourcery"))
 
+    def test_author_repair_denies_unavailable_coderabbit_enrichment(self):
+        candidate = stranded()
+        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(
+                 merge_pr, "_with_coderabbit_status", return_value=None,
+             ) as coderabbit, \
+             patch.object(merge_pr, "_with_sourcery_status") as sourcery, \
+             patch.object(
+                 merge_pr, "has_authoritative_assigned_review",
+             ) as authoritative:
+            self.assertFalse(fnw._author_can_repair_review(candidate))
+
+        coderabbit.assert_called_once_with(candidate["number"], evidence)
+        sourcery.assert_not_called()
+        authoritative.assert_not_called()
+
+    def test_author_repair_denies_unavailable_sourcery_enrichment(self):
+        candidate = stranded()
+        candidate["labels"] = [
+            label for label in candidate["labels"]
+            if not label["name"].startswith("review:")
+        ] + [{"name": "review:sourcery"}]
+        candidate["body"] = "Closes #2"
+        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
+             patch.object(
+                 merge_pr, "_with_sourcery_status", return_value=None,
+             ) as sourcery, \
+             patch.object(
+                 merge_pr, "has_authoritative_assigned_review",
+             ) as authoritative:
+            self.assertFalse(fnw._author_can_repair_review(candidate))
+
+        coderabbit.assert_not_called()
+        sourcery.assert_called_once_with(candidate["number"], evidence)
+        authoritative.assert_not_called()
+
     def test_missing_or_unsupported_service_is_not_author_fixable(self):
         # pr()/stranded() default to review:coderabbit whenever a caller omits
         # a review label, so the deny branch below needs an explicit opt-out

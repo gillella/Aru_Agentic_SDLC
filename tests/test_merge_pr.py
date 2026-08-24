@@ -1,4 +1,4 @@
-# line-ceiling: 5486
+# line-ceiling: 5560
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -946,6 +946,19 @@ class ReviewGateTests(unittest.TestCase):
             "checkSuite": {"app": {"slug": "coderabbitai"}},
         }]
 
+    @classmethod
+    def coderabbit_status_payload(cls, head):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": head,
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                "contexts": {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": cls.coderabbit_checkrun_status(),
+                },
+            }}}]},
+        }}}}
+
     def no_findings_full_review_evidence(
         self,
         *,
@@ -1376,6 +1389,33 @@ class ReviewGateTests(unittest.TestCase):
         self.assertEqual(merge_pr.review_service_for_issue(4), "coderabbit")
         self.assertEqual(merge_pr.assigned_review_service(pr), "coderabbit")
 
+    def test_authoritative_status_propagates_coderabbit_loader_failure(self):
+        evidence = {"github_review_evidence": True, "head_oid": "a" * 40}
+        with patch.object(
+            merge_pr, "_with_coderabbit_status", return_value=None,
+        ) as coderabbit, patch.object(
+            merge_pr, "_with_sourcery_status", return_value=evidence,
+        ) as sourcery:
+            result = merge_pr._with_authoritative_review_status(383, evidence)
+
+        self.assertIsNone(result)
+        coderabbit.assert_called_once_with(383, evidence)
+        sourcery.assert_not_called()
+
+    def test_authoritative_status_propagates_sourcery_loader_failure(self):
+        evidence = {"github_review_evidence": True, "head_oid": "a" * 40}
+        coderabbit_evidence = dict(evidence, coderabbit_status=[])
+        with patch.object(
+            merge_pr, "_with_coderabbit_status", return_value=coderabbit_evidence,
+        ) as coderabbit, patch.object(
+            merge_pr, "_with_sourcery_status", return_value=None,
+        ) as sourcery:
+            result = merge_pr._with_authoritative_review_status(383, evidence)
+
+        self.assertIsNone(result)
+        coderabbit.assert_called_once_with(383, evidence)
+        sourcery.assert_called_once_with(383, coderabbit_evidence)
+
     def test_sourcery_successful_assigned_head_check_passes(self):
         pr = labelled("author:agent-1", "review:sourcery")
         pr["statusCheckRollup"] = [{
@@ -1425,7 +1465,7 @@ class ReviewGateTests(unittest.TestCase):
             "status": "COMPLETED",
             "conclusion": "SUCCESS",
         }]
-        gh_json.return_value = {
+        sourcery_payload = {
             "total_count": 1,
             "check_runs": [{
                 "name": "Sourcery review",
@@ -1440,6 +1480,9 @@ class ReviewGateTests(unittest.TestCase):
                 }],
             }]
         }
+        gh_json.side_effect = [
+            self.coderabbit_status_payload(head), sourcery_payload,
+        ]
         evidence = merge_pr._with_authoritative_review_status(383, {
             "github_review_evidence": True,
             "head_oid": head,
@@ -1466,7 +1509,7 @@ class ReviewGateTests(unittest.TestCase):
             "status": "COMPLETED",
             "conclusion": "SUCCESS",
         }]
-        gh_json.return_value = {
+        sourcery_payload = {
             "total_count": 1,
             "check_runs": [{
                 "name": "Sourcery review",
@@ -1477,6 +1520,9 @@ class ReviewGateTests(unittest.TestCase):
                 "pull_requests": [{"number": 383, "head": {"sha": head}}],
             }]
         }
+        gh_json.side_effect = [
+            self.coderabbit_status_payload(head), sourcery_payload,
+        ]
         evidence = merge_pr._with_authoritative_review_status(383, {
             "github_review_evidence": True,
             "head_oid": head,
@@ -1503,7 +1549,10 @@ class ReviewGateTests(unittest.TestCase):
             "status": "COMPLETED",
             "conclusion": "SUCCESS",
         }]
-        gh_json.return_value = {"total_count": 0, "check_runs": []}
+        gh_json.side_effect = [
+            self.coderabbit_status_payload(head),
+            {"total_count": 0, "check_runs": []},
+        ]
         evidence = merge_pr._with_authoritative_review_status(383, {
             "github_review_evidence": True,
             "head_oid": head,
@@ -1525,7 +1574,7 @@ class ReviewGateTests(unittest.TestCase):
         pr = labelled("author:agent-1", "review:sourcery")
         pr.update({"number": 383, "headRefOid": head})
         # total_count exceeds the returned page: a blocking run may be hidden.
-        gh_json.return_value = {
+        sourcery_payload = {
             "total_count": 101,
             "check_runs": [{
                 "name": "Sourcery review",
@@ -1536,6 +1585,9 @@ class ReviewGateTests(unittest.TestCase):
                 "pull_requests": [{"number": 383, "head": {"sha": head}}],
             }],
         }
+        gh_json.side_effect = [
+            self.coderabbit_status_payload(head), sourcery_payload,
+        ]
         evidence = merge_pr._with_authoritative_review_status(383, {
             "github_review_evidence": True,
             "head_oid": head,
@@ -1608,6 +1660,28 @@ class ReviewGateTests(unittest.TestCase):
         ok, msg = merge_pr.check_reviews(pr, evidence)
         self.assertTrue(ok, msg)
         self.assertIn("CodeAnt", msg)
+
+    def test_codeant_exact_head_changes_requested_fails_closed(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "Blocking finding remains.",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {
+                "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        }
+
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+
+        self.assertFalse(ok)
+        self.assertIn("CodeAnt requested changes", msg)
 
     def test_codeant_empty_commented_review_fails_closed(self):
         pr = labelled("author:agent-1", "review:codeant")
