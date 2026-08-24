@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4577
+# line-ceiling: 4610
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1799,6 +1799,64 @@ def has_authoritative_coderabbit_review(pr, evidence):
     return _coderabbit_check(pr, evidence, review) is True
 
 
+def _sourcery_unique_match(rollup):
+    """Return the sole "Sourcery review" rollup entry, or False/None on ambiguity."""
+    matches = []
+    for item in rollup:
+        if not isinstance(item, dict):
+            return None
+        if str(item.get("name") or item.get("context") or "").strip().lower() == "sourcery review":
+            matches.append(item)
+    if len(matches) != 1:
+        return False
+    return matches[0]
+
+
+def _sourcery_linked_pr_matches(pr, expected_head, linked_prs):
+    """True when a linked PR entry attests the exact head (and base, if known)."""
+    expected_number = pr.get("number")
+    expected_base = pr.get("baseRefOid")
+    return any(
+        isinstance(linked, dict)
+        and (
+            not isinstance(expected_number, int)
+            or linked.get("number") == expected_number
+        )
+        and heads_match(expected_head, ((linked.get("head") or {}).get("sha")))
+        and (
+            not expected_base
+            or heads_match(expected_base, ((linked.get("base") or {}).get("sha")))
+        )
+        for linked in linked_prs
+    )
+
+
+def _sourcery_authoritative_match_valid(pr, evidence, match):
+    """Validate a commit-scoped REST check run against the exact PR head."""
+    slug = str(((match.get("app") or {}).get("slug")) or "").lower()
+    if slug not in SOURCERY_REST_APP_SLUGS:
+        return False
+    expected_head = (
+        (evidence.get("head_oid") if isinstance(evidence, dict) else None)
+        or pr.get("headRefOid")
+    )
+    if not heads_match(expected_head, match.get("head_sha")):
+        return False
+    linked_prs = match.get("pull_requests")
+    if not isinstance(linked_prs, list) or not linked_prs:
+        return False
+    return _sourcery_linked_pr_matches(pr, expected_head, linked_prs)
+
+
+def _sourcery_legacy_match_valid(match):
+    """Validate a rollup-sourced check run's app identity (no head binding available)."""
+    kind = match.get("__typename") or match.get("type")
+    if kind != "CheckRun":
+        return False
+    slug = str((((match.get("checkSuite") or {}).get("app") or {}).get("slug")) or "").lower()
+    return slug in SOURCERY_APP_SLUGS
+
+
 def _sourcery_check(pr, evidence):
     authoritative = evidence.get("sourcery_check_runs") if isinstance(evidence, dict) else None
     if (
@@ -1808,51 +1866,17 @@ def _sourcery_check(pr, evidence):
     ):
         return None
     rollup = authoritative if authoritative is not None else pr.get("statusCheckRollup") or []
-    matches = []
-    for item in rollup:
-        if not isinstance(item, dict):
-            return None
-        if str(item.get("name") or item.get("context") or "").strip().lower() == "sourcery review":
-            matches.append(item)
-    if len(matches) != 1:
+    match = _sourcery_unique_match(rollup)
+    if match is None:
+        return None
+    if match is False:
         return False
-    match = matches[0]
     if authoritative is not None:
-        slug = str(((match.get("app") or {}).get("slug")) or "").lower()
-        expected_head = (
-            (evidence.get("head_oid") if isinstance(evidence, dict) else None)
-            or pr.get("headRefOid")
-        )
-        if slug not in SOURCERY_REST_APP_SLUGS:
-            return False
-        if not heads_match(expected_head, match.get("head_sha")):
-            return False
-        linked_prs = match.get("pull_requests")
-        if not isinstance(linked_prs, list) or not linked_prs:
-            return False
-        expected_number = pr.get("number")
-        expected_base = pr.get("baseRefOid")
-        if not any(
-            isinstance(linked, dict)
-            and (
-                not isinstance(expected_number, int)
-                or linked.get("number") == expected_number
-            )
-            and heads_match(expected_head, ((linked.get("head") or {}).get("sha")))
-            and (
-                not expected_base
-                or heads_match(expected_base, ((linked.get("base") or {}).get("sha")))
-            )
-            for linked in linked_prs
-        ):
-            return False
+        valid = _sourcery_authoritative_match_valid(pr, evidence, match)
     else:
-        kind = match.get("__typename") or match.get("type")
-        if kind != "CheckRun":
-            return False
-        slug = str((((match.get("checkSuite") or {}).get("app") or {}).get("slug")) or "").lower()
-        if slug not in SOURCERY_APP_SLUGS:
-            return False
+        valid = _sourcery_legacy_match_valid(match)
+    if not valid:
+        return False
     if str(match.get("status") or "").upper() != "COMPLETED":
         return False
     return str(match.get("conclusion") or "").upper() == "SUCCESS"
