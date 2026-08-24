@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 441
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -33,11 +34,22 @@ from common import (
 )
 
 NEEDS_REVIEW_LABEL = "needs-review"
+REVIEW_SERVICES = ("coderabbit", "sourcery", "codeant")
+REVIEW_LABEL_PREFIX = "review:"
 
 # Kept explicit rather than free-form: a typo like "anthropc" would silently
 # make every PR look cross-family to the picker, which is the one failure mode
 # this label exists to prevent.
 MODEL_FAMILIES = ("anthropic", "openai", "google", "meta", "mistral", "xai", "human")
+
+
+def review_service_for_issue(issue_id: int) -> str:
+    """Stable approximately-even authority assignment for one issue number."""
+    return REVIEW_SERVICES[(issue_id - 1) % len(REVIEW_SERVICES)]
+
+
+def review_label_for_service(service: str) -> str:
+    return f"{REVIEW_LABEL_PREFIX}{service}"
 
 
 def collect_verification_evidence(
@@ -252,6 +264,45 @@ def enqueue_review(pr_ref: str) -> bool:
     return True
 
 
+def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:
+    """Assign exactly one review-pool service while the PR is still draft."""
+    service = review_service_for_issue(issue_id)
+    label = review_label_for_service(service)
+    ensure_label(label, "0e8a16", f"Authoritative review service: {service}")
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", pr_ref, "--add-label", label],
+        check=False,
+    )
+    if code != 0:
+        print(f"[ERROR] Could not apply {label}: {err.strip()}", file=sys.stderr)
+        return False
+    code, _, err = run_cmd(["gh", "pr", "ready", pr_ref], check=False)
+    if code != 0:
+        print(f"[ERROR] Could not mark PR ready after assigning {label}: {err.strip()}", file=sys.stderr)
+        return False
+    if service == "codeant":
+        code, _, err = run_cmd(
+            ["gh", "pr", "comment", pr_ref, "--body", "@codeant-ai: review"],
+            check=False,
+        )
+        if code != 0:
+            print(f"[ERROR] Could not trigger CodeAnt review: {err.strip()}", file=sys.stderr)
+            rollback_code, _, rollback_err = run_cmd(
+                ["gh", "pr", "ready", pr_ref, "--undo"],
+                check=False,
+            )
+            if rollback_code != 0:
+                print(
+                    f"[ERROR] Could not restore draft state: {rollback_err.strip()}",
+                    file=sys.stderr,
+                )
+            else:
+                print("[INFO] Restored draft state; CodeAnt finalization can be retried.")
+            return False
+    print(f"🔍 Assigned {label} and marked PR ready")
+    return True
+
+
 def create_pr(issue_id: int, title: str = "", body: str = "",
               agent: str = "", family: str = "",
               verification_commands: Optional[List[str]] = None) -> bool:
@@ -280,7 +331,10 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
     full_body = base_body + render_verification_evidence(evidence) + closure_footer
 
     print(f"Opening Pull Request for branch '{current_branch}' linking 'Closes #{issue_id}'...")
-    cmd = ["gh", "pr", "create", "--title", title, "--body", full_body, "--head", current_branch]
+    cmd = [
+        "gh", "pr", "create", "--draft",
+        "--title", title, "--body", full_body, "--head", current_branch,
+    ]
 
     code, out, err = run_cmd(cmd, check=False)
     if code != 0:
@@ -289,20 +343,18 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
 
     print(f"✅ Pull Request created successfully:\n{out}")
 
-    if agent or family:
-        # `gh pr create` prints the URL, which gh accepts anywhere a PR number
-        # would do. Falling back to the branch keeps this working if the output
-        # format ever changes.
-        pr_ref = out.strip().splitlines()[-1].strip() if out.strip() else current_branch
-        # Reported as failure even though the PR opened: an unstamped PR is a
-        # hole in the review gate, and a zero exit here would let a caller
-        # move on believing the identity landed.
-        if not apply_identity(pr_ref, agent, family):
-            return False
-        enqueue_review(pr_ref)
-        return True
-
-    return True
+    # `gh pr create` prints the URL, which gh accepts anywhere a PR number
+    # would do. Falling back to the branch keeps this working if the output
+    # format ever changes.
+    pr_ref = out.strip().splitlines()[-1].strip() if out.strip() else current_branch
+    # Reported as failure even though the PR opened: an unstamped PR is a
+    # hole in the review gate, and a zero exit here would let a caller
+    # move on believing the identity landed. Every created PR is finalized,
+    # even with empty agent/family, so it always gets its authoritative
+    # review-service label and leaves draft state.
+    if not apply_identity(pr_ref, agent, family):
+        return False
+    return finalize_review_assignment(pr_ref, issue_id)
 
 
 def main():

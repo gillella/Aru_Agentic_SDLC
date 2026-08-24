@@ -125,9 +125,9 @@ worktree, PR, review, merge, and cleanup. Other installed frameworks may help
 with a step, but their session-resume files, brainstorming flows, memory, or PR
 bots cannot replace board state or start a competing lifecycle.
 
-After CodeRabbit completes a substantive review on the exact current head and
-all Definition-of-Done checks pass, any factory agent, including the implementation
-author, may execute the mechanical merge only through
+After the assigned review-pool service supplies authoritative exact-head
+evidence and all Definition-of-Done checks pass, any factory agent, including
+the implementation author, may execute the mechanical merge only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID> --expected-head <HEAD_SHA>`
 when the picker supplied `head_sha`. Direct pushes and
 ad-hoc merge commands have no merge authority. Coding agents never review.
@@ -136,7 +136,7 @@ merge conflict or merge/close-out failure remains unsafe or impossible for
 agents to resolve through governed remediation; risk category, diff size, and
 review-round count alone never require human participation.
 
-CodeRabbit review does not authorize real-money execution, production cutover,
+Assigned-service review does not authorize real-money execution, production cutover,
 destructive migrations, credential use, or external-account mutations. Those
 existing human operational gates remain separate.
 
@@ -200,17 +200,22 @@ intact. Every finding must be disposed of in one of two ways:
 
 Two consequences worth knowing before you hit them:
 
-- **Pushing after CodeRabbit review invalidates it.** The review attests to the commit it
+- **Pushing after assigned-service review invalidates it.** The review or check
+  attests to the commit it
   was submitted against, so once head moves nobody has reviewed what would
   merge. Re-review the current commit.
 - **The audit line records which signal let the PR through** — reviewed at
   head, no unresolved threads, and how many findings were withdrawn rather
   than fixed — so a later reader can reconstruct why.
 
-CodeRabbit is the sole code-review authority. Its identity, completed status,
-substantive review, current-head binding, and thread state are read from
-authoritative GitHub data. Missing, pending, failed, rate-limited, stale,
-ambiguous, or spoofed evidence blocks. Legacy `reviewer:` / `reviewed-by:`
+The assigned review-pool service is the sole code-review authority for a given
+PR. CodeRabbit keeps its current exact-head contract. Sourcery requires a
+successful head-bound `Sourcery review` check and zero Sourcery unresolved
+threads. CodeAnt requires an authoritative exact-head `codeant-ai` review
+object and zero CodeAnt unresolved threads. Identity, completed status,
+current-head binding, and assigned-service thread state are read from
+authoritative GitHub data. Missing, pending, failed, skipped, stale, ambiguous,
+duplicated, or spoofed evidence blocks. Legacy `reviewer:` / `reviewed-by:`
 coding-agent state is non-authoritative and must not be re-dispatched.
 
 ---

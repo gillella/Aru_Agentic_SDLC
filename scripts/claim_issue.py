@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1424
+# line-ceiling: 1425
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.
@@ -669,8 +669,9 @@ def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
 def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
     """Reject retired coding-agent review claims."""
     print(
-        "[CONFLICT] CodeRabbit is the sole PR code-review authority; coding "
-        "agents may implement or remediate findings but cannot claim review.",
+        "[CONFLICT] The assigned review-pool service is the sole PR code-review "
+        "authority; coding agents may implement or remediate findings but "
+        "cannot claim review.",
         file=sys.stderr,
     )
     return EXIT_CONFLICT

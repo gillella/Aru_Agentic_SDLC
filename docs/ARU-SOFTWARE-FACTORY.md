@@ -1,12 +1,13 @@
 # Aru Software Factory — Build Plan
 
-> **Current review policy (Issue #373):** CodeRabbit is the sole PR code-review
-> authority. Coding-agent `reviewer:` / `reviewed-by:` workflows described in
-> historical sections below are retired and cannot satisfy the merge gate.
-> Claude, Codex, Cursor, and Antigravity implement, remediate, and mechanically
-> merge only through the governed `merge_pr.py` helper after CodeRabbit
-> completes a substantive exact-head review and every enforced gate passes;
-> they never review.
+> **Current review policy (Issue #382, 2026-08-24):** each ordinary PR is
+> deterministically assigned exactly one review oracle via
+> `review:coderabbit`, `review:sourcery`, or `review:codeant`. Coding-agent
+> `reviewer:` / `reviewed-by:` workflows described in historical sections below
+> are retired and cannot satisfy the merge gate. Claude, Codex, Cursor, and
+> Antigravity implement, remediate, and mechanically merge only through the
+> governed `merge_pr.py` helper after the assigned service supplies
+> authoritative exact-head evidence and every enforced gate passes; they never review.
 
 **Goal:** idea → deployed software through an autonomous governed loop, with
 operator visibility and exceptional human intervention only for an unresolved
@@ -206,11 +207,11 @@ reported as unavailable rather than converted into a false cost claim.
 
 ## 4. The operator visibility and intervention interface
 
-The factory proceeds autonomously through planning, CodeRabbit review, agent
-remediation, and mechanical merge. Money, PII, security, schema, migration,
-diff size, and review-round count increase the evidence required but do not
-create human review or merge gates. Product intent still belongs in issue
-acceptance criteria; if a required decision is absent, agents record the
+The factory proceeds autonomously through planning, assigned-service review,
+agent remediation, and mechanical merge. Money, PII, security, schema,
+migration, diff size, and review-round count increase the evidence required but
+do not create human review or merge gates. Product intent still belongs in
+issue acceptance criteria; if a required decision is absent, agents record the
 options and keep the requirement blocked rather than inventing it.
 
 ### 4.1 The one mandatory human intervention
@@ -236,14 +237,14 @@ operator screen (#106–#108). They expose:
 
 ### 4.3 The operating principle
 
-> **The issue defines direction. CodeRabbit reviews. The gated helper
-> merges. Human intervention is the last resort for an unresolved severe merge
-> or close-out failure.**
+> **The issue defines direction. The assigned review-pool service reviews. The
+> gated helper merges. Human intervention is the last resort for an unresolved
+> severe merge or close-out failure.**
 
 Every proposed automation should be tested against it. There is no separate
 coding-agent review lane: implementation/remediation agents fix findings, and
-CodeRabbit is the reviewer of record. A risk label, large diff, repeated
-review, or tool preference is not a human gate.
+the assigned review-pool service is the reviewer of record. A risk label, large
+diff, repeated review, or tool preference is not a human gate.
 
 ---
 

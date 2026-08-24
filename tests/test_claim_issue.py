@@ -1,4 +1,4 @@
-# line-ceiling: 960
+# line-ceiling: 965
 import json
 import sys
 import tempfile
@@ -891,6 +891,12 @@ class DummyRecord:
 
 
 class ClaimIssueTests(unittest.TestCase):
+    def test_review_claim_conflict_message_references_review_pool(self):
+        with patch("sys.stderr") as stderr:
+            code = claim_issue.claim_review(17, "codex-review-pool")
+        self.assertEqual(code, claim_issue.EXIT_CONFLICT)
+        self.assertIn("review-pool", "".join(call.args[0] for call in stderr.write.call_args_list).lower())
+
     def test_absent_agent_reduced_reap_threshold(self):
         store = DummyPresenceStore(records={})
         hours, reason = claim_issue._effective_reap_threshold("absent-agent", 4, store=store)

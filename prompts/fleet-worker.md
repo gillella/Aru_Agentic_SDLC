@@ -6,10 +6,12 @@ task owns repeat, waiting, retry, and termination. It repeatedly asks the board
 what to do, completes or safely hands off one unit, and asks again. GitHub
 remains the only shared work queue.
 
-Agents implement issues, remediate CI or CodeRabbit findings, and mechanically
-merge PRs whose Definition-of-Done gates pass. **CodeRabbit is the sole PR
-code-review authority.** Coding agents never review, claim, perform, or
-receive review work. Missing or blocked CodeRabbit review has no coding-agent
+Agents implement issues, remediate CI or assigned-service review findings, and
+mechanically merge PRs whose Definition-of-Done gates pass. **The assigned
+review-pool service is the sole PR code-review authority for a given PR.**
+`create_pr.py` assigns exactly one of `review:coderabbit`, `review:sourcery`,
+or `review:codeant`. Coding agents never review, claim, perform, or receive
+review work. Missing or blocked assigned-service review has no coding-agent
 fallback.
 
 ## Start in a desktop application
@@ -217,14 +219,21 @@ gate. Your claim is `merger:<AGENT_ID>` (already applied when `--claim` ran).
    success.
 
 Any factory agent, including the implementation author, may perform this
-mechanical merge once the exact-current-head CodeRabbit oracle and every other
-Definition-of-Done gate pass.
+mechanical merge once the assigned exact-current-head review-pool oracle and
+every other Definition-of-Done gate pass.
 
 ---
 
 #### C. `review` — forbidden for coding agents
 
-The picker must never emit this work type. CodeRabbit is the sole PR code-review authority. If legacy state or a caller supplies `work.type=review` after `--claim`, do not inspect or review the PR; release this agent's legacy reviewer claim with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent <AGENT_ID> --release`, then return to the picker. Route existing CodeRabbit findings to the author or adopted remediator with `address-pr-feedback`. Missing, pending, failed, rate-limited, stale, ambiguous, or spoofed CodeRabbit evidence remains blocked.
+The picker must never emit this work type. The assigned review-pool service is
+the sole PR code-review authority. If legacy state or a caller supplies
+`work.type=review` after `--claim`, do not inspect or review the PR; release
+this agent's legacy reviewer claim with
+`python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent <AGENT_ID> --release`,
+then return to the picker. Route existing assigned-service findings to the
+author or adopted remediator with `address-pr-feedback`. Missing, pending,
+failed, stale, ambiguous, or spoofed assigned-service evidence remains blocked.
 
 ---
 
@@ -301,7 +310,8 @@ below. Never collapse research into this implementation branch.
    take new work while the PR stays conflict-protected. The `agent:<id>` label
    remains only as a legacy authorship backstop until Done; `author:<id>` is the
    PR's authoritative attribution.
-   Do not review. CodeRabbit owns review; route its findings back through
+   Do not review. The assigned review-pool service owns review; route its
+   findings back through
    `address-pr-feedback`. Once all gates pass, any factory agent, including the
    implementation author, may perform the mechanical merge through
    `merge_pr.py`. Loop.
@@ -319,13 +329,15 @@ corrupts someone else's work, not just yours.
    this on every PR regardless of which tool you are.
 2. **Never touch shared spine files** — `AGENTS.md`, `PROJECT-PLAN.md`,
    `pyproject.toml`, `.github/workflows/*` — unless your issue names them.
-3. **Coding agents never review.** CodeRabbit alone reviews. Never remove
+3. **Coding agents never review.** The assigned review-pool service alone
+   reviews. Never remove
    another agent's `agent:*` or `author:*` label or change another agent's
    issue status.
 4. **Never commit to `main`**, never force-push a branch that is not yours.
 5. **One work item at a time.** Finish or release before asking for more.
 6. **Never merge directly.** Only `merge_pr.py` has merge authority, and only
-   after CodeRabbit's exact-current-head review and every enforced gate pass.
+   after the assigned service's exact-current-head evidence and every enforced
+   gate pass.
 7. **Report failures honestly.** If tests fail, say so with the output. Never
    claim a verification you did not run.
 8. **Never use GitHub MCP for lifecycle mutations.** Claims, labels, board

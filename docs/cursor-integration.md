@@ -116,7 +116,7 @@ All four agents auto-discover the symlinked skills. The installer links:
 - `implement-next-issue`
 - `init-agent-project`
 - `create-github-issue`
-- `code-review` (policy refusal; CodeRabbit alone reviews)
+- `code-review` (policy refusal; the assigned review-pool service alone reviews)
 - `remediate-ci-failure`
 - `address-pr-feedback`
 
@@ -124,8 +124,8 @@ The canonical entry phrase is **`aru code`** (synonyms `software` / `dev` /
 `sdlc`); `aru video` / `aru poem` are reserved for factories not yet built —
 stop rather than improvising from Code Factory skills. In a new chat,
 **`aru code`** (or `/continue`) is loop mode: recover from the board, then
-pick feedback → merge → issue. CodeRabbit review is external evidence, not a
-coding-agent queue stage. Do not route bare "continue" to
+pick feedback → merge → issue; assigned-service review is external evidence,
+not a coding-agent queue stage. Do not route bare "continue" to
 `implement-next-issue`; that skips review and merge.
 
 Agents must **read** the matching `SKILL.md` before acting. Scripts are

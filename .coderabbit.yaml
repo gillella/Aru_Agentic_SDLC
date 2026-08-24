@@ -19,6 +19,11 @@
 inheritance: true
 
 reviews:
+  auto_review:
+    enabled: true
+    drafts: false
+    labels:
+      - review:coderabbit
   path_instructions:
     - path: "AGENTS.md"
       instructions: |

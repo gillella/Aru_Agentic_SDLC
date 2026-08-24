@@ -1,4 +1,4 @@
-# line-ceiling: 5100
+# line-ceiling: 5560
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -168,15 +168,46 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         }}}}
 
     @staticmethod
-    def thread_page(head="head123"):
+    def thread_page(head="head123", nodes=None):
         return {"data": {"repository": {"pullRequest": {
             "headRefOid": head,
             "commits": {"nodes": []},
             "reviewThreads": {
-                "nodes": [],
+                "nodes": [] if nodes is None else nodes,
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
             },
         }}}}
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_unattributed_active_thread_fails_closed(self, gh_json, _slug):
+        malformed_comments = (
+            [],
+            [{"createdAt": "2026-08-24T01:00:00Z", "body": "finding", "author": None}],
+            [{
+                "createdAt": "2026-08-24T01:00:00Z",
+                "body": "finding",
+                "author": "malformed",
+            }],
+            [{
+                "createdAt": "2026-08-24T01:00:00Z",
+                "body": "finding",
+                "author": {"login": "", "__typename": "Bot"},
+            }],
+        )
+        for comments in malformed_comments:
+            with self.subTest(comments=comments):
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.side_effect = [
+                    self.review_page(),
+                    self.attestation_page(),
+                    self.thread_page(nodes=[{
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "comments": {"nodes": comments},
+                    }]),
+                ]
+                self.assertIsNone(merge_pr.review_evidence(162))
 
     @staticmethod
     def attestation_page(head="head123", nodes=None, has_next=False, cursor=None):
@@ -915,6 +946,19 @@ class ReviewGateTests(unittest.TestCase):
             "checkSuite": {"app": {"slug": "coderabbitai"}},
         }]
 
+    @classmethod
+    def coderabbit_status_payload(cls, head):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": head,
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                "contexts": {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": cls.coderabbit_checkrun_status(),
+                },
+            }}}]},
+        }}}}
+
     def no_findings_full_review_evidence(
         self,
         *,
@@ -1292,6 +1336,436 @@ class ReviewGateTests(unittest.TestCase):
         evidence["github_review_evidence"] = True
         self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
 
+    def test_missing_assigned_review_service_label_fails_closed(self):
+        pr = {
+            "author": {"login": "gillella"},
+            "reviews": [{
+                "id": "default-review",
+                "state": "APPROVED",
+                "submittedAt": "2026-01-01T00:00:00Z",
+                "author": {"login": "gillella"},
+            }],
+            "labels": [{"name": "author:agent-1"}],
+            "statusCheckRollup": [{
+                "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
+            }],
+        }
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertFalse(ok)
+        self.assertIn("review:", msg)
+
+    def test_duplicate_assigned_review_service_labels_fail_closed(self):
+        pr = self.coderabbit_pr("author:agent-1", "review:coderabbit", "review:sourcery")
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertFalse(ok)
+        self.assertIn("exactly one", msg)
+
+    def test_no_linked_issue_fails_closed(self):
+        """A review: label with no 'Closes #N' has nothing to recompute from."""
+        pr = self.coderabbit_pr("author:agent-1")
+        pr["body"] = "No issue link here."
+        self.assertIsNone(merge_pr.assigned_review_service(pr))
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertFalse(ok)
+        self.assertIn("review:", msg)
+
+    def test_mixed_service_multi_issue_pr_fails_closed(self):
+        """Issue #1 resolves to coderabbit, #2 resolves to sourcery: no single
+        service can be trusted, so the review:coderabbit label must be rejected
+        rather than letting the first issue silently pick the evidence path."""
+        pr = self.coderabbit_pr("author:agent-1")
+        pr["body"] = "Closes #1\nCloses #2"
+        self.assertEqual(merge_pr.review_service_for_issue(1), "coderabbit")
+        self.assertEqual(merge_pr.review_service_for_issue(2), "sourcery")
+        self.assertIsNone(merge_pr.assigned_review_service(pr))
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertFalse(ok)
+        self.assertIn("review:", msg)
+
+    def test_multi_issue_pr_agreeing_on_one_service_resolves(self):
+        """Issues #1 and #4 both recompute to coderabbit, so the label stands."""
+        pr = self.coderabbit_pr("author:agent-1")
+        pr["body"] = "Closes #1\nCloses #4"
+        self.assertEqual(merge_pr.review_service_for_issue(4), "coderabbit")
+        self.assertEqual(merge_pr.assigned_review_service(pr), "coderabbit")
+
+    def test_authoritative_status_propagates_coderabbit_loader_failure(self):
+        evidence = {"github_review_evidence": True, "head_oid": "a" * 40}
+        with patch.object(
+            merge_pr, "_with_coderabbit_status", return_value=None,
+        ) as coderabbit, patch.object(
+            merge_pr, "_with_sourcery_status", return_value=evidence,
+        ) as sourcery:
+            result = merge_pr._with_authoritative_review_status(383, evidence)
+
+        self.assertIsNone(result)
+        coderabbit.assert_called_once_with(383, evidence)
+        sourcery.assert_not_called()
+
+    def test_authoritative_status_propagates_sourcery_loader_failure(self):
+        evidence = {"github_review_evidence": True, "head_oid": "a" * 40}
+        coderabbit_evidence = dict(evidence, coderabbit_status=[])
+        with patch.object(
+            merge_pr, "_with_coderabbit_status", return_value=coderabbit_evidence,
+        ) as coderabbit, patch.object(
+            merge_pr, "_with_sourcery_status", return_value=None,
+        ) as sourcery:
+            result = merge_pr._with_authoritative_review_status(383, evidence)
+
+        self.assertIsNone(result)
+        coderabbit.assert_called_once_with(383, evidence)
+        sourcery.assert_called_once_with(383, coderabbit_evidence)
+
+    def test_sourcery_successful_assigned_head_check_passes(self):
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "sourcery"}},
+        }]
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [],
+            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        })
+        self.assertTrue(ok, msg)
+        self.assertIn("Sourcery", msg)
+
+    def test_sourcery_failed_or_spoofed_check_fails_closed(self):
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "spoofed-app"}},
+        }]
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [],
+            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        })
+        self.assertFalse(ok)
+        self.assertIn("Sourcery", msg)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_sourcery_live_evidence_requires_exact_head_bound_check_run(
+        self, gh_json, _slug
+    ):
+        head = "a" * 40
+        base = "b" * 40
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr.update({"number": 383, "headRefOid": head, "baseRefOid": base})
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }]
+        sourcery_payload = {
+            "total_count": 1,
+            "check_runs": [{
+                "name": "Sourcery review",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": head,
+                "app": {"slug": "sourcery-ai"},
+                "pull_requests": [{
+                    "number": 383,
+                    "head": {"sha": head},
+                    "base": {"sha": base},
+                }],
+            }]
+        }
+        gh_json.side_effect = [
+            self.coderabbit_status_payload(head), sourcery_payload,
+        ]
+        evidence = merge_pr._with_authoritative_review_status(383, {
+            "github_review_evidence": True,
+            "head_oid": head,
+            "reviews": [],
+            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        })
+
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+
+        self.assertTrue(ok, msg)
+        self.assertIn("Sourcery", msg)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_sourcery_live_evidence_fails_closed_when_check_run_head_is_stale(
+        self, gh_json, _slug
+    ):
+        head = "a" * 40
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr.update({"number": 383, "headRefOid": head})
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }]
+        sourcery_payload = {
+            "total_count": 1,
+            "check_runs": [{
+                "name": "Sourcery review",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": "c" * 40,
+                "app": {"slug": "sourcery-ai"},
+                "pull_requests": [{"number": 383, "head": {"sha": head}}],
+            }]
+        }
+        gh_json.side_effect = [
+            self.coderabbit_status_payload(head), sourcery_payload,
+        ]
+        evidence = merge_pr._with_authoritative_review_status(383, {
+            "github_review_evidence": True,
+            "head_oid": head,
+            "reviews": [],
+            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        })
+
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+
+        self.assertFalse(ok)
+        self.assertIn("Sourcery", msg)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_sourcery_live_evidence_fails_closed_when_head_binding_is_missing(
+        self, gh_json, _slug
+    ):
+        head = "a" * 40
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr.update({"number": 383, "headRefOid": head})
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }]
+        gh_json.side_effect = [
+            self.coderabbit_status_payload(head),
+            {"total_count": 0, "check_runs": []},
+        ]
+        evidence = merge_pr._with_authoritative_review_status(383, {
+            "github_review_evidence": True,
+            "head_oid": head,
+            "reviews": [],
+            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        })
+
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+
+        self.assertFalse(ok)
+        self.assertIn("Sourcery", msg)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_sourcery_live_evidence_fails_closed_when_check_runs_are_truncated(
+        self, gh_json, _slug
+    ):
+        head = "a" * 40
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr.update({"number": 383, "headRefOid": head})
+        # total_count exceeds the returned page: a blocking run may be hidden.
+        sourcery_payload = {
+            "total_count": 101,
+            "check_runs": [{
+                "name": "Sourcery review",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": head,
+                "app": {"slug": "sourcery-ai"},
+                "pull_requests": [{"number": 383, "head": {"sha": head}}],
+            }],
+        }
+        gh_json.side_effect = [
+            self.coderabbit_status_payload(head), sourcery_payload,
+        ]
+        evidence = merge_pr._with_authoritative_review_status(383, {
+            "github_review_evidence": True,
+            "head_oid": head,
+            "reviews": [],
+            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        })
+
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+
+        self.assertFalse(ok)
+        self.assertIn("Sourcery", msg)
+
+    def test_sourcery_cannot_pass_over_human_changes_requested(self):
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "sourcery"}},
+        }]
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "human-block", "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "author": {"login": "human-reviewer", "__typename": "User"},
+            }],
+            "service_threads": {
+                "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        })
+        self.assertFalse(ok)
+        self.assertIn("requested changes", msg)
+
+    def test_sourcery_cannot_pass_over_aggregate_unfixed_blocker(self):
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "sourcery"}},
+        }]
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [],
+            "unfixed": 1,
+            "service_threads": {
+                "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        })
+        self.assertFalse(ok)
+        self.assertIn("resolved thread(s) have no evidence", msg)
+
+    def test_codeant_exact_head_review_and_zero_threads_passes(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "CodeAnt findings.",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        }
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeAnt", msg)
+
+    def test_codeant_exact_head_changes_requested_fails_closed(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "Blocking finding remains.",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {
+                "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        }
+
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+
+        self.assertFalse(ok)
+        self.assertIn("CodeAnt requested changes", msg)
+
+    def test_codeant_empty_commented_review_fails_closed(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "   ",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        }
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeAnt", msg)
+
+    def test_codeant_stale_review_fails_closed(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "b" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "CodeAnt findings.",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        }
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeAnt", msg)
+
+    def test_codeant_spoofed_review_fails_closed(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "CodeAnt findings.",
+                "author": {"login": "not-codeant", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        }
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeAnt", msg)
+
+    def test_codeant_cannot_pass_over_human_changes_requested(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "human-block", "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "author": {"login": "human-reviewer", "__typename": "User"},
+            }],
+            "service_threads": {
+                "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        })
+        self.assertFalse(ok)
+        self.assertIn("requested changes", msg)
+
+    def test_codeant_cannot_pass_over_aggregate_unfixed_blocker(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [],
+            "unfixed": 1,
+            "service_threads": {
+                "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        })
+        self.assertFalse(ok)
+        self.assertIn("resolved thread(s) have no evidence", msg)
+
 
 class CodeRabbitStatusEvidenceTests(unittest.TestCase):
     @patch.object(merge_pr, "_gh_json")
@@ -1369,7 +1843,18 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
 
 
 def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella"):
-    """A PR whose default reviews come from the same GitHub account."""
+    """A PR whose default reviews come from the same GitHub account.
+
+    The body links whichever issue number recomputes to the review: label in
+    ``names`` (or the default review:coderabbit), so assigned_review_service's
+    fail-closed "every linked issue must resolve to the label" check accepts
+    the fixture the way a real PR created by create_pr.py would.
+    """
+    labels = list(names)
+    if not any(name.startswith("review:") for name in labels):
+        labels.append("review:coderabbit")
+    service = next(name.split(":", 1)[1] for name in labels if name.startswith("review:"))
+    issue_num = next(n for n in range(1, 4) if merge_pr.review_service_for_issue(n) == service)
     default = [{
         "id": "default-review",
         "state": "APPROVED",
@@ -1379,7 +1864,8 @@ def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella")
     return {
         "author": {"login": pr_login},
         "reviews": reviews if reviews is not None else default,
-        "labels": [{"name": n} for n in names],
+        "labels": [{"name": n} for n in labels],
+        "body": f"Closes #{issue_num}",
     }
 
 
@@ -2664,7 +3150,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
                 "author": {"login": "peer"},
             }],
             "author": {"login": "author"},
-            "labels": [{"name": "author:agent-1"}],
+            "labels": [{"name": "author:agent-1"}, {"name": "review:coderabbit"}],
             "mergeStateStatus": "CLEAN",
             "mergeable": "MERGEABLE",
             "additions": 2,
@@ -2723,7 +3209,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
                 "author": {"login": "peer"},
             }],
             "author": {"login": "author"},
-            "labels": [{"name": "author:agent-1"}],
+            "labels": [{"name": "author:agent-1"}, {"name": "review:coderabbit"}],
             "mergeStateStatus": "CLEAN",
             "mergeable": "MERGEABLE",
             "additions": 2,
@@ -4527,10 +5013,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                         "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
                         "reviewThreads": {
                             "nodes": [
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1"}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2"}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3"}]}},
-                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
                             ],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
@@ -4571,10 +5057,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                         },
                         "reviewThreads": {
                             "nodes": [
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1"}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2"}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3"}]}},
-                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
                             ],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },

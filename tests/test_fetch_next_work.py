@@ -21,6 +21,9 @@ def ts(minutes_ago):
 
 def pr(number, *labels, draft=False, checks="green", reviews=0, minutes_old=5,
        decision="", title="a pr"):
+    labels = list(labels)
+    if not any(label.startswith("review:") for label in labels):
+        labels.append("review:coderabbit")
     rollup = {
         "green": [{"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"}],
         "red": [{"name": "verify", "status": "COMPLETED", "conclusion": "FAILURE"}],
@@ -154,7 +157,7 @@ class EligibilityTests(unittest.TestCase):
     def test_coding_agents_are_never_eligible_for_review(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic"))
         self.assertFalse(verdict["eligible"])
-        self.assertIn("CodeRabbit", verdict["reason"])
+        self.assertIn("review-pool", verdict["reason"])
 
     def test_picker_json_top_level_agent_is_resolved_identity(self):
         parts = {
@@ -610,7 +613,7 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_resolved_threads_are_author_fixable(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=True):
             found = self.fix(stranded(), reason="unmet: review")
         self.assertIsNotNone(found)
@@ -624,7 +627,7 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_threads_plus_rebase_are_both_author_work(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 1, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=True):
             found = self.fix(stranded(), reason="unmet: rebased, review")
         self.assertEqual(found["unmet_gates"], ["rebased", "review-evidence"])
@@ -632,24 +635,153 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_without_current_head_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": False}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=False):
             self.assertIsNone(self.fix(stranded(), reason="unmet: review"))
 
     def test_unfixed_without_peer_attribution_is_author_fixable_with_coderabbit(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=True):
             found = self.fix(stranded(peer=None), reason="unmet: review")
         self.assertEqual(found["unmet_gates"], ["review-evidence"])
 
+    def test_outdated_unfixed_thread_stays_a_peer_gate_even_with_unfixed(self):
+        with patch.object(fnw, "review_evidence",
+                          return_value={
+                              "unresolved": 0, "unfixed": 2,
+                              "outdated_unfixed": 1, "reviewed_head": True,
+                          }), \
+             patch.object(merge_pr, "has_authoritative_assigned_review",
+                          return_value=True):
+            self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
+
     def test_unfixed_without_authoritative_coderabbit_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=False):
             self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
+
+    def test_unfixed_with_assigned_codeant_review_is_author_fixable(self):
+        candidate = stranded(peer=None)
+        candidate["labels"] = [
+            label for label in candidate["labels"]
+            if label["name"] != "review:coderabbit"
+        ] + [{"name": "review:codeant"}]
+        # This fixture's default "Closes #1" only matches the deterministic
+        # coderabbit assignment; point it at an issue number that
+        # deterministically maps to codeant so the label-vs-issue cross-check
+        # in assigned_review_service still validates the relabel above.
+        candidate["body"] = "Closes #3"
+        evidence = {
+            "unresolved": 0,
+            "unfixed": 2,
+            "reviewed_head": True,
+            "github_review_evidence": True,
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "CodeAnt findings.",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 2, "outdated_unfixed": 0}},
+        }
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(merge_pr, "_with_coderabbit_status", return_value=None) as coderabbit:
+            found = self.fix(candidate, reason="unmet: review")
+        self.assertEqual(found["unmet_gates"], ["review-evidence"])
+        coderabbit.assert_not_called()
+
+    def test_author_repair_enriches_only_the_assigned_service(self):
+        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        # review_service_for_issue((n - 1) % 3) maps issue 1/2/3 deterministically
+        # onto coderabbit/sourcery/codeant.
+        issue_for_service = {"coderabbit": 1, "sourcery": 2, "codeant": 3}
+        for service in ("coderabbit", "sourcery", "codeant"):
+            candidate = stranded()
+            candidate["labels"] = [
+                label for label in candidate["labels"]
+                if not label["name"].startswith("review:")
+            ] + [{"name": f"review:{service}"}]
+            # This fixture's default "Closes #1" only matches the
+            # deterministic coderabbit assignment; point it at the issue
+            # number that maps to each tested service so the label-vs-issue
+            # cross-check in assigned_review_service still validates the
+            # relabel above.
+            candidate["body"] = f"Closes #{issue_for_service[service]}"
+            with self.subTest(service=service), \
+                 patch.object(fnw, "review_evidence", return_value=evidence), \
+                 patch.object(merge_pr, "_with_coderabbit_status", return_value=evidence) as coderabbit, \
+                 patch.object(merge_pr, "_with_sourcery_status", return_value=evidence) as sourcery, \
+                 patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True):
+                self.assertTrue(fnw._author_can_repair_review(candidate))
+                self.assertEqual(coderabbit.call_count, int(service == "coderabbit"))
+                self.assertEqual(sourcery.call_count, int(service == "sourcery"))
+
+    def test_author_repair_denies_unavailable_coderabbit_enrichment(self):
+        candidate = stranded()
+        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(
+                 merge_pr, "_with_coderabbit_status", return_value=None,
+             ) as coderabbit, \
+             patch.object(merge_pr, "_with_sourcery_status") as sourcery, \
+             patch.object(
+                 merge_pr, "has_authoritative_assigned_review",
+             ) as authoritative:
+            self.assertFalse(fnw._author_can_repair_review(candidate))
+
+        coderabbit.assert_called_once_with(candidate["number"], evidence)
+        sourcery.assert_not_called()
+        authoritative.assert_not_called()
+
+    def test_author_repair_denies_unavailable_sourcery_enrichment(self):
+        candidate = stranded()
+        candidate["labels"] = [
+            label for label in candidate["labels"]
+            if not label["name"].startswith("review:")
+        ] + [{"name": "review:sourcery"}]
+        candidate["body"] = "Closes #2"
+        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
+             patch.object(
+                 merge_pr, "_with_sourcery_status", return_value=None,
+             ) as sourcery, \
+             patch.object(
+                 merge_pr, "has_authoritative_assigned_review",
+             ) as authoritative:
+            self.assertFalse(fnw._author_can_repair_review(candidate))
+
+        coderabbit.assert_not_called()
+        sourcery.assert_called_once_with(candidate["number"], evidence)
+        authoritative.assert_not_called()
+
+    def test_missing_or_unsupported_service_is_not_author_fixable(self):
+        # pr()/stranded() default to review:coderabbit whenever a caller omits
+        # a review label, so the deny branch below needs an explicit opt-out
+        # to exercise "no assigned service" rather than always landing on the
+        # allowed coderabbit path.
+        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        for labels in ([], [{"name": "review:unknown-bot"}]):
+            with self.subTest(labels=labels):
+                candidate = stranded()
+                candidate["labels"] = [
+                    label for label in candidate["labels"]
+                    if not label["name"].startswith("review:")
+                ] + labels
+                candidate["body"] = ""
+                with patch.object(fnw, "review_evidence", return_value=evidence), \
+                     patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
+                     patch.object(merge_pr, "_with_sourcery_status") as sourcery:
+                    self.assertFalse(fnw._author_can_repair_review(candidate))
+                coderabbit.assert_not_called()
+                sourcery.assert_not_called()
 
     def test_retired_reviewer_claim_does_not_block_merge(self):
         candidate = stranded(peer=None)
