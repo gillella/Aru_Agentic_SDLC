@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# line-ceiling: 600
+# line-ceiling: 680
 """Audit provider-neutral review-service capacity snapshots without mutation."""
 
 import argparse
+import fcntl
 import json
 import os
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -383,6 +386,50 @@ def load_unavailability_snapshot(path=None):
     return payload
 
 
+@contextmanager
+def _ledger_lock(target):
+    """Serialize load-and-append on the shared ledger across processes.
+
+    The ledger is deliberately shared by every governed checkout on the
+    machine, so two repositories recording capacity events at the same moment
+    is the normal case, not a corner case. Without a lock both read the same
+    entries and the later writer's full-file rewrite silently drops the
+    earlier append -- losing exactly the cross-repository evidence the ledger
+    exists to carry. The lock file is separate from the ledger so that the
+    atomic replace below never invalidates the held descriptor.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_name(target.name + ".lock")
+    with open(lock_path, "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _write_ledger_atomically(target, payload):
+    """Replace the ledger in one step, never leaving a partial file behind.
+
+    load_unavailability_snapshot() treats a corrupt ledger as "no evidence",
+    so a torn write would not fail loudly -- it would quietly stop excluding
+    every unavailable service. os.replace() is atomic within a filesystem, so
+    a concurrent reader sees either the old ledger or the new one.
+    """
+    handle_fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, target)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def record_unavailability(service, state, reason, retry_at, *, source,
                            observed_at=None, path=None):
     """Append one trusted known-unavailable entry to the shared ledger.
@@ -413,14 +460,14 @@ def record_unavailability(service, state, reason, retry_at, *, source,
         "source": source.strip(),
     }
     target = Path(path) if path else unavailability_ledger_path()
-    snapshot = load_unavailability_snapshot(target)
-    entries = [item for item in snapshot.get("entries", []) if isinstance(item, dict)]
-    entries.append(entry)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps({"schema": UNAVAILABILITY_SCHEMA, "entries": entries}, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    # Read and write inside one lock: an append that re-reads outside the lock
+    # is the read-modify-write race, not a fix for it.
+    with _ledger_lock(target):
+        snapshot = load_unavailability_snapshot(target)
+        entries = [item for item in snapshot.get("entries", []) if isinstance(item, dict)]
+        entries.append(entry)
+        _write_ledger_atomically(target, json.dumps(
+            {"schema": UNAVAILABILITY_SCHEMA, "entries": entries}, indent=2, sort_keys=True))
     return entry
 
 

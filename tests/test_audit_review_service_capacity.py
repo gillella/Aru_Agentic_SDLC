@@ -1,8 +1,11 @@
-# line-ceiling: 550
+# line-ceiling: 680
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from contextlib import redirect_stdout
 from copy import deepcopy
@@ -395,6 +398,127 @@ class UnavailabilityAuditTests(unittest.TestCase):
         report = audit.audit_unavailability(ledger(), as_of=AS_OF)
         self.assertEqual(report["unavailable"], {})
         self.assertEqual(report["ignored"], [])
+
+
+class LedgerConcurrencyTests(unittest.TestCase):
+    """The ledger is shared by every governed checkout on the machine.
+
+    Concurrent writers are therefore the normal case. An unlocked
+    read-modify-write loses whichever append finishes first, and the loss is
+    silent: the next routing decision simply stops excluding a service that
+    really is unavailable.
+    """
+
+    def record(self, path, service, minute):
+        audit.record_unavailability(
+            service, "cooldown", f"cooldown at {minute}", "2026-08-24T14:00:00Z",
+            source="test", observed_at=f"2026-08-24T12:{minute:02d}:00Z", path=path,
+        )
+
+    def test_concurrent_appends_from_separate_processes_all_survive(self):
+        # Real processes, not threads: the GIL would hide the race this guards
+        # against, and the writers are genuinely separate repository checkouts.
+        writers = 8
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            program = textwrap.dedent(f"""
+                import sys
+                sys.path.insert(0, {str(ROOT / "scripts")!r})
+                import audit_review_service_capacity as audit
+                index = int(sys.argv[1])
+                audit.record_unavailability(
+                    "sourcery", "cooldown", "writer %d" % index,
+                    "2026-08-24T14:00:00Z", source="test",
+                    observed_at="2026-08-24T12:%02d:00Z" % index,
+                    path={str(path)!r},
+                )
+            """)
+            script = Path(directory) / "writer.py"
+            script.write_text(program, encoding="utf-8")
+            procs = [
+                subprocess.Popen([sys.executable, str(script), str(i)])
+                for i in range(writers)
+            ]
+            codes = [proc.wait(timeout=60) for proc in procs]
+            snapshot = audit.load_unavailability_snapshot(path)
+
+        self.assertEqual(codes, [0] * writers)
+        self.assertEqual(len(snapshot["entries"]), writers)
+        self.assertEqual(
+            {entry["reason"] for entry in snapshot["entries"]},
+            {f"writer {i}" for i in range(writers)},
+        )
+
+    def test_append_holds_the_lock_across_the_whole_read_modify_write(self):
+        """Re-reading inside the lock is the actual fix; a lock taken only
+        around the write still loses the append it raced with."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            self.record(path, "sourcery", 1)
+            seen = []
+            real_load = audit.load_unavailability_snapshot
+
+            def observing_load(target=None):
+                seen.append(Path(str(target)).exists())
+                return real_load(target)
+
+            with patch.object(audit, "load_unavailability_snapshot", observing_load):
+                self.record(path, "codeant", 2)
+            snapshot = real_load(path)
+        self.assertEqual(seen, [True])  # read once, inside the lock
+        self.assertEqual(len(snapshot["entries"]), 2)
+
+    def test_reader_never_observes_a_partially_written_ledger(self):
+        """load_unavailability_snapshot() treats corruption as 'no evidence',
+        so a torn write would silently stop excluding every service rather
+        than failing loudly. os.replace() makes the swap all-or-nothing."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            self.record(path, "sourcery", 1)
+            before = path.read_text(encoding="utf-8")
+
+            real_replace = os.replace
+            observed = {}
+
+            def capturing_replace(src, dst):
+                # Mid-write: the live ledger must still be the previous
+                # complete file, and the new bytes must be somewhere else.
+                observed["live"] = Path(dst).read_text(encoding="utf-8")
+                observed["staged"] = Path(src).read_text(encoding="utf-8")
+                return real_replace(src, dst)
+
+            with patch.object(audit.os, "replace", capturing_replace):
+                self.record(path, "codeant", 2)
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(observed["live"], before)
+        self.assertNotEqual(observed["staged"], before)
+        self.assertEqual(after, observed["staged"])
+        self.assertEqual(len(json.loads(after)["entries"]), 2)
+
+    def test_failed_write_leaves_the_previous_ledger_and_no_temp_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            self.record(path, "sourcery", 1)
+            before = path.read_text(encoding="utf-8")
+
+            with patch.object(audit.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    self.record(path, "codeant", 2)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            leftovers = [item.name for item in Path(directory).iterdir()
+                         if item.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+    def test_lock_file_is_not_mistaken_for_ledger_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            self.record(path, "sourcery", 1)
+            snapshot = audit.load_unavailability_snapshot(path)
+            names = sorted(item.name for item in Path(directory).iterdir())
+        self.assertEqual(len(snapshot["entries"]), 1)
+        self.assertEqual(names, ["ledger.json", "ledger.json.lock"])
 
 
 class UnavailabilityLedgerIoTests(unittest.TestCase):
