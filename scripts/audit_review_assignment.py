@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 405
 """Read-only audit of a pull request's deterministic review assignment."""
 
 import argparse
@@ -81,6 +82,11 @@ def _add_mismatch(report, code, message):
 
 def _valid_head(value):
     return isinstance(value, str) and HEAD_RE.fullmatch(value) is not None
+
+
+def _same_head(left, right):
+    """True when both sides are valid, case-insensitively equal full SHAs."""
+    return _valid_head(left) and _valid_head(right) and left.lower() == right.lower()
 
 
 def _assignment_summary(pr, report):
@@ -219,7 +225,7 @@ def _review_facts(review, head, report):
     substantive = state not in {"PENDING", "DISMISSED"} and (
         state != "COMMENTED" or bool(body.strip())
     )
-    return state, service, oid == head, substantive
+    return state, service, _same_head(oid, head), substantive
 
 
 def _review_summary(evidence, head, assigned_service, report):
@@ -281,7 +287,7 @@ def _final_head_reread(pr_number, initial_pr, report):
     report["heads"]["final_pr"] = final_head
     if not _valid_head(final_head):
         _add_mismatch(report, "final_pr_head_invalid", "Final PR head commit OID is missing or malformed.")
-    elif final_head != initial_pr.get("headRefOid"):
+    elif not _same_head(final_head, initial_pr.get("headRefOid")):
         _add_mismatch(report, "pr_head_changed", "PR head changed while the audit was running.")
     if _assignment_fingerprint(final_pr) != _assignment_fingerprint(initial_pr):
         _add_mismatch(
@@ -357,7 +363,7 @@ def audit_review_assignment(pr_number, expected_head=None):
         _add_mismatch(report, "pr_head_missing", "PR snapshot has no head commit OID.")
     elif not _valid_head(pr_head):
         _add_mismatch(report, "pr_head_invalid", "PR snapshot head commit OID is malformed.")
-    if expected_head is not None and _valid_head(expected_head) and pr_head != expected_head:
+    if expected_head is not None and _valid_head(expected_head) and not _same_head(pr_head, expected_head):
         _add_mismatch(report, "expected_head_mismatch", "PR head differs from --expected-head.")
 
     _check_summary(pr, report)
@@ -371,7 +377,7 @@ def audit_review_assignment(pr_number, expected_head=None):
         _add_mismatch(report, "evidence_head_missing", "Review evidence has no head commit OID.")
     elif not _valid_head(evidence_head):
         _add_mismatch(report, "evidence_head_invalid", "Review evidence head commit OID is malformed.")
-    if pr_head != evidence_head:
+    if not _same_head(pr_head, evidence_head):
         _add_mismatch(
             report,
             "evidence_head_mismatch",

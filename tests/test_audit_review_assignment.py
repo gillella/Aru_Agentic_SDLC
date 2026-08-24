@@ -128,7 +128,9 @@ class AuditReviewAssignmentTests(unittest.TestCase):
             (pr_snapshot(head=""), review_evidence(), None, "pr_head_missing"),
             (pr_snapshot(), review_evidence(head="b" * 40), None, "evidence_head_mismatch"),
             (pr_snapshot(), review_evidence(), "b" * 40, "expected_head_mismatch"),
+            (pr_snapshot(), review_evidence(), ("b" * 40).upper(), "expected_head_mismatch"),
             (pr_snapshot(), review_evidence(), "not-a-sha", "expected_head_invalid"),
+            (pr_snapshot(), review_evidence(), "G" * 40, "expected_head_invalid"),
         )
         for pr, evidence, expected, code in cases:
             with self.subTest(code=code), patch.object(
@@ -137,6 +139,42 @@ class AuditReviewAssignmentTests(unittest.TestCase):
                 report = audit.audit_review_assignment(77, expected_head=expected)
             self.assertFalse(report["ok"])
             self.assertIn(code, {item["code"] for item in report["mismatches"]})
+
+    def test_uppercase_heads_are_equivalent_to_lowercase_at_every_comparison(self):
+        with patch.object(
+            audit, "fetch_pr", return_value=pr_snapshot(),
+        ), patch.object(audit, "review_evidence", return_value=review_evidence()):
+            report = audit.audit_review_assignment(77, expected_head=HEAD.upper())
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["mismatches"], [])
+        self.assertEqual(report["heads"]["expected"], HEAD.upper())
+        self.assertEqual(report["reviews"]["exact_head"], 1)
+
+    def test_uppercase_evidence_and_review_commit_heads_match_lowercase_pr_head(self):
+        with patch.object(
+            audit, "fetch_pr", return_value=pr_snapshot(),
+        ), patch.object(
+            audit, "review_evidence", return_value=review_evidence(head=HEAD.upper()),
+        ):
+            report = audit.audit_review_assignment(77)
+
+        codes = {item["code"] for item in report["mismatches"]}
+        self.assertNotIn("evidence_head_mismatch", codes)
+        self.assertEqual(report["reviews"]["exact_head"], 1)
+
+    def test_uppercase_final_head_reread_matches_lowercase_initial_head(self):
+        with patch.object(
+            audit,
+            "fetch_pr",
+            side_effect=[pr_snapshot(), pr_snapshot(head=HEAD.upper())],
+        ), patch.object(audit, "review_evidence", return_value=review_evidence()):
+            report = audit.audit_review_assignment(77)
+
+        self.assertTrue(report["ok"])
+        self.assertNotIn(
+            "pr_head_changed", {item["code"] for item in report["mismatches"]},
+        )
 
     def test_unavailable_pr_or_review_evidence_fails_closed(self):
         with patch.object(audit, "fetch_pr", return_value=None), patch.object(
