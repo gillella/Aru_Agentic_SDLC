@@ -58,12 +58,18 @@ reviews:
         Confirm evidence is regenerated against a freshly re-read head rather than a stale local value, and that the `Closes #N` linkage is emitted exactly once and cannot be injected or suppressed by user input.
         Check that titles, bodies, and branch names are passed as separate `subprocess` argv elements and never interpolated into a shell string.
 
-    - path: "{scripts/init_project.py,templates/**}"
+    - path: "{scripts/init_project.py,templates/cursor/rules/aru-agentic-sdlc.mdc}"
       instructions: |
         This scaffolder renders the governance stack (AGENTS.md, CI, deploy/release workflows, issue and PR templates, ignore rules) into downstream projects, so a weakened template silently weakens every project created afterwards.
         Require rendered artifacts to stay consistent with this repository's own tracked equivalents under `.github/` and `templates/`, and flag a change to one side of that pair without the other.
         Verify rendered workflows keep pinned action and image references, least-privilege `permissions`, and the required CI marker jobs; flag any removal or broadening.
         Check every scaffolding write for path traversal: destination paths built from project names, stack names, or touch entries must be normalized and confined to the target directory, and `..`, absolute paths, and symlinked destinations must be rejected.
+
+    - path: "{scripts/install_local_agent_integrations.sh,templates/cursor/commands/**,templates/integrations/**}"
+      instructions: |
+        These standalone templates are installed into local agent homes by `scripts/install_local_agent_integrations.sh`; they are not project artifacts rendered by `init_project.py` and generally have no matching `.github/` output to keep in sync.
+        Review them for installer correctness instead: confirm each template family still matches the destination path, managed-block/update semantics, and project-scoped wake/loop behavior the installer enforces.
+        Flag any change that assumes scaffold-sync requirements meant for `init_project.py`, or that could overwrite unrelated user-owned local files outside the installer's managed paths.
 
     - path: "{.github/workflows/**,scripts/enable_main_ruleset.py}"
       instructions: |
