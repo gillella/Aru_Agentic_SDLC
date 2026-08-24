@@ -110,8 +110,9 @@ All three additionally require every blocker enforced by `check_reviews`
   threads raised by the assigned service itself.
 - Aggregate unresolved, outdated-unfixed, and "unfixed" counts across the
   whole PR are zero. "Unfixed" means a thread resolved with no commit,
-  size-waiver, or verification-refresh after the finding was raised — see
-  "Closing out a review finding" in `docs/project_board_workflow.md`.
+  size-waiver, or verification-refresh after the finding was raised, and no
+  `Withdrawn:` reply — see "Closing out a review finding" in
+  `docs/project_board_workflow.md`.
 - No non-advisory human reviewer's latest verdict is `CHANGES_REQUESTED`.
   This applies regardless of which service is assigned — a Sourcery- or
   CodeAnt-assigned PR still blocks on an unaddressed human
@@ -154,7 +155,9 @@ Follow `skills/address-pr-feedback/SKILL.md`:
 2. Implement fixes per §0 in the PR branch worktree under `.worktrees/`; for
    `type:feat`, `needs-design`, money, PII, schema, migration, or other
    irreversible-work findings, confirm a plan is in place before editing.
-   Run the local suite.
+   Run the local suite and confirm it is green before committing or
+   pushing — never commit or push against a red suite (`AGENTS.md`
+   §Repository Rules & Guardrails, "Local Test Verification First").
 3. Commit and push. This invalidates the prior review by design — the PR
    returns to `review`, not `ready-to-merge`.
 4. Refresh verification evidence for the new head:
@@ -218,6 +221,8 @@ dry-run is evidence the PR is mergeable, not a merge —
 - [ ] Preflight complete: issue confirmed open, session state inspected,
       running from `.worktrees/`, and (for high-risk work per §0) plan
       obtained before editing.
+- [ ] Local suite is green before any remediation commit or push (§4 step 2,
+      `AGENTS.md` "Local Test Verification First").
 - [ ] Exactly one `review:<service>` label, applied before `gh pr ready`.
 - [ ] Assigned service's exact-head evidence present per §3.
 - [ ] The assigned-service thread gate passes and aggregate unresolved,
