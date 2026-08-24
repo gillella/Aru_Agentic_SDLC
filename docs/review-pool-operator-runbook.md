@@ -36,7 +36,8 @@ instead of changing accepted review authority.
 
 Sequence, enforced by `finalize_review_assignment()` in `scripts/create_pr.py`:
 
-1. `gh pr create --draft` opens the PR.
+1. `gh pr create --draft` opens the PR; the PR body must include
+   `Closes #<issue_number>` (`check_issue_link` in `scripts/merge_pr.py`).
 2. The assigned `review:<service>` label is added.
 3. The PR is marked ready (`gh pr ready`).
 4. For `review:codeant` only, a `@codeant-ai: review` comment fires the
@@ -91,7 +92,8 @@ Follow `skills/address-pr-feedback/SKILL.md`:
    Also check for outdated-unfixed and unfixed threads, and any non-advisory
    human `CHANGES_REQUESTED` review — every blocker listed in §3 must clear,
    not just unresolved threads.
-2. Implement fixes in the branch worktree; run the local suite.
+2. Implement fixes in the PR branch worktree under `.worktrees/`; run the
+   local suite.
 3. Commit and push. This invalidates the prior review by design — the PR
    returns to `review`, not `ready-to-merge`.
 4. Refresh verification evidence for the new head:
@@ -111,11 +113,12 @@ reply after the finding was raised.
 python3 scripts/merge_pr.py --pr <PR_ID> --dry-run [--expected-head <SHA>] [--json]
 ```
 
-Runs every Definition-of-Done gate (CI, review, threads, verification
-evidence, size, spec-sync, acceptance) against the live PR and merges
-nothing. `--expected-head` refuses the run if the live head differs from
-what the caller expected — use it whenever the head SHA is already known, to
-catch a race against a concurrent push. Exit `0` means every gate passed;
+Runs every Definition-of-Done gate (open, issue link, verification, CI,
+review, rebased, size, tests, spec-sync, review rounds, and per-linked-issue
+acceptance) against the live PR and merges nothing. `--expected-head`
+refuses the run if the live head differs from what the caller expected —
+use it whenever the head SHA is already known, to catch a race against a
+concurrent push. Exit `0` means every gate passed;
 exit `3` means Definition of Done is unmet and names the first failing gate;
 exit `1` is a tooling/API error, not a gate verdict. A passing dry-run is
 evidence the PR is mergeable, not a merge — `merge_pr.py --pr <PR_ID>`
