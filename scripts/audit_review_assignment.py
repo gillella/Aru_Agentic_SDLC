@@ -41,12 +41,7 @@ def _base_report(pr_number, expected_head):
     return {
         "schema": SCHEMA,
         "ok": False,
-        "pr": {
-            "requested_number": pr_number,
-            "number": None,
-            "state": None,
-            "is_draft": None,
-        },
+        "pr": {"requested_number": pr_number, "number": None, "state": None, "is_draft": None},
         "assignment": {
             "linked_issues": [],
             "expected_service": None,
@@ -54,12 +49,7 @@ def _base_report(pr_number, expected_head):
             "label_service": None,
             "validated_service": None,
         },
-        "heads": {
-            "expected": expected_head,
-            "pr": None,
-            "review_evidence": None,
-            "final_pr": None,
-        },
+        "heads": {"expected": expected_head, "pr": None, "review_evidence": None, "final_pr": None},
         "checks": {
             "total": 0,
             "by_review_service": {service: 0 for service in SERVICES},
@@ -270,7 +260,18 @@ def _review_summary(evidence, head, assigned_service, report):
         )
 
 
-def _final_head_reread(pr_number, initial_head, report):
+def _assignment_fingerprint(pr):
+    labels = pr.get("labels")
+    if not isinstance(labels, list) or not all(
+        isinstance(item, dict) and isinstance(item.get("name"), str) for item in labels
+    ):
+        return pr.get("body"), None
+    return pr.get("body"), tuple(sorted(
+        item["name"] for item in labels if item["name"] in REVIEW_SERVICE_LABELS
+    ))
+
+
+def _final_head_reread(pr_number, initial_pr, report):
     final_pr = fetch_pr(pr_number)
     if not isinstance(final_pr, dict):
         _add_mismatch(report, "final_pr_unavailable", "Final PR head reread is unavailable.")
@@ -279,8 +280,14 @@ def _final_head_reread(pr_number, initial_head, report):
     report["heads"]["final_pr"] = final_head
     if not _valid_head(final_head):
         _add_mismatch(report, "final_pr_head_invalid", "Final PR head commit OID is missing or malformed.")
-    elif final_head != initial_head:
+    elif final_head != initial_pr.get("headRefOid"):
         _add_mismatch(report, "pr_head_changed", "PR head changed while the audit was running.")
+    if _assignment_fingerprint(final_pr) != _assignment_fingerprint(initial_pr):
+        _add_mismatch(
+            report,
+            "assignment_changed",
+            "PR body or authoritative review labels changed while the audit was running.",
+        )
 
 
 def _nonnegative_count(value):
@@ -372,7 +379,7 @@ def audit_review_assignment(pr_number, expected_head=None):
 
     _review_summary(evidence, pr_head, assigned_service, report)
     _thread_summary(evidence, assigned_service, report)
-    _final_head_reread(pr_number, pr_head, report)
+    _final_head_reread(pr_number, pr, report)
     report["ok"] = not report["mismatches"]
     return report
 

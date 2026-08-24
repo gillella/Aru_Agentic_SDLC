@@ -284,6 +284,22 @@ class AuditReviewAssignmentTests(unittest.TestCase):
             self.assertFalse(report["ok"])
             self.assertIn(code, {item["code"] for item in report["mismatches"]})
 
+    def test_final_pr_reread_fails_closed_when_assignment_snapshot_changes(self):
+        cases = (
+            pr_snapshot(body="Closes #384\n\nUpdated while audit ran."),
+            pr_snapshot(labels=[{"name": "review:sourcery"}]),
+        )
+        for final_pr in cases:
+            with self.subTest(final_pr=final_pr), patch.object(
+                audit, "fetch_pr", side_effect=[pr_snapshot(), final_pr],
+            ), patch.object(audit, "review_evidence", return_value=review_evidence()):
+                report = audit.audit_review_assignment(77)
+            self.assertFalse(report["ok"])
+            self.assertIn(
+                "assignment_changed",
+                {item["code"] for item in report["mismatches"]},
+            )
+
     @patch.object(audit, "audit_review_assignment")
     def test_cli_emits_json_and_returns_fail_closed_status(self, run_audit):
         for ok, expected_exit in ((True, 0), (False, 1)):

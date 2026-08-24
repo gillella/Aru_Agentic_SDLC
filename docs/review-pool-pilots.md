@@ -24,10 +24,11 @@ threads, checks, account configuration, or billing. Output is JSON using schema
 
 Exit `0` means the snapshot is internally coherent: linked issues all map to
 one deterministic service, exactly one matching `review:*` label exists, the
-requested/PR/evidence heads match exactly, evidence fields are well formed,
-and no other known review service submits a review or owns attributable thread
-evidence. Exit `1` means at least one mismatch or unavailable evidence source
-was reported. Argument errors exit `2`.
+requested/PR/evidence heads match exactly, the final assignment snapshot is
+unchanged, evidence fields are well formed, and no other known review service
+submits a review or owns attributable thread evidence. Exit `1` means at least
+one mismatch or unavailable evidence source was reported. Argument errors exit
+`2`.
 
 An audit with `"ok": true` is not a merge verdict. In particular, zero
 assigned-service reviews is a truthful pre-review snapshot, not evidence of
@@ -47,7 +48,7 @@ gate after the assigned service completes.
 | `heads.expected` | Full SHA supplied by the operator, when present. |
 | `heads.pr` | Head from the PR snapshot. Check rollup entries describe this snapshot. |
 | `heads.review_evidence` | Head repeated across the paginated review and thread reads. A concurrent push makes evidence unavailable instead of mixing heads. |
-| `heads.final_pr` | Head re-read after review/thread pagination; a missing or moved final head fails the audit closed. |
+| `heads.final_pr` | Head re-read after review/thread pagination. A missing or moved final head fails closed, as does a same-head change to the PR body or authoritative review labels. |
 | `checks` | Current check total, normalized entries, and counts for recognized review-service checks. Status and conclusion remain separate. |
 | `reviews` | Raw total/exact-head review-object counts plus substantive counts. Assigned/all-service authority counts exclude pending, dismissed, empty commented, and spoofed-actor records. |
 | `threads.aggregate` | Unresolved, unfixed, outdated-unfixed, outdated-addressed, body-addressed, and withdrawn counts used by the merge evidence loader. |
