@@ -211,12 +211,21 @@ Two consequences worth knowing before you hit them:
 The assigned review-pool service is the sole code-review authority for a given
 PR. CodeRabbit keeps its current exact-head contract. Sourcery requires a
 successful head-bound `Sourcery review` check and zero Sourcery unresolved
-threads. CodeAnt requires an authoritative exact-head `codeant-ai` review
-object and zero CodeAnt unresolved threads. Identity, completed status,
+threads. CodeAnt accepts either of two evidence shapes bound unambiguously to
+the exact current head, plus zero CodeAnt unresolved threads: an authoritative
+exact-head `codeant-ai` review object, or - when CodeAnt found nothing to
+flag and therefore created no review object - a trusted, provider-owned
+`codeant-review-status` marker on CodeAnt's own rolling status comment,
+recording a completed (`done: true`) run for the exact head (#394). The
+status-marker path only ever proves the run finished; it grants nothing about
+findings or verdict, so it never overrides the aggregate unresolved-thread
+count or a human's `CHANGES_REQUESTED`. Identity, completed status,
 current-head binding, and assigned-service thread state are read from
 authoritative GitHub data. Missing, pending, failed, skipped, stale, ambiguous,
-duplicated, or spoofed evidence blocks. Legacy `reviewer:` / `reviewed-by:`
-coding-agent state is non-authoritative and must not be re-dispatched.
+duplicated, or spoofed evidence blocks - including a status marker that is
+malformed, unfinished, bound to a different commit, or posted from more than
+one trusted comment. Legacy `reviewer:` / `reviewed-by:` coding-agent state is
+non-authoritative and must not be re-dispatched.
 
 ---
 
