@@ -31,28 +31,27 @@ the skill wins.
 
 Canonical home: `$ARU_SDLC_HOME`.
 
-## Identity — required before any claim
+## Identity
 
-Every claim, review, and PR needs an **agent id** and a **model family**:
+The picker auto-assigns an **agent id** when `--agent` is omitted, and its
+model family is optional:
 
+```text
+[--agent <AGENT_ID>] [--family <FAMILY>]
 ```
---agent <AGENT_ID> --family <FAMILY>
-```
 
-Every agent authenticates as the same GitHub user, so these labels are the only
-identity the board has. They are what lets the picker route a PR to someone who
-did not write it, and what lets the merge gate tell a peer review from a
-self-review.
+Every agent authenticates as the same GitHub user, so these labels provide
+durable author/remediator routing and audit attribution.
 
-`--agent` is **optional**. Omit it and the picker derives a stable id from where
+Omit `--agent` and the picker derives a stable id from where
 this agent runs — `<product>-<fingerprint>`, e.g. `claude-a3f19c`. The same
 machine, checkout, and family always resolve to the same id, so a restarted
 session reclaims its own board work, and two machines can never be issued one
 id. `ARU_AGENT_ID` pins an id explicitly; `--agent-pool` selects the older
 named ring (`claude-1`, `codex-1`, …) for fleets that want fixed names.
 
-```
-python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --claim --json
+```shell
+python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
 ```
 
 ## Modes
@@ -96,25 +95,33 @@ report the state and its reasons rather than acting on them.
 you already hold, marked `resuming`, before offering anything new. Finishing
 beats starting, and an abandoned claim blocks the board for everyone else.
 
-```
-python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
-  --agent <AGENT_ID> --family <FAMILY> --claim --json
+```shell
+python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
 ```
 
-It returns one item and claims it. Follow the skill for its type:
+It returns one item. `feedback`, `error`, and `idle` are returned without
+claims. `merge` and non-resume issue paths perform the claim mutations;
+resume output reports already-held work instead of claiming it again. Follow
+the skill for its type:
 
 | type | skill |
 |---|---|
 | `feedback` | `address-pr-feedback` |
-| `review` | `code-review` |
+| `review` | Forbidden legacy state: release your reviewer claim, then return to picker; CodeRabbit alone reviews. Coding agents never review |
 | `issue` with `skill: research` | `research` |
 | any other `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
 | `idle` | `next` stops; `loop` waits and asks again |
 
-The picker's `work.skill` field is authoritative — a research issue has its own
+The picker's top-level `agent` field is the resolved identity; use that exact
+value as `<AGENT_ID>` for later `claim_issue.py` and `create_pr.py` calls,
+including unnamed workers. The picker's `work.skill` field is authoritative — a research issue has its own
 close-out contract in `$ARU_SDLC_HOME/skills/research/SKILL.md`, so do not route
 every issue through implementation.
+
+If forbidden legacy state or a caller supplies `work.type=review` after
+`--claim`, coding agents never review. Release this agent's legacy reviewer
+claim with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent <AGENT_ID> --release`, then return to the picker.
 
 **If the claim conflicts**, another agent won the race. That ends the
 iteration, not the session — ask the picker again. Treating a lost race as an
@@ -142,7 +149,7 @@ flag below.
 an operator mention; idle ticks and heartbeats never notify. Examples:
 `prompts/fleet-worker.md`.
 
-```
+```text
 --project-id <PROJECT_ID> --agent <AGENT_ID> --family <FAMILY>
 --event <blocked|waiting-on|hitl> --repo <OWNER/REPO> --repo-dir <CONSUMER_REPO_ROOT>
 ```
@@ -162,7 +169,7 @@ never use UI scripting. Details: [fleet runner](../../docs/fleet-runner.md) and
 
 Read-only. It must never claim, label, branch, commit, or open anything.
 
-```
+```shell
 python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py"
 python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py" --json \
   --project /absolute/path/to/repo
@@ -188,7 +195,7 @@ Restated only because skipping one is how each has been broken before.
 2. **GitHub is `gh` plus helpers, not MCP.** Lifecycle mutations go through
    `$ARU_SDLC_HOME/scripts/*.py`. `gh auth status` is the identity check.
    Slack is not a queue; direct `gh` only when no helper exists (`gh issue comment`).
-3. **Worktree isolation.** Feature work and reviews happen under `.worktrees/`,
+3. **Worktree isolation.** Feature and remediation work happens under `.worktrees/`,
    in a directory scoped to your agent id. Run helpers by absolute path and `cd`
    into the worktree before editing.
 4. **Stay inside `touches:`.** To write outside it, widen the declaration on the
@@ -197,35 +204,23 @@ Restated only because skipping one is how each has been broken before.
 5. **Verify locally before pushing.** `ruff check .` and the test suite, both
    clean. Report failures with their output; never claim a check you did not
    run.
-6. **Every PR carries `Closes #<issue>`** and is opened through
-   `create_pr.py --agent <id> --model-family <family>`.
+6. **Every PR carries `Closes #<issue>`**. `create_pr.py` requires a non-empty
+   `--agent <id>`; `--model-family <family>` is optional.
 7. **Degraded GitHub halts coordination gracefully** — never a secondary local
    task queue or an ungated merge. See `docs/degraded-mode.md`.
-8. **Never review your own PR.** The merge gate reads `author:` against
-   `reviewed-by:` and refuses a self-review — posting one does not unblock
-   anything.
-
-### Reviewing, in a same-account fleet
-
-GitHub rejects `--approve` and `--request-changes` from the PR's own account,
-and the whole fleet shares one account. Use `gh pr review --comment` and state
-the verdict in the body, with each blocking finding in its own **unresolved**
-inline thread so the picker routes the PR back to its author. Then:
-
-```
-python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> \
-  --model-family <FAMILY> --complete-review
-```
-
-Only on a review with no blocking findings; otherwise release the claim and
-leave the threads open. Full procedure: `skills/code-review/SKILL.md`.
+8. **Coding agents never review.** CodeRabbit is the sole code-review
+   authority. The
+   merge gate requires its exact-current-head evidence and rejects coding-agent
+   comments, approvals, labels, and attestations.
 
 ### Merging
 
-Merge only through the gated close-out, and never a PR you authored:
+After CodeRabbit has reviewed the exact current head and every DoD gate passes,
+any factory agent, including the implementation author, may execute the merge
+helper with the picker-supplied `head_sha` pinned as `--expected-head`:
 
-```
-python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N>
+```shell
+python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>
 ```
 
 Direct pushes and `gh pr merge` have no merge authority. A finding closes by a

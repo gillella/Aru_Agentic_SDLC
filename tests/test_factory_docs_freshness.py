@@ -1,3 +1,4 @@
+# line-ceiling: 430
 """Mechanical truth contract for the canonical factory documentation."""
 
 import re
@@ -186,6 +187,30 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                         re.IGNORECASE,
                     ),
                 )
+
+    def test_current_review_policy_keeps_agents_out_of_review_role(self):
+        plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
+        introduction = section(
+            plan,
+            plan.splitlines()[0],
+            "## Lifecycle status vocabulary",
+        )
+        normalized_intro = introduction.replace("> ", "")
+        self.assertRegex(
+            normalized_intro,
+            re.compile(
+                r"implement,\s+remediate,\s+and\s+mechanically\s+merge.*they never review",
+                re.IGNORECASE | re.DOTALL,
+            ),
+        )
+        operator = section(plan, "## 4. The operator visibility and intervention interface", "### 4.1")
+        self.assertNotIn("independent-agent review", operator)
+        principle = section(plan, "### 4.3 The operating principle", "---")
+        self.assertIn("CodeRabbit reviews", principle)
+        self.assertNotIn("A distinct agent reviews", principle)
+        intervention = section(plan, "### 4.1 The one mandatory human intervention", "### 4.2")
+        self.assertIn("implementation/remediation/mechanical-merge loop", intervention)
+        self.assertNotIn("implementation/review/remediation loop", intervention)
 
     def test_historical_roadmap_cannot_look_current(self):
         plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]

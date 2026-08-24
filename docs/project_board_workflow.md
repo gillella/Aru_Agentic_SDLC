@@ -64,11 +64,15 @@ When an increment reaches the `accepted` state, `scripts/increment_release.py` t
 ## 🌳 Git Worktree Isolation Guidelines
 
 1. **Clean Workspace Isolation**:
-   To prevent dirtying the main working directory during multi-agent or multi-branch development, all feature implementations and PR reviews MUST be run inside dedicated worktrees under `.worktrees/`.
+   To prevent dirtying the main working directory during multi-agent or multi-branch development, all feature implementations and PR remediation work MUST be run inside dedicated worktrees under `.worktrees/`.
 2. **Worktree Creation**:
    Execute `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --worktree --agent <AGENT_ID>` to generate `.worktrees/feat-issue-<ID>-<slug>__<agent>`.
 3. **Worktree Cleanup**:
-   Upon PR merge or review completion, remove temporary worktree directories with `git worktree remove .worktrees/<dir>`.
+   Keep active PR worktrees attached until governed close-out runs. Normal
+   post-merge cleanup belongs to
+   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`, and leftover
+   retained/orphaned copies are reclaimed by the supported janitor sweep:
+   `python3 "$ARU_SDLC_HOME/scripts/cleanup_worktrees.py" --repo <REPO_ROOT>`.
 
 ---
 
@@ -121,15 +125,20 @@ worktree, PR, review, merge, and cleanup. Other installed frameworks may help
 with a step, but their session-resume files, brainstorming flows, memory, or PR
 bots cannot replace board state or start a competing lifecycle.
 
-After a distinct agent completes an independent review and all
-Definition-of-Done checks pass, any factory agent, including the implementation
+After CodeRabbit completes a substantive review on the exact current head and
+all Definition-of-Done checks pass, any factory agent, including the implementation
 author, may execute the mechanical merge only through
-`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. Direct pushes and
-ad-hoc merge commands have no merge authority, and authors may never
-self-review. Human intervention is exceptional and applies only when a severe
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID> --expected-head <HEAD_SHA>`
+when the picker supplied `head_sha`. Direct pushes and
+ad-hoc merge commands have no merge authority. Coding agents never review.
+Human intervention is exceptional and applies only when a severe
 merge conflict or merge/close-out failure remains unsafe or impossible for
 agents to resolve through governed remediation; risk category, diff size, and
 review-round count alone never require human participation.
+
+CodeRabbit review does not authorize real-money execution, production cutover,
+destructive migrations, credential use, or external-account mutations. Those
+existing human operational gates remain separate.
 
 ### Review-round scope reduction (issue #98)
 
@@ -191,18 +200,18 @@ intact. Every finding must be disposed of in one of two ways:
 
 Two consequences worth knowing before you hit them:
 
-- **Pushing after a review invalidates it.** A review attests to the commit it
+- **Pushing after CodeRabbit review invalidates it.** The review attests to the commit it
   was submitted against, so once head moves nobody has reviewed what would
   merge. Re-review the current commit.
 - **The audit line records which signal let the PR through** — reviewed at
   head, no unresolved threads, and how many findings were withdrawn rather
   than fixed — so a later reader can reconstruct why.
 
-GitHub **required approving reviews** stay disabled until issue #123's
-reviewer App is live. Set `ARU_REVIEW_APP_LOGIN` to that App's login
-(provisionally `aru-reviewer[bot]`). Unconfigured bots remain advisory.
-Same-account fleet reviews still use `reviewer:` as the claim and
-`reviewed-by:` as completion; those labels are not interchangeable.
+CodeRabbit is the sole code-review authority. Its identity, completed status,
+substantive review, current-head binding, and thread state are read from
+authoritative GitHub data. Missing, pending, failed, rate-limited, stale,
+ambiguous, or spoofed evidence blocks. Legacy `reviewer:` / `reviewed-by:`
+coding-agent state is non-authoritative and must not be re-dispatched.
 
 ---
 
