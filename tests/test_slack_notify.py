@@ -1,4 +1,4 @@
-# line-ceiling: 1689
+# line-ceiling: 1700
 import sys
 import tempfile
 import unittest
@@ -56,6 +56,17 @@ class SlackNotifyTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.default_root = Path(self.temporary.name)
+
+        # An operator running this suite from a live war-room shell inherits
+        # the real workspace credentials, and load_slack_env deliberately lets
+        # os.environ win over the env file. That would swap the workspace out
+        # from under every fixture registry binding, so drop the whole key set
+        # and let each case read only the env file it writes.
+        environment = patch.dict("os.environ", {}, clear=False)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for key in sn.ENV_KEYS:
+            os.environ.pop(key, None)
 
         cache_path = self.default_root / "slack-notify-dedupe.json"
         cache_patcher = patch.object(
