@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 430
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 

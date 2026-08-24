@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4350
+# line-ceiling: 4577
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -90,6 +90,7 @@ CODERABBIT_APP_SLUGS = {"coderabbitai"}
 CODERABBIT_ACTOR_TYPES = {"Bot"}
 SOURCERY_LOGINS = {"sourcery-ai", "sourcery-ai[bot]"}
 SOURCERY_APP_SLUGS = {"sourcery"}
+SOURCERY_REST_APP_SLUGS = {"sourcery-ai"}
 CODEANT_LOGINS = {"codeant-ai", "codeant-ai[bot]"}
 REVIEW_SERVICE_LABELS = ("review:coderabbit", "review:sourcery", "review:codeant")
 CODERABBIT_FULL_REVIEW_REQUEST = "@coderabbitai full review"
@@ -1528,6 +1529,60 @@ def _with_coderabbit_status(pr_id, evidence):
     return combined
 
 
+def _sourcery_check_runs(owner, name, expected_head):
+    """Fetch commit-scoped Sourcery check runs for one exact head, or None."""
+    if not isinstance(expected_head, str) or not expected_head:
+        return None
+    data = _gh_json([
+        "gh", "api",
+        f"repos/{owner}/{name}/commits/{expected_head}/check-runs?per_page=100",
+    ])
+    if not data or (isinstance(data, dict) and data.get("errors")):
+        return None
+    runs = data.get("check_runs")
+    total = data.get("total_count")
+    if (
+        not isinstance(runs, list)
+        or not isinstance(total, int)
+        or total != len(runs)
+    ):
+        return None
+    return runs
+
+
+def _with_sourcery_status(pr_id, evidence):
+    """Bind Sourcery evidence to an authoritative current-head check-run set."""
+    del pr_id
+    if not isinstance(evidence, dict):
+        return None
+    if not evidence.get("github_review_evidence"):
+        return evidence
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    owner, name = slug.split("/", 1)
+    checks = _sourcery_check_runs(owner, name, evidence.get("head_oid"))
+    if checks is None:
+        return None
+    combined = dict(evidence)
+    combined["sourcery_check_runs"] = checks
+    return combined
+
+
+def _with_authoritative_review_status(pr_id, evidence):
+    """Attach every live GitHub review artifact the gate trusts."""
+    if not isinstance(evidence, dict):
+        return None
+    combined = dict(evidence)
+    coderabbit = _with_coderabbit_status(pr_id, combined)
+    if isinstance(coderabbit, dict):
+        combined = coderabbit
+    sourcery = _with_sourcery_status(pr_id, combined)
+    if isinstance(sourcery, dict):
+        combined = sourcery
+    return combined
+
+
 def _coderabbit_check(pr, evidence, recognized_review=None):  # noqa: C901, PLR0912
     """Return the exact current-head CodeRabbit status verdict, or ``None``.
 
@@ -1745,7 +1800,14 @@ def has_authoritative_coderabbit_review(pr, evidence):
 
 
 def _sourcery_check(pr, evidence):
-    rollup = pr.get("statusCheckRollup") or []
+    authoritative = evidence.get("sourcery_check_runs") if isinstance(evidence, dict) else None
+    if (
+        isinstance(evidence, dict)
+        and evidence.get("github_review_evidence")
+        and authoritative is None
+    ):
+        return None
+    rollup = authoritative if authoritative is not None else pr.get("statusCheckRollup") or []
     matches = []
     for item in rollup:
         if not isinstance(item, dict):
@@ -1755,12 +1817,42 @@ def _sourcery_check(pr, evidence):
     if len(matches) != 1:
         return False
     match = matches[0]
-    kind = match.get("__typename") or match.get("type")
-    if kind != "CheckRun":
-        return False
-    slug = str((((match.get("checkSuite") or {}).get("app") or {}).get("slug")) or "").lower()
-    if slug not in SOURCERY_APP_SLUGS:
-        return False
+    if authoritative is not None:
+        slug = str(((match.get("app") or {}).get("slug")) or "").lower()
+        expected_head = (
+            (evidence.get("head_oid") if isinstance(evidence, dict) else None)
+            or pr.get("headRefOid")
+        )
+        if slug not in SOURCERY_REST_APP_SLUGS:
+            return False
+        if not heads_match(expected_head, match.get("head_sha")):
+            return False
+        linked_prs = match.get("pull_requests")
+        if not isinstance(linked_prs, list) or not linked_prs:
+            return False
+        expected_number = pr.get("number")
+        expected_base = pr.get("baseRefOid")
+        if not any(
+            isinstance(linked, dict)
+            and (
+                not isinstance(expected_number, int)
+                or linked.get("number") == expected_number
+            )
+            and heads_match(expected_head, ((linked.get("head") or {}).get("sha")))
+            and (
+                not expected_base
+                or heads_match(expected_base, ((linked.get("base") or {}).get("sha")))
+            )
+            for linked in linked_prs
+        ):
+            return False
+    else:
+        kind = match.get("__typename") or match.get("type")
+        if kind != "CheckRun":
+            return False
+        slug = str((((match.get("checkSuite") or {}).get("app") or {}).get("slug")) or "").lower()
+        if slug not in SOURCERY_APP_SLUGS:
+            return False
     if str(match.get("status") or "").upper() != "COMPLETED":
         return False
     return str(match.get("conclusion") or "").upper() == "SUCCESS"
@@ -3710,7 +3802,7 @@ def dod_status(pr_id):
         if issue is None:
             return False, f"could not read issue #{num}"
         issue_bodies[num] = issue.get("body") or ""
-    evidence = _with_coderabbit_status(pr_id, review_evidence(pr_id))
+    evidence = _with_authoritative_review_status(pr_id, review_evidence(pr_id))
     evidence_head = evidence.get("head_oid") if evidence else None
     snapshot_head = pr.get("headRefOid")
     if not heads_match(snapshot_head, evidence_head):
@@ -4266,7 +4358,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 return EXIT_ERROR
             issue_bodies[num] = issue.get("body") or ""
 
-        evidence = _with_coderabbit_status(args.pr, review_evidence(args.pr))
+        evidence = _with_authoritative_review_status(args.pr, review_evidence(args.pr))
         evidence_head = evidence.get("head_oid") if evidence else None
         if not heads_match(gated_head, evidence_head):
             reason = (
@@ -4371,7 +4463,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
             # Review, status, and thread evidence can change without moving the
             # head. Re-read it under the merge lock immediately before the
             # server-side mutation, then rerun every gate that consumes it.
-            final_evidence = _with_coderabbit_status(
+            final_evidence = _with_authoritative_review_status(
                 args.pr, review_evidence(args.pr)
             )
             final_head = final_evidence.get("head_oid") if final_evidence else None
