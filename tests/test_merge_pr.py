@@ -1,4 +1,4 @@
-# line-ceiling: 6037
+# line-ceiling: 6186
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -2074,9 +2074,11 @@ def _codeant_review(head, **overrides):
 
 class CodeAntReviewUnusableTests(unittest.TestCase):
     """_codeant_latest_review() must distinguish true absence (``None``,
-    zero CodeAnt Review objects) from unusable evidence
-    (``CODEANT_REVIEW_UNUSABLE``: a Review object exists but is pending,
-    malformed, spoofed, stale, or an ambiguous tie for newest) (#394)."""
+    zero CodeAnt Review objects bound to the exact current head - including
+    a well-formed Review object bound to a prior head, which is historical
+    audit evidence, #396) from unusable evidence (``CODEANT_REVIEW_UNUSABLE``:
+    a Review object bound to the exact current head exists but is pending,
+    malformed, spoofed, or an ambiguous tie for newest) (#394)."""
 
     HEAD = "a" * 40
 
@@ -2124,11 +2126,48 @@ class CodeAntReviewUnusableTests(unittest.TestCase):
         evidence = {"head_oid": self.HEAD, "reviews": [_codeant_review(self.HEAD, state="PENDING")]}
         self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
 
-    def test_stale_head_is_unusable(self):
+    def test_well_formed_prior_head_review_is_true_absence(self):
+        """A Review object bound to a different, well-formed commit oid is
+        historical audit evidence from an earlier push, not evidence about
+        the current head - it must not block status fallback (#396)."""
         evidence = {"head_oid": self.HEAD, "reviews": [
             _codeant_review(self.HEAD, commit={"oid": "b" * 40}),
         ]}
+        self.assertIsNone(merge_pr._codeant_latest_review(evidence))
+
+    def test_missing_commit_oid_is_unusable(self):
+        # Unlike a well-formed prior-head oid, a missing binding cannot be
+        # confirmed as historical, so it still fails closed (#396).
+        evidence = {"head_oid": self.HEAD, "reviews": [
+            _codeant_review(self.HEAD, commit={}),
+        ]}
         self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
+
+    def test_malformed_commit_oid_is_unusable(self):
+        evidence = {"head_oid": self.HEAD, "reviews": [
+            _codeant_review(self.HEAD, commit={"oid": "not-a-sha"}),
+        ]}
+        self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
+
+    def test_prior_head_review_with_spoofed_identity_is_true_absence(self):
+        # A Review object bound to a prior head is ignored as history before
+        # its identity is even checked - only current-head-bound evidence is
+        # held to the strict trust checks (#396).
+        evidence = {"head_oid": self.HEAD, "reviews": [
+            _codeant_review(
+                self.HEAD, commit={"oid": "b" * 40},
+                author={"login": "codeant-ai", "__typename": "User"},
+            ),
+        ]}
+        self.assertIsNone(merge_pr._codeant_latest_review(evidence))
+
+    def test_prior_head_review_does_not_shadow_valid_current_head_review(self):
+        evidence = {"head_oid": self.HEAD, "reviews": [
+            _codeant_review(self.HEAD, id="historical", commit={"oid": "b" * 40}),
+            _codeant_review(self.HEAD, id="current"),
+        ]}
+        review = merge_pr._codeant_latest_review(evidence)
+        self.assertEqual(review["id"], "current")
 
     def test_empty_commented_body_is_unusable(self):
         evidence = {"head_oid": self.HEAD, "reviews": [
@@ -2158,9 +2197,11 @@ class CodeAntReviewUnusableTests(unittest.TestCase):
 
 class CodeAntUnusableReviewBlocksStatusFallbackTests(unittest.TestCase):
     """Regression coverage for the CodeRabbit Major finding on PR #395:
-    unusable CodeAnt Review evidence must block check_reviews() and
-    has_authoritative_assigned_review() even when a trusted, valid
-    clean-review status record also exists for the exact head (#394)."""
+    CodeAnt Review evidence bound to the exact current head that is
+    unusable must block check_reviews() and has_authoritative_assigned_review()
+    even when a trusted, valid clean-review status record also exists for the
+    exact head (#394). A Review object bound to a prior head is historical
+    audit evidence and must not trigger that same block (#396)."""
 
     HEAD = "a" * 40
 
@@ -2193,11 +2234,23 @@ class CodeAntUnusableReviewBlocksStatusFallbackTests(unittest.TestCase):
         self.assertIn("untrustworthy", msg)
         self.assertFalse(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
 
-    def test_stale_review_blocks_despite_valid_status(self):
+    def test_prior_head_review_does_not_block_valid_status(self):
+        # A Review object bound to a well-formed prior-head commit is
+        # historical audit evidence, not current-head evidence, so it must
+        # not shadow a trusted current-head clean-review status record
+        # (#396, PR #390 reproduction shape).
         evidence = self._evidence([_codeant_review(self.HEAD, commit={"oid": "b" * 40})])
+        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeAnt clean-review status", msg)
+        self.assertTrue(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
+
+    def test_missing_commit_oid_blocks_despite_valid_status(self):
+        evidence = self._evidence([_codeant_review(self.HEAD, commit={})])
         ok, msg = merge_pr.check_reviews(self._pr(), evidence)
         self.assertFalse(ok)
         self.assertIn("untrustworthy", msg)
+        self.assertFalse(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
 
     def test_malformed_review_body_blocks_despite_valid_status(self):
         evidence = self._evidence([_codeant_review(self.HEAD, body=None)])
@@ -2242,6 +2295,102 @@ class CodeAntUnusableReviewBlocksStatusFallbackTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("CodeAnt review is complete", msg)
         self.assertTrue(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
+
+
+class CodeAntPr390ReproductionTests(unittest.TestCase):
+    """Live reproduction of PR #390 at exact head
+    ``3bd0f3c10246931d9c0dde9a2d40a25f4c6dd0e1`` (#396): remediation pushes
+    left CodeAnt Review objects bound to two earlier heads in GitHub history,
+    then a clean final push produced zero Review objects and a trusted
+    completed clean-review status record bound to the exact current head.
+    The merged #394 gate treated the historical Review objects as unusable
+    current-head evidence and blocked forever; the exact-head status record
+    must win instead, with zero unresolved CodeAnt threads."""
+
+    HEAD = "3bd0f3c10246931d9c0dde9a2d40a25f4c6dd0e1"
+    PRIOR_HEAD_1 = "1" * 36 + "aaaa"
+    PRIOR_HEAD_2 = "2" * 36 + "bbbb"
+
+    def _pr(self):
+        return labelled("author:agent-1", "review:codeant")
+
+    def _evidence(self, reviews):
+        return {
+            "head_oid": self.HEAD,
+            "reviews": reviews,
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+            "codeant_status_comments": [_codeant_status_comment([
+                _codeant_status_record(self.HEAD, label="Reviewed your PR"),
+                _codeant_status_record(self.HEAD, label="Incremental review completed"),
+                _codeant_status_record(self.PRIOR_HEAD_1),
+                _codeant_status_record(self.PRIOR_HEAD_2),
+            ])],
+        }
+
+    def test_historical_review_objects_do_not_block_exact_head_status_fallback(self):
+        evidence = self._evidence([
+            _codeant_review(
+                self.PRIOR_HEAD_1, id="pr390-review-1",
+                state="CHANGES_REQUESTED", commit={"oid": self.PRIOR_HEAD_1},
+            ),
+            _codeant_review(
+                self.PRIOR_HEAD_2, id="pr390-review-2",
+                state="COMMENTED", commit={"oid": self.PRIOR_HEAD_2},
+            ),
+        ])
+        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeAnt clean-review status", msg)
+        self.assertIn(self.HEAD[:12], msg)
+        self.assertTrue(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
+
+    def test_unusable_current_head_review_still_blocks_alongside_history(self):
+        # The exact scenario above, plus one additional Review object that
+        # *is* bound to the exact current head but is malformed - current-
+        # head unusable evidence must still block even with clean history
+        # and a trusted status record present (#396 acceptance criterion).
+        evidence = self._evidence([
+            _codeant_review(
+                self.PRIOR_HEAD_1, id="pr390-review-1",
+                state="CHANGES_REQUESTED", commit={"oid": self.PRIOR_HEAD_1},
+            ),
+            _codeant_review(self.HEAD, id="pr390-current", body=None),
+        ])
+        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
+        self.assertFalse(ok)
+        self.assertIn("untrustworthy", msg)
+        self.assertFalse(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
+
+    def test_substantive_current_head_review_still_takes_priority_over_history(self):
+        # Compatibility: a valid, non-CHANGES_REQUESTED current-head review
+        # still wins outright, with historical objects merely ignored.
+        evidence = self._evidence([
+            _codeant_review(
+                self.PRIOR_HEAD_1, id="pr390-review-1",
+                state="CHANGES_REQUESTED", commit={"oid": self.PRIOR_HEAD_1},
+                submittedAt="2026-08-24T01:00:00Z",
+            ),
+            _codeant_review(
+                self.HEAD, id="pr390-current", state="APPROVED",
+                submittedAt="2026-08-24T02:00:00Z",
+            ),
+        ])
+        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeAnt review is complete", msg)
+        self.assertTrue(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
+
+    def test_unresolved_thread_still_blocks_despite_clean_status_and_history(self):
+        evidence = self._evidence([
+            _codeant_review(
+                self.PRIOR_HEAD_1, id="pr390-review-1",
+                state="CHANGES_REQUESTED", commit={"oid": self.PRIOR_HEAD_1},
+            ),
+        ])
+        evidence["service_threads"]["codeant"]["unresolved"] = 1
+        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
+        self.assertFalse(ok)
+        self.assertIn("unresolved", msg)
 
 
 class CodeRabbitStatusEvidenceTests(unittest.TestCase):

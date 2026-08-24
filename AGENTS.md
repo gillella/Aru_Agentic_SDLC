@@ -51,8 +51,12 @@ Sourcery unresolved threads. CodeAnt requires either an authoritative
 exact-head `codeant-ai` review object or, when a clean run left no review
 object to find, a trusted `codeant-ai` completed clean-review status record
 bound unambiguously to the exact head - either way, plus zero CodeAnt
-unresolved threads. No agent or human may bypass the merge helper with a
-direct push or an ad-hoc merge.
+unresolved threads. A `codeant-ai` Review object bound to an earlier head is
+historical audit evidence from a prior push, not current-head evidence, and
+does not block the status-record fallback; a Review object that is itself
+bound to the exact current head but unusable (pending, malformed, spoofed,
+or ambiguous) still blocks. No agent or human may bypass the merge helper
+with a direct push or an ad-hoc merge.
 Direct pushes to `main` are also blocked server-side by branch protection;
 an ad-hoc merge (`gh pr merge` or the GitHub UI, run outside `merge_pr.py`)
 is not - branch protection requires only a green CI status check, not
