@@ -80,13 +80,15 @@ class AuditReviewAssignmentTests(unittest.TestCase):
             "expected": HEAD,
             "pr": HEAD,
             "review_evidence": HEAD,
+            "final_pr": HEAD,
         })
         self.assertEqual(report["checks"]["total"], 1)
         self.assertEqual(report["reviews"]["total"], 1)
         self.assertEqual(report["reviews"]["exact_head"], 1)
         self.assertEqual(report["reviews"]["assigned_service_exact_head"], 1)
         self.assertEqual(report["threads"]["assigned_service"]["unresolved"], 1)
-        fetch.assert_called_once_with(77)
+        self.assertEqual(fetch.call_count, 2)
+        fetch.assert_called_with(77)
         evidence.assert_called_once_with(77)
 
     def test_wrong_or_multiple_review_labels_fail_closed(self):
@@ -222,6 +224,65 @@ class AuditReviewAssignmentTests(unittest.TestCase):
 
         self.assertTrue(report["ok"])
         self.assertEqual(report["checks"]["by_review_service"]["coderabbit"], 1)
+
+    def test_non_substantive_unassigned_reviews_are_raw_records_not_activity(self):
+        evidence = review_evidence()
+        for index, (state, body) in enumerate((
+            ("PENDING", ""),
+            ("DISMISSED", "old review"),
+            ("COMMENTED", ""),
+        ), start=2):
+            evidence["reviews"].append({
+                "id": f"review-{index}",
+                "state": state,
+                "submittedAt": None if state == "PENDING" else "2026-08-24T12:01:00Z",
+                "body": body,
+                "author": {"login": "coderabbitai", "__typename": "Bot"},
+                "commit": {"oid": HEAD},
+            })
+        with patch.object(audit, "fetch_pr", return_value=pr_snapshot()), patch.object(
+            audit, "review_evidence", return_value=evidence,
+        ):
+            report = audit.audit_review_assignment(77)
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["reviews"]["total"], 4)
+        self.assertEqual(report["reviews"]["substantive_total"], 1)
+        self.assertEqual(report["reviews"]["by_service_total"]["coderabbit"], 0)
+
+    def test_known_service_login_with_wrong_actor_type_fails_closed(self):
+        evidence = review_evidence()
+        evidence["reviews"].append({
+            "id": "review-2",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-24T12:01:00Z",
+            "body": "Spoofed service actor.",
+            "author": {"login": "coderabbitai", "__typename": "User"},
+            "commit": {"oid": HEAD},
+        })
+        with patch.object(audit, "fetch_pr", return_value=pr_snapshot()), patch.object(
+            audit, "review_evidence", return_value=evidence,
+        ):
+            report = audit.audit_review_assignment(77)
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "reviews_malformed",
+            {item["code"] for item in report["mismatches"]},
+        )
+
+    def test_final_pr_reread_fails_closed_when_unavailable_or_head_moves(self):
+        cases = (
+            (pr_snapshot(head="b" * 40), "pr_head_changed"),
+            (None, "final_pr_unavailable"),
+        )
+        for final_pr, code in cases:
+            with self.subTest(code=code), patch.object(
+                audit, "fetch_pr", side_effect=[pr_snapshot(), final_pr],
+            ), patch.object(audit, "review_evidence", return_value=review_evidence()):
+                report = audit.audit_review_assignment(77)
+            self.assertFalse(report["ok"])
+            self.assertIn(code, {item["code"] for item in report["mismatches"]})
 
     @patch.object(audit, "audit_review_assignment")
     def test_cli_emits_json_and_returns_fail_closed_status(self, run_audit):

@@ -47,8 +47,9 @@ gate after the assigned service completes.
 | `heads.expected` | Full SHA supplied by the operator, when present. |
 | `heads.pr` | Head from the PR snapshot. Check rollup entries describe this snapshot. |
 | `heads.review_evidence` | Head repeated across the paginated review and thread reads. A concurrent push makes evidence unavailable instead of mixing heads. |
+| `heads.final_pr` | Head re-read after review/thread pagination; a missing or moved final head fails the audit closed. |
 | `checks` | Current check total, normalized entries, and counts for recognized review-service checks. Status and conclusion remain separate. |
-| `reviews` | Total and exact-head review-object counts, including total/exact-head counts for the assigned service and all known services. |
+| `reviews` | Raw total/exact-head review-object counts plus substantive counts. Assigned/all-service authority counts exclude pending, dismissed, empty commented, and spoofed-actor records. |
 | `threads.aggregate` | Unresolved, unfixed, outdated-unfixed, outdated-addressed, body-addressed, and withdrawn counts used by the merge evidence loader. |
 | `threads.assigned_service` | Unresolved, unfixed, and outdated-unfixed counts attributable to the assigned service. |
 | `threads.by_service` | The same attributable counts for every review-pool service, used to detect an unassigned service. |

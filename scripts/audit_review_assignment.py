@@ -58,6 +58,7 @@ def _base_report(pr_number, expected_head):
             "expected": expected_head,
             "pr": None,
             "review_evidence": None,
+            "final_pr": None,
         },
         "checks": {
             "total": 0,
@@ -67,6 +68,8 @@ def _base_report(pr_number, expected_head):
         "reviews": {
             "total": 0,
             "exact_head": 0,
+            "substantive_total": 0,
+            "substantive_exact_head": 0,
             "assigned_service_total": 0,
             "assigned_service_exact_head": 0,
             "by_service_total": {service: 0 for service in SERVICES},
@@ -200,6 +203,34 @@ def _service_for_login(login):
     )
 
 
+def _review_facts(review, head, report):
+    if not isinstance(review, dict):
+        _add_mismatch(report, "reviews_malformed", "A review entry is malformed.")
+        return None
+    author = review.get("author")
+    if not isinstance(author, dict) or not isinstance(author.get("login"), str) or not author["login"]:
+        _add_mismatch(report, "reviews_malformed", "A review entry lacks a trusted author.")
+        return None
+    state = review.get("state")
+    body = review.get("body")
+    commit = review.get("commit")
+    if not isinstance(state, str) or not isinstance(body, str) or commit is not None and not isinstance(commit, dict):
+        _add_mismatch(report, "reviews_malformed", "A review entry lacks trusted fields.")
+        return None
+    oid = (commit or {}).get("oid")
+    if oid is not None and not _valid_head(oid):
+        _add_mismatch(report, "reviews_malformed", "A review commit OID is malformed.")
+        return None
+    service = _service_for_login(author["login"])
+    if service and author.get("__typename") != "Bot":
+        _add_mismatch(report, "reviews_malformed", "A service review has a spoofed actor type.")
+        return None
+    substantive = state not in {"PENDING", "DISMISSED"} and (
+        state != "COMMENTED" or bool(body.strip())
+    )
+    return state, service, oid == head, substantive
+
+
 def _review_summary(evidence, head, assigned_service, report):
     reviews = evidence.get("reviews")
     if not isinstance(reviews, list):
@@ -207,36 +238,23 @@ def _review_summary(evidence, head, assigned_service, report):
         return
     summary = report["reviews"]
     for review in reviews:
-        if not isinstance(review, dict):
-            _add_mismatch(report, "reviews_malformed", "A review entry is malformed.")
+        facts = _review_facts(review, head, report)
+        if facts is None:
             return
-        author = review.get("author")
-        commit = review.get("commit")
-        state = review.get("state")
-        if (
-            not isinstance(author, dict)
-            or not isinstance(author.get("login"), str)
-            or not author["login"]
-            or not isinstance(state, str)
-            or commit is not None and not isinstance(commit, dict)
-        ):
-            _add_mismatch(report, "reviews_malformed", "A review entry lacks trusted fields.")
-            return
-        oid = (commit or {}).get("oid")
-        if oid is not None and not _valid_head(oid):
-            _add_mismatch(report, "reviews_malformed", "A review commit OID is malformed.")
-            return
-        service = _service_for_login(author["login"])
-        exact_head = isinstance(head, str) and oid == head
+        state, service, exact_head, substantive = facts
         summary["total"] += 1
         summary["by_state"][state] = summary["by_state"].get(state, 0) + 1
         if exact_head:
             summary["exact_head"] += 1
-            if service:
+        if substantive:
+            summary["substantive_total"] += 1
+            if exact_head:
+                summary["substantive_exact_head"] += 1
+            if exact_head and service:
                 summary["by_service_exact_head"][service] += 1
-        if service:
+        if substantive and service:
             summary["by_service_total"][service] += 1
-        if assigned_service and service == assigned_service:
+        if substantive and assigned_service and service == assigned_service:
             summary["assigned_service_total"] += 1
             if exact_head:
                 summary["assigned_service_exact_head"] += 1
@@ -250,6 +268,19 @@ def _review_summary(evidence, head, assigned_service, report):
             "unexpected_review_service_review",
             f"Unassigned review services submitted reviews: {', '.join(unexpected)}.",
         )
+
+
+def _final_head_reread(pr_number, initial_head, report):
+    final_pr = fetch_pr(pr_number)
+    if not isinstance(final_pr, dict):
+        _add_mismatch(report, "final_pr_unavailable", "Final PR head reread is unavailable.")
+        return
+    final_head = final_pr.get("headRefOid")
+    report["heads"]["final_pr"] = final_head
+    if not _valid_head(final_head):
+        _add_mismatch(report, "final_pr_head_invalid", "Final PR head commit OID is missing or malformed.")
+    elif final_head != initial_head:
+        _add_mismatch(report, "pr_head_changed", "PR head changed while the audit was running.")
 
 
 def _nonnegative_count(value):
@@ -341,6 +372,7 @@ def audit_review_assignment(pr_number, expected_head=None):
 
     _review_summary(evidence, pr_head, assigned_service, report)
     _thread_summary(evidence, assigned_service, report)
+    _final_head_reread(pr_number, pr_head, report)
     report["ok"] = not report["mismatches"]
     return report
 
