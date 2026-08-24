@@ -1,0 +1,94 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+# Aru_Agentic_SDLC override. Organization defaults (profile, auto-review
+# cadence, learnings scope, chat policy, and the generic security / migration /
+# test / CI path instructions) come from the central `gillella/coderabbit`
+# configuration and are deliberately not restated here.
+#
+# Governance prose is not duplicated either: `AGENTS.md` and
+# `templates/integrations/claude/CLAUDE.md` are consumed natively by
+# CodeRabbit's code-guideline detection. Everything below is the delta that
+# only makes sense for this repository: the Factory governance kernel and the
+# trust boundaries it defends.
+#
+# No `path_filters` are set. Every generated or vendored artifact this repo
+# ignores (`__pycache__/`, `.venv/`, `.worktrees/`, `*.log`, `.env`,
+# `dummy_calculator_app/`) is untracked and can never appear in a diff, so
+# repeating them here would buy nothing while risking a clobber of the
+# inherited central filter list.
+inheritance: true
+
+reviews:
+  path_instructions:
+    - path: "AGENTS.md"
+      instructions: |
+        This file is the operating contract the agent fleet executes against, not documentation about it.
+        Flag any edit that describes a gate, claim rule, merge authority, or lifecycle step that the helper scripts under `scripts/` do not actually enforce, and any edit that relaxes a stated guarantee without a corresponding script change in the same pull request.
+        Treat drift between this contract and enforced behaviour as a correctness defect.
+
+    - path: "scripts/merge_pr.py"
+      instructions: |
+        This is the sole merge gate; a false pass here merges unreviewed or unverified code.
+        Require every gate to fail closed: an unknown, absent, malformed, or unparseable API response must block the merge, never fall through to an allow.
+        Verify that approvals, review-thread resolution, acceptance evidence, and completion stamps are bound to the exact current head SHA, and that a new push invalidates prior evidence rather than inheriting it.
+        Check that paginated `gh api` reads cannot silently truncate: a capped or partial page that could hide a blocking review, comment, thread, or check must be treated as blocking, not as an empty result.
+        Guard the advisory carve-outs precisely: `ADVISORY_CHECK_CONTEXTS` only excuses CodeRabbit's commit-status context from the CI gate, while CodeRabbit's own separately authenticated exact-head status, review, and thread evidence stays mandatory for the review gate, and `ADVISORY_REVIEW_ACCOUNTS` holds non-CodeRabbit review bots only. Flag any change that widens either set, matches contexts or logins by substring instead of an exact normalized comparison, reclassifies CodeRabbit's authenticated status, review, or thread evidence as advisory, or lets a non-CodeRabbit advisory bot's approval, check, or resolved thread satisfy the review gate.
+        Flag reliance on attacker-influenced strings (PR title, body, branch name, label text, comment bodies) for identity or authorization decisions.
+
+    - path: "{scripts/claim_issue.py,scripts/update_issue_status.py}"
+      instructions: |
+        These enforce single-writer ownership of issues, pull requests, and board status across concurrent agents.
+        Look for races between the read that decides a claim is free and the write that takes it, and confirm every partial claim has a rollback path that leaves no orphaned label, assignee, or status behind.
+        Confirm contested claims settle deterministically to one winner and that a loser fully releases; two agents holding the same issue, review, or merge claim is a correctness defect.
+        Verify agent, reviewer, merger, and status labels are matched by exact prefix and value rather than substring, so one agent's name cannot shadow another's.
+        Check that untrusted issue or pull-request metadata (author, assignee, label text) is validated against a trusted set before it is allowed to grant a claim, and that failure to establish trust refuses the claim rather than proceeding.
+
+    - path: "scripts/fetch_next_work.py"
+      instructions: |
+        Work selection decides what each agent is authorized to touch next, so a parsing bug here routes an agent into work it must not do.
+        Verify label, status, gate-reason, and review-thread parsing tolerates missing, renamed, duplicated, or unexpected values without silently defaulting to eligible.
+        Confirm paginated listings cannot truncate: a partial snapshot that hides an open pull request, an unresolved thread, or an incomplete closeout must make the item ineligible rather than eligible.
+        Check that authorship and reviewer identity are derived from durable evidence, and that an agent can never be routed to review or merge its own work through a spoofable branch name, label, or display string.
+        Confirm eligibility decisions fail closed when a `gh` call errors or returns `None`.
+
+    - path: "scripts/create_pr.py"
+      instructions: |
+        The pull-request body carries the verification-evidence block that downstream gates read as machine-readable state.
+        Verify the evidence markers cannot be forged, duplicated, nested, or reordered by caller-supplied body text, and that a body failing the exactly-one-complete-block invariant is rejected rather than rewritten.
+        Confirm evidence is regenerated against a freshly re-read head rather than a stale local value, and that the `Closes #N` linkage is emitted exactly once and cannot be injected or suppressed by user input.
+        Check that titles, bodies, and branch names are passed as separate `subprocess` argv elements and never interpolated into a shell string.
+
+    - path: "{scripts/init_project.py,templates/cursor/rules/aru-agentic-sdlc.mdc}"
+      instructions: |
+        This scaffolder renders the governance stack (AGENTS.md, CI, deploy/release workflows, issue and PR templates, ignore rules) into downstream projects, so a weakened template silently weakens every project created afterwards.
+        Require rendered artifacts to stay consistent with this repository's own tracked equivalents under `.github/` and `templates/`, and flag a change to one side of that pair without the other.
+        Verify rendered workflows keep pinned action and image references, least-privilege `permissions`, and the required CI marker jobs; flag any removal or broadening.
+        Check every scaffolding write for path traversal: destination paths built from project names, stack names, or touch entries must be normalized and confined to the target directory, and `..`, absolute paths, and symlinked destinations must be rejected.
+
+    - path: "{scripts/install_local_agent_integrations.sh,templates/cursor/commands/**,templates/integrations/**}"
+      instructions: |
+        These standalone templates are installed into local agent homes by `scripts/install_local_agent_integrations.sh`; they are not project artifacts rendered by `init_project.py` and generally have no matching `.github/` output to keep in sync.
+        Review them for installer correctness instead: confirm each template family still matches the destination path, managed-block/update semantics, and project-scoped wake/loop behavior the installer enforces.
+        Flag any change that assumes scaffold-sync requirements meant for `init_project.py`, or that could overwrite unrelated user-owned local files outside the installer's managed paths.
+
+    - path: "{.github/workflows/**,scripts/enable_main_ruleset.py}"
+      instructions: |
+        The `aru-protect-main` ruleset pins one required status check derived from this repository's CI workflow, so the workflow name and the ruleset generator must move together.
+        Flag any rename or restructure of the CI workflow or its job that would leave the required context pointing at a check that no longer reports.
+        CodeRabbit is the required pull-request review oracle, but it is not a CI job, a substitute for GitHub ruleset approval, a workflow owner, or a merge authority; the Factory merge helper is what validates authoritative exact-head CodeRabbit review, status, and thread evidence.
+        Flag any change that adds a CodeRabbit status context to `required_status_checks`, that hands ruleset or workflow ownership to the bot, or that lets a bot check satisfy an unrelated CI or acceptance gate.
+        Flag widened `permissions`, secrets exposed to jobs that run untrusted pull-request code, `pull_request_target` used where the head is checked out, and any reduction in the strictness of the ruleset payload.
+
+    - path: "{scripts/**/*.py,hooks/*.py}"
+      instructions: |
+        Treat every value that originates from GitHub (issue and pull-request titles, bodies, comments, labels, branch names, login and agent names, workflow metadata) as attacker-influenced input.
+        Flag interpolation of those values into shell strings or `shell=True` invocations; command arguments must be passed as an argv list.
+        Flag their use as filesystem paths without normalization and containment checks, and their use as an identity or authorization signal without verification against a trusted source.
+        Flag `except` blocks that swallow an error and return a permissive default; a failed lookup on a governance path must surface or block.
+
+    - path: "tests/**"
+      instructions: |
+        These tests are the only regression barrier on the merge gate, so coverage gaps here are how a gate quietly stops working.
+        Require the deny branch to be tested, not just the allow branch: every fail-closed path (truncated pagination, malformed API payload, stale head, contested claim, untrusted metadata, spoofed identity) needs a test asserting it actually blocks.
+        Flag tests that assert on their own mocks, that pass when the code under test is deleted, or that swallow exceptions instead of asserting on them.
+        Flag any test that reaches the network, invokes real `gh`, or depends on ambient repository or filesystem state; the suite must stay hermetic.
