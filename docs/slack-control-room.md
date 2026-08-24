@@ -1,9 +1,12 @@
 # Slack factory control room
 
-GitHub remains the work queue. One local Slack bridge can route several Aru
-projects, with one private channel bound to each project. Cursor, Claude,
-Codex, and Antigravity do not join as separate Slack users; messages use one
-bot and stamp the agent, model family, project, issue or PR, and time.
+GitHub remains the work queue. One local Slack bridge routes several Aru
+projects. Aru's operator contract is one shared Anguliyam coding war room for
+every governed project, so several projects normally bind to the same private
+channel and the message metadata (repository, project, issue or PR) tells them
+apart; a channel bound to exactly one project also remains valid. Cursor,
+Claude, Codex, and Antigravity do not join as separate Slack users; messages
+use one bot and stamp the agent, model family, project, issue or PR, and time.
 
 Credentials stay in `~/.aru/slack.env`. Project routing lives separately in
 `~/.aru/projects.json`. The registry never stores bot tokens, app tokens,
@@ -14,13 +17,16 @@ signing secrets, or other credentials.
 Every record has an immutable generated `project_id` and immutable GitHub
 repository and ProjectV2 identities. The repository slug and canonical local
 checkout path are recoverable pointers. The Slack team and channel form a
-reserved route. A record's lifecycle is `active` or `closed`; a missing local
-checkout is runtime health `degraded_unreachable`, not a lifecycle change.
+route that is reserved to one project until an operator declares it shared. A
+record's lifecycle is `active` or `closed`; a missing local checkout is runtime
+health `degraded_unreachable`, not a lifecycle change.
 
 The registry is versioned and enforces:
 
-- exactly one active project for an inbound team and channel;
-- no reuse of a channel after its record is closed;
+- exactly one active project for an inbound team and channel, unless that
+  channel is a declared shared war room;
+- at most one binding per repository on any one channel, shared or not;
+- no reuse of an undeclared channel after its record is closed;
 - private `0700` parent directories and `0600` JSON and lock files; an
   owner-controlled legacy `0755` `~/.aru` directory is tightened automatically,
   while foreign-owned or group/world-writable paths fail closed;
@@ -42,8 +48,42 @@ python3 scripts/slack_projects.py verify --project-id proj_...
 ```
 
 `create` discovers and verifies the repository and governed ProjectV2 board
-through GitHub. Save the generated `project_id`; outbound notifications and
-local status checks require it explicitly.
+through GitHub. Save the generated `project_id`; local status checks require
+it explicitly.
+
+## One shared war room, several projects
+
+Binding a second repository to a channel that already routes a project is
+refused by default, because an accidental rebind is usually a mistake. Pass
+`--shared-channel` to declare, once and auditably, that the channel is the
+shared war room:
+
+```bash
+python3 scripts/slack_projects.py create \
+  --local-path /Users/gillella/Projects/jaji-mission-control \
+  --team-id T07L1SZCQEM --channel-id C0BPZMRR1RC \
+  --operator aravind --shared-channel
+```
+
+The declaration is stored in the registry under `shared_channels` and applies
+to the route, so later repositories on the same war room need no flag. The
+declaration is audited as `share_channel` in `~/.aru/slack-audit.json`. A
+registry written before shared war rooms existed has no declaration and keeps
+its one-project-per-channel reservation unchanged.
+
+Nothing else about identity changes: there is still one channel and one bot,
+and repository, project, and issue/PR metadata disambiguate messages. Per
+project channels stay out of scope while one human operator runs the factory.
+
+Channel identity alone no longer selects a project on a shared route, so
+`resolve` requires the repository named in the message and fails closed when
+it is missing, listing the candidates instead of guessing:
+
+```bash
+python3 scripts/slack_projects.py resolve \
+  --team-id T07L1SZCQEM --channel-id C0BPZMRR1RC \
+  --repo gillella/jaji-mission-control
+```
 
 If a checkout moves or a repository is renamed, recover only the mutable
 pointers. Recovery refuses a checkout whose GitHub repository or ProjectV2
@@ -55,8 +95,9 @@ python3 scripts/slack_projects.py recover \
   --repo-slug owner/new-name --operator aravind
 ```
 
-Close an obsolete record locally. Closing preserves its channel reservation
-and immediately disables inbound and outbound routing:
+Close an obsolete record locally. Closing preserves an undeclared channel's
+reservation, leaves any peer project on a shared war room routable, and
+immediately disables inbound and outbound routing for the closed record:
 
 ```bash
 python3 scripts/slack_projects.py close \
@@ -134,9 +175,14 @@ record is authoritative for both repository slug and checkout path; `--repo`
 and `--repo-dir` cannot redirect an alert. `--project-id` is optional: when
 omitted, `slack_notify.py` resolves the binding from `--repo-dir` via
 `~/.aru/projects.json`, so any factory agent can notify from a bound checkout
-with no per-agent Slack setup. An unbound checkout fails closed with a clear
-warning (bind it once with `slack_projects.py migrate --local-path <repo>
---operator <you>`).
+with no per-agent Slack setup. The checkout, not the channel, selects the
+project, so this stays exact when one war room serves several repositories,
+and a directory nested under a bound checkout — an agent's
+`.worktrees/<branch>` copy — resolves to the repository it belongs to. When
+the working directory is outside every bound checkout, `--repo owner/name`
+selects the binding; a path match always wins over it. An unresolvable
+checkout fails closed with a clear warning (bind it once with
+`slack_projects.py migrate --local-path <repo> --operator <you>`).
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
@@ -177,7 +223,13 @@ For each inbound mention, the bridge resolves exactly one active project
 before authorization, deduplication, command parsing, filesystem mutation,
 GitHub access, or Slack acknowledgement. Unknown, ambiguous, and closed routes
 produce no Slack reply and no remote or project side effect. They create only
-a throttled local audit entry in `~/.aru/slack-audit.json`.
+a throttled local audit entry in `~/.aru/slack-audit.json`. On a shared war
+room a message that carries no repository is ambiguous by that rule: it is
+refused rather than answered for whichever project happens to be first. The
+bridge does not yet read a repository out of the message text, so inbound
+operator commands on a shared war room are refused until it does; outbound
+notification, escalation, and the registry CLI (`resolve --repo`) already
+select the project explicitly.
 
 Before a resolved command can inspect or mutate a checkout, the bridge also
 re-verifies its immutable GitHub repository and ProjectV2 identities. A path

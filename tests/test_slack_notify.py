@@ -1,4 +1,4 @@
-# line-ceiling: 1565
+# line-ceiling: 1689
 import sys
 import tempfile
 import unittest
@@ -481,6 +481,130 @@ class SlackNotifyTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(posted.call_args.args[0].channel_id, "C88888888")
             self.assertNotEqual(explicit.project_id, "proj_from_checkout")
+
+    def test_cli_resolves_each_repository_on_one_shared_war_room(self):
+        # Aru runs a single Anguliyam war room, so two governed repositories
+        # share a channel and only the checkout distinguishes them (#355).
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            os.chmod(root, 0o700)
+            first = root / "hermes-trading-automation"
+            second = root / "jaji-mission-control"
+            first.mkdir()
+            second.mkdir()
+            registry_path = root / "projects.json"
+            audit_path = root / "audit.json"
+
+            def identity(path):
+                name = path.resolve().name
+                return {
+                    "github_repo_id": f"R_{name}",
+                    "github_repo_database_id": 1,
+                    "project_v2_id": f"P_{name}",
+                    "repo_slug": f"gillella/{name}",
+                    "local_path": str(path.resolve()),
+                }
+
+            registry = ProjectRegistry(registry_path, audit_path, identity)
+            registry.create(
+                first, "T07L1SZCQEM", "C0BPZMRR1RC", "operator", "proj_hermes",
+                shared_channel=True,
+            )
+            jmc = registry.create(
+                second, "T07L1SZCQEM", "C0BPZMRR1RC", "operator", "proj_jmc"
+            )
+            env_file = root / "slack.env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+                + "\nSLACK_TEAM_ID=T07L1SZCQEM\nSLACK_CHANNEL_ID=C0BPZMRR1RC\n",
+                encoding="utf-8",
+            )
+            with patch("slack_notify.post_event", return_value={"ok": True}) as posted:
+                code = main([
+                    "--agent", "claude-1", "--family", "anthropic", "--event", "state",
+                    "--repo-dir", str(second),
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            self.assertEqual(code, 0)
+            event = posted.call_args.args[1]
+            self.assertEqual(posted.call_args.args[0].channel_id, "C0BPZMRR1RC")
+            self.assertEqual(event["project_id"], jmc.project_id)
+            self.assertEqual(event["repo"], "gillella/jaji-mission-control")
+            self.assertIn("project=proj_jmc", format_event(event))
+
+    def test_cli_resolves_the_binding_from_an_agent_worktree(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            os.chmod(root, 0o700)
+            checkout = root / "checkout"
+            worktree = checkout / ".worktrees" / "fix-issue-355"
+            worktree.mkdir(parents=True)
+            registry_path = root / "projects.json"
+            audit_path = root / "audit.json"
+
+            def identity(path):
+                return {
+                    "github_repo_id": "R_repo",
+                    "github_repo_database_id": 1,
+                    "project_v2_id": "P_project",
+                    "repo_slug": "owner/repo",
+                    "local_path": str(path.resolve()),
+                }
+
+            record = ProjectRegistry(registry_path, audit_path, identity).create(
+                checkout, "T01234567", "C0BPZMRR1RC", "operator", "proj_worktree"
+            )
+            env_file = root / "slack.env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+                + "\nSLACK_TEAM_ID=T01234567\nSLACK_CHANNEL_ID=C11111111\n",
+                encoding="utf-8",
+            )
+            with patch("slack_notify.post_event", return_value={"ok": True}) as posted:
+                code = main([
+                    "--agent", "claude-1", "--family", "anthropic", "--event", "state",
+                    "--repo-dir", str(worktree),
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(posted.call_args.args[1]["project_id"], record.project_id)
+
+    def test_cli_repo_slug_resolves_a_checkout_the_registry_does_not_know(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            os.chmod(root, 0o700)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            registry_path = root / "projects.json"
+            audit_path = root / "audit.json"
+
+            def identity(path):
+                return {
+                    "github_repo_id": "R_repo",
+                    "github_repo_database_id": 1,
+                    "project_v2_id": "P_project",
+                    "repo_slug": "gillella/jaji-mission-control",
+                    "local_path": str(path.resolve()),
+                }
+
+            record = ProjectRegistry(registry_path, audit_path, identity).create(
+                checkout, "T01234567", "C0BPZMRR1RC", "operator", "proj_jmc"
+            )
+            env_file = root / "slack.env"
+            env_file.write_text(
+                "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+                + "\nSLACK_TEAM_ID=T01234567\nSLACK_CHANNEL_ID=C11111111\n",
+                encoding="utf-8",
+            )
+            with patch("slack_notify.post_event", return_value={"ok": True}) as posted:
+                code = main([
+                    "--agent", "claude-1", "--family", "anthropic", "--event", "state",
+                    "--repo", "gillella/jaji-mission-control",
+                    "--repo-dir", str(root.parent / "not-a-bound-checkout"),
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(posted.call_args.args[1]["project_id"], record.project_id)
 
     def test_cli_routes_by_registry_and_ignores_legacy_channel(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -1,4 +1,4 @@
-# line-ceiling: 435
+# line-ceiling: 618
 import json
 import os
 import stat
@@ -429,6 +429,189 @@ class FindByCheckoutTests(unittest.TestCase):
             self.checkout, "T01234567", "C01234567", "operator", "proj_project_a"
         )
         self.assertEqual(first.project_id, "proj_project_a")
+
+    def test_worktree_under_bound_checkout_resolves_to_its_project(self):
+        # Factory agents run from `.worktrees/<branch>`, never from the bound
+        # root, so a nested directory must route to the repository it is in.
+        self.registry.create(
+            self.checkout, "T01234567", "C01234567", "operator", "proj_project_a"
+        )
+        worktree = self.checkout / ".worktrees" / "fix-issue-355"
+        worktree.mkdir(parents=True)
+        found = self.registry.find_by_checkout(worktree)
+        self.assertEqual(found.project_id, "proj_project_a")
+
+    def test_deepest_bound_checkout_wins_over_enclosing_repository(self):
+        outer = self.registry.create(
+            self.root, "T01234567", "C01234567", "operator", "proj_outer"
+        )
+        inner = self.registry.create(
+            self.checkout, "T01234567", "C11111111", "operator", "proj_inner"
+        )
+        self.assertEqual(
+            self.registry.find_by_checkout(self.checkout / "src").project_id,
+            inner.project_id,
+        )
+        self.assertEqual(
+            self.registry.find_by_checkout(self.root / "elsewhere").project_id,
+            outer.project_id,
+        )
+
+    def test_repo_slug_resolves_a_checkout_outside_every_bound_path(self):
+        self.registry.create(
+            self.checkout, "T01234567", "C01234567", "operator", "proj_project_a"
+        )
+        found = self.registry.find_by_checkout(
+            self.root.parent / "elsewhere", repo_slug="owner/project_a"
+        )
+        self.assertEqual(found.project_id, "proj_project_a")
+
+    def test_unknown_repo_slug_still_fails_closed(self):
+        self.registry.create(
+            self.checkout, "T01234567", "C01234567", "operator", "proj_project_a"
+        )
+        with self.assertRaises(slack_projects.RegistryError):
+            self.registry.find_by_checkout(
+                self.root.parent / "elsewhere", repo_slug="owner/other"
+            )
+
+
+class SharedWarRoomTests(unittest.TestCase):
+    """One Anguliyam war room routes every governed project (issue #355)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        os.chmod(self.root, 0o700)
+        self.registry_path = self.root / "projects.json"
+        self.audit_path = self.root / "audit.json"
+        self.checkout_a = self.root / "project-a"
+        self.checkout_b = self.root / "project-b"
+        self.checkout_a.mkdir()
+        self.checkout_b.mkdir()
+        self.registry = ProjectRegistry(self.registry_path, self.audit_path, identity)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def bind_both(self):
+        first = self.registry.create(
+            self.checkout_a, "T07L1SZCQEM", "C0BPZMRR1RC", "operator",
+            "proj_project_a", shared_channel=True,
+        )
+        second = self.registry.create(
+            self.checkout_b, "T07L1SZCQEM", "C0BPZMRR1RC", "operator",
+            "proj_project_b",
+        )
+        return first, second
+
+    def test_shared_channel_binds_several_active_repositories(self):
+        first, second = self.bind_both()
+        self.assertTrue(self.registry.is_shared_channel("T07L1SZCQEM", "C0BPZMRR1RC"))
+        self.assertEqual(
+            [record.project_id for record in self.registry.list(include_closed=False)],
+            [first.project_id, second.project_id],
+        )
+
+    def test_shared_declaration_persists_for_a_fresh_registry_reader(self):
+        self.bind_both()
+        reopened = ProjectRegistry(self.registry_path, self.audit_path, identity)
+        self.assertEqual(len(reopened.list(include_closed=False)), 2)
+        self.assertIn(
+            "T07L1SZCQEM:C0BPZMRR1RC", reopened.shared_channels()
+        )
+
+    def test_undeclared_channel_keeps_its_one_project_reservation(self):
+        self.registry.create(
+            self.checkout_a, "T01234567", "C01234567", "operator", "proj_project_a"
+        )
+        with self.assertRaisesRegex(RegistryError, "reserved"):
+            self.registry.create(
+                self.checkout_b, "T01234567", "C01234567", "operator", "proj_project_b"
+            )
+        self.assertEqual(
+            self.registry.resolve("T01234567", "C01234567").project_id, "proj_project_a"
+        )
+
+    def test_channel_only_resolution_fails_closed_on_a_shared_route(self):
+        self.bind_both()
+        with self.assertRaisesRegex(RegistryError, "ambiguous shared-channel route") as ctx:
+            self.registry.resolve("T07L1SZCQEM", "C0BPZMRR1RC")
+        self.assertIn("owner/project_a", str(ctx.exception))
+        self.assertIn("owner/project_b", str(ctx.exception))
+
+    def test_repository_metadata_selects_one_project_on_a_shared_route(self):
+        first, second = self.bind_both()
+        self.assertEqual(
+            self.registry.resolve(
+                "T07L1SZCQEM", "C0BPZMRR1RC", "owner/project_b"
+            ).project_id,
+            second.project_id,
+        )
+        self.assertEqual(
+            slack_projects.resolve_project(
+                "T07L1SZCQEM", "C0BPZMRR1RC", self.registry_path, "owner/project_a"
+            )["project_id"],
+            first.project_id,
+        )
+
+    def test_unknown_repository_on_a_shared_route_fails_closed(self):
+        self.bind_both()
+        with self.assertRaises(RegistryError):
+            self.registry.resolve("T07L1SZCQEM", "C0BPZMRR1RC", "owner/absent")
+
+    def test_shared_route_candidates_are_listed_for_operator_selection(self):
+        first, second = self.bind_both()
+        self.assertEqual(
+            [
+                record.project_id
+                for record in self.registry.resolve_candidates("T07L1SZCQEM", "C0BPZMRR1RC")
+            ],
+            [first.project_id, second.project_id],
+        )
+
+    def test_closing_one_shared_project_leaves_the_peer_resolvable(self):
+        first, second = self.bind_both()
+        self.registry.close(first.project_id, "operator")
+        self.assertEqual(
+            self.registry.resolve("T07L1SZCQEM", "C0BPZMRR1RC").project_id,
+            second.project_id,
+        )
+
+    def test_checkout_still_selects_the_project_on_a_shared_channel(self):
+        _, second = self.bind_both()
+        found = self.registry.find_by_checkout(self.checkout_b)
+        self.assertEqual(found.project_id, second.project_id)
+        self.assertEqual(found.slack_channel_id, "C0BPZMRR1RC")
+
+    def test_declaring_a_shared_channel_is_audited(self):
+        self.bind_both()
+        events = json.loads(self.audit_path.read_text(encoding="utf-8"))["events"]
+        shared = [event for event in events if event["action"] == "share_channel"]
+        self.assertEqual(len(shared), 1)
+        self.assertEqual(shared[0]["detail"], "T07L1SZCQEM:C0BPZMRR1RC")
+
+    def test_same_repository_twice_on_a_shared_route_is_rejected(self):
+        first, _ = self.bind_both()
+        document = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        clone = dict(document["projects"][first.project_id])
+        clone["project_id"] = "proj_clone"
+        document["projects"]["proj_clone"] = clone
+        self.registry_path.write_text(
+            json.dumps(document, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(RegistryError, "duplicate Slack binding for"):
+            self.registry.list()
+
+    def test_non_object_shared_channels_fails_closed(self):
+        self.bind_both()
+        document = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        document["shared_channels"] = ["T07L1SZCQEM:C0BPZMRR1RC"]
+        self.registry_path.write_text(
+            json.dumps(document, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(RegistryError, "shared_channels must be an object"):
+            self.registry.list()
 
 
 if __name__ == "__main__":

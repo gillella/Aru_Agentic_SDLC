@@ -903,7 +903,12 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901, PLR0912, PLR09
     parser.add_argument("--agent", required=True)
     parser.add_argument("--family", required=True)
     parser.add_argument("--event", required=True, dest="type")
-    parser.add_argument("--repo", default="")
+    parser.add_argument(
+        "--repo",
+        default="",
+        help="owner/name used only to resolve a binding when --repo-dir is "
+             "unknown; the registry record stays authoritative for the slug",
+    )
     parser.add_argument("--issue", type=int)
     parser.add_argument("--pr", type=int)
     parser.add_argument("--state", default="")
@@ -939,8 +944,12 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901, PLR0912, PLR09
             project = registry.get(args.project_id)
         else:
             # Otherwise resolve the binding from the checkout the agent is
-            # working in, so a bound repo needs no per-agent Slack setup.
-            project = registry.find_by_checkout(Path(args.repo_dir))
+            # working in, so a bound repo needs no per-agent Slack setup. The
+            # checkout, not the channel, selects the project, so this stays
+            # exact when one war room serves several governed repositories.
+            project = registry.find_by_checkout(
+                Path(args.repo_dir), repo_slug=args.repo or None
+            )
         config = config_for_project(base, project)
     except (ValueError, RegistryError) as exc:
         print(f"[WARN] Slack notify skipped: {exc}", file=sys.stderr)

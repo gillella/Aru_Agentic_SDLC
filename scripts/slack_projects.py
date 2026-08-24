@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 811
+# line-ceiling: 941
 """Secure multi-project registry for the Slack control-room bridge."""
 
 from __future__ import annotations
@@ -24,6 +24,10 @@ from common import select_governed_projects
 
 
 SCHEMA_VERSION = 1
+# Aru runs one Anguliyam coding war room for every governed project, so a
+# channel an operator has explicitly declared shared may carry several active
+# bindings. The declaration lives in the registry document, keyed by route.
+SHARED_CHANNELS_KEY = "shared_channels"
 DEFAULT_REGISTRY_PATH = Path.home() / ".aru" / "projects.json"
 DEFAULT_AUDIT_PATH = Path.home() / ".aru" / "slack-audit.json"
 REGISTRY_PATH = DEFAULT_REGISTRY_PATH
@@ -39,6 +43,10 @@ class RegistryError(RuntimeError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _binding_key(team_id: str, channel_id: str) -> str:
+    return f"{team_id}:{channel_id}"
 
 
 def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
@@ -251,6 +259,17 @@ class ProjectRecord:
 IdentityProvider = Callable[[Path], Dict[str, Any]]
 
 
+def _deepest_checkouts(records: List[ProjectRecord]) -> List[ProjectRecord]:
+    """Keep only the most specific bound checkouts among nested ancestors."""
+    def depth(record: ProjectRecord) -> int:
+        return len(Path(record.local_path).expanduser().resolve().parts)
+
+    if not records:
+        return []
+    deepest = max(depth(record) for record in records)
+    return [record for record in records if depth(record) == deepest]
+
+
 def _bounded_json(command: List[str], cwd: Optional[str] = None) -> Any:
     try:
         result = subprocess.run(
@@ -362,21 +381,46 @@ class ProjectRegistry:
         return {"schema_version": SCHEMA_VERSION, "projects": {}, "migrations": {}}
 
     @staticmethod
+    def _shared_bindings(document: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the war-room routes an operator has declared shared.
+
+        Absent on every registry written before shared war rooms existed, so a
+        missing key means "no shared route" and keeps those registries on the
+        original one-project-per-channel reservation.
+        """
+        shared = document.get(SHARED_CHANNELS_KEY, {})
+        if not isinstance(shared, dict):
+            raise RegistryError("registry shared_channels must be an object")
+        return shared
+
+    @staticmethod
     def _validate_document(document: Any) -> Dict[str, Any]:
         if not isinstance(document, dict) or document.get("schema_version") != SCHEMA_VERSION:
             raise RegistryError("unsupported or missing registry schema_version")
         if not isinstance(document.get("projects"), dict) or not isinstance(document.get("migrations"), dict):
             raise RegistryError("registry projects and migrations must be objects")
+        shared = ProjectRegistry._shared_bindings(document)
         records: Dict[str, ProjectRecord] = {}
         bindings: set[tuple[str, str]] = set()
+        repo_routes: set[tuple[str, str, str]] = set()
         for project_id, value in document["projects"].items():
             record = ProjectRecord.from_dict(value)
             if record.project_id != project_id:
                 raise RegistryError(f"project key mismatch: {project_id}")
             binding = (record.slack_team_id, record.slack_channel_id)
-            if binding in bindings:
+            if binding in bindings and _binding_key(*binding) not in shared:
                 raise RegistryError(f"duplicate Slack binding: {binding[0]}:{binding[1]}")
+            # A shared war room disambiguates by repository, so the same
+            # repository must never appear twice on one route -- that would
+            # make inbound selection ambiguous with no way to restate it.
+            repo_route = (*binding, record.github_repo_id)
+            if repo_route in repo_routes:
+                raise RegistryError(
+                    f"duplicate Slack binding for {record.repo_slug} on "
+                    f"{binding[0]}:{binding[1]}"
+                )
             bindings.add(binding)
+            repo_routes.add(repo_route)
             records[project_id] = record
         return {"document": document, "records": records}
 
@@ -396,23 +440,45 @@ class ProjectRegistry:
             raise RegistryError(f"unknown or closed project_id: {project_id}")
         return record
 
-    def find_by_checkout(self, local_path: Path, active_only: bool = True) -> ProjectRecord:
+    def find_by_checkout(
+        self,
+        local_path: Path,
+        active_only: bool = True,
+        repo_slug: Optional[str] = None,
+    ) -> ProjectRecord:
         """Resolve the registry binding for a checked-out directory.
 
         Agents (Cursor, Antigravity, Claude, Codex) share one Slack bot and
         must not get per-agent Slack users or tokens; this lets any factory
         agent resolve the project binding from the repo it is working in.
+        Those agents work inside `.worktrees/<branch>` copies, so a directory
+        nested under a bound checkout resolves to it, and the deepest bound
+        ancestor wins so a repo checked out inside another repo still routes
+        to itself. Checkout identity stays the selector when one war-room
+        channel carries several projects; `repo_slug` only breaks a tie or
+        answers an otherwise unknown checkout, never overrides a path match.
         An unknown or ambiguous checkout fails closed so a missing binding is
         loud instead of silently unrouted.
         """
         wanted = Path(local_path).expanduser().resolve()
-        matches = []
-        for record in self.list(include_closed=not active_only):
-            if active_only and record.lifecycle != "active":
-                continue
+        records = [
+            record
+            for record in self.list(include_closed=not active_only)
+            if not active_only or record.lifecycle == "active"
+        ]
+        exact: List[ProjectRecord] = []
+        nested: List[ProjectRecord] = []
+        for record in records:
             candidate = Path(record.local_path).expanduser().resolve()
             if candidate == wanted:
-                matches.append(record)
+                exact.append(record)
+            elif candidate in wanted.parents:
+                nested.append(record)
+        matches = exact or _deepest_checkouts(nested)
+        if len(matches) != 1 and repo_slug:
+            narrowed = [item for item in (matches or records) if item.repo_slug == repo_slug]
+            if len(narrowed) == 1:
+                return narrowed[0]
         if len(matches) == 1:
             return matches[0]
         if not matches:
@@ -422,17 +488,49 @@ class ProjectRegistry:
             )
         raise RegistryError(f"ambiguous project binding for {wanted}")
 
-    def resolve(self, team_id: str, channel_id: str) -> ProjectRecord:
-        matches = [
-            record
-            for record in self._read()["records"].values()
-            if record.lifecycle == "active"
-            and record.slack_team_id == team_id
-            and record.slack_channel_id == channel_id
-        ]
-        if len(matches) != 1:
+    def resolve_candidates(self, team_id: str, channel_id: str) -> List[ProjectRecord]:
+        """Every active project bound to one inbound team and channel."""
+        return sorted(
+            (
+                record
+                for record in self._read()["records"].values()
+                if record.lifecycle == "active"
+                and record.slack_team_id == team_id
+                and record.slack_channel_id == channel_id
+            ),
+            key=lambda record: record.project_id,
+        )
+
+    def resolve(
+        self, team_id: str, channel_id: str, repo: Optional[str] = None
+    ) -> ProjectRecord:
+        """Resolve one inbound route, failing closed when it is ambiguous.
+
+        A shared war room carries several active projects, so the channel no
+        longer identifies one project by itself. Callers pass the repository
+        named in the message metadata; without it an ambiguous route raises
+        with the candidate slugs so the operator can restate the repository,
+        and the bridge never silently answers for the wrong project.
+        """
+        matches = self.resolve_candidates(team_id, channel_id)
+        if repo:
+            matches = [record for record in matches if record.repo_slug == repo]
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
             raise RegistryError(f"no unique active route for {team_id}:{channel_id}")
-        return matches[0]
+        slugs = ", ".join(record.repo_slug for record in matches)
+        raise RegistryError(
+            f"ambiguous shared-channel route for {team_id}:{channel_id}; "
+            f"name one repository ({slugs})"
+        )
+
+    def shared_channels(self) -> Dict[str, Any]:
+        """Declared shared war-room routes, keyed `team:channel`."""
+        return dict(self._shared_bindings(self._read()["document"]))
+
+    def is_shared_channel(self, team_id: str, channel_id: str) -> bool:
+        return _binding_key(team_id, channel_id) in self.shared_channels()
 
     def _mutate(self, updater: Callable[[Dict[str, Any]], Any]) -> Any:
         result: Dict[str, Any] = {}
@@ -453,6 +551,7 @@ class ProjectRegistry:
         channel_id: str,
         operator: str,
         project_id: Optional[str] = None,
+        shared_channel: bool = False,
     ) -> ProjectRecord:
         identity = self.identity_provider(Path(local_path))
         identifier = project_id or f"proj_{uuid.uuid4().hex}"
@@ -474,15 +573,27 @@ class ProjectRegistry:
         )
         record.validate()
 
+        declared = {"value": False}
+
         def add(document: Dict[str, Any]) -> ProjectRecord:
             records = [ProjectRecord.from_dict(item) for item in document["projects"].values()]
             if identifier in document["projects"]:
                 raise RegistryError(f"project_id already exists: {identifier}")
+            shared = dict(self._shared_bindings(document))
+            binding = _binding_key(team_id, channel_id)
             if any(
                 item.slack_team_id == team_id and item.slack_channel_id == channel_id
                 for item in records
-            ):
-                raise RegistryError(f"Slack binding is reserved: {team_id}:{channel_id}")
+            ) and binding not in shared and not shared_channel:
+                raise RegistryError(
+                    f"Slack binding is reserved: {team_id}:{channel_id}. "
+                    "Re-run with --shared-channel to add this repository to a "
+                    "shared war room."
+                )
+            if shared_channel and binding not in shared:
+                shared[binding] = {"at": timestamp, "operator": operator}
+                document[SHARED_CHANNELS_KEY] = shared
+                declared["value"] = True
             if any(
                 item.lifecycle == "active"
                 and item.github_repo_id == record.github_repo_id
@@ -494,6 +605,11 @@ class ProjectRegistry:
             return record
 
         created = self._mutate(add)
+        if declared["value"]:
+            self.audit(
+                "share_channel", operator, created.project_id,
+                detail=_binding_key(team_id, channel_id),
+            )
         self.audit("create", operator, created.project_id)
         return created
 
@@ -634,7 +750,7 @@ class ProjectRegistry:
                     result["record"] = ProjectRecord.from_dict(document["projects"][project_id])
                     return document
                 raise RegistryError("legacy migration evidence is corrupt")
-            if any(
+            if _binding_key(team_id, channel_id) not in self._shared_bindings(document) and any(
                 item.get("slack_team_id") == team_id and item.get("slack_channel_id") == channel_id
                 for item in document["projects"].values()
             ):
@@ -690,8 +806,10 @@ def project_by_id(project_id: str, path: Path = REGISTRY_PATH, active_only: bool
     return ProjectRegistry(path).get(project_id, active_only).public_dict()
 
 
-def resolve_project(team_id: str, channel_id: str, path: Path = REGISTRY_PATH) -> Dict[str, Any]:
-    return ProjectRegistry(path).resolve(team_id, channel_id).public_dict()
+def resolve_project(
+    team_id: str, channel_id: str, path: Path = REGISTRY_PATH, repo: Optional[str] = None
+) -> Dict[str, Any]:
+    return ProjectRegistry(path).resolve(team_id, channel_id, repo).public_dict()
 
 
 def verify_project(project_id: str, path: Path = REGISTRY_PATH) -> Dict[str, Any]:
@@ -748,10 +866,19 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--team-id", required=True)
     create.add_argument("--channel-id", required=True)
     create.add_argument("--operator", required=True)
+    create.add_argument(
+        "--shared-channel",
+        action="store_true",
+        help="bind this repository to a shared war-room channel that already "
+             "routes other governed projects",
+    )
 
     resolve = subparsers.add_parser("resolve")
     resolve.add_argument("--team-id", required=True)
     resolve.add_argument("--channel-id", required=True)
+    resolve.add_argument(
+        "--repo", default="", help="owner/name that selects one project on a shared channel"
+    )
     subparsers.add_parser("list").add_argument("--active-only", action="store_true")
 
     verify = subparsers.add_parser("verify")
@@ -777,10 +904,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.command == "create":
             value: Any = registry.create(
-                args.local_path, args.team_id, args.channel_id, args.operator
+                args.local_path, args.team_id, args.channel_id, args.operator,
+                shared_channel=args.shared_channel,
             ).public_dict()
         elif args.command == "resolve":
-            value = registry.resolve(args.team_id, args.channel_id).public_dict()
+            value = registry.resolve(
+                args.team_id, args.channel_id, args.repo or None
+            ).public_dict()
         elif args.command == "list":
             value = [record.public_dict() for record in registry.list(not args.active_only)]
         elif args.command == "verify":
