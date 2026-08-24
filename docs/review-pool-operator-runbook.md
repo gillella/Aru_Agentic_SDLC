@@ -121,7 +121,7 @@ All three additionally require every blocker enforced by `check_reviews`
 
 Follow `skills/address-pr-feedback/SKILL.md`:
 
-1. `python3 scripts/fetch_pr_feedback.py --pr <PR_ID>` lists unresolved
+1. `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <PR_ID>` lists unresolved
    thread text and location, but not outdated-unfixed/unfixed counts or a
    human `CHANGES_REQUESTED` verdict. Confirm the full blocker set with the
    governed dry-run (§5, `--expected-head <SHA>`) — every blocker listed in
@@ -133,9 +133,12 @@ Follow `skills/address-pr-feedback/SKILL.md`:
 3. Commit and push. This invalidates the prior review by design — the PR
    returns to `review`, not `ready-to-merge`.
 4. Refresh verification evidence for the new head:
-   `python3 scripts/create_pr.py --refresh-pr <PR_ID> --verify-command "<cmd>" ...`
-5. Reply on each addressed thread with the fix commit hash and resolve it, or
-   reply `Withdrawn: <reason>` for a finding argued down instead of fixed.
+   `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --refresh-pr <PR_ID> --verify-command "<cmd>" ...`
+5. If a code fix exists, reply on the addressed thread with the fix commit
+   hash and resolve it. If the finding is satisfied by a matching
+   size-waiver or verification-evidence edit instead, cite that evidence in
+   the reply and resolve it. Reply `Withdrawn: <reason>` only for a finding
+   argued down instead of fixed.
 6. Re-trigger review at the new head per §2 (CodeRabbit: comment
    `@coderabbitai full review`; Sourcery/CodeAnt: the new push is sufficient).
 
@@ -146,7 +149,7 @@ reply after the finding was raised.
 ## 5. Governed dry-run
 
 ```shell
-python3 scripts/merge_pr.py --pr <PR_ID> --dry-run [--expected-head <SHA>] [--json]
+python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --dry-run [--expected-head <SHA>] [--json]
 ```
 
 Runs every Definition-of-Done gate (open, issue link, verification, CI,
@@ -159,8 +162,9 @@ exit `3` means Definition of Done is unmet and names the first failing gate;
 exit `1` is a tooling/API error, not a gate verdict. If the `ci` gate fails,
 invoke `remediate-ci-failure` (`skills/remediate-ci-failure/SKILL.md`) before
 rerunning the dry-run — do not rerun against an unfixed CI failure. A passing
-dry-run is evidence the PR is mergeable, not a merge — `merge_pr.py --pr
-<PR_ID>` (without `--dry-run`) performs the actual merge and close-out.
+dry-run is evidence the PR is mergeable, not a merge —
+`python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID>` (without
+`--dry-run`) performs the actual merge and close-out.
 
 ## 6. Billing boundaries
 
@@ -196,8 +200,9 @@ dry-run is evidence the PR is mergeable, not a merge — `merge_pr.py --pr
       is fixed, explicitly withdrawn, or supported by the required
       size-waiver/verification-refresh evidence.
 - [ ] No non-advisory human reviewer's latest verdict is `CHANGES_REQUESTED`.
-- [ ] `merge_pr.py --pr <PR_ID> --dry-run --expected-head <SHA>` exits `0`
-      before requesting merge, using the recorded exact head.
+- [ ] `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --dry-run
+      --expected-head <SHA>` exits `0` before requesting merge, using the
+      recorded exact head.
 - [ ] No repository script changed billing, trial, or account-plan state,
       and vendor account billing status/review eligibility was confirmed
       before triggering review.
