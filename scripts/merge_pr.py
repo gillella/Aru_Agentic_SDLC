@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4790
+# line-ceiling: 4815
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1939,7 +1939,22 @@ def _sourcery_check(pr, evidence):
     return str(match.get("conclusion") or "").upper() == "SUCCESS"
 
 
+class _CodeAntReviewUnusable:
+    """Distinct from ``None``: a CodeAnt Review object exists but can't be
+    trusted (pending, malformed, spoofed, or an ambiguous tie for newest),
+    so callers must block rather than fall back to status evidence (#394)."""
+
+    def __repr__(self):
+        return "CODEANT_REVIEW_UNUSABLE"
+
+
+CODEANT_REVIEW_UNUSABLE = _CodeAntReviewUnusable()
+
+
 def _codeant_latest_review(evidence):
+    """Return a trustworthy review ``dict``, ``None`` if no CodeAnt Review
+    object exists at all (status fallback allowed), or
+    ``CODEANT_REVIEW_UNUSABLE`` if one exists but can't be trusted (#394)."""
     if not isinstance(evidence, dict):
         return None
     head = evidence.get("head_oid")
@@ -1948,7 +1963,7 @@ def _codeant_latest_review(evidence):
     candidates = []
     for review in evidence.get("reviews") or []:
         if not isinstance(review, dict):
-            return None
+            return CODEANT_REVIEW_UNUSABLE
         author = review.get("author") or {}
         login = str(author.get("login") or "").lower()
         actor_type = author.get("__typename")
@@ -1960,9 +1975,9 @@ def _codeant_latest_review(evidence):
         if login not in CODEANT_LOGINS:
             continue
         if actor_type != "Bot":
-            return None
+            return CODEANT_REVIEW_UNUSABLE
         if state == "PENDING":
-            return None
+            return CODEANT_REVIEW_UNUSABLE
         if state == "DISMISSED":
             continue
         if (
@@ -1973,12 +1988,14 @@ def _codeant_latest_review(evidence):
             or state == "COMMENTED" and not body.strip()
             or oid != head
         ):
-            return None
+            return CODEANT_REVIEW_UNUSABLE
         candidates.append((submitted, review_id, review))
-    newest = max((candidate[0] for candidate in candidates), default=None)
+    if not candidates:
+        return None
+    newest = max(candidate[0] for candidate in candidates)
     candidates = [candidate for candidate in candidates if candidate[0] == newest]
     if len(candidates) != 1:
-        return None
+        return CODEANT_REVIEW_UNUSABLE
     return candidates[0][2]
 
 
@@ -2105,6 +2122,8 @@ def has_authoritative_assigned_review(pr, evidence):
         review = _codeant_latest_review(evidence)
         if isinstance(review, dict):
             return str(review.get("state") or "").upper() != "CHANGES_REQUESTED"
+        if review is CODEANT_REVIEW_UNUSABLE:
+            return False
         return _codeant_status_evidence(evidence) is True
     return False
 
@@ -2196,6 +2215,12 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
         )
     if service == "codeant":
         review = _codeant_latest_review(evidence)
+        if review is CODEANT_REVIEW_UNUSABLE:
+            return False, (
+                "CodeAnt has an untrustworthy Review object for this PR "
+                "(pending, malformed, spoofed, or ambiguous). Trusted status "
+                "evidence cannot override it; refusing rather than falling back."
+            )
         if review is None:
             if _codeant_status_evidence(evidence) is True:
                 return True, (
