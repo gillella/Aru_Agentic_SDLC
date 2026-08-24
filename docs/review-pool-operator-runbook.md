@@ -53,6 +53,18 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> \
   [--model-family <family>] --verify-command "<cmd>" [--verify-command "<cmd>" ...]
 ```
 
+Each `--verify-command` becomes part of the committed verification evidence
+(§3), so it must never contain a literal token, password, PII, or
+secret-bearing URL. Commands that need a secret must read it from the
+process environment themselves; do not pass secret values as command-line
+arguments. `run_cmd` in `scripts/common.py` invokes each command as an
+argv list without a shell, so shell metacharacters and variable expansion
+are not interpreted, and `sanitize_command` redacts recognized secret
+patterns (known option names, headers, URL credentials, opaque `-c`/`-e`
+values) before the evidence is recorded — but it cannot redact an
+unrecognized literal, so keeping secrets out of the command line is the
+operator's responsibility, not the sanitizer's.
+
 Everything below is performed internally by `create_pr()` and
 `finalize_review_assignment()` in `scripts/create_pr.py` — the operator does
 not type these `gh` commands directly:
