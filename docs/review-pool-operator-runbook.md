@@ -69,16 +69,28 @@ after a review invalidates it — re-review the new head before merging
 - **CodeAnt** — one authoritative exact-head `codeant-ai` review object, not
   `CHANGES_REQUESTED` (`_codeant_latest_review`).
 
-All three additionally require zero unresolved threads for the assigned
-service and zero "unfixed" resolved threads (a thread resolved with no
-commit, size-waiver, or verification-refresh after the finding was raised —
-see "Closing out a review finding" in `docs/project_board_workflow.md`).
+All three additionally require every blocker enforced by `check_reviews`
+(`scripts/merge_pr.py`) to be clear:
+
+- The assigned-service thread gate: zero unresolved and zero outdated-unfixed
+  threads raised by the assigned service itself.
+- Aggregate unresolved, outdated-unfixed, and "unfixed" counts across the
+  whole PR are zero. "Unfixed" means a thread resolved with no commit,
+  size-waiver, or verification-refresh after the finding was raised — see
+  "Closing out a review finding" in `docs/project_board_workflow.md`.
+- No non-advisory human reviewer's latest verdict is `CHANGES_REQUESTED`.
+  This applies regardless of which service is assigned — a Sourcery- or
+  CodeAnt-assigned PR still blocks on an unaddressed human
+  `CHANGES_REQUESTED`.
 
 ## 4. Remediation
 
 Follow `skills/address-pr-feedback/SKILL.md`:
 
 1. `python3 scripts/fetch_pr_feedback.py --pr <PR_ID>` for unresolved threads.
+   Also check for outdated-unfixed and unfixed threads, and any non-advisory
+   human `CHANGES_REQUESTED` review — every blocker listed in §3 must clear,
+   not just unresolved threads.
 2. Implement fixes in the branch worktree; run the local suite.
 3. Commit and push. This invalidates the prior review by design — the PR
    returns to `review`, not `ready-to-merge`.
@@ -131,8 +143,11 @@ evidence the PR is mergeable, not a merge — `merge_pr.py --pr <PR_ID>`
 
 - [ ] Exactly one `review:<service>` label, applied before `gh pr ready`.
 - [ ] Assigned service's exact-head evidence present per §3.
-- [ ] Zero unresolved threads for the assigned service; every resolved
-      finding is fixed, explicitly withdrawn, or supported by the required
+- [ ] The assigned-service thread gate passes and aggregate unresolved,
+      outdated-unfixed, and unfixed counts are zero; every resolved finding
+      is fixed, explicitly withdrawn, or supported by the required
       size-waiver/verification-refresh evidence.
-- [ ] `merge_pr.py --pr <PR_ID> --dry-run` exits `0` before requesting merge.
+- [ ] No non-advisory human reviewer's latest verdict is `CHANGES_REQUESTED`.
+- [ ] `merge_pr.py --pr <PR_ID> --dry-run --expected-head <SHA>` exits `0`
+      before requesting merge, using the recorded exact head.
 - [ ] No billing, trial, or account-plan state changed to run the pilot.
