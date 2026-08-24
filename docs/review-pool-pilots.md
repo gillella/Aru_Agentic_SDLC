@@ -50,7 +50,7 @@ gate after the assigned service completes.
 | `heads.review_evidence` | Head repeated across the paginated review and thread reads. A concurrent push makes evidence unavailable instead of mixing heads. |
 | `heads.final_pr` | Head re-read after review/thread pagination. A missing or moved final head fails closed, as does a same-head change to the PR body or authoritative review labels. |
 | `checks` | Current check total, normalized entries, and counts for recognized review-service checks. Status and conclusion remain separate. |
-| `reviews` | Raw total/exact-head review-object counts plus substantive counts. Assigned/all-service authority counts exclude pending, dismissed, empty commented, and spoofed-actor records. |
+| `reviews` | Raw total/exact-head review-object counts plus substantive counts. Assigned/all-service authority counts exclude pending, dismissed, and empty commented records; spoofed or unknown automation actors fail closed. |
 | `threads.aggregate` | Unresolved, unfixed, outdated-unfixed, outdated-addressed, body-addressed, and withdrawn counts used by the merge evidence loader. |
 | `threads.assigned_service` | Unresolved, unfixed, and outdated-unfixed counts attributable to the assigned service. |
 | `threads.by_service` | The same attributable counts for every review-pool service, used to detect an unassigned service. |

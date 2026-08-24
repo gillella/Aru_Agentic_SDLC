@@ -271,6 +271,27 @@ class AuditReviewAssignmentTests(unittest.TestCase):
             {item["code"] for item in report["mismatches"]},
         )
 
+    def test_unknown_automation_review_fails_closed(self):
+        evidence = review_evidence()
+        evidence["reviews"].append({
+            "id": "review-2",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-24T12:01:00Z",
+            "body": "Unattributed automation review.",
+            "author": {"login": "unknown-review-bot", "__typename": "Bot"},
+            "commit": {"oid": HEAD},
+        })
+        with patch.object(audit, "fetch_pr", return_value=pr_snapshot()), patch.object(
+            audit, "review_evidence", return_value=evidence,
+        ):
+            report = audit.audit_review_assignment(77)
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "reviews_malformed",
+            {item["code"] for item in report["mismatches"]},
+        )
+
     def test_final_pr_reread_fails_closed_when_unavailable_or_head_moves(self):
         cases = (
             (pr_snapshot(head="b" * 40), "pr_head_changed"),

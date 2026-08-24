@@ -212,8 +212,9 @@ def _review_facts(review, head, report):
         _add_mismatch(report, "reviews_malformed", "A review commit OID is malformed.")
         return None
     service = _service_for_login(author["login"])
-    if service and author.get("__typename") != "Bot":
-        _add_mismatch(report, "reviews_malformed", "A service review has a spoofed actor type.")
+    actor_type = author.get("__typename")
+    if service and actor_type != "Bot" or not service and actor_type != "User":
+        _add_mismatch(report, "reviews_malformed", "A review actor cannot be attributed safely.")
         return None
     substantive = state not in {"PENDING", "DISMISSED"} and (
         state != "COMMENTED" or bool(body.strip())
