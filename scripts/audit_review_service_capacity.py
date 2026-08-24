@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+# line-ceiling: 600
 """Audit provider-neutral review-service capacity snapshots without mutation."""
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +19,23 @@ PLAN_KINDS = ("trial", "free", "paid")
 QUOTA_KINDS = ("metered", "unlimited")
 SNAPSHOT_KEYS = {"schema", "observed_at", "configured_services", "services"}
 SERVICE_KEYS = {"service", "account_state", "plan", "quota"}
+
+# --- Cross-repository known-unavailable ledger -----------------------------
+#
+# audit_capacity() above answers "is this trial/quota snapshot healthy right
+# now" for one point-in-time poll, and fails closed on any mismatch. The
+# create_pr.py kernel needs a different shaped question -- "has any governed
+# repository recently recorded that a service is in a bounded cooldown, quota
+# exhaustion, outage, or unavailable state" -- answered from a small durable
+# ledger shared across every checkout on the machine, so one repo's evidence
+# is honored by the next. It reuses this module's timestamp parsing and
+# REVIEW_SERVICES rather than inventing a second capacity model.
+CAPACITY_LEDGER_ENV = "ARU_REVIEW_CAPACITY_LEDGER"
+UNAVAILABILITY_SCHEMA = "aru.review-service-unavailability-ledger.v1"
+UNAVAILABLE_STATES = ("cooldown", "quota_exhausted", "outage", "unavailable")
+UNAVAILABILITY_KEYS = {"schema", "entries"}
+ENTRY_KEYS = {"service", "state", "reason", "observed_at", "retry_at", "source"}
+DEFAULT_UNAVAILABILITY_MAX_AGE_SECONDS = 3600
 
 
 def _unique_object(pairs):
@@ -332,6 +351,195 @@ def audit_capacity(payload, *, as_of=None, max_age_seconds=3600):
         and all(item["available"] for item in report["services"])
     )
     return report
+
+
+def unavailability_ledger_path():
+    """Shared cross-repository ledger location.
+
+    Every governed checkout on the same machine reads and writes the same
+    file unless ARU_REVIEW_CAPACITY_LEDGER overrides it (tests, or a fleet
+    that wants an explicit shared path rather than the per-machine default).
+    """
+    override = os.environ.get(CAPACITY_LEDGER_ENV, "").strip()
+    return Path(override) if override else Path.home() / ".aru" / "review-service-capacity.json"
+
+
+def load_unavailability_snapshot(path=None):
+    """Read the shared ledger.
+
+    Missing, unreadable, or corrupt is treated as "no evidence", not an
+    error -- that is what keeps routing backward compatible when nothing has
+    ever recorded an outage.
+    """
+    target = Path(path) if path else unavailability_ledger_path()
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except OSError:
+        return {"schema": UNAVAILABILITY_SCHEMA, "entries": []}
+    try:
+        payload = parse_snapshot(raw)
+    except ValueError:
+        return {"schema": UNAVAILABILITY_SCHEMA, "entries": []}
+    return payload
+
+
+def record_unavailability(service, state, reason, retry_at, *, source,
+                           observed_at=None, path=None):
+    """Append one trusted known-unavailable entry to the shared ledger.
+
+    This is the only sanctioned writer. audit_unavailability() below still
+    revalidates every entry it reads, so a hand-edited or corrupted file
+    fails open per-entry rather than trusting its own past output.
+    """
+    if service not in REVIEW_SERVICES:
+        raise ValueError(f"unknown review service: {service!r}")
+    if state not in UNAVAILABLE_STATES:
+        raise ValueError(f"unknown unavailability state: {state!r}")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("reason must be a non-empty string")
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("source must be a non-empty string")
+    observed = _as_of(observed_at)
+    retry = _parse_timestamp(retry_at)
+    if retry <= observed:
+        raise ValueError("retry_at must be after observed_at")
+
+    entry = {
+        "service": service,
+        "state": state,
+        "reason": reason.strip(),
+        "observed_at": _iso(observed),
+        "retry_at": _iso(retry),
+        "source": source.strip(),
+    }
+    target = Path(path) if path else unavailability_ledger_path()
+    snapshot = load_unavailability_snapshot(target)
+    entries = [item for item in snapshot.get("entries", []) if isinstance(item, dict)]
+    entries.append(entry)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps({"schema": UNAVAILABILITY_SCHEMA, "entries": entries}, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return entry
+
+
+def _validate_unavailability_entry(raw, as_of, max_age_seconds):
+    """Return (service, info) for one fresh, well-formed, unexpired entry.
+
+    Every rejection path returns (None, ignored-item): malformed, spoofed,
+    stale, or ambiguous evidence is simply not counted, never treated as
+    proof of unavailability. Only genuine fresh evidence can exclude a
+    service, which is what keeps bad data from excluding one indefinitely.
+    """
+    if not isinstance(raw, dict) or set(raw) != ENTRY_KEYS:
+        return None, {"code": "entry_invalid", "message": "Entry fields are missing or unexpected."}
+    service = raw.get("service")
+    if service not in REVIEW_SERVICES:
+        service_value = service if isinstance(service, str) else None
+        return None, {
+            "code": "entry_service_invalid",
+            "message": "Entry service is not recognized.",
+            "service": service_value,
+        }
+    if raw.get("state") not in UNAVAILABLE_STATES:
+        return None, {"code": "entry_state_invalid", "message": "Entry state is not recognized.", "service": service}
+    reason = raw.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None, {
+            "code": "entry_reason_invalid",
+            "message": "Entry reason must be a non-empty string.",
+            "service": service,
+        }
+    source = raw.get("source")
+    if not isinstance(source, str) or not source.strip():
+        return None, {
+            "code": "entry_source_invalid",
+            "message": "Entry source must be a non-empty string.",
+            "service": service,
+        }
+    try:
+        observed = _parse_timestamp(raw.get("observed_at"))
+    except ValueError:
+        return None, {
+            "code": "entry_observed_at_invalid",
+            "message": "Entry observed_at is missing or malformed.",
+            "service": service,
+        }
+    try:
+        retry_at = _parse_timestamp(raw.get("retry_at"))
+    except ValueError:
+        return None, {
+            "code": "entry_retry_at_invalid",
+            "message": "Entry retry_at is missing or malformed.",
+            "service": service,
+        }
+    if retry_at <= observed:
+        return None, {
+            "code": "entry_bounds_invalid",
+            "message": "retry_at must be after observed_at.",
+            "service": service,
+        }
+    age = (as_of - observed).total_seconds()
+    if age < 0:
+        return None, {"code": "entry_from_future", "message": "Entry is dated in the future.", "service": service}
+    if age > max_age_seconds:
+        return None, {"code": "entry_stale", "message": "Entry exceeds the maximum age.", "service": service}
+    if retry_at <= as_of:
+        return None, {"code": "entry_expired", "message": "retry_at has already passed.", "service": service}
+    return service, {
+        "state": raw["state"],
+        "reason": reason.strip(),
+        "source": source.strip(),
+        "observed_at": _iso(observed),
+        "retry_at": _iso(retry_at),
+    }
+
+
+def audit_unavailability(payload, *, as_of=None, max_age_seconds=DEFAULT_UNAVAILABILITY_MAX_AGE_SECONDS):
+    """Fail-open classification of the known-unavailable ledger.
+
+    Deliberately the mirror image of audit_capacity(): that function fails
+    closed (any mismatch marks every service unavailable) because it audits
+    whether capacity is provably healthy. This fails open (any invalid or
+    stale entry is ignored, not excluded) because it decides whether a
+    service may be *excluded* from routing, and the kernel's contract is
+    that stale or malformed evidence must never exclude one indefinitely.
+    """
+    now = _as_of(as_of)
+    ignored = []
+    max_age_valid = _count(max_age_seconds, positive=True)
+    entries = []
+    if not max_age_valid:
+        ignored.append({"code": "max_age_invalid", "message": "Maximum age must be a positive integer."})
+    elif (not isinstance(payload, dict) or set(payload) != UNAVAILABILITY_KEYS
+            or payload.get("schema") != UNAVAILABILITY_SCHEMA):
+        ignored.append({"code": "snapshot_shape_invalid", "message": "Ledger fields are missing or unexpected."})
+    else:
+        raw_entries = payload.get("entries")
+        if isinstance(raw_entries, list):
+            entries = raw_entries
+        else:
+            ignored.append({"code": "entries_invalid", "message": "Entries must be a list."})
+
+    unavailable = {}
+    for raw in entries:
+        service, info = _validate_unavailability_entry(raw, now, max_age_seconds)
+        if service is None:
+            ignored.append(info)
+            continue
+        existing = unavailable.get(service)
+        if existing is None or info["observed_at"] > existing["observed_at"]:
+            unavailable[service] = info
+
+    ignored.sort(key=lambda item: (item.get("service") or "", item["code"]))
+    return {
+        "schema": "aru.review-service-unavailability-audit.v1",
+        "as_of": _iso(now),
+        "max_age_seconds": max_age_seconds,
+        "unavailable": unavailable,
+        "ignored": ignored,
+    }
 
 
 def _input_error(as_of, max_age_seconds, message):

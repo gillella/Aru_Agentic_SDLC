@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 441
+# line-ceiling: 620
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -43,13 +43,105 @@ REVIEW_LABEL_PREFIX = "review:"
 MODEL_FAMILIES = ("anthropic", "openai", "google", "meta", "mistral", "xai", "human")
 
 
+CAPACITY_MAX_AGE_SECONDS = 3600
+CAPACITY_EVIDENCE_START = "<!-- ARU:REVIEW-CAPACITY-EVIDENCE:START -->"
+CAPACITY_EVIDENCE_END = "<!-- ARU:REVIEW-CAPACITY-EVIDENCE:END -->"
+
+
 def review_service_for_issue(issue_id: int) -> str:
-    """Stable approximately-even authority assignment for one issue number."""
+    """Stable approximately-even authority assignment for one issue number.
+
+    Capacity-unaware by design: merge_pr.py and audit_review_assignment.py
+    recompute this from every linked issue to prove a PR's label was not
+    edited after the fact, so it must stay a pure function of issue_id alone.
+    select_review_service() below is where capacity evidence is applied.
+    """
     return REVIEW_SERVICES[(issue_id - 1) % len(REVIEW_SERVICES)]
 
 
 def review_label_for_service(service: str) -> str:
     return f"{REVIEW_LABEL_PREFIX}{service}"
+
+
+def select_review_service(issue_id: int, *, as_of=None, snapshot: Optional[Dict] = None) -> Dict:
+    """Deterministic, approximately-even selection over the eligible pool.
+
+    Loads fresh known-unavailable evidence from the shared cross-repository
+    ledger that scripts/audit_review_service_capacity.py owns, and excludes
+    only services with a fresh, well-formed, unexpired cooldown,
+    quota-exhaustion, outage, or unavailable record. When nothing excludes
+    anyone -- an empty ledger, or only stale/malformed entries -- the
+    eligible pool is the full REVIEW_SERVICES tuple in order, and
+    `eligible[(issue_id - 1) % len(eligible)]` is exactly
+    review_service_for_issue(issue_id): the original rotation is unchanged
+    until real evidence exists.
+    """
+    from audit_review_service_capacity import audit_unavailability, load_unavailability_snapshot
+
+    if snapshot is None:
+        snapshot = load_unavailability_snapshot()
+    report = audit_unavailability(snapshot, as_of=as_of, max_age_seconds=CAPACITY_MAX_AGE_SECONDS)
+    excluded_map = report["unavailable"]
+    eligible = [service for service in REVIEW_SERVICES if service not in excluded_map]
+    if eligible:
+        selected = eligible[(issue_id - 1) % len(eligible)]
+        rationale = (
+            f"selected '{selected}' from {len(eligible)} eligible service(s) via "
+            f"(issue_id - 1) mod {len(eligible)} rotation over the eligible pool"
+        )
+    else:
+        selected = None
+        rationale = "no configured review service is currently eligible; PR stays draft"
+    return {
+        "schema": "aru.review-capacity-selection.v1",
+        "as_of": report["as_of"],
+        "candidates": list(REVIEW_SERVICES),
+        "eligible": eligible,
+        "excluded": [
+            {"service": service, **excluded_map[service]}
+            for service in REVIEW_SERVICES if service in excluded_map
+        ],
+        "selected": selected,
+        "rationale": rationale,
+    }
+
+
+def render_capacity_evidence(evidence: Dict) -> str:
+    """Renders auditable candidate/exclusion/selection rationale as a PR comment."""
+    payload = json.dumps(evidence, indent=2, sort_keys=True).replace("<", "\\u003c").replace(">", "\\u003e")
+    return (
+        "## Review-capacity assignment evidence\n\n"
+        f"{CAPACITY_EVIDENCE_START}\n"
+        "```json\n"
+        f"{payload}\n"
+        "```\n"
+        f"{CAPACITY_EVIDENCE_END}\n"
+    )
+
+
+def existing_review_assignment(pr_ref: str) -> Optional[str]:
+    """Reads live PR labels for an already-assigned review service, if any.
+
+    Authority is immutable once assigned: every (re)assignment path calls
+    this first, so a later capacity change, or a retry of a PR left waiting
+    for capacity, can never silently switch reviewers on a PR that already
+    has one.
+    """
+    code, out, _err = run_cmd(["gh", "pr", "view", pr_ref, "--json", "labels"], check=False)
+    if code != 0:
+        return None
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    names = {
+        label.get("name") for label in payload.get("labels", [])
+        if isinstance(label, dict)
+    }
+    for service in REVIEW_SERVICES:
+        if review_label_for_service(service) in names:
+            return service
+    return None
 
 
 def collect_verification_evidence(
@@ -265,17 +357,50 @@ def enqueue_review(pr_ref: str) -> bool:
 
 
 def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:
-    """Assign exactly one review-pool service while the PR is still draft."""
-    service = review_service_for_issue(issue_id)
-    label = review_label_for_service(service)
-    ensure_label(label, "0e8a16", f"Authoritative review service: {service}")
-    code, _, err = run_cmd(
-        ["gh", "pr", "edit", pr_ref, "--add-label", label],
-        check=False,
-    )
-    if code != 0:
-        print(f"[ERROR] Could not apply {label}: {err.strip()}", file=sys.stderr)
-        return False
+    """Assign exactly one eligible review-pool service while the PR is draft.
+
+    Idempotent and safe to retry: if a review:* label is already on the PR,
+    authority is stable and this only resumes marking it ready (recovering
+    from a prior ready/trigger failure) rather than recomputing or switching
+    the assignment. Otherwise it loads fresh capacity evidence, records
+    candidate/exclusion/selection rationale as an auditable PR comment, and
+    either assigns the selected service or -- if none are eligible -- leaves
+    the PR in draft with that evidence as the bounded waiting-for-capacity
+    record. Call this again later to retry a waiting PR.
+    """
+    service = existing_review_assignment(pr_ref)
+    if service is not None:
+        label = review_label_for_service(service)
+        print(f"🔒 {label} already assigned; authority stays stable, resuming finalization.")
+    else:
+        evidence = select_review_service(issue_id)
+        comment_code, _, comment_err = run_cmd(
+            ["gh", "pr", "comment", pr_ref, "--body", render_capacity_evidence(evidence)],
+            check=False,
+        )
+        if comment_code != 0:
+            print(f"[WARN] Could not record capacity evidence: {comment_err.strip()}", file=sys.stderr)
+
+        service = evidence["selected"]
+        if service is None:
+            print(
+                f"⏳ No review service is currently eligible for PR {pr_ref}; left in draft "
+                "with bounded waiting-for-capacity evidence. Retry with --finalize-review "
+                "once capacity evidence changes.",
+                file=sys.stderr,
+            )
+            return True
+
+        label = review_label_for_service(service)
+        ensure_label(label, "0e8a16", f"Authoritative review service: {service}")
+        code, _, err = run_cmd(
+            ["gh", "pr", "edit", pr_ref, "--add-label", label],
+            check=False,
+        )
+        if code != 0:
+            print(f"[ERROR] Could not apply {label}: {err.strip()}", file=sys.stderr)
+            return False
+
     code, _, err = run_cmd(["gh", "pr", "ready", pr_ref], check=False)
     if code != 0:
         print(f"[ERROR] Could not mark PR ready after assigning {label}: {err.strip()}", file=sys.stderr)
@@ -369,6 +494,18 @@ def main():
         help="Refresh the evidence block on an existing PR for the checked-out head.",
     )
     parser.add_argument(
+        "--finalize-review",
+        type=int,
+        default=0,
+        metavar="PR",
+        help=(
+            "Retry capacity-aware review assignment on an existing draft PR left "
+            "waiting for capacity (or recover from a prior ready/trigger failure). "
+            "Requires --issue for the linked issue number; authority is stable and "
+            "unchanged if the PR is already assigned."
+        ),
+    )
+    parser.add_argument(
         "--verify-command",
         action="append",
         default=[],
@@ -386,6 +523,13 @@ def main():
     parser.add_argument("--model-family", type=str, default="", dest="family",
                         help=f"Authoring model family, one of: {', '.join(MODEL_FAMILIES)}")
     args = parser.parse_args()
+
+    if args.finalize_review:
+        # Retry only, never a second create path: --agent/--model-family are
+        # unused here (the PR already carries author:/family: from creation),
+        # but argparse still requires the token be present on the command line.
+        ok = finalize_review_assignment(str(args.finalize_review), args.issue)
+        sys.exit(0 if ok else 1)
 
     # `required=True` only proves the option token was typed; `--agent ""` gets
     # past it and reopens exactly the hole this script is meant to close - an
