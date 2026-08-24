@@ -19,7 +19,7 @@ mandatory human gates that no review evidence satisfies.
 
 `create_pr.py` assigns exactly one review service per issue, deterministically:
 
-```
+```text
 REVIEW_SERVICES[(issue_id - 1) % 3]  ->  coderabbit | sourcery | codeant
 ```
 
@@ -39,8 +39,8 @@ Sequence, enforced by `finalize_review_assignment()` in `scripts/create_pr.py`:
 2. The assigned `review:<service>` label is added.
 3. The PR is marked ready (`gh pr ready`).
 4. For `review:codeant` only, a `@codeant-ai: review` comment fires the
-   manual trigger; failure here rolls the PR back to draft so the operator can
-   retry rather than leaving an unlabeled-but-ready PR.
+   manual trigger; on failure, the function attempts to restore draft state so
+   the operator can retry. If that rollback also fails, the PR can remain ready.
 
 CodeRabbit's auto-review is centrally scoped to non-draft PRs carrying
 `review:coderabbit` (`.coderabbit.yaml` `reviews.auto_review`), so step 3
@@ -94,7 +94,7 @@ reply after the finding was raised.
 
 ## 5. Governed dry-run
 
-```
+```shell
 python3 scripts/merge_pr.py --pr <PR_ID> --dry-run [--expected-head <SHA>] [--json]
 ```
 
