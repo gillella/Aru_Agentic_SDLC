@@ -221,13 +221,13 @@ class AuditCapacityTests(unittest.TestCase):
 
 
 class CapacityCliTests(unittest.TestCase):
-    def run_main(self, raw):
+    def run_main(self, raw, *, max_age="3600"):
         output = io.StringIO()
         with patch.object(sys, "stdin", io.StringIO(raw)), redirect_stdout(output):
             code = audit.main([
                 "--input", "-",
                 "--as-of", AS_OF,
-                "--max-age-seconds", "3600",
+                "--max-age-seconds", max_age,
             ])
         return code, json.loads(output.getvalue())
 
@@ -240,6 +240,23 @@ class CapacityCliTests(unittest.TestCase):
 
     def test_cli_emits_fail_closed_json_for_invalid_input(self):
         code, report = self.run_main('{"duplicate":1,"duplicate":2}')
+
+        self.assertEqual(code, 1)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["max_age_seconds"], 3600)
+        self.assertIn("input_invalid", mismatch_codes(report))
+
+    def test_cli_emits_fail_closed_json_for_non_integer_max_age(self):
+        code, report = self.run_main(json.dumps(snapshot()), max_age="not-a-number")
+
+        self.assertEqual(code, 1)
+        self.assertFalse(report["ok"])
+        self.assertIn("input_invalid", mismatch_codes(report))
+
+    def test_cli_emits_fail_closed_json_for_deeply_nested_input(self):
+        raw = "[" * 2000 + "]" * 2000
+
+        code, report = self.run_main(raw)
 
         self.assertEqual(code, 1)
         self.assertFalse(report["ok"])

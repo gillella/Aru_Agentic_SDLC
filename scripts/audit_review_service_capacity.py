@@ -40,7 +40,7 @@ def parse_snapshot(raw):
             object_pairs_hook=_unique_object,
             parse_constant=_reject_constant,
         )
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid capacity snapshot JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise ValueError("capacity snapshot must be a JSON object")
@@ -341,12 +341,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", default="-", help="snapshot JSON path, or - for stdin")
     parser.add_argument("--as-of", help="ISO-8601 audit time; defaults to current UTC")
-    parser.add_argument("--max-age-seconds", type=int, default=3600)
+    parser.add_argument("--max-age-seconds", default="3600")
     args = parser.parse_args(argv)
+    now = datetime.now(timezone.utc)
     try:
         now = _as_of(args.as_of)
+        max_age_seconds = int(args.max_age_seconds)
     except ValueError as exc:
-        now = datetime.now(timezone.utc)
         report = _input_error(now, args.max_age_seconds, str(exc))
     else:
         try:
@@ -355,12 +356,12 @@ def main(argv=None):
             )
             payload = parse_snapshot(raw)
         except (OSError, UnicodeError, ValueError) as exc:
-            report = _input_error(now, args.max_age_seconds, str(exc))
+            report = _input_error(now, max_age_seconds, str(exc))
         else:
             report = audit_capacity(
                 payload,
                 as_of=now,
-                max_age_seconds=args.max_age_seconds,
+                max_age_seconds=max_age_seconds,
             )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["ok"] else 1
