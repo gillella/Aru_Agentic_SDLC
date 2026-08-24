@@ -1292,6 +1292,100 @@ class ReviewGateTests(unittest.TestCase):
         evidence["github_review_evidence"] = True
         self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
 
+    def test_missing_assigned_review_service_label_fails_closed(self):
+        pr = {
+            "author": {"login": "gillella"},
+            "reviews": [{
+                "id": "default-review",
+                "state": "APPROVED",
+                "submittedAt": "2026-01-01T00:00:00Z",
+                "author": {"login": "gillella"},
+            }],
+            "labels": [{"name": "author:agent-1"}],
+            "statusCheckRollup": [{
+                "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
+            }],
+        }
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertFalse(ok)
+        self.assertIn("review:", msg)
+
+    def test_duplicate_assigned_review_service_labels_fail_closed(self):
+        pr = self.coderabbit_pr("author:agent-1", "review:coderabbit", "review:sourcery")
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertFalse(ok)
+        self.assertIn("exactly one", msg)
+
+    def test_sourcery_successful_assigned_head_check_passes(self):
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "sourcery"}},
+        }]
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [],
+            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        })
+        self.assertTrue(ok, msg)
+        self.assertIn("Sourcery", msg)
+
+    def test_sourcery_failed_or_spoofed_check_fails_closed(self):
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "spoofed-app"}},
+        }]
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [],
+            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        })
+        self.assertFalse(ok)
+        self.assertIn("Sourcery", msg)
+
+    def test_codeant_exact_head_review_and_zero_threads_passes(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "CodeAnt findings.",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        }
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeAnt", msg)
+
+    def test_codeant_stale_or_spoofed_review_fails_closed(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "b" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "CodeAnt findings.",
+                "author": {"login": "not-codeant", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        }
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeAnt", msg)
+
 
 class CodeRabbitStatusEvidenceTests(unittest.TestCase):
     @patch.object(merge_pr, "_gh_json")
@@ -1370,6 +1464,9 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
 
 def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella"):
     """A PR whose default reviews come from the same GitHub account."""
+    labels = list(names)
+    if not any(name.startswith("review:") for name in labels):
+        labels.append("review:coderabbit")
     default = [{
         "id": "default-review",
         "state": "APPROVED",
@@ -1379,7 +1476,7 @@ def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella")
     return {
         "author": {"login": pr_login},
         "reviews": reviews if reviews is not None else default,
-        "labels": [{"name": n} for n in names],
+        "labels": [{"name": n} for n in labels],
     }
 
 
@@ -2664,7 +2761,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
                 "author": {"login": "peer"},
             }],
             "author": {"login": "author"},
-            "labels": [{"name": "author:agent-1"}],
+            "labels": [{"name": "author:agent-1"}, {"name": "review:coderabbit"}],
             "mergeStateStatus": "CLEAN",
             "mergeable": "MERGEABLE",
             "additions": 2,
@@ -2723,7 +2820,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
                 "author": {"login": "peer"},
             }],
             "author": {"login": "author"},
-            "labels": [{"name": "author:agent-1"}],
+            "labels": [{"name": "author:agent-1"}, {"name": "review:coderabbit"}],
             "mergeStateStatus": "CLEAN",
             "mergeable": "MERGEABLE",
             "additions": 2,

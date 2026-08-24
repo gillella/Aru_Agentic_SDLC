@@ -615,7 +615,7 @@ def _author_can_repair_review(pr: dict[str, Any]) -> bool:
     if not evidence:
         return False
     evidence = merge_pr._with_coderabbit_status(pr["number"], evidence)
-    if not merge_pr.has_authoritative_coderabbit_review(pr, evidence):
+    if not merge_pr.has_authoritative_assigned_review(pr, evidence):
         return False
     if int(evidence.get("unresolved") or 0) > 0:
         return False
@@ -690,8 +690,8 @@ def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
     """Legacy API that always refuses coding-agent review work."""
     return {
         "eligible": False,
-        "reason": ("CodeRabbit is the sole code-review authority; coding agents "
-                   "implement and remediate findings only"),
+        "reason": ("The assigned review-pool service is the sole code-review authority "
+                   "for this PR; coding agents implement and remediate findings only"),
         "cross_family": False,
         "degraded": False,
         "stale_attribution": False,

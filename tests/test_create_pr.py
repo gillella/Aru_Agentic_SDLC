@@ -128,9 +128,40 @@ class IdentityStampTests(unittest.TestCase):
     def test_successful_open_enqueues_review(self, _branch, _issue):
         with patch.object(create_pr, "run_cmd", return_value=(0, "https://x/pull/7", "")), \
                 patch.object(create_pr, "apply_identity", return_value=True), \
-                patch.object(create_pr, "enqueue_review", return_value=True) as queued:
+                patch.object(create_pr, "finalize_review_assignment", return_value=True) as queued:
             self.assertTrue(create_pr.create_pr(7, "t", "b", "agent-1", "anthropic"))
-            queued.assert_called_once_with("https://x/pull/7")
+            queued.assert_called_once_with("https://x/pull/7", 7)
+
+    def test_review_service_assignment_is_stable_and_evenly_distributed(self):
+        self.assertEqual(create_pr.review_service_for_issue(1), "coderabbit")
+        self.assertEqual(create_pr.review_service_for_issue(2), "sourcery")
+        self.assertEqual(create_pr.review_service_for_issue(3), "codeant")
+        self.assertEqual(create_pr.review_service_for_issue(4), "coderabbit")
+
+    @patch.object(create_pr, "run_cmd")
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_codeant_assignment_labels_readys_and_triggers_review_after_ready(self, _label, run):
+        run.side_effect = [
+            (0, "", ""),
+            (0, "", ""),
+            (0, "", ""),
+        ]
+        self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        label_cmd = run.call_args_list[0].args[0]
+        self.assertEqual(label_cmd[:4], ["gh", "pr", "edit", "https://x/pull/9"])
+        self.assertIn("review:codeant", label_cmd)
+        ready_cmd = run.call_args_list[1].args[0]
+        self.assertEqual(ready_cmd[:4], ["gh", "pr", "ready", "https://x/pull/9"])
+        comment_cmd = run.call_args_list[2].args[0]
+        self.assertEqual(comment_cmd[:3], ["gh", "pr", "comment"])
+        self.assertIn("@codeant-ai: review", comment_cmd)
+
+    @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_sourcery_assignment_marks_ready_without_codeant_trigger(self, _label, run):
+        self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/8", 8))
+        self.assertEqual(len(run.call_args_list), 2)
+        self.assertIn("review:sourcery", run.call_args_list[0].args[0])
 
     @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
     @patch.object(create_pr, "ensure_label", return_value=True)

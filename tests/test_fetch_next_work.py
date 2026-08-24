@@ -21,6 +21,9 @@ def ts(minutes_ago):
 
 def pr(number, *labels, draft=False, checks="green", reviews=0, minutes_old=5,
        decision="", title="a pr"):
+    labels = list(labels)
+    if not any(label.startswith("review:") for label in labels):
+        labels.append("review:coderabbit")
     rollup = {
         "green": [{"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"}],
         "red": [{"name": "verify", "status": "COMPLETED", "conclusion": "FAILURE"}],
@@ -154,7 +157,7 @@ class EligibilityTests(unittest.TestCase):
     def test_coding_agents_are_never_eligible_for_review(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic"))
         self.assertFalse(verdict["eligible"])
-        self.assertIn("CodeRabbit", verdict["reason"])
+        self.assertIn("review-pool", verdict["reason"])
 
     def test_picker_json_top_level_agent_is_resolved_identity(self):
         parts = {
@@ -610,7 +613,7 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_resolved_threads_are_author_fixable(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=True):
             found = self.fix(stranded(), reason="unmet: review")
         self.assertIsNotNone(found)
@@ -624,7 +627,7 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_threads_plus_rebase_are_both_author_work(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 1, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=True):
             found = self.fix(stranded(), reason="unmet: rebased, review")
         self.assertEqual(found["unmet_gates"], ["rebased", "review-evidence"])
@@ -632,14 +635,14 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_without_current_head_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": False}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=False):
             self.assertIsNone(self.fix(stranded(), reason="unmet: review"))
 
     def test_unfixed_without_peer_attribution_is_author_fixable_with_coderabbit(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=True):
             found = self.fix(stranded(peer=None), reason="unmet: review")
         self.assertEqual(found["unmet_gates"], ["review-evidence"])
@@ -647,9 +650,22 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_without_authoritative_coderabbit_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=False):
             self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
+
+    def test_unfixed_with_assigned_codeant_review_is_author_fixable(self):
+        candidate = stranded(peer=None)
+        candidate["labels"].append({"name": "review:codeant"})
+        with patch.object(fnw, "review_evidence", return_value={
+            "unresolved": 0,
+            "unfixed": 2,
+            "reviewed_head": True,
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 2, "outdated_unfixed": 0}},
+        }), \
+             patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True):
+            found = self.fix(candidate, reason="unmet: review")
+        self.assertEqual(found["unmet_gates"], ["review-evidence"])
 
     def test_retired_reviewer_claim_does_not_block_merge(self):
         candidate = stranded(peer=None)

@@ -88,6 +88,10 @@ ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
 CODERABBIT_LOGINS = {"coderabbitai", "coderabbitai[bot]"}
 CODERABBIT_APP_SLUGS = {"coderabbitai"}
 CODERABBIT_ACTOR_TYPES = {"Bot"}
+SOURCERY_LOGINS = {"sourcery-ai", "sourcery-ai[bot]"}
+SOURCERY_APP_SLUGS = {"sourcery"}
+CODEANT_LOGINS = {"codeant-ai", "codeant-ai[bot]"}
+REVIEW_SERVICE_LABELS = ("review:coderabbit", "review:sourcery", "review:codeant")
 CODERABBIT_FULL_REVIEW_REQUEST = "@coderabbitai full review"
 CODERABBIT_FULL_REVIEW_FINISHED = "Full review finished."
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
@@ -742,7 +746,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
             nodes {
               isResolved
               isOutdated
-              comments(first:50) { nodes { createdAt body } }
+              comments(first:50) { nodes { createdAt body author { login __typename } } }
             }
             pageInfo { hasNextPage endCursor }
           }
@@ -760,6 +764,11 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     body_addressed = 0
     body_edit_events = None
     commit_times = None
+    service_threads = {
+        "coderabbit": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+        "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+        "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+    }
 
     while True:
         args = [
@@ -802,9 +811,21 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
             outdated = bool(node.get("isOutdated"))
             resolved = bool(node.get("isResolved"))
             comments = (node.get("comments") or {}).get("nodes") or []
+            thread_service = None
+            if comments:
+                author = comments[0].get("author") or {}
+                login = str(author.get("login") or "").lower()
+                if login in CODERABBIT_LOGINS:
+                    thread_service = "coderabbit"
+                elif login in SOURCERY_LOGINS:
+                    thread_service = "sourcery"
+                elif login in CODEANT_LOGINS:
+                    thread_service = "codeant"
 
             if not resolved and not outdated:
                 unresolved += 1
+                if thread_service:
+                    service_threads[thread_service]["unresolved"] += 1
                 continue
 
             if not comments:
@@ -822,6 +843,8 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
             if not resolved and outdated:
                 if not has_commit_after:
                     outdated_unfixed += 1
+                    if thread_service:
+                        service_threads[thread_service]["outdated_unfixed"] += 1
                 else:
                     outdated_addressed += 1
                 continue
@@ -846,6 +869,8 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                     body_addressed += 1
                 else:
                     unfixed += 1
+                    if thread_service:
+                        service_threads[thread_service]["unfixed"] += 1
 
         if not has_next:
             return {
@@ -866,6 +891,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                 "body_addressed": body_addressed,
                 "withdrawn": withdrawn,
                 "reviewed_head": reviewed_head,
+                "service_threads": service_threads,
             }
         next_cursor = page_info.get("endCursor")
         if not next_cursor or next_cursor in seen_cursors:
@@ -1129,6 +1155,47 @@ def label_values(pr, prefix):
         for lab in (pr.get("labels") or [])
         if (lab.get("name") or "").startswith(prefix)
     ]
+
+
+def assigned_review_service(pr):
+    """Exactly one review-pool authority label must be present."""
+    labels = {
+        lab.get("name", "")
+        for lab in (pr.get("labels") or [])
+        if (lab.get("name") or "") in REVIEW_SERVICE_LABELS
+    }
+    if len(labels) != 1:
+        return None
+    return next(iter(labels)).split(":", 1)[1]
+
+
+def _service_thread_counts(evidence, service):
+    threads = evidence.get("service_threads") if isinstance(evidence, dict) else None
+    if isinstance(threads, dict) and isinstance(threads.get(service), dict):
+        return threads[service]
+    return evidence if isinstance(evidence, dict) else None
+
+
+def _thread_gate_message(counts):
+    unresolved = int(counts.get("unresolved") or 0)
+    outdated_unfixed = int(counts.get("outdated_unfixed") or 0)
+    unfixed = int(counts.get("unfixed") or 0)
+    if unresolved > 0 or outdated_unfixed > 0:
+        total = unresolved + outdated_unfixed
+        if unresolved > 0 and outdated_unfixed > 0:
+            return False, f"{total} unresolved review thread(s) ({outdated_unfixed} outdated without evidence)."
+        if unresolved > 0:
+            return False, f"{unresolved} unresolved review thread(s)."
+        return False, f"{outdated_unfixed} outdated review thread(s) without evidence."
+    if unfixed > 0:
+        return False, (
+            f"{unfixed} resolved thread(s) have no evidence that the finding was addressed: "
+            "no commit after the finding was raised, no relevant size-waiver or verification-evidence "
+            "body edit after it was raised, and no reply starting with 'Withdrawn:'. "
+            "Push the fix, apply the documented body-only gate remedy when it matches the finding, "
+            "or withdraw the finding with a reason."
+        )
+    return True, ""
 
 
 def latest_state_per_reviewer(reviews):
@@ -1677,7 +1744,120 @@ def has_authoritative_coderabbit_review(pr, evidence):
     return _coderabbit_check(pr, evidence, review) is True
 
 
+def _sourcery_check(pr, evidence):
+    rollup = pr.get("statusCheckRollup") or []
+    matches = []
+    for item in rollup:
+        if not isinstance(item, dict):
+            return None
+        if str(item.get("name") or item.get("context") or "").strip().lower() == "sourcery review":
+            matches.append(item)
+    if len(matches) != 1:
+        return False
+    match = matches[0]
+    kind = match.get("__typename") or match.get("type")
+    if kind != "CheckRun":
+        return False
+    slug = str((((match.get("checkSuite") or {}).get("app") or {}).get("slug")) or "").lower()
+    if slug not in SOURCERY_APP_SLUGS:
+        return False
+    if str(match.get("status") or "").upper() != "COMPLETED":
+        return False
+    return str(match.get("conclusion") or "").upper() == "SUCCESS"
+
+
+def _codeant_latest_review(evidence):
+    if not isinstance(evidence, dict):
+        return None
+    head = evidence.get("head_oid")
+    if not isinstance(head, str) or not head:
+        return None
+    candidates = []
+    for review in evidence.get("reviews") or []:
+        if not isinstance(review, dict):
+            return None
+        author = review.get("author") or {}
+        login = str(author.get("login") or "").lower()
+        actor_type = author.get("__typename")
+        state = str(review.get("state") or "").upper()
+        submitted = _parse_review_ts(review.get("submittedAt"))
+        oid = (review.get("commit") or {}).get("oid")
+        review_id = review.get("id")
+        body = review.get("body")
+        if login not in CODEANT_LOGINS:
+            continue
+        if actor_type != "Bot":
+            return None
+        if state == "PENDING":
+            return None
+        if state == "DISMISSED":
+            continue
+        if (
+            state not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+            or submitted is None
+            or not isinstance(review_id, str) or not review_id
+            or not isinstance(body, str)
+            or oid != head
+        ):
+            return None
+        candidates.append((submitted, review_id, review))
+    newest = max((candidate[0] for candidate in candidates), default=None)
+    candidates = [candidate for candidate in candidates if candidate[0] == newest]
+    if len(candidates) != 1:
+        return None
+    return candidates[0][2]
+
+
+def has_authoritative_assigned_review(pr, evidence):
+    service = assigned_review_service(pr) if isinstance(pr, dict) else None
+    if service == "coderabbit":
+        return has_authoritative_coderabbit_review(pr, evidence)
+    if service == "sourcery":
+        return _sourcery_check(pr, evidence) is True
+    if service == "codeant":
+        review = _codeant_latest_review(evidence)
+        return isinstance(review, dict) and str(review.get("state") or "").upper() != "CHANGES_REQUESTED"
+    return False
+
+
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
+    service = assigned_review_service(pr) if isinstance(pr, dict) else None
+    if service is None:
+        return False, (
+            "PR must carry exactly one authoritative review-pool label: "
+            "review:coderabbit, review:sourcery, or review:codeant."
+        )
+    counts = _service_thread_counts(evidence, service)
+    if not isinstance(counts, dict):
+        return False, f"Could not determine {service.title()} review-thread state; refusing rather than guessing."
+    ok, thread_message = _thread_gate_message(counts)
+    if not ok:
+        return False, thread_message
+    if service == "sourcery":
+        if _sourcery_check(pr, evidence) is not True:
+            return False, (
+                "Sourcery has not supplied one successful authoritative current-head "
+                "'Sourcery review' check. Missing, skipped, failed, stale, ambiguous, "
+                "or spoofed evidence blocks merge."
+            )
+        return True, (
+            f"Sourcery review is complete on current head "
+            f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved Sourcery threads."
+        )
+    if service == "codeant":
+        review = _codeant_latest_review(evidence)
+        if review is None:
+            return False, (
+                "CodeAnt has not supplied one authoritative exact-head review object. "
+                "Missing, stale, ambiguous, or spoofed evidence blocks merge."
+            )
+        if str(review.get("state") or "").upper() == "CHANGES_REQUESTED":
+            return False, "CodeAnt requested changes and has not re-reviewed."
+        return True, (
+            f"CodeAnt review is complete on current head "
+            f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved CodeAnt threads."
+        )
+
     # Prefer the same explicitly paginated review history used for current-head
     # evidence. The PR snapshot remains a compatibility fallback for pure
     # unit-level callers that supply handcrafted evidence.

@@ -41,9 +41,12 @@ class ProjectBootstrapTests(unittest.TestCase):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
         self.assertIn("introduces a new helper function, module, or script", rules)
 
-    def test_generated_governance_uses_coderabbit_review_and_mechanical_merge(self):
+    def test_generated_governance_uses_review_pool_and_mechanical_merge(self):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
-        self.assertIn("CodeRabbit is the sole PR code-review authority", rules)
+        self.assertIn("assigned review-pool service is the sole PR code-review authority", rules)
+        self.assertIn("review:coderabbit", rules)
+        self.assertIn("review:sourcery", rules)
+        self.assertIn("review:codeant", rules)
         self.assertIn("including the implementation author", rules)
         self.assertIn("merge_pr.py", rules)
         self.assertIn("--expected-head <HEAD_SHA>", rules)

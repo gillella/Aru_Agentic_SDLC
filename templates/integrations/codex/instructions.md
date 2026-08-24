@@ -7,7 +7,7 @@ This environment is governed by Aru_Agentic_SDLC.
    - `run-aru-factory` — `aru code` (synonyms `software`/`dev`/`sdlc`), "please continue", work the board, loop mode. `aru video` / `aru poem` are reserved for unbuilt factories: stop, do not improvise from Code Factory skills
    - `implement-next-issue` — claim / worktree / implement / PR for an issue
    - `create-github-issue` — file work
-   - `code-review` — refuse coding-agent review; CodeRabbit alone reviews. Coding agents never review
+   - `code-review` — refuse coding-agent review; the assigned review-pool service alone reviews. Coding agents never review
    - `remediate-ci-failure` — fix red CI
    - `address-pr-feedback` — resolve review comments
 3. Execute Git & GitHub actions via `python3 "$ARU_SDLC_HOME/scripts/<script>.py"`.

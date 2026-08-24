@@ -119,9 +119,9 @@ branch, or merge around the Definition-of-Done gate.
   non-authoritative here.
 - Brainstorming frameworks supply input to Aru's plan gate rather than running
   a parallel lifecycle.
-- Memory tools provide context only. **CodeRabbit is the sole PR code-review authority.** Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
+- Memory tools provide context only. **The assigned review-pool service is the sole PR code-review authority for a given PR.** `create_pr.py` assigns exactly one of `review:coderabbit`, `review:sourcery`, or `review:codeant`. Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
 
-After CodeRabbit completes a substantive review on the exact current head and
+After the assigned review-pool service supplies authoritative exact-head evidence and
 every enforced gate passes, any factory agent, including the implementation author,
 may execute the mechanical merge only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. When the picker
@@ -141,7 +141,7 @@ governed remediation.
    - Router: `aru-agentic-sdlc/SKILL.md`
    - Primary Skill: `implement-next-issue/SKILL.md`
    - Issue Creation: `create-github-issue/SKILL.md`
-   - Code Review Skill: `code-review/SKILL.md` (refusal; CodeRabbit alone reviews)
+   - Code Review Skill: `code-review/SKILL.md` (refusal; the assigned review-pool service alone reviews)
    - CI Failure Remediation: `remediate-ci-failure/SKILL.md`
    - PR Review Feedback: `address-pr-feedback/SKILL.md`
 2. **Worktree Isolation**:

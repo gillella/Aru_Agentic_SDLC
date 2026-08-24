@@ -107,7 +107,7 @@ the skill for its type:
 | type | skill |
 |---|---|
 | `feedback` | `address-pr-feedback` |
-| `review` | Forbidden legacy state: release your reviewer claim, then return to picker; CodeRabbit alone reviews. Coding agents never review |
+| `review` | Forbidden legacy state: release your reviewer claim, then return to picker; the assigned review-pool service alone reviews. Coding agents never review |
 | `issue` with `skill: research` | `research` |
 | any other `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
@@ -208,15 +208,17 @@ Restated only because skipping one is how each has been broken before.
    `--agent <id>`; `--model-family <family>` is optional.
 7. **Degraded GitHub halts coordination gracefully** — never a secondary local
    task queue or an ungated merge. See `docs/degraded-mode.md`.
-8. **Coding agents never review.** CodeRabbit is the sole code-review
-   authority. The
-   merge gate requires its exact-current-head evidence and rejects coding-agent
-   comments, approvals, labels, and attestations.
+8. **Coding agents never review.** The assigned review-pool service is the
+   sole code-review authority. CodeRabbit remains one of those assigned
+   services. The merge gate requires exact-current-head assigned-service
+   evidence and rejects coding-agent comments, approvals, labels, and
+   attestations.
 
 ### Merging
 
-After CodeRabbit has reviewed the exact current head and every DoD gate passes,
-any factory agent, including the implementation author, may execute the merge
+After the assigned review-pool service has supplied exact-current-head evidence
+and every DoD gate passes, any factory agent, including the implementation author,
+may execute the merge
 helper with the picker-supplied `head_sha` pinned as `--expected-head`:
 
 ```shell
