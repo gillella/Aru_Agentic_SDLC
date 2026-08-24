@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4836
+# line-ceiling: 5176
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -143,6 +143,12 @@ _REWORK_BLOCKING_RE = re.compile(
 # in the merge authority prevents desktop clients from disagreeing about when
 # a transient cleanup failure becomes exceptional operator intervention.
 CLOSEOUT_RETRY_DELAYS = (5, 15, 45)
+
+# `execute_merge` prefixes every refusal it reaches *before* running the merge
+# command with this. It lets `main` report a gate refusal as blocked rather
+# than as a merge failure without taking a second base read, which would
+# reopen the very window the refusal exists to close (#371 review).
+MERGE_NOT_ATTEMPTED = "No merge command was run:"
 
 PR_FIELDS = (
     "number,title,body,state,isDraft,mergeable,mergeStateStatus,baseRefName,baseRefOid,author,"
@@ -2468,7 +2474,10 @@ def _ci_saw_base_advance(pr, advance_resolver=None, run_resolver=None):
     seconds before the merge ref itself is rebuilt. That window is orders of
     magnitude smaller than the unbounded one above, but the run metadata still
     does not name the exact merge commit the runner checked out, so the literal
-    tested-merge identity proof still cannot be derived from here.
+    tested-merge identity proof still cannot be derived from here. `check_rebased`
+    closes that residual separately, right after this returns fresh, by reading
+    the PR's own test-merge commit and checking its parents directly
+    (`_merge_commit_parents`, issue #371).
     """
     resolve = advance_resolver or _base_advance_time
     advanced = resolve(pr.get("baseRefName"), pr.get("headRefOid"))
@@ -2626,8 +2635,89 @@ def _github_actions_current_base_evidence(pr, check, advanced, run_resolver=None
     return _github_actions_run_timestamps(data, advanced)
 
 
+# How many times the identity proof re-reads the base branch tip when the two
+# reads bracketing the merge-parent lookup disagree. GitHub's REST reads are
+# eventually consistent, so one disagreement can be replica lag rather than a
+# real push; a base that is actually moving keeps disagreeing and is refused.
+MERGE_PARENT_BASE_RECHECK_ATTEMPTS = 3
+
+
+def _current_base_tip(pr):
+    """The base branch's live tip SHA, or None if it cannot be read.
+
+    `pr["baseRefOid"]` is a snapshot taken before the merge-parent lookup, so
+    on its own it cannot witness a base that advanced since (#371 review).
+    Reading the ref itself lets the identity proof bracket that lookup with two
+    live reads and refuse when the base moves underneath it.
+
+    Returns None for "could not determine" -- an unresolvable slug or base
+    branch, an unreadable ref, or a ref payload without a non-empty string SHA.
+    Every caller must treat None as unverifiable, never as a passing merge.
+    """
+    branch = pr.get("baseRefName")
+    slug = get_repo_slug()
+    if not branch or not slug:
+        return None
+    ref = _gh_json(["gh", "api", f"repos/{slug}/git/ref/heads/{branch}"])
+    if not isinstance(ref, dict):
+        return None
+    obj = ref.get("object")
+    if not isinstance(obj, dict):
+        return None
+    sha = obj.get("sha")
+    if not isinstance(sha, str) or not sha:
+        return None
+    return sha
+
+
+def _merge_commit_parents(pr):
+    """Parent SHAs of the PR's current test-merge commit, or None if unusable.
+
+    REST's `merge_commit_sha` is not GraphQL's `mergeCommit` -- the latter
+    stays null until the PR is actually merged. For an open, mergeable PR,
+    GitHub keeps `merge_commit_sha` pointed at a two-parent commit merging the
+    current head onto the current base tip: the same `refs/pull/N/merge` ref
+    every job in ci.yml checks out, since none overrides the checkout ref.
+
+    This supplies the literal identity proof `_ci_saw_base_advance` cannot
+    give on its own (issue #371): reading a commit's own parents names exactly
+    what it merges, rather than inferring freshness from when a check started.
+
+    Returns None for "could not determine" -- an unresolvable PR or slug, an
+    absent or non-string `merge_commit_sha`, an unresolvable commit, or a
+    commit that does not report exactly two parents with string SHAs. Every
+    caller must treat None as unverifiable, never as a passing merge.
+    """
+    number = pr.get("number")
+    slug = get_repo_slug()
+    if not number or not slug:
+        return None
+    pull = _gh_json(["gh", "api", f"repos/{slug}/pulls/{number}"])
+    if not isinstance(pull, dict):
+        return None
+    merge_sha = pull.get("merge_commit_sha")
+    if not isinstance(merge_sha, str) or not merge_sha:
+        return None
+    commit = _gh_json(["gh", "api", f"repos/{slug}/commits/{merge_sha}"])
+    if not isinstance(commit, dict):
+        return None
+    parents = commit.get("parents")
+    if not isinstance(parents, list) or len(parents) != 2:
+        return None
+    shas = []
+    for entry in parents:
+        if not isinstance(entry, dict):
+            return None
+        sha = entry.get("sha")
+        if not isinstance(sha, str) or not sha:
+            return None
+        shas.append(sha)
+    return shas
+
+
 def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolver=None,
-                  run_resolver=None):
+                  run_resolver=None, merge_parents_resolver=None,
+                  base_tip_resolver=None):
     """Staleness gate.
 
     A branch behind the base is not automatically stale. Requiring a literal
@@ -2657,6 +2747,13 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
     is not enough, because GitHub replays the original event SHA/ref. The
     preserving-head remedy when this refuses is a fresh `pull_request` event on
     the same head, not a rebase.
+
+    Timing alone still cannot name the exact commit a check tested, so once
+    `_ci_saw_base_advance` is satisfied this also reads the PR's own
+    test-merge commit and requires its parents to be literally the current
+    base tip and this head (`_merge_commit_parents`, issue #371). That closes
+    the identity gap timing leaves open -- including GitHub's own merge-ref
+    recomputation lag -- without ever asking for a rebase either.
     """
     state = (pr.get("mergeStateStatus") or "").upper()
     if state == "DIRTY":
@@ -2725,11 +2822,180 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
                 f"runner checked out. Do not rebase: that rewrites the head "
                 f"SHA and destroys the review attestation bound to it."
             )
+        # Timing proves the checks started late enough to have read the
+        # advance; it does not name the commit they actually tested (issue
+        # #371). Read the PR's own test-merge commit and confirm its parents
+        # are literally the current base tip and this head -- the identity
+        # proof timing alone cannot supply.
+        identity_ok, identity_reason = _merge_commit_matches_base(
+            pr, behind, plural, merge_parents_resolver, base_tip_resolver)
+        if not identity_ok:
+            return False, identity_reason
         return True, (
             f"Branch is {behind} {plural} behind the base, but its changes are "
-            f"disjoint from the base advance and {reason}."
+            f"disjoint from the base advance, {reason}, and its tested merge "
+            f"commit names the current base tip as a parent."
         )
     return True, "Branch is current with the base."
+
+
+def _identity_refusal(behind, plural, detail):
+    """Composes one refusal from the merge-parent identity proof.
+
+    Every refusal on this path states the same three things -- what was already
+    proven, what could not be proven, and that the remedy is never a rebase --
+    so the shared wording is built once here instead of being restated at each
+    exit. `detail` supplies only the middle part and must end its own sentence.
+    A rebase is always the wrong remedy: it rewrites the head SHA and destroys
+    the head-bound review attestation this gate exists to preserve (#369).
+    """
+    return (
+        f"Branch is {behind} {plural} behind the base with disjoint "
+        f"changes and CI that started after the advance, but {detail} Do "
+        f"not rebase: that rewrites the head SHA and destroys the review "
+        f"attestation bound to it."
+    )
+
+
+def _well_formed_parents(parents):
+    """True only for a list of exactly two non-empty `str` parent SHAs.
+
+    The resolver is injectable and its live implementation reads JSON GitHub
+    produced, so `parents` is untrusted input: it may be any object at all.
+    Checking the shape before the set comparison and before formatting keeps a
+    malformed value from raising `TypeError` (unhashable entries in `set()`,
+    non-`str` entries in `", ".join`) out of the fail-closed handlers, which
+    would crash the gate instead of refusing the merge (#371 review).
+
+    `type(x) is not str` rather than `isinstance` on purpose: a `str` subclass
+    can override `__eq__`/`__hash__` and compare equal to a SHA it does not
+    contain, which is precisely the deception this proof must not accept.
+    """
+    return (
+        isinstance(parents, list)
+        and len(parents) == 2
+        and all(type(parent) is str and parent for parent in parents)
+    )
+
+
+def _show_parents(parents):
+    """A display form for `parents` that is safe for any object.
+
+    Only joins when every entry is genuinely a `str`; anything else is shown
+    through `repr`, so a malformed resolver result can still be reported to the
+    operator without the message construction itself raising.
+    """
+    if isinstance(parents, list) and all(type(p) is str for p in parents):
+        return ", ".join(parents)
+    return repr(parents)
+
+
+def _proved_base_and_parents(pr, resolve_base, resolve_parents):
+    """Reads the merge parents bracketed by two live reads of the base tip.
+
+    Returns `(base_tip, parents, failure)`, where `failure` is None on success
+    and otherwise a sentence naming why no proof could be taken.
+
+    The bracketing is the whole point (#371 review). `pr["baseRefOid"]` is a
+    snapshot taken before this lookup, so comparing the parents against it
+    cannot witness a base that advanced in between: the stale merge commit
+    still matches the stale snapshot and the gate passes, after which the merge
+    itself runs against the newer base that CI never saw. Two live reads either
+    side of the lookup make that movement observable, and a parent list read
+    across a moving base is attributable to neither end of the move.
+
+    Retries are bounded and never weaken the proof. GitHub's REST reads are
+    eventually consistent, so a single disagreement between the two reads can
+    be replica lag rather than a real push; a base that is genuinely moving
+    keeps disagreeing and is refused once the attempts run out.
+    """
+    failure = None
+    for _attempt in range(MERGE_PARENT_BASE_RECHECK_ATTEMPTS):
+        before = resolve_base(pr)
+        if not isinstance(before, str) or not before:
+            return None, None, "the base branch tip could not be read."
+        parents = resolve_parents(pr)
+        after = resolve_base(pr)
+        if not isinstance(after, str) or not after:
+            return None, None, "the base branch tip could not be re-read."
+        if before == after:
+            return after, parents, None
+        failure = (
+            f"the base branch kept advancing (last seen moving from "
+            f"{before[:12]} to {after[:12]}) while the tested merge commit "
+            f"was being read, so the merge commit's parents cannot be "
+            f"attributed to any one base tip. Wait for the base to settle "
+            f"and retry."
+        )
+    return None, None, failure
+
+
+def _merge_commit_matches_base(pr, behind, plural, merge_parents_resolver,
+                               base_tip_resolver=None):
+    """The literal identity proof `check_rebased` needs for a behind branch.
+
+    Confirms the PR's test-merge commit is a genuine two-parent merge of the
+    current base tip and this head, per issue #371. Split out of
+    `check_rebased` to keep its branch count within the complexity ceiling.
+
+    The base tip used for that comparison is re-read live around the parent
+    lookup rather than taken from the PR snapshot, and the snapshot must still
+    agree with it, so a base that advanced after the snapshot is refused
+    instead of being merged into on evidence that predates it (#371 review).
+    """
+    snapshot_base = pr.get("baseRefOid")
+    head_sha = pr.get("headRefOid")
+    resolve_parents = merge_parents_resolver or _merge_commit_parents
+    resolve_base = base_tip_resolver or _current_base_tip
+    if not snapshot_base or not head_sha:
+        return False, _identity_refusal(behind, plural, (
+            "the current base tip or head SHA is unknown, so the tested "
+            "merge commit's parents cannot be verified. Refusing to merge "
+            "on unverified evidence."
+        ))
+    try:
+        base_tip, parents, failure = _proved_base_and_parents(
+            pr, resolve_base, resolve_parents)
+    except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
+        return False, _identity_refusal(behind, plural, (
+            f"the pull request's tested merge commit could not be resolved "
+            f"({type(exc).__name__}: {exc}). Wait for GitHub to finish "
+            f"computing the merge ref and retry."
+        ))
+    if failure:
+        return False, _identity_refusal(behind, plural, failure)
+    # The rest of the gate -- disjointness and the CI-timing proof -- was all
+    # computed against the snapshot base. If the live base is no longer that
+    # commit, every one of those findings describes a base that no longer
+    # exists, so the parents matching the live tip would still not make the
+    # merge safe. Refuse and let the caller re-read the PR.
+    if base_tip != snapshot_base:
+        return False, _identity_refusal(behind, plural, (
+            f"the base branch advanced from {snapshot_base[:12]} to "
+            f"{base_tip[:12]} after this pull request was read, so the "
+            f"disjointness and CI-freshness evidence describes a superseded "
+            f"base. Re-run the merge so every check is taken against the "
+            f"current base tip."
+        ))
+    if parents is None:
+        return False, _identity_refusal(behind, plural, (
+            "the pull request's tested merge commit could not be resolved. "
+            "Wait for GitHub to finish computing the merge ref and retry."
+        ))
+    # A set comparison alone would let a malformed, duplicate-padded list
+    # like [base_tip, base_tip, head_sha] slip through as a clean match,
+    # since sets discard the extra copy -- require the shape too. The shape
+    # check must come first: `set()` on unhashable entries and `", ".join` on
+    # non-string ones both raise TypeError outside the handlers above.
+    if not _well_formed_parents(parents) or set(parents) != {base_tip, head_sha}:
+        return False, _identity_refusal(behind, plural, (
+            f"the pull request's tested merge commit does not name exactly "
+            f"the current base tip {base_tip[:12]} and head {head_sha[:12]} "
+            f"as its parents (got: {_show_parents(parents)}). GitHub may "
+            f"still be recomputing the merge ref against the latest base. "
+            f"Wait for it to finish and retry."
+        ))
+    return True, "tested merge commit names the current base tip as a parent"
 
 
 def check_issue_link(pr):
@@ -3602,13 +3868,75 @@ def repository_merge_lock():
             handle.close()
 
 
-def execute_merge(pr_id, pr, merge_method):
+def _base_tip_unchanged(pr, expected_base, base_tip_resolver=None):
+    """Fail-closed proof that the base is still the tip the gates were taken against.
+
+    Neither merge API GitHub exposes has a base-side precondition, so there is
+    no server-side compare-and-swap to ask for. GraphQL's `mergePullRequest`
+    input accepts only `expectedHeadOid` -- "OID that the pull request head ref
+    must match to allow merge" -- and REST's
+    `PUT /repos/{slug}/pulls/{n}/merge` only the equivalent `sha`, which is
+    exactly what `gh pr merge --match-head-commit` sends. The head is pinned;
+    the base is whatever the server holds when it runs the merge.
+
+    The intervening base move therefore has to be blocked here instead (#371
+    review). Every gate -- path disjointness, CI freshness, and the tested
+    merge commit's parents -- was computed against one base tip. If the base
+    advanced after that, GitHub would merge the reviewed head into a tree no
+    check ever built, so refuse rather than treat a non-atomic proof as though
+    it still described the merge the server is about to perform.
+
+    Returns `(ok, detail)`. Anything unreadable, absent, or moved is not ok:
+    the caller must never merge on a base it could not re-prove.
+    """
+    if not isinstance(expected_base, str) or not expected_base:
+        return False, (
+            "no proved base tip was supplied to pin the merge against, so an "
+            "advance since the gates ran could not be ruled out."
+        )
+    resolve = base_tip_resolver or _current_base_tip
+    try:
+        live = resolve(pr)
+    except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
+        return False, (
+            f"the base branch tip could not be re-read immediately before the "
+            f"merge ({type(exc).__name__}: {exc})."
+        )
+    if not isinstance(live, str) or not live:
+        return False, (
+            "the base branch tip could not be re-read immediately before the "
+            "merge."
+        )
+    if live != expected_base:
+        return False, (
+            f"the base branch advanced from {expected_base[:12]} to "
+            f"{live[:12]} after the final gate reread, so the merge would "
+            f"combine the reviewed head with a base tip no check ever tested. "
+            f"Re-run the merge so every gate is taken against the current base "
+            f"tip. Do not rebase: that rewrites the head SHA and destroys the "
+            f"review attestation bound to it."
+        )
+    return True, f"base tip still {live[:12]}"
+
+
+def execute_merge(pr_id, pr, merge_method, expected_base, base_tip_resolver=None):
     """Runs only the server-side merge, then re-reads authoritative PR state.
 
     The merge command deliberately does not delete either branch. Cleanup is a
     separate, resumable phase. A non-zero command may still mean GitHub merged
     successfully, so the return code is never interpreted without a re-read.
+
+    `expected_base` is the base tip every gate was proved against. It is
+    re-proved live here, as the last action before the merge command rather
+    than at the caller, because the command can pin only the head and anything
+    interposed between the proof and the command reopens the window it closes
+    (`_base_tip_unchanged`, #371 review). A missing expectation is itself a
+    refusal: unpinned means unverified.
     """
+    unchanged, base_detail = _base_tip_unchanged(pr, expected_base, base_tip_resolver)
+    if not unchanged:
+        return None, f"{MERGE_NOT_ATTEMPTED} {base_detail}"
+
     env = dict(os.environ, ARU_ALLOW_MAIN_PUSH="1")
     merge_cmd = ["gh", "pr", "merge", str(pr_id), f"--{merge_method}"]
     head_sha = pr.get("headRefOid")
@@ -3990,18 +4318,21 @@ def clear_merger_claims(pr_num, cwd=None):
 
 
 def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None,
-                 paths_resolver=None, advance_resolver=None):
+                 paths_resolver=None, advance_resolver=None,
+                 merge_parents_resolver=None, base_tip_resolver=None):
     """Runs every Definition-of-Done check without merging.
 
     Returns ``(ok, gates)`` where ``gates`` is a list of
     ``(name, passed, message)`` in evaluation order. Shared by ``--dry-run``
     and the merge work picker so eligibility cannot drift from the gate.
 
-    ``behind_resolver``, ``paths_resolver`` and ``advance_resolver`` are
-    threaded to :func:`check_rebased` so a caller with no repository to
-    interrogate -- a hermetic fleet simulation -- can state ancestry, changed
-    paths, and when the base advanced directly. Production callers omit all
-    three and get the fail-closed git path, which is the point of the gate.
+    ``behind_resolver``, ``paths_resolver``, ``advance_resolver``,
+    ``merge_parents_resolver`` and ``base_tip_resolver`` are threaded to
+    :func:`check_rebased` so a caller with no repository to interrogate -- a
+    hermetic fleet simulation -- can state ancestry, changed paths, when the
+    base advanced, the tested merge commit's parents, and the live base tip
+    directly. Production callers omit all five and get the fail-closed
+    git/GitHub path, which is the point of the gate.
     """
     issue_nums = linked_issues(pr.get("body"))
     gates = [
@@ -4010,7 +4341,9 @@ def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None,
         ("verification", *check_verification(pr)),
         ("ci", *check_ci(pr)),
         ("review", *check_reviews(pr, evidence)),
-        ("rebased", *check_rebased(pr, behind_resolver, paths_resolver, advance_resolver)),
+        ("rebased", *check_rebased(pr, behind_resolver, paths_resolver, advance_resolver,
+                                   merge_parents_resolver=merge_parents_resolver,
+                                   base_tip_resolver=base_tip_resolver)),
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
         ("spec-sync", *check_spec_sync(pr)),
@@ -4577,7 +4910,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
         return EXIT_ERROR
 
     gated_head = pr.get("headRefOid") or "unknown"
-    gated_base = pr.get("baseRefOid") or "unknown"
     # Stays None on the resume path, where no gate is evaluated. The checkpoint
     # records that gap rather than inventing a verdict set.
     gates = None
@@ -4700,18 +5032,13 @@ def main():  # noqa: C901, PLR0912, PLR0915
                     file=sys.stderr,
                 )
                 return EXIT_BLOCKED
-            live_base = fresh.get("baseRefOid") or "unknown"
-            if (
-                gated_base == "unknown"
-                or live_base == "unknown"
-                or not heads_match(live_base, gated_base)
-            ):
-                print(
-                    f"[ERROR] Base moved to {live_base} after DoD checks; gated base was "
-                    f"{gated_base}. Rebase and reverify before merging.",
-                    file=sys.stderr,
-                )
-                return EXIT_BLOCKED
+            # A base that advanced between the initial DoD gate and this lock
+            # is not itself disqualifying (issue #371): check_rebased
+            # re-derives freshness -- disjointness, CI timing, and the tested
+            # merge commit's parents -- against whatever the base is right
+            # now. Blocking here unconditionally would have to tell the
+            # operator to rebase, which destroys the head-bound review
+            # attestation this gate exists to protect.
             rebased, rebased_message = check_rebased(fresh)
             if not rebased:
                 print(
@@ -4745,13 +5072,26 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 )
                 return EXIT_BLOCKED
             pr = fresh
+            # Every gate above -- disjointness, CI freshness, the tested merge
+            # commit's parents, review evidence -- was computed against this
+            # exact base tip. execute_merge re-proves it is still live right
+            # before the server merge, because `gh pr merge` pins only the head
+            # and GitHub would otherwise merge into whatever base it holds at
+            # execution time (#371 review).
+            gated_base = fresh.get("baseRefOid")
 
             print(f"  ✅ merge lock          {lock_message}")
             print(f"  ✅ final base check    {rebased_message}")
             print("\n=== Merge execution ===")
-            final_pr, outcome = execute_merge(args.pr, pr, args.merge_method)
+            final_pr, outcome = execute_merge(
+                args.pr, pr, args.merge_method, gated_base
+            )
             if not final_pr:
                 print(f"  ❌ not merged          {outcome}", file=sys.stderr)
+                # A refusal taken before the command ran is a gate block, not a
+                # failed merge: nothing was mutated and re-running is the remedy.
+                if outcome.startswith(MERGE_NOT_ATTEMPTED):
+                    return EXIT_BLOCKED
                 return EXIT_ERROR
             print(f"  ✅ server merge        {outcome}")
 

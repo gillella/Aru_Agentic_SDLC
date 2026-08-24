@@ -1,4 +1,4 @@
-# line-ceiling: 6186
+# line-ceiling: 6870
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -2642,6 +2642,44 @@ def _boom(*_args):
     raise AssertionError("resolver must not be consulted on this path")
 
 
+def _matching_parents(pr):
+    """merge_parents_resolver stub: the tested merge commit matches `pr` exactly."""
+    return [pr["baseRefOid"], pr["headRefOid"]]
+
+
+def _stable_base(pr):
+    """base_tip_resolver stub: the live base tip still equals the snapshot.
+
+    The default resolver reads GitHub, so every test reaching the identity
+    proof injects a stub. This one models the ordinary case -- the base has
+    not moved since the PR was read -- and each read returns the same SHA.
+    """
+    return pr["baseRefOid"]
+
+
+def _moving_base(*shas):
+    """base_tip_resolver stub returning `shas` in order, then repeating the last.
+
+    Models a base advancing between the reads that bracket the merge-parent
+    lookup, which is the race the bracketing exists to catch (#371 review).
+    """
+    seen = []
+
+    def resolve(_pr):
+        sha = shas[min(len(seen), len(shas) - 1)]
+        seen.append(sha)
+        return sha
+
+    resolve.calls = seen
+    return resolve
+
+
+# Sentinel distinguishing "caller passed nothing" from "caller passed None",
+# since None is itself a meaningful merge_parents_resolver stub result
+# (unresolvable).
+_UNSET = object()
+
+
 class RebaseGateTests(unittest.TestCase):
     def test_conflicts_block(self):
         self.assertFalse(merge_pr.check_rebased({"mergeStateStatus": "DIRTY"}, _behind(0))[0])
@@ -2666,9 +2704,11 @@ class RebaseGateTests(unittest.TestCase):
         Disjointness alone is no longer enough (#371), so the CI this branch
         carries has to postdate the advance as well.
         """
+        pr = _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], state="CLEAN")
         ok, msg = merge_pr.check_rebased(
-            _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], state="CLEAN"), _behind(3),
-            _paths(["scripts/merge_pr.py"], ["docs/releases.md"]), _advance())
+            pr, _behind(3),
+            _paths(["scripts/merge_pr.py"], ["docs/releases.md"]), _advance(),
+            merge_parents_resolver=_matching_parents, base_tip_resolver=_stable_base)
         self.assertTrue(ok)
         self.assertIn("3 commits behind", msg)
         self.assertIn("disjoint", msg)
@@ -2684,7 +2724,8 @@ class RebaseGateTests(unittest.TestCase):
         """A BEHIND branch still merges when it does not overlap the base."""
         pr = _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], state="BEHIND")
         ok, _ = merge_pr.check_rebased(pr, _behind(2), _paths(["a.py"], ["b.py"]),
-                                       _advance())
+                                       _advance(), merge_parents_resolver=_matching_parents,
+                                       base_tip_resolver=_stable_base)
         self.assertTrue(ok)
 
     def test_one_commit_behind_is_singular(self):
@@ -2783,7 +2824,12 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
     """
 
     def _check(self, pr, behind=2, ours=("a.py",), theirs=("b.py",), when=_ADVANCE_AT,
-               run_resolver=None):
+               run_resolver=None, merge_parents_resolver=_UNSET,
+               base_tip_resolver=_UNSET):
+        if merge_parents_resolver is _UNSET:
+            merge_parents_resolver = _matching_parents
+        if base_tip_resolver is _UNSET:
+            base_tip_resolver = _stable_base
         return merge_pr.check_rebased(
             pr, _behind(behind),
             _paths(list(ours), list(theirs),
@@ -2793,6 +2839,8 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
                      base=pr.get("baseRefName", "main"),
                      head=pr.get("headRefOid", "deadbeef")),
             run_resolver,
+            merge_parents_resolver=merge_parents_resolver,
+            base_tip_resolver=base_tip_resolver,
         )
 
     def test_stale_pre_advance_ci_does_not_pass(self):
@@ -3059,6 +3107,345 @@ class StaleCIAgainstBaseAdvanceTests(unittest.TestCase):
         self.assertIn("superseded base", rebased[2])
         self.assertEqual(seen, [("main", "deadbeef")])
 
+    # -- Literal merge-commit-parent identity proof (issue #371) --------
+    #
+    # Timing alone cannot name the commit a check actually tested. These
+    # cover the residual `_ci_saw_base_advance` itself flags: once
+    # disjointness and timing both pass, the PR's own test-merge commit must
+    # still name the current base tip and this head as its parents.
+
+    def test_current_base_parent_passes(self):
+        """Default acceptance case: the tested merge commit is current."""
+        ok, msg = self._check(_ci_pr([_check_run("Lint", _AFTER_ADVANCE)]))
+        self.assertTrue(ok)
+        self.assertIn("tested merge commit names the current base tip", msg)
+
+    def test_superseded_base_parent_blocks(self):
+        """The merge commit's base-side parent is an older base tip.
+
+        Disjointness and check-start timing can both look fresh while the
+        PR's live test-merge commit still merges onto a base GitHub has not
+        finished (re)computing against -- or has since moved again. This is
+        the false-pass the literal check exists to catch.
+        """
+        ok, msg = self._check(
+            _ci_pr([_check_run("Lint", _AFTER_ADVANCE)]),
+            merge_parents_resolver=lambda pr: ["superseded-base-sha", pr["headRefOid"]],
+        )
+        self.assertFalse(ok)
+        self.assertIn("does not name exactly the current base tip", msg)
+        self.assertIn("retry", msg)
+
+    def test_unresolvable_merge_parents_fails_closed(self):
+        """An unresolvable test-merge commit is unverified, not a pass."""
+        ok, msg = self._check(
+            _ci_pr([_check_run("Lint", _AFTER_ADVANCE)]),
+            merge_parents_resolver=lambda pr: None,
+        )
+        self.assertFalse(ok)
+        self.assertIn("could not be resolved", msg)
+
+    def test_malformed_merge_parents_fail_closed(self):
+        """A resolver reporting other than exactly the base tip and head."""
+        for parents in ([], ["only-one-parent"],
+                        ["deadbeef", "deadbeef", "base-tip"],
+                        ["unrelated-a", "unrelated-b"]):
+            ok, msg = self._check(
+                _ci_pr([_check_run("Lint", _AFTER_ADVANCE)]),
+                merge_parents_resolver=lambda pr, p=parents: p,
+            )
+            self.assertFalse(ok, f"{parents!r}")
+            self.assertIn("does not name exactly the current base tip", msg)
+
+    def test_merge_parents_resolver_exception_fails_closed(self):
+        def boom(_pr):
+            raise RuntimeError("commit lookup exploded")
+        ok, msg = self._check(
+            _ci_pr([_check_run("Lint", _AFTER_ADVANCE)]), merge_parents_resolver=boom)
+        self.assertFalse(ok)
+        self.assertIn("commit lookup exploded", msg)
+
+    def test_merge_parent_gate_never_instructs_rebase(self):
+        """#371: the remedy is a fresh CI run or a wait, never a rebase.
+
+        A rebase rewrites the head SHA and destroys the head-bound review
+        attestation this whole gate exists to preserve (#369).
+        """
+        cases = [
+            self._check(
+                _ci_pr([_check_run("Lint", _AFTER_ADVANCE)]),
+                merge_parents_resolver=lambda pr: ["stale-base", pr["headRefOid"]],
+            ),
+            self._check(
+                _ci_pr([_check_run("Lint", _AFTER_ADVANCE)]),
+                merge_parents_resolver=lambda pr: None,
+            ),
+        ]
+        boom_msg = self._check(
+            _ci_pr([_check_run("Lint", _AFTER_ADVANCE)]),
+            merge_parents_resolver=lambda pr: (_ for _ in ()).throw(RuntimeError("x")),
+        )
+        cases.append(boom_msg)
+        for ok, msg in cases:
+            self.assertFalse(ok)
+            self.assertIn("Do not rebase", msg)
+            self.assertNotIn("Rebase and", msg)
+            self.assertNotIn("Rebase on main", msg)
+
+    def test_merge_parents_resolver_receives_the_pr(self):
+        seen = []
+
+        def record(pr):
+            seen.append(pr.get("number"))
+            return [pr["baseRefOid"], pr["headRefOid"]]
+
+        pr = _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], number=4242)
+        ok, _ = self._check(pr, merge_parents_resolver=record)
+        self.assertTrue(ok)
+        self.assertEqual(seen, [4242])
+
+
+class MergeParentBaseRaceTests(unittest.TestCase):
+    """Issue #371 review: the identity proof must own the base it compares to.
+
+    `check_rebased` receives a PR snapshot, and the merge-parent lookup reads
+    GitHub separately afterwards. If the base advances in between while
+    GitHub's merge ref still lags, the superseded merge commit matches the
+    superseded snapshot and the gate passes -- then the merge itself runs
+    against a newer base no CI ever saw. These tests pin the two properties
+    that close it: the base is read live either side of the parent lookup, and
+    any movement -- since the snapshot or during the lookup -- is refused.
+
+    They also pin that malformed resolver output fails closed as a refusal
+    rather than escaping as a `TypeError` from `set()` or `", ".join`.
+    """
+
+    def _check(self, pr=None, **kwargs):
+        pr = pr or _ci_pr([_check_run("Lint", _AFTER_ADVANCE)])
+        kwargs.setdefault("merge_parents_resolver", _matching_parents)
+        kwargs.setdefault("base_tip_resolver", _stable_base)
+        return merge_pr.check_rebased(
+            pr, _behind(2),
+            _paths(["a.py"], ["b.py"],
+                   base=pr.get("baseRefName", "main"),
+                   head=pr.get("headRefOid", "deadbeef")),
+            _advance(_ADVANCE_AT,
+                     base=pr.get("baseRefName", "main"),
+                     head=pr.get("headRefOid", "deadbeef")),
+            None,
+            **kwargs,
+        )
+
+    def test_the_parent_lookup_is_bracketed_by_two_live_base_reads(self):
+        """A single read before or after the lookup cannot see movement."""
+        order = []
+
+        def base(pr):
+            order.append("base")
+            return pr["baseRefOid"]
+
+        def parents(pr):
+            order.append("parents")
+            return [pr["baseRefOid"], pr["headRefOid"]]
+
+        ok, _ = self._check(merge_parents_resolver=parents, base_tip_resolver=base)
+        self.assertTrue(ok)
+        self.assertEqual(order, ["base", "parents", "base"])
+
+    def test_base_advanced_since_the_snapshot_blocks_even_when_parents_match(self):
+        """The reported race: parents name the *new* base, the snapshot is old.
+
+        Disjointness and CI timing were both computed against the snapshot, so
+        a live base that is no longer that commit invalidates them however
+        well-formed the merge commit looks.
+        """
+        pr = _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], base_oid="base-a")
+        ok, msg = self._check(
+            pr,
+            base_tip_resolver=lambda _pr: "base-b",
+            merge_parents_resolver=lambda p: ["base-b", p["headRefOid"]],
+        )
+        self.assertFalse(ok)
+        self.assertIn("advanced from", msg)
+        self.assertIn("superseded", msg)
+        self.assertIn("Do not rebase", msg)
+
+    def test_stale_merge_ref_plus_advanced_base_blocks(self):
+        """The exact false-pass: lagging merge ref still matches the old snapshot.
+
+        Before the live re-read, `set(parents) == {snapshot_base, head}` held
+        and the gate passed while the base had already moved on.
+        """
+        pr = _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], base_oid="base-a")
+        ok, msg = self._check(
+            pr,
+            base_tip_resolver=lambda _pr: "base-b",
+            merge_parents_resolver=lambda p: ["base-a", p["headRefOid"]],
+        )
+        self.assertFalse(ok)
+        self.assertIn("Do not rebase", msg)
+
+    def test_base_moving_between_the_two_reads_is_refused(self):
+        """Movement observed mid-lookup settles, and the settled tip is judged.
+
+        The retry lets the reads agree, and the snapshot comparison then
+        catches that the agreed tip is not the one the rest of the gate used.
+        """
+        pr = _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], base_oid="base-a")
+        ok, msg = self._check(
+            pr,
+            base_tip_resolver=_moving_base("base-a", "base-b"),
+            merge_parents_resolver=lambda p: ["base-b", p["headRefOid"]],
+        )
+        self.assertFalse(ok)
+        self.assertIn("advanced from", msg)
+
+    def test_a_flapping_read_that_settles_still_proves_identity(self):
+        """Bounded retry exists so replica lag is not mistaken for a push.
+
+        The first pair of reads disagrees, the second agrees on the snapshot
+        tip, and the proof then proceeds normally rather than refusing.
+        """
+        pr = _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], base_oid="base-a")
+        ok, msg = self._check(
+            pr, base_tip_resolver=_moving_base("base-b", "base-a"))
+        self.assertTrue(ok)
+        self.assertIn("names the current base tip", msg)
+
+    def test_a_base_that_never_settles_is_refused_after_bounded_retries(self):
+        """No unbounded spin: the attempts are capped and end in a refusal."""
+        seen = []
+
+        def base(_pr):
+            sha = f"base-{len(seen)}"
+            seen.append(sha)
+            return sha
+
+        ok, msg = self._check(base_tip_resolver=base)
+        self.assertFalse(ok)
+        self.assertIn("kept advancing", msg)
+        self.assertIn("Do not rebase", msg)
+        self.assertEqual(len(seen), 2 * merge_pr.MERGE_PARENT_BASE_RECHECK_ATTEMPTS)
+
+    def test_unreadable_base_tip_fails_closed(self):
+        """An unknown live base is unverified, never a pass."""
+        for value in (None, "", 0, ["base-a"]):
+            ok, msg = self._check(base_tip_resolver=lambda _pr, v=value: v)
+            self.assertFalse(ok, f"{value!r}")
+            self.assertIn("could not be read", msg)
+
+    def test_unreadable_base_tip_on_the_second_read_fails_closed(self):
+        ok, msg = self._check(base_tip_resolver=_moving_base("base-a", None))
+        self.assertFalse(ok)
+        self.assertIn("could not be re-read", msg)
+
+    def test_base_tip_resolver_exception_fails_closed(self):
+        def boom(_pr):
+            raise RuntimeError("base ref lookup exploded")
+
+        ok, msg = self._check(base_tip_resolver=boom)
+        self.assertFalse(ok)
+        self.assertIn("base ref lookup exploded", msg)
+        self.assertIn("Do not rebase", msg)
+
+    def test_unhashable_parent_entries_fail_closed_without_raising(self):
+        """`set(parents)` would raise TypeError outside the fail-closed handlers.
+
+        A dict, list or set entry is unhashable, so the shape check has to run
+        before the set comparison or the gate crashes instead of refusing.
+        """
+        for parents in ([{"sha": "base-a"}, "gated-sha"],
+                        [["base-a"], ["gated-sha"]],
+                        [{"base-a"}, "gated-sha"],
+                        [{}, {}]):
+            ok, msg = self._check(
+                merge_parents_resolver=lambda _pr, p=parents: p)
+            self.assertFalse(ok, f"{parents!r}")
+            self.assertIn("does not name exactly the current base tip", msg)
+            self.assertIn(repr(parents), msg)
+
+    def test_non_string_parent_entries_fail_closed_without_raising(self):
+        """`", ".join(parents)` would raise TypeError on any non-string entry."""
+        for parents in ([1, 2], [None, None], [b"base-a", b"gated-sha"],
+                        ["base-a", None], [3.5, "gated-sha"]):
+            ok, msg = self._check(
+                merge_parents_resolver=lambda _pr, p=parents: p)
+            self.assertFalse(ok, f"{parents!r}")
+            self.assertIn("does not name exactly the current base tip", msg)
+
+    def test_non_list_parent_results_fail_closed(self):
+        """A resolver may return any object; only a two-item list is a proof."""
+        for parents in ("base-a gated-sha", ("base-a", "gated-sha"), 7,
+                        {"base-a": 1, "gated-sha": 2}, object()):
+            ok, msg = self._check(
+                merge_parents_resolver=lambda _pr, p=parents: p)
+            self.assertFalse(ok, f"{parents!r}")
+            self.assertIn("does not name exactly the current base tip", msg)
+
+    def test_empty_string_parent_entries_fail_closed(self):
+        """An empty SHA names nothing, so it cannot stand in for the base tip."""
+        ok, msg = self._check(merge_parents_resolver=lambda p: ["", p["headRefOid"]])
+        self.assertFalse(ok)
+        self.assertIn("does not name exactly the current base tip", msg)
+
+    def test_a_str_subclass_parent_is_not_accepted(self):
+        """A `str` subclass can lie in `__eq__`/`__hash__`; require exactly `str`.
+
+        This entry compares equal to anything, so a plain set comparison would
+        accept it as both the base tip and the head.
+        """
+        class Liar(str):
+            def __eq__(self, _other):
+                return True
+
+            def __hash__(self):
+                return hash("base-a")
+
+        pr = _ci_pr([_check_run("Lint", _AFTER_ADVANCE)], base_oid="base-a")
+        ok, msg = self._check(
+            pr, merge_parents_resolver=lambda p: [Liar("nonsense"), p["headRefOid"]])
+        self.assertFalse(ok)
+        self.assertIn("does not name exactly the current base tip", msg)
+
+    def test_malformed_parents_never_instruct_a_rebase(self):
+        """#371: the remedy stays a wait, even for output this broken."""
+        for parents in ([{"sha": "x"}], None, [1, 2], "nope"):
+            ok, msg = self._check(
+                merge_parents_resolver=lambda _pr, p=parents: p)
+            self.assertFalse(ok, f"{parents!r}")
+            self.assertIn("Do not rebase", msg)
+            self.assertNotIn("Rebase on main", msg)
+
+
+class CurrentBaseTipTests(unittest.TestCase):
+    """`_current_base_tip` must answer None for anything it cannot read."""
+
+    def _tip(self, payload, slug="o/r", branch="main"):
+        with patch.object(merge_pr, "get_repo_slug", return_value=slug), \
+             patch.object(merge_pr, "_gh_json", return_value=payload):
+            return merge_pr._current_base_tip({"baseRefName": branch})
+
+    def test_reads_the_ref_object_sha(self):
+        self.assertEqual(self._tip({"object": {"sha": "base-a"}}), "base-a")
+
+    def test_queries_the_base_branch_ref(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "_gh_json",
+                          return_value={"object": {"sha": "x"}}) as gh:
+            merge_pr._current_base_tip({"baseRefName": "release/v2"})
+        self.assertEqual(gh.call_args[0][0],
+                         ["gh", "api", "repos/o/r/git/ref/heads/release/v2"])
+
+    def test_unusable_payloads_are_none(self):
+        for payload in (None, {}, [], "sha", {"object": None}, {"object": "sha"},
+                        {"object": {}}, {"object": {"sha": ""}},
+                        {"object": {"sha": 7}}):
+            self.assertIsNone(self._tip(payload), f"{payload!r}")
+
+    def test_missing_branch_or_slug_is_none(self):
+        self.assertIsNone(self._tip({"object": {"sha": "x"}}, branch=""))
+        self.assertIsNone(self._tip({"object": {"sha": "x"}}, slug=None))
+
 
 class BaseAdvanceTimeTests(unittest.TestCase):
     """`_base_advance_time` must answer None for anything it cannot read."""
@@ -3270,6 +3657,85 @@ class ComparePathsTests(unittest.TestCase):
                         {"files": [{"filename": ""}]}, {"files": [{"filename": 3}]},
                         {"files": [{"no_filename": "a.py"}]}, {"files": ["a.py"]}):
             self.assertIsNone(self._resolve(payload), f"{payload!r}")
+
+
+class MergeCommitParentsTests(unittest.TestCase):
+    """`_merge_commit_parents`: the literal merge-commit identity proof (#371).
+
+    REST's `merge_commit_sha` -- distinct from GraphQL's `mergeCommit`, which
+    stays null until actually merged -- names the PR's live test-merge commit;
+    its `parents` name what it actually merges.
+    """
+
+    @staticmethod
+    def _gh_json_stub(pull, commit, number=370):
+        def resolve(args):
+            url = args[-1]
+            if url == f"repos/o/r/pulls/{number}":
+                return pull
+            if url == "repos/o/r/commits/merge-sha":
+                return commit
+            raise AssertionError(f"unexpected gh api call: {url}")
+        return resolve
+
+    def _resolve(self, pull, commit, number=370):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "_gh_json",
+                          side_effect=self._gh_json_stub(pull, commit, number)):
+            return merge_pr._merge_commit_parents({"number": number})
+
+    def test_two_parents_are_returned(self):
+        pull = {"merge_commit_sha": "merge-sha"}
+        commit = {"parents": [{"sha": "base-tip"}, {"sha": "head-sha"}]}
+        self.assertEqual(self._resolve(pull, commit), ["base-tip", "head-sha"])
+
+    def test_missing_pr_number_returns_none(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"):
+            self.assertIsNone(merge_pr._merge_commit_parents({}))
+
+    def test_missing_slug_returns_none(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value=None):
+            self.assertIsNone(merge_pr._merge_commit_parents({"number": 370}))
+
+    def test_unresolvable_pull_returns_none(self):
+        self.assertIsNone(self._resolve(None, {"parents": []}))
+
+    def test_missing_merge_commit_sha_returns_none(self):
+        self.assertIsNone(self._resolve({}, {}))
+
+    def test_non_string_merge_commit_sha_returns_none(self):
+        self.assertIsNone(self._resolve({"merge_commit_sha": 12345}, {}))
+
+    def test_empty_merge_commit_sha_returns_none(self):
+        self.assertIsNone(self._resolve({"merge_commit_sha": ""}, {}))
+
+    def test_unresolvable_commit_returns_none(self):
+        self.assertIsNone(self._resolve({"merge_commit_sha": "merge-sha"}, None))
+
+    def test_wrong_parent_count_returns_none(self):
+        for parents in ([], [{"sha": "only-one"}],
+                        [{"sha": "a"}, {"sha": "b"}, {"sha": "c"}]):
+            commit = {"parents": parents}
+            self.assertIsNone(
+                self._resolve({"merge_commit_sha": "merge-sha"}, commit), f"{parents!r}")
+
+    def test_malformed_parent_entries_return_none(self):
+        for parents in (
+            "not-a-list",
+            [{"sha": "a"}, "not-a-dict"],
+            [{"sha": "a"}, {"no_sha": "b"}],
+            [{"sha": "a"}, {"sha": 5}],
+            [{"sha": "a"}, {"sha": ""}],
+        ):
+            commit = {"parents": parents}
+            self.assertIsNone(
+                self._resolve({"merge_commit_sha": "merge-sha"}, commit), f"{parents!r}")
+
+    def test_uses_the_prs_own_number(self):
+        pull = {"merge_commit_sha": "merge-sha"}
+        commit = {"parents": [{"sha": "base-tip"}, {"sha": "head-sha"}]}
+        self.assertEqual(
+            self._resolve(pull, commit, number=9001), ["base-tip", "head-sha"])
 
 
 class OverlapWithBaseAdvanceTests(unittest.TestCase):
@@ -3699,7 +4165,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     def test_nonzero_merge_command_recovers_when_server_reports_merged(self, run, _fetch):
         run.return_value = SimpleNamespace(returncode=1, stdout="", stderr="delete failed")
         final, message = merge_pr.execute_merge(
-            9, {"headRefOid": "gated-sha"}, "squash"
+            9, {"headRefOid": "gated-sha", "baseRefOid": "base-sha"}, "squash",
+            "base-sha", base_tip_resolver=lambda pr: "base-sha",
         )
 
         self.assertEqual(final["state"], "MERGED")
@@ -3712,7 +4179,10 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr.subprocess, "run")
     def test_nonzero_merge_command_distinguishes_not_merged(self, run, _fetch):
         run.return_value = SimpleNamespace(returncode=1, stdout="", stderr="refused")
-        final, message = merge_pr.execute_merge(9, {"headRefOid": "sha"}, "squash")
+        final, message = merge_pr.execute_merge(
+            9, {"headRefOid": "sha", "baseRefOid": "base-sha"}, "squash",
+            "base-sha", base_tip_resolver=lambda pr: "base-sha",
+        )
 
         self.assertIsNone(final)
         self.assertIn("still reports OPEN", message)
@@ -3788,7 +4258,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
              patch("builtins.print") as printer:
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
 
-        execute.assert_called_once_with(9, fetch.return_value, "merge")
+        execute.assert_called_once_with(9, fetch.return_value, "merge", "base-sha")
         self.assertEqual(_close.call_count, 4)
         self.assertEqual(_done.call_count, 4)
         self.assertEqual(_issue_claim.call_count, 4)
@@ -3846,7 +4316,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
                           return_value=nullcontext((True, "serialized"))):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
 
-        execute.assert_called_once_with(9, fetch.return_value, "merge")
+        execute.assert_called_once_with(9, fetch.return_value, "merge", "base-sha")
 
 
 class SerializedMergeExecutionTests(unittest.TestCase):
@@ -3873,20 +4343,68 @@ class SerializedMergeExecutionTests(unittest.TestCase):
             "mergeable": "MERGEABLE",
         }
 
-    def test_base_move_inside_serialized_window_blocks_server_merge(self):
+    def _race_window(self, *, live_base, merge_parents):
+        """Drive main() to the serialized re-read after the base moved mid-flight.
+
+        The base-OID lock only proves nothing moved *during* the merge
+        command; it says nothing about a move that landed between the
+        initial DoD gate and grabbing this lock. That race is no longer
+        disqualifying on its own (issue #371): check_rebased re-derives
+        freshness -- disjointness, CI timing, and the tested merge commit's
+        parents -- against whatever the base is right now, rather than
+        comparing OIDs and demanding a rebase.
+        """
         initial = self._open_pr("base-a")
-        fresh = self._open_pr("base-b")
+        fresh = self._open_pr(live_base)
+        fresh.update({
+            "baseRefName": "main",
+            "headRefOid": "gated-sha",
+            "mergeStateStatus": "BEHIND",
+            "statusCheckRollup": [_check_run("Lint", _AFTER_ADVANCE)],
+        })
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
              patch.object(merge_pr, "fetch_pr", side_effect=[initial, fresh]), \
              patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
              patch.object(merge_pr, "review_evidence",
                           return_value={"head_oid": "gated-sha"}), \
              patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
+             patch.object(merge_pr, "_behind_by", new=lambda _base, _head: 1), \
+             patch.object(merge_pr, "_compare_paths", _paths(["a.py"], ["b.py"],
+                                                             base="main", head="gated-sha")), \
+             patch.object(merge_pr, "_base_advance_time",
+                          _advance(base="main", head="gated-sha")), \
+             patch.object(merge_pr, "_merge_commit_parents", return_value=merge_parents), \
+             patch.object(merge_pr, "_current_base_tip", return_value=live_base), \
+             patch.object(merge_pr, "run_closeout", return_value=True), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
              patch.object(merge_pr, "repository_merge_lock",
                           return_value=nullcontext((True, "serialized"))), \
-             patch.object(merge_pr, "execute_merge") as execute:
-            code = merge_pr.main()
+             patch.object(merge_pr, "execute_merge",
+                          return_value=(merged_pr(), "merged")) as execute:
+            return merge_pr.main(), execute
 
+    def test_base_move_inside_window_still_merges_once_the_merge_ref_catches_up(self):
+        """A base move mid-flight is not itself disqualifying.
+
+        check_rebased re-derives freshness against the live base -- disjoint
+        changes, CI that started after the advance, and a tested merge commit
+        that already names the new base tip as a parent -- so the merge
+        proceeds without ever asking anyone to rebase.
+        """
+        code, execute = self._race_window(
+            live_base="base-b", merge_parents=["base-b", "gated-sha"])
+        self.assertEqual(code, merge_pr.EXIT_OK)
+        execute.assert_called_once()
+
+    def test_base_move_inside_window_blocks_while_the_merge_ref_still_lags(self):
+        """The base moved, but GitHub has not finished recomputing the merge ref.
+
+        Its parents still name the superseded base, so the literal identity
+        proof refuses -- correctly, since what is about to be merged has not
+        been verified against what the base is now.
+        """
+        code, execute = self._race_window(
+            live_base="base-b", merge_parents=["base-a", "gated-sha"])
         self.assertEqual(code, merge_pr.EXIT_BLOCKED)
         execute.assert_not_called()
 
@@ -3914,6 +4432,9 @@ class SerializedMergeExecutionTests(unittest.TestCase):
                                                              head="gated-sha")), \
              patch.object(merge_pr, "_base_advance_time",
                           _advance(head="gated-sha")), \
+             patch.object(merge_pr, "_merge_commit_parents",
+                          return_value=["base-a", "gated-sha"]), \
+             patch.object(merge_pr, "_current_base_tip", return_value="base-a"), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
              patch.object(merge_pr, "repository_merge_lock",
@@ -3954,6 +4475,169 @@ class SerializedMergeExecutionTests(unittest.TestCase):
 
         self.assertEqual(code, merge_pr.EXIT_BLOCKED)
         execute.assert_not_called()
+
+
+class FinalWindowBaseMovementTests(unittest.TestCase):
+    """The gap between the last identity proof and the server-side merge.
+
+    `gh pr merge` pins only the head: REST's `PUT /pulls/{n}/merge` takes a
+    head `sha` and GraphQL's `mergePullRequest` an `expectedHeadOid`, and
+    neither accepts a base-side precondition, so GitHub will happily merge the
+    reviewed head into whatever the base is when the request lands. Every test
+    here drives a base that advances inside that final window and asserts the
+    merge command is never issued (#371 review).
+    """
+
+    HEAD = "gated-sha"
+
+    def _pr(self, base="base-a"):
+        return {"number": 9, "headRefOid": self.HEAD, "baseRefOid": base,
+                "baseRefName": "main"}
+
+    def _blocked(self, expected_base, resolver):
+        with patch.object(merge_pr.subprocess, "run") as run, \
+             patch.object(merge_pr, "fetch_pr") as fetch:
+            final, message = merge_pr.execute_merge(
+                9, self._pr(), "merge", expected_base, base_tip_resolver=resolver,
+            )
+        run.assert_not_called()
+        fetch.assert_not_called()
+        self.assertIsNone(final)
+        self.assertTrue(message.startswith(merge_pr.MERGE_NOT_ATTEMPTED), message)
+        return message
+
+    def test_base_advance_in_the_final_window_blocks_the_merge_command(self):
+        message = self._blocked("base-a", lambda pr: "base-b")
+        self.assertIn("base-a", message)
+        self.assertIn("base-b", message)
+        self.assertIn("no check ever tested", message)
+
+    def test_the_refusal_never_asks_for_a_rebase(self):
+        message = self._blocked("base-a", lambda pr: "base-b")
+        self.assertIn("Do not rebase", message)
+        self.assertNotIn("Rebase on main", message)
+
+    def test_unreadable_base_tip_before_the_merge_fails_closed(self):
+        message = self._blocked("base-a", lambda pr: None)
+        self.assertIn("could not be re-read", message)
+
+    def test_malformed_base_tip_before_the_merge_fails_closed(self):
+        for live in ("", 0, b"base-a", ["base-a"]):
+            with self.subTest(live=live):
+                message = self._blocked("base-a", lambda pr, live=live: live)
+                self.assertIn("could not be re-read", message)
+
+    def test_raising_base_tip_resolver_before_the_merge_fails_closed(self):
+        def explode(pr):
+            raise RuntimeError("api down")
+
+        message = self._blocked("base-a", explode)
+        self.assertIn("RuntimeError: api down", message)
+
+    def test_unpinned_base_is_itself_a_refusal(self):
+        for expected in (None, "", 0, b"base-a"):
+            with self.subTest(expected=expected):
+                message = self._blocked(expected, lambda pr: "base-a")
+                self.assertIn("no proved base tip", message)
+
+    def test_base_is_reproved_before_the_merge_command_not_after(self):
+        """Ordering is the whole guarantee: anything after the command is too late."""
+        order = []
+
+        def resolver(pr):
+            order.append("base-read")
+            return "base-a"
+
+        def run(cmd, **kwargs):
+            order.append(" ".join(cmd[:3]))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(merge_pr.subprocess, "run", side_effect=run), \
+             patch.object(merge_pr, "fetch_pr", return_value=merged_pr()):
+            final, message = merge_pr.execute_merge(
+                9, self._pr(), "merge", "base-a", base_tip_resolver=resolver,
+            )
+
+        self.assertEqual(order, ["base-read", "gh pr merge"])
+        self.assertEqual(final["state"], "MERGED")
+        self.assertIn("accepted the merge", message)
+
+    def _drive_main(self, base_reads):
+        """Run main() with the real execute_merge and a scripted base ref."""
+        pr = {
+            "number": 9, "title": "open", "body": "Closes #7", "state": "OPEN",
+            "isDraft": False, "headRefName": "fix/issue-7-example",
+            "headRefOid": self.HEAD, "baseRefOid": "base-a", "baseRefName": "main",
+            "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE",
+        }
+        commands = []
+
+        def run(cmd, **kwargs):
+            commands.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr",
+                          side_effect=[pr, dict(pr), merged_pr()]), \
+             patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": self.HEAD}), \
+             patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
+             patch.object(merge_pr, "_behind_by", new=lambda _base, _head: 0), \
+             patch.object(merge_pr, "_current_base_tip", side_effect=base_reads), \
+             patch.object(merge_pr, "run_closeout", return_value=True), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "write_checkpoint_tag",
+                          return_value=(True, "checkpoint written")), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
+             patch.object(merge_pr.subprocess, "run", side_effect=run):
+            code = merge_pr.main()
+        merges = [c for c in commands if c[:3] == ["gh", "pr", "merge"]]
+        return code, merges
+
+    def test_end_to_end_base_move_after_the_final_gates_never_reaches_github(self):
+        """The exact reported race, end to end.
+
+        Every gate passes against base-a, then the base advances to base-b in
+        the instant before the server merge. Nothing downstream can undo a
+        merge, so the only fail-closed outcome is that `gh pr merge` is never
+        run at all.
+        """
+        code, merges = self._drive_main(["base-b"])
+        # Blocked, not error: nothing was mutated, so re-running is the remedy.
+        self.assertEqual(code, merge_pr.EXIT_BLOCKED)
+        self.assertEqual(merges, [])
+
+    def test_end_to_end_held_base_still_merges_with_the_head_pinned(self):
+        code, merges = self._drive_main(["base-a"])
+        self.assertEqual(code, merge_pr.EXIT_OK)
+        self.assertEqual(len(merges), 1)
+        self.assertIn("--match-head-commit", merges[0])
+        self.assertIn(self.HEAD, merges[0])
+
+    def test_a_failed_merge_command_is_still_reported_as_an_error(self):
+        """The blocked classification must not swallow a real merge failure.
+
+        Only refusals taken before the command ran are blocks; a command that
+        ran and left the PR open may have mutated something and stays an error.
+        """
+        with patch.object(merge_pr, "execute_merge",
+                          return_value=(None, "GitHub still reports OPEN; refused")), \
+             patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr",
+                          return_value=dict(self._pr(), title="open",
+                                            body="Closes #7", state="OPEN",
+                                            isDraft=False, mergeStateStatus="CLEAN",
+                                            mergeable="MERGEABLE")), \
+             patch.object(merge_pr, "_gh_json", return_value={"body": ""}), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": self.HEAD}), \
+             patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
+             patch.object(merge_pr, "_behind_by", new=lambda _base, _head: 0), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))):
+            self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
 
 
 class CloseOutRecoveryTests(unittest.TestCase):
