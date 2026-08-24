@@ -320,6 +320,9 @@ def audit_capacity(payload, *, as_of=None, max_age_seconds=3600):
         for service in configured
         if service in records
     ]
+    if report["mismatches"]:
+        for item in report["services"]:
+            item["available"] = False
     report["mismatches"].sort(
         key=lambda item: (item.get("service", ""), item["code"], item["message"]),
     )

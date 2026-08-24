@@ -164,6 +164,7 @@ class AuditCapacityTests(unittest.TestCase):
                 report = audit.audit_capacity(payload, as_of=AS_OF)
             self.assertFalse(report["ok"])
             self.assertIn(expected, mismatch_codes(report))
+            self.assertTrue(all(not item["available"] for item in report["services"]))
 
     def test_top_level_missing_or_malformed_data_fails_closed(self):
         cases = []
@@ -182,6 +183,7 @@ class AuditCapacityTests(unittest.TestCase):
                 report = audit.audit_capacity(payload, as_of=AS_OF)
             self.assertFalse(report["ok"])
             self.assertIn(expected, mismatch_codes(report))
+            self.assertTrue(all(not item["available"] for item in report["services"]))
 
     def test_non_string_configuration_and_invalid_max_age_return_reports(self):
         malformed = snapshot()
