@@ -42,9 +42,9 @@ eligible reviewers, nothing gets reviewed, and merge_pr.py blocks everything -
 a deadlock. After a PR has waited past the threshold, any *different agent* may
 review it and the PR is labelled `same-family-review` so the degradation shows.
 
-CodeRabbit is the sole PR code-review authority. Coding-agent work is limited
-to implementation, remediation, and mechanical merge execution after every
-Definition-of-Done gate passes.
+The assigned review-pool service is the sole PR code-review authority.
+Coding-agent work is limited to implementation, remediation, and mechanical
+merge execution after every Definition-of-Done gate passes.
 """
 
 import argparse
@@ -614,7 +614,15 @@ def _author_can_repair_review(pr: dict[str, Any]) -> bool:
     evidence = review_evidence(pr["number"])
     if not evidence:
         return False
-    evidence = merge_pr._with_coderabbit_status(pr["number"], evidence)
+    service = merge_pr.assigned_review_service(pr)
+    if service == "coderabbit":
+        evidence = merge_pr._with_coderabbit_status(pr["number"], evidence)
+    elif service == "sourcery":
+        evidence = merge_pr._with_sourcery_status(pr["number"], evidence)
+    elif service != "codeant":
+        return False
+    if not evidence:
+        return False
     if not merge_pr.has_authoritative_assigned_review(pr, evidence):
         return False
     if int(evidence.get("unresolved") or 0) > 0:

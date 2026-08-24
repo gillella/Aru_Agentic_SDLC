@@ -20,4 +20,4 @@ is no coding-agent fallback.
 
 Human operational authorization for money, production cutover, destructive
 migration, credentials, or external-account mutations remains a separate gate
-and is never supplied by CodeRabbit review.
+and is never supplied by the assigned review-pool service.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 430
+# line-ceiling: 441
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -287,6 +287,17 @@ def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:
         )
         if code != 0:
             print(f"[ERROR] Could not trigger CodeAnt review: {err.strip()}", file=sys.stderr)
+            rollback_code, _, rollback_err = run_cmd(
+                ["gh", "pr", "ready", pr_ref, "--undo"],
+                check=False,
+            )
+            if rollback_code != 0:
+                print(
+                    f"[ERROR] Could not restore draft state: {rollback_err.strip()}",
+                    file=sys.stderr,
+                )
+            else:
+                print("[INFO] Restored draft state; CodeAnt finalization can be retried.")
             return False
     print(f"🔍 Assigned {label} and marked PR ready")
     return True

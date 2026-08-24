@@ -656,16 +656,48 @@ class AuthorGateFixTests(unittest.TestCase):
 
     def test_unfixed_with_assigned_codeant_review_is_author_fixable(self):
         candidate = stranded(peer=None)
-        candidate["labels"].append({"name": "review:codeant"})
-        with patch.object(fnw, "review_evidence", return_value={
+        candidate["labels"] = [
+            label for label in candidate["labels"]
+            if label["name"] != "review:coderabbit"
+        ] + [{"name": "review:codeant"}]
+        evidence = {
             "unresolved": 0,
             "unfixed": 2,
             "reviewed_head": True,
+            "github_review_evidence": True,
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "CodeAnt findings.",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
             "service_threads": {"codeant": {"unresolved": 0, "unfixed": 2, "outdated_unfixed": 0}},
-        }), \
-             patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True):
+        }
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(merge_pr, "_with_coderabbit_status", return_value=None) as coderabbit:
             found = self.fix(candidate, reason="unmet: review")
         self.assertEqual(found["unmet_gates"], ["review-evidence"])
+        coderabbit.assert_not_called()
+
+    def test_author_repair_enriches_only_the_assigned_service(self):
+        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        for service in ("coderabbit", "sourcery", "codeant"):
+            candidate = stranded()
+            candidate["labels"] = [
+                label for label in candidate["labels"]
+                if not label["name"].startswith("review:")
+            ] + [{"name": f"review:{service}"}]
+            with self.subTest(service=service), \
+                 patch.object(fnw, "review_evidence", return_value=evidence), \
+                 patch.object(merge_pr, "_with_coderabbit_status", return_value=evidence) as coderabbit, \
+                 patch.object(merge_pr, "_with_sourcery_status", return_value=evidence) as sourcery, \
+                 patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True):
+                self.assertTrue(fnw._author_can_repair_review(candidate))
+                self.assertEqual(coderabbit.call_count, int(service == "coderabbit"))
+                self.assertEqual(sourcery.call_count, int(service == "sourcery"))
 
     def test_retired_reviewer_claim_does_not_block_merge(self):
         candidate = stranded(peer=None)

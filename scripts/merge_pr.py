@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4610
+# line-ceiling: 4612
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -809,14 +809,23 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                 return None
 
         for node in nodes:
+            if not isinstance(node, dict):
+                return None
             outdated = bool(node.get("isOutdated"))
             resolved = bool(node.get("isResolved"))
             comments = (node.get("comments") or {}).get("nodes") or []
             thread_service = None
             if comments:
-                author = comments[0].get("author") or {}
+                root = comments[0]
+                if not isinstance(root, dict):
+                    return None
+                author = root.get("author")
+                if not isinstance(author, dict):
+                    author = {}
                 login = str(author.get("login") or "").lower()
-                if login in CODERABBIT_LOGINS:
+                if author.get("__typename") != "Bot":
+                    thread_service = None
+                elif login in CODERABBIT_LOGINS:
                     thread_service = "coderabbit"
                 elif login in SOURCERY_LOGINS:
                     thread_service = "sourcery"
@@ -824,9 +833,10 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                     thread_service = "codeant"
 
             if not resolved and not outdated:
+                if thread_service is None:
+                    return None
                 unresolved += 1
-                if thread_service:
-                    service_threads[thread_service]["unresolved"] += 1
+                service_threads[thread_service]["unresolved"] += 1
                 continue
 
             if not comments:
@@ -1913,6 +1923,7 @@ def _codeant_latest_review(evidence):
             or submitted is None
             or not isinstance(review_id, str) or not review_id
             or not isinstance(body, str)
+            or state == "COMMENTED" and not body.strip()
             or oid != head
         ):
             return None

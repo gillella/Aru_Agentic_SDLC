@@ -1,4 +1,4 @@
-# line-ceiling: 493
+# line-ceiling: 554
 import json
 import sys
 import unittest
@@ -155,6 +155,67 @@ class IdentityStampTests(unittest.TestCase):
         comment_cmd = run.call_args_list[2].args[0]
         self.assertEqual(comment_cmd[:3], ["gh", "pr", "comment"])
         self.assertIn("@codeant-ai: review", comment_cmd)
+
+    @patch.object(create_pr, "run_cmd")
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_review_assignment_stops_safely_when_label_or_ready_fails(self, _label, run):
+        cases = (
+            ([(1, "", "label failed")], 1),
+            ([(0, "", ""), (1, "", "ready failed")], 2),
+        )
+        for side_effect, expected_calls in cases:
+            with self.subTest(expected_calls=expected_calls):
+                run.reset_mock(side_effect=True)
+                run.side_effect = side_effect
+                self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+                self.assertEqual(run.call_count, expected_calls)
+
+    @patch.object(create_pr, "run_cmd")
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_codeant_trigger_failure_restores_draft_state(self, _label, run):
+        run.side_effect = [
+            (0, "", ""),
+            (0, "", ""),
+            (1, "", "trigger failed"),
+            (0, "", ""),
+        ]
+
+        self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+
+        self.assertEqual(
+            run.call_args_list[3].args[0],
+            ["gh", "pr", "ready", "https://x/pull/9", "--undo"],
+        )
+
+    @patch.object(create_pr, "run_cmd")
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_codeant_trigger_failure_reports_failed_draft_rollback(self, _label, run):
+        run.side_effect = [
+            (0, "", ""),
+            (0, "", ""),
+            (1, "", "trigger failed"),
+            (1, "", "rollback failed"),
+        ]
+
+        self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        self.assertEqual(run.call_count, 4)
+
+    @patch.object(create_pr, "run_cmd")
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_codeant_finalization_can_retry_after_trigger_rollback(self, _label, run):
+        run.side_effect = [
+            (0, "", ""), (0, "", ""), (1, "", "trigger failed"), (0, "", ""),
+            (0, "", ""), (0, "", ""), (0, "", ""),
+        ]
+
+        self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+
+        trigger_calls = [
+            call.args[0] for call in run.call_args_list
+            if call.args[0][:3] == ["gh", "pr", "comment"]
+        ]
+        self.assertEqual(len(trigger_calls), 2)
 
     @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
     @patch.object(create_pr, "ensure_label", return_value=True)

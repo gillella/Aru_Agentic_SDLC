@@ -1,4 +1,4 @@
-# line-ceiling: 430
+# line-ceiling: 431
 """Mechanical truth contract for the canonical factory documentation."""
 
 import re
@@ -206,8 +206,14 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
         operator = section(plan, "## 4. The operator visibility and intervention interface", "### 4.1")
         self.assertNotIn("independent-agent review", operator)
         principle = section(plan, "### 4.3 The operating principle", "---")
-        self.assertIn("CodeRabbit reviews", principle)
+        self.assertIn("assigned review-pool service reviews", principle)
         self.assertNotIn("A distinct agent reviews", principle)
+        self.assertNotIn("CodeRabbit is the reviewer of record", principle)
+        cursor = (ROOT / "docs/cursor-integration.md").read_text(encoding="utf-8")
+        policy = (ROOT / "skills/code-review/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("assigned-service review is external evidence", cursor)
+        self.assertIn("assigned review-pool service", policy)
+        self.assertNotIn("never supplied by CodeRabbit review", policy)
         intervention = section(plan, "### 4.1 The one mandatory human intervention", "### 4.2")
         self.assertIn("implementation/remediation/mechanical-merge loop", intervention)
         self.assertNotIn("implementation/review/remediation loop", intervention)

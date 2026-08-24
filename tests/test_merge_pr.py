@@ -1,4 +1,4 @@
-# line-ceiling: 5277
+# line-ceiling: 5344
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -168,15 +168,46 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         }}}}
 
     @staticmethod
-    def thread_page(head="head123"):
+    def thread_page(head="head123", nodes=None):
         return {"data": {"repository": {"pullRequest": {
             "headRefOid": head,
             "commits": {"nodes": []},
             "reviewThreads": {
-                "nodes": [],
+                "nodes": [] if nodes is None else nodes,
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
             },
         }}}}
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_unattributed_active_thread_fails_closed(self, gh_json, _slug):
+        malformed_comments = (
+            [],
+            [{"createdAt": "2026-08-24T01:00:00Z", "body": "finding", "author": None}],
+            [{
+                "createdAt": "2026-08-24T01:00:00Z",
+                "body": "finding",
+                "author": "malformed",
+            }],
+            [{
+                "createdAt": "2026-08-24T01:00:00Z",
+                "body": "finding",
+                "author": {"login": "", "__typename": "Bot"},
+            }],
+        )
+        for comments in malformed_comments:
+            with self.subTest(comments=comments):
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.side_effect = [
+                    self.review_page(),
+                    self.attestation_page(),
+                    self.thread_page(nodes=[{
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "comments": {"nodes": comments},
+                    }]),
+                ]
+                self.assertIsNone(merge_pr.review_evidence(162))
 
     @staticmethod
     def attestation_page(head="head123", nodes=None, has_next=False, cursor=None):
@@ -1474,10 +1505,46 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("CodeAnt", msg)
 
-    def test_codeant_stale_or_spoofed_review_fails_closed(self):
+    def test_codeant_empty_commented_review_fails_closed(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "   ",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        }
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeAnt", msg)
+
+    def test_codeant_stale_review_fails_closed(self):
         pr = labelled("author:agent-1", "review:codeant")
         evidence = {
             "head_oid": "b" * 40,
+            "reviews": [{
+                "id": "codeant-review",
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "body": "CodeAnt findings.",
+                "author": {"login": "codeant-ai", "__typename": "Bot"},
+                "commit": {"oid": "a" * 40},
+            }],
+            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        }
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeAnt", msg)
+
+    def test_codeant_spoofed_review_fails_closed(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        evidence = {
+            "head_oid": "a" * 40,
             "reviews": [{
                 "id": "codeant-review",
                 "state": "COMMENTED",
@@ -4730,10 +4797,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                         "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
                         "reviewThreads": {
                             "nodes": [
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1"}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2"}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3"}]}},
-                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
                             ],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
@@ -4774,10 +4841,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                         },
                         "reviewThreads": {
                             "nodes": [
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1"}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2"}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3"}]}},
-                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)"}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
                             ],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
