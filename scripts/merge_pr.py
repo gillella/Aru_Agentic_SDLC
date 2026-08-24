@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4815
+# line-ceiling: 4836
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1940,9 +1940,12 @@ def _sourcery_check(pr, evidence):
 
 
 class _CodeAntReviewUnusable:
-    """Distinct from ``None``: a CodeAnt Review object exists but can't be
-    trusted (pending, malformed, spoofed, or an ambiguous tie for newest),
-    so callers must block rather than fall back to status evidence (#394)."""
+    """Distinct from ``None``: a CodeAnt Review object bound to the exact
+    current head exists but can't be trusted (pending, malformed, spoofed,
+    or an ambiguous tie for newest), so callers must block rather than fall
+    back to status evidence (#394). A Review object bound to a prior head is
+    historical audit evidence, not current-head evidence, so it never
+    produces this sentinel (#396)."""
 
     def __repr__(self):
         return "CODEANT_REVIEW_UNUSABLE"
@@ -1951,10 +1954,22 @@ class _CodeAntReviewUnusable:
 CODEANT_REVIEW_UNUSABLE = _CodeAntReviewUnusable()
 
 
-def _codeant_latest_review(evidence):
+def _codeant_latest_review(evidence):  # noqa: C901
     """Return a trustworthy review ``dict``, ``None`` if no CodeAnt Review
-    object exists at all (status fallback allowed), or
-    ``CODEANT_REVIEW_UNUSABLE`` if one exists but can't be trusted (#394)."""
+    object targets the exact current head (status fallback allowed), or
+    ``CODEANT_REVIEW_UNUSABLE`` if one bound to the current head exists but
+    can't be trusted (#394).
+
+    A Review object bound to a well-formed commit oid other than the exact
+    current head is historical audit evidence from an earlier push, not
+    evidence about the current head, so it is skipped here exactly like a
+    dismissed review - it must never block a trusted current-head
+    clean-review status record (#396). Only Review objects that are
+    themselves bound to the exact current head - or whose commit binding is
+    missing or too malformed to tell - still go through the full trust
+    checks below and can make this function return
+    ``CODEANT_REVIEW_UNUSABLE``.
+    """
     if not isinstance(evidence, dict):
         return None
     head = evidence.get("head_oid")
@@ -1966,14 +1981,20 @@ def _codeant_latest_review(evidence):
             return CODEANT_REVIEW_UNUSABLE
         author = review.get("author") or {}
         login = str(author.get("login") or "").lower()
+        if login not in CODEANT_LOGINS:
+            continue
+        oid = (review.get("commit") or {}).get("oid")
+        if (
+            isinstance(oid, str)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", oid) is not None
+            and oid != head
+        ):
+            continue
         actor_type = author.get("__typename")
         state = str(review.get("state") or "").upper()
         submitted = _parse_review_ts(review.get("submittedAt"))
-        oid = (review.get("commit") or {}).get("oid")
         review_id = review.get("id")
         body = review.get("body")
-        if login not in CODEANT_LOGINS:
-            continue
         if actor_type != "Bot":
             return CODEANT_REVIEW_UNUSABLE
         if state == "PENDING":

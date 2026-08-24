@@ -219,7 +219,11 @@ flag and therefore created no review object - a trusted, provider-owned
 recording a completed (`done: true`) run for the exact head (#394). The
 status-marker path only ever proves the run finished; it grants nothing about
 findings or verdict, so it never overrides the aggregate unresolved-thread
-count or a human's `CHANGES_REQUESTED`. Identity, completed status,
+count or a human's `CHANGES_REQUESTED`. A `codeant-ai` Review object bound to
+an earlier head is historical audit evidence left over from a prior
+remediation push, not evidence about the current head, so it does not block
+the status-record fallback; only a Review object bound to the exact current
+head that is itself unusable still blocks (#396). Identity, completed status,
 current-head binding, and assigned-service thread state are read from
 authoritative GitHub data. Missing, pending, failed, skipped, stale, ambiguous,
 duplicated, or spoofed evidence blocks - including a status marker that is
