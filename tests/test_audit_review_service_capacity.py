@@ -1,7 +1,11 @@
+# line-ceiling: 680
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from contextlib import redirect_stdout
 from copy import deepcopy
@@ -282,6 +286,325 @@ class CapacityCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertTrue(json.loads(output.getvalue())["ok"])
+
+
+def unavailability_entry(service="coderabbit", state="cooldown", *,
+                          observed_at="2026-08-24T11:30:00Z",
+                          retry_at="2026-08-24T13:00:00Z",
+                          reason="rate limited", source="review-status-webhook"):
+    return {
+        "service": service, "state": state, "reason": reason,
+        "observed_at": observed_at, "retry_at": retry_at, "source": source,
+    }
+
+
+def ledger(*entries):
+    return {"schema": audit.UNAVAILABILITY_SCHEMA, "entries": list(entries)}
+
+
+class UnavailabilityAuditTests(unittest.TestCase):
+    """audit_unavailability() is the fail-open twin of audit_capacity(): only
+    fresh, well-formed, unexpired evidence excludes a service; everything
+    else is ignored, never treated as proof of unavailability."""
+
+    def test_each_unavailable_state_excludes_the_service(self):
+        for state in audit.UNAVAILABLE_STATES:
+            with self.subTest(state=state):
+                report = audit.audit_unavailability(
+                    ledger(unavailability_entry(state=state)), as_of=AS_OF,
+                )
+                self.assertEqual(set(report["unavailable"]), {"coderabbit"})
+                self.assertEqual(report["unavailable"]["coderabbit"]["state"], state)
+                self.assertEqual(report["ignored"], [])
+
+    def test_stale_entry_beyond_max_age_is_ignored_not_excluded(self):
+        old = unavailability_entry(observed_at="2026-08-24T10:00:00Z", retry_at="2026-08-24T15:00:00Z")
+        report = audit.audit_unavailability(ledger(old), as_of=AS_OF, max_age_seconds=3600)
+        self.assertEqual(report["unavailable"], {})
+        self.assertIn("entry_stale", {item["code"] for item in report["ignored"]})
+
+    def test_expired_retry_at_is_ignored_not_excluded(self):
+        expired = unavailability_entry(observed_at="2026-08-24T11:00:00Z", retry_at="2026-08-24T11:30:00Z")
+        report = audit.audit_unavailability(ledger(expired), as_of=AS_OF)
+        self.assertEqual(report["unavailable"], {})
+        self.assertIn("entry_expired", {item["code"] for item in report["ignored"]})
+
+    def test_future_observed_at_is_ignored(self):
+        future = unavailability_entry(observed_at="2026-08-24T12:00:01Z", retry_at="2026-08-24T13:00:00Z")
+        report = audit.audit_unavailability(ledger(future), as_of=AS_OF)
+        self.assertEqual(report["unavailable"], {})
+        self.assertIn("entry_from_future", {item["code"] for item in report["ignored"]})
+
+    def test_retry_at_not_after_observed_at_is_ignored(self):
+        bad = unavailability_entry(observed_at="2026-08-24T11:30:00Z", retry_at="2026-08-24T11:30:00Z")
+        report = audit.audit_unavailability(ledger(bad), as_of=AS_OF)
+        self.assertEqual(report["unavailable"], {})
+        self.assertIn("entry_bounds_invalid", {item["code"] for item in report["ignored"]})
+
+    def test_malformed_and_spoofed_entries_are_ignored_not_excluded(self):
+        cases = [
+            ({"service": "coderabbit"}, "entry_invalid"),
+            ({**unavailability_entry(), "extra": "field"}, "entry_invalid"),
+            (unavailability_entry(service="not-a-real-service"), "entry_service_invalid"),
+            (unavailability_entry(state="banned"), "entry_state_invalid"),
+            (unavailability_entry(reason=""), "entry_reason_invalid"),
+            (unavailability_entry(reason=123), "entry_reason_invalid"),
+            (unavailability_entry(source=""), "entry_source_invalid"),
+            (unavailability_entry(observed_at="not-a-date"), "entry_observed_at_invalid"),
+            (unavailability_entry(retry_at="not-a-date"), "entry_retry_at_invalid"),
+        ]
+        for raw, expected in cases:
+            with self.subTest(expected=expected):
+                report = audit.audit_unavailability(ledger(raw), as_of=AS_OF)
+                self.assertEqual(report["unavailable"], {})
+                self.assertIn(expected, {item["code"] for item in report["ignored"]})
+
+    def test_non_list_entries_and_malformed_top_level_are_ignored_not_excluded(self):
+        cases = [
+            ({"schema": audit.UNAVAILABILITY_SCHEMA, "entries": "not-a-list"}, "entries_invalid"),
+            ({"schema": "wrong-schema", "entries": []}, "snapshot_shape_invalid"),
+            ({}, "snapshot_shape_invalid"),
+            ([], "snapshot_shape_invalid"),
+            (None, "snapshot_shape_invalid"),
+            ("not-a-dict", "snapshot_shape_invalid"),
+        ]
+        for payload, expected in cases:
+            with self.subTest(expected=expected):
+                report = audit.audit_unavailability(payload, as_of=AS_OF)
+                self.assertEqual(report["unavailable"], {})
+                self.assertIn(expected, {item["code"] for item in report["ignored"]})
+
+    def test_invalid_max_age_is_ignored_fail_open(self):
+        report = audit.audit_unavailability(
+            ledger(unavailability_entry()), as_of=AS_OF, max_age_seconds=-1,
+        )
+        self.assertEqual(report["unavailable"], {})
+        self.assertIn("max_age_invalid", {item["code"] for item in report["ignored"]})
+
+    def test_duplicate_entries_for_one_service_keep_most_recently_observed(self):
+        older = unavailability_entry(
+            state="cooldown", observed_at="2026-08-24T11:00:00Z", retry_at="2026-08-24T13:00:00Z",
+        )
+        newer = unavailability_entry(
+            state="outage", observed_at="2026-08-24T11:45:00Z", retry_at="2026-08-24T13:00:00Z",
+        )
+        report = audit.audit_unavailability(ledger(older, newer), as_of=AS_OF)
+        self.assertEqual(report["unavailable"]["coderabbit"]["state"], "outage")
+
+        report_reversed = audit.audit_unavailability(ledger(newer, older), as_of=AS_OF)
+        self.assertEqual(report_reversed["unavailable"]["coderabbit"]["state"], "outage")
+
+    def test_empty_ledger_excludes_nothing(self):
+        report = audit.audit_unavailability(ledger(), as_of=AS_OF)
+        self.assertEqual(report["unavailable"], {})
+        self.assertEqual(report["ignored"], [])
+
+
+class LedgerConcurrencyTests(unittest.TestCase):
+    """The ledger is shared by every governed checkout on the machine.
+
+    Concurrent writers are therefore the normal case. An unlocked
+    read-modify-write loses whichever append finishes first, and the loss is
+    silent: the next routing decision simply stops excluding a service that
+    really is unavailable.
+    """
+
+    def record(self, path, service, minute):
+        audit.record_unavailability(
+            service, "cooldown", f"cooldown at {minute}", "2026-08-24T14:00:00Z",
+            source="test", observed_at=f"2026-08-24T12:{minute:02d}:00Z", path=path,
+        )
+
+    def test_concurrent_appends_from_separate_processes_all_survive(self):
+        # Real processes, not threads: the GIL would hide the race this guards
+        # against, and the writers are genuinely separate repository checkouts.
+        writers = 8
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            program = textwrap.dedent(f"""
+                import sys
+                sys.path.insert(0, {str(ROOT / "scripts")!r})
+                import audit_review_service_capacity as audit
+                index = int(sys.argv[1])
+                audit.record_unavailability(
+                    "sourcery", "cooldown", "writer %d" % index,
+                    "2026-08-24T14:00:00Z", source="test",
+                    observed_at="2026-08-24T12:%02d:00Z" % index,
+                    path={str(path)!r},
+                )
+            """)
+            script = Path(directory) / "writer.py"
+            script.write_text(program, encoding="utf-8")
+            procs = [
+                subprocess.Popen([sys.executable, str(script), str(i)])
+                for i in range(writers)
+            ]
+            codes = [proc.wait(timeout=60) for proc in procs]
+            snapshot = audit.load_unavailability_snapshot(path)
+
+        self.assertEqual(codes, [0] * writers)
+        self.assertEqual(len(snapshot["entries"]), writers)
+        self.assertEqual(
+            {entry["reason"] for entry in snapshot["entries"]},
+            {f"writer {i}" for i in range(writers)},
+        )
+
+    def test_append_holds_the_lock_across_the_whole_read_modify_write(self):
+        """Re-reading inside the lock is the actual fix; a lock taken only
+        around the write still loses the append it raced with."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            self.record(path, "sourcery", 1)
+            seen = []
+            real_load = audit.load_unavailability_snapshot
+
+            def observing_load(target=None):
+                seen.append(Path(str(target)).exists())
+                return real_load(target)
+
+            with patch.object(audit, "load_unavailability_snapshot", observing_load):
+                self.record(path, "codeant", 2)
+            snapshot = real_load(path)
+        self.assertEqual(seen, [True])  # read once, inside the lock
+        self.assertEqual(len(snapshot["entries"]), 2)
+
+    def test_reader_never_observes_a_partially_written_ledger(self):
+        """load_unavailability_snapshot() treats corruption as 'no evidence',
+        so a torn write would silently stop excluding every service rather
+        than failing loudly. os.replace() makes the swap all-or-nothing."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            self.record(path, "sourcery", 1)
+            before = path.read_text(encoding="utf-8")
+
+            real_replace = os.replace
+            observed = {}
+
+            def capturing_replace(src, dst):
+                # Mid-write: the live ledger must still be the previous
+                # complete file, and the new bytes must be somewhere else.
+                observed["live"] = Path(dst).read_text(encoding="utf-8")
+                observed["staged"] = Path(src).read_text(encoding="utf-8")
+                return real_replace(src, dst)
+
+            with patch.object(audit.os, "replace", capturing_replace):
+                self.record(path, "codeant", 2)
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(observed["live"], before)
+        self.assertNotEqual(observed["staged"], before)
+        self.assertEqual(after, observed["staged"])
+        self.assertEqual(len(json.loads(after)["entries"]), 2)
+
+    def test_failed_write_leaves_the_previous_ledger_and_no_temp_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            self.record(path, "sourcery", 1)
+            before = path.read_text(encoding="utf-8")
+
+            with patch.object(audit.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    self.record(path, "codeant", 2)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            leftovers = [item.name for item in Path(directory).iterdir()
+                         if item.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+    def test_lock_file_is_not_mistaken_for_ledger_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            self.record(path, "sourcery", 1)
+            snapshot = audit.load_unavailability_snapshot(path)
+            names = sorted(item.name for item in Path(directory).iterdir())
+        self.assertEqual(len(snapshot["entries"]), 1)
+        self.assertEqual(names, ["ledger.json", "ledger.json.lock"])
+
+
+class UnavailabilityLedgerIoTests(unittest.TestCase):
+    def test_missing_file_loads_as_empty_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.json"
+            snapshot = audit.load_unavailability_snapshot(path)
+        self.assertEqual(snapshot, {"schema": audit.UNAVAILABILITY_SCHEMA, "entries": []})
+
+    def test_corrupt_file_loads_as_empty_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "corrupt.json"
+            path.write_text("{not json", encoding="utf-8")
+            snapshot = audit.load_unavailability_snapshot(path)
+        self.assertEqual(snapshot, {"schema": audit.UNAVAILABILITY_SCHEMA, "entries": []})
+
+    def test_record_unavailability_appends_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            audit.record_unavailability(
+                "sourcery", "quota_exhausted", "trial quota exhausted",
+                "2026-08-24T13:00:00Z", source="billing-webhook",
+                observed_at="2026-08-24T12:00:00Z", path=path,
+            )
+            audit.record_unavailability(
+                "codeant", "outage", "5xx from provider status page",
+                "2026-08-24T13:30:00Z", source="status-page-poll",
+                observed_at="2026-08-24T12:05:00Z", path=path,
+            )
+            snapshot = audit.load_unavailability_snapshot(path)
+        self.assertEqual(len(snapshot["entries"]), 2)
+        self.assertEqual({e["service"] for e in snapshot["entries"]}, {"sourcery", "codeant"})
+
+        report = audit.audit_unavailability(snapshot, as_of="2026-08-24T12:10:00Z")
+        self.assertEqual(set(report["unavailable"]), {"sourcery", "codeant"})
+
+    def test_record_unavailability_rejects_unknown_service_state_or_bad_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            with self.assertRaises(ValueError):
+                audit.record_unavailability(
+                    "not-a-service", "cooldown", "r", "2026-08-24T13:00:00Z",
+                    source="s", path=path,
+                )
+            with self.assertRaises(ValueError):
+                audit.record_unavailability(
+                    "coderabbit", "not-a-state", "r", "2026-08-24T13:00:00Z",
+                    source="s", path=path,
+                )
+            with self.assertRaises(ValueError):
+                audit.record_unavailability(
+                    "coderabbit", "cooldown", "r", "2026-08-24T11:00:00Z",
+                    source="s", observed_at="2026-08-24T12:00:00Z", path=path,
+                )
+            with self.assertRaises(ValueError):
+                audit.record_unavailability(
+                    "coderabbit", "cooldown", "  ", "2026-08-24T13:00:00Z",
+                    source="s", path=path,
+                )
+        self.assertFalse(path.exists())
+
+    def test_default_ledger_path_honors_env_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "shared.json"
+            with patch.dict("os.environ", {audit.CAPACITY_LEDGER_ENV: str(target)}):
+                self.assertEqual(audit.unavailability_ledger_path(), target)
+
+    def test_cross_repository_shared_ledger_is_visible_to_a_second_reader(self):
+        """Two working directories (simulated repos) pointing
+        ARU_REVIEW_CAPACITY_LEDGER at the same path see the same evidence --
+        the ledger is a shared cross-repository resource, not per-repo state."""
+        with tempfile.TemporaryDirectory() as directory:
+            shared_path = Path(directory) / "shared-ledger.json"
+            with patch.dict("os.environ", {audit.CAPACITY_LEDGER_ENV: str(shared_path)}):
+                # "repo A" records an outage using only the shared env var.
+                audit.record_unavailability(
+                    "coderabbit", "outage", "provider 5xx", "2026-08-24T13:00:00Z",
+                    source="status-page-poll", observed_at="2026-08-24T11:45:00Z",
+                )
+            with patch.dict("os.environ", {audit.CAPACITY_LEDGER_ENV: str(shared_path)}):
+                # "repo B" reads through the same env var, independently of repo A.
+                snapshot = audit.load_unavailability_snapshot()
+            self.assertEqual(len(snapshot["entries"]), 1)
+            self.assertEqual(snapshot["entries"][0]["service"], "coderabbit")
+            report = audit.audit_unavailability(snapshot, as_of=AS_OF)
+            self.assertEqual(set(report["unavailable"]), {"coderabbit"})
 
 
 if __name__ == "__main__":
