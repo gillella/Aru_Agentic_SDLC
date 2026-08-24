@@ -1,4 +1,4 @@
-# line-ceiling: 5344
+# line-ceiling: 5376
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -1475,6 +1475,38 @@ class ReviewGateTests(unittest.TestCase):
             "conclusion": "SUCCESS",
         }]
         gh_json.return_value = {"total_count": 0, "check_runs": []}
+        evidence = merge_pr._with_authoritative_review_status(383, {
+            "github_review_evidence": True,
+            "head_oid": head,
+            "reviews": [],
+            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
+        })
+
+        ok, msg = merge_pr.check_reviews(pr, evidence)
+
+        self.assertFalse(ok)
+        self.assertIn("Sourcery", msg)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_sourcery_live_evidence_fails_closed_when_check_runs_are_truncated(
+        self, gh_json, _slug
+    ):
+        head = "a" * 40
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr.update({"number": 383, "headRefOid": head})
+        # total_count exceeds the returned page: a blocking run may be hidden.
+        gh_json.return_value = {
+            "total_count": 101,
+            "check_runs": [{
+                "name": "Sourcery review",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": head,
+                "app": {"slug": "sourcery-ai"},
+                "pull_requests": [{"number": 383, "head": {"sha": head}}],
+            }],
+        }
         evidence = merge_pr._with_authoritative_review_status(383, {
             "github_review_evidence": True,
             "head_oid": head,

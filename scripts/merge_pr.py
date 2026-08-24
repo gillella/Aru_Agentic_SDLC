@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4612
+# line-ceiling: 4636
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -45,7 +45,11 @@ from common import (
     get_repo_slug,
     run_cmd,
 )
-from create_pr import render_verification_evidence, replace_verification_evidence
+from create_pr import (
+    render_verification_evidence,
+    replace_verification_evidence,
+    review_service_for_issue,
+)
 from update_issue_status import update_status
 
 EXIT_OK = 0
@@ -1169,7 +1173,15 @@ def label_values(pr, prefix):
 
 
 def assigned_review_service(pr):
-    """Exactly one review-pool authority label must be present."""
+    """Exactly one review-pool authority label must be present.
+
+    The label alone is not trusted: create_pr.py assigns
+    review_service_for_issue(issue_id) once, deterministically, from the
+    linked issue number. When the PR's linked issue is unambiguous, a label
+    that no longer matches that recomputation - e.g. a relabel after
+    assignment - is rejected rather than trusted, closing the window where an
+    edited label could swap the review oracle after the fact.
+    """
     labels = {
         lab.get("name", "")
         for lab in (pr.get("labels") or [])
@@ -1177,7 +1189,11 @@ def assigned_review_service(pr):
     }
     if len(labels) != 1:
         return None
-    return next(iter(labels)).split(":", 1)[1]
+    service = next(iter(labels)).split(":", 1)[1]
+    issue_nums = linked_issues(pr.get("body") or "")
+    if len(issue_nums) == 1 and review_service_for_issue(issue_nums[0]) != service:
+        return None
+    return service
 
 
 def _service_thread_counts(evidence, service):
@@ -1960,30 +1976,6 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     ok, thread_message = _thread_gate_message(counts)
     if not ok:
         return False, thread_message
-    if service == "sourcery":
-        if _sourcery_check(pr, evidence) is not True:
-            return False, (
-                "Sourcery has not supplied one successful authoritative current-head "
-                "'Sourcery review' check. Missing, skipped, failed, stale, ambiguous, "
-                "or spoofed evidence blocks merge."
-            )
-        return True, (
-            f"Sourcery review is complete on current head "
-            f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved Sourcery threads."
-        )
-    if service == "codeant":
-        review = _codeant_latest_review(evidence)
-        if review is None:
-            return False, (
-                "CodeAnt has not supplied one authoritative exact-head review object. "
-                "Missing, stale, ambiguous, or spoofed evidence blocks merge."
-            )
-        if str(review.get("state") or "").upper() == "CHANGES_REQUESTED":
-            return False, "CodeAnt requested changes and has not re-reviewed."
-        return True, (
-            f"CodeAnt review is complete on current head "
-            f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved CodeAnt threads."
-        )
 
     # Prefer the same explicitly paginated review history used for current-head
     # evidence. The PR snapshot remains a compatibility fallback for pure
@@ -1994,8 +1986,12 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
         else pr.get("reviews")
     ) or []
     substantive = [r for r in reviews if (r.get("state") or "").upper() != "PENDING"]
-    if not substantive:
-        return False, "No review on this PR. At least one review is required."
+
+    # A human's blocking review and the aggregate unresolved/outdated-unfixed/
+    # unfixed thread counts apply no matter which service is assigned: they
+    # ran only on the CodeRabbit fallback path below, so a Sourcery- or
+    # CodeAnt-assigned PR could merge over a human's unaddressed
+    # CHANGES_REQUESTED or a thread the assigned bot didn't itself raise.
     verdicts = latest_state_per_reviewer(reviews)
     if verdicts is None:
         return False, (
@@ -2031,7 +2027,7 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # zero-unresolved alone certified PR #62's five blocking findings as
     # addressed while every one of them survived to main. A finding must have
     # been fixed - some commit followed it - or explicitly withdrawn.
-    if evidence["unfixed"] > 0:
+    if evidence.get("unfixed", 0) > 0:
         return False, (
             f"{evidence['unfixed']} resolved thread(s) have no evidence that the "
             "finding was addressed: no commit after the finding was raised, no relevant "
@@ -2040,6 +2036,34 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
             "documented body-only gate remedy when it matches the finding, or "
             "withdraw the finding with a reason."
         )
+
+    if service == "sourcery":
+        if _sourcery_check(pr, evidence) is not True:
+            return False, (
+                "Sourcery has not supplied one successful authoritative current-head "
+                "'Sourcery review' check. Missing, skipped, failed, stale, ambiguous, "
+                "or spoofed evidence blocks merge."
+            )
+        return True, (
+            f"Sourcery review is complete on current head "
+            f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved Sourcery threads."
+        )
+    if service == "codeant":
+        review = _codeant_latest_review(evidence)
+        if review is None:
+            return False, (
+                "CodeAnt has not supplied one authoritative exact-head review object. "
+                "Missing, stale, ambiguous, or spoofed evidence blocks merge."
+            )
+        if str(review.get("state") or "").upper() == "CHANGES_REQUESTED":
+            return False, "CodeAnt requested changes and has not re-reviewed."
+        return True, (
+            f"CodeAnt review is complete on current head "
+            f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved CodeAnt threads."
+        )
+
+    if not substantive:
+        return False, "No review on this PR. At least one review is required."
 
     latest_coderabbit_review = _coderabbit_latest_review(evidence)
     if latest_coderabbit_review is None:

@@ -343,19 +343,18 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
 
     print(f"✅ Pull Request created successfully:\n{out}")
 
-    if agent or family:
-        # `gh pr create` prints the URL, which gh accepts anywhere a PR number
-        # would do. Falling back to the branch keeps this working if the output
-        # format ever changes.
-        pr_ref = out.strip().splitlines()[-1].strip() if out.strip() else current_branch
-        # Reported as failure even though the PR opened: an unstamped PR is a
-        # hole in the review gate, and a zero exit here would let a caller
-        # move on believing the identity landed.
-        if not apply_identity(pr_ref, agent, family):
-            return False
-        return finalize_review_assignment(pr_ref, issue_id)
-
-    return True
+    # `gh pr create` prints the URL, which gh accepts anywhere a PR number
+    # would do. Falling back to the branch keeps this working if the output
+    # format ever changes.
+    pr_ref = out.strip().splitlines()[-1].strip() if out.strip() else current_branch
+    # Reported as failure even though the PR opened: an unstamped PR is a
+    # hole in the review gate, and a zero exit here would let a caller
+    # move on believing the identity landed. Every created PR is finalized,
+    # even with empty agent/family, so it always gets its authoritative
+    # review-service label and leaves draft state.
+    if not apply_identity(pr_ref, agent, family):
+        return False
+    return finalize_review_assignment(pr_ref, issue_id)
 
 
 def main():

@@ -660,6 +660,10 @@ class AuthorGateFixTests(unittest.TestCase):
             label for label in candidate["labels"]
             if label["name"] != "review:coderabbit"
         ] + [{"name": "review:codeant"}]
+        # This fixture's default "Closes #1" only matches the deterministic
+        # coderabbit assignment; blank it so the label-vs-issue cross-check
+        # in assigned_review_service does not fight the relabel above.
+        candidate["body"] = ""
         evidence = {
             "unresolved": 0,
             "unfixed": 2,
@@ -690,6 +694,10 @@ class AuthorGateFixTests(unittest.TestCase):
                 label for label in candidate["labels"]
                 if not label["name"].startswith("review:")
             ] + [{"name": f"review:{service}"}]
+            # This fixture's default "Closes #1" only matches the
+            # deterministic coderabbit assignment; blank it so the
+            # label-vs-issue cross-check does not fight the relabel above.
+            candidate["body"] = ""
             with self.subTest(service=service), \
                  patch.object(fnw, "review_evidence", return_value=evidence), \
                  patch.object(merge_pr, "_with_coderabbit_status", return_value=evidence) as coderabbit, \
@@ -698,6 +706,27 @@ class AuthorGateFixTests(unittest.TestCase):
                 self.assertTrue(fnw._author_can_repair_review(candidate))
                 self.assertEqual(coderabbit.call_count, int(service == "coderabbit"))
                 self.assertEqual(sourcery.call_count, int(service == "sourcery"))
+
+    def test_missing_or_unsupported_service_is_not_author_fixable(self):
+        # pr()/stranded() default to review:coderabbit whenever a caller omits
+        # a review label, so the deny branch below needs an explicit opt-out
+        # to exercise "no assigned service" rather than always landing on the
+        # allowed coderabbit path.
+        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        for labels in ([], [{"name": "review:unknown-bot"}]):
+            with self.subTest(labels=labels):
+                candidate = stranded()
+                candidate["labels"] = [
+                    label for label in candidate["labels"]
+                    if not label["name"].startswith("review:")
+                ] + labels
+                candidate["body"] = ""
+                with patch.object(fnw, "review_evidence", return_value=evidence), \
+                     patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
+                     patch.object(merge_pr, "_with_sourcery_status") as sourcery:
+                    self.assertFalse(fnw._author_can_repair_review(candidate))
+                coderabbit.assert_not_called()
+                sourcery.assert_not_called()
 
     def test_retired_reviewer_claim_does_not_block_merge(self):
         candidate = stranded(peer=None)

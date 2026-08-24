@@ -49,8 +49,12 @@ enforced gate passes. CodeRabbit keeps its current exact-head contract.
 Sourcery requires a successful head-bound `Sourcery review` check and zero
 Sourcery unresolved threads. CodeAnt requires an authoritative exact-head
 `codeant-ai` review object and zero CodeAnt unresolved threads. No agent or
-human may bypass the merge helper
-with a direct push or an ad-hoc merge.
+human may bypass the merge helper with a direct push or an ad-hoc merge.
+Direct pushes to `main` are also blocked server-side by branch protection;
+an ad-hoc merge (`gh pr merge` or the GitHub UI, run outside `merge_pr.py`)
+is not - branch protection requires only a green CI status check, not
+assigned-service review evidence - so that half of the rule is a governance
+requirement agents and humans must follow, not a technical guarantee.
 
 Legacy `reviewed-by:<coding-agent>`, `reviewer:<coding-agent>`, and
 `aru-review-head:v1` evidence never satisfies the current review gate.
