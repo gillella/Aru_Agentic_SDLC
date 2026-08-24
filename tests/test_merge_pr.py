@@ -18,13 +18,7 @@ import cleanup_worktrees
 
 
 def _gate(pr, threads=0, **overrides):
-    """Runs the review gate with evidence defaulting to a clean pull request.
-
-    Most cases below exercise reviewer identity and label logic rather than
-    thread evidence, so they should not have to spell out every signal.
-    ``threads`` keeps its original positional meaning - the unresolved count,
-    or None when the query failed.
-    """
+    """Run the review gate with clean default evidence."""
     if threads is None:
         return merge_pr.check_reviews(pr, None)
     evidence = {
@@ -466,10 +460,8 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         self.assertTrue(evidence["reviewed_head"])
         pr = labelled("author:codex-1", "reviewed-by:cursor-1")
         ok, message = merge_pr.check_reviews(pr, evidence)
-        self.assertTrue(ok)
-        self.assertIn("Peer attribution: cursor-1", message)
-        self.assertIn(f"current head {head[:12]}", message)
-        self.assertIn("substantive independent review from gillella", message)
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", message)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -535,8 +527,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         )
 
         self.assertFalse(ok)
-        self.assertIn("no substantive review targets that commit", message)
-        self.assertNotIn("none is bound", message)
+        self.assertIn("CodeRabbit", message)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -586,9 +577,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         )
 
         self.assertFalse(ok)
-        self.assertIn("peer attribution exists for cursor-1", message.lower())
-        self.assertIn("current head head123", message)
-        self.assertIn("may be stale", message)
+        self.assertIn("coderabbit", message.lower())
 
     def test_latest_verdict_uses_timestamp_not_page_order(self):
         reviews = [
@@ -886,7 +875,7 @@ class NoFastTrackEscapeHatchTests(unittest.TestCase):
         with patch.dict("os.environ", {"ARU_FAST_TRACK": "1"}):
             ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-1"), 0)
         self.assertFalse(ok, "a self-review merged under ARU_FAST_TRACK")
-        self.assertIn("self-review", msg.lower())
+        self.assertIn("coderabbit", msg.lower())
 
     def test_the_environment_cannot_waive_test_coverage(self):
         pr = {"files": [{"path": "scripts/thing.py", "additions": 10, "deletions": 0}]}
@@ -908,103 +897,479 @@ class NoFastTrackEscapeHatchTests(unittest.TestCase):
 
 
 class ReviewGateTests(unittest.TestCase):
-    def test_no_reviews_blocks(self):
-        ok, msg = _gate({"reviews": []}, 0)
-        self.assertFalse(ok)
-        self.assertIn("No review", msg)
+    def coderabbit_evidence(self, *, head="a" * 40, state="COMMENTED",
+                            login="coderabbitai[bot]", body="Review complete."):
+        return coderabbit_evidence(head, state=state, login=login, body=body)
 
-    def test_changes_requested_blocks(self):
-        review = {
-            "id": "blocking-review", "state": "CHANGES_REQUESTED",
-            "submittedAt": "2026-01-01T00:00:00Z",
-            "author": {"login": "peer"},
-        }
-        ok, msg = _gate({"reviews": [review]}, 0)
-        self.assertFalse(ok)
-        self.assertIn("requested changes", msg)
+    @staticmethod
+    def coderabbit_pr(*labels):
+        return coderabbit_pr(*labels)
 
-    def test_advisory_bot_changes_requested_does_not_block_after_threads_resolve(self):
-        reviews = [{
-            "id": "advisory-change-request",
-            "state": "CHANGES_REQUESTED",
-            "submittedAt": "2026-01-01T00:00:00Z",
-            "author": {"login": "chatgpt-codex-connector"},
+    @staticmethod
+    def coderabbit_checkrun_status():
+        return [{
+            "__typename": "CheckRun",
+            "name": "CodeRabbit",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "coderabbitai"}},
         }]
+
+    def no_findings_full_review_evidence(
+        self,
+        *,
+        head="a" * 40,
+        request_time="2026-08-23T22:58:00Z",
+        review_time="2026-08-23T22:59:55Z",
+        completion_time="2026-08-23T23:00:10Z",
+        head_commit_time="2026-08-23T22:57:00Z",
+        request_author="gillella",
+        request_type="User",
+        completion_author="coderabbitai[bot]",
+        completion_type="Bot",
+        include_request=True,
+        include_completion=True,
+        extra_comments=None,
+    ):
+        evidence = self.coderabbit_evidence(head=head, body="", state="COMMENTED")
+        evidence["reviews"][0]["submittedAt"] = review_time
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        evidence["head_commit_committed_at"] = head_commit_time
+        comments = []
+        if include_request:
+            comments.append({
+                "body": "@coderabbitai full review",
+                "createdAt": request_time,
+                "author": {"login": request_author, "__typename": request_type},
+            })
+        if include_completion:
+            comments.append({
+                "body": "Full review finished.",
+                "createdAt": completion_time,
+                "author": {"login": completion_author, "__typename": completion_type},
+            })
+        comments.extend([] if extra_comments is None else extra_comments)
+        evidence["coderabbit_full_review_comments"] = comments
+        return evidence
+
+    def test_coderabbit_current_head_substantive_review_is_sole_authority(self):
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1", "reviewed-by:agent-2"),
+            self.coderabbit_evidence(),
+        )
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_remediation_head_status_can_bind_new_head_after_prior_review(self):
+        old_head = "a" * 40
+        new_head = "b" * 40
+        evidence = self.coderabbit_evidence(head=old_head, state="APPROVED", body="")
+        evidence["head_oid"] = new_head
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+            "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }]
+        ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
+        self.assertTrue(ok, msg)
+        self.assertIn(new_head[:12], msg)
+
+    def test_current_head_status_without_prior_substantive_coderabbit_review_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["reviews"] = [{
+            "id": "peer-review",
+            "state": "APPROVED",
+            "submittedAt": "2026-08-23T19:00:00Z",
+            "body": "Peer approved.",
+            "author": {"login": "human-reviewer", "__typename": "User"},
+            "commit": {"oid": evidence["head_oid"]},
+        }]
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_latest_completed_coderabbit_changes_requested_blocks_even_with_current_head_status(self):
+        head = "b" * 40
+        evidence = self.coderabbit_evidence(head="a" * 40, state="APPROVED")
+        evidence["head_oid"] = head
+        evidence["reviews"].append({
+            "id": "coderabbit-changes-requested",
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-08-23T21:00:00Z",
+            "body": "Blocking issue remains.",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "commit": {"oid": "a" * 40},
+        })
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit requested changes", msg)
+
+    def test_ambiguous_newest_prior_coderabbit_reviews_fail_closed_even_with_current_head_status(self):
+        evidence = self.coderabbit_evidence(head="a" * 40, state="APPROVED")
+        evidence["reviews"].append({
+            "id": "coderabbit-review-2",
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": evidence["reviews"][0]["submittedAt"],
+            "body": "Blocking issue remains.",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "commit": {"oid": "a" * 40},
+        })
+        evidence["head_oid"] = "b" * 40
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
+        self.assertFalse(ok)
+        self.assertIn("unambiguous latest review verdict", msg)
+
+    def test_graphql_coderabbit_login_without_bot_suffix_is_accepted(self):
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.coderabbit_evidence(login="coderabbitai"),
+        )
+        self.assertTrue(ok, msg)
+
+    def test_coding_agent_review_cannot_satisfy_gate(self):
         ok, msg = _gate(
-            labelled("author:agent-1", "reviewed-by:agent-2", reviews=reviews), 0)
-        self.assertTrue(ok)
-        self.assertIn("agent-2", msg)
-
-    def test_re_approval_after_changes_requested_unblocks(self):
-        # The reviews list is history, so the CHANGES_REQUESTED entry survives
-        # re-approval. Reading it raw blocked the PR forever, contradicting the
-        # refusal message that promised re-approval was supported.
-        pr = {"author": {"login": "alice"},
-              "labels": [{"name": "author:agent-1"}],
-              "reviews": [
-            {"state": "CHANGES_REQUESTED", "author": {"login": "bob"},
-             "submittedAt": "2026-01-01T00:00:00Z"},
-            {"state": "APPROVED", "author": {"login": "bob"},
-             "submittedAt": "2026-01-02T00:00:00Z"},
-        ]}
-        ok, _ = _gate(pr, 0)
-        self.assertTrue(ok)
-
-    def test_another_reviewer_still_blocking_is_respected(self):
-        pr = {"reviews": [
-            {"state": "APPROVED", "author": {"login": "bob"},
-             "submittedAt": "2026-01-02T00:00:00Z"},
-            {"state": "CHANGES_REQUESTED", "author": {"login": "eve"},
-             "submittedAt": "2026-01-03T00:00:00Z"},
-        ]}
-        ok, msg = _gate(pr, 0)
-        self.assertFalse(ok)
-        self.assertIn("eve", msg)
-
-    def test_a_later_comment_does_not_clear_a_change_request(self):
-        pr = {"reviews": [
-            {"state": "CHANGES_REQUESTED", "author": {"login": "bob"},
-             "submittedAt": "2026-01-01T00:00:00Z"},
-            {"state": "COMMENTED", "author": {"login": "bob"},
-             "submittedAt": "2026-01-05T00:00:00Z"},
-        ]}
-        self.assertFalse(_gate(pr, 0)[0])
-
-    def test_unresolved_threads_block(self):
-        ok, msg = _gate({"reviews": [{"state": "COMMENTED"}]}, 3)
-        self.assertFalse(ok)
-        self.assertIn("3 unresolved", msg)
-
-    def test_unknown_thread_state_blocks_rather_than_guesses(self):
-        review = {
-            "id": "approval", "state": "APPROVED",
-            "submittedAt": "2026-01-01T00:00:00Z",
-            "author": {"login": "peer"},
-        }
-        ok, msg = _gate({"reviews": [review]}, None)
-        self.assertFalse(ok)
-        self.assertIn("review-thread state", msg)
-
-    def test_approved_and_resolved_passes(self):
-        ok, _ = _gate(
-            labelled("author:agent-1", review_login="some-colleague"), 0)
-        self.assertTrue(ok)
-
-    def test_commented_review_with_no_open_threads_passes(self):
-        # Same-account agents cannot APPROVE through GitHub, so their governed
-        # reviewed-by attribution remains the proof of completed peer review.
-        ok, _ = _gate(
             labelled("author:agent-1", "reviewed-by:agent-2",
-                     reviews=[{"state": "COMMENTED"}]), 0)
-        self.assertTrue(ok)
+                     reviews=[{
+                         "id": "peer", "state": "APPROVED",
+                         "submittedAt": "2026-08-23T20:00:00Z",
+                         "body": "Approved.",
+                         "author": {"login": "human", "__typename": "User"},
+                         "commit": {"oid": "a" * 40},
+                     }]),
+            head_oid="a" * 40,
+        )
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_spoofed_coderabbit_login_fails_closed(self):
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.coderabbit_evidence(login="coderabbit-reviewer"),
+        )
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_pending_coderabbit_review_fails_closed(self):
+        pending = self.coderabbit_evidence()
+        pending["reviews"].append(dict(
+            pending["reviews"][0], id="coderabbit-pending", state="PENDING",
+        ))
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), pending,
+        )
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_success_context_from_unknown_producer_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": {"login": "spoof", "__typename": "User"},
+        }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_empty_body_commented_exact_head_review_fails_closed_even_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="", state="COMMENTED")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_empty_body_approved_exact_head_review_passes_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="", state="APPROVED")
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_valid_no_findings_full_review_passes(self):
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(),
+        )
+        self.assertTrue(ok, msg)
+
+    def test_automatic_empty_review_without_full_review_request_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(include_request=False),
+        )[0])
+
+    def test_non_substantive_empty_commented_review_does_not_block_later_approval(self):
+        evidence = self.no_findings_full_review_evidence(
+            include_request=False,
+            review_time="2026-08-23T20:00:00Z",
+        )
+        evidence["reviews"].append({
+            "id": "coderabbit-approved",
+            "state": "APPROVED",
+            "submittedAt": "2026-08-23T21:00:00Z",
+            "body": "",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "commit": {"oid": evidence["head_oid"]},
+        })
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_only_non_substantive_empty_commented_history_still_fails_closed(self):
+        evidence = self.no_findings_full_review_evidence(include_request=False)
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_empty_review_without_completion_comment_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(include_completion=False),
+        )[0])
+
+    def test_spoofed_full_review_completion_author_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(
+                completion_author="octocat",
+                completion_type="User",
+            ),
+        )[0])
+
+    def test_completion_before_request_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(
+                request_time="2026-08-23T23:00:00Z",
+                completion_time="2026-08-23T22:59:00Z",
+            ),
+        )[0])
+
+    def test_request_before_current_head_commit_fails_closed(self):
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"),
+            self.no_findings_full_review_evidence(
+                head_commit_time="2026-08-23T22:58:30Z",
+                request_time="2026-08-23T22:58:00Z",
+            ),
+        )[0])
+
+    def test_tied_full_review_request_events_are_ambiguous(self):
+        evidence = self.no_findings_full_review_evidence(extra_comments=[{
+            "body": "@coderabbitai full review",
+            "createdAt": "2026-08-23T22:58:00Z",
+            "author": {"login": "other-user", "__typename": "User"},
+        }])
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_tied_full_review_completion_events_are_ambiguous(self):
+        evidence = self.no_findings_full_review_evidence(extra_comments=[{
+            "body": "Full review finished.",
+            "createdAt": "2026-08-23T23:00:10Z",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }])
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_whitespace_body_commented_exact_head_review_fails_closed_even_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="   \n\t", state="COMMENTED")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_whitespace_body_approved_exact_head_review_passes_with_successful_status(self):
+        evidence = self.coderabbit_evidence(body="   \n\t", state="APPROVED")
+        evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_null_status_creator_passes_with_recognized_review(self):
+        evidence = self.coderabbit_evidence(body="Review complete.")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": None,
+        }]
+        ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_non_null_spoof_status_creator_fails_with_recognized_review(self):
+        evidence = self.coderabbit_evidence(body="")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": {"login": "coderabbit-status", "__typename": "Bot"},
+        }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_null_status_creator_without_recognized_review_fails_closed(self):
+        evidence = self.coderabbit_evidence(login="not-coderabbit", body="")
+        evidence["coderabbit_status"] = [{
+            "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
+            "creator": None,
+        }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_missing_failed_rate_limited_or_ambiguous_check_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        cases = (
+            [],
+            [{"name": "CodeRabbit", "status": "COMPLETED", "conclusion": "FAILURE"}],
+            [{"name": "CodeRabbit", "status": "COMPLETED", "conclusion": "NEUTRAL"}],
+            [{"name": "CodeRabbit", "status": "IN_PROGRESS", "conclusion": ""}],
+            [
+                {"name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"context": "CodeRabbit", "state": "SUCCESS"},
+            ],
+        )
+        for checks in cases:
+            with self.subTest(checks=checks):
+                pr = labelled("author:agent-1")
+                pr["statusCheckRollup"] = checks
+                self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
+
+    def test_github_review_evidence_without_authoritative_status_never_uses_pr_rollup(self):
+        evidence = self.coderabbit_evidence()
+        evidence["github_review_evidence"] = True
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_tied_newest_current_head_coderabbit_reviews_are_ambiguous(self):
+        evidence = self.coderabbit_evidence()
+        second = dict(evidence["reviews"][0], id="coderabbit-review-2")
+        evidence["reviews"].append(second)
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_distinct_timestamp_newest_current_head_coderabbit_review_wins(self):
+        evidence = self.coderabbit_evidence()
+        evidence["reviews"].append(dict(
+            evidence["reviews"][0], id="coderabbit-review-2",
+            submittedAt="2026-08-23T21:00:00Z",
+        ))
+        self.assertTrue(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_invalid_newest_current_head_coderabbit_review_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["reviews"].append(dict(
+            evidence["reviews"][0], id="coderabbit-review-2",
+            submittedAt="not-a-time",
+        ))
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_github_review_evidence_without_authoritative_status_fails_closed(self):
+        pr = self.coderabbit_pr("author:agent-1")
+        evidence = self.coderabbit_evidence()
+        evidence["github_review_evidence"] = True
+        self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
+
+
+class CodeRabbitStatusEvidenceTests(unittest.TestCase):
+    @patch.object(merge_pr, "_gh_json")
+    def test_errors_field_rejects_partial_status_payload(self, gh_json):
+        gh_json.return_value = {
+            "errors": [{"message": "partial result"}],
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                    "contexts": {"totalCount": 1, "nodes": []},
+                }}}]},
+            }}},
+        }
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_missing_context_total_count_rejects_status_payload(self, gh_json):
+        gh_json.return_value = {
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                    "contexts": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [],
+                    },
+                }}}]},
+            }}},
+        }
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_truncated_context_page_rejects_status_payload(self, gh_json):
+        gh_json.return_value = {
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                    "contexts": {
+                        "totalCount": 2,
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [{
+                            "__typename": "CheckRun",
+                            "name": "CodeRabbit",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "checkSuite": {"app": {"slug": "coderabbitai"}},
+                        }],
+                    },
+                }}}]},
+            }}},
+        }
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_has_next_page_rejects_status_payload_even_when_count_matches(self, gh_json):
+        gh_json.return_value = {
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": "head123",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                    "contexts": {
+                        "totalCount": 1,
+                        "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                        "nodes": [{
+                            "__typename": "CheckRun",
+                            "name": "CodeRabbit",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "checkSuite": {"app": {"slug": "coderabbitai"}},
+                        }],
+                    },
+                }}}]},
+            }}},
+        }
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+
 
 
 def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella"):
-    """A PR whose reviews come from the same GitHub account by default.
-
-    Same-account is the interesting case: every agent authenticates as one user,
-    so only the identity labels distinguish them.
-    """
+    """A PR whose default reviews come from the same GitHub account."""
     default = [{
         "id": "default-review",
         "state": "APPROVED",
@@ -1018,366 +1383,26 @@ def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella")
     }
 
 
-class ExternalReviewerTests(unittest.TestCase):
-    """Only approving, non-automation external reviewers count on their own."""
-
-    def test_a_bot_review_is_advisory_without_any_label(self):
-        reviews = [{"state": "COMMENTED", "author": {
-            "login": "chatgpt-codex-connector"}}]
-        ok, msg = _gate(
-            labelled("author:agent-1", reviews=reviews), 0)
-        self.assertFalse(ok)
-        self.assertIn("chatgpt-codex-connector", msg)
-        self.assertIn("advisory", msg)
-
-    def test_a_bot_approval_is_still_advisory(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", review_login="chatgpt-codex-connector"), 0)
-        self.assertFalse(ok)
-        self.assertIn("advisory", msg)
-
-    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
-    def test_configured_review_app_approval_satisfies_the_gate(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", review_login="aru-reviewer[bot]"), 0)
-        self.assertTrue(ok)
-        self.assertIn("aru-reviewer[bot]", msg)
-
-    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
-    def test_configured_review_app_bot_actor_at_current_head_counts(self):
-        head = "a" * 40
-        reviews = [{
-            "id": "app-approve",
-            "state": "APPROVED",
-            "submittedAt": "2026-01-01T00:00:00Z",
-            "author": {"login": "aru-reviewer[bot]", "__typename": "Bot"},
+def coderabbit_evidence(head="gated-sha", *, state="COMMENTED",
+                        login="coderabbitai[bot]", body="Review complete."):
+    return {
+        "head_oid": head, "unresolved": 0, "unfixed": 0,
+        "outdated_unfixed": 0, "withdrawn": 0, "reviewed_head": False,
+        "reviews": [{
+            "id": "coderabbit-review", "state": state,
+            "submittedAt": "2026-08-23T20:00:00Z", "body": body,
+            "author": {"login": login, "__typename": "Bot"},
             "commit": {"oid": head},
-            "body": "",
-        }]
-        pr = labelled("author:agent-1", reviews=reviews)
-        ok, msg = _gate(
-            pr, 0,
-            head_oid=head,
-            reviews=reviews,
-            review_attestations=[],
-            reviewed_head=True,
-        )
-        self.assertTrue(ok)
-        self.assertIn("aru-reviewer[bot]", msg)
-
-    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
-    def test_unconfigured_bot_stays_advisory_when_app_is_named(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", review_login="coderabbitai[bot]"), 0)
-        self.assertFalse(ok)
-        self.assertIn("advisory", msg)
-
-    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
-    def test_same_account_self_review_still_fails_when_app_is_named(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewed-by:agent-1"), 0)
-        self.assertFalse(ok)
-        self.assertIn("self-review", msg)
-
-    @patch.dict(os.environ, {"ARU_REVIEW_APP_LOGIN": "aru-reviewer[bot]"})
-    def test_reviewer_claim_still_blocks_configured_app_approval(self):
-        ok, msg = _gate(
-            labelled(
-                "author:agent-1",
-                "reviewer:agent-2",
-                review_login="aru-reviewer[bot]",
-            ),
-            0,
-        )
-        self.assertFalse(ok)
-        self.assertIn("reviewer:", msg)
-
-    def test_an_external_approval_counts_without_any_label(self):
-        ok, _ = _gate(
-            labelled("author:agent-1", review_login="some-colleague"), 0)
-        self.assertTrue(ok)
-
-    def test_an_external_comment_does_not_count_without_approval(self):
-        reviews = [{"state": "COMMENTED", "author": {"login": "some-colleague"}}]
-        ok, msg = _gate(
-            labelled("author:agent-1", reviews=reviews), 0)
-        self.assertFalse(ok)
-        self.assertIn("reviewed-by:", msg)
-
-    def test_same_account_still_needs_the_labels(self):
-        ok, msg = _gate(labelled("author:agent-1"), 0)
-        self.assertFalse(ok)
-        # Names the attribution the gate reads and the command that writes it,
-        # so the remedy is executable rather than a label to invent.
-        self.assertIn("reviewed-by:", msg)
-        self.assertIn("--complete-review", msg)
+        }],
+    }
 
 
-class SelfReviewTests(unittest.TestCase):
-    """Every agent is the same GitHub user, so GitHub cannot catch this."""
-
-    def test_self_review_is_refused(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewed-by:agent-1"), 0)
-        self.assertFalse(ok)
-        self.assertIn("self-review", msg.lower())
-
-    def test_peer_review_passes(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewed-by:agent-2"), 0)
-        self.assertTrue(ok)
-        self.assertIn("agent-2", msg)
-
-    def test_a_peer_alongside_a_self_review_passes(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
-        self.assertTrue(ok)
-        self.assertIn("agent-3", msg)
-
-    # --- Identity as the pair (id, family) (#307) ---------------------------
-    # Agents authenticate as one GitHub user, so the labels are all that
-    # distinguish them. Comparing the id alone cannot tell a genuine
-    # cross-family reviewer apart from the author reviewing its own work.
-
-    def test_same_id_same_family_is_still_a_self_review(self):
-        ok, msg = _gate(labelled(
-            "author:agent-1", "family:anthropic",
-            "reviewed-by:agent-1", "reviewer-family:agent-1:anthropic"), 0)
-        self.assertFalse(ok)
-        self.assertIn("self-review", msg.lower())
-        # Families were present, so no missing-label caveat is warranted.
-        self.assertNotIn("cannot be ruled out", msg)
-
-    def test_same_id_different_family_is_reported_as_an_id_collision(self):
-        # Two agents answering to one id (#304). Not a peer review, and not
-        # honestly a self-review either -- the namespace broke.
-        ok, msg = _gate(labelled(
-            "author:agent-1", "family:anthropic",
-            "reviewed-by:agent-1", "reviewer-family:agent-1:google"), 0)
-        self.assertFalse(ok)
-        self.assertIn("sharing one id", msg)
-        self.assertIn("anthropic", msg)
-        self.assertIn("google", msg)
-        self.assertNotIn("A self-review does not satisfy", msg)
-
-    def test_id_collision_blocks_even_with_a_genuine_peer(self):
-        # A broken id namespace is reportable regardless of who else reviewed:
-        # no attribution carrying that id can be trusted.
-        ok, msg = _gate(labelled(
-            "author:agent-1", "family:anthropic",
-            "reviewed-by:agent-1", "reviewer-family:agent-1:google",
-            "reviewed-by:agent-9"), 0)
-        self.assertFalse(ok)
-        self.assertIn("sharing one id", msg)
-
-    def test_distinct_id_review_passes_without_any_family_labels(self):
-        # Unchanged from today: family is consulted only where the ids collide,
-        # so PRs predating family stamping keep merging.
-        ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-2"), 0)
-        self.assertTrue(ok)
-        self.assertIn("agent-2", msg)
-
-    def test_missing_family_on_a_same_id_review_names_what_is_missing(self):
-        ok, msg = _gate(labelled("author:agent-1", "reviewed-by:agent-1"), 0)
-        self.assertFalse(ok)
-        self.assertIn("self-review", msg.lower())
-        self.assertIn("family:<family> on the PR", msg)
-        self.assertIn("reviewer-family:agent-1:<family>", msg)
-
-    def test_missing_reviewer_family_alone_is_named(self):
-        ok, msg = _gate(labelled(
-            "author:agent-1", "family:anthropic", "reviewed-by:agent-1"), 0)
-        self.assertFalse(ok)
-        self.assertIn("reviewer-family:agent-1:<family>", msg)
-        self.assertNotIn("family:<family> on the PR", msg)
-
-    def test_missing_family_does_not_block_a_genuine_peer(self):
-        ok, _ = _gate(labelled(
-            "author:agent-1", "reviewed-by:agent-1", "reviewed-by:agent-3"), 0)
-        self.assertTrue(ok)
-
-    def test_classifier_partitions_reviewers(self):
-        pr = labelled("author:a1", "family:anthropic",
-                      "reviewed-by:a1", "reviewer-family:a1:google",
-                      "reviewed-by:a2")
-        peers, collisions, unresolved = merge_pr.classify_reviewers(
-            pr, ["a1", "a2"], "a1")
-        self.assertEqual(peers, ["a2"])
-        self.assertEqual(collisions, [("a1", "anthropic", "google")])
-        self.assertEqual(unresolved, [])
-
-    def test_reviewer_families_ignores_malformed_labels(self):
-        pr = labelled("reviewer-family:a1:google", "reviewer-family:nofamily",
-                      "reviewer-family:")
-        self.assertEqual(merge_pr.reviewer_families(pr), {"a1": ["google"]})
-
-    def test_conflicting_family_stamps_are_reported_as_ambiguity(self):
-        # Two families for one id is evidence of the reissue defect; letting the
-        # last label win would describe the wrong situation entirely.
-        pr = labelled("author:agent-1", "family:anthropic",
-                      "reviewed-by:agent-1",
-                      "reviewer-family:agent-1:anthropic",
-                      "reviewer-family:agent-1:google")
-        _peers, collisions, _unresolved = merge_pr.classify_reviewers(
-            pr, ["agent-1"], "agent-1")
-        self.assertEqual(len(collisions), 1)
-        self.assertIn("ambiguous", collisions[0][1])
-
-    def test_two_author_family_labels_are_reported_as_ambiguity(self):
-        pr = labelled("author:agent-1", "family:anthropic", "family:google",
-                      "reviewed-by:agent-1",
-                      "reviewer-family:agent-1:anthropic")
-        _peers, collisions, _unresolved = merge_pr.classify_reviewers(
-            pr, ["agent-1"], "agent-1")
-        self.assertEqual(len(collisions), 1)
-        self.assertIn("anthropic, google", collisions[0][1])
-
-    def test_ambiguous_families_still_block_the_merge(self):
-        ok, msg = _gate(labelled(
-            "author:agent-1", "family:anthropic",
-            "reviewed-by:agent-1",
-            "reviewer-family:agent-1:anthropic",
-            "reviewer-family:agent-1:google"), 0)
-        self.assertFalse(ok)
-        self.assertIn("ambiguous", msg)
-
-    def test_reviewer_family_label_is_not_read_as_the_author_family(self):
-        # family: and reviewer-family: must not be confused by prefix matching.
-        pr = labelled("reviewer-family:a1:google")
-        self.assertEqual(merge_pr.label_values(pr, merge_pr.FAMILY_LABEL), [])
-
-    def test_an_empty_author_label_does_not_make_every_reviewer_a_peer(self):
-        # A bare `author:` label parses to "", which no reviewer id equals, so
-        # a self-review read as an independent peer and satisfied the gate.
-        ok, msg = _gate(labelled("author:", "reviewed-by:agent-1"), 0)
-        self.assertFalse(ok)
-        self.assertIn("author:", msg)
-
-    def test_a_whitespace_only_author_label_is_also_rejected(self):
-        ok, _msg = _gate(labelled("author:   ", "reviewed-by:agent-1"), 0)
-        self.assertFalse(ok)
-
-    def test_an_empty_reviewed_by_label_is_not_a_peer(self):
-        ok, _msg = _gate(labelled("author:agent-1", "reviewed-by:"), 0)
-        self.assertFalse(ok)
-
-    def test_author_label_whitespace_is_trimmed_not_treated_as_distinct(self):
-        # " agent-1" and "agent-1" are one identity, not an ambiguity.
-        ok, _msg = _gate(labelled("author: agent-1", "author:agent-1",
-                                  "reviewed-by:agent-2"), 0)
-        self.assertTrue(ok)
-
-    def test_two_different_author_labels_fail_closed(self):
-        # Concurrent adoption can leave two author: stamps. Picking one by
-        # position would decide the peer comparison arbitrarily.
-        ok, msg = _gate(labelled("author:agent-1", "author:agent-2",
-                                 "reviewed-by:agent-3"), 0)
-        self.assertFalse(ok)
-        self.assertIn("cannot be established", msg)
-        self.assertIn("agent-1, agent-2", msg)
-
-    def test_a_duplicated_identical_author_label_is_not_ambiguous(self):
-        ok, _msg = _gate(labelled("author:agent-1", "author:agent-1",
-                                  "reviewed-by:agent-3"), 0)
-        self.assertTrue(ok)
-
-    def test_review_without_attribution_is_refused(self):
-        # Unattributable on a stamped PR: it cannot be told apart from a
-        # self-review, so it must not pass.
-        ok, msg = _gate(labelled("author:agent-1"), 0)
-        self.assertFalse(ok)
-        self.assertIn("reviewed-by:", msg)
-
-
-    def test_unstamped_pr_fails_closed(self):
-        ok, msg = _gate(labelled(), 0)
-        self.assertFalse(ok)
-        self.assertIn("author:<id>", msg)
-        self.assertIn("create_pr.py", msg)
-
-    def test_unstamped_pr_with_external_approval_still_fails_closed(self):
-        ok, msg = _gate(
-            labelled(review_login="some-colleague"), 0)
-        self.assertFalse(ok)
-        self.assertIn("author:<id>", msg)
-
-    def test_same_family_review_warns_but_does_not_refuse(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewed-by:agent-2", "same-family-review"), 0)
-        self.assertTrue(ok)
-        self.assertIn("Same-family", msg)
-
-    def test_self_review_refusal_outranks_nothing_else_being_wrong(self):
-        # CI green, threads resolved, criteria ticked - still refused.
-        approval = {
-            "id": "self-approval", "state": "APPROVED",
-            "submittedAt": "2026-01-01T00:00:00Z",
-            "author": {"login": "gillella"},
-        }
-        ok, msg = _gate(
-            labelled("author:solo", "reviewed-by:solo",
-                     reviews=[approval, {"state": "COMMENTED"}]), 0)
-        self.assertFalse(ok)
-        self.assertIn("self-review", msg.lower())
-
-
-class ClaimIsNotAttestationTests(unittest.TestCase):
-    """A review claim records queue occupancy, not that anyone read the diff.
-
-    An earlier revision of this fix accepted `reviewer:` as proof of review.
-    That let the author leave a same-account COMMENTED review, any peer claim
-    the PR, and the gate pass before that peer had looked at anything. On the
-    repository's only merge gate.
-    """
-
-    def test_a_peer_claim_alone_does_not_satisfy_the_gate(self):
-        # The exploit, verbatim: author's own review + a peer's bare claim.
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewer:agent-2"), 0)
-        self.assertFalse(ok)
-        self.assertIn("complete-review", msg)
-
-    def test_the_refusal_names_the_claimant_and_the_command(self):
-        _, msg = _gate(
-            labelled("author:agent-1", "reviewer:agent-2"), 0)
-        self.assertIn("agent-2", msg)
-        self.assertIn("--complete-review", msg)
-
-    def test_completed_attribution_satisfies_the_gate(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewed-by:agent-2"), 0)
-        self.assertTrue(ok)
-        self.assertIn("agent-2", msg)
-
-    def test_a_claim_alongside_completed_attribution_still_blocks(self):
-        # A held claim is live queue ownership and must be released even if an
-        # earlier reviewer already completed a separate review.
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewer:agent-2", "reviewed-by:agent-2"), 0)
-        self.assertFalse(ok)
-        self.assertIn("still in progress", msg)
-
-    def test_bot_comment_plus_peer_claim_blocks(self):
-        reviews = [{"state": "COMMENTED", "author": {
-            "login": "chatgpt-codex-connector"}}]
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewer:agent-2", reviews=reviews), 0)
-        self.assertFalse(ok)
-        self.assertIn("agent-2", msg)
-        self.assertIn("still in progress", msg)
-
-    def test_external_approval_plus_peer_claim_blocks(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewer:agent-2",
-                     review_login="some-colleague"), 0)
-        self.assertFalse(ok)
-        self.assertIn("agent-2", msg)
-
-    def test_self_attribution_is_still_a_self_review(self):
-        ok, msg = _gate(
-            labelled("author:agent-1", "reviewed-by:agent-1"), 0)
-        self.assertFalse(ok)
-        self.assertIn("self-review", msg.lower())
+def coderabbit_pr(*labels):
+    pr = labelled(*labels)
+    pr["statusCheckRollup"] = [{
+        "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
+    }]
+    return pr
 
 
 def _pr(
@@ -1416,8 +1441,7 @@ def _paths(ours, theirs, base="main", head="deadbeef"):
     return resolve
 
 
-# The moment the base advance landed, for the freshness gate. Every check below
-# is placed either side of it, so "stale" and "fresh" are never ambiguous.
+# Freshness gate anchor; every check below sits on one side or the other.
 _ADVANCE_AT = datetime(2026, 8, 22, 12, 0, 0, tzinfo=timezone.utc)
 _BEFORE_ADVANCE = "2026-08-22T11:59:59Z"
 _AFTER_ADVANCE = "2026-08-22T12:00:01Z"
@@ -2610,10 +2634,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(
         merge_pr,
         "review_evidence",
-        return_value={
-            "head_oid": "gated-sha", "unresolved": 0, "unfixed": 0,
-            "withdrawn": 0, "reviewed_head": True,
-        },
+        return_value=coderabbit_evidence(),
     )
     @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
@@ -2634,7 +2655,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "headRefOid": "gated-sha",
             "baseRefOid": "base-sha",
             "statusCheckRollup": [
-                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS"},
             ],
             "reviews": [{
                 "id": "peer-approval", "state": "APPROVED",
@@ -2673,10 +2695,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(
         merge_pr,
         "review_evidence",
-        return_value={
-            "head_oid": "gated-sha", "unresolved": 0, "unfixed": 0,
-            "withdrawn": 0, "reviewed_head": True,
-        },
+        return_value=coderabbit_evidence(),
     )
     @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
@@ -2695,7 +2714,8 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
             "headRefOid": "gated-sha",
             "baseRefOid": "base-sha",
             "statusCheckRollup": [
-                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS"},
             ],
             "reviews": [{
                 "id": "peer-approval", "state": "APPROVED",
@@ -4018,6 +4038,31 @@ class ExpectedHeadGateTests(unittest.TestCase):
         self.assertEqual(rc, merge_pr.EXIT_BLOCKED)
         execute.assert_not_called()
 
+    @patch.object(merge_pr, "execute_merge")
+    @patch.object(merge_pr, "evaluate_dod", side_effect=[(True, []), (False, [
+        ("review", False, "CodeRabbit evidence changed"),
+    ])])
+    @patch.object(merge_pr, "review_evidence", return_value={"head_oid": "H1"})
+    @patch.object(merge_pr, "_gh_json", return_value={"body": ""})
+    @patch.object(merge_pr, "fetch_pr")
+    def test_mutable_review_evidence_is_revalidated_immediately_before_merge(
+        self, fetch_pr, _issue, evidence, evaluate, execute
+    ):
+        first = self.open_pr("H1")
+        first["baseRefOid"] = "B1"
+        fresh = dict(first)
+        fetch_pr.side_effect = [first, fresh]
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
+             patch.object(merge_pr, "check_rebased", return_value=(True, "current")):
+            rc = merge_pr.main()
+
+        self.assertEqual(rc, merge_pr.EXIT_BLOCKED)
+        self.assertEqual(evidence.call_count, 2)
+        self.assertEqual(evaluate.call_count, 2)
+        execute.assert_not_called()
+
 
 class DodStatusHeadBindingTests(unittest.TestCase):
     @patch.object(merge_pr, "evaluate_dod")
@@ -4225,7 +4270,7 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
         "state": "COMMENTED",
         "submittedAt": "2026-08-17T00:20:00Z",
         "body": "Verdict: approved after fixes.",
-        "author": {"login": "gillella", "__typename": "User"},
+        "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
         "commit": {"oid": HEAD},
     }
 
@@ -4282,11 +4327,18 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
             "P1 — size waiver or split required. Add `size-waiver:` to the body.",
             "P1 — verification evidence is stale. Run `--refresh-pr`.",
         ], {"size-waiver": True, "verification": True})
+        evidence["coderabbit_status"] = [{
+            "__typename": "CheckRun",
+            "name": "CodeRabbit",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "coderabbitai"}},
+        }]
 
         self.assertEqual(evidence["unfixed"], 0)
         self.assertEqual(evidence["body_addressed"], 2)
         ok, message = merge_pr.check_reviews(
-            labelled("author:agent-1", "reviewed-by:agent-2"), evidence,
+            coderabbit_pr("author:agent-1"), evidence,
         )
         self.assertTrue(ok)
         self.assertIn("2 finding(s) addressed by relevant PR body edit", message)
@@ -4309,15 +4361,7 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
 
 
 class ResolutionIsNotProofTests(unittest.TestCase):
-    """Resolving a thread must not, by itself, certify that a finding was fixed.
-
-    PR #62 merged with five blocking findings intact. Nothing was bypassed:
-    the reviews were substantive, no latest verdict was CHANGES_REQUESTED
-    (the same-account path posts findings as COMMENTED with unresolved
-    threads), the threads were resolved, attribution was present, CI was
-    green. Zero-unresolved was doing work it cannot do - resolution is a UI
-    toggle with no relationship to the diff.
-    """
+    """Resolving a thread is not proof that the underlying finding was fixed."""
 
     PASSING = ("author:agent-1", "reviewed-by:agent-2")
 
@@ -4342,8 +4386,7 @@ class ResolutionIsNotProofTests(unittest.TestCase):
 
     def test_a_resolved_finding_followed_by_a_commit_passes(self):
         ok, _ = merge_pr.check_reviews(
-            labelled(*self.PASSING),
-            {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+            coderabbit_pr(*self.PASSING), coderabbit_evidence(),
         )
         self.assertTrue(ok)
 
@@ -4354,22 +4397,21 @@ class ResolutionIsNotProofTests(unittest.TestCase):
         and the rational response is to manufacture an empty commit - an audit
         trail that lies, which is worse than the gap being closed.
         """
-        ok, msg = merge_pr.check_reviews(
-            labelled(*self.PASSING),
-            {"unresolved": 0, "unfixed": 0, "withdrawn": 1, "reviewed_head": True},
-        )
+        evidence = coderabbit_evidence()
+        evidence["withdrawn"] = 1
+        ok, msg = merge_pr.check_reviews(coderabbit_pr(*self.PASSING), evidence)
         self.assertTrue(ok)
         self.assertIn("withdrawn, not fixed", msg)
 
     def test_the_audit_line_distinguishes_fixed_from_withdrawn(self):
         """A later reader must be able to tell why the merge was allowed."""
         _, fixed = merge_pr.check_reviews(
-            labelled(*self.PASSING),
-            {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+            coderabbit_pr(*self.PASSING), coderabbit_evidence(),
         )
+        withdrawn_evidence = coderabbit_evidence()
+        withdrawn_evidence["withdrawn"] = 2
         _, withdrawn = merge_pr.check_reviews(
-            labelled(*self.PASSING),
-            {"unresolved": 0, "unfixed": 0, "withdrawn": 2, "reviewed_head": True},
+            coderabbit_pr(*self.PASSING), withdrawn_evidence,
         )
         self.assertNotIn("withdrawn", fixed)
         self.assertIn("2 finding(s) withdrawn", withdrawn)
@@ -4384,11 +4426,7 @@ class ResolutionIsNotProofTests(unittest.TestCase):
 
 
 class ReviewMustCoverHeadTests(unittest.TestCase):
-    """A review attests to the commit it was submitted against.
-
-    Once head moves, the attestation covers code that is no longer proposed,
-    so a reviewed PR could be force-pushed and merged on the stale verdict.
-    """
+    """A review attests only to the commit it was submitted against."""
 
     PASSING = ("author:agent-1", "reviewed-by:agent-2")
 
@@ -4398,15 +4436,14 @@ class ReviewMustCoverHeadTests(unittest.TestCase):
             {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": False},
         )
         self.assertFalse(ok)
-        self.assertIn("predates the current head", msg)
+        self.assertIn("CodeRabbit", msg)
 
     def test_a_review_at_head_passes(self):
         ok, msg = merge_pr.check_reviews(
-            labelled(*self.PASSING),
-            {"unresolved": 0, "unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+            coderabbit_pr(*self.PASSING), coderabbit_evidence(),
         )
         self.assertTrue(ok)
-        self.assertIn("reviewed at head", msg)
+        self.assertIn("CodeRabbit", msg)
 
 
 class WithdrawnMarkerTests(unittest.TestCase):
@@ -4461,8 +4498,7 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
 
     def test_outdated_unresolved_thread_with_commit_after_finding_passes(self):
         ok, _ = merge_pr.check_reviews(
-            labelled(*self.PASSING),
-            {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0, "withdrawn": 0, "reviewed_head": True},
+            coderabbit_pr(*self.PASSING), coderabbit_evidence(),
         )
         self.assertTrue(ok)
 

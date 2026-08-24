@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1674
+# line-ceiling: 1760
 """
 fleet_status.py - Authoritative state calculation for Aru_Agentic_SDLC factory.
 
@@ -447,6 +447,114 @@ def _has_reviewed_by(pr: Dict[str, Any]) -> bool:
     )
 
 
+def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # noqa: C901
+    if "_review_evidence" in pr:
+        return pr["_review_evidence"]
+    # Review evidence is the expensive path: several GraphQL pages per PR.
+    # Cheap snapshot fields can already prove these PRs are not review-ready.
+    if pr.get("isDraft"):
+        pr["_review_evidence"] = None
+        return None
+    cached_feedback = pr.get("_active_review_feedback")
+    if cached_feedback is not None and len(cached_feedback) > 0:
+        pr["_review_evidence"] = None
+        return None
+    unresolved = pr.get("unresolvedReviewThreadsCount")
+    if unresolved is not None:
+        try:
+            if int(unresolved) > 0:
+                pr["_review_evidence"] = None
+                return None
+        except (TypeError, ValueError):
+            pass
+    threads = pr.get("reviewThreads")
+    if isinstance(threads, dict) and isinstance(threads.get("nodes"), list):
+        if any(not node.get("isResolved") for node in threads["nodes"] if isinstance(node, dict)):
+            pr["_review_evidence"] = None
+            return None
+    elif isinstance(threads, list):
+        if any(not node.get("isResolved") for node in threads if isinstance(node, dict)):
+            pr["_review_evidence"] = None
+            return None
+    rollup = pr.get("statusCheckRollup") or []
+    if not any(
+        isinstance(item, dict)
+        and isinstance(item.get("name") or item.get("context"), str)
+        and (item.get("name") or item.get("context")).strip().lower() == "coderabbit"
+        for item in rollup
+    ):
+        pr["_review_evidence"] = None
+        return None
+    try:
+        import merge_pr as mp
+
+        evidence = mp.review_evidence(pr["number"])
+        evidence = mp._with_coderabbit_status(pr["number"], evidence)
+    except Exception as exc:
+        print(f"[WARN] Could not load review evidence for PR #{pr['number']}: {exc}", file=sys.stderr)
+        evidence = None
+    pr["_review_evidence"] = evidence
+    return evidence
+
+
+def _has_active_review_feedback(pr: Dict[str, Any]) -> bool:
+    if "_active_review_feedback" in pr:
+        feedback = pr["_active_review_feedback"]
+        return feedback is None or len(feedback) > 0
+    if "unresolvedReviewThreadsCount" in pr:
+        unresolved = pr.get("unresolvedReviewThreadsCount")
+        return unresolved is not None and unresolved > 0
+    if "reviewThreads" in pr:
+        threads = pr.get("reviewThreads") or {}
+        if isinstance(threads, dict) and "nodes" in threads:
+            return sum(1 for t in threads["nodes"] if not t.get("isResolved")) > 0
+        if isinstance(threads, list):
+            return sum(1 for t in threads if not t.get("isResolved")) > 0
+    try:
+        from fetch_pr_feedback import fetch_active_review_feedback
+
+        feedback = fetch_active_review_feedback(pr["number"])
+        if feedback is None:
+            pr["_active_review_feedback"] = None
+            return True
+        pr["_active_review_feedback"] = feedback
+        return len(feedback) > 0
+    except Exception as exc:
+        print(f"[WARN] Could not load active review feedback for PR #{pr['number']}: {exc}", file=sys.stderr)
+        pr["_active_review_feedback"] = None
+        return True
+
+
+def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
+    evidence = _review_evidence(pr)
+    if not evidence:
+        return None
+    try:
+        import merge_pr as mp
+    except ImportError:
+        return None
+    if not mp.has_authoritative_coderabbit_review(pr, evidence):
+        return None
+    if (
+        int(evidence.get("unresolved") or 0) > 0
+        or int(evidence.get("unfixed") or 0) > 0
+        or int(evidence.get("outdated_unfixed") or 0) > 0
+    ):
+        return "feedback"
+    return "reviewed"
+
+
+def _review_state(pr: Dict[str, Any]) -> str:
+    if pr.get("isDraft"):
+        return "none"
+    if _has_active_review_feedback(pr):
+        return "feedback"
+    coderabbit_state = _coderabbit_review_state(pr)
+    if coderabbit_state:
+        return coderabbit_state
+    return "pending"
+
+
 def resolve_ready_target(
     fleet_size: Optional[int] = None, configured: Optional[int] = None
 ) -> Optional[int]:
@@ -586,41 +694,7 @@ def _holders_question(issues: List[Dict[str, Any]], prs: List[Dict[str, Any]], n
 
 
 def _pending_review(pr: Dict[str, Any]) -> bool:  # noqa: C901, PLR0912
-    if pr.get("isDraft"):
-        return False
-    if _has_reviewed_by(pr):
-        return False
-    decision = (pr.get("reviewDecision") or "").upper()
-    if decision == "APPROVED":
-        return False
-    if "_active_review_feedback" in pr:
-        feedback = pr["_active_review_feedback"]
-        if feedback is not None and len(feedback) > 0:
-            return False
-    elif "unresolvedReviewThreadsCount" in pr:
-        unresolved = pr.get("unresolvedReviewThreadsCount")
-        if unresolved is not None and unresolved > 0:
-            return False
-    elif "reviewThreads" in pr:
-        threads = pr.get("reviewThreads") or {}
-        if isinstance(threads, dict) and "nodes" in threads:
-            unresolved_nodes = sum(1 for t in threads["nodes"] if not t.get("isResolved"))
-            if unresolved_nodes > 0:
-                return False
-        elif isinstance(threads, list):
-            unresolved_list = sum(1 for t in threads if not t.get("isResolved"))
-            if unresolved_list > 0:
-                return False
-    else:
-        try:
-            from fetch_pr_feedback import fetch_active_review_feedback
-            feedback = fetch_active_review_feedback(pr["number"])
-            pr["_active_review_feedback"] = feedback
-            if feedback is not None and len(feedback) > 0:
-                return False
-        except (ImportError, Exception):
-            pass
-    return True
+    return _review_state(pr) == "pending"
 
 
 def _review_age_question(prs: List[Dict[str, Any]], now: datetime) -> Dict[str, Any]:
@@ -1119,6 +1193,8 @@ def evaluate_queue_row(
             }
 
     evidence = review_evidence_fn(number)
+    if evidence is not None:
+        evidence = mp._with_coderabbit_status(number, evidence)
     # None means the GraphQL/auth query failed — fail closed for this row.
     # Do not coerce to {} or check_reviews will KeyError on missing keys.
     if evidence is None or evidence.get("error"):
@@ -1127,9 +1203,8 @@ def evaluate_queue_row(
         ok = False
         # Keep review as the sole blocking gate so first_blocking stays
         # review-evidence failure; CI still surfaces via queue_ci_label(full).
-        gates: List[Any] = [
-            ("review", False, "Could not determine review-thread state; refusing rather than guessing."),
-        ]
+        reason = evidence.get("error") if isinstance(evidence, dict) else "no evidence returned"
+        gates: List[Any] = [("review", False, f"review evidence unavailable: {reason}")]
     else:
         unresolved = int(evidence.get("unresolved") or 0)
         threads_known = True
@@ -1402,7 +1477,6 @@ def _evaluate_current_repo(  # noqa: C901, PLR0912, PLR0915
     for pr in prs:
         num = pr["number"]
         labels = set(label_names(pr))
-        decision = (pr.get("reviewDecision") or "").upper()
         merge_state = (pr.get("mergeStateStatus") or "").upper()
 
         reviewer_label = next(
@@ -1417,10 +1491,11 @@ def _evaluate_current_repo(  # noqa: C901, PLR0912, PLR0915
                 f"PR #{num} has an escalated severe merge conflict that agents could not resolve."
             )
 
-        if decision == "CHANGES_REQUESTED":
-            waiting_reasons.append(f"PR #{num} has requested changes.")
-        elif decision == "APPROVED":
-            waiting_reasons.append(f"PR #{num} is approved and waiting for merge.")
+        review_state = _review_state(pr)
+        if review_state == "feedback":
+            waiting_reasons.append(f"PR #{num} has active review feedback.")
+        elif review_state == "reviewed":
+            waiting_reasons.append(f"PR #{num} is reviewed and waiting for merge.")
         else:
             waiting_reasons.append(f"PR #{num} is open and pending review.")
 

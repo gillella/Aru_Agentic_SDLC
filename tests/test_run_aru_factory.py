@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "run-aru-factory" / "SKILL.md"
 ROUTER = ROOT / "skills" / "aru-agentic-sdlc" / "SKILL.md"
 FLEET_PROMPT = ROOT / "prompts" / "fleet-worker.md"
+BOARD_WORKFLOW = ROOT / "docs" / "project_board_workflow.md"
+IMPLEMENT_SKILL = ROOT / "skills" / "implement-next-issue" / "SKILL.md"
 DESKTOP_ADAPTERS = (
     ROOT / "templates" / "integrations" / "codex" / "instructions.md",
     ROOT / "templates" / "integrations" / "claude" / "CLAUDE.md",
@@ -23,6 +25,8 @@ DESKTOP_ADAPTERS = (
     ROOT / "templates" / "cursor" / "commands" / "run-aru-factory.md",
     ROOT / "templates" / "cursor" / "commands" / "continue.md",
 )
+CURSOR_CODE_REVIEW = ROOT / "templates" / "cursor" / "commands" / "code-review.md"
+CURSOR_USER_RULES = ROOT / "templates" / "cursor" / "user-rules-aru-agentic-sdlc.md"
 
 MODES = ("adopt", "status", "next", "loop", "doctor")
 
@@ -140,15 +144,31 @@ class ContinuityContractTests(unittest.TestCase):
 
 
 class IdentityTests(unittest.TestCase):
-    def test_agent_id_and_family_are_required(self):
-        text = skill_text()
+    def test_identity_examples_match_helper_contracts(self):
+        text = flat(skill_text())
+        self.assertIn("picker derives a stable id", text)
+        self.assertIn("model family is optional", text)
+        self.assertIn("`create_pr.py` requires", text)
         self.assertIn("--agent", text)
-        self.assertIn("--family", text)
+        self.assertNotIn("every claim and pr needs", text)
+
+    def test_fleet_prompt_names_top_level_agent_handoff(self):
+        text = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
+        self.assertIn("picker json top-level `agent` field is the resolved identity", text)
+        self.assertIn("use that exact value as `<agent_id>`", text)
+        self.assertIn("claim_issue.py", text)
+        self.assertIn("create_pr.py", text)
 
     def test_the_reason_identity_matters_is_stated(self):
         """Without the why, the flags read as ceremony and get dropped."""
         text = flat(skill_text())
         self.assertIn("same github user", text)
+
+    def test_fleet_prompt_reuses_the_picker_resolved_identity(self):
+        text = FLEET_PROMPT.read_text(encoding="utf-8")
+        self.assertIn("top-level `agent` field", text)
+        self.assertIn("resolved identity for this session", text)
+        self.assertIn("later `claim_issue.py` and `create_pr.py` calls", text)
 
 
 class GovernanceTests(unittest.TestCase):
@@ -157,18 +177,17 @@ class GovernanceTests(unittest.TestCase):
         for rule in ("issue-first", "worktree", "touches:", "closes #"):
             self.assertIn(rule, text, f"guarantee missing: {rule}")
 
-    def test_self_review_is_refused(self):
-        text = flat(skill_text())
-        self.assertIn("never review your own pr", text)
+    def test_coding_agent_review_is_refused(self):
+        for text in (
+            flat(skill_text()),
+            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
+        ):
+            self.assertIn("coding agents never review", text)
 
-    def test_the_same_account_review_path_is_the_documented_one(self):
-        """`--approve` is rejected by GitHub for the fleet's shared account.
-
-        Regression guard: the skill must not drift back to advising it.
-        """
+    def test_coderabbit_is_the_only_review_path(self):
         text = skill_text()
-        self.assertIn("--comment", text)
-        self.assertIn("reviewed-by", text)
+        self.assertIn("CodeRabbit", text)
+        self.assertIn("rejects coding-agent", text)
         self.assertNotIn("gh pr review --approve", text)
 
     def test_merging_goes_through_the_gate_only(self):
@@ -176,6 +195,90 @@ class GovernanceTests(unittest.TestCase):
         self.assertIn("merge_pr.py", text)
         self.assertIn("gh pr merge", text)  # named as forbidden
         self.assertNotIn("gh pr merge --", text)
+        self.assertIn("including the implementation author", text)
+        self.assertNotIn("never a PR you authored", text)
+
+    def test_retired_review_skill_is_self_contained(self):
+        review = (ROOT / "skills" / "code-review" / "SKILL.md").read_text()
+        self.assertNotIn("SKILL.md", review)
+        self.assertNotIn("skills/address-pr-feedback", review)
+
+    def test_cursor_code_review_command_is_a_refusal_router(self):
+        text = CURSOR_CODE_REVIEW.read_text(encoding="utf-8")
+        self.assertEqual(
+            text.strip(),
+            "\n".join([
+                "Refuse coding-agent pull-request review under Aru_Agentic_SDLC.",
+                "",
+                "CodeRabbit alone reviews pull requests in this repository; coding agents never review.",
+                "Route review findings back to the factory picker to remediate them instead.",
+                "Do not inspect the PR, run `gh pr review`, open a review workspace, or submit review comments.",
+            ]),
+        )
+        lowered = text.lower()
+        self.assertNotIn("approve", lowered)
+        self.assertNotIn("request changes", lowered)
+        self.assertNotIn("inspect the pr and", lowered)
+        self.assertNotIn("review worktree", lowered)
+
+    def test_cursor_user_rules_route_review_to_remediation(self):
+        text = CURSOR_USER_RULES.read_text(encoding="utf-8").lower()
+        self.assertIn("agents remediate findings", text)
+        self.assertNotIn("auto-assign a free identity", text)
+        self.assertIn("helper-specific contracts", text)
+
+    def test_legacy_review_state_releases_claim_before_looping(self):
+        for text in (
+            flat(skill_text()),
+            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
+        ):
+            self.assertIn("work.type=review", text)
+            self.assertIn("claim_issue.py", text)
+            self.assertIn("--release", text)
+            self.assertIn("return to the picker", text)
+
+    def test_error_work_state_reports_reason_and_retries(self):
+        text = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
+        self.assertIn("work.type", text)
+        self.assertIn("`error`", text)
+        self.assertIn("report `work.reason`", text)
+        self.assertIn("start no work", text)
+        self.assertIn("wait/retry path", text)
+
+    def test_picker_claim_semantics_are_work_type_specific(self):
+        for text in (
+            flat(skill_text()),
+            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
+        ):
+            self.assertIn("feedback", text)
+            self.assertIn("error", text)
+            self.assertIn("idle", text)
+            self.assertIn("returned without claims", text)
+            self.assertIn("merge", text)
+            self.assertIn("non-resume issue", text)
+            self.assertIn("claim mutations", text)
+
+    def test_merge_commands_preserve_picker_expected_head(self):
+        for text in (
+            flat(skill_text()),
+            flat(BOARD_WORKFLOW.read_text(encoding="utf-8")),
+            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
+        ):
+            self.assertIn("--expected-head <head_sha>", text)
+            self.assertIn("head_sha", text)
+
+    def test_worktree_cleanup_uses_governed_helpers(self):
+        board = flat(BOARD_WORKFLOW.read_text(encoding="utf-8"))
+        implement = flat(IMPLEMENT_SKILL.read_text(encoding="utf-8"))
+        self.assertIn("cleanup_worktrees.py", board)
+        self.assertIn("--repo <repo_root>", board)
+        self.assertIn("merge_pr.py", board)
+        self.assertNotIn("remove temporary worktree directories with `git worktree remove .worktrees/<dir>`", board)
+        self.assertIn("keep the active pr worktree", implement)
+        self.assertIn("merge or remediation completion", implement)
+        self.assertNotIn("clean up worktree directory if needed", implement)
+        self.assertIn("later commit on the pr branch or by a reply that begins `withdrawn:`", implement)
+        self.assertIn("thread resolution alone is never sufficient", implement)
 
 
 class DelegationTests(unittest.TestCase):
@@ -191,7 +294,6 @@ class DelegationTests(unittest.TestCase):
         for skill in (
             "init-agent-project",
             "implement-next-issue",
-            "code-review",
             "address-pr-feedback",
         ):
             self.assertIn(skill, text, f"unreferenced route: {skill}")
@@ -248,15 +350,14 @@ class WiringTests(unittest.TestCase):
         skill = flat(skill_text())
         self.assertIn("please continue", frontmatter(skill_text()).lower())
         self.assertIn("loop", skill)
-        # The continue row must name run-aru-factory, not implement-next-issue.
-        continue_lines = [
-            line for line in router.splitlines()
-            if "continue" in line.lower() and "|" in line
-        ]
+        continue_lines = [line for line in router.splitlines() if "continue" in line.lower() and "|" in line]
         self.assertTrue(continue_lines, "router has no continue row")
         joined = " ".join(continue_lines).lower()
         self.assertIn("run-aru-factory", joined)
         self.assertNotIn("implement-next-issue", joined)
+        cursor = (ROOT / "docs" / "cursor-integration.md").read_text(encoding="utf-8")
+        self.assertIn("pick feedback → merge → issue", cursor)
+        self.assertNotIn("pick feedback → merge → review → issue", cursor)
 
     def test_loop_pacing_is_dynamic(self):
         text = flat(skill_text())
@@ -281,6 +382,15 @@ class WiringTests(unittest.TestCase):
             text = flat(adapter.read_text(encoding="utf-8"))
             self.assertIn("desktop app", text, str(adapter))
             self.assertIn("do not replace", text, str(adapter))
+
+
+class CursorRuleTests(unittest.TestCase):
+    def test_cursor_rule_uses_remediation_wording(self):
+        rule = (
+            ROOT / "templates" / "cursor" / "rules" / "aru-agentic-sdlc.mdc"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Feature and remediation work", rule)
+        self.assertNotIn("Feature and review work", rule)
 
 
 if __name__ == "__main__":

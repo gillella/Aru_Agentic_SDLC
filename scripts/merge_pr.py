@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4050
+# line-ceiling: 4350
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -85,6 +85,11 @@ ADVISORY_REVIEW_ACCOUNTS = {"chatgpt-codex-connector"}
 # review (e.g. CodeRabbit) posts a StatusContext that stays PENDING while it
 # re-reads the diff; it is not a build check and cannot certify the head.
 ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
+CODERABBIT_LOGINS = {"coderabbitai", "coderabbitai[bot]"}
+CODERABBIT_APP_SLUGS = {"coderabbitai"}
+CODERABBIT_ACTOR_TYPES = {"Bot"}
+CODERABBIT_FULL_REVIEW_REQUEST = "@coderabbitai full review"
+CODERABBIT_FULL_REVIEW_FINISHED = "Full review finished."
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
 # review evidence; all other known actor kinds are automation or identities
@@ -214,6 +219,21 @@ def _parse_review_ts(value):
     if parsed is None or parsed.tzinfo is None:
         return None
     return parsed
+
+
+def _normalize_comment_body(body):
+    """Collapse whitespace so command comments compare deterministically."""
+    return re.sub(r"\s+", " ", (body or "").strip())
+
+
+def _coderabbit_full_review_comment_kind(body):
+    """Identify exact full-review request/completion comments, if any."""
+    normalized = _normalize_comment_body(body).casefold()
+    if normalized == CODERABBIT_FULL_REVIEW_REQUEST:
+        return "request"
+    if normalized == CODERABBIT_FULL_REVIEW_FINISHED.casefold():
+        return "completion"
+    return None
 
 
 def _size_waiver_region(body):
@@ -547,7 +567,7 @@ def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
 
 
 def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
-    """Head-bound agent attestations written by complete_review().
+    """Head-bound agent attestations plus exact-match CodeRabbit comments.
 
     Pull-request comments are paginated independently from reviews and review
     threads. Malformed markers are ignored and therefore cannot create review
@@ -561,7 +581,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
         pullRequest(number:$pr) {
           headRefOid
           comments(first:100, after:$cursor) {
-            nodes { body author { login __typename } }
+            nodes { body createdAt author { login __typename } }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -571,6 +591,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
     cursor = None
     seen_cursors = set()
     attestations = []
+    coderabbit_full_review_comments = []
     while True:
         args = [
             "gh", "api", "graphql", "-f", f"query={query}",
@@ -599,6 +620,27 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
             if not isinstance(node, dict) or not isinstance(node.get("body"), str):
                 return None
             body = node["body"]
+            comment_kind = _coderabbit_full_review_comment_kind(body)
+            if comment_kind is not None:
+                created_at = _parse_ts(node.get("createdAt"))
+                author = node.get("author")
+                if (
+                    created_at is None
+                    or not isinstance(author, dict)
+                    or not isinstance(author.get("login"), str)
+                    or not author["login"]
+                    or author.get("__typename") not in KNOWN_REVIEW_ACTOR_TYPES
+                ):
+                    return None
+                coderabbit_full_review_comments.append({
+                    "kind": comment_kind,
+                    "body": body,
+                    "createdAt": node["createdAt"],
+                    "author": {
+                        "login": author["login"],
+                        "__typename": author["__typename"],
+                    },
+                })
             if not body.startswith(prefix):
                 continue
             marker, separator, _rest = body.partition(" -->")
@@ -629,7 +671,10 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
                 "github_login": author["login"],
             })
         if not has_next:
-            return attestations
+            return {
+                "attestations": attestations,
+                "coderabbit_full_review_comments": coderabbit_full_review_comments,
+            }
         next_cursor = page_info.get("endCursor")
         if (
             not isinstance(next_cursor, str) or not next_cursor
@@ -672,11 +717,19 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     if review_result is None:
         return None
     expected_head, reviewed_head, reviews = review_result
-    review_attestations = _review_head_attestations(
+    comment_evidence = _review_head_attestations(
         owner, name, pr_id, expected_head
     )
-    if review_attestations is None:
+    if comment_evidence is None:
         return None
+    if isinstance(comment_evidence, list):
+        review_attestations = comment_evidence
+        coderabbit_full_review_comments = []
+    else:
+        review_attestations = comment_evidence["attestations"]
+        coderabbit_full_review_comments = comment_evidence[
+            "coderabbit_full_review_comments"
+        ]
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
@@ -797,8 +850,15 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
         if not has_next:
             return {
                 "head_oid": expected_head,
+                "head_commit_committed_at": (
+                    commit_times[-1].isoformat() if commit_times else None
+                ),
+                "github_review_evidence": True,
                 "reviews": reviews,
                 "review_attestations": review_attestations,
+                "coderabbit_full_review_comments": (
+                    coderabbit_full_review_comments
+                ),
                 "unresolved": unresolved,
                 "unfixed": unfixed,
                 "outdated_unfixed": outdated_unfixed,
@@ -1334,6 +1394,289 @@ def _evidence_note(evidence):
     return ", ".join(parts) + "."
 
 
+def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
+    """Read status producer identity from GitHub's typed commit rollup."""
+    query = """
+    query($owner:String!, $name:String!, $pr:Int!) {
+      repository(owner:$owner, name:$name) {
+        pullRequest(number:$pr) {
+          headRefOid
+          commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
+            totalCount
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              __typename
+              ... on CheckRun { name status conclusion checkSuite { app { slug } } }
+              ... on StatusContext { context state creator { login __typename } }
+            }
+          } } } } }
+        }
+      }
+    }"""
+    data = _gh_json([
+        "gh", "api", "graphql", "-f", f"query={query}",
+        "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
+    ])
+    if not data or (isinstance(data, dict) and data.get("errors")):
+        return None
+    try:
+        pull = data["data"]["repository"]["pullRequest"]
+        nodes = pull["commits"]["nodes"]
+        connection = nodes[0]["commit"]["statusCheckRollup"]["contexts"]
+        contexts = connection["nodes"]
+        total_count = connection["totalCount"]
+        page_info = connection["pageInfo"]
+        has_next = page_info["hasNextPage"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if pull.get("headRefOid") != expected_head or not isinstance(contexts, list):
+        return None
+    if (
+        not isinstance(total_count, int)
+        or not isinstance(has_next, bool)
+        or has_next
+        or total_count != len(contexts)
+    ):
+        return None
+    return contexts
+
+
+def _with_coderabbit_status(pr_id, evidence):
+    """Bind review evidence to an authoritative, producer-identified status."""
+    if not isinstance(evidence, dict):
+        return None
+    # Pure unit callers use compact handcrafted evidence; live evidence always
+    # carries this marker from review_evidence().
+    if not evidence.get("github_review_evidence"):
+        return evidence
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    owner, name = slug.split("/", 1)
+    statuses = _coderabbit_status_evidence(owner, name, pr_id, evidence.get("head_oid"))
+    if statuses is None:
+        return None
+    combined = dict(evidence)
+    combined["coderabbit_status"] = statuses
+    return combined
+
+
+def _coderabbit_check(pr, evidence, recognized_review=None):  # noqa: C901, PLR0912
+    """Return the exact current-head CodeRabbit status verdict, or ``None``.
+
+    The review object carries findings and verdict history; the GitHub-hosted
+    CodeRabbit status is the per-head attestation. Duplicate current records,
+    unknown shapes, unauthenticated producers, pending/rate-limited/failing
+    conclusions, and a missing check all fail closed.
+    """
+    matches = []
+    if (
+        isinstance(evidence, dict)
+        and evidence.get("github_review_evidence")
+        and "coderabbit_status" not in evidence
+    ):
+        return None
+    authoritative = evidence.get("coderabbit_status") if isinstance(evidence, dict) else None
+    rollup = authoritative if authoritative is not None else pr.get("statusCheckRollup") or []
+    for item in rollup:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name") or item.get("context")
+        if isinstance(name, str) and name.strip().lower() == "coderabbit":
+            matches.append(item)
+    if len(matches) != 1:
+        return None
+    check = matches[0]
+    if authoritative is not None:
+        kind = check.get("__typename") or check.get("type")
+        if kind == "CheckRun":
+            suite = check.get("checkSuite") or {}
+            slug = str((suite.get("app") or {}).get("slug") or "").lower()
+            if slug not in CODERABBIT_APP_SLUGS:
+                return None
+        elif kind == "StatusContext":
+            creator = check.get("creator")
+            if creator is None:
+                if not isinstance(recognized_review, dict):
+                    return None
+            elif (
+                not isinstance(creator, dict)
+                or str(creator.get("login") or "").lower() not in CODERABBIT_LOGINS
+                or creator.get("__typename") not in CODERABBIT_ACTOR_TYPES
+            ):
+                return None
+        else:
+            return None
+    status = str(check.get("status") or "").upper()
+    conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
+    if status and status != "COMPLETED":
+        return False
+    return conclusion == "SUCCESS"
+
+
+def _parse_coderabbit_full_review_comment(comment):
+    """Parse one exact-match full-review request/completion comment."""
+    if not isinstance(comment, dict):
+        return False
+    kind = comment.get("kind") or _coderabbit_full_review_comment_kind(
+        comment.get("body")
+    )
+    if kind is None:
+        return None
+    created_at = _parse_ts(comment.get("createdAt"))
+    author = comment.get("author")
+    if (
+        created_at is None
+        or not isinstance(author, dict)
+        or not isinstance(author.get("login"), str)
+        or not author["login"]
+        or author.get("__typename") not in KNOWN_REVIEW_ACTOR_TYPES
+    ):
+        return False
+    login = author["login"].lower()
+    actor_type = author["__typename"]
+    if kind == "request":
+        if actor_type != "User" or login in CODERABBIT_LOGINS:
+            return False
+    elif kind == "completion":
+        if actor_type not in CODERABBIT_ACTOR_TYPES or login not in CODERABBIT_LOGINS:
+            return False
+    else:
+        return False
+    return kind, created_at
+
+
+def _coderabbit_full_review_comment_times(evidence):
+    """Return validated request/completion timestamps, or None on ambiguity."""
+    comments = evidence.get("coderabbit_full_review_comments")
+    if not isinstance(comments, list):
+        return None
+    requests = []
+    completions = []
+    for comment in comments:
+        parsed = _parse_coderabbit_full_review_comment(comment)
+        if parsed is False:
+            return None
+        if parsed is None:
+            continue
+        kind, created_at = parsed
+        if kind == "request":
+            requests.append(created_at)
+        else:
+            completions.append(created_at)
+    return requests, completions
+
+
+def _unique_selected_timestamp(timestamps, *, select):
+    """Return a uniquely newest/oldest timestamp, else None."""
+    if not timestamps:
+        return None
+    selected = select(timestamps)
+    if sum(ts == selected for ts in timestamps) != 1:
+        return None
+    return selected
+
+
+def _coderabbit_no_findings_full_review(review, evidence):
+    """Accept an empty COMMENTED review only with full-review completion evidence."""
+    if not isinstance(review, dict) or not isinstance(evidence, dict):
+        return False
+    if str(review.get("state") or "").upper() != "COMMENTED":
+        return False
+    body = review.get("body")
+    if not isinstance(body, str) or body.strip():
+        return False
+    review_time = _parse_review_ts(review.get("submittedAt"))
+    head_commit_time = _parse_ts(evidence.get("head_commit_committed_at"))
+    comments = evidence.get("coderabbit_full_review_comments")
+    if (
+        review_time is None
+        or head_commit_time is None
+        or comments is None
+    ):
+        return False
+    parsed = _coderabbit_full_review_comment_times(evidence)
+    if parsed is None:
+        return False
+    requests, completions = parsed
+
+    eligible_requests = [
+        created_at
+        for created_at in requests
+        if head_commit_time <= created_at < review_time
+    ]
+    if _unique_selected_timestamp(eligible_requests, select=max) is None:
+        return False
+    if any(created_at >= review_time for created_at in requests):
+        return False
+
+    eligible_completions = [
+        created_at for created_at in completions if review_time < created_at
+    ]
+    return _unique_selected_timestamp(eligible_completions, select=min) is not None
+
+
+def _coderabbit_latest_review(evidence):  # noqa: C901, PLR0912
+    """Select the unique newest completed substantive CodeRabbit review."""
+    if not isinstance(evidence, dict):
+        return None
+    candidates = []
+    for review in evidence.get("reviews") or []:
+        if not isinstance(review, dict):
+            return None
+        author = review.get("author") or {}
+        if not isinstance(author, dict):
+            return None
+        login = str(author.get("login") or "").lower()
+        if login not in CODERABBIT_LOGINS:
+            continue
+        if author.get("__typename") not in CODERABBIT_ACTOR_TYPES:
+            return None
+        state = str(review.get("state") or "").upper()
+        submitted = _parse_review_ts(review.get("submittedAt"))
+        body = review.get("body")
+        oid = (review.get("commit") or {}).get("oid")
+        if state == "PENDING":
+            return None
+        if not isinstance(oid, str) or not oid:
+            return None
+        if state == "DISMISSED":
+            continue
+        if (
+            state not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+            or submitted is None
+            or not isinstance(body, str)
+        ):
+            return None
+        review_id = review.get("id")
+        if not isinstance(review_id, str) or not review_id:
+            return None
+        if (
+            state == "COMMENTED"
+            and not body.strip()
+            and not _coderabbit_no_findings_full_review(review, evidence)
+        ):
+            continue
+        candidates.append((submitted, review_id, review))
+    newest = max((candidate[0] for candidate in candidates), default=None)
+    candidates = [candidate for candidate in candidates if candidate[0] == newest]
+    if len(candidates) != 1:
+        return None
+    return candidates[0][2]
+
+
+def has_authoritative_coderabbit_review(pr, evidence):
+    """True only when CodeRabbit reviewed this PR and attested the current head."""
+    if not isinstance(pr, dict) or not isinstance(evidence, dict):
+        return False
+    review = _coderabbit_latest_review(evidence)
+    if not isinstance(review, dict):
+        return False
+    if str(review.get("state") or "").upper() == "CHANGES_REQUESTED":
+        return False
+    return _coderabbit_check(pr, evidence, review) is True
+
+
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # Prefer the same explicitly paginated review history used for current-head
     # evidence. The PR snapshot remains a compatibility fallback for pure
@@ -1391,137 +1734,28 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
             "withdraw the finding with a reason."
         )
 
-    # A claim means an independent agent is still reviewing. It must block
-    # before any external-account or completed-attribution shortcut, otherwise
-    # a bot comment can make the PR mergeable while that reviewer is working.
-    claimants = label_values(pr, REVIEW_CLAIM_LABEL)
-    if claimants:
+    latest_coderabbit_review = _coderabbit_latest_review(evidence)
+    if latest_coderabbit_review is None:
         return False, (
-            f"Review is still in progress: {', '.join(claimants)} holds a "
-            f"{REVIEW_CLAIM_LABEL}<agent> claim. Complete the review with "
-            "`claim_issue.py --pr <n> --agent <id> --complete-review`, or "
-            "release the claim if no review was performed."
+            "CodeRabbit has not supplied one completed, substantive review in "
+            "this PR's review history plus a successful authoritative "
+            "current-head CodeRabbit status. Missing, malformed, pending, "
+            "ambiguous, or spoofed evidence blocks merge."
         )
-
-    # GitHub cannot tell a self-review from a peer review here: every agent
-    # authenticates as the same user, so every review looks like it came from
-    # the same person who opened the PR. The agent identity labels are the only
-    # thing that distinguishes them.
-    # A review from a different non-automation GitHub account is provably not a
-    # self-review, but only its latest APPROVED verdict counts. Unconfigured
-    # review apps stay advisory. An App login named in ARU_REVIEW_APP_LOGIN is
-    # the #123 reviewer identity and counts as that external account.
-    pr_login = ((pr.get("author") or {}).get("login") or "").lower()
-    other_accounts = sorted({
-        ((r.get("author") or {}).get("login") or "").lower()
-        for r in substantive if not is_advisory_review_actor(r)
-    } - {"", pr_login})
-
-    # Authorship is required before any approval path can pass. Without the
-    # governed author stamp, even a genuine external approval cannot prove the
-    # PR did not bypass create_pr.py or establish who must be excluded from
-    # same-account agent review.
-    authors = identity_values(pr, AUTHOR_LABEL)
-    if not authors:
+    if str(latest_coderabbit_review.get("state") or "").upper() == "CHANGES_REQUESTED":
+        return False, "CodeRabbit requested changes and has not re-approved."
+    if not has_authoritative_coderabbit_review(pr, evidence):
         return False, (
-            "PR has no author:<id> label, so the gate cannot prove that the "
-            "reviewer is independent. Create PRs with "
-            "`scripts/create_pr.py --issue <n> --agent <id>`; stamp the verified "
-            "author on a legacy PR before retrying."
+            "CodeRabbit has not supplied a successful authoritative "
+            "current-head CodeRabbit status tied to the latest substantive "
+            "review history for this PR. Missing, pending, failed, "
+            "rate-limited, stale, ambiguous, or spoofed evidence blocks "
+            "merge."
         )
-    if len(set(authors)) > 1:
-        # Resolving this by position would pick an author arbitrarily, and the
-        # whole peer comparison below rests on knowing who wrote the PR.
-        return False, (
-            f"PR carries {len(set(authors))} different {AUTHOR_LABEL} labels "
-            f"({', '.join(sorted(set(authors)))}), so who wrote it cannot be "
-            "established. Two agents likely adopted it concurrently; remove the "
-            "stale label before merging."
-        )
-    author = authors[0]
-
-    current_head_reviewers = set(_current_head_reviewers(evidence))
-    legacy_head_evidence = (
-        "review_attestations" not in evidence and evidence.get("reviewed_head")
+    return True, (
+        f"CodeRabbit status is complete on current head "
+        f"{evidence['head_oid'][:12]}; {_evidence_note(evidence)}"
     )
-    external_approvers = sorted(
-        who for who, state in verdicts.items()
-        if who.lower() in other_accounts
-        and (who in current_head_reviewers or legacy_head_evidence)
-        and state == "APPROVED"
-        and not is_advisory_review_account(who)
-    )
-    if external_approvers:
-        note = (
-            f"Approved by external reviewer(s) {', '.join(external_approvers)}, "
-            f"{_evidence_note(evidence)}"
-        )
-        if any((lab.get("name") or "") == "same-family-review"
-               for lab in (pr.get("labels") or [])):
-            note += " ⚠️  Same-family review: no cross-family agent was available."
-        return True, note
-
-    # Everything below is the same-account case: agents all authenticate as one
-    # GitHub user, so only the identity labels can tell them apart.
-    # Only completed attribution counts. Active reviewer claims were rejected
-    # above because they represent work still in progress, not attestation.
-    reviewers = identity_values(pr, REVIEWED_BY_LABEL)
-    peers, collisions, unresolved = classify_reviewers(pr, reviewers, author)
-    # A collision blocks even when a genuine peer also reviewed: the operator
-    # needs to know the id namespace broke. A merely unstamped family does not,
-    # or every PR predating family stamping would stop merging.
-    if collisions:
-        return False, id_collision_message(collisions)
-    if reviewers and not peers:
-        return False, self_review_message(author, unresolved)
-    if not reviewers:
-        advisory = sorted(a for a in advisory_accounts if a and a != pr_login)
-        if advisory:
-            return False, (
-                f"Automated review from {', '.join(advisory)} is advisory; no "
-                f"{REVIEWED_BY_LABEL}<agent> label attributes a completed independent "
-                "agent review."
-            )
-        return False, (f"A review exists but no {REVIEWED_BY_LABEL}<agent> label identifies "
-                       f"who left it, so it cannot be distinguished from a self-review by "
-                       f"'{author}'. The reviewing agent must finish with "
-                       f"`claim_issue.py --pr <n> --agent <id> --complete-review`.")
-
-    attested_peers = _attested_head_peers(evidence, peers)
-    if attested_peers is not None and not attested_peers:
-        head = evidence.get("head_oid")
-        head_text = (
-            f"current head {head[:12]}"
-            if isinstance(head, str) and head else "the current head"
-        )
-        return False, (
-            f"Completed peer attribution exists for {', '.join(peers)}, but "
-            f"none is bound to {head_text}. The attribution may be stale; "
-            "the peer must re-review and complete the current commit."
-        )
-    if attested_peers and not evidence.get("reviewed_head"):
-        return False, (
-            f"Peer attribution for {', '.join(attested_peers)} names the current "
-            "head, but no substantive review targets that commit. Re-review the "
-            "current commit."
-        )
-
-    # Compatibility for pure unit callers predating the attestation field.
-    # Live review_evidence always includes it, so the production merge path
-    # cannot fall back to an unbound reviewed-by label.
-    if attested_peers is None and not evidence["reviewed_head"]:
-        return False, (
-            "Every review predates the current head, so no reviewer has seen "
-            "what would merge. Re-review the current commit."
-        )
-
-    note = (
-        f"Peer attribution: {', '.join(attested_peers or peers)}; "
-        f"{_evidence_note(evidence)}"
-    )
-    if any((lab.get("name") or "") == "same-family-review" for lab in (pr.get("labels") or [])):
-        note += " ⚠️  Same-family review: no cross-family agent was available."
-    return True, note
 
 
 def _behind_by(base_ref, head_sha):
@@ -3296,7 +3530,7 @@ def dod_status(pr_id):
         if issue is None:
             return False, f"could not read issue #{num}"
         issue_bodies[num] = issue.get("body") or ""
-    evidence = review_evidence(pr_id)
+    evidence = _with_coderabbit_status(pr_id, review_evidence(pr_id))
     evidence_head = evidence.get("head_oid") if evidence else None
     snapshot_head = pr.get("headRefOid")
     if not heads_match(snapshot_head, evidence_head):
@@ -3852,7 +4086,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 return EXIT_ERROR
             issue_bodies[num] = issue.get("body") or ""
 
-        evidence = review_evidence(args.pr)
+        evidence = _with_coderabbit_status(args.pr, review_evidence(args.pr))
         evidence_head = evidence.get("head_oid") if evidence else None
         if not heads_match(gated_head, evidence_head):
             reason = (
@@ -3951,6 +4185,31 @@ def main():  # noqa: C901, PLR0912, PLR0915
             if not rebased:
                 print(
                     f"[ERROR] Final rebased check failed: {rebased_message}",
+                    file=sys.stderr,
+                )
+                return EXIT_BLOCKED
+            # Review, status, and thread evidence can change without moving the
+            # head. Re-read it under the merge lock immediately before the
+            # server-side mutation, then rerun every gate that consumes it.
+            final_evidence = _with_coderabbit_status(
+                args.pr, review_evidence(args.pr)
+            )
+            final_head = final_evidence.get("head_oid") if final_evidence else None
+            if not heads_match(live, final_head):
+                print(
+                    "[ERROR] Final review evidence is unavailable or stale. "
+                    "No merge command was run.",
+                    file=sys.stderr,
+                )
+                return EXIT_BLOCKED
+            final_ok, final_gates = evaluate_dod(fresh, issue_bodies, final_evidence)
+            if not final_ok:
+                final_blocked = ", ".join(
+                    name for name, passed, _ in final_gates if not passed
+                )
+                print(
+                    f"[ERROR] Final Definition-of-Done reread failed: {final_blocked}. "
+                    "No merge command was run.",
                     file=sys.stderr,
                 )
                 return EXIT_BLOCKED

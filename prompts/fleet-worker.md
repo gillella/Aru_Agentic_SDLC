@@ -6,11 +6,11 @@ task owns repeat, waiting, retry, and termination. It repeatedly asks the board
 what to do, completes or safely hands off one unit, and asks again. GitHub
 remains the only shared work queue.
 
-Agents do four kinds of work: fix their own PR when a reviewer asks, merge a
-PR whose Definition-of-Done gates already pass, review someone else's PR, or
-implement an issue. **Review and merge are work an agent claims off the board**,
-done under that agent's own subscription. There is no CI reviewer and no
-provider API key anywhere in this design.
+Agents implement issues, remediate CI or CodeRabbit findings, and mechanically
+merge PRs whose Definition-of-Done gates pass. **CodeRabbit is the sole PR
+code-review authority.** Coding agents never review, claim, perform, or
+receive review work. Missing or blocked CodeRabbit review has no coding-agent
+fallback.
 
 ## Start in a desktop application
 
@@ -29,9 +29,8 @@ actually supported and configured.
 
 1. Give every agent a **distinct id** (`agent-1`, `agent-2`, …) and declare its
    **model family** (`anthropic`, `openai`, `google`, …). All agents
-   authenticate as the same GitHub user, so these labels are the only identity
-   the board has — and the family is what lets the picker avoid handing a PR to
-   a reviewer with the same blind spots as its author.
+   authenticate as the same GitHub user, so these labels provide durable
+   author/remediator routing and audit attribution.
 2. Give every agent its **own clone** (see `scripts/launch_fleet.sh`). Sharing
    one `.git` past ~3 agents means constant `index.lock` contention.
 3. Open each isolated clone as a project in its desktop application and start
@@ -101,8 +100,8 @@ unavailable.
 
 ### Setup
 
-- Pass `--agent <AGENT_ID> --family <FAMILY>` on **every** picker command. A
-  command without them is a bug.
+- Pass `--agent <AGENT_ID>` when this task is operating as a named fleet
+  member; otherwise the picker derives a stable id from this runtime. The picker JSON top-level `agent` field is the resolved identity for this session: use that exact value as `<AGENT_ID>` for every later `claim_issue.py` and `create_pr.py` calls, including unnamed workers. Pass `--family <FAMILY>` when it is known. `create_pr.py` still requires `--agent`.
 - Your clone is the current working directory. Invoke helper scripts by
   absolute path so they act on this repo:
   `python3 "$ARU_SDLC_HOME/scripts/<script>.py"`.
@@ -113,13 +112,15 @@ unavailable.
 
 **Ask what to do:**
 
-```
-python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID> --family <FAMILY> --claim --json
+```bash
+python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
 ```
 
-It returns one work item of type `feedback`, `merge`, `review`, `issue`, or
-`idle`, and claims it. The priority order is deliberate — **finishing beats
-starting** (feedback → merge → review → issue). Do the branch below that
+It returns one work item of type `feedback`, `merge`, `issue`, `error`, or
+`idle`. `feedback`, `error`, and `idle` are returned without claims. `merge`
+and non-resume issue paths perform claim mutations; resume results report
+already-held work instead of claiming it again. The priority order is deliberate — **finishing beats
+starting** (feedback → merge → issue). Do the branch below that
 matches, then ask again. The current desktop task remains the loop owner.
 
 ---
@@ -215,64 +216,29 @@ gate. Your claim is `merger:<AGENT_ID>` (already applied when `--claim` ran).
    hitl`, and stop; never repeat the retry policy outside the helper or report
    success.
 
-The PR author may perform this mechanical merge once a distinct peer's
-`reviewed-by:<id>` is present. Self-review remains forbidden.
+Any factory agent, including the implementation author, may perform this
+mechanical merge once the exact-current-head CodeRabbit oracle and every other
+Definition-of-Done gate pass.
 
 ---
 
-#### C. `review` — review someone else's PR
+#### C. `review` — forbidden for coding agents
 
-Follow `$ARU_SDLC_HOME/skills/code-review/SKILL.md`.
-
-You were handed this PR because you did **not** write it. If the picker marked
-it `SAME FAMILY (degraded)`, no cross-family agent was free; say so in your
-review so the weaker check is on the record.
-
-1. **Check the code out and run it.** Create a review worktree for the PR
-   branch and run the test suite and linters yourself. Reviewing from the diff
-   alone misses everything that only shows up when the code executes.
-2. **Read the linked issue.** Does the diff satisfy every acceptance criterion?
-   Does it do anything the issue did not ask for? Does it stay inside the
-   issue's `touches:` declaration? A path outside it breaks the parallel-safety
-   guarantee other agents are relying on right now — high severity.
-3. **Judge the tests, not just their presence.** Do they assert real behaviour,
-   or that the implementation is whatever it happens to be? A tautological test
-   is worse than no test: it buys false confidence.
-4. **Check the verification claims.** The PR body claims something was
-   verified. Is that plausible given the diff? Flag any claim the diff cannot
-   support.
-5. **Submit a real GitHub review.** With a distinct GitHub account, use
-   `gh pr review --approve` or `--request-changes` with inline comments. Agents
-   sharing the PR owner's account cannot use either verdict; submit
-   `gh pr review --comment` instead. Put every blocking finding in an unresolved
-   inline thread. A clean substantive `COMMENTED` review becomes the
-   approval-equivalent only after the distinct agent completes attribution in
-   the next step.
-6. If there are no blocking findings, complete the review. One command
-   attributes it and releases your claim:
-   `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --complete-review`
-
-   This is not optional bookkeeping. `merge_pr.py` reads `reviewed-by:<id>` to
-   tell a peer review from a self-review, because every agent authenticates as
-   the same GitHub user. Skip it and the PR stays blocked with your claim on
-   it, and the next agent sees work that looks taken but unreviewed. If you
-   found blockers, release the claim with `--release` without adding
-   `reviewed-by:`; the unresolved threads route the PR back to its author.
-7. If the review is complete with no blocking findings, verify that every
-   thread is resolved, then run the Definition-of-Done gate:
-   `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --dry-run`. If it
-   passes, any factory agent, including the author, may execute the mechanical
-   merge with the same command without `--dry-run`. Never self-review and never
-   bypass this helper.
-
-**Approving without verifying is a failure, not efficiency.** A rubber stamp is
-worse than no review at all, because it satisfies the merge gate while
-verifying nothing. Equally: finding nothing wrong is a legitimate outcome —
-say so in one sentence rather than inventing findings to look thorough.
+The picker must never emit this work type. CodeRabbit is the sole PR code-review authority. If legacy state or a caller supplies `work.type=review` after `--claim`, do not inspect or review the PR; release this agent's legacy reviewer claim with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent <AGENT_ID> --release`, then return to the picker. Route existing CodeRabbit findings to the author or adopted remediator with `address-pr-feedback`. Missing, pending, failed, rate-limited, stale, ambiguous, or spoofed CodeRabbit evidence remains blocked.
 
 ---
 
-#### D. `issue` — follow the picker-selected skill
+#### D. `error` — report and retry
+
+When `work.type=\`error\``, this is a recoverable picker or GitHub failure,
+not work to start. Report
+`work.reason`, start no work, and follow the existing wait/retry path. Return
+to the picker after the normal delay; do not invent a claim, branch, PR, or
+merge attempt from an error item.
+
+---
+
+#### E. `issue` — follow the picker-selected skill
 
 Read `work.skill` from the claimed picker result.
 
@@ -335,9 +301,10 @@ below. Never collapse research into this implementation branch.
    take new work while the PR stays conflict-protected. The `agent:<id>` label
    remains only as a legacy authorship backstop until Done; `author:<id>` is the
    PR's authoritative attribution.
-   Do not self-review. After a distinct agent completes review and the merge
-   helper's gates pass, the author or another factory agent may perform the
-   mechanical merge through `merge_pr.py`. Loop.
+   Do not review. CodeRabbit owns review; route its findings back through
+   `address-pr-feedback`. Once all gates pass, any factory agent, including the
+   implementation author, may perform the mechanical merge through
+   `merge_pr.py`. Loop.
 
 ---
 
@@ -352,13 +319,13 @@ corrupts someone else's work, not just yours.
    this on every PR regardless of which tool you are.
 2. **Never touch shared spine files** — `AGENTS.md`, `PROJECT-PLAN.md`,
    `pyproject.toml`, `.github/workflows/*` — unless your issue names them.
-3. **Never review your own PR**, never remove another agent's `agent:*`,
-   `reviewer:*`, or `author:*` label, never change another agent's issue status.
+3. **Coding agents never review.** CodeRabbit alone reviews. Never remove
+   another agent's `agent:*` or `author:*` label or change another agent's
+   issue status.
 4. **Never commit to `main`**, never force-push a branch that is not yours.
 5. **One work item at a time.** Finish or release before asking for more.
 6. **Never merge directly.** Only `merge_pr.py` has merge authority, and only
-   after a distinct agent's independent review and every enforced gate pass.
-   The author may execute that mechanical merge but may never self-review.
+   after CodeRabbit's exact-current-head review and every enforced gate pass.
 7. **Report failures honestly.** If tests fail, say so with the output. Never
    claim a verification you did not run.
 8. **Never use GitHub MCP for lifecycle mutations.** Claims, labels, board
