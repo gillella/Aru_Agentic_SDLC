@@ -15,6 +15,18 @@ and remediate only. Real-money execution, production cutover, destructive
 migration, credential use, and external-account mutation stay separate,
 mandatory human gates that no review evidence satisfies.
 
+## 0. Preflight
+
+Before assigning or editing anything, confirm the claimed issue is open and
+inspect git log, branches, open PRs, and board status for related work
+already in flight (`AGENTS.md` §1 Strict Issue-First Execution, §8 Session
+State Memory). Execute the review from a PR-branch worktree under
+`.worktrees/` (`AGENTS.md` §4 Mandatory Worktree Isolation). For `type:feat`,
+`needs-design`, money, PII, schema, migration, or other irreversible work,
+obtain the implementation plan required by `implement-next-issue` before the
+first edit (`AGENTS.md` §9 Plan Before Editing). These gates apply to
+remediation edits in §4 as well as initial assignment.
+
 ## 1. Assignment
 
 `create_pr.py` assigns exactly one review service per issue, deterministically:
@@ -34,7 +46,16 @@ instead of changing accepted review authority.
 
 ## 2. Trigger
 
-Sequence, enforced by `finalize_review_assignment()` in `scripts/create_pr.py`:
+The operator invokes the helper once:
+
+```shell
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> \
+  [--model-family <family>] --verify-command "<cmd>" [--verify-command "<cmd>" ...]
+```
+
+Everything below is performed internally by `create_pr()` and
+`finalize_review_assignment()` in `scripts/create_pr.py` — the operator does
+not type these `gh` commands directly:
 
 1. `gh pr create --draft` opens the PR; the PR body must include
    `Closes #<issue_number>` (`check_issue_link` in `scripts/merge_pr.py`).
@@ -88,12 +109,15 @@ All three additionally require every blocker enforced by `check_reviews`
 
 Follow `skills/address-pr-feedback/SKILL.md`:
 
-1. `python3 scripts/fetch_pr_feedback.py --pr <PR_ID>` for unresolved threads.
-   Also check for outdated-unfixed and unfixed threads, and any non-advisory
-   human `CHANGES_REQUESTED` review — every blocker listed in §3 must clear,
-   not just unresolved threads.
-2. Implement fixes in the PR branch worktree under `.worktrees/`; run the
-   local suite.
+1. `python3 scripts/fetch_pr_feedback.py --pr <PR_ID>` lists unresolved
+   thread text and location, but not outdated-unfixed/unfixed counts or a
+   human `CHANGES_REQUESTED` verdict. Confirm the full blocker set with the
+   governed dry-run (§5, `--expected-head <SHA>`) — every blocker listed in
+   §3 must clear, not just unresolved threads.
+2. Implement fixes per §0 in the PR branch worktree under `.worktrees/`; for
+   `type:feat`, `needs-design`, money, PII, schema, migration, or other
+   irreversible-work findings, confirm a plan is in place before editing.
+   Run the local suite.
 3. Commit and push. This invalidates the prior review by design — the PR
    returns to `review`, not `ready-to-merge`.
 4. Refresh verification evidence for the new head:
@@ -120,9 +144,11 @@ refuses the run if the live head differs from what the caller expected —
 use it whenever the head SHA is already known, to catch a race against a
 concurrent push. Exit `0` means every gate passed;
 exit `3` means Definition of Done is unmet and names the first failing gate;
-exit `1` is a tooling/API error, not a gate verdict. A passing dry-run is
-evidence the PR is mergeable, not a merge — `merge_pr.py --pr <PR_ID>`
-(without `--dry-run`) performs the actual merge and close-out.
+exit `1` is a tooling/API error, not a gate verdict. If the `ci` gate fails,
+invoke `remediate-ci-failure` (`skills/remediate-ci-failure/SKILL.md`) before
+rerunning the dry-run — do not rerun against an unfixed CI failure. A passing
+dry-run is evidence the PR is mergeable, not a merge — `merge_pr.py --pr
+<PR_ID>` (without `--dry-run`) performs the actual merge and close-out.
 
 ## 6. Billing boundaries
 
@@ -130,6 +156,10 @@ evidence the PR is mergeable, not a merge — `merge_pr.py --pr <PR_ID>`
   or trial-conversion state for CodeRabbit, Sourcery, or CodeAnt. Assignment,
   triggering, and merge gating operate entirely on public PR/review/check
   data.
+- Triggering a review can consume included vendor quota and may incur
+  vendor-side usage-based charges when the account is eligible, even though
+  no repository script touches billing state. Confirm account and plan
+  eligibility before triggering a review.
 - CodeRabbit's configuration is inherited from the organization-level
   `gillella/coderabbit` config (`.coderabbit.yaml` header); this repo does
   not manage its account or plan.
@@ -144,6 +174,9 @@ evidence the PR is mergeable, not a merge — `merge_pr.py --pr <PR_ID>`
 
 ## 7. Operator checklist
 
+- [ ] Preflight complete: issue confirmed open, session state inspected,
+      running from `.worktrees/`, and (for high-risk work per §0) plan
+      obtained before editing.
 - [ ] Exactly one `review:<service>` label, applied before `gh pr ready`.
 - [ ] Assigned service's exact-head evidence present per §3.
 - [ ] The assigned-service thread gate passes and aggregate unresolved,
@@ -153,4 +186,6 @@ evidence the PR is mergeable, not a merge — `merge_pr.py --pr <PR_ID>`
 - [ ] No non-advisory human reviewer's latest verdict is `CHANGES_REQUESTED`.
 - [ ] `merge_pr.py --pr <PR_ID> --dry-run --expected-head <SHA>` exits `0`
       before requesting merge, using the recorded exact head.
-- [ ] No billing, trial, or account-plan state changed to run the pilot.
+- [ ] No repository script changed billing, trial, or account-plan state,
+      and vendor account billing status/review eligibility was confirmed
+      before triggering review.
