@@ -1,4 +1,4 @@
-# line-ceiling: 5376
+# line-ceiling: 5448
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -1519,6 +1519,49 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Sourcery", msg)
 
+    def test_sourcery_cannot_pass_over_human_changes_requested(self):
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "sourcery"}},
+        }]
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "human-block", "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "author": {"login": "human-reviewer", "__typename": "User"},
+            }],
+            "service_threads": {
+                "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        })
+        self.assertFalse(ok)
+        self.assertIn("requested changes", msg)
+
+    def test_sourcery_cannot_pass_over_aggregate_unfixed_blocker(self):
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "sourcery"}},
+        }]
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [],
+            "unfixed": 1,
+            "service_threads": {
+                "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        })
+        self.assertFalse(ok)
+        self.assertIn("resolved thread(s) have no evidence", msg)
+
     def test_codeant_exact_head_review_and_zero_threads_passes(self):
         pr = labelled("author:agent-1", "review:codeant")
         evidence = {
@@ -1590,6 +1633,35 @@ class ReviewGateTests(unittest.TestCase):
         ok, msg = merge_pr.check_reviews(pr, evidence)
         self.assertFalse(ok)
         self.assertIn("CodeAnt", msg)
+
+    def test_codeant_cannot_pass_over_human_changes_requested(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [{
+                "id": "human-block", "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-08-24T01:00:00Z",
+                "author": {"login": "human-reviewer", "__typename": "User"},
+            }],
+            "service_threads": {
+                "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        })
+        self.assertFalse(ok)
+        self.assertIn("requested changes", msg)
+
+    def test_codeant_cannot_pass_over_aggregate_unfixed_blocker(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        ok, msg = merge_pr.check_reviews(pr, {
+            "head_oid": "a" * 40,
+            "reviews": [],
+            "unfixed": 1,
+            "service_threads": {
+                "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        })
+        self.assertFalse(ok)
+        self.assertIn("resolved thread(s) have no evidence", msg)
 
 
 class CodeRabbitStatusEvidenceTests(unittest.TestCase):

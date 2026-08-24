@@ -627,6 +627,8 @@ def _author_can_repair_review(pr: dict[str, Any]) -> bool:
         return False
     if int(evidence.get("unresolved") or 0) > 0:
         return False
+    if int(evidence.get("outdated_unfixed") or 0) > 0:
+        return False
     return int(evidence.get("unfixed") or 0) > 0
 
 

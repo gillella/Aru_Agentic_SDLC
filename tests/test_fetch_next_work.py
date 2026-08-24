@@ -647,6 +647,16 @@ class AuthorGateFixTests(unittest.TestCase):
             found = self.fix(stranded(peer=None), reason="unmet: review")
         self.assertEqual(found["unmet_gates"], ["review-evidence"])
 
+    def test_outdated_unfixed_thread_stays_a_peer_gate_even_with_unfixed(self):
+        with patch.object(fnw, "review_evidence",
+                          return_value={
+                              "unresolved": 0, "unfixed": 2,
+                              "outdated_unfixed": 1, "reviewed_head": True,
+                          }), \
+             patch.object(merge_pr, "has_authoritative_assigned_review",
+                          return_value=True):
+            self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
+
     def test_unfixed_without_authoritative_coderabbit_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
@@ -661,9 +671,10 @@ class AuthorGateFixTests(unittest.TestCase):
             if label["name"] != "review:coderabbit"
         ] + [{"name": "review:codeant"}]
         # This fixture's default "Closes #1" only matches the deterministic
-        # coderabbit assignment; blank it so the label-vs-issue cross-check
-        # in assigned_review_service does not fight the relabel above.
-        candidate["body"] = ""
+        # coderabbit assignment; point it at an issue number that
+        # deterministically maps to codeant so the label-vs-issue cross-check
+        # in assigned_review_service still validates the relabel above.
+        candidate["body"] = "Closes #3"
         evidence = {
             "unresolved": 0,
             "unfixed": 2,
@@ -688,6 +699,9 @@ class AuthorGateFixTests(unittest.TestCase):
 
     def test_author_repair_enriches_only_the_assigned_service(self):
         evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        # review_service_for_issue((n - 1) % 3) maps issue 1/2/3 deterministically
+        # onto coderabbit/sourcery/codeant.
+        issue_for_service = {"coderabbit": 1, "sourcery": 2, "codeant": 3}
         for service in ("coderabbit", "sourcery", "codeant"):
             candidate = stranded()
             candidate["labels"] = [
@@ -695,9 +709,11 @@ class AuthorGateFixTests(unittest.TestCase):
                 if not label["name"].startswith("review:")
             ] + [{"name": f"review:{service}"}]
             # This fixture's default "Closes #1" only matches the
-            # deterministic coderabbit assignment; blank it so the
-            # label-vs-issue cross-check does not fight the relabel above.
-            candidate["body"] = ""
+            # deterministic coderabbit assignment; point it at the issue
+            # number that maps to each tested service so the label-vs-issue
+            # cross-check in assigned_review_service still validates the
+            # relabel above.
+            candidate["body"] = f"Closes #{issue_for_service[service]}"
             with self.subTest(service=service), \
                  patch.object(fnw, "review_evidence", return_value=evidence), \
                  patch.object(merge_pr, "_with_coderabbit_status", return_value=evidence) as coderabbit, \
