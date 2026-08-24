@@ -203,11 +203,25 @@ class AuditReviewAssignmentTests(unittest.TestCase):
 
         codes = {item["code"] for item in report["mismatches"]}
         self.assertFalse(report["ok"])
-        self.assertIn("unexpected_review_service_check", codes)
+        self.assertNotIn("unexpected_review_service_check", codes)
         self.assertIn("unexpected_review_service_review", codes)
         self.assertIn("unexpected_review_service_thread", codes)
         self.assertEqual(report["checks"]["by_review_service"]["sourcery"], 1)
         self.assertEqual(report["reviews"]["by_service_total"]["coderabbit"], 1)
+
+    def test_unassigned_service_skip_status_is_reported_without_mismatch(self):
+        checks = [{
+            "__typename": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+        }]
+        with patch.object(
+            audit, "fetch_pr", return_value=pr_snapshot(checks=checks),
+        ), patch.object(audit, "review_evidence", return_value=review_evidence()):
+            report = audit.audit_review_assignment(77)
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["checks"]["by_review_service"]["coderabbit"], 1)
 
     @patch.object(audit, "audit_review_assignment")
     def test_cli_emits_json_and_returns_fail_closed_status(self, run_audit):

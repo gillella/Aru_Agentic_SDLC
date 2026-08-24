@@ -159,7 +159,7 @@ def _review_service_for_check(name):
     return None
 
 
-def _check_summary(pr, assigned_service, report):
+def _check_summary(pr, report):
     rollup = pr.get("statusCheckRollup")
     if not isinstance(rollup, list):
         _add_mismatch(report, "checks_unavailable", "Current-head check data is unavailable.")
@@ -190,16 +190,6 @@ def _check_summary(pr, assigned_service, report):
         "by_review_service": by_service,
         "items": items,
     }
-    unexpected = [
-        service for service, count in by_service.items()
-        if count and assigned_service and service != assigned_service
-    ]
-    if unexpected:
-        _add_mismatch(
-            report,
-            "unexpected_review_service_check",
-            f"Unassigned review-service checks ran: {', '.join(unexpected)}.",
-        )
 
 
 def _service_for_login(login):
@@ -331,7 +321,7 @@ def audit_review_assignment(pr_number, expected_head=None):
     if expected_head is not None and _valid_head(expected_head) and pr_head != expected_head:
         _add_mismatch(report, "expected_head_mismatch", "PR head differs from --expected-head.")
 
-    _check_summary(pr, assigned_service, report)
+    _check_summary(pr, report)
     evidence = review_evidence(pr_number)
     if not isinstance(evidence, dict):
         _add_mismatch(report, "review_evidence_unavailable", "Review evidence is unavailable.")

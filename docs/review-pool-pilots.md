@@ -25,9 +25,9 @@ threads, checks, account configuration, or billing. Output is JSON using schema
 Exit `0` means the snapshot is internally coherent: linked issues all map to
 one deterministic service, exactly one matching `review:*` label exists, the
 requested/PR/evidence heads match exactly, evidence fields are well formed,
-and no other known review service appears in checks, reviews, or attributable
-thread counts. Exit `1` means at least one mismatch or unavailable evidence
-source was reported. Argument errors exit `2`.
+and no other known review service submits a review or owns attributable thread
+evidence. Exit `1` means at least one mismatch or unavailable evidence source
+was reported. Argument errors exit `2`.
 
 An audit with `"ok": true` is not a merge verdict. In particular, zero
 assigned-service reviews is a truthful pre-review snapshot, not evidence of
@@ -57,6 +57,12 @@ gate after the assigned service completes.
 The audit reports evidence; it does not manufacture missing evidence. An empty
 check or review list is recorded as zero. A missing, malformed, ambiguous, or
 stale source is a mismatch rather than an assumed zero.
+
+An unassigned service may emit a successful status while its label filter
+records that review was skipped. The audit reports that check but does not call
+the status alone a review run. An unassigned review object or attributable
+thread count is a mismatch; confirm skip/run meaning from the service comment
+or dashboard when recording the live pilot.
 
 ## Live-pilot record
 
