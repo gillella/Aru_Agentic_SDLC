@@ -1652,12 +1652,15 @@ def _coderabbit_latest_review(evidence):  # noqa: C901, PLR0912
             or not isinstance(body, str)
         ):
             return None
-        if state == "COMMENTED" and not body.strip():
-            if not _coderabbit_no_findings_full_review(review, evidence):
-                return None
         review_id = review.get("id")
         if not isinstance(review_id, str) or not review_id:
             return None
+        if (
+            state == "COMMENTED"
+            and not body.strip()
+            and not _coderabbit_no_findings_full_review(review, evidence)
+        ):
+            continue
         candidates.append((submitted, review_id, review))
     newest = max((candidate[0] for candidate in candidates), default=None)
     candidates = [candidate for candidate in candidates if candidate[0] == newest]
