@@ -28,8 +28,9 @@ applied to the PR **while it is still draft**, before the PR is marked ready.
 Only one review-pool label may ever be present; `merge_pr.py` refuses to
 resolve a service when zero or more than one is set
 (`check_reviews` in `scripts/merge_pr.py`). Never add or swap a review-pool
-label by hand — it would move merge authority to a service that never saw
-the diff.
+label by hand. `merge_pr.py` recomputes the assigned service from every
+linked issue and rejects a mismatched label, making the PR unmergeable
+instead of changing accepted review authority.
 
 ## 2. Trigger
 
@@ -131,6 +132,7 @@ evidence the PR is mergeable, not a merge — `merge_pr.py --pr <PR_ID>`
 - [ ] Exactly one `review:<service>` label, applied before `gh pr ready`.
 - [ ] Assigned service's exact-head evidence present per §3.
 - [ ] Zero unresolved threads for the assigned service; every resolved
-      finding is fixed or explicitly withdrawn.
+      finding is fixed, explicitly withdrawn, or supported by the required
+      size-waiver/verification-refresh evidence.
 - [ ] `merge_pr.py --pr <PR_ID> --dry-run` exits `0` before requesting merge.
 - [ ] No billing, trial, or account-plan state changed to run the pilot.
