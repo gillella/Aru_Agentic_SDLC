@@ -214,6 +214,69 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
         self.assertIn("implementation/remediation/mechanical-merge loop", intervention)
         self.assertNotIn("implementation/review/remediation loop", intervention)
 
+    def test_review_fallback_policy_is_documented_for_operators(self):
+        """#436: the operator-facing docs must state the fallback-only policy,
+        the per-service evidence the merge gate really enforces, and what an
+        operator does when the service they switched to also stalls.
+
+        Every assertion is made against whitespace-normalized text so a future
+        rewrap cannot silently drop a policy sentence while the test keeps
+        passing.
+        """
+        def flat(relative_path):
+            return " ".join(
+                (ROOT / relative_path).read_text(encoding="utf-8").replace("> ", "").split()
+            )
+
+        runbook = flat("docs/review-pool-operator-runbook.md")
+        agents = flat("AGENTS.md")
+        board = flat("docs/project_board_workflow.md")
+        plan = flat("docs/ARU-SOFTWARE-FACTORY.md")
+
+        # Fallback-only policy: one default assignment, and reassignment is a
+        # deliberate operator act rather than any form of load distribution.
+        self.assertIn(
+            "`review:coderabbit` is the only review assignment `create_pr.py` ever creates",
+            runbook,
+        )
+        self.assertIn("never a load balancer and never a retry", runbook)
+        self.assertIn(
+            "`review:coderabbit` is the only review assignment `create_pr.py` creates",
+            agents,
+        )
+        self.assertIn("never a load balancer, a rotation, or a retry", agents)
+        self.assertIn(
+            "`review:coderabbit` is the only review assignment `create_pr.py` creates",
+            board,
+        )
+        self.assertIn("no automatic rotation, load balancer, or scheduler exists", board)
+        self.assertIn(
+            "`review:coderabbit` is the only assignment `create_pr.py` creates", plan
+        )
+        self.assertIn("never as a load balancer", plan)
+        # "Pool" is rotation-era vocabulary for a mechanism that does not exist.
+        self.assertNotIn("review-pool label", runbook)
+        self.assertNotIn("Review-Pool Operator Runbook", runbook)
+
+        # Evidence contract: producer identity and exact-head binding, not just
+        # a check with the right name.
+        self.assertIn("produced by the recognized `sourcery-ai` app slug", runbook)
+        self.assertIn("linked to this pull request number and base", runbook)
+        self.assertIn("Zero such checks and two or more both block", runbook)
+        self.assertIn("`codeant-review-status` marker", runbook)
+        self.assertIn("blocks **both** paths", runbook)
+
+        # Recovery: the switch is one-way, and the agent escalation is terminal.
+        self.assertIn("### When the selected service also fails",
+                      (ROOT / "docs/review-pool-operator-runbook.md").read_text(encoding="utf-8"))
+        self.assertIn("The external switch is one-way by design", runbook)
+        self.assertIn("reassignment is not a retry mechanism", runbook)
+        self.assertIn(
+            "`--to agent` is the only move accepted from an already-switched PR", runbook
+        )
+        self.assertIn("There is no third hop", runbook)
+        self.assertIn("That external switch is one-way", board)
+
     def test_historical_roadmap_cannot_look_current(self):
         plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
         marker = "### 5.2 Historical S-roadmap snapshot — verified 2026-08-15"
