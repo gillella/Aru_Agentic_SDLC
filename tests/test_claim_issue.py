@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import call, patch
@@ -47,12 +48,11 @@ def issue_with_labels(*names, author="owner", number=7):
 class ClaimProtocolTests(unittest.TestCase):
     def setUp(self):
         self.required_board_preflight = claim_issue._required_board_preflight
-        owner = patch.object(
-            claim_issue, "repository_owner_login", return_value="owner")
-        trusted = patch.object(
-            claim_issue, "repository_trusted_logins", return_value={"owner"})
-        board = patch.object(
-            claim_issue, "_required_board_preflight", return_value=True)
+        owner = patch.object(claim_issue, "repository_owner_login", return_value="owner")
+        trusted = patch.object(claim_issue, "repository_trusted_logins", return_value={"owner"})
+        board = patch.object(claim_issue, "_required_board_preflight", return_value=True)
+        self.enterContext(patch.object(claim_issue.merge_pr, "repository_merge_lock",
+            return_value=nullcontext((True, "locked"))))
         self.addCleanup(owner.stop)
         self.addCleanup(trusted.stop)
         self.addCleanup(board.stop)

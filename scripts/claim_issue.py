@@ -1,24 +1,13 @@
 #!/usr/bin/env python3
 # line-ceiling: 1514
 """
-claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
-for one agent.
+claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
 GitHub exposes no compare-and-swap on issue state, so a true lock is not
 available. The protocol here is optimistic:
 
-  1. Read the issue. If another agent already holds it, abort (exit 2).
-  2. Preflight the governed Project item, Ready state, and target Status option.
-  3. Write our agent:<id> label.
-  4. Settle: sleep and read back repeatedly. If two agents raced, both see
-     both labels and compute the same winner - the lowest-sorting agent id.
-     The loser releases. Multiple settle rounds catch late label writes that
-     arrive after an earlier sole-holder readback.
-  5. Move the board item, then verify holders once more; roll back if a
-     lower-sorting contender appeared during the status update.
-
-Steps 4/5 are what make this safe. Without settle+confirm, two agents that
-read "unclaimed" in the same instant both proceed and duplicate the work.
+Claims serialize with other lifecycle transitions on this host, then settle
+optimistically through GitHub so competing machines choose one winner.
 
 Exit codes:
   0 - claimed
@@ -408,8 +397,8 @@ def _start_fresh_issue_claim(
     )
 
 
-def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
-                assignee: str = "@me") -> int:
+def _claim_issue_locked(issue_id: int, agent: str, status: str,
+                        assignee: str) -> int:
     issue = get_issue(issue_id)
     if not issue:
         print(f"[ERROR] Issue #{issue_id} not found.", file=sys.stderr)
@@ -480,6 +469,16 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
         issue_id, agent, status, assignee, my_label,
         owner, trusted_logins,
     )
+
+
+def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
+                assignee: str = "@me") -> int:
+    """Serialize claims against auto-triage and merge lifecycle transitions."""
+    with merge_pr.repository_merge_lock() as (locked, message):
+        if not locked:
+            print(f"[ERROR] Issue claim deferred: {message}.", file=sys.stderr)
+            return EXIT_ERROR
+        return _claim_issue_locked(issue_id, agent, status, assignee)
 
 
 def release_issue(issue_id: int, agent: str) -> int:
