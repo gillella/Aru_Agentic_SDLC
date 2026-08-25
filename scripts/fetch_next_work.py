@@ -75,6 +75,7 @@ from fetch_next_issue import (
     active_increment_scope,
     attach_open_pr_file_snapshots,
     build_candidates,
+    priority_rank,
     pr_files_by_issue_from_prs,
     reap_stale_claims,
 )
@@ -87,6 +88,7 @@ from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # implementation of that predicate in the picker is exactly the drift that let
 # reviewed-but-since-pushed PRs reach no agent at all.
 from merge_pr import review_evidence
+from update_issue_status import update_status
 
 
 # Seats disambiguate concurrent sessions sharing one checkout -- the only case a
@@ -901,6 +903,81 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     }
 
 
+def promote_one_idle_backlog_issue(agent: str) -> int | None:
+    """Promote one qualified Backlog issue when no actionable Ready work exists.
+
+    This is deliberately narrower than ``triage_backlog.py --promote``. The
+    claiming picker needs one next item, not a freshly filled queue. Reuse the
+    triage module's Ready contract and oversize checks, then pass qualified
+    inventory through the normal picker so trust, priority, active-increment,
+    and in-flight path gates still fail closed.
+    """
+    from triage_backlog import partition, ready_gaps, split_reasons
+
+    issues = list_open_issues()
+    if not issues:
+        return None
+
+    backlog, ready, _held = partition(issues)
+    if ready or not backlog:
+        return None
+
+    open_numbers = {issue["number"] for issue in issues}
+    repo_slug = get_repo_slug()
+    qualified_numbers = {
+        issue["number"]
+        for issue in backlog
+        if not ready_gaps(issue, open_numbers, repo_slug=repo_slug)
+        and not split_reasons(issue)
+        and priority_rank(issue.get("labels", []))[0] is not None
+    }
+    if not qualified_numbers:
+        return None
+
+    # Evaluate every qualified Backlog item as though it were Ready, but write
+    # only the highest-priority candidate the ordinary picker would accept.
+    staged_issues = []
+    for issue in issues:
+        if issue["number"] not in qualified_numbers:
+            staged_issues.append(issue)
+            continue
+        staged = dict(issue)
+        staged["labels"] = [
+            label
+            for label in issue.get("labels", [])
+            if not (label.get("name") or "").lower().startswith("status:")
+        ] + [{"name": "status:ready"}]
+        staged_issues.append(staged)
+
+    prs = list_work_prs()
+    if prs is None:
+        print("[WARN] Cannot triage while the pull request queue is unreadable.",
+              file=sys.stderr)
+        return None
+    parts = build_candidates(
+        staged_issues,
+        agent,
+        pr_files_by_issue=pr_files_by_issue_from_prs(prs),
+        increment_scope=active_increment_scope(),
+    )
+    candidate = next(
+        (issue for issue in parts["candidates"]
+         if issue["number"] in qualified_numbers),
+        None,
+    )
+    if candidate is None:
+        return None
+
+    number = candidate["number"]
+    if not update_status(number, "Ready", require_board=True):
+        print(f"[WARN] Qualified Backlog issue #{number} could not be promoted.",
+              file=sys.stderr)
+        return None
+    print(f"[INFO] Picker promoted qualified Backlog issue #{number} to Ready.",
+          file=sys.stderr)
+    return number
+
+
 def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Pick the next work item for one agent.")
     parser.add_argument("--agent", required=False, default=None,
@@ -944,6 +1021,17 @@ def main():  # noqa: C901, PLR0912, PLR0915
     res = select(args.agent, (args.family or "").lower() or None,
                  args.round_cap, args.cross_family_wait)
     work = res["work"]
+
+    # A read-only picker call remains read-only. A loop asking to claim work may
+    # promote one mechanically qualified Backlog item, then immediately run the
+    # ordinary selector again so normal claim arbitration still applies.
+    if args.claim and work["type"] == "idle":
+        promoted = promote_one_idle_backlog_issue(args.agent)
+        if promoted is not None:
+            res = select(args.agent, (args.family or "").lower() or None,
+                         args.round_cap, args.cross_family_wait)
+            res["auto_promoted_issue"] = promoted
+            work = res["work"]
 
     if args.claim and work["type"] == "merge":
         work["claimed"] = False

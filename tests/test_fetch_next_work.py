@@ -1338,5 +1338,111 @@ class WorkPickerTests(unittest.TestCase):
             fnw.main()
             self.assertIn("[WARN] Autonomous claim reap encountered error: transient network failure", fake_stderr.getvalue())
 
+
+class IdleBacklogPromotionTests(unittest.TestCase):
+    @staticmethod
+    def _issue(number, priority="p1", *, status="backlog", body=None, labels=()):
+        return {
+            "number": number,
+            "title": f"issue {number}",
+            "body": body or (
+                "## Acceptance Criteria\n"
+                "- [ ] Works (verify: `python3 -m unittest tests.test_example`)\n\n"
+                "## Decision Boundaries\n- Default: bounded\n\n"
+                "## Non-Goals\n- No extras\n\n"
+                "## Verification\n"
+                "- `python3 -m unittest tests.test_example`\n\n"
+                "touches: scripts/example.py, tests/test_example.py\n"
+                "depends-on: none\n"
+            ),
+            "labels": [
+                {"name": f"status:{status}"},
+                {"name": f"priority:{priority}"},
+                {"name": "type:feat"},
+                *({"name": label} for label in labels),
+            ],
+            "author": {"login": "owner"},
+        }
+
+    def test_promotes_only_highest_priority_picker_eligible_issue(self):
+        issues = [self._issue(20, "p2"), self._issue(30, "p0"),
+                  self._issue(10, "p0")]
+        with patch.object(fnw, "list_open_issues", return_value=issues), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "active_increment_scope", return_value=None), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins",
+                          return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login",
+                          return_value="owner"), \
+             patch.object(fetch_next_issue, "is_trusted_metadata_author",
+                          return_value=True), \
+             patch.object(fnw, "update_status", return_value=True) as update:
+            promoted = fnw.promote_one_idle_backlog_issue("agent-1")
+        self.assertEqual(promoted, 10)
+        update.assert_called_once_with(10, "Ready", require_board=True)
+
+    def test_does_not_promote_when_any_ready_issue_exists(self):
+        issues = [self._issue(1, status="ready"), self._issue(2)]
+        with patch.object(fnw, "list_open_issues", return_value=issues), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_leaves_operator_epic_incomplete_and_oversized_work_in_backlog(self):
+        incomplete = self._issue(1, body="touches: scripts/x.py")
+        operator = self._issue(2, labels=("needs-human",))
+        epic = self._issue(3, labels=("type:epic",))
+        oversized = self._issue(
+            4,
+            body=(self._issue(4)["body"]
+                  .replace("touches: scripts/example.py, tests/test_example.py",
+                           "touches: scripts/a.py, hooks/b.py, tests/test_example.py")),
+        )
+        with patch.object(
+            fnw, "list_open_issues",
+            return_value=[incomplete, operator, epic, oversized],
+        ), patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_read_only_picker_does_not_attempt_promotion(self):
+        idle = {
+            "agent": "agent-1", "family": None,
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [], "merge_skipped": [], "claimable_issues": [],
+        }
+        with patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "select", return_value=idle), \
+             patch.object(fnw, "promote_one_idle_backlog_issue") as promote, \
+             patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1",
+                                "--reap-after", "0"]), \
+             patch("sys.stdout", io.StringIO()):
+            fnw.main()
+        promote.assert_not_called()
+
+    def test_claiming_idle_picker_promotes_reselects_and_claims(self):
+        idle = {
+            "agent": "agent-1", "family": None,
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [], "merge_skipped": [], "claimable_issues": [],
+        }
+        selected = IssueClaimFailureTests.selection()
+        stdout = io.StringIO()
+        with patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "select", side_effect=[idle, selected]), \
+             patch.object(fnw, "promote_one_idle_backlog_issue", return_value=334), \
+             patch("claim_issue.claim_issue", return_value=fnw.EXIT_OK) as claim, \
+             patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1",
+                                "--claim", "--json", "--reap-after", "0"]), \
+             patch("sys.stdout", stdout):
+            result = fnw.main()
+        payload = json.loads(stdout.getvalue())
+        self.assertIsNone(result)
+        self.assertEqual(payload["auto_promoted_issue"], 334)
+        self.assertTrue(payload["work"]["claimed"])
+        claim.assert_called_once_with(334, "agent-1")
+
 if __name__ == "__main__":
     unittest.main()
