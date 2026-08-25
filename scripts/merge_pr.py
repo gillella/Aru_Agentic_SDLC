@@ -1727,18 +1727,48 @@ def has_authoritative_sourcery_review(pr, evidence):
     return _sourcery_check(pr, evidence) is True
 
 
+def _sourcery_check_run_pages(pages):
+    """Every check run across ``--slurp`` pages, or None when the read is partial.
+
+    The endpoint reports a ``total_count`` for the whole reference and caps its
+    result set at the 1,000 most recent check suites, so a page set that falls
+    short of its own declared total is a truncated read rather than a complete
+    one. Accepting it would let a second "Sourcery review" run sit outside the
+    returned window and make an ambiguous verdict look like the sole
+    authoritative match, so anything but an exact int total that equals the
+    collected run count fails closed - the same completeness proof the GraphQL
+    rollup reader already applies to its own ``totalCount``.
+    """
+    if not isinstance(pages, list) or not pages:
+        return None
+    runs, expected_total = [], None
+    for page in pages:
+        if not isinstance(page, dict):
+            return None
+        total, page_runs = page.get("total_count"), page.get("check_runs")
+        if (
+            type(total) is not int
+            or not isinstance(page_runs, list)
+            or expected_total not in {None, total}
+        ):
+            return None
+        expected_total = total
+        runs.extend(page_runs)
+    return runs if expected_total == len(runs) else None
+
+
 def _sourcery_check_runs(owner, name, expected_head):
-    """Commit-scoped check runs for the exact head, or None when unreadable."""
+    """Commit-scoped check runs for the exact head, or None when unreadable.
+
+    --slurp yields one JSON array of pages; without it, --paginate concatenates
+    per-page objects and a single json.loads fails after the first page.
+    """
     if not expected_head:
         return None
-    data = _gh_json([
+    return _sourcery_check_run_pages(_gh_json([
         "gh", "api", f"repos/{owner}/{name}/commits/{expected_head}/check-runs",
-        "--paginate",
-    ])
-    if not isinstance(data, dict):
-        return None
-    runs = data.get("check_runs")
-    return runs if isinstance(runs, list) else None
+        "--paginate", "--slurp",
+    ]))
 
 
 def _with_sourcery_runs(pr_id, evidence):
