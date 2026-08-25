@@ -1258,6 +1258,79 @@ class IssueClaimFailureTests(unittest.TestCase):
                 fnw.cli()
 
 
+class MergeClaimFailureTests(unittest.TestCase):
+    @staticmethod
+    def selection():
+        details = [
+            {"pr": 21, "title": "first merge", "head_sha": "a" * 40},
+            {"pr": 22, "title": "second merge", "head_sha": "b" * 40},
+        ]
+        return {
+            "agent": "agent-1",
+            "family": "openai",
+            "work": {
+                "type": "merge", "pr": 21, "title": "first merge",
+                "skill": "merge-pr", "head_sha": "a" * 40,
+            },
+            "mergeable_detail": details, "mergeable": [21, 22],
+            "merge_skipped": [], "reviewable_detail": [], "reviewable": [],
+            "skipped_prs": [], "escalated_prs": [], "claimable_issues": [],
+            "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
+            "missing_touches": [], "operator_only_issues": [],
+        }
+
+    def test_json_merge_claim_failures_are_explicit_and_nonzero(self):
+        from claim_issue import EXIT_CONFLICT, EXIT_ERROR
+        cases = (
+            ([EXIT_ERROR], "error", 1),
+            ([EXIT_CONFLICT, EXIT_CONFLICT], "all_taken", 2),
+        )
+        for claim_results, expected, expected_calls in cases:
+            with self.subTest(claim_results=claim_results):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with patch.object(fnw, "_resolve_identity", return_value=None), \
+                     patch.object(fnw, "select", return_value=self.selection()), \
+                     patch.object(fnw, "claim_merge", side_effect=claim_results) as claim, \
+                     patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--claim", "--json", "--reap-after", "0"]), \
+                     patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                    result = fnw.main()
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(result, 1)
+                self.assertFalse(payload["work"]["claimed"])
+                self.assertEqual(payload["work"]["claim_result"], expected)
+                self.assertEqual(claim.call_count, expected_calls)
+                self.assertEqual(
+                    [record.args for record in claim.call_args_list],
+                    [(21, "agent-1")] if expected_calls == 1 else [
+                        (21, "agent-1"), (22, "agent-1"),
+                    ],
+                )
+
+    def test_text_merge_claim_failure_never_prints_merge_success(self):
+        from claim_issue import EXIT_CONFLICT, EXIT_ERROR
+        cases = (
+            ([EXIT_ERROR], "error"),
+            ([EXIT_CONFLICT, EXIT_CONFLICT], "all_taken"),
+        )
+        for claim_results, expected in cases:
+            with self.subTest(claim_results=claim_results):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with patch.object(fnw, "_resolve_identity", return_value=None), \
+                     patch.object(fnw, "select", return_value=self.selection()), \
+                     patch.object(fnw, "claim_merge", side_effect=claim_results), \
+                     patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--claim", "--reap-after", "0"]), \
+                     patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                    result = fnw.main()
+                output = stdout.getvalue()
+                self.assertEqual(result, 1)
+                self.assertIn("Could not claim merge #21", output)
+                self.assertIn(f"result={expected}", output)
+                self.assertIn("No work was started", output)
+                self.assertNotIn("Merge PR", output)
+
+
 class WorkPickerTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
