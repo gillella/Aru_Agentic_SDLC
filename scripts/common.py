@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from github_inventory import (
+    board_agent_identities as rest_board_agent_identities,
+    local_repo_slug,
+    open_issues as rest_open_issues,
+)
+
 
 VERIFICATION_EVIDENCE_SCHEMA = "aru.verification.v1"
 VERIFICATION_EVIDENCE_START = "<!-- aru-verification-evidence:v1 -->"
@@ -443,9 +449,6 @@ def create_worktree(branch_name: str, path: str = None, attempts: int = 5,
     return None
 
 
-BOARD_IDENTITY_LABEL_PREFIXES = ("agent:", "reviewer:", "merger:", "author:")
-
-
 def board_agent_identities() -> Tuple[Optional[Dict[str, List[str]]], str]:
     """Agent ids GitHub currently shows in use, mapped to where they are held.
 
@@ -456,44 +459,31 @@ def board_agent_identities() -> Tuple[Optional[Dict[str, List[str]]], str]:
     PR, so its id was handed to a second session and every downstream identity
     guarantee degraded (#304).
 
-    Two endpoints because gh exposes issues and pull requests separately; this
-    runs once at identity resolution, not per tick.
+    Two REST endpoints are used because GitHub exposes issues and pull requests
+    separately.  Keeping this lightweight read off GraphQL prevents identity
+    resolution from consuming the Projects/review query budget.
 
     Returns (holders, error). ``holders`` is None when the board could not be
     read, so callers fail closed rather than assign a possibly-held id.
     """
-    holders: Dict[str, List[str]] = {}
-    queries = (
-        (["gh", "issue", "list", "--state", "open", "--limit", "500",
-          "--json", "number,labels"], "issue"),
-        (["gh", "pr", "list", "--state", "open", "--limit", "500",
-          "--json", "number,labels"], "PR"),
-    )
-    for cmd, kind in queries:
-        items = run_gh_json(cmd)
-        if not isinstance(items, list):
-            return None, f"could not read open {kind}s from GitHub"
-        for item in items:
-            for label in item.get("labels") or []:
-                name = str(label.get("name") or "")
-                for prefix in BOARD_IDENTITY_LABEL_PREFIXES:
-                    if name.startswith(prefix) and name[len(prefix):]:
-                        agent_id = name[len(prefix):]
-                        holders.setdefault(agent_id, []).append(
-                            f"{kind} #{item.get('number')} ({name})")
-    return holders, ""
+    slug = get_repo_slug()
+    if not slug:
+        return None, "could not resolve the repository from the local origin"
+    return rest_board_agent_identities(run_cmd, slug)
 
 
 def query_open_issues() -> Optional[List[Dict[str, Any]]]:
-    """Fetches open issues, preserving a query failure as ``None``.
+    """Fetch open issues through paginated REST, preserving failure as ``None``.
 
-    --limit is explicit: gh defaults to 30, which silently truncates any board
-    with more issues than that and makes the dependency graph wrong.
+    ``gh issue list`` uses GraphQL and historically spent quota on a payload the
+    REST Issues endpoint already provides.  Filtering pull requests in jq and
+    paginating explicitly keeps this inventory complete without consuming the
+    GraphQL budget needed for Projects and review threads.
     """
-    cmd = ["gh", "issue", "list", "--state", "open", "--limit", "500",
-           "--json", "number,title,labels,assignees,body,state,updatedAt,author"]
-    res = run_gh_json(cmd)
-    return res if isinstance(res, list) else None
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    return rest_open_issues(run_cmd, slug)
 
 
 def list_open_issues() -> List[Dict[str, Any]]:
@@ -978,10 +968,8 @@ def fetch_issue_comments(issue_id: int) -> List[Dict[str, Any]]:
 
 
 def get_repo_slug() -> Optional[str]:
-    """Returns 'owner/repo' for the current working directory's repo."""
-    cmd = ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]
-    code, stdout, _ = run_cmd(cmd, check=False)
-    return stdout or None
+    """Return ``owner/repo`` from the local origin without spending API quota."""
+    return local_repo_slug(run_cmd)
 
 
 def query_issue_project_items(
