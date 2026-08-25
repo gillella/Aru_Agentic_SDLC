@@ -991,6 +991,18 @@ class AgentResolutionTests(unittest.TestCase):
         self.assertIsNone(rc)
         self.assertEqual(select_mock.call_args.args[0], "claude-1")
 
+    def test_invalid_explicit_and_environment_ids_fail_closed(self):
+        for argv, env in (
+            (["fetch_next_work.py", "--agent", "bad id"], {}),
+            (["fetch_next_work.py"], {"ARU_AGENT_ID": ""}),
+        ):
+            with self.subTest(argv=argv, env=env):
+                with patch("sys.stderr", new_callable=io.StringIO) as error:
+                    rc, select_mock = self._run(argv, env)
+                self.assertEqual(rc, 1)
+                select_mock.assert_not_called()
+                self.assertIn("invalid", error.getvalue())
+
     def test_presence_allocation_flags_are_removed(self):
         for flag in ("--session-id", "--agent-pool"):
             with self.subTest(flag=flag), patch(

@@ -84,6 +84,14 @@ class FingerprintDerivationTests(unittest.TestCase):
             "env",
         )
 
+    def test_resolver_rejects_invalid_operator_ids(self):
+        for explicit in ("", "bad id", "-bad"):
+            with self.subTest(explicit=explicit), self.assertRaises(ValueError):
+                ai.resolve_agent_id(explicit, family="openai", env={})
+        for pinned in ("", "bad id", "-bad"):
+            with self.subTest(pinned=pinned), self.assertRaises(ValueError):
+                ai.resolve_agent_id(None, family="openai", env={"ARU_AGENT_ID": pinned})
+
 
 class PickerIdentityTests(unittest.TestCase):
     """The picker's end of the same behaviour."""
@@ -109,19 +117,34 @@ class PickerIdentityTests(unittest.TestCase):
         # A restart is a new PID with no link to the worker that was running.
         # Under the pool model it took a different name; the fingerprint is
         # recomputed from the same machine and checkout, so it comes back.
-        _rc, first, _err = self._run(
-            ["fetch_next_work.py", "--family", "anthropic"])
-        _rc2, second, _err2 = self._run(
-            ["fetch_next_work.py", "--family", "anthropic"])
+        with patch.object(ai, "_checkout_root", return_value="/repo"), \
+             patch.object(ai, "_machine_identifier", return_value="box-a"):
+            _rc, first, _err = self._run(
+                ["fetch_next_work.py", "--family", "anthropic"])
+            _rc2, second, _err2 = self._run(
+                ["fetch_next_work.py", "--family", "anthropic"])
         self.assertEqual(first.call_args[0][0], second.call_args[0][0])
 
     def test_derivation_needs_no_presence_registry(self):
-        with patch.object(ap, "PresenceStore",
-                          side_effect=AssertionError("presence must not be read")):
+        with patch.object(ai, "fingerprint_agent_id",
+                          wraps=ai.fingerprint_agent_id) as derive:
             rc, select_mock, _err = self._run(
                 ["fetch_next_work.py", "--family", "anthropic"])
+        derive.assert_called_once()
+        self.assertFalse(hasattr(fnw, "agent_presence"))
         self.assertIsNone(rc)
         self.assertTrue(select_mock.call_args[0][0].startswith("claude-"))
+
+    def test_invalid_operator_ids_stop_before_selection(self):
+        for argv, env in (
+            (["fetch_next_work.py", "--agent", "bad id"], {}),
+            (["fetch_next_work.py"], {"ARU_AGENT_ID": ""}),
+        ):
+            with self.subTest(argv=argv, env=env):
+                rc, select_mock, error = self._run(argv, env=env)
+                self.assertEqual(rc, 1)
+                select_mock.assert_not_called()
+                self.assertIn("invalid", error)
 
     def test_env_pinned_id_wins_over_derivation(self):
         rc, select_mock, _err = self._run(

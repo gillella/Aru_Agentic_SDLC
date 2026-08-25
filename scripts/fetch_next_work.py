@@ -90,7 +90,12 @@ from merge_pr import review_evidence
 
 def _resolve_identity(args):
     """Resolve identity without a presence registry, seat, or board query."""
-    args.agent = resolve_agent_id(args.agent, family=(args.family or "").lower())
+    try:
+        args.agent = resolve_agent_id(args.agent, family=(args.family or "").lower())
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    return None
 
 
 def skill_for_issue(issue: dict[str, Any]) -> str:
@@ -776,7 +781,9 @@ def main():  # noqa: C901, PLR0912, PLR0915
                         help="Release issue and review claims idle longer than HOURS (default: 4h; 0 disables)")
     args = parser.parse_args()
 
-    _resolve_identity(args)
+    rc = _resolve_identity(args)
+    if rc is not None:
+        return rc
 
     if args.reap_after > 0:
         try:

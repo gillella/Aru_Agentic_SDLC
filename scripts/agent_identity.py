@@ -97,8 +97,14 @@ def resolve_agent_id(
 ) -> str:
     """Resolve explicit id, then environment override, then fingerprint."""
     if explicit is not None:
-        return explicit.strip()
-    pinned = configured_agent_id(env)
-    if pinned:
+        candidate = explicit.strip()
+        if not AGENT_ID_RE.fullmatch(candidate):
+            raise ValueError(f"invalid explicit agent id: {candidate!r}")
+        return candidate
+    source = env if env is not None else os.environ
+    if AGENT_ID_ENV_VAR in source:
+        pinned = configured_agent_id(source)
+        if not AGENT_ID_RE.fullmatch(pinned):
+            raise ValueError(f"invalid {AGENT_ID_ENV_VAR} agent id: {pinned!r}")
         return pinned
     return fingerprint_agent_id(family, repo_root=repo_root, machine=machine)
