@@ -94,6 +94,14 @@ CODERABBIT_ACTOR_TYPES = {"Bot"}
 REVIEW_SERVICE_LABELS = ("review:coderabbit",)
 CODERABBIT_FULL_REVIEW_REQUEST = "@coderabbitai full review"
 CODERABBIT_FULL_REVIEW_FINISHED = "Full review finished."
+# CodeRabbit reports throttling and configuration skips as state=SUCCESS, byte
+# -identical in state to a genuine verdict and separable only by description:
+# "Review rate limited" and "Review skipped: excluded by label configuration"
+# both mean no review ran against this head. Recognition is therefore an exact
+# allowlist compared after strip()+casefold(), never a substring test - a
+# substring rule for "complete" would silently re-admit a future wording such
+# as "Review could not be completed".
+CODERABBIT_COMPLETED_DESCRIPTIONS = frozenset({"review completed"})
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
 # review evidence; all other known actor kinds are automation or identities
@@ -1438,7 +1446,15 @@ def _with_coderabbit_status(pr_id, evidence):
 
 
 def _coderabbit_check(evidence):  # noqa: C901, PLR0912
-    """Return an authenticated exact-head CodeRabbit status, or ``None``."""
+    """Return an authenticated exact-head CodeRabbit status, or ``None``.
+
+    ``None`` means the evidence cannot be read as an attestation at all: a
+    wrong or unauthenticated producer, a missing or ambiguous context, or - for
+    a StatusContext - a description that is not an exactly recognized
+    completion wording. CodeRabbit reports both throttling and configuration
+    skips as ``state=SUCCESS``, so for that shape the description is the only
+    field separating "I reviewed this head" from "I did not review it".
+    """
     if not isinstance(evidence, dict):
         return None
     rollup = evidence.get("coderabbit_status")
@@ -1465,6 +1481,16 @@ def _coderabbit_check(evidence):  # noqa: C901, PLR0912
         if (not isinstance(creator, dict)
                 or str(creator.get("login") or "").lower() not in CODERABBIT_LOGINS
                 or creator.get("__typename") not in CODERABBIT_ACTOR_TYPES):
+            return None
+        # An authenticated producer is not yet an attestation. A throttled or
+        # config-skipped status is authentic, current-head, and SUCCESS while
+        # meaning no review ran, so the description must match a recognized
+        # completion wording exactly. Absent, empty, non-string, and unknown
+        # descriptions are unusable evidence, not completions.
+        description = check.get("description")
+        if (not isinstance(description, str)
+                or description.strip().casefold()
+                not in CODERABBIT_COMPLETED_DESCRIPTIONS):
             return None
     else:
         return None

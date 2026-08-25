@@ -1085,6 +1085,23 @@ class ReviewGateTests(unittest.TestCase):
             "checkSuite": {"app": {"slug": "coderabbitai"}},
         }]
 
+    @staticmethod
+    def coderabbit_status_context(**overrides):
+        """One authentic, current-head CodeRabbit StatusContext.
+
+        Defaults to the genuine completion shape so each case below overrides
+        exactly the one field it is about.
+        """
+        context = {
+            "type": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+            "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "description": "Review completed",
+        }
+        context.update(overrides)
+        return [context]
+
     @classmethod
     def coderabbit_status_payload(cls, head):
         return {"data": {"repository": {"pullRequest": {
@@ -1266,6 +1283,76 @@ class ReviewGateTests(unittest.TestCase):
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": {"login": "spoof", "__typename": "User"},
         }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_completed_description_status_passes(self):
+        """The genuine verdict still merges: no currently mergeable PR regresses."""
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context()
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_rate_limited_description_status_fails_closed(self):
+        """The reported bug: state=SUCCESS meaning 'I did not review this head'."""
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description="Review rate limited",
+        )
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )
+        self.assertFalse(ok)
+        # The refusal already promised rate-limited evidence blocks merge;
+        # this binds that wording to behaviour the code now implements.
+        self.assertIn("rate-limited", msg)
+
+    def test_label_skipped_description_status_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description="Review skipped: excluded by label configuration",
+        )
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_missing_description_status_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        status = self.coderabbit_status_context()
+        del status[0]["description"]
+        evidence["coderabbit_status"] = status
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_empty_description_status_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description="   ",
+        )
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_non_string_description_status_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description={"text": "Review completed"},
+        )
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_unknown_description_status_fails_closed(self):
+        """A future wording is not silently admitted by a substring rule."""
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description="Review could not be completed",
+        )
         self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])

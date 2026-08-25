@@ -108,6 +108,7 @@ def canonical_pr(**overrides) -> dict:
                 "context": "CodeRabbit",
                 "state": "SUCCESS",
                 "creator": {"login": "coderabbitai", "__typename": "Bot"},
+                "description": "Review completed",
             },
         ],
     }
@@ -137,6 +138,7 @@ def canonical_evidence(**overrides) -> dict:
             "context": "CodeRabbit",
             "state": "SUCCESS",
             "creator": {"login": "coderabbitai", "__typename": "Bot"},
+            "description": "Review completed",
         }],
         "service_threads": {
             "coderabbit": {
