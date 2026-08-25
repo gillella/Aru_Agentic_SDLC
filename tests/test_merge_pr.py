@@ -17,6 +17,14 @@ import merge_pr
 import cleanup_worktrees
 
 
+def _complete_comments(nodes):
+    return {
+        "totalCount": len(nodes),
+        "nodes": nodes,
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+    }
+
+
 def _gate(pr, threads=0, **overrides):
     """Run the review gate with clean default evidence."""
     if threads is None:
@@ -84,67 +92,6 @@ Do a thing.
         self.assertEqual(merge_pr.unticked_criteria("no headings here"), [])
 
 
-class UnresolvedThreadQueryTests(unittest.TestCase):
-    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
-    @patch.object(merge_pr, "_gh_json")
-    def test_paginates_and_counts_unresolved_threads_on_later_pages(
-        self, gh_json, _slug
-    ):
-        gh_json.side_effect = [
-            {"data": {"repository": {"pullRequest": {"reviewThreads": {
-                "nodes": [{"isResolved": True, "isOutdated": False}],
-                "pageInfo": {"hasNextPage": True, "endCursor": "next-page"},
-            }}}}},
-            {"data": {"repository": {"pullRequest": {"reviewThreads": {
-                "nodes": [{"isResolved": False, "isOutdated": False}],
-                "pageInfo": {"hasNextPage": False, "endCursor": None},
-            }}}}},
-        ]
-
-        self.assertEqual(merge_pr.unresolved_threads(57), 1)
-        self.assertIn("cursor=next-page", gh_json.call_args_list[1].args[0])
-
-    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
-    @patch.object(merge_pr, "_gh_json")
-    def test_missing_pagination_proof_returns_unknown(self, gh_json, _slug):
-        gh_json.return_value = {"data": {"repository": {"pullRequest": {
-            "reviewThreads": {
-                "nodes": [{"isResolved": True, "isOutdated": False}],
-            }
-        }}}}
-
-        self.assertIsNone(merge_pr.unresolved_threads(57))
-
-    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
-    @patch.object(merge_pr, "_gh_json")
-    def test_multi_cursor_cycle_returns_unknown_without_another_request(
-        self, gh_json, _slug
-    ):
-        def page(next_cursor):
-            return {"data": {"repository": {"pullRequest": {"reviewThreads": {
-                "nodes": [],
-                "pageInfo": {"hasNextPage": True, "endCursor": next_cursor},
-            }}}}}
-
-        gh_json.side_effect = [page("A"), page("B"), page("A")]
-
-        self.assertIsNone(merge_pr.unresolved_threads(57))
-        self.assertEqual(gh_json.call_count, 3)
-
-    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
-    @patch.object(merge_pr, "_gh_json")
-    def test_partial_data_with_graphql_errors_returns_unknown(self, gh_json, _slug):
-        gh_json.return_value = {
-            "errors": [{"message": "partial result"}],
-            "data": {"repository": {"pullRequest": {"reviewThreads": {
-                "nodes": [],
-                "pageInfo": {"hasNextPage": False, "endCursor": None},
-            }}}},
-        }
-
-        self.assertIsNone(merge_pr.unresolved_threads(57))
-
-
 class ReviewEvidencePaginationTests(unittest.TestCase):
     @staticmethod
     def review_page(head="head123", nodes=None, has_next=False, cursor=None):
@@ -169,11 +116,22 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
 
     @staticmethod
     def thread_page(head="head123", nodes=None):
+        normalized = []
+        for node in [] if nodes is None else nodes:
+            node = dict(node)
+            comments = dict(node.get("comments") or {})
+            comment_nodes = comments.get("nodes") or []
+            comments.setdefault("totalCount", len(comment_nodes))
+            comments.setdefault(
+                "pageInfo", {"hasNextPage": False, "endCursor": None},
+            )
+            node["comments"] = comments
+            normalized.append(node)
         return {"data": {"repository": {"pullRequest": {
             "headRefOid": head,
             "commits": {"nodes": []},
             "reviewThreads": {
-                "nodes": [] if nodes is None else nodes,
+                "nodes": normalized,
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
             },
         }}}}
@@ -206,6 +164,42 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                         "isOutdated": False,
                         "comments": {"nodes": comments},
                     }]),
+                ]
+                self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_nested_thread_comments_require_complete_truncation_proof(
+        self, gh_json, _slug,
+    ):
+        comment = {
+            "createdAt": "2026-08-24T01:00:00Z",
+            "body": "finding",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }
+        cases = ("missing-total", "missing-page", "truncated", "count-mismatch")
+        for case in cases:
+            with self.subTest(case=case):
+                thread_page = self.thread_page(nodes=[{
+                    "isResolved": False,
+                    "isOutdated": False,
+                    "comments": {"nodes": [comment]},
+                }])
+                connection = thread_page["data"]["repository"]["pullRequest"][
+                    "reviewThreads"
+                ]["nodes"][0]["comments"]
+                if case == "missing-total":
+                    connection.pop("totalCount")
+                elif case == "missing-page":
+                    connection.pop("pageInfo")
+                elif case == "truncated":
+                    connection["pageInfo"]["hasNextPage"] = True
+                    connection["pageInfo"]["endCursor"] = "more"
+                else:
+                    connection["totalCount"] = 2
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.side_effect = [
+                    self.review_page(), self.attestation_page(), thread_page,
                 ]
                 self.assertIsNone(merge_pr.review_evidence(162))
 
@@ -1004,10 +998,9 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("CodeRabbit", msg)
 
-    def test_issue_341_coderabbit_pin_is_deterministic_and_fail_closed(self):
+    def test_coderabbit_label_is_the_only_authority(self):
         pr = self.coderabbit_pr("author:agent-1", "review:coderabbit")
         pr["body"] = "Closes #341"
-        self.assertEqual(merge_pr.review_service_for_issue(341), "coderabbit")
         self.assertEqual(merge_pr.assigned_review_service(pr), "coderabbit")
         ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
         self.assertTrue(ok, msg)
@@ -1018,7 +1011,7 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(merge_pr.check_reviews(wrong_service, None)[0])
         self.assertFalse(merge_pr.check_reviews(pr, None)[0])
 
-    def test_remediation_head_status_can_bind_new_head_after_prior_review(self):
+    def test_remediation_head_status_cannot_reuse_prior_head_review(self):
         old_head = "a" * 40
         new_head = "b" * 40
         evidence = self.coderabbit_evidence(head=old_head, state="APPROVED", body="")
@@ -1030,8 +1023,8 @@ class ReviewGateTests(unittest.TestCase):
             "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
         }]
         ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
-        self.assertTrue(ok, msg)
-        self.assertIn(new_head[:12], msg)
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", msg)
 
     def test_current_head_status_without_prior_substantive_coderabbit_review_fails_closed(self):
         evidence = self.coderabbit_evidence()
@@ -1063,7 +1056,7 @@ class ReviewGateTests(unittest.TestCase):
         evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
         ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
         self.assertFalse(ok)
-        self.assertIn("CodeRabbit requested changes", msg)
+        self.assertIn("CodeRabbit", msg)
 
     def test_ambiguous_newest_prior_coderabbit_reviews_fail_closed_even_with_current_head_status(self):
         evidence = self.coderabbit_evidence(head="a" * 40, state="APPROVED")
@@ -1182,6 +1175,20 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("CodeRabbit", msg)
 
+    def test_newer_empty_commented_review_without_proof_blocks_older_approval(self):
+        evidence = self.coderabbit_evidence(body="", state="APPROVED")
+        evidence["reviews"].append({
+            "id": "coderabbit-empty-comment",
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-23T21:00:00Z",
+            "body": "",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "commit": {"oid": evidence["head_oid"]},
+        })
+        ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", msg)
+
     def test_only_non_substantive_empty_commented_history_still_fails_closed(self):
         evidence = self.no_findings_full_review_evidence(include_request=False)
         evidence["coderabbit_status"] = self.coderabbit_checkrun_status()
@@ -1261,14 +1268,14 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("CodeRabbit", msg)
 
-    def test_null_status_creator_passes_with_recognized_review(self):
+    def test_null_status_creator_fails_even_with_recognized_review(self):
         evidence = self.coderabbit_evidence(body="Review complete.")
         evidence["coderabbit_status"] = [{
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": None,
         }]
         ok, msg = merge_pr.check_reviews(self.coderabbit_pr("author:agent-1"), evidence)
-        self.assertTrue(ok, msg)
+        self.assertFalse(ok)
         self.assertIn("CodeRabbit", msg)
 
     def test_non_null_spoof_status_creator_fails_with_recognized_review(self):
@@ -1292,25 +1299,24 @@ class ReviewGateTests(unittest.TestCase):
         )[0])
 
     def test_missing_failed_rate_limited_or_ambiguous_check_fails_closed(self):
-        evidence = self.coderabbit_evidence()
+        good = self.coderabbit_checkrun_status()[0]
         cases = (
             [],
-            [{"name": "CodeRabbit", "status": "COMPLETED", "conclusion": "FAILURE"}],
-            [{"name": "CodeRabbit", "status": "COMPLETED", "conclusion": "NEUTRAL"}],
-            [{"name": "CodeRabbit", "status": "IN_PROGRESS", "conclusion": ""}],
-            [
-                {"name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS"},
-                {"context": "CodeRabbit", "state": "SUCCESS"},
-            ],
+            [dict(good, conclusion="FAILURE")],
+            [dict(good, conclusion="NEUTRAL")],
+            [dict(good, status="IN_PROGRESS", conclusion="")],
+            [dict(good), dict(good)],
         )
         for checks in cases:
             with self.subTest(checks=checks):
-                pr = labelled("author:agent-1")
-                pr["statusCheckRollup"] = checks
+                evidence = self.coderabbit_evidence()
+                evidence["coderabbit_status"] = checks
+                pr = self.coderabbit_pr("author:agent-1")
                 self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
 
     def test_github_review_evidence_without_authoritative_status_never_uses_pr_rollup(self):
         evidence = self.coderabbit_evidence()
+        evidence.pop("coderabbit_status")
         evidence["github_review_evidence"] = True
         self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
@@ -1347,6 +1353,7 @@ class ReviewGateTests(unittest.TestCase):
     def test_github_review_evidence_without_authoritative_status_fails_closed(self):
         pr = self.coderabbit_pr("author:agent-1")
         evidence = self.coderabbit_evidence()
+        evidence.pop("coderabbit_status")
         evidence["github_review_evidence"] = True
         self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
 
@@ -1368,1046 +1375,56 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("review:", msg)
 
-    def test_duplicate_assigned_review_service_labels_fail_closed(self):
+    def test_mixed_review_labels_fail_closed(self):
         pr = self.coderabbit_pr("author:agent-1", "review:coderabbit", "review:sourcery")
         ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
         self.assertFalse(ok)
         self.assertIn("exactly one", msg)
 
-    def test_no_linked_issue_fails_closed(self):
-        """A review: label with no 'Closes #N' has nothing to recompute from."""
+    def test_review_authority_does_not_duplicate_the_issue_link_gate(self):
         pr = self.coderabbit_pr("author:agent-1")
         pr["body"] = "No issue link here."
-        self.assertIsNone(merge_pr.assigned_review_service(pr))
-        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
-        self.assertFalse(ok)
-        self.assertIn("review:", msg)
-
-    def test_mixed_service_multi_issue_pr_fails_closed(self):
-        """Issue #1 resolves to coderabbit, #2 resolves to sourcery: no single
-        service can be trusted, so the review:coderabbit label must be rejected
-        rather than letting the first issue silently pick the evidence path."""
-        pr = self.coderabbit_pr("author:agent-1")
-        pr["body"] = "Closes #1\nCloses #2"
-        self.assertEqual(merge_pr.review_service_for_issue(1), "coderabbit")
-        self.assertEqual(merge_pr.review_service_for_issue(2), "sourcery")
-        self.assertIsNone(merge_pr.assigned_review_service(pr))
-        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
-        self.assertFalse(ok)
-        self.assertIn("review:", msg)
-
-    def test_multi_issue_pr_agreeing_on_one_service_resolves(self):
-        """Issues #1 and #4 both recompute to coderabbit, so the label stands."""
-        pr = self.coderabbit_pr("author:agent-1")
-        pr["body"] = "Closes #1\nCloses #4"
-        self.assertEqual(merge_pr.review_service_for_issue(4), "coderabbit")
         self.assertEqual(merge_pr.assigned_review_service(pr), "coderabbit")
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertTrue(ok, msg)
+        self.assertFalse(merge_pr.check_issue_link(pr)[0])
+
+    def test_legacy_unknown_and_duplicate_review_labels_fail_closed(self):
+        cases = (
+            ("review:sourcery",),
+            ("review:codeant",),
+            ("review:manual",),
+            ("review:coderabbit", "review:coderabbit"),
+        )
+        for labels in cases:
+            with self.subTest(labels=labels):
+                pr = self.coderabbit_pr("author:agent-1", *labels)
+                self.assertIsNone(merge_pr.assigned_review_service(pr))
+                ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+                self.assertFalse(ok)
+                self.assertIn("review:coderabbit", msg)
 
     def test_authoritative_status_propagates_coderabbit_loader_failure(self):
         evidence = {"github_review_evidence": True, "head_oid": "a" * 40}
-        with patch.object(
-            merge_pr, "_with_coderabbit_status", return_value=None,
-        ) as coderabbit, patch.object(
-            merge_pr, "_with_sourcery_status", return_value=evidence,
-        ) as sourcery:
-            result = merge_pr._with_authoritative_review_status(383, evidence)
-
-        self.assertIsNone(result)
-        coderabbit.assert_called_once_with(383, evidence)
-        sourcery.assert_not_called()
-
-    def test_authoritative_status_propagates_sourcery_loader_failure(self):
-        evidence = {"github_review_evidence": True, "head_oid": "a" * 40}
-        coderabbit_evidence = dict(evidence, coderabbit_status=[])
-        with patch.object(
-            merge_pr, "_with_coderabbit_status", return_value=coderabbit_evidence,
-        ) as coderabbit, patch.object(
-            merge_pr, "_with_sourcery_status", return_value=None,
-        ) as sourcery:
-            result = merge_pr._with_authoritative_review_status(383, evidence)
-
-        self.assertIsNone(result)
-        coderabbit.assert_called_once_with(383, evidence)
-        sourcery.assert_called_once_with(383, coderabbit_evidence)
-
-    def test_sourcery_successful_assigned_head_check_passes(self):
-        pr = labelled("author:agent-1", "review:sourcery")
-        pr["statusCheckRollup"] = [{
-            "__typename": "CheckRun",
-            "name": "Sourcery review",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-            "checkSuite": {"app": {"slug": "sourcery"}},
-        }]
-        ok, msg = merge_pr.check_reviews(pr, {
-            "head_oid": "a" * 40,
-            "reviews": [],
-            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        })
-        self.assertTrue(ok, msg)
-        self.assertIn("Sourcery", msg)
-
-    def test_sourcery_failed_or_spoofed_check_fails_closed(self):
-        pr = labelled("author:agent-1", "review:sourcery")
-        pr["statusCheckRollup"] = [{
-            "__typename": "CheckRun",
-            "name": "Sourcery review",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-            "checkSuite": {"app": {"slug": "spoofed-app"}},
-        }]
-        ok, msg = merge_pr.check_reviews(pr, {
-            "head_oid": "a" * 40,
-            "reviews": [],
-            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        })
-        self.assertFalse(ok)
-        self.assertIn("Sourcery", msg)
-
-    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
-    @patch.object(merge_pr, "_gh_json")
-    def test_sourcery_live_evidence_requires_exact_head_bound_check_run(
-        self, gh_json, _slug
-    ):
-        head = "a" * 40
-        base = "b" * 40
-        pr = labelled("author:agent-1", "review:sourcery")
-        pr.update({"number": 383, "headRefOid": head, "baseRefOid": base})
-        pr["statusCheckRollup"] = [{
-            "__typename": "CheckRun",
-            "name": "Sourcery review",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-        }]
-        sourcery_payload = {
-            "total_count": 1,
-            "check_runs": [{
-                "name": "Sourcery review",
-                "status": "completed",
-                "conclusion": "success",
-                "head_sha": head,
-                "app": {"slug": "sourcery-ai"},
-                "pull_requests": [{
-                    "number": 383,
-                    "head": {"sha": head},
-                    "base": {"sha": base},
-                }],
-            }]
-        }
-        gh_json.side_effect = [
-            self.coderabbit_status_payload(head), sourcery_payload,
-        ]
-        evidence = merge_pr._with_authoritative_review_status(383, {
-            "github_review_evidence": True,
-            "head_oid": head,
-            "reviews": [],
-            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        })
-
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-
-        self.assertTrue(ok, msg)
-        self.assertIn("Sourcery", msg)
-
-    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
-    @patch.object(merge_pr, "_gh_json")
-    def test_sourcery_live_evidence_fails_closed_when_check_run_head_is_stale(
-        self, gh_json, _slug
-    ):
-        head = "a" * 40
-        pr = labelled("author:agent-1", "review:sourcery")
-        pr.update({"number": 383, "headRefOid": head})
-        pr["statusCheckRollup"] = [{
-            "__typename": "CheckRun",
-            "name": "Sourcery review",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-        }]
-        sourcery_payload = {
-            "total_count": 1,
-            "check_runs": [{
-                "name": "Sourcery review",
-                "status": "completed",
-                "conclusion": "success",
-                "head_sha": "c" * 40,
-                "app": {"slug": "sourcery-ai"},
-                "pull_requests": [{"number": 383, "head": {"sha": head}}],
-            }]
-        }
-        gh_json.side_effect = [
-            self.coderabbit_status_payload(head), sourcery_payload,
-        ]
-        evidence = merge_pr._with_authoritative_review_status(383, {
-            "github_review_evidence": True,
-            "head_oid": head,
-            "reviews": [],
-            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        })
-
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-
-        self.assertFalse(ok)
-        self.assertIn("Sourcery", msg)
-
-    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
-    @patch.object(merge_pr, "_gh_json")
-    def test_sourcery_live_evidence_fails_closed_when_head_binding_is_missing(
-        self, gh_json, _slug
-    ):
-        head = "a" * 40
-        pr = labelled("author:agent-1", "review:sourcery")
-        pr.update({"number": 383, "headRefOid": head})
-        pr["statusCheckRollup"] = [{
-            "__typename": "CheckRun",
-            "name": "Sourcery review",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-        }]
-        gh_json.side_effect = [
-            self.coderabbit_status_payload(head),
-            {"total_count": 0, "check_runs": []},
-        ]
-        evidence = merge_pr._with_authoritative_review_status(383, {
-            "github_review_evidence": True,
-            "head_oid": head,
-            "reviews": [],
-            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        })
-
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-
-        self.assertFalse(ok)
-        self.assertIn("Sourcery", msg)
-
-    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
-    @patch.object(merge_pr, "_gh_json")
-    def test_sourcery_live_evidence_fails_closed_when_check_runs_are_truncated(
-        self, gh_json, _slug
-    ):
-        head = "a" * 40
-        pr = labelled("author:agent-1", "review:sourcery")
-        pr.update({"number": 383, "headRefOid": head})
-        # total_count exceeds the returned page: a blocking run may be hidden.
-        sourcery_payload = {
-            "total_count": 101,
-            "check_runs": [{
-                "name": "Sourcery review",
-                "status": "completed",
-                "conclusion": "success",
-                "head_sha": head,
-                "app": {"slug": "sourcery-ai"},
-                "pull_requests": [{"number": 383, "head": {"sha": head}}],
-            }],
-        }
-        gh_json.side_effect = [
-            self.coderabbit_status_payload(head), sourcery_payload,
-        ]
-        evidence = merge_pr._with_authoritative_review_status(383, {
-            "github_review_evidence": True,
-            "head_oid": head,
-            "reviews": [],
-            "service_threads": {"sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        })
-
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-
-        self.assertFalse(ok)
-        self.assertIn("Sourcery", msg)
-
-    def test_sourcery_cannot_pass_over_human_changes_requested(self):
-        pr = labelled("author:agent-1", "review:sourcery")
-        pr["statusCheckRollup"] = [{
-            "__typename": "CheckRun",
-            "name": "Sourcery review",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-            "checkSuite": {"app": {"slug": "sourcery"}},
-        }]
-        ok, msg = merge_pr.check_reviews(pr, {
-            "head_oid": "a" * 40,
-            "reviews": [{
-                "id": "human-block", "state": "CHANGES_REQUESTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "author": {"login": "human-reviewer", "__typename": "User"},
-            }],
-            "service_threads": {
-                "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-            },
-        })
-        self.assertFalse(ok)
-        self.assertIn("requested changes", msg)
-
-    def test_sourcery_cannot_pass_over_aggregate_unfixed_blocker(self):
-        pr = labelled("author:agent-1", "review:sourcery")
-        pr["statusCheckRollup"] = [{
-            "__typename": "CheckRun",
-            "name": "Sourcery review",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-            "checkSuite": {"app": {"slug": "sourcery"}},
-        }]
-        ok, msg = merge_pr.check_reviews(pr, {
-            "head_oid": "a" * 40,
-            "reviews": [],
-            "unfixed": 1,
-            "service_threads": {
-                "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-            },
-        })
-        self.assertFalse(ok)
-        self.assertIn("resolved thread(s) have no evidence", msg)
-
-    def test_codeant_exact_head_review_and_zero_threads_passes(self):
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": "a" * 40,
-            "reviews": [{
-                "id": "codeant-review",
-                "state": "COMMENTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "body": "CodeAnt findings.",
-                "author": {"login": "codeant-ai", "__typename": "Bot"},
-                "commit": {"oid": "a" * 40},
-            }],
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        }
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-        self.assertTrue(ok, msg)
-        self.assertIn("CodeAnt", msg)
-
-    def test_codeant_exact_head_changes_requested_fails_closed(self):
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": "a" * 40,
-            "reviews": [{
-                "id": "codeant-review",
-                "state": "CHANGES_REQUESTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "body": "Blocking finding remains.",
-                "author": {"login": "codeant-ai", "__typename": "Bot"},
-                "commit": {"oid": "a" * 40},
-            }],
-            "service_threads": {
-                "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-            },
-        }
-
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-
-        self.assertFalse(ok)
-        self.assertIn("CodeAnt requested changes", msg)
-
-    def test_codeant_empty_commented_review_fails_closed(self):
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": "a" * 40,
-            "reviews": [{
-                "id": "codeant-review",
-                "state": "COMMENTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "body": "   ",
-                "author": {"login": "codeant-ai", "__typename": "Bot"},
-                "commit": {"oid": "a" * 40},
-            }],
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        }
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-        self.assertFalse(ok)
-        self.assertIn("CodeAnt", msg)
-
-    def test_codeant_stale_review_fails_closed(self):
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": "b" * 40,
-            "reviews": [{
-                "id": "codeant-review",
-                "state": "COMMENTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "body": "CodeAnt findings.",
-                "author": {"login": "codeant-ai", "__typename": "Bot"},
-                "commit": {"oid": "a" * 40},
-            }],
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        }
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-        self.assertFalse(ok)
-        self.assertIn("CodeAnt", msg)
-
-    def test_codeant_spoofed_review_fails_closed(self):
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": "a" * 40,
-            "reviews": [{
-                "id": "codeant-review",
-                "state": "COMMENTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "body": "CodeAnt findings.",
-                "author": {"login": "not-codeant", "__typename": "Bot"},
-                "commit": {"oid": "a" * 40},
-            }],
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        }
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-        self.assertFalse(ok)
-        self.assertIn("CodeAnt", msg)
-
-    def test_codeant_cannot_pass_over_human_changes_requested(self):
-        pr = labelled("author:agent-1", "review:codeant")
-        ok, msg = merge_pr.check_reviews(pr, {
-            "head_oid": "a" * 40,
-            "reviews": [{
-                "id": "human-block", "state": "CHANGES_REQUESTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "author": {"login": "human-reviewer", "__typename": "User"},
-            }],
-            "service_threads": {
-                "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-            },
-        })
-        self.assertFalse(ok)
-        self.assertIn("requested changes", msg)
-
-    def test_codeant_cannot_pass_over_aggregate_unfixed_blocker(self):
-        pr = labelled("author:agent-1", "review:codeant")
-        ok, msg = merge_pr.check_reviews(pr, {
-            "head_oid": "a" * 40,
-            "reviews": [],
-            "unfixed": 1,
-            "service_threads": {
-                "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-            },
-        })
-        self.assertFalse(ok)
-        self.assertIn("resolved thread(s) have no evidence", msg)
-
-
-def _codeant_status_comment(records, login="codeant-ai", typename="Bot"):
-    """Build a trusted-shaped CodeAnt status comment fixture (issue #394)."""
-    body = (
-        "## \U0001f916 CodeAnt AI — Review Status\n\n"
-        "| Status | Commit | Started (UTC) | Finished (UTC) |\n"
-        f"<!-- codeant-review-status:{json.dumps(records)} -->"
-    )
-    return {"body": body, "author": {"login": login, "__typename": typename}}
-
-
-def _codeant_status_record(commit, label="Reviewed your PR", done=True):
-    return {
-        "label": label,
-        "commit": commit,
-        "started": "2026-08-24T15:07:07.927200",
-        "finished": "2026-08-24T15:08:00.608736",
-        "done": done,
-    }
-
-
-class CodeAntStatusRecordParsingTests(unittest.TestCase):
-    """Unit coverage for the marker/record parsers introduced by #394."""
-
-    def test_no_marker_returns_none(self):
-        self.assertIsNone(merge_pr._codeant_status_records("just some prose"))
-
-    def test_non_string_body_returns_none(self):
-        self.assertIsNone(merge_pr._codeant_status_records(None))
-
-    def test_duplicated_marker_in_one_body_returns_none(self):
-        one = f"<!-- codeant-review-status:{json.dumps([])} -->"
-        self.assertIsNone(merge_pr._codeant_status_records(one + " " + one))
-
-    def test_malformed_json_returns_none(self):
-        body = "<!-- codeant-review-status:{not json} -->"
-        self.assertIsNone(merge_pr._codeant_status_records(body))
-
-    def test_non_list_payload_returns_none(self):
-        body = f"<!-- codeant-review-status:{json.dumps({'a': 1})} -->"
-        self.assertIsNone(merge_pr._codeant_status_records(body))
-
-    def test_well_formed_list_round_trips(self):
-        records = [_codeant_status_record("a" * 40)]
-        body = f"<!-- codeant-review-status:{json.dumps(records)} -->"
-        self.assertEqual(merge_pr._codeant_status_records(body), records)
-
-    def test_record_at_different_head_is_irrelevant(self):
-        record = _codeant_status_record("b" * 40)
-        self.assertIsNone(merge_pr._codeant_status_record_at_head(record, "a" * 40))
-
-    def test_record_missing_key_at_exact_head_fails_closed(self):
-        record = _codeant_status_record("a" * 40)
-        del record["started"]
-        self.assertIs(
-            merge_pr._codeant_status_record_at_head(record, "a" * 40), False
-        )
-
-    def test_record_extra_key_at_exact_head_fails_closed(self):
-        record = _codeant_status_record("a" * 40)
-        record["extra"] = "nope"
-        self.assertIs(
-            merge_pr._codeant_status_record_at_head(record, "a" * 40), False
-        )
-
-    def test_record_not_done_at_exact_head_fails_closed(self):
-        record = _codeant_status_record("a" * 40, done=False)
-        self.assertIs(
-            merge_pr._codeant_status_record_at_head(record, "a" * 40), False
-        )
-
-    def test_record_done_non_bool_fails_closed(self):
-        record = _codeant_status_record("a" * 40, done="true")
-        self.assertIs(
-            merge_pr._codeant_status_record_at_head(record, "a" * 40), False
-        )
-
-    def test_record_bad_commit_shape_is_irrelevant(self):
-        record = _codeant_status_record("not-a-sha")
-        self.assertIsNone(merge_pr._codeant_status_record_at_head(record, "a" * 40))
-
-    def test_record_done_true_at_exact_head_passes(self):
-        record = _codeant_status_record("a" * 40)
-        self.assertIs(
-            merge_pr._codeant_status_record_at_head(record, "a" * 40), True
-        )
-
-
-class CodeAntStatusEvidenceTests(unittest.TestCase):
-    """Coverage for the trusted-status fallback path added for issue #394."""
-
-    def test_no_evidence_dict_fails_closed(self):
-        self.assertIs(merge_pr._codeant_status_evidence(None), False)
-
-    def test_missing_head_oid_fails_closed(self):
-        evidence = {"codeant_status_comments": [_codeant_status_comment(
-            [_codeant_status_record("a" * 40)]
-        )]}
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-    def test_missing_comments_list_fails_closed(self):
-        evidence = {"head_oid": "a" * 40}
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-    def test_no_trusted_comments_fails_closed(self):
-        evidence = {"head_oid": "a" * 40, "codeant_status_comments": []}
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-    def test_full_and_incremental_completed_records_pass(self):
-        """Reproduces PR #390: two completed records, zero Review objects."""
-        head = "d9826305ac582ffdfa237cdb7e8fc4a3d4b92d9c"
-        records = [
-            _codeant_status_record(head, label="Reviewed your PR"),
-            _codeant_status_record(head, label="Incremental review completed"),
-            _codeant_status_record("4a4bda010c3bcc6ad73496275cf237f69ba97828"),
-        ]
-        evidence = {
-            "head_oid": head,
-            "codeant_status_comments": [_codeant_status_comment(records)],
-        }
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), True)
-
-    def test_stale_status_only_old_head_fails_closed(self):
-        evidence = {
-            "head_oid": "a" * 40,
-            "codeant_status_comments": [_codeant_status_comment(
-                [_codeant_status_record("b" * 40)]
-            )],
-        }
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-    def test_unfinished_status_at_exact_head_fails_closed(self):
-        evidence = {
-            "head_oid": "a" * 40,
-            "codeant_status_comments": [_codeant_status_comment(
-                [_codeant_status_record("a" * 40, done=False)]
-            )],
-        }
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-    def test_malformed_record_at_exact_head_fails_closed(self):
-        bad = _codeant_status_record("a" * 40)
-        del bad["label"]
-        evidence = {
-            "head_oid": "a" * 40,
-            "codeant_status_comments": [_codeant_status_comment([bad])],
-        }
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-    def test_spoofed_login_fails_closed(self):
-        evidence = {
-            "head_oid": "a" * 40,
-            "codeant_status_comments": [_codeant_status_comment(
-                [_codeant_status_record("a" * 40)], login="not-codeant",
-            )],
-        }
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-    def test_spoofed_actor_type_fails_closed(self):
-        evidence = {
-            "head_oid": "a" * 40,
-            "codeant_status_comments": [_codeant_status_comment(
-                [_codeant_status_record("a" * 40)], typename="User",
-            )],
-        }
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-    def test_duplicate_trusted_comments_are_ambiguous_and_fail_closed(self):
-        evidence = {
-            "head_oid": "a" * 40,
-            "codeant_status_comments": [
-                _codeant_status_comment([_codeant_status_record("a" * 40)]),
-                _codeant_status_comment([_codeant_status_record("a" * 40)]),
-            ],
-        }
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-    def test_malformed_marker_body_is_ignored_not_trusted(self):
-        evidence = {
-            "head_oid": "a" * 40,
-            "codeant_status_comments": [{
-                "body": "<!-- codeant-review-status:{broken} -->",
-                "author": {"login": "codeant-ai", "__typename": "Bot"},
-            }],
-        }
-        self.assertIs(merge_pr._codeant_status_evidence(evidence), False)
-
-
-class CodeAntStatusGateIntegrationTests(unittest.TestCase):
-    """check_reviews()/has_authoritative_assigned_review() integration (#394)."""
-
-    def test_check_reviews_accepts_trusted_clean_status_when_no_review_object(self):
-        head = "d9826305ac582ffdfa237cdb7e8fc4a3d4b92d9c"
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": head,
-            "reviews": [],
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-            "codeant_status_comments": [_codeant_status_comment([
-                _codeant_status_record(head, label="Reviewed your PR"),
-                _codeant_status_record(head, label="Incremental review completed"),
-            ])],
-        }
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-        self.assertTrue(ok, msg)
-        self.assertIn("CodeAnt", msg)
-        self.assertIn(head[:12], msg)
-
-    def test_check_reviews_rejects_missing_status_and_missing_review_object(self):
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": "a" * 40,
-            "reviews": [],
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-        }
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-        self.assertFalse(ok)
-        self.assertIn("CodeAnt", msg)
-
-    def test_check_reviews_prefers_review_object_over_status_when_both_present(self):
-        head = "a" * 40
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": head,
-            "reviews": [{
-                "id": "codeant-review",
-                "state": "CHANGES_REQUESTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "body": "Blocking finding remains.",
-                "author": {"login": "codeant-ai", "__typename": "Bot"},
-                "commit": {"oid": head},
-            }],
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-            "codeant_status_comments": [_codeant_status_comment(
-                [_codeant_status_record(head)]
-            )],
-        }
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-        self.assertFalse(ok)
-        self.assertIn("CodeAnt requested changes", msg)
-
-    def test_check_reviews_still_blocks_on_unresolved_codeant_threads(self):
-        head = "a" * 40
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": head,
-            "reviews": [],
-            "service_threads": {"codeant": {"unresolved": 1, "unfixed": 0, "outdated_unfixed": 0}},
-            "codeant_status_comments": [_codeant_status_comment(
-                [_codeant_status_record(head)]
-            )],
-        }
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-        self.assertFalse(ok)
-        self.assertIn("unresolved", msg)
-
-    def test_check_reviews_still_blocks_on_human_changes_requested(self):
-        head = "a" * 40
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": head,
-            "reviews": [{
-                "id": "human-block", "state": "CHANGES_REQUESTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "author": {"login": "human-reviewer", "__typename": "User"},
-            }],
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-            "codeant_status_comments": [_codeant_status_comment(
-                [_codeant_status_record(head)]
-            )],
-        }
-        ok, msg = merge_pr.check_reviews(pr, evidence)
-        self.assertFalse(ok)
-        self.assertIn("requested changes", msg)
-
-    def test_has_authoritative_assigned_review_true_for_trusted_status(self):
-        head = "a" * 40
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {
-            "head_oid": head,
-            "reviews": [],
-            "codeant_status_comments": [_codeant_status_comment(
-                [_codeant_status_record(head)]
-            )],
-        }
-        self.assertTrue(merge_pr.has_authoritative_assigned_review(pr, evidence))
-
-    def test_has_authoritative_assigned_review_false_for_missing_status(self):
-        pr = labelled("author:agent-1", "review:codeant")
-        evidence = {"head_oid": "a" * 40, "reviews": []}
-        self.assertFalse(merge_pr.has_authoritative_assigned_review(pr, evidence))
-
-
-def _codeant_review(head, **overrides):
-    review = {
-        "id": "codeant-review",
-        "state": "COMMENTED",
-        "submittedAt": "2026-08-24T01:00:00Z",
-        "body": "CodeAnt findings.",
-        "author": {"login": "codeant-ai", "__typename": "Bot"},
-        "commit": {"oid": head},
-    }
-    review.update(overrides)
-    return review
-
-
-class CodeAntReviewUnusableTests(unittest.TestCase):
-    """_codeant_latest_review() must distinguish true absence (``None``,
-    zero CodeAnt Review objects bound to the exact current head - including
-    a well-formed Review object bound to a prior head, which is historical
-    audit evidence, #396) from unusable evidence (``CODEANT_REVIEW_UNUSABLE``:
-    a Review object bound to the exact current head exists but is pending,
-    malformed, spoofed, or an ambiguous tie for newest) (#394)."""
-
-    HEAD = "a" * 40
-
-    def test_no_reviews_is_true_absence(self):
-        evidence = {"head_oid": self.HEAD, "reviews": []}
-        self.assertIsNone(merge_pr._codeant_latest_review(evidence))
-
-    def test_only_dismissed_review_is_true_absence(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, state="DISMISSED"),
-        ]}
-        self.assertIsNone(merge_pr._codeant_latest_review(evidence))
-
-    def test_only_non_codeant_login_is_true_absence(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, author={"login": "someone-else", "__typename": "User"}),
-        ]}
-        self.assertIsNone(merge_pr._codeant_latest_review(evidence))
-
-    def test_valid_review_returns_dict(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [_codeant_review(self.HEAD)]}
-        review = merge_pr._codeant_latest_review(evidence)
-        self.assertIsInstance(review, dict)
-        self.assertEqual(review["id"], "codeant-review")
-
-    def test_newest_of_several_valid_reviews_wins(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, id="older", submittedAt="2026-08-24T01:00:00Z"),
-            _codeant_review(self.HEAD, id="newer", submittedAt="2026-08-24T02:00:00Z"),
-        ]}
-        review = merge_pr._codeant_latest_review(evidence)
-        self.assertEqual(review["id"], "newer")
-
-    def test_malformed_non_dict_entry_is_unusable(self):
-        evidence = {"head_oid": self.HEAD, "reviews": ["not-a-dict"]}
-        self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
-
-    def test_non_bot_identity_is_unusable(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, author={"login": "codeant-ai", "__typename": "User"}),
-        ]}
-        self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
-
-    def test_pending_state_is_unusable(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [_codeant_review(self.HEAD, state="PENDING")]}
-        self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
-
-    def test_well_formed_prior_head_review_is_true_absence(self):
-        """A Review object bound to a different, well-formed commit oid is
-        historical audit evidence from an earlier push, not evidence about
-        the current head - it must not block status fallback (#396)."""
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, commit={"oid": "b" * 40}),
-        ]}
-        self.assertIsNone(merge_pr._codeant_latest_review(evidence))
-
-    def test_missing_commit_oid_is_unusable(self):
-        # Unlike a well-formed prior-head oid, a missing binding cannot be
-        # confirmed as historical, so it still fails closed (#396).
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, commit={}),
-        ]}
-        self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
-
-    def test_malformed_commit_oid_is_unusable(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, commit={"oid": "not-a-sha"}),
-        ]}
-        self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
-
-    def test_prior_head_review_with_spoofed_identity_is_true_absence(self):
-        # A Review object bound to a prior head is ignored as history before
-        # its identity is even checked - only current-head-bound evidence is
-        # held to the strict trust checks (#396).
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(
-                self.HEAD, commit={"oid": "b" * 40},
-                author={"login": "codeant-ai", "__typename": "User"},
-            ),
-        ]}
-        self.assertIsNone(merge_pr._codeant_latest_review(evidence))
-
-    def test_prior_head_review_does_not_shadow_valid_current_head_review(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, id="historical", commit={"oid": "b" * 40}),
-            _codeant_review(self.HEAD, id="current"),
-        ]}
-        review = merge_pr._codeant_latest_review(evidence)
-        self.assertEqual(review["id"], "current")
-
-    def test_empty_commented_body_is_unusable(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, state="COMMENTED", body="   "),
-        ]}
-        self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
-
-    def test_missing_review_id_is_unusable(self):
-        evidence = {"head_oid": self.HEAD, "reviews": [_codeant_review(self.HEAD, id=None)]}
-        self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
-
-    def test_ambiguous_tie_for_newest_is_unusable(self):
-        ts = "2026-08-24T01:00:00Z"
-        evidence = {"head_oid": self.HEAD, "reviews": [
-            _codeant_review(self.HEAD, id="review-1", submittedAt=ts),
-            _codeant_review(self.HEAD, id="review-2", submittedAt=ts),
-        ]}
-        self.assertIs(merge_pr._codeant_latest_review(evidence), merge_pr.CODEANT_REVIEW_UNUSABLE)
-
-    def test_sentinel_repr(self):
-        self.assertEqual(repr(merge_pr.CODEANT_REVIEW_UNUSABLE), "CODEANT_REVIEW_UNUSABLE")
-
-    def test_sentinel_is_distinct_from_none_and_dict(self):
-        self.assertIsNotNone(merge_pr.CODEANT_REVIEW_UNUSABLE)
-        self.assertNotIsInstance(merge_pr.CODEANT_REVIEW_UNUSABLE, dict)
-
-
-class CodeAntUnusableReviewBlocksStatusFallbackTests(unittest.TestCase):
-    """Regression coverage for the CodeRabbit Major finding on PR #395:
-    CodeAnt Review evidence bound to the exact current head that is
-    unusable must block check_reviews() and has_authoritative_assigned_review()
-    even when a trusted, valid clean-review status record also exists for the
-    exact head (#394). A Review object bound to a prior head is historical
-    audit evidence and must not trigger that same block (#396)."""
-
-    HEAD = "a" * 40
-
-    def _pr(self):
-        return labelled("author:agent-1", "review:codeant")
-
-    def _evidence(self, reviews):
-        return {
-            "head_oid": self.HEAD,
-            "reviews": reviews,
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-            "codeant_status_comments": [_codeant_status_comment(
-                [_codeant_status_record(self.HEAD)]
-            )],
-        }
-
-    def test_pending_review_blocks_despite_valid_status(self):
-        evidence = self._evidence([_codeant_review(self.HEAD, state="PENDING")])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertFalse(ok)
-        self.assertIn("untrustworthy", msg)
-        self.assertFalse(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-    def test_spoofed_review_blocks_despite_valid_status(self):
-        evidence = self._evidence([
-            _codeant_review(self.HEAD, author={"login": "codeant-ai", "__typename": "User"}),
-        ])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertFalse(ok)
-        self.assertIn("untrustworthy", msg)
-        self.assertFalse(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-    def test_prior_head_review_does_not_block_valid_status(self):
-        # A Review object bound to a well-formed prior-head commit is
-        # historical audit evidence, not current-head evidence, so it must
-        # not shadow a trusted current-head clean-review status record
-        # (#396, PR #390 reproduction shape).
-        evidence = self._evidence([_codeant_review(self.HEAD, commit={"oid": "b" * 40})])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertTrue(ok, msg)
-        self.assertIn("CodeAnt clean-review status", msg)
-        self.assertTrue(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-    def test_missing_commit_oid_blocks_despite_valid_status(self):
-        evidence = self._evidence([_codeant_review(self.HEAD, commit={})])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertFalse(ok)
-        self.assertIn("untrustworthy", msg)
-        self.assertFalse(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-    def test_malformed_review_body_blocks_despite_valid_status(self):
-        evidence = self._evidence([_codeant_review(self.HEAD, body=None)])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertFalse(ok)
-        self.assertIn("untrustworthy", msg)
-
-    def test_non_dict_review_entry_blocks_has_authoritative_assigned_review(self):
-        # A bare non-dict list entry can't reach check_reviews()'s generic
-        # substantive-review filter (a pre-existing, unrelated crash on
-        # malformed evidence shape); has_authoritative_assigned_review()
-        # calls _codeant_latest_review() directly, so it is exercised here.
-        evidence = self._evidence(["not-a-dict"])
-        self.assertFalse(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-    def test_ambiguous_tie_blocks_despite_valid_status(self):
-        ts = "2026-08-24T01:00:00Z"
-        evidence = self._evidence([
-            _codeant_review(self.HEAD, id="review-1", submittedAt=ts),
-            _codeant_review(self.HEAD, id="review-2", submittedAt=ts),
-        ])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertFalse(ok)
-        self.assertIn("untrustworthy", msg)
-
-    def test_empty_commented_body_blocks_despite_valid_status(self):
-        evidence = self._evidence([_codeant_review(self.HEAD, body="   ")])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertFalse(ok)
-        self.assertIn("untrustworthy", msg)
-
-    def test_dismissed_review_is_true_absence_and_status_fallback_still_applies(self):
-        evidence = self._evidence([_codeant_review(self.HEAD, state="DISMISSED")])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertTrue(ok, msg)
-        self.assertIn("CodeAnt clean-review status", msg)
-        self.assertTrue(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-    def test_valid_approved_review_passes_and_takes_priority_over_status(self):
-        evidence = self._evidence([_codeant_review(self.HEAD, state="APPROVED")])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertTrue(ok, msg)
-        self.assertIn("CodeAnt review is complete", msg)
-        self.assertTrue(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-
-class CodeAntPr390ReproductionTests(unittest.TestCase):
-    """Live reproduction of PR #390 at exact head
-    ``3bd0f3c10246931d9c0dde9a2d40a25f4c6dd0e1`` (#396): remediation pushes
-    left CodeAnt Review objects bound to two earlier heads in GitHub history,
-    then a clean final push produced zero Review objects and a trusted
-    completed clean-review status record bound to the exact current head.
-    The merged #394 gate treated the historical Review objects as unusable
-    current-head evidence and blocked forever; the exact-head status record
-    must win instead, with zero unresolved CodeAnt threads."""
-
-    HEAD = "3bd0f3c10246931d9c0dde9a2d40a25f4c6dd0e1"
-    PRIOR_HEAD_1 = "1" * 36 + "aaaa"
-    PRIOR_HEAD_2 = "2" * 36 + "bbbb"
-
-    def _pr(self):
-        return labelled("author:agent-1", "review:codeant")
-
-    def _evidence(self, reviews):
-        return {
-            "head_oid": self.HEAD,
-            "reviews": reviews,
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}},
-            "codeant_status_comments": [_codeant_status_comment([
-                _codeant_status_record(self.HEAD, label="Reviewed your PR"),
-                _codeant_status_record(self.HEAD, label="Incremental review completed"),
-                _codeant_status_record(self.PRIOR_HEAD_1),
-                _codeant_status_record(self.PRIOR_HEAD_2),
-            ])],
-        }
-
-    def test_historical_review_objects_do_not_block_exact_head_status_fallback(self):
-        evidence = self._evidence([
-            _codeant_review(
-                self.PRIOR_HEAD_1, id="pr390-review-1",
-                state="CHANGES_REQUESTED", commit={"oid": self.PRIOR_HEAD_1},
-            ),
-            _codeant_review(
-                self.PRIOR_HEAD_2, id="pr390-review-2",
-                state="COMMENTED", commit={"oid": self.PRIOR_HEAD_2},
-            ),
-        ])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertTrue(ok, msg)
-        self.assertIn("CodeAnt clean-review status", msg)
-        self.assertIn(self.HEAD[:12], msg)
-        self.assertTrue(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-    def test_unusable_current_head_review_still_blocks_alongside_history(self):
-        # The exact scenario above, plus one additional Review object that
-        # *is* bound to the exact current head but is malformed - current-
-        # head unusable evidence must still block even with clean history
-        # and a trusted status record present (#396 acceptance criterion).
-        evidence = self._evidence([
-            _codeant_review(
-                self.PRIOR_HEAD_1, id="pr390-review-1",
-                state="CHANGES_REQUESTED", commit={"oid": self.PRIOR_HEAD_1},
-            ),
-            _codeant_review(self.HEAD, id="pr390-current", body=None),
-        ])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertFalse(ok)
-        self.assertIn("untrustworthy", msg)
-        self.assertFalse(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-    def test_substantive_current_head_review_still_takes_priority_over_history(self):
-        # Compatibility: a valid, non-CHANGES_REQUESTED current-head review
-        # still wins outright, with historical objects merely ignored.
-        evidence = self._evidence([
-            _codeant_review(
-                self.PRIOR_HEAD_1, id="pr390-review-1",
-                state="CHANGES_REQUESTED", commit={"oid": self.PRIOR_HEAD_1},
-                submittedAt="2026-08-24T01:00:00Z",
-            ),
-            _codeant_review(
-                self.HEAD, id="pr390-current", state="APPROVED",
-                submittedAt="2026-08-24T02:00:00Z",
-            ),
-        ])
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertTrue(ok, msg)
-        self.assertIn("CodeAnt review is complete", msg)
-        self.assertTrue(merge_pr.has_authoritative_assigned_review(self._pr(), evidence))
-
-    def test_unresolved_thread_still_blocks_despite_clean_status_and_history(self):
-        evidence = self._evidence([
-            _codeant_review(
-                self.PRIOR_HEAD_1, id="pr390-review-1",
-                state="CHANGES_REQUESTED", commit={"oid": self.PRIOR_HEAD_1},
-            ),
-        ])
-        evidence["service_threads"]["codeant"]["unresolved"] = 1
-        ok, msg = merge_pr.check_reviews(self._pr(), evidence)
-        self.assertFalse(ok)
-        self.assertIn("unresolved", msg)
+        with patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"), \
+                patch.object(merge_pr, "_coderabbit_status_evidence", return_value=None):
+            self.assertIsNone(merge_pr._with_coderabbit_status(383, evidence))
 
 
 class CodeRabbitStatusEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def payload(*, head="head123", total=1, nodes=None, has_next=False, cursor=None):
+        return {"data": {"repository": {"pullRequest": {
+            "headRefOid": head,
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+                "contexts": {
+                    "totalCount": total,
+                    "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                    "nodes": [] if nodes is None else nodes,
+                },
+            }}}]},
+        }}}}
+
     @patch.object(merge_pr, "_gh_json")
     def test_errors_field_rejects_partial_status_payload(self, gh_json):
         gh_json.return_value = {
@@ -2459,42 +1476,49 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
         self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
 
     @patch.object(merge_pr, "_gh_json")
-    def test_has_next_page_rejects_status_payload_even_when_count_matches(self, gh_json):
-        gh_json.return_value = {
-            "data": {"repository": {"pullRequest": {
-                "headRefOid": "head123",
-                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
-                    "contexts": {
-                        "totalCount": 1,
-                        "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
-                        "nodes": [{
-                            "__typename": "CheckRun",
-                            "name": "CodeRabbit",
-                            "status": "COMPLETED",
-                            "conclusion": "SUCCESS",
-                            "checkSuite": {"app": {"slug": "coderabbitai"}},
-                        }],
-                    },
-                }}}]},
-            }}},
+    def test_status_contexts_paginate_with_repeated_head_proof(self, gh_json):
+        coderabbit = {
+            "__typename": "CheckRun",
+            "name": "CodeRabbit",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "coderabbitai"}},
         }
-        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+        other = {
+            "__typename": "CheckRun",
+            "name": "CI",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "github-actions"}},
+        }
+        gh_json.side_effect = [
+            self.payload(total=2, nodes=[coderabbit], has_next=True, cursor="page-2"),
+            self.payload(total=2, nodes=[other]),
+        ]
+
+        self.assertEqual(
+            merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"),
+            [coderabbit, other],
+        )
+        self.assertIn("cursor=page-2", gh_json.call_args_list[1].args[0])
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_status_pagination_rejects_concurrent_head_change(self, gh_json):
+        gh_json.side_effect = [
+            self.payload(total=1, has_next=True, cursor="page-2"),
+            self.payload(head="new-head", total=1, nodes=[{}]),
+        ]
+        self.assertIsNone(
+            merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123")
+        )
 
 
 
 def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella"):
-    """A PR whose default reviews come from the same GitHub account.
-
-    The body links whichever issue number recomputes to the review: label in
-    ``names`` (or the default review:coderabbit), so assigned_review_service's
-    fail-closed "every linked issue must resolve to the label" check accepts
-    the fixture the way a real PR created by create_pr.py would.
-    """
+    """A linked PR whose default reviews come from the same GitHub account."""
     labels = list(names)
     if not any(name.startswith("review:") for name in labels):
         labels.append("review:coderabbit")
-    service = next(name.split(":", 1)[1] for name in labels if name.startswith("review:"))
-    issue_num = next(n for n in range(1, 4) if merge_pr.review_service_for_issue(n) == service)
     default = [{
         "id": "default-review",
         "state": "APPROVED",
@@ -2505,7 +1529,7 @@ def labelled(*names, reviews=None, pr_login="gillella", review_login="gillella")
         "author": {"login": pr_login},
         "reviews": reviews if reviews is not None else default,
         "labels": [{"name": n} for n in labels],
-        "body": f"Closes #{issue_num}",
+        "body": "Closes #1",
     }
 
 
@@ -2514,6 +1538,13 @@ def coderabbit_evidence(head="gated-sha", *, state="COMMENTED",
     return {
         "head_oid": head, "unresolved": 0, "unfixed": 0,
         "outdated_unfixed": 0, "withdrawn": 0, "reviewed_head": False,
+        "coderabbit_status": [{
+            "__typename": "CheckRun",
+            "name": "CodeRabbit",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "coderabbitai"}},
+        }],
         "reviews": [{
             "id": "coderabbit-review", "state": state,
             "submittedAt": "2026-08-23T20:00:00Z", "body": body,
@@ -6094,10 +5125,11 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
                     {
                         "isResolved": True,
                         "isOutdated": False,
-                        "comments": {"nodes": [{
+                        "comments": _complete_comments([{
                             "createdAt": "2026-08-17T00:23:58Z",
                             "body": body,
-                        }]},
+                            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+                        }]),
                     }
                     for body in comments
                 ],
@@ -6337,10 +5369,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                         "commits": {"nodes": [{"commit": {"committedDate": "2026-08-10T10:00:00Z"}}]},
                         "reviewThreads": {
                             "nodes": [
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
-                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": _complete_comments([{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}])},
+                                {"isResolved": False, "isOutdated": False, "comments": _complete_comments([{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}])},
+                                {"isResolved": False, "isOutdated": False, "comments": _complete_comments([{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}])},
+                                {"isResolved": False, "isOutdated": True, "comments": _complete_comments([{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}])},
                             ],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },
@@ -6381,10 +5413,10 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
                         },
                         "reviewThreads": {
                             "nodes": [
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
-                                {"isResolved": False, "isOutdated": False, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
-                                {"isResolved": False, "isOutdated": True, "comments": {"nodes": [{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}]}},
+                                {"isResolved": False, "isOutdated": False, "comments": _complete_comments([{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 1", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}])},
+                                {"isResolved": False, "isOutdated": False, "comments": _complete_comments([{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 2", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}])},
+                                {"isResolved": False, "isOutdated": False, "comments": _complete_comments([{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 3", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}])},
+                                {"isResolved": False, "isOutdated": True, "comments": _complete_comments([{"createdAt": "2026-08-10T11:00:00Z", "body": "finding 4 (anchor line deleted)", "author": {"login": "coderabbitai[bot]", "__typename": "Bot"}}])},
                             ],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         },

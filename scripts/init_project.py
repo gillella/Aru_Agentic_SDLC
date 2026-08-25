@@ -119,10 +119,11 @@ branch, or merge around the Definition-of-Done gate.
   non-authoritative here.
 - Brainstorming frameworks supply input to Aru's plan gate rather than running
   a parallel lifecycle.
-- Memory tools provide context only. **The assigned review-pool service is the sole PR code-review authority for a given PR.** `create_pr.py` assigns exactly one of `review:coderabbit`, `review:sourcery`, or `review:codeant`. Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
+- Memory tools provide context only. **CodeRabbit is the sole positive PR code-review authority.** `create_pr.py` assigns exactly `review:coderabbit`; that label selects the oracle but never satisfies review by itself. Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
 
-After the assigned review-pool service supplies authoritative exact-head evidence and
-every enforced gate passes, any factory agent, including the implementation author,
+After the uniquely newest authenticated completed exact-head CodeRabbit Review is present—
+`APPROVED` may have an empty body; `COMMENTED` must be substantive unless the ordered full-review no-findings proof exists; `CHANGES_REQUESTED` blocks—along with a producer-authenticated successful CodeRabbit status for that head,
+complete review-thread evidence with no unresolved or unfixed finding, and every other enforced gate passes, any factory agent, including the implementation author,
 may execute the mechanical merge only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. When the picker
 supplies `head_sha`, pass it as `--expected-head <HEAD_SHA>`. Authors must never review.
@@ -141,7 +142,7 @@ governed remediation.
    - Router: `aru-agentic-sdlc/SKILL.md`
    - Primary Skill: `implement-next-issue/SKILL.md`
    - Issue Creation: `create-github-issue/SKILL.md`
-   - Code Review Skill: `code-review/SKILL.md` (refusal; the assigned review-pool service alone reviews)
+   - Code Review Skill: `code-review/SKILL.md` (refusal; CodeRabbit alone supplies positive review authority)
    - CI Failure Remediation: `remediate-ci-failure/SKILL.md`
    - PR Review Feedback: `address-pr-feedback/SKILL.md`
 2. **Worktree Isolation**:
@@ -599,92 +600,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python .github/scripts/check_touches.py
-"""
-
-REVIEW_SCRIPT = """#!/usr/bin/env python3
-\"\"\"review.py - Model-routed AI reviewer script for CI.\"\"\"
-
-import os
-import subprocess
-import sys
-
-
-def main():
-    api_keys = [
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "MISTRAL_API_KEY",
-    ]
-    has_key = any(os.environ.get(k) for k in api_keys)
-    if not has_key:
-        print("::notice:: No AI provider API key configured; model review degraded to notice.", file=sys.stderr)
-        sys.exit(0)
-
-    # Perform diff analysis when provider key is present
-    res = subprocess.run(["git", "diff", "origin/main...HEAD"], capture_output=True, text=True)
-    if res.returncode != 0:
-        print(f"::error:: Failed to capture git diff for model review: {res.stderr}", file=sys.stderr)
-        sys.exit(1)
-
-    diff = res.stdout.strip()
-    if not diff:
-        print("::notice:: Model reviewer active; no diff changes to analyze.")
-        sys.exit(0)
-
-    lines = len(diff.splitlines())
-    print(f"✅ Model reviewer active: evaluated PR diff ({lines} lines).")
-    sys.exit(0)
-
-
-if __name__ == "__main__":
-    main()
-"""
-
-REVIEW_WORKFLOW = """name: Model Reviewer
-
-on:
-  pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
-  pull-requests: read
-
-jobs:
-  model-review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Run model-routed code review
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          python .github/scripts/review.py
-"""
-
-REVIEWERS_CONFIG = """# Model-routed reviewer configuration
-version: 1
-reviewers:
-  default:
-    model: claude-3-5-sonnet
-    degrade_to_notice: true
-  routing:
-    anthropic: openai
-    openai: anthropic
-    google: anthropic
 """
 
 DEPLOY_PREVIEW_WORKFLOW = r"""name: Deploy Preview

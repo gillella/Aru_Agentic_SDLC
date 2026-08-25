@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 740
+# line-ceiling: 560
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -34,13 +34,8 @@ from common import (
 )
 
 NEEDS_REVIEW_LABEL = "needs-review"
-REVIEW_SERVICES = ("coderabbit", "sourcery", "codeant")
 REVIEW_LABEL_PREFIX = "review:"
-
-# PR #356 already carries the operator-approved CodeRabbit assignment. Keep
-# that assignment deterministic until the following trim slice deletes the
-# legacy provider rotation altogether.
-LEGACY_REVIEW_SERVICE_PINS = {341: "coderabbit"}
+CODERABBIT_REVIEW_LABEL = "review:coderabbit"
 
 # Kept explicit rather than free-form: a typo like "anthropc" would silently
 # make every PR look cross-family to the picker, which is the one failure mode
@@ -48,145 +43,23 @@ LEGACY_REVIEW_SERVICE_PINS = {341: "coderabbit"}
 MODEL_FAMILIES = ("anthropic", "openai", "google", "meta", "mistral", "xai", "human")
 
 
-# merge_pr.assigned_review_service() still requires the live review:* label to
-# equal review_service_for_issue(), so an assignment that reroutes around an
-# excluded service would open a PR that can never pass the merge gate. #403 is
-# the governed follow-up that teaches that gate to validate capacity-selection
-# evidence; until it lands, a divergent selection is withheld rather than
-# shipped. This is a bounded sequencing dependency, not a policy change.
-MERGE_AUTHORITY_FOLLOWUP = 403
-
-CAPACITY_MAX_AGE_SECONDS = 3600
-CAPACITY_EVIDENCE_START = "<!-- ARU:REVIEW-CAPACITY-EVIDENCE:START -->"
-CAPACITY_EVIDENCE_END = "<!-- ARU:REVIEW-CAPACITY-EVIDENCE:END -->"
-
-
-def review_service_for_issue(issue_id: int) -> str:
-    """Stable approximately-even authority assignment for one issue number.
-
-    Capacity-unaware by design: merge_pr.py and audit_review_assignment.py
-    recompute this from every linked issue to prove a PR's label was not
-    edited after the fact, so it must stay a pure function of issue_id alone.
-    Explicit migration pins preserve already-assigned authority while the
-    provider-removal slice is in flight. select_review_service() below is
-    where capacity evidence is applied.
-    """
-    if issue_id in LEGACY_REVIEW_SERVICE_PINS:
-        return LEGACY_REVIEW_SERVICE_PINS[issue_id]
-    return REVIEW_SERVICES[(issue_id - 1) % len(REVIEW_SERVICES)]
-
-
-def review_label_for_service(service: str) -> str:
-    return f"{REVIEW_LABEL_PREFIX}{service}"
-
-
-def select_review_service(issue_id: int, *, as_of=None, snapshot: Optional[Dict] = None) -> Dict:
-    """Deterministic, approximately-even selection over the eligible pool.
-
-    Loads fresh known-unavailable evidence from the shared cross-repository
-    ledger that scripts/audit_review_service_capacity.py owns, and excludes
-    only services with a fresh, well-formed, unexpired cooldown,
-    quota-exhaustion, outage, or unavailable record. When nothing excludes
-    anyone -- an empty ledger, or only stale/malformed entries -- the
-    eligible pool is the full REVIEW_SERVICES tuple in order, and
-    `eligible[(issue_id - 1) % len(eligible)]` is exactly
-    review_service_for_issue(issue_id): the original rotation is unchanged
-    until real evidence exists.
-    """
-    from audit_review_service_capacity import audit_unavailability, load_unavailability_snapshot
-
-    if snapshot is None:
-        snapshot = load_unavailability_snapshot()
-    report = audit_unavailability(snapshot, as_of=as_of, max_age_seconds=CAPACITY_MAX_AGE_SECONDS)
-    excluded_map = report["unavailable"]
-    eligible = [service for service in REVIEW_SERVICES if service not in excluded_map]
-    if eligible:
-        selected = eligible[(issue_id - 1) % len(eligible)]
-        rationale = (
-            f"selected '{selected}' from {len(eligible)} eligible service(s) via "
-            f"(issue_id - 1) mod {len(eligible)} rotation over the eligible pool"
-        )
-    else:
-        selected = None
-        rationale = "no configured review service is currently eligible; PR stays draft"
-    return {
-        "schema": "aru.review-capacity-selection.v1",
-        "as_of": report["as_of"],
-        "candidates": list(REVIEW_SERVICES),
-        "eligible": eligible,
-        "excluded": [
-            {"service": service, **excluded_map[service]}
-            for service in REVIEW_SERVICES if service in excluded_map
-        ],
-        "selected": selected,
-        "rationale": rationale,
-    }
-
-
-def gate_divergent_selection(evidence: Dict, issue_id: int) -> Dict:
-    """Withhold a selection the merge authority would reject.
-
-    Capacity exclusion is allowed to change eligibility before assignment,
-    but merge_pr.py still recomputes review_service_for_issue() and rejects
-    any PR whose label disagrees. Assigning the rerouted service would
-    therefore produce a correctly-routed PR that is permanently unmergeable,
-    which is strictly worse than waiting. Until #403 lands, a divergent
-    selection is downgraded to the same bounded waiting-for-capacity state as
-    an empty eligible pool: the PR stays draft, the withheld candidate stays
-    in the auditable evidence, and --finalize-review retries later.
-    """
-    selected = evidence["selected"]
-    formula = review_service_for_issue(issue_id)
-    if selected is None or selected == formula:
-        return evidence
-    return {
-        **evidence,
-        "selected": None,
-        "withheld_selection": selected,
-        "withheld_reason": f"merge authority requires '{formula}' until #{MERGE_AUTHORITY_FOLLOWUP}",
-        "rationale": (
-            f"'{selected}' is eligible and would be selected, but the merge gate still "
-            f"requires '{formula}' for issue #{issue_id}; assignment withheld until "
-            f"#{MERGE_AUTHORITY_FOLLOWUP} lands, so the PR stays draft rather than "
-            "becoming unmergeable"
-        ),
-    }
-
-
-def render_capacity_evidence(evidence: Dict) -> str:
-    """Renders auditable candidate/exclusion/selection rationale as a PR comment."""
-    payload = json.dumps(evidence, indent=2, sort_keys=True).replace("<", "\\u003c").replace(">", "\\u003e")
-    return (
-        "## Review-capacity assignment evidence\n\n"
-        f"{CAPACITY_EVIDENCE_START}\n"
-        "```json\n"
-        f"{payload}\n"
-        "```\n"
-        f"{CAPACITY_EVIDENCE_END}\n"
-    )
-
-
 class ReviewAssignmentLookupError(RuntimeError):
     """The live review assignment could not be read, or is ambiguous.
 
     Deliberately distinct from `None`, which means "read successfully, no
     assignment yet". Collapsing the two is what let a failed `gh pr view`, a
-    malformed response, or a PR carrying two review:* labels look like an
-    unassigned PR: finalization would then select a service and add another
-    authority label, switching or duplicating a reviewer the routing contract
-    promises is immutable. Every such state fails closed instead.
+    malformed response, or a PR carrying any non-canonical review label look
+    like an unassigned PR: finalization would then add CodeRabbit beside an
+    unknown or legacy authority. Every such state fails closed instead.
     """
 
 
 def existing_review_assignment(pr_ref: str) -> Optional[str]:
-    """Reads live PR labels for an already-assigned review service, if any.
+    """Return the sole canonical CodeRabbit assignment, if safely readable.
 
-    Authority is immutable once assigned: every (re)assignment path calls
-    this first, so a later capacity change, or a retry of a PR left waiting
-    for capacity, can never silently switch reviewers on a PR that already
-    has one. Returns None only when the labels were read successfully and
-    none of them is a review:* label; anything else raises
-    ReviewAssignmentLookupError so the caller stops rather than guesses.
+    ``None`` means the complete label array was read and contains no review
+    label. Legacy, unknown, case-variant, duplicated, multiple, or malformed
+    label state raises instead of being mistaken for an unassigned PR.
     """
     code, out, err = run_cmd(["gh", "pr", "view", pr_ref, "--json", "labels"], check=False)
     if code != 0:
@@ -201,17 +74,26 @@ def existing_review_assignment(pr_ref: str) -> Optional[str]:
     if not isinstance(labels, list):
         raise ReviewAssignmentLookupError(
             f"could not parse labels for PR {pr_ref}: no labels array in response")
-    names = {label.get("name") for label in labels if isinstance(label, dict)}
-    assigned = [
-        service for service in REVIEW_SERVICES
-        if review_label_for_service(service) in names
-    ]
-    if len(assigned) > 1:
+    names = []
+    for label in labels:
+        if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+            raise ReviewAssignmentLookupError(
+                f"could not parse labels for PR {pr_ref}: malformed label entry")
+        names.append(label["name"])
+    review_labels = [name for name in names if name.lower().startswith(REVIEW_LABEL_PREFIX)]
+    if not review_labels:
+        return None
+    if len(review_labels) != 1:
         raise ReviewAssignmentLookupError(
-            f"PR {pr_ref} carries conflicting review labels "
-            f"({', '.join(review_label_for_service(s) for s in assigned)}); "
-            "exactly one service may be authoritative. Remove the extras.")
-    return assigned[0] if assigned else None
+            f"PR {pr_ref} carries {len(review_labels)} review labels "
+            f"({', '.join(review_labels)}); exactly one canonical "
+            f"{CODERABBIT_REVIEW_LABEL} label is required.")
+    if review_labels[0] != CODERABBIT_REVIEW_LABEL:
+        raise ReviewAssignmentLookupError(
+            f"PR {pr_ref} carries unsupported review label {review_labels[0]!r}; "
+            f"only {CODERABBIT_REVIEW_LABEL!r} is authoritative and legacy "
+            "assignments are never migrated implicitly.")
+    return "coderabbit"
 
 
 def collect_verification_evidence(
@@ -426,125 +308,93 @@ def enqueue_review(pr_ref: str) -> bool:
     return True
 
 
-def _acquire_review_assignment(pr_ref: str, issue_id: int):
-    """Select, record, and claim exactly one review service for a draft PR.
+def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C901, PLR0912
+    """Assign only CodeRabbit, read it back, and make the PR reviewable.
 
-    Returns (ok, service): (True, service) claimed it, (True, None) correctly
-    left the PR waiting for capacity, and (False, None) stop -- nothing safe
-    was done and nothing should follow. The three outcomes are kept distinct
-    because "no service" and "could not tell" must not share a return value;
-    conflating them is what let a failed lookup look like an unassigned PR.
+    The issue id remains in the public call shape for create/revert/CLI
+    compatibility, but it no longer selects authority. Retries are idempotent:
+    the sole canonical label is retained, an identical concurrent assignment
+    is accepted after readback, and a PR already made ready is recognized from
+    live state. Every legacy, unknown, duplicate, malformed, or unreadable
+    review-label state blocks without being migrated.
     """
-    evidence = gate_divergent_selection(select_review_service(issue_id), issue_id)
-    # The evidence comment is the only durable record of why a PR was assigned
-    # or left waiting, so a PR must never reach either state without it.
-    # Failing to post it is a failed finalization, not a warning.
-    comment_code, _, comment_err = run_cmd(
-        ["gh", "pr", "comment", pr_ref, "--body", render_capacity_evidence(evidence)],
-        check=False,
-    )
-    if comment_code != 0:
-        print(f"[ERROR] Could not record capacity evidence for PR {pr_ref}: "
-              f"{comment_err.strip()}; not assigning without it.", file=sys.stderr)
-        return False, None
-
-    service = evidence["selected"]
-    if service is None:
-        print(
-            f"⏳ No review service is assignable for PR {pr_ref}; left in draft "
-            f"with bounded waiting-for-capacity evidence ({evidence['rationale']}). "
-            "Retry with --finalize-review once capacity evidence changes.",
-            file=sys.stderr,
-        )
-        return True, None
-
-    label = review_label_for_service(service)
-    ensure_label(label, "0e8a16", f"Authoritative review service: {service}")
-    # Re-read immediately before the write: the gap since the caller's lookup
-    # is exactly where a second concurrent finalizer can land its own label,
-    # and two review:* labels means no single authority.
-    try:
-        if existing_review_assignment(pr_ref) is not None:
-            print(f"[ERROR] PR {pr_ref} was assigned concurrently; leaving that "
-                  "assignment authoritative.", file=sys.stderr)
-            return False, None
-    except ReviewAssignmentLookupError as exc:
-        print(f"[ERROR] Refusing to assign PR {pr_ref}: {exc}", file=sys.stderr)
-        return False, None
-
-    code, _, err = run_cmd(["gh", "pr", "edit", pr_ref, "--add-label", label], check=False)
-    if code != 0:
-        print(f"[ERROR] Could not apply {label}: {err.strip()}", file=sys.stderr)
-        return False, None
-
-    # And re-read after: a racing finalizer that wrote between the check above
-    # and this add-label leaves both labels present, which the lookup now
-    # reports as a conflict instead of silently picking one.
-    try:
-        confirmed = existing_review_assignment(pr_ref)
-    except ReviewAssignmentLookupError as exc:
-        print(f"[ERROR] PR {pr_ref} has ambiguous authority after assignment: {exc}",
-              file=sys.stderr)
-        return False, None
-    if confirmed != service:
-        print(f"[ERROR] PR {pr_ref} resolved to '{confirmed}' after assigning "
-              f"'{service}'; not marking ready.", file=sys.stderr)
-        return False, None
-    return True, service
-
-
-def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:
-    """Assign exactly one eligible review-pool service while the PR is draft.
-
-    Idempotent and safe to retry: if a review:* label is already on the PR,
-    authority is stable and this only resumes marking it ready (recovering
-    from a prior ready/trigger failure) rather than recomputing or switching
-    the assignment. Otherwise it loads fresh capacity evidence, records
-    candidate/exclusion/selection rationale as an auditable PR comment, and
-    either assigns the selected service or -- if none is assignable -- leaves
-    the PR in draft with that evidence as the bounded waiting-for-capacity
-    record. Call this again later to retry a waiting PR.
-    """
+    del issue_id
     try:
         service = existing_review_assignment(pr_ref)
     except ReviewAssignmentLookupError as exc:
         print(f"[ERROR] Refusing to finalize PR {pr_ref}: {exc}", file=sys.stderr)
         return False
-    if service is not None:
-        label = review_label_for_service(service)
-        print(f"🔒 {label} already assigned; authority stays stable, resuming finalization.")
-    else:
-        ok, service = _acquire_review_assignment(pr_ref, issue_id)
-        if not ok:
+    if service is None:
+        ensure_label(
+            CODERABBIT_REVIEW_LABEL,
+            "0e8a16",
+            "Authoritative review service: coderabbit",
+        )
+        try:
+            service = existing_review_assignment(pr_ref)
+        except ReviewAssignmentLookupError as exc:
+            print(f"[ERROR] Refusing to assign PR {pr_ref}: {exc}", file=sys.stderr)
             return False
         if service is None:
-            return True
-        label = review_label_for_service(service)
+            code, _, err = run_cmd(
+                ["gh", "pr", "edit", pr_ref, "--add-label", CODERABBIT_REVIEW_LABEL],
+                check=False,
+            )
+            if code != 0:
+                print(
+                    f"[ERROR] Could not apply {CODERABBIT_REVIEW_LABEL}: {err.strip()}",
+                    file=sys.stderr,
+                )
+                return False
+        else:
+            print(
+                f"🔒 {CODERABBIT_REVIEW_LABEL} was assigned concurrently; "
+                "resuming finalization."
+            )
+    else:
+        print(f"🔒 {CODERABBIT_REVIEW_LABEL} already assigned; resuming finalization.")
+
+    try:
+        confirmed = existing_review_assignment(pr_ref)
+    except ReviewAssignmentLookupError as exc:
+        print(f"[ERROR] PR {pr_ref} has ambiguous authority before ready: {exc}", file=sys.stderr)
+        return False
+    if confirmed != "coderabbit":
+        print(
+            f"[ERROR] PR {pr_ref} did not retain {CODERABBIT_REVIEW_LABEL}; not marking ready.",
+            file=sys.stderr,
+        )
+        return False
 
     code, _, err = run_cmd(["gh", "pr", "ready", pr_ref], check=False)
     if code != 0:
-        print(f"[ERROR] Could not mark PR ready after assigning {label}: {err.strip()}", file=sys.stderr)
-        return False
-    if service == "codeant":
-        code, _, err = run_cmd(
-            ["gh", "pr", "comment", pr_ref, "--body", "@codeant-ai: review"],
+        state_code, state_out, state_err = run_cmd(
+            ["gh", "pr", "view", pr_ref, "--json", "isDraft"],
             check=False,
         )
-        if code != 0:
-            print(f"[ERROR] Could not trigger CodeAnt review: {err.strip()}", file=sys.stderr)
-            rollback_code, _, rollback_err = run_cmd(
-                ["gh", "pr", "ready", pr_ref, "--undo"],
-                check=False,
+        try:
+            state = json.loads(state_out) if state_code == 0 else None
+        except json.JSONDecodeError:
+            state = None
+        if not isinstance(state, dict) or state.get("isDraft") is not False:
+            detail = state_err.strip() if state_code != 0 else err.strip()
+            print(
+                f"[ERROR] Could not mark PR ready after assigning "
+                f"{CODERABBIT_REVIEW_LABEL}: {detail or 'ready state remained unconfirmed'}",
+                file=sys.stderr,
             )
-            if rollback_code != 0:
-                print(
-                    f"[ERROR] Could not restore draft state: {rollback_err.strip()}",
-                    file=sys.stderr,
-                )
-            else:
-                print("[INFO] Restored draft state; CodeAnt finalization can be retried.")
             return False
-    print(f"🔍 Assigned {label} and marked PR ready")
+        try:
+            if existing_review_assignment(pr_ref) != "coderabbit":
+                return False
+        except ReviewAssignmentLookupError as exc:
+            print(f"[ERROR] PR {pr_ref} has ambiguous authority after ready recovery: {exc}",
+                  file=sys.stderr)
+            return False
+        print(f"🔍 PR {pr_ref} was already ready with {CODERABBIT_REVIEW_LABEL}")
+        return True
+
+    print(f"🔍 Assigned {CODERABBIT_REVIEW_LABEL} and marked PR ready")
     return True
 
 
@@ -619,10 +469,9 @@ def main():
         default=0,
         metavar="PR",
         help=(
-            "Retry capacity-aware review assignment on an existing draft PR left "
-            "waiting for capacity (or recover from a prior ready/trigger failure). "
-            "Requires --issue for the linked issue number; authority is stable and "
-            "unchanged if the PR is already assigned."
+            "Retry CodeRabbit assignment on an existing PR or recover from a "
+            "prior label/readback/ready failure. Requires --issue for the linked "
+            "issue number; legacy or unknown review labels are never migrated."
         ),
     )
     parser.add_argument(
@@ -648,9 +497,8 @@ def main():
         # Retry only, never a second create path: --agent/--model-family are
         # unused here (the PR already carries author:/family: from creation),
         # but argparse still requires the token be present on the command line.
-        # The rotation is `(issue_id - 1) % len(eligible)`, so a non-positive
-        # issue number indexes backwards into the pool and yields a plausible
-        # assignment for an issue that does not exist.
+        # Keep the linked issue contract strict even though issue number no
+        # longer selects a provider.
         if args.issue <= 0:
             print("[ERROR] --issue must be a positive issue number.", file=sys.stderr)
             sys.exit(1)
