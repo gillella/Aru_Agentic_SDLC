@@ -21,7 +21,41 @@ def _slug(status: str) -> str:
     return "status:" + status.lower().replace(" ", "-")
 
 
-def update_status(issue_id: int, status: str, require_board: bool = False) -> bool:
+def _transition_precondition_holds(
+    issue_id: int,
+    issue: dict,
+    current_labels: set[str],
+    expected_status: str | None,
+    require_unclaimed: bool,
+) -> bool:
+    if expected_status is not None:
+        expected_label = _slug(expected_status)
+        current_statuses = sorted(
+            label for label in current_labels if label.startswith("status:")
+        )
+        if issue.get("state", "OPEN").upper() != "OPEN" or current_statuses != [expected_label]:
+            print(
+                f"[CONFLICT] Issue #{issue_id} is not exactly {expected_status}; "
+                "refusing conditional status transition.",
+                file=sys.stderr,
+            )
+            return False
+    if require_unclaimed and any(label.startswith("agent:") for label in current_labels):
+        print(
+            f"[CONFLICT] Issue #{issue_id} is claimed; refusing status transition.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def update_status(
+    issue_id: int,
+    status: str,
+    require_board: bool = False,
+    expected_status: str | None = None,
+    require_unclaimed: bool = False,
+) -> bool:
     canonical = next((s for s in VALID_STATUSES if s.lower() == status.lower()), None)
     if not canonical:
         print(
@@ -37,6 +71,10 @@ def update_status(issue_id: int, status: str, require_board: bool = False) -> bo
 
     target_label = _slug(canonical)
     current_labels = set(label_names(issue))
+    if not _transition_precondition_holds(
+        issue_id, issue, current_labels, expected_status, require_unclaimed,
+    ):
+        return False
     stale_labels = [
         _slug(s)
         for s in VALID_STATUSES

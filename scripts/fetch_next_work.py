@@ -1,50 +1,10 @@
 #!/usr/bin/env python3
 # line-ceiling: 1226
-"""fetch_next_work.py - answers "what should I do next?" for one agent.
-
-The issue picker only ever answered "which issue do I implement?", so a fleet
-of agents that all prefer fresh issues buries the board in unreviewed PRs.
-Review is not a CI job here - agents run this loop under their own
-subscriptions and no provider API keys exist - so review has to be work an
-agent claims off the board like anything else.
-
-Three work types, in strict priority order:
-
-  1. feedback  - a PR I authored has requested changes or unresolved threads
-  2. merge     - a PR whose Definition-of-Done gates already pass
-  3. review    - an eligible PR is waiting for someone to review it
-  4. issue     - nothing to finish, so start something new
-
-Finishing beats starting. That ordering is the whole point: it is what stops
-the review queue growing faster than it drains, and what carries independently
-reviewed work through gated merge without a human pressing the button.
-
-  python3 fetch_next_work.py --agent agent-1 --json
-  python3 fetch_next_work.py --agent agent-1 --family anthropic --claim
-
-Review eligibility:
-
-  | rule                          | hard? |
-  |-------------------------------|-------|
-  | nobody else holds reviewer:*  | hard  |
-  | author:<id> is not me         | hard  |
-  | family:<f> is not mine        | soft  |
-  | CI red                        | hard  |
-  | not a draft                   | hard  |
-
-CI pending or absent does not block a review claim. Pickup latency is the
-queue, and the reviewer already re-runs tests in a worktree. Merge still
-requires green CI. A red check still refuses review so the author fixes
-first.
-
-The family rule must be soft. An all-Claude fleet with a hard rule has zero
-eligible reviewers, nothing gets reviewed, and merge_pr.py blocks everything -
-a deadlock. After a PR has waited past the threshold, any *different agent* may
-review it and the PR is labelled `same-family-review` so the degradation shows.
-
-CodeRabbit is the sole positive PR code-review authority.
-Coding-agent work is limited to implementation, remediation, and mechanical
-merge execution after every Definition-of-Done gate passes.
+"""Return the highest-priority work one governed factory agent can perform.
+Finishing beats starting: author feedback, merge-ready work, resumable issues,
+then Ready issues. External review services remain outside the coding-agent queue.
+A claiming picker that is truly idle may promote one fully qualified
+Backlog issue, reselect it, and use the ordinary optimistic claim protocol.
 """
 
 import argparse
@@ -66,11 +26,13 @@ from claim_issue import (
 )
 from common import (
     board_agent_identities,
+    get_repo_projects,
     get_repo_slug,
     list_open_issues,
     query_issue_project_items,
     run_cmd,
     select_governed_project_items,
+    select_governed_projects,
     label_names as issue_label_names,
 )
 from fetch_next_issue import (
@@ -97,6 +59,10 @@ from update_issue_status import update_status
 # fingerprint alone cannot separate. Small on purpose: more than a handful of
 # agents in one working copy is a misconfiguration, not a fleet.
 MAX_WORKER_SEATS = 8
+
+
+class AutoTriageError(RuntimeError):
+    """An attempted automatic promotion left unverifiable lifecycle state."""
 
 
 def _fingerprint_assign_identity(args, session_id):
@@ -905,6 +871,47 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     }
 
 
+def _governed_open_issue_statuses(
+    repo_slug: str, open_numbers: set[int],
+) -> dict[int, str] | None:
+    """Read the governed board once and prove its open-issue inventory complete."""
+    projects = get_repo_projects(repo_slug)
+    governed = select_governed_projects(projects or [], repo_slug)
+    if len(governed) != 1:
+        return None
+    project = governed[0]
+    owner = (project.get("owner") or {}).get("login")
+    number = project.get("number")
+    if not owner or not isinstance(number, int):
+        return None
+    code, stdout, _stderr = run_cmd([
+        "gh", "project", "item-list", str(number), "--owner", owner,
+        "--limit", "1000", "--format", "json",
+    ], check=False)
+    if code != 0:
+        return None
+    try:
+        payload = json.loads(stdout)
+        items = payload["items"]
+        total = payload["totalCount"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(items, list) or total != len(items) or len(items) >= 1000:
+        return None
+    statuses: dict[int, str] = {}
+    for item in items:
+        content = item.get("content") or {}
+        issue_number = content.get("number")
+        repository = content.get("repository") or item.get("repository")
+        if issue_number not in open_numbers or repository != repo_slug:
+            continue
+        status = item.get("status")
+        if issue_number in statuses or not isinstance(status, str) or not status:
+            return None
+        statuses[issue_number] = status
+    return statuses if set(statuses) == open_numbers else None
+
+
 def _idle_backlog_candidate(agent: str) -> tuple[dict[str, Any] | None, str | None]:
     """Return the one issue triage and the ordinary picker would admit."""
     from triage_backlog import partition, ready_gaps, split_reasons
@@ -917,12 +924,23 @@ def _idle_backlog_candidate(agent: str) -> tuple[dict[str, Any] | None, str | No
               file=sys.stderr)
         return None, None
 
+    repo_slug = get_repo_slug()
+    open_numbers = {issue["number"] for issue in issues}
+    board_statuses = _governed_open_issue_statuses(repo_slug or "", open_numbers)
+    if board_statuses is None:
+        print("[WARN] Governed board inventory is incomplete; refusing auto-triage.",
+              file=sys.stderr)
+        return None, repo_slug
+    if any(status.lower() == "ready" for status in board_statuses.values()):
+        return None, repo_slug
+    if any("status:ready" in {name.lower() for name in issue_label_names(issue)}
+           for issue in issues):
+        return None, repo_slug
+
     backlog, ready, _held = partition(issues)
     if ready or not backlog:
         return None, None
 
-    open_numbers = {issue["number"] for issue in issues}
-    repo_slug = get_repo_slug()
     qualified_numbers = {
         issue["number"]
         for issue in backlog
@@ -932,7 +950,9 @@ def _idle_backlog_candidate(agent: str) -> tuple[dict[str, Any] | None, str | No
             if (label.get("name") or "").lower().startswith("status:")
         ] == ["status:backlog"]
         and not (
-            "trusted-rewrite" in issue_label_names(issue)
+            "trusted-rewrite" in {
+                name.lower() for name in issue_label_names(issue)
+            }
             and not issue.get("editor")
         )
         and not ready_gaps(issue, open_numbers, repo_slug=repo_slug)
@@ -977,13 +997,18 @@ def _idle_backlog_candidate(agent: str) -> tuple[dict[str, Any] | None, str | No
     ), repo_slug
 
 
-def _promote_one_idle_backlog_issue_locked(agent: str) -> int | None:
+def _promote_one_idle_backlog_issue_locked(
+    agent: str, family: str | None, round_cap: int, cross_family_wait: int,
+) -> int | None:
     """Promote one qualified Backlog issue when no Ready item exists.
 
     This is deliberately narrower than ``triage_backlog.py --promote``. The
     candidate must clear the triage and picker contracts twice without changing
     and still be Backlog on the governed board immediately before the write.
     """
+    current = select(agent, family, round_cap, cross_family_wait)
+    if current["work"]["type"] != "idle":
+        return None
     candidate, repo_slug = _idle_backlog_candidate(agent)
     fresh, fresh_slug = _idle_backlog_candidate(agent)
     if candidate is None or fresh is None or not repo_slug or fresh_slug != repo_slug:
@@ -999,32 +1024,59 @@ def _promote_one_idle_backlog_issue_locked(agent: str) -> int | None:
         return None
 
     number = fresh["number"]
-    items = query_issue_project_items(number)
-    governed = select_governed_project_items(items or [], repo_slug)
-    board_status = (
-        ((governed[0].get("status") or {}).get("name") or "").lower()
-        if len(governed) == 1 else ""
-    )
-    if board_status != "backlog":
+
+    def board_status() -> str:
+        items = query_issue_project_items(number)
+        governed = select_governed_project_items(items or [], repo_slug)
+        return (
+            ((governed[0].get("status") or {}).get("name") or "").lower()
+            if len(governed) == 1 else ""
+        )
+
+    if board_status() != "backlog":
         print(f"[WARN] Issue #{number} is not authoritatively Backlog on the board.",
               file=sys.stderr)
         return None
-    if not update_status(number, "Ready", require_board=True):
-        print(f"[WARN] Qualified Backlog issue #{number} could not be promoted.",
-              file=sys.stderr)
-        return None
+    if not update_status(
+        number, "Ready", require_board=True,
+        expected_status="Backlog", require_unclaimed=True,
+    ):
+        raise AutoTriageError(
+            f"qualified Backlog issue #{number} could not be promoted cleanly"
+        )
+    post = next(
+        (issue for issue in list_open_issues() if issue["number"] == number), None,
+    )
+    post_statuses = {
+        name.lower() for name in issue_label_names(post or {})
+        if name.lower().startswith("status:")
+    }
+    post_agents = {
+        name for name in issue_label_names(post or {}) if name.lower().startswith("agent:")
+    }
+    if post_statuses != {"status:ready"} or post_agents or board_status() != "ready":
+        raise AutoTriageError(
+            f"issue #{number} did not read back as unclaimed Ready on board and labels"
+        )
     print(f"[INFO] Picker promoted qualified Backlog issue #{number} to Ready.",
           file=sys.stderr)
     return number
 
 
-def promote_one_idle_backlog_issue(agent: str) -> int | None:
+def promote_one_idle_backlog_issue(
+    agent: str,
+    family: str | None = None,
+    round_cap: int = DEFAULT_ROUND_CAP,
+    cross_family_wait: int = DEFAULT_CROSS_FAMILY_WAIT_MIN,
+) -> int | None:
     """Serialize one auto-triage transition against other lifecycle writes."""
     with merge_pr.repository_merge_lock() as (locked, message):
         if not locked:
             print(f"[WARN] Auto-triage deferred: {message}.", file=sys.stderr)
             return None
-        return _promote_one_idle_backlog_issue_locked(agent)
+        return _promote_one_idle_backlog_issue_locked(
+            agent, family, round_cap, cross_family_wait,
+        )
 
 
 def main():  # noqa: C901, PLR0912, PLR0915
@@ -1075,7 +1127,15 @@ def main():  # noqa: C901, PLR0912, PLR0915
     # promote one mechanically qualified Backlog item, then immediately run the
     # ordinary selector again so normal claim arbitration still applies.
     if args.claim and work["type"] == "idle":
-        promoted = promote_one_idle_backlog_issue(args.agent)
+        try:
+            promoted = promote_one_idle_backlog_issue(
+                args.agent, (args.family or "").lower() or None,
+                args.round_cap, args.cross_family_wait,
+            )
+        except AutoTriageError as exc:
+            promoted = None
+            res["work"] = {"type": "error", "skill": None, "reason": str(exc)}
+            work = res["work"]
         if promoted is not None:
             res = select(args.agent, (args.family or "").lower() or None,
                          args.round_cap, args.cross_family_wait)

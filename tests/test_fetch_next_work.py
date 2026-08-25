@@ -1332,14 +1332,14 @@ class WorkPickerTests(unittest.TestCase):
             fnw.main()
             self.assertIn("[WARN] Autonomous claim reap encountered error: transient network failure", fake_stderr.getvalue())
 
-
 class IdleBacklogPromotionTests(unittest.TestCase):
     def setUp(self):
-        lock = patch.object(merge_pr, "repository_merge_lock",
-                            return_value=nullcontext((True, "locked")))
-        lock.start()
-        self.addCleanup(lock.stop)
-
+        self.enterContext(patch.object(merge_pr, "repository_merge_lock",
+            return_value=nullcontext((True, "locked"))))
+        self.enterContext(patch.object(
+            fnw, "select", return_value={"work": {"type": "idle"}}))
+        self.enterContext(patch.object(fnw, "_governed_open_issue_statuses",
+            side_effect=lambda _slug, numbers: {number: "Backlog" for number in numbers}))
     @staticmethod
     def _issue(number, priority="p1", *, status="backlog", body=None, labels=()):
         return {
@@ -1366,7 +1366,9 @@ class IdleBacklogPromotionTests(unittest.TestCase):
 
     def test_promotes_only_highest_priority_picker_eligible_issue(self):
         issues = [self._issue(20, "p2"), self._issue(30, "p0"), self._issue(10, "p0")]
-        with patch.object(fnw, "list_open_issues", return_value=issues), \
+        post = self._issue(10, "p0", status="ready")
+        with patch.object(fnw, "list_open_issues",
+                          side_effect=[issues, issues, [post]]), \
              patch.object(fnw, "list_work_prs", return_value=[]), \
              patch.object(fnw, "active_increment_scope", return_value=None), \
              patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
@@ -1377,13 +1379,16 @@ class IdleBacklogPromotionTests(unittest.TestCase):
              patch.object(fetch_next_issue, "is_trusted_metadata_author",
                           return_value=True), \
              patch.object(fnw, "query_issue_project_items",
-                          return_value=[{"status": {"name": "Backlog"}}]), \
+                          side_effect=[[{"status": {"name": "Backlog"}}],
+                                       [{"status": {"name": "Ready"}}]]), \
              patch.object(fnw, "select_governed_project_items",
                           side_effect=lambda items, _slug: items), \
              patch.object(fnw, "update_status", return_value=True) as update:
             promoted = fnw.promote_one_idle_backlog_issue("agent-1")
         self.assertEqual(promoted, 10)
-        update.assert_called_once_with(10, "Ready", require_board=True)
+        update.assert_called_once_with(10, "Ready", require_board=True,
+            expected_status="Backlog", require_unclaimed=True,
+        )
 
     def test_does_not_promote_when_any_ready_issue_exists(self):
         issues = [self._issue(1, status="ready"), self._issue(2)]
@@ -1493,6 +1498,3 @@ class IdleBacklogPromotionTests(unittest.TestCase):
         self.assertEqual(payload["auto_promoted_issue"], 334)
         self.assertTrue(payload["work"]["claimed"])
         claim.assert_called_once_with(334, "agent-1")
-
-if __name__ == "__main__":
-    unittest.main()
