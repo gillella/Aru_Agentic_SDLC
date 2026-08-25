@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -369,13 +370,6 @@ class MergeWorkTests(unittest.TestCase):
         self.assertEqual(work["pr"], 2)
         self.assertEqual(work["head_sha"], "bbb")
         self.assertIsNotNone(claimed)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-
 class UnreadableQueueTests(unittest.TestCase):
     def test_selector_fails_closed_when_prs_cannot_be_listed(self):
         # Treating an unreadable queue as empty would claim new implementation
@@ -1340,6 +1334,12 @@ class WorkPickerTests(unittest.TestCase):
 
 
 class IdleBacklogPromotionTests(unittest.TestCase):
+    def setUp(self):
+        lock = patch.object(merge_pr, "repository_merge_lock",
+                            return_value=nullcontext((True, "locked")))
+        lock.start()
+        self.addCleanup(lock.stop)
+
     @staticmethod
     def _issue(number, priority="p1", *, status="backlog", body=None, labels=()):
         return {
@@ -1365,8 +1365,7 @@ class IdleBacklogPromotionTests(unittest.TestCase):
         }
 
     def test_promotes_only_highest_priority_picker_eligible_issue(self):
-        issues = [self._issue(20, "p2"), self._issue(30, "p0"),
-                  self._issue(10, "p0")]
+        issues = [self._issue(20, "p2"), self._issue(30, "p0"), self._issue(10, "p0")]
         with patch.object(fnw, "list_open_issues", return_value=issues), \
              patch.object(fnw, "list_work_prs", return_value=[]), \
              patch.object(fnw, "active_increment_scope", return_value=None), \
@@ -1377,6 +1376,10 @@ class IdleBacklogPromotionTests(unittest.TestCase):
                           return_value="owner"), \
              patch.object(fetch_next_issue, "is_trusted_metadata_author",
                           return_value=True), \
+             patch.object(fnw, "query_issue_project_items",
+                          return_value=[{"status": {"name": "Backlog"}}]), \
+             patch.object(fnw, "select_governed_project_items",
+                          side_effect=lambda items, _slug: items), \
              patch.object(fnw, "update_status", return_value=True) as update:
             promoted = fnw.promote_one_idle_backlog_issue("agent-1")
         self.assertEqual(promoted, 10)
@@ -1385,6 +1388,53 @@ class IdleBacklogPromotionTests(unittest.TestCase):
     def test_does_not_promote_when_any_ready_issue_exists(self):
         issues = [self._issue(1, status="ready"), self._issue(2)]
         with patch.object(fnw, "list_open_issues", return_value=issues), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_refuses_conflicting_status_labels(self):
+        issue = self._issue(1)
+        issue["labels"].append({"name": "status:done"})
+        with patch.object(fnw, "list_open_issues", return_value=[issue]), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_refuses_candidate_that_changes_during_live_revalidation(self):
+        original = self._issue(1)
+        changed = {**original, "body": original["body"] + "\nchanged\n"}
+        with patch.object(fnw, "list_open_issues",
+                          side_effect=[[original], [changed]]), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "active_increment_scope", return_value=None), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins",
+                          return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login",
+                          return_value="owner"), \
+             patch.object(fetch_next_issue, "is_trusted_metadata_author",
+                          return_value=True), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_refuses_when_governed_board_is_not_backlog(self):
+        issue = self._issue(1)
+        with patch.object(fnw, "list_open_issues", return_value=[issue]), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "active_increment_scope", return_value=None), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins",
+                          return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login",
+                          return_value="owner"), \
+             patch.object(fetch_next_issue, "is_trusted_metadata_author",
+                          return_value=True), \
+             patch.object(fnw, "query_issue_project_items",
+                          return_value=[{"status": {"name": "Done"}}]), \
+             patch.object(fnw, "select_governed_project_items",
+                          side_effect=lambda items, _slug: items), \
              patch.object(fnw, "update_status") as update:
             self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
         update.assert_not_called()

@@ -68,7 +68,9 @@ from common import (
     board_agent_identities,
     get_repo_slug,
     list_open_issues,
+    query_issue_project_items,
     run_cmd,
+    select_governed_project_items,
     label_names as issue_label_names,
 )
 from fetch_next_issue import (
@@ -903,39 +905,43 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     }
 
 
-def promote_one_idle_backlog_issue(agent: str) -> int | None:
-    """Promote one qualified Backlog issue when no actionable Ready work exists.
-
-    This is deliberately narrower than ``triage_backlog.py --promote``. The
-    claiming picker needs one next item, not a freshly filled queue. Reuse the
-    triage module's Ready contract and oversize checks, then pass qualified
-    inventory through the normal picker so trust, priority, active-increment,
-    and in-flight path gates still fail closed.
-    """
+def _idle_backlog_candidate(agent: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Return the one issue triage and the ordinary picker would admit."""
     from triage_backlog import partition, ready_gaps, split_reasons
 
     issues = list_open_issues()
     if not issues:
-        return None
+        return None, None
+    if len(issues) >= 500:
+        print("[WARN] Open issue inventory may be truncated; refusing auto-triage.",
+              file=sys.stderr)
+        return None, None
 
     backlog, ready, _held = partition(issues)
     if ready or not backlog:
-        return None
+        return None, None
 
     open_numbers = {issue["number"] for issue in issues}
     repo_slug = get_repo_slug()
     qualified_numbers = {
         issue["number"]
         for issue in backlog
-        if not ready_gaps(issue, open_numbers, repo_slug=repo_slug)
+        if [
+            (label.get("name") or "").lower()
+            for label in issue.get("labels", [])
+            if (label.get("name") or "").lower().startswith("status:")
+        ] == ["status:backlog"]
+        and not (
+            "trusted-rewrite" in issue_label_names(issue)
+            and not issue.get("editor")
+        )
+        and not ready_gaps(issue, open_numbers, repo_slug=repo_slug)
         and not split_reasons(issue)
         and priority_rank(issue.get("labels", []))[0] is not None
     }
     if not qualified_numbers:
-        return None
+        return None, repo_slug
 
-    # Evaluate every qualified Backlog item as though it were Ready, but write
-    # only the highest-priority candidate the ordinary picker would accept.
     staged_issues = []
     for issue in issues:
         if issue["number"] not in qualified_numbers:
@@ -953,22 +959,56 @@ def promote_one_idle_backlog_issue(agent: str) -> int | None:
     if prs is None:
         print("[WARN] Cannot triage while the pull request queue is unreadable.",
               file=sys.stderr)
-        return None
+        return None, repo_slug
+    if len(prs) >= 200:
+        print("[WARN] Open pull request inventory may be truncated; refusing auto-triage.",
+              file=sys.stderr)
+        return None, repo_slug
     parts = build_candidates(
         staged_issues,
         agent,
         pr_files_by_issue=pr_files_by_issue_from_prs(prs),
         increment_scope=active_increment_scope(),
     )
-    candidate = next(
+    return next(
         (issue for issue in parts["candidates"]
          if issue["number"] in qualified_numbers),
         None,
-    )
-    if candidate is None:
+    ), repo_slug
+
+
+def _promote_one_idle_backlog_issue_locked(agent: str) -> int | None:
+    """Promote one qualified Backlog issue when no Ready item exists.
+
+    This is deliberately narrower than ``triage_backlog.py --promote``. The
+    candidate must clear the triage and picker contracts twice without changing
+    and still be Backlog on the governed board immediately before the write.
+    """
+    candidate, repo_slug = _idle_backlog_candidate(agent)
+    fresh, fresh_slug = _idle_backlog_candidate(agent)
+    if candidate is None or fresh is None or not repo_slug or fresh_slug != repo_slug:
         return None
 
-    number = candidate["number"]
+    compared_fields = (
+        "number", "body", "labels", "author", "editor", "authorAssociation",
+        "editorAssociation", "trustIdentityResolved",
+    )
+    if any(candidate.get(field) != fresh.get(field) for field in compared_fields):
+        print("[WARN] Backlog candidate changed during triage; leaving it untouched.",
+              file=sys.stderr)
+        return None
+
+    number = fresh["number"]
+    items = query_issue_project_items(number)
+    governed = select_governed_project_items(items or [], repo_slug)
+    board_status = (
+        ((governed[0].get("status") or {}).get("name") or "").lower()
+        if len(governed) == 1 else ""
+    )
+    if board_status != "backlog":
+        print(f"[WARN] Issue #{number} is not authoritatively Backlog on the board.",
+              file=sys.stderr)
+        return None
     if not update_status(number, "Ready", require_board=True):
         print(f"[WARN] Qualified Backlog issue #{number} could not be promoted.",
               file=sys.stderr)
@@ -976,6 +1016,15 @@ def promote_one_idle_backlog_issue(agent: str) -> int | None:
     print(f"[INFO] Picker promoted qualified Backlog issue #{number} to Ready.",
           file=sys.stderr)
     return number
+
+
+def promote_one_idle_backlog_issue(agent: str) -> int | None:
+    """Serialize one auto-triage transition against other lifecycle writes."""
+    with merge_pr.repository_merge_lock() as (locked, message):
+        if not locked:
+            print(f"[WARN] Auto-triage deferred: {message}.", file=sys.stderr)
+            return None
+        return _promote_one_idle_backlog_issue_locked(agent)
 
 
 def main():  # noqa: C901, PLR0912, PLR0915
@@ -1065,10 +1114,11 @@ def main():  # noqa: C901, PLR0912, PLR0915
         and not work.get("resuming")
         and not work.get("claimed", False)
     )
+    command_failed = claim_failed or work["type"] == "error"
 
     if args.as_json:
         print(json.dumps(res, indent=2))
-        return 1 if claim_failed else None
+        return 1 if command_failed else None
 
     print("=== Aru_Agentic_SDLC: next work ===")
     print(f"👤 {args.agent}" + (f" ({args.family})" if args.family else " (family unset)"))
@@ -1105,7 +1155,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
     if work["type"] not in {"issue", "merge"} and res["claimable_issues"]:
         print(f"\nIssues waiting: {res['claimable_issues']}")
 
-    return 1 if claim_failed else None
+    return 1 if command_failed else None
 
 
 def cli() -> None:
