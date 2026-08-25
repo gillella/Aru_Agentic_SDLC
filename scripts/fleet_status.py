@@ -476,20 +476,14 @@ def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # noqa: C
         if any(not node.get("isResolved") for node in threads if isinstance(node, dict)):
             pr["_review_evidence"] = None
             return None
-    rollup = pr.get("statusCheckRollup") or []
-    if not any(
-        isinstance(item, dict)
-        and isinstance(item.get("name") or item.get("context"), str)
-        and (item.get("name") or item.get("context")).strip().lower() == "coderabbit"
-        for item in rollup
-    ):
-        pr["_review_evidence"] = None
-        return None
     try:
         import merge_pr as mp
 
+        if mp.assigned_review_service(pr) not in {"coderabbit", "sourcery", "codeant"}:
+            pr["_review_evidence"] = None
+            return None
         evidence = mp.review_evidence(pr["number"])
-        evidence = mp._with_coderabbit_status(pr["number"], evidence)
+        evidence = mp.with_service_evidence(pr, pr["number"], evidence)
     except Exception as exc:
         print(f"[WARN] Could not load review evidence for PR #{pr['number']}: {exc}", file=sys.stderr)
         evidence = None
@@ -525,7 +519,7 @@ def _has_active_review_feedback(pr: Dict[str, Any]) -> bool:
         return True
 
 
-def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
+def _assigned_service_review_state(pr: Dict[str, Any]) -> Optional[str]:
     evidence = _review_evidence(pr)
     if not evidence:
         return None
@@ -533,7 +527,7 @@ def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
         import merge_pr as mp
     except ImportError:
         return None
-    if not mp.has_authoritative_coderabbit_review(pr, evidence):
+    if not mp.has_authoritative_assigned_review(pr, evidence):
         return None
     if (
         int(evidence.get("unresolved") or 0) > 0
@@ -549,9 +543,9 @@ def _review_state(pr: Dict[str, Any]) -> str:
         return "none"
     if _has_active_review_feedback(pr):
         return "feedback"
-    coderabbit_state = _coderabbit_review_state(pr)
-    if coderabbit_state:
-        return coderabbit_state
+    assigned_state = _assigned_service_review_state(pr)
+    if assigned_state:
+        return assigned_state
     return "pending"
 
 

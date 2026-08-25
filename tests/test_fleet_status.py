@@ -975,34 +975,31 @@ class FleetStatusTests(unittest.TestCase):
         pr_draft = {"number": 14, "isDraft": True, "labels": []}
         self.assertFalse(_pending_review(pr_draft))
 
-    def test_pr_without_coderabbit_hint_skips_review_evidence_lookup(self):
-        pr = {
-            "number": 21,
-            "isDraft": False,
-            "reviewDecision": "COMMENTED",
-            "labels": [],
-            "_active_review_feedback": [],
-            "statusCheckRollup": [],
-        }
-        with patch(
-            "merge_pr.review_evidence",
-            side_effect=AssertionError("review evidence should stay unloaded"),
-        ):
-            self.assertTrue(fleet_status._pending_review(pr))
+    def test_invalid_authority_skips_review_evidence_lookup(self):
+        for labels in ([], [{"name": "review:unknown"}], [
+            {"name": "review:coderabbit"}, {"name": "review:sourcery"},
+        ]):
+            pr = {"number": 21, "isDraft": False, "reviewDecision": "COMMENTED",
+                  "labels": labels, "_active_review_feedback": []}
+            with self.subTest(labels=labels), patch(
+                "merge_pr.review_evidence",
+                side_effect=AssertionError("review evidence should stay unloaded"),
+            ):
+                self.assertTrue(fleet_status._pending_review(pr))
 
-    def test_current_head_coderabbit_review_is_not_reported_as_pending_review(self):
-        reviewed = mock_pr(
-            18,
-            decision="COMMENTED",
-            statusCheckRollup=[{
-                "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
-            }],
-        )
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]), \
-             patch("merge_pr.review_evidence", return_value=coderabbit_evidence("b")):
-            status = self.evaluate_fixture(prs=[reviewed])
-        self.assertIn("PR #18 is reviewed and waiting for merge.", status["reasons"])
-        self.assertNotIn("PR #18 is open and pending review.", status["reasons"])
+    def test_assigned_service_evidence_controls_compact_review_state(self):
+        for service, authoritative in (("sourcery", True), ("codeant", True), ("sourcery", False)):
+            reviewed = mock_pr(18, f"review:{service}", decision="COMMENTED")
+            evidence = {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}
+            with self.subTest(service=service, authoritative=authoritative), \
+                 patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]), \
+                 patch("merge_pr.review_evidence", return_value=evidence), \
+                 patch("merge_pr.with_service_evidence", return_value=evidence) as enrich, \
+                 patch("merge_pr.has_authoritative_assigned_review", return_value=authoritative):
+                status = self.evaluate_fixture(prs=[reviewed])
+            reason = "PR #18 is reviewed and waiting for merge." if authoritative else "PR #18 is open and pending review."
+            self.assertIn(reason, status["reasons"])
+            enrich.assert_called_once_with(reviewed, 18, evidence)
 
     def test_unknown_feedback_result_keeps_pr_in_feedback_state(self):
         pr = mock_pr(19, decision="COMMENTED", statusCheckRollup=[{
