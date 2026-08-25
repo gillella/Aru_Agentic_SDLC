@@ -2,6 +2,15 @@
 
 This document defines code quality, testing requirements, git commit conventions, and pull request standards for **Aru_Agentic_SDLC**.
 
+> [!IMPORTANT]
+> **ARU CODE FACTORY REPOSITORY RULE — DO NOT MISS THIS:** For every ordinary
+> issue and pull request in this `Aru_Agentic_SDLC` repository, run only the
+> issue's focused verification. Do **not** run the complete repository test
+> suite as a routine per-issue or per-PR gate. This exception belongs only to
+> the Aru Code Factory repository; governed consumer repositories keep their
+> own testing policies. The complete Aru suite runs only at the separately
+> defined phase-exit and pre-release checkpoints below.
+
 ---
 
 ## 📝 Conventional Commit Specification
@@ -29,11 +38,20 @@ All git commit messages MUST follow Conventional Commits formatting:
 
 ## 🧪 Testing & Quality Standards
 
-1. **Local Test Execution**:
-   Before committing, agents MUST run the full test suite and confirm 100% pass rate.
-2. **Zero Masked Errors**:
+1. **Focused Story Verification**:
+   In this `Aru_Agentic_SDLC` repository, before committing, agents MUST run
+   every acceptance-criteria `verify:` predicate, the directly affected tests,
+   and every relevant lint, syntax, documentation, and build check. Changed
+   behavior always needs behavioral evidence; a focused scope is never
+   permission to record zero tests.
+2. **Complete-Suite Checkpoints**:
+   `python3 -m unittest discover tests` is not a default per-story gate. It is
+   reserved for every phase exit and before release, using the evidence
+   contract in `docs/project_board_workflow.md`; it is never an ordinary
+   issue or pull-request gate in this repository.
+3. **Zero Masked Errors**:
    Never resolve failures by swallowing exceptions, adding dummy fallbacks, or deleting failing assertions. Always address the root cause.
-3. **CI Pipeline Gatekeeper**:
+4. **CI Pipeline Gatekeeper**:
    No code is merged without passing automated CI runs. If CI fails, inspect logs using `python3 "$ARU_SDLC_HOME/scripts/check_ci.py"` and submit fix commits.
 
 ---
@@ -52,12 +70,13 @@ the hosted matrix. PyYAML is a required part of the pinned toolchain because the
 generated-workflow checks must parse YAML rather than skip when the parser is
 missing.
 
-Then the two commands `prompts/fleet-worker.md` requires before every push run
-as written:
+Ruff is a fast baseline for every story. Pair it with the exact focused tests
+and other predicates declared by the issue:
 
 ```bash
 ruff check .
-python3 -m unittest discover tests
+# Example only; use the modules named by the issue.
+python3 -m unittest tests.test_affected_module
 ```
 
 **The toolchain is pinned, and that is the point.** Versions live in

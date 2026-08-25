@@ -284,13 +284,20 @@ below. Never collapse research into this implementation branch.
    Everything from here happens inside the worktree.
 4. **Implement.** Minimal and targeted. Match the surrounding idiom. Do not
    refactor what the issue did not ask you to touch.
-5. **Verify locally — not optional:** `ruff check .` and `python3 -m unittest discover tests` both clean.
-   New source with no test is not done. Docs-only? State in the PR body exactly
-   what you checked.
+5. **Verify locally — focused evidence is not optional.** First identify the
+   target repository. Only for `Aru_Agentic_SDLC` (the Aru Code Factory), run
+   every `verify:` predicate in the issue, the directly affected tests, and
+   every relevant lint, syntax, documentation, or build check. New behavior
+   with no behavioral evidence is not done. Do not run
+   `python3 -m unittest discover tests` for an ordinary Aru issue or PR; the
+   complete Aru suite belongs only to the phase and pre-release checkpoints in
+   `docs/project_board_workflow.md`. For every consumer repository, follow its
+   own `AGENTS.md` and testing policy; never export this Aru-only exception.
+   Docs-only? State in the PR body exactly what you checked.
 6. **Commit, rebase, re-verify, push:**
    ```bash
    git fetch origin && git rebase origin/main
-   ruff check . && python3 -m unittest discover tests
+   # Re-run the same focused verification required above.
    git push -u origin <branch>
    ```
 7. **Open the PR, stamped with your identity:**

@@ -185,9 +185,23 @@ or other irreversible work from the plan gate.
 4. Perform source code modifications while preserving existing docstrings, formatting, and public API contracts.
 
 ### Step 6: Run Local Tests & Verification
-1. Execute the project's test runner, build system, and syntax/lint checks inside the worktree directory.
-2. Verify that all existing unit tests pass without regressions.
-3. If tests fail, resolve failures locally before proceeding.
+1. Determine the target repository before selecting tests. The focused-only
+   exception below applies **only** when the target repository is
+   `Aru_Agentic_SDLC` (the Aru Code Factory). For every consumer repository
+   governed by Aru, follow that repository's `AGENTS.md` and test policy;
+   never export or infer this Aru-specific exception.
+2. For an ordinary Aru Code Factory issue, run every acceptance-criteria
+   `verify:` predicate from the issue inside the worktree directory.
+3. Run the directly affected tests and every relevant lint, syntax,
+   documentation, and build check. Focused scope never means zero behavioral
+   evidence for changed behavior.
+4. For an ordinary Aru Code Factory issue or PR, do **not** run the complete
+   repository test suite (`python3 -m unittest discover tests`). The complete
+   Aru suite belongs only to the phase-exit and pre-release checkpoints in
+   `docs/project_board_workflow.md`.
+5. Resolve every focused-verification failure locally before proceeding.
+6. Pass the exact successful commands to `create_pr.py`; its current-head
+   verification record and `merge_pr.py` acceptance gate remain mandatory.
 
 ### Step 7: Commit & Push Changes
 1. Create atomic, conventional git commits:

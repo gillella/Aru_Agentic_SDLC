@@ -142,6 +142,9 @@ class IdentityStampTests(unittest.TestCase):
         self.assertEqual(create_pr.review_service_for_issue(2), "sourcery")
         self.assertEqual(create_pr.review_service_for_issue(3), "codeant")
         self.assertEqual(create_pr.review_service_for_issue(4), "coderabbit")
+        self.assertEqual(create_pr.review_service_for_issue(340), "coderabbit")
+        self.assertEqual(create_pr.review_service_for_issue(341), "coderabbit")
+        self.assertEqual(create_pr.review_service_for_issue(342), "codeant")
 
     # finalize_review_assignment() consults existing_review_assignment() (a
     # live "gh pr view --json labels" call) before anything else, and posts

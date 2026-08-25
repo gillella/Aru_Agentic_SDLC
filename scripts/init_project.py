@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1927
+# line-ceiling: 1913
 """
 init_project.py - Automation script for bootstrapping a brand-new repository under
 Aru_Agentic_SDLC governance, scaffolding AGENTS.md, CI workflows, issue/PR templates,
@@ -251,6 +251,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           # fetch-depth: 0 is required so a PR-range scan can resolve base^..head.
           # push/pull_request: the action scans that event's commits, not the
           # whole repo. schedule/workflow_dispatch: full-history detect.

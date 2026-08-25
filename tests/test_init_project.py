@@ -1,4 +1,4 @@
-# line-ceiling: 791
+# line-ceiling: 812
 import contextlib
 import io
 import os
@@ -28,6 +28,12 @@ from init_project import (  # noqa: E402
 
 
 class ProjectBootstrapTests(unittest.TestCase):
+    def test_generated_governance_does_not_export_aru_focused_only_exception(self):
+        rules = init_project.DEFAULT_AGENTS_TEMPLATE
+        self.assertNotIn("ARU CODE FACTORY REPOSITORY RULE", rules)
+        self.assertNotIn("focused-only exception", rules)
+        self.assertIn("Run `{test_runner}` and confirm all tests pass", rules)
+
     def test_generated_plan_gate_requires_reuse_audit_with_names_and_locations(self):
         """Generated governance must carry the canonical reuse audit contract."""
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
@@ -355,6 +361,21 @@ class CiGateTests(unittest.TestCase):
     """
 
     STACKS = (("python", "pytest -q"), ("node", "npm test"), ("go", "go test ./..."))
+
+    def test_generated_consumer_ci_does_not_inherit_aru_checkpoint_schedule(self):
+        for stack, runner in self.STACKS:
+            with self.subTest(stack=stack):
+                parsed = yaml.safe_load(render_ci_workflow(stack, runner))
+                steps = parsed["jobs"]["verify"]["steps"]
+                tests_step = next(step for step in steps if step.get("name") == "Tests")
+                self.assertNotIn("if", tests_step)
+
+    def test_generated_checkout_does_not_persist_credentials(self):
+        for stack, runner in self.STACKS:
+            with self.subTest(stack=stack):
+                parsed = yaml.safe_load(render_ci_workflow(stack, runner))
+                checkout = parsed["jobs"]["verify"]["steps"][0]
+                self.assertIs(checkout["with"]["persist-credentials"], False)
 
     def test_test_gate_keys_on_source_not_on_tests(self):
         # Keying on tests is self-defeating - a repo with code and no tests
