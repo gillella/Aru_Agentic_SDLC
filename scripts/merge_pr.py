@@ -690,14 +690,10 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     )
     if comment_evidence is None:
         return None
-    if isinstance(comment_evidence, list):
-        review_attestations = comment_evidence
-        coderabbit_full_review_comments = []
-    else:
-        review_attestations = comment_evidence["attestations"]
-        coderabbit_full_review_comments = comment_evidence[
-            "coderabbit_full_review_comments"
-        ]
+    review_attestations = comment_evidence["attestations"]
+    coderabbit_full_review_comments = comment_evidence[
+        "coderabbit_full_review_comments"
+    ]
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {

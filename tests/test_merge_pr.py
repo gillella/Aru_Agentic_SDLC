@@ -5157,7 +5157,10 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
             ),
             patch.object(
                 merge_pr, "_review_head_attestations",
-                return_value=[{"agent": "agent-2", "head": self.HEAD}],
+                return_value={
+                    "attestations": [{"agent": "agent-2", "head": self.HEAD}],
+                    "coderabbit_full_review_comments": [],
+                },
             ),
             patch.object(merge_pr, "_gh_json", return_value=self.thread_page(comments)),
             patch.object(merge_pr, "_body_edit_events", return_value=normalized),

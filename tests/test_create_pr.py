@@ -188,6 +188,18 @@ class IdentityStampTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[0].args[0][:3], ["gh", "pr", "ready"])
         self.assertEqual(run.call_args_list[1].args[0][-1], "isDraft")
 
+    @patch("builtins.print")
+    @patch.object(create_pr, "run_cmd")
+    @patch.object(create_pr, "ensure_label")
+    @patch.object(create_pr, "existing_review_assignment",
+                  side_effect=["coderabbit", "coderabbit", None])
+    def test_already_ready_retry_reports_lost_assignment(self, _existing, label, run, output):
+        run.side_effect = [(1, "", "already ready"), (0, '{"isDraft": false}', "")]
+        self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        label.assert_not_called()
+        self.assertTrue(any("no longer carries review:coderabbit" in str(call)
+                            for call in output.call_args_list))
+
     @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
     @patch.object(create_pr, "ensure_label", return_value=True)
     def test_enqueue_review_comments_queued_at_and_needs_review(self, _label, run):

@@ -386,6 +386,7 @@ def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C90
             return False
         try:
             if existing_review_assignment(pr_ref) != "coderabbit":
+                print(f"[ERROR] PR {pr_ref} is ready but no longer carries {CODERABBIT_REVIEW_LABEL}.", file=sys.stderr)
                 return False
         except ReviewAssignmentLookupError as exc:
             print(f"[ERROR] PR {pr_ref} has ambiguous authority after ready recovery: {exc}",
