@@ -968,15 +968,33 @@ def main():  # noqa: C901, PLR0912, PLR0915
             work["claim_result"] = "all_taken"
     elif args.claim and work["type"] == "issue" and not work.get("resuming"):
         from claim_issue import claim_issue
-        work["claimed"] = claim_issue(work["issue"], args.agent) == EXIT_OK
+        issue_rc = claim_issue(work["issue"], args.agent)
+        work["claimed"] = issue_rc == EXIT_OK
+        if not work["claimed"]:
+            work["claim_result"] = (
+                "conflict" if issue_rc == EXIT_CONFLICT else "error"
+            )
+
+    claim_failed = bool(
+        args.claim
+        and work["type"] in {"issue", "review", "merge"}
+        and not work.get("resuming")
+        and not work.get("claimed", False)
+    )
 
     if args.as_json:
         print(json.dumps(res, indent=2))
-        return
+        return 1 if claim_failed else None
 
     print("=== Aru_Agentic_SDLC: next work ===")
     print(f"👤 {args.agent}" + (f" ({args.family})" if args.family else " (family unset)"))
-    if work["type"] == "feedback":
+    if claim_failed:
+        number = work.get("issue") or work.get("pr")
+        print(
+            f"⛔ Could not claim {work['type']} #{number}; "
+            f"result={work.get('claim_result', 'error')}. No work was started."
+        )
+    elif work["type"] == "feedback":
         print(f"🔁 Your PR #{work['pr']} has requested changes — address it before taking new work.")
         print(f"   → {work['skill']}: {work['title']}")
     elif work["type"] == "merge":
@@ -1003,6 +1021,12 @@ def main():  # noqa: C901, PLR0912, PLR0915
     if work["type"] not in {"issue", "merge"} and res["claimable_issues"]:
         print(f"\nIssues waiting: {res['claimable_issues']}")
 
+    return 1 if claim_failed else None
+
+
+def cli() -> None:
+    raise SystemExit(main())
+
 
 if __name__ == "__main__":
-    main()
+    cli()

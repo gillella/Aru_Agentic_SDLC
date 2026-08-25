@@ -1,4 +1,5 @@
-# line-ceiling: 965
+# line-ceiling: 1162
+import io
 import json
 import sys
 import tempfile
@@ -45,14 +46,210 @@ def issue_with_labels(*names, author="owner", number=7):
 
 class ClaimProtocolTests(unittest.TestCase):
     def setUp(self):
+        self.required_board_preflight = claim_issue._required_board_preflight
         owner = patch.object(
             claim_issue, "repository_owner_login", return_value="owner")
         trusted = patch.object(
             claim_issue, "repository_trusted_logins", return_value={"owner"})
+        board = patch.object(
+            claim_issue, "_required_board_preflight", return_value=True)
         self.addCleanup(owner.stop)
         self.addCleanup(trusted.stop)
+        self.addCleanup(board.stop)
         owner.start()
         trusted.start()
+        board.start()
+
+    @staticmethod
+    def _board_item():
+        return {
+            "status": {"name": "Ready"},
+            "project": {
+                "title": "widgets Board",
+                "repositories": {"nodes": [{"nameWithOwner": "octocat/widgets"}]},
+                "field": {
+                    "id": "STATUS_FIELD",
+                    "options": [{"id": "IN_PROGRESS", "name": "In Progress"}],
+                },
+            },
+        }
+
+    def _assert_preflight_blocks_claim(self, items):
+        stderr = io.StringIO()
+        with patch.object(
+            claim_issue,
+            "_required_board_preflight",
+            side_effect=self.required_board_preflight,
+        ), patch.object(
+            claim_issue, "get_repo_slug", return_value="octocat/widgets"
+        ), patch.object(
+            claim_issue, "query_issue_project_items", return_value=items
+        ), patch.object(
+            claim_issue, "get_issue", return_value=issue_with_labels("status:ready")
+        ), patch.object(
+            claim_issue, "ensure_label"
+        ) as ensure_label, patch.object(
+            claim_issue, "run_cmd"
+        ) as run_cmd, patch.object(
+            claim_issue, "update_status"
+        ) as update_status, patch(
+            "sys.stderr", stderr
+        ):
+            result = claim_issue.claim_issue(7, "agent-a")
+
+        self.assertEqual(result, claim_issue.EXIT_ERROR)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+        return stderr.getvalue()
+
+    def _claim_with_failed_board_update(self, label_cleanup, assignee_cleanup):
+        snapshots = [
+            issue_with_labels("status:ready"),
+            issue_with_labels("status:ready", "agent:agent-a"),
+            issue_with_labels("status:ready", "agent:agent-a"),
+            issue_with_labels("status:ready", "agent:agent-a"),
+        ]
+        stderr = io.StringIO()
+        with patch.object(claim_issue.time, "sleep"), patch.object(
+            claim_issue, "update_status", return_value=False
+        ), patch.object(
+            claim_issue, "run_cmd"
+        ) as run_cmd, patch.object(
+            claim_issue, "ensure_label", return_value=True
+        ), patch.object(
+            claim_issue, "get_issue", side_effect=snapshots
+        ), patch(
+            "sys.stderr", stderr
+        ):
+            def command_result(command, **_kwargs):
+                if "--remove-label" in command:
+                    return label_cleanup
+                if "--remove-assignee" in command:
+                    return assignee_cleanup
+                return 0, "", ""
+
+            run_cmd.side_effect = command_result
+            result = claim_issue.claim_issue(7, "agent-a")
+
+        commands = [record.args[0] for record in run_cmd.call_args_list]
+        return result, commands, stderr.getvalue()
+
+    def test_unreadable_project_preflight_names_required_authority(self):
+        stderr = io.StringIO()
+        with patch.object(claim_issue, "get_repo_slug", return_value="octocat/widgets"), \
+             patch.object(claim_issue, "query_issue_project_items", return_value=None), \
+             patch("sys.stderr", stderr):
+            self.assertFalse(self.required_board_preflight(7, "In Progress"))
+        self.assertIn("read:project", stderr.getvalue())
+        self.assertIn("project", stderr.getvalue())
+        self.assertIn("claim cannot proceed", stderr.getvalue())
+
+    def test_project_preflight_requires_ready_state_and_target_option(self):
+        item = self._board_item()
+        with patch.object(claim_issue, "get_repo_slug", return_value="octocat/widgets"), \
+             patch.object(claim_issue, "query_issue_project_items", return_value=[item]):
+            self.assertTrue(self.required_board_preflight(7, "In Progress"))
+            item["status"]["name"] = "Backlog"
+            with patch("sys.stderr", io.StringIO()):
+                self.assertFalse(self.required_board_preflight(7, "In Progress"))
+
+    def test_project_preflight_rejects_zero_or_multiple_governed_items(self):
+        item = self._board_item()
+        for items in ([], [item, self._board_item()]):
+            with self.subTest(project_item_count=len(items)):
+                error = self._assert_preflight_blocks_claim(items)
+                self.assertIn("exactly one governed Project Board item", error)
+
+    def test_project_preflight_rejects_missing_status_contract(self):
+        no_field = self._board_item()
+        no_field["project"]["field"] = None
+        no_target = self._board_item()
+        no_target["project"]["field"]["options"] = [{"id": "READY", "name": "Ready"}]
+        for case, item in (("missing field", no_field), ("missing target", no_target)):
+            with self.subTest(case=case):
+                error = self._assert_preflight_blocks_claim([item])
+                self.assertIn("no readable Status option 'In Progress'", error)
+
+    @patch.object(claim_issue, "_required_board_preflight", return_value=False)
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_failed_project_preflight_writes_no_claim_state(
+        self, get_issue, ensure_label, run_cmd, update_status, _preflight
+    ):
+        get_issue.return_value = issue_with_labels("status:ready")
+        result = claim_issue.claim_issue(7, "agent-a")
+        self.assertEqual(result, claim_issue.EXIT_ERROR)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+
+    @patch.object(claim_issue, "_required_board_preflight", return_value=False)
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_interrupted_claim_preflight_reports_retained_state(
+        self, get_issue, ensure_label, run_cmd, update_status, _preflight
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:ready", "agent:agent-a")
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            result = claim_issue.claim_issue(7, "agent-a")
+        self.assertEqual(result, claim_issue.EXIT_ERROR)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+        self.assertIn("Incomplete claim state retained", stderr.getvalue())
+        self.assertIn("agent:agent-a", stderr.getvalue())
+        self.assertIn("existing assignee", stderr.getvalue())
+
+    def test_failed_board_mutation_rolls_back_and_returns_error(self):
+        result, commands, stderr = self._claim_with_failed_board_update(
+            (0, "", ""), (0, "", "")
+        )
+        self.assertEqual(result, claim_issue.EXIT_ERROR)
+        self.assertIn(
+            ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
+            commands,
+        )
+        self.assertIn(
+            ["gh", "issue", "edit", "7", "--remove-assignee", "@me"],
+            commands,
+        )
+        self.assertIn("Required Project Board/status mutation failed", stderr)
+        self.assertIn("read:project", stderr)
+
+    def test_failed_board_mutation_reports_failed_label_cleanup(self):
+        result, commands, stderr = self._claim_with_failed_board_update(
+            (1, "", "label cleanup denied"), (0, "", "")
+        )
+        self.assertEqual(result, claim_issue.EXIT_ERROR)
+        self.assertTrue(any("--remove-label" in command for command in commands))
+        self.assertTrue(any("--remove-assignee" in command for command in commands))
+        self.assertIn("Claim rollback incomplete", stderr)
+        self.assertIn("manual reconciliation required", stderr)
+        self.assertIn("claim label cleanup failed", stderr)
+
+    def test_failed_board_mutation_reports_failed_assignee_cleanup(self):
+        result, commands, stderr = self._claim_with_failed_board_update(
+            (0, "", ""), (1, "", "assignee cleanup denied")
+        )
+        self.assertEqual(result, claim_issue.EXIT_ERROR)
+        self.assertTrue(any("--remove-label" in command for command in commands))
+        self.assertTrue(any("--remove-assignee" in command for command in commands))
+        self.assertIn("Claim rollback incomplete", stderr)
+        self.assertIn("manual reconciliation required", stderr)
+        self.assertIn("assignee cleanup denied", stderr)
+
+    def test_cli_propagates_claim_error_exit_code(self):
+        with patch.object(claim_issue, "claim_issue", return_value=claim_issue.EXIT_ERROR), \
+             patch("sys.argv", ["claim_issue.py", "--issue", "7", "--agent", "agent-a"]):
+            with self.assertRaisesRegex(SystemExit, "1"):
+                claim_issue.main()
     @patch.object(claim_issue, "update_status")
     @patch.object(claim_issue, "run_cmd")
     @patch.object(claim_issue, "ensure_label")
