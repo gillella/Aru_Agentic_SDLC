@@ -7,86 +7,98 @@ ring[0]. Deriving the id from where the agent runs removes both.
 """
 
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import agent_identity as ai  # noqa: E402
 import agent_presence as ap  # noqa: E402
 import fetch_next_work as fnw  # noqa: E402
 
 
 class FingerprintDerivationTests(unittest.TestCase):
     def test_same_worker_resolves_to_the_same_id(self):
-        first = ap.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
-        second = ap.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
+        first = ai.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
+        second = ai.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
         self.assertEqual(first, second)
 
     def test_two_machines_resolve_to_different_ids(self):
         # The cross-machine collision: two local registries both pick ring[0].
-        box_a = ap.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
-        box_b = ap.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-b")
+        box_a = ai.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
+        box_b = ai.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-b")
         self.assertNotEqual(box_a, box_b)
 
     def test_two_checkouts_on_one_machine_resolve_to_different_ids(self):
-        one = ap.fingerprint_agent_id("anthropic", repo_root="/repo-one", machine="box-a")
-        two = ap.fingerprint_agent_id("anthropic", repo_root="/repo-two", machine="box-a")
+        one = ai.fingerprint_agent_id("anthropic", repo_root="/repo-one", machine="box-a")
+        two = ai.fingerprint_agent_id("anthropic", repo_root="/repo-two", machine="box-a")
         self.assertNotEqual(one, two)
 
     def test_families_are_separated(self):
-        claude = ap.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
-        codex = ap.fingerprint_agent_id("openai", repo_root="/repo", machine="box-a")
+        claude = ai.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
+        codex = ai.fingerprint_agent_id("openai", repo_root="/repo", machine="box-a")
         self.assertNotEqual(claude, codex)
 
     def test_id_is_readable_and_prefixed_by_product(self):
         self.assertTrue(
-            ap.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
+            ai.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
             .startswith("claude-"))
         self.assertTrue(
-            ap.fingerprint_agent_id("openai", repo_root="/repo", machine="box-a")
+            ai.fingerprint_agent_id("openai", repo_root="/repo", machine="box-a")
             .startswith("codex-"))
 
     def test_unknown_family_still_yields_a_usable_id(self):
-        agent_id = ap.fingerprint_agent_id("", repo_root="/repo", machine="box-a")
+        agent_id = ai.fingerprint_agent_id("", repo_root="/repo", machine="box-a")
         self.assertTrue(agent_id.startswith("agent-"))
-        self.assertRegex(agent_id, ap.AGENT_ID_RE)
+        self.assertRegex(agent_id, ai.AGENT_ID_RE)
 
     def test_id_is_a_valid_agent_id_and_stays_short(self):
-        agent_id = ap.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
-        self.assertRegex(agent_id, ap.AGENT_ID_RE)
+        agent_id = ai.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
+        self.assertRegex(agent_id, ai.AGENT_ID_RE)
         self.assertLessEqual(len(agent_id), 20)
+
+    def test_fingerprint_uses_twelve_hex_characters(self):
+        agent_id = ai.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
+        self.assertRegex(agent_id, r"^claude-[0-9a-f]{12}$")
 
     def test_checkout_path_is_hashed_not_embedded(self):
         # The id lands in public GitHub labels; an absolute path would name the
         # operator's home directory.
-        agent_id = ap.fingerprint_agent_id(
+        agent_id = ai.fingerprint_agent_id(
             "anthropic", repo_root="/Users/someone/secret-project", machine="box-a")
         self.assertNotIn("someone", agent_id)
         self.assertNotIn("secret-project", agent_id)
 
-    def test_seats_disambiguate_one_checkout(self):
-        base = ap.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
-        seat2 = ap.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a", seat=2)
-        self.assertNotEqual(base, seat2)
-        self.assertTrue(seat2.startswith(base))
-
     def test_env_override_is_reported(self):
-        self.assertEqual(ap.configured_agent_id({"ARU_AGENT_ID": " box-agent "}), "box-agent")
-        self.assertEqual(ap.configured_agent_id({}), "")
+        self.assertEqual(ai.configured_agent_id({"ARU_AGENT_ID": " box-agent "}), "box-agent")
+        self.assertEqual(ai.configured_agent_id({}), "")
+
+    def test_presence_temporarily_reexports_the_pure_api(self):
+        self.assertIs(ap.fingerprint_agent_id, ai.fingerprint_agent_id)
+        self.assertIs(ap.configured_agent_id, ai.configured_agent_id)
+
+    def test_resolver_precedence(self):
+        self.assertEqual(
+            ai.resolve_agent_id(" explicit ", family="openai", env={"ARU_AGENT_ID": "env"}),
+            "explicit",
+        )
+        self.assertEqual(
+            ai.resolve_agent_id(None, family="openai", env={"ARU_AGENT_ID": " env "}),
+            "env",
+        )
+
+    def test_resolver_rejects_invalid_operator_ids(self):
+        for explicit in ("", "bad id", "-bad"):
+            with self.subTest(explicit=explicit), self.assertRaises(ValueError):
+                ai.resolve_agent_id(explicit, family="openai", env={})
+        for pinned in ("", "bad id", "-bad"):
+            with self.subTest(pinned=pinned), self.assertRaises(ValueError):
+                ai.resolve_agent_id(None, family="openai", env={"ARU_AGENT_ID": pinned})
 
 
 class PickerIdentityTests(unittest.TestCase):
     """The picker's end of the same behaviour."""
-
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.presence = Path(self.temporary.name) / "agent-presence.json"
-        patcher = patch.object(ap, "DEFAULT_PRESENCE_PATH", self.presence)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def _idle(self):
         return {"agent": "unused", "family": None,
@@ -94,66 +106,80 @@ class PickerIdentityTests(unittest.TestCase):
                 "merge_skipped": [], "claimable_issues": [],
                 "mergeable_detail": [], "reviewable_detail": []}
 
-    def _run(self, argv, env=None):
+    def _run(self, argv, env=None, reserve_identity=True):
+        from contextlib import nullcontext
         import io
+        argv = [*argv, "--reap-after", "0"]
         out = patch("sys.stdout", new_callable=io.StringIO)
         err = patch("sys.stderr", new_callable=io.StringIO)
+        reserve = (
+            patch.object(fnw, "_reserve_derived_identity", return_value=None)
+            if reserve_identity else nullcontext()
+        )
         with patch.object(fnw, "select", return_value=self._idle()) as select_mock, \
-             patch.dict("os.environ", env or {}, clear=False), \
+             reserve, \
+             patch.dict("os.environ", env or {}, clear=True), \
              patch("sys.argv", argv), out as _o, err as _e:
             rc = fnw.main()
         return rc, select_mock, _e.getvalue()
-
-    def _age_out_claims(self):
-        """Backdate every registry claim, the way a heartbeat gap would."""
-        import json
-        from datetime import datetime, timedelta, timezone
-        stale = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ")
-        document = json.loads(self.presence.read_text(encoding="utf-8"))
-        for claim in (document.get("claims") or {}).values():
-            claim["at"] = stale
-        self.presence.write_text(json.dumps(document), encoding="utf-8")
 
     def test_restarted_session_gets_the_same_id_back(self):
         # A restart is a new PID with no link to the worker that was running.
         # Under the pool model it took a different name; the fingerprint is
         # recomputed from the same machine and checkout, so it comes back.
-        _rc, first, _err = self._run(
-            ["fetch_next_work.py", "--family", "anthropic", "--session-id", "pid-1"])
-        self._age_out_claims()
-        _rc2, second, _err2 = self._run(
-            ["fetch_next_work.py", "--family", "anthropic", "--session-id", "pid-2"])
+        with patch.object(ai, "_checkout_root", return_value="/repo"), \
+             patch.object(ai, "_machine_identifier", return_value="box-a"):
+            _rc, first, _err = self._run(
+                ["fetch_next_work.py", "--family", "anthropic"])
+            _rc2, second, _err2 = self._run(
+                ["fetch_next_work.py", "--family", "anthropic"])
         self.assertEqual(first.call_args[0][0], second.call_args[0][0])
 
-    def test_a_concurrent_second_session_gets_a_distinct_seat(self):
-        argv = ["fetch_next_work.py", "--family", "anthropic", "--session-id", "pid-1"]
-        _rc, first, _err = self._run(argv)
-        argv2 = ["fetch_next_work.py", "--family", "anthropic", "--session-id", "pid-2"]
-        _rc2, second, _err2 = self._run(argv2)
-        self.assertNotEqual(first.call_args[0][0], second.call_args[0][0])
-
-    def test_derivation_needs_no_board_query(self):
-        # A restart must not depend on GitHub being reachable: a board claim
-        # carrying this id is this worker's own earlier work by construction.
-        with patch.object(fnw, "board_agent_identities",
-                          side_effect=AssertionError("board must not be queried")):
+    def test_derivation_needs_no_presence_registry(self):
+        with patch.object(ai, "fingerprint_agent_id",
+                          wraps=ai.fingerprint_agent_id) as derive:
             rc, select_mock, _err = self._run(
-                ["fetch_next_work.py", "--family", "anthropic", "--session-id", "s"])
+                ["fetch_next_work.py", "--family", "anthropic"])
+        derive.assert_called_once()
+        self.assertFalse(hasattr(fnw, "agent_presence"))
         self.assertIsNone(rc)
         self.assertTrue(select_mock.call_args[0][0].startswith("claude-"))
 
+    def test_live_derived_identity_stops_before_selection(self):
+        with patch.object(fnw, "select", return_value=self._idle()) as select_mock, \
+             patch.object(fnw, "_reserve_derived_identity", return_value=1), \
+             patch.dict("os.environ", {}, clear=True), \
+             patch("sys.argv", ["fetch_next_work.py", "--family", "anthropic", "--reap-after", "0"]):
+            rc = fnw.main()
+        self.assertEqual(rc, 1)
+        select_mock.assert_not_called()
+
+    def test_invalid_operator_ids_stop_before_selection(self):
+        for argv, env in (
+            (["fetch_next_work.py", "--agent", "bad id"], {}),
+            (["fetch_next_work.py"], {"ARU_AGENT_ID": ""}),
+        ):
+            with self.subTest(argv=argv, env=env):
+                rc, select_mock, error = self._run(argv, env=env)
+                self.assertEqual(rc, 1)
+                select_mock.assert_not_called()
+                self.assertIn("invalid", error)
+
     def test_env_pinned_id_wins_over_derivation(self):
-        rc, select_mock, _err = self._run(
-            ["fetch_next_work.py", "--family", "anthropic", "--session-id", "s"],
-            env={"ARU_AGENT_ID": "box-agent"})
+        with patch.object(fnw, "_reserve_derived_identity") as reserve:
+            rc, select_mock, _err = self._run(
+                ["fetch_next_work.py", "--family", "anthropic"],
+                env={"ARU_AGENT_ID": "box-agent"}, reserve_identity=False)
+        reserve.assert_not_called()
         self.assertIsNone(rc)
         self.assertEqual(select_mock.call_args[0][0], "box-agent")
 
     def test_explicit_agent_still_wins_over_everything(self):
-        rc, select_mock, _err = self._run(
-            ["fetch_next_work.py", "--agent", "claude-1", "--session-id", "s"],
-            env={"ARU_AGENT_ID": "box-agent"})
+        with patch.object(fnw, "_reserve_derived_identity") as reserve:
+            rc, select_mock, _err = self._run(
+                ["fetch_next_work.py", "--agent", "claude-1"],
+                env={"ARU_AGENT_ID": "box-agent"}, reserve_identity=False)
+        reserve.assert_not_called()
         self.assertIsNone(rc)
         self.assertEqual(select_mock.call_args[0][0], "claude-1")
 

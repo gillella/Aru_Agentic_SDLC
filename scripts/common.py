@@ -880,7 +880,7 @@ def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
     """Fetches single issue details via gh CLI, plus GraphQL trust identity."""
     cmd = [
         "gh", "issue", "view", str(issue_id),
-        "--json", "number,title,labels,assignees,body,state,author",
+        "--json", "number,title,labels,assignees,body,state,author,updatedAt",
     ]
     res = run_gh_json(cmd)
     if not isinstance(res, dict):

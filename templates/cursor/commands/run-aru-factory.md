@@ -5,7 +5,8 @@ Run the Aru_Agentic_SDLC factory (`aru code` / `aru` is the canonical trigger).
    run the factory. Use `next` only when they asked for one unit, then stop.
    `aru video` / `aru poem` are reserved for factories not yet built — stop
    rather than improvising from Code Factory skills.
-3. Omit `--agent` on the picker to auto-assign a free identity from the
-   presence registry, or pass `--agent`/`--family` explicitly for this session.
+3. Pass `--family` on the picker. Omit `--agent` to derive the stable
+   `<product>-<fingerprint>` from machine, checkout, and family; set
+   `ARU_AGENT_ID` or pass `--agent` only to pin an explicit id.
 4. In the Cursor desktop app, keep this current project task in charge. Do not
    replace it with a CLI agent. A recoverable wait does not end the loop.

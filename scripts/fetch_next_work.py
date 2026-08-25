@@ -1,50 +1,10 @@
 #!/usr/bin/env python3
-# line-ceiling: 1226
-"""fetch_next_work.py - answers "what should I do next?" for one agent.
-
-The issue picker only ever answered "which issue do I implement?", so a fleet
-of agents that all prefer fresh issues buries the board in unreviewed PRs.
-Review is not a CI job here - agents run this loop under their own
-subscriptions and no provider API keys exist - so review has to be work an
-agent claims off the board like anything else.
-
-Three work types, in strict priority order:
-
-  1. feedback  - a PR I authored has requested changes or unresolved threads
-  2. merge     - a PR whose Definition-of-Done gates already pass
-  3. review    - an eligible PR is waiting for someone to review it
-  4. issue     - nothing to finish, so start something new
-
-Finishing beats starting. That ordering is the whole point: it is what stops
-the review queue growing faster than it drains, and what carries independently
-reviewed work through gated merge without a human pressing the button.
-
-  python3 fetch_next_work.py --agent agent-1 --json
-  python3 fetch_next_work.py --agent agent-1 --family anthropic --claim
-
-Review eligibility:
-
-  | rule                          | hard? |
-  |-------------------------------|-------|
-  | nobody else holds reviewer:*  | hard  |
-  | author:<id> is not me         | hard  |
-  | family:<f> is not mine        | soft  |
-  | CI red                        | hard  |
-  | not a draft                   | hard  |
-
-CI pending or absent does not block a review claim. Pickup latency is the
-queue, and the reviewer already re-runs tests in a worktree. Merge still
-requires green CI. A red check still refuses review so the author fixes
-first.
-
-The family rule must be soft. An all-Claude fleet with a hard rule has zero
-eligible reviewers, nothing gets reviewed, and merge_pr.py blocks everything -
-a deadlock. After a PR has waited past the threshold, any *different agent* may
-review it and the PR is labelled `same-family-review` so the degradation shows.
-
-CodeRabbit is the sole positive PR code-review authority.
-Coding-agent work is limited to implementation, remediation, and mechanical
-merge execution after every Definition-of-Done gate passes.
+# line-ceiling: 1260
+"""Return the highest-priority work one governed factory agent can perform.
+Finishing beats starting: author feedback, merge-ready work, resumable issues,
+then Ready issues. External review services stay outside the coding-agent queue;
+only a preassigned emergency agent review can resume here. A truly idle claiming
+picker may promote one qualified Backlog issue and reselect it.
 """
 
 import argparse
@@ -65,16 +25,18 @@ from claim_issue import (
     reap_stale_merges,
 )
 from common import (
-    board_agent_identities,
     get_repo_slug,
     list_open_issues,
+    query_issue_project_items,
     run_cmd,
+    select_governed_project_items,
     label_names as issue_label_names,
 )
 from fetch_next_issue import (
     active_increment_scope,
     attach_open_pr_file_snapshots,
     build_candidates,
+    priority_rank,
     pr_files_by_issue_from_prs,
     reap_stale_claims,
 )
@@ -87,155 +49,43 @@ from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # implementation of that predicate in the picker is exactly the drift that let
 # reviewed-but-since-pushed PRs reach no agent at all.
 from merge_pr import review_evidence
+from update_issue_status import update_status
+from picker_board_inventory import governed_board_inventory as _governed_open_issue_statuses, stage_expected_ready_for_triage
 
 
-# Seats disambiguate concurrent sessions sharing one checkout -- the only case a
-# fingerprint alone cannot separate. Small on purpose: more than a handful of
-# agents in one working copy is a misconfiguration, not a fleet.
-MAX_WORKER_SEATS = 8
+class AutoTriageError(RuntimeError):
+    """An attempted automatic promotion left unverifiable lifecycle state."""
 
 
-def _fingerprint_assign_identity(args, session_id):
-    """Derive this worker's identity from where it runs (#310).
+def _reserve_derived_identity(agent_id: str) -> int | None:
+    """Refuse a second live session before it can reuse a derived identity."""
+    from agent_presence import DEFAULT_PRESENCE_PATH, PresenceError, PresenceStore
 
-    The pool model assigned a name per *process*, so a restart -- a new PID with
-    no link to the worker that had been running -- took a different name, and two
-    machines each arbitrating from their own local registry both took ring[0].
-    A fingerprint over machine, checkout, and family is stable across restarts
-    and distinct across machines, so an id can never be reissued to a different
-    worker.
-
-    No board query is needed here: a board claim carrying this id is, by
-    construction, this worker's own earlier work. That is what makes a restart
-    reclaim its issue instead of treating it as somebody else's.
-    """
-    from agent_presence import (
-        DEFAULT_PRESENCE_PATH,
-        PresenceError,
-        PresenceStore,
-        fingerprint_agent_id,
-    )
-    family = (args.family or "").lower()
-    # The seat ladder is the pool. resolve_free_identity skips seats held by
-    # another *live* session and records the claim atomically, so a restart
-    # (whose old claim has aged out) lands back on seat 1, while a genuinely
-    # concurrent second session on the same checkout gets seat 2.
-    ladder = [fingerprint_agent_id(family, seat=seat)
-              for seat in range(1, MAX_WORKER_SEATS + 1)]
-    store = PresenceStore(DEFAULT_PRESENCE_PATH)
+    session_id = f"{socket.gethostname().split('.')[0]}|{os.getpid()}"
     try:
-        args.agent = store.resolve_free_identity(ladder, session_id)
+        PresenceStore(DEFAULT_PRESENCE_PATH).resolve_free_identity([agent_id], session_id)
     except PresenceError as exc:
-        print(f"[ERROR] {exc}", file=sys.stderr)
-        return 1
-    print(f"[presence] worker identity '{args.agent}' for session '{session_id}'",
-          file=sys.stderr)
-    return None
-
-
-def _auto_assign_identity(args, session_id):
-    """Settle an identity when none was named on the command line.
-
-    An operator-pinned ARU_AGENT_ID wins, then the fingerprint, then the legacy
-    named pool for fleets that want fixed readable names.
-    """
-    from agent_presence import configured_agent_id
-
-    pinned = configured_agent_id()
-    if pinned:
-        args.agent = pinned
-        return _explicit_identity(args, session_id)
-    if not getattr(args, "agent_pool", False):
-        return _fingerprint_assign_identity(args, session_id)
-    return _pool_assign_identity(args, session_id)
-
-
-def _pool_assign_identity(args, session_id):
-    """Pick a free identity from the named pool, consulting GitHub first.
-
-    The registry alone was never enough: its 300-second heartbeat TTL freed an
-    id that the board still showed holding an issue claim and authoring an open
-    PR, so a live agent's id was reissued to a second session (#304). The
-    registry stays as fast-path advisory state; GitHub decides liveness. Only
-    reachable via --agent-pool now that #310 makes derived ids the default.
-    """
-    from agent_presence import (
-        DEFAULT_AGENT_RING,
-        DEFAULT_PRESENCE_PATH,
-        PresenceError,
-        PresenceStore,
-    )
-    holders, error = board_agent_identities()
-    if holders is None:
-        # Fail closed. Assigning under an unreadable board risks handing out an
-        # id another agent is demonstrably using, which is the defect itself.
-        print(f"[ERROR] Cannot verify agent id ownership on GitHub: {error}. "
-              "Refusing to auto-assign an identity; pass --agent explicitly if "
-              "you know the id is free.", file=sys.stderr)
-        return 1
-
-    store = PresenceStore(DEFAULT_PRESENCE_PATH)
-    try:
-        registered = sorted(store._read().get("agents") or {})
-        pool = registered or list(DEFAULT_AGENT_RING)
-        free_pool = [a for a in pool if a not in holders]
-        if not free_pool:
-            taken = ", ".join(
-                f"{a} held by {holders[a][0]}" for a in pool if a in holders)
-            print(f"[ERROR] Every agent id in the pool is in use on the board: "
-                  f"{taken}. Refusing to reuse a live id -- add ids to the pool "
-                  "or wait for that work to close.", file=sys.stderr)
-            return 1
-        args.agent = store.resolve_free_identity(free_pool, session_id)
         print(
-            f"[presence] auto-assigned agent id '{args.agent}' for session '{session_id}'",
+            f"[ERROR] Derived agent identity '{agent_id}' is already in use by a "
+            "live local session. Pass a unique --agent or set ARU_AGENT_ID. "
+            f"{exc}",
             file=sys.stderr,
         )
-    except PresenceError as exc:
-        print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
     return None
 
 
-def _explicit_identity(args, session_id):
-    """Refuse an explicitly named identity that another live session holds.
+def _resolve_identity(args):
+    """Resolve overrides first, then reserve a derived identity for one session."""
+    from agent_identity import AGENT_ID_ENV_VAR, resolve_agent_id
 
-    The board is consulted for evidence, not as an extra refusal trigger. An
-    agent legitimately keeps its id while it holds an issue claim and while its
-    PR sits in review, so board presence alone cannot mean "taken" here without
-    stopping an agent from ever picking up its next item. What the board adds is
-    a message that names the work the conflicting session is on, instead of only
-    an opaque session token.
-    """
-    from agent_presence import DEFAULT_PRESENCE_PATH, PresenceStore
-
-    holder = PresenceStore(DEFAULT_PRESENCE_PATH).identity_holder(
-        args.agent, session_id
-    )
-    if holder is None:
-        return None
-    holders, _error = board_agent_identities()
-    where = (holders or {}).get(args.agent) or []
-    evidence = f" It currently holds {', '.join(where)}." if where else ""
-    print(
-        f"[ERROR] agent '{args.agent}' already has a live heartbeat from "
-        f"session '{holder}'.{evidence} Omit --agent to auto-assign a free "
-        "identity, or wait for that session to expire.",
-        file=sys.stderr,
-    )
-    return 1
-
-
-def _resolve_identity(args, session_id):
-    """Settle args.agent. Returns an exit code to abort on, or None to proceed."""
-    if args.agent is None:
-        return _auto_assign_identity(args, session_id)
-    return _explicit_identity(args, session_id)
-
-
-def _default_session_id() -> str:
-    """A per-invocation session token so live claims are attributable."""
-    return f"{socket.gethostname().split('.')[0]}|{os.getpid()}"
+    derived = args.agent is None and AGENT_ID_ENV_VAR not in os.environ
+    try:
+        args.agent = resolve_agent_id(args.agent, family=(args.family or "").lower())
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    return _reserve_derived_identity(args.agent) if derived else None
 
 
 def skill_for_issue(issue: dict[str, Any]) -> str:
@@ -693,15 +543,31 @@ def author_gate_fix(pr: dict[str, Any], agent: str,
 def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
                        round_cap: int, cross_family_wait: int,
                        merge_reason: str | None = None) -> dict[str, Any]:
-    """Legacy API that always refuses coding-agent review work."""
+    """Legacy API: ordinary coding-agent review is never queue-eligible."""
     return {
         "eligible": False,
-        "reason": ("CodeRabbit is the sole positive code-review authority "
-                   "for this PR; coding agents implement and remediate findings only"),
+        "reason": ("coding-agent review is never selected from the normal queue; "
+                   "only an explicit emergency review:agent assignment is resumable"),
         "cross_family": False,
         "degraded": False,
         "stale_attribution": False,
     }
+
+
+def assigned_agent_review(pr: dict[str, Any], agent: str) -> bool:
+    """True only for an explicit emergency assignment to this exact agent."""
+    if pr.get("isDraft") or is_merged(pr):
+        return False
+    labels = label_names(pr)
+    authorities = [name for name in labels if name.startswith("review:")]
+    reviewers = [name[len("reviewer:"):] for name in labels
+                 if name.startswith("reviewer:")]
+    authors = [name[len("author:"):] for name in labels
+               if name.startswith("author:")]
+    completed = [name[len("reviewed-by:"):] for name in labels
+                 if name.startswith("reviewed-by:")]
+    return (authorities == ["review:agent"] and reviewers == [agent]
+            and len(authors) == 1 and authors[0] != agent and agent not in completed)
 
 
 def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa: C901, PLR0912
@@ -833,9 +699,15 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         if gate_fix:
             break
 
-    # CodeRabbit owns PR review. Coding-agent queue state deliberately contains
-    # no review candidates; findings are surfaced through `feedback` above.
-    reviewable, skipped = [], []
+    # Normal coding-agent review remains absent. This resumes only a PR the
+    # operator already moved to review:agent and assigned to this exact id.
+    reviewable = [
+        (pr, {"cross_family": False, "degraded": True,
+              "stale_attribution": False})
+        for pr in sorted(prs, key=lambda item: item["number"])
+        if assigned_agent_review(pr, agent)
+    ]
+    skipped = []
 
     # 4. Otherwise start something new - unchanged issue selection.
     issues = list_open_issues()
@@ -860,6 +732,10 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
                 "unmet_gates": gate_fix["unmet_gates"], "reason": gate_fix["reason"]}
         if gate_fix.get("gate_details"):
             work["gate_details"] = gate_fix["gate_details"]
+    elif reviewable:
+        pr = reviewable[0][0]
+        work = {"type": "review", "pr": pr["number"], "title": pr["title"],
+                "skill": "code-review", "resuming": True}
     elif parts["my_in_flight"]:
         issue = parts["my_in_flight"]
         work = {"type": "issue", "issue": issue["number"], "title": issue["title"],
@@ -901,22 +777,224 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     }
 
 
+def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None) -> tuple[dict[str, Any] | None, str | None]:  # noqa: C901
+    """Return the one issue triage and the ordinary picker would admit."""
+    from triage_backlog import partition, ready_gaps, split_reasons
+
+    issues = list_open_issues()
+    if not issues:
+        return None, None
+    if len(issues) >= 500:
+        print("[WARN] Open issue inventory may be truncated; refusing auto-triage.",
+              file=sys.stderr)
+        return None, None
+
+    repo_slug = get_repo_slug()
+    open_numbers = {issue["number"] for issue in issues}
+    inventory = _governed_open_issue_statuses(repo_slug or "", open_numbers)
+    if inventory is None:
+        print("[WARN] Governed board inventory is incomplete; refusing auto-triage.",
+              file=sys.stderr)
+        return None, repo_slug
+    _board_statuses, ready_count = inventory
+    expected_ready_count = int(expected_ready_issue is not None)
+    target_ready = _board_statuses.get(expected_ready_issue, "").lower() == "ready"
+    if ready_count != expected_ready_count or (
+            expected_ready_issue is not None and not target_ready):
+        return None, repo_slug
+    triage_issues = stage_expected_ready_for_triage(issues, expected_ready_issue)
+    if triage_issues is None:
+        return None, repo_slug
+
+    backlog, ready, _held = partition(triage_issues)
+    if ready or not backlog:
+        return None, None
+
+    qualified_numbers = {
+        issue["number"]
+        for issue in backlog
+        if [
+            (label.get("name") or "").lower()
+            for label in issue.get("labels", [])
+            if (label.get("name") or "").lower().startswith("status:")
+        ] == ["status:backlog"]
+        and not (
+            "trusted-rewrite" in {
+                name.lower() for name in issue_label_names(issue)
+            }
+            and not issue.get("editor")
+        )
+        and not ready_gaps(issue, open_numbers, repo_slug=repo_slug)
+        and not split_reasons(issue)
+        and priority_rank(issue.get("labels", []))[0] is not None
+    }
+    if not qualified_numbers:
+        return None, repo_slug
+
+    staged_issues = []
+    for issue in triage_issues:
+        if issue["number"] not in qualified_numbers:
+            staged_issues.append(issue)
+            continue
+        staged = dict(issue)
+        staged["labels"] = [
+            label
+            for label in issue.get("labels", [])
+            if not (label.get("name") or "").lower().startswith("status:")
+        ] + [{"name": "status:ready"}]
+        staged_issues.append(staged)
+
+    prs = list_work_prs()
+    if prs is None:
+        print("[WARN] Cannot triage while the pull request queue is unreadable.",
+              file=sys.stderr)
+        return None, repo_slug
+    if len(prs) >= 200:
+        print("[WARN] Open pull request inventory may be truncated; refusing auto-triage.",
+              file=sys.stderr)
+        return None, repo_slug
+    increment_scope = _auto_triage_increment_scope()
+    if increment_scope is False:
+        return None, repo_slug
+    parts = build_candidates(
+        staged_issues,
+        agent,
+        pr_files_by_issue=pr_files_by_issue_from_prs(prs),
+        increment_scope=increment_scope,
+    )
+    return next(
+        (issue for issue in parts["candidates"]
+         if issue["number"] in qualified_numbers),
+        None,
+    ), repo_slug
+
+
+def _auto_triage_increment_scope() -> set | None | bool:
+    try:
+        return active_increment_scope(fail_on_error=True)
+    except Exception as exc:
+        print(f"[WARN] Active increment state is unreadable: {exc}", file=sys.stderr)
+        return False
+
+
+def _promote_one_idle_backlog_issue_locked(
+    agent: str, family: str | None, round_cap: int, cross_family_wait: int,
+) -> int | None:
+    """Promote one qualified Backlog issue when no Ready item exists.
+
+    This is deliberately narrower than ``triage_backlog.py --promote``. The
+    candidate must clear the triage and picker contracts twice without changing
+    and still be Backlog on the governed board immediately before the write.
+    """
+    current = select(agent, family, round_cap, cross_family_wait)
+    if current["work"]["type"] != "idle":
+        return None
+    candidate, repo_slug = _idle_backlog_candidate(agent)
+    fresh, fresh_slug = _idle_backlog_candidate(agent)
+    if candidate is None or fresh is None or not repo_slug or fresh_slug != repo_slug:
+        return None
+
+    compared_fields = (
+        "number", "body", "labels", "author", "editor", "authorAssociation",
+        "editorAssociation", "trustIdentityResolved", "updatedAt",
+    )
+    if any(candidate.get(field) != fresh.get(field) for field in compared_fields):
+        print("[WARN] Backlog candidate changed during triage; leaving it untouched.",
+              file=sys.stderr)
+        return None
+    if not fresh.get("updatedAt"):
+        print("[WARN] Candidate update time is missing; refusing auto-triage.",
+              file=sys.stderr)
+        return None
+    if select(agent, family, round_cap, cross_family_wait)["work"]["type"] != "idle":
+        print("[WARN] Picker is no longer idle; refusing auto-triage.", file=sys.stderr)
+        return None
+
+    number = fresh["number"]
+
+    def board_status() -> str:
+        items = query_issue_project_items(number)
+        governed = select_governed_project_items(items or [], repo_slug)
+        return (
+            ((governed[0].get("status") or {}).get("name") or "").lower()
+            if len(governed) == 1 else ""
+        )
+
+    if board_status() != "backlog":
+        print(f"[WARN] Issue #{number} is not authoritatively Backlog on the board.",
+              file=sys.stderr)
+        return None
+    if not update_status(
+        number, "Ready", require_board=True,
+        expected_status="Backlog", require_unclaimed=True,
+        expected_updated_at=fresh.get("updatedAt"),
+    ):
+        raise AutoTriageError(
+            f"qualified Backlog issue #{number} could not be promoted cleanly"
+        )
+    post_issues = list_open_issues()
+    post = next((issue for issue in post_issues if issue["number"] == number), None)
+    post_candidate, _post_slug = _idle_backlog_candidate(
+        agent, expected_ready_issue=number)
+    post_statuses = {
+        name.lower() for name in issue_label_names(post or {})
+        if name.lower().startswith("status:")
+    }
+    post_agents = {
+        name for name in issue_label_names(post or {}) if name.lower().startswith("agent:")
+    }
+    expected_labels = {
+        name.lower() for name in issue_label_names(fresh)
+        if not name.lower().startswith("status:")
+    } | {"status:ready"}
+    post_labels = {name.lower() for name in issue_label_names(post or {})}
+    stable_fields = ("number", "body", "author", "editor", "authorAssociation",
+                     "editorAssociation", "trustIdentityResolved")
+    stable = post is not None and all(
+        post.get(field) == fresh.get(field) for field in stable_fields
+    )
+    post_work = select(agent, family, round_cap, cross_family_wait)["work"]
+    if (post_statuses != {"status:ready"} or post_agents
+            or post_labels != expected_labels or not stable
+            or post_candidate is None or post_candidate.get("number") != number
+            or post_work.get("type") != "issue" or post_work.get("issue") != number
+            or board_status() != "ready"):
+        update_status(
+            number, "Backlog", require_board=True,
+            expected_status="Ready", require_unclaimed=True,
+        )
+        raise AutoTriageError(
+            f"issue #{number} changed during promotion or failed authoritative readback"
+        )
+    print(f"[INFO] Picker promoted qualified Backlog issue #{number} to Ready.",
+          file=sys.stderr)
+    return number
+
+
+def promote_one_idle_backlog_issue(
+    agent: str,
+    family: str | None = None,
+    round_cap: int = DEFAULT_ROUND_CAP,
+    cross_family_wait: int = DEFAULT_CROSS_FAMILY_WAIT_MIN,
+) -> int | None:
+    """Serialize one auto-triage transition against other lifecycle writes."""
+    with merge_pr.repository_merge_lock() as (locked, message):
+        if not locked:
+            print(f"[WARN] Auto-triage deferred: {message}.", file=sys.stderr)
+            return None
+        return _promote_one_idle_backlog_issue_locked(
+            agent, family, round_cap, cross_family_wait,
+        )
+
+
 def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Pick the next work item for one agent.")
     parser.add_argument("--agent", required=False, default=None,
-                        help="Agent id. Omit to auto-assign a free identity from the "
-                             "presence registry (see --session-id).")
-    parser.add_argument("--session-id", default=None,
-                        help="Identity of this loop session. Defaults to "
-                             "hostname|pid. Used to attribute live presence claims "
-                             "so two sessions never share an identity.")
+                        help="Agent id. Omit to use ARU_AGENT_ID or a stable "
+                             "machine, checkout, and family fingerprint.")
     parser.add_argument("--family", default=None,
                         help="This agent's model family (anthropic, openai, ...). "
                              "Omitting it means every PR looks cross-family.")
-    parser.add_argument("--agent-pool", action="store_true",
-                        help="Assign an id from the named pool (claude-1, ...) "
-                             "instead of deriving one from this worker. Legacy "
-                             "path for fleets that want fixed readable names.")
     parser.add_argument("--claim", action="store_true", help="Claim the selected work item")
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument(
@@ -929,8 +1007,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
                         help="Release issue and review claims idle longer than HOURS (default: 4h; 0 disables)")
     args = parser.parse_args()
 
-    session_id = args.session_id or _default_session_id()
-    rc = _resolve_identity(args, session_id)
+    rc = _resolve_identity(args)
     if rc is not None:
         return rc
 
@@ -944,6 +1021,25 @@ def main():  # noqa: C901, PLR0912, PLR0915
     res = select(args.agent, (args.family or "").lower() or None,
                  args.round_cap, args.cross_family_wait)
     work = res["work"]
+
+    # A read-only picker call remains read-only. A loop asking to claim work may
+    # promote one mechanically qualified Backlog item, then immediately run the
+    # ordinary selector again so normal claim arbitration still applies.
+    if args.claim and work["type"] == "idle":
+        try:
+            promoted = promote_one_idle_backlog_issue(
+                args.agent, (args.family or "").lower() or None,
+                args.round_cap, args.cross_family_wait,
+            )
+        except AutoTriageError as exc:
+            promoted = None
+            res["work"] = {"type": "error", "skill": None, "reason": str(exc)}
+            work = res["work"]
+        if promoted is not None:
+            res = select(args.agent, (args.family or "").lower() or None,
+                         args.round_cap, args.cross_family_wait)
+            res["auto_promoted_issue"] = promoted
+            work = res["work"]
 
     if args.claim and work["type"] == "merge":
         work["claimed"] = False
@@ -977,10 +1073,11 @@ def main():  # noqa: C901, PLR0912, PLR0915
         and not work.get("resuming")
         and not work.get("claimed", False)
     )
+    command_failed = claim_failed or work["type"] == "error"
 
     if args.as_json:
         print(json.dumps(res, indent=2))
-        return 1 if claim_failed else None
+        return 1 if command_failed else None
 
     print("=== Aru_Agentic_SDLC: next work ===")
     print(f"👤 {args.agent}" + (f" ({args.family})" if args.family else " (family unset)"))
@@ -1001,6 +1098,9 @@ def main():  # noqa: C901, PLR0912, PLR0915
         verb = "Resume" if work.get("resuming") else "Implement"
         print(f"🛠️  {verb} issue #{work['issue']}")
         print(f"   → {work['skill']}: {work['title']}")
+    elif work["type"] == "review":
+        print(f"🔎 Resume explicitly assigned emergency review for PR #{work['pr']}")
+        print(f"   → {work['skill']}: {work['title']}")
     elif work["type"] == "error":
         print(f"⛔ Picker error: {work.get('reason')}")
     else:
@@ -1017,7 +1117,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
     if work["type"] not in {"issue", "merge"} and res["claimable_issues"]:
         print(f"\nIssues waiting: {res['claimable_issues']}")
 
-    return 1 if claim_failed else None
+    return 1 if command_failed else None
 
 
 def cli() -> None:
