@@ -1,4 +1,4 @@
-# line-ceiling: 2286
+# line-ceiling: 2288
 import io
 import json
 import os
@@ -2241,6 +2241,8 @@ class UnifiedWorkDispatchAndIndependenceTests(unittest.TestCase):
         doc = et.__doc__ or ""
         self.assertIn("fetch_next_work.py", doc)
         self.assertNotIn("fetch_next_issue.py", doc)
+        self.assertIn("path-conflict", doc)
+        self.assertNotIn("only thing", doc.lower())
 
     def test_hook_imports_no_workflow_scripts(self):
         hook_path = ROOT / "hooks" / "enforce_touches.py"
