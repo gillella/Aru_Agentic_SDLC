@@ -130,37 +130,43 @@ class PickerTransitionGuardTests(unittest.TestCase):
                 fnw.promote_one_idle_backlog_issue("agent-1")
         update.assert_not_called()
 
-    def test_lost_board_readback_surfaces_failed_rollback(self):
-        issue = qualified_issue()
-        post = qualified_issue(status="ready")
-        contexts = self.qualification_context()
-        backlog = ({issue["number"]: "Backlog"}, 0)
-        with patch.object(
-                 fnw, "list_open_issues",
-                 side_effect=[[issue], [issue], [post], [post]],
-             ), contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
-             contexts[5], patch.object(
-                 fnw, "_governed_open_issue_statuses",
-                 side_effect=[backlog, backlog, None],
-             ), patch.object(
-                 fnw, "query_issue_project_items",
-                 return_value=[{"status": {"name": "Backlog"}}],
-             ), patch.object(
-                 fnw, "select_governed_project_items",
-                 side_effect=lambda items, _slug: items,
-             ), patch.object(fnw, "update_status", side_effect=[True, False]) as update:
-            with self.assertRaisesRegex(
-                fnw.AutoTriageError,
-                "failed authoritative readback; rollback FAILED",
-            ):
-                fnw.promote_one_idle_backlog_issue("agent-1")
-        self.assertEqual(update.call_args_list, [
-            call(10, "Ready", require_board=True, expected_status="Backlog",
-                 require_unclaimed=True,
-                 expected_updated_at="2026-08-25T18:00:00Z"),
-            call(10, "Backlog", require_board=True, expected_status="Ready",
-                 require_unclaimed=True),
-        ])
+    def test_lost_board_readback_reports_rollback_result(self):
+        for rolled_back, expected in (
+            (True, "rollback succeeded"),
+            (False, "rollback FAILED"),
+        ):
+            with self.subTest(rolled_back=rolled_back):
+                self.select_reads = 0
+                issue = qualified_issue()
+                post = qualified_issue(status="ready")
+                contexts = self.qualification_context()
+                backlog = ({issue["number"]: "Backlog"}, 0)
+                with patch.object(
+                         fnw, "list_open_issues",
+                         side_effect=[[issue], [issue], [post], [post]],
+                     ), contexts[0], contexts[1], contexts[2], contexts[3], \
+                     contexts[4], contexts[5], patch.object(
+                         fnw, "_governed_open_issue_statuses",
+                         side_effect=[backlog, backlog, None],
+                     ), patch.object(
+                         fnw, "query_issue_project_items",
+                         return_value=[{"status": {"name": "Backlog"}}],
+                     ), patch.object(
+                         fnw, "select_governed_project_items",
+                         side_effect=lambda items, _slug: items,
+                     ), patch.object(
+                         fnw, "update_status",
+                         side_effect=[True, rolled_back],
+                     ) as update:
+                    with self.assertRaisesRegex(fnw.AutoTriageError, expected):
+                        fnw.promote_one_idle_backlog_issue("agent-1")
+                self.assertEqual(update.call_args_list, [
+                    call(10, "Ready", require_board=True,
+                         expected_status="Backlog", require_unclaimed=True,
+                         expected_updated_at="2026-08-25T18:00:00Z"),
+                    call(10, "Backlog", require_board=True,
+                         expected_status="Ready", require_unclaimed=True),
+                ])
 
     def test_claiming_picker_reports_unavailable_board_instead_of_idle(self):
         idle = {
