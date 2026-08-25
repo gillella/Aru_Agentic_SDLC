@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from slack_projects import RegistryError, _file_lock, _private_file, _write_unlocked
+from secure_json import RegistryError, _file_lock, _private_file, _write_unlocked
 
 
 SCHEMA_VERSION = 1
