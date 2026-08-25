@@ -1,8 +1,6 @@
-# line-ceiling: 1060
+# line-ceiling: 700
 import json
-import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -121,9 +119,9 @@ class IdentityStampTests(unittest.TestCase):
     def test_create_pr_propagates_a_failed_stamp(self, _branch, _issue):
         with patch.object(create_pr, "run_cmd", return_value=(0, "https://x/pull/7", "")), \
                 patch.object(create_pr, "apply_identity", return_value=False), \
-                patch.object(create_pr, "enqueue_review") as queued:
+                patch.object(create_pr, "finalize_review_assignment") as finalize:
             self.assertFalse(create_pr.create_pr(7, "t", "b", "agent-1", "anthropic"))
-            queued.assert_not_called()
+            finalize.assert_not_called()
 
     @patch.object(create_pr, "get_issue", return_value={"title": "t"})
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
@@ -137,191 +135,70 @@ class IdentityStampTests(unittest.TestCase):
         self.assertEqual(create_cmd[:3], ["gh", "pr", "create"])
         self.assertIn("--draft", create_cmd)
 
-    def test_review_service_assignment_is_stable_and_evenly_distributed(self):
-        self.assertEqual(create_pr.review_service_for_issue(1), "coderabbit")
-        self.assertEqual(create_pr.review_service_for_issue(2), "sourcery")
-        self.assertEqual(create_pr.review_service_for_issue(3), "codeant")
-        self.assertEqual(create_pr.review_service_for_issue(4), "coderabbit")
-        self.assertEqual(create_pr.review_service_for_issue(340), "coderabbit")
-        self.assertEqual(create_pr.review_service_for_issue(341), "coderabbit")
-        self.assertEqual(create_pr.review_service_for_issue(342), "codeant")
-
-    # finalize_review_assignment() consults existing_review_assignment() (a
-    # live "gh pr view --json labels" call) before anything else, and posts
-    # capacity evidence as a "gh pr comment" call before the label edit. Both
-    # are patched out in the mechanics tests below so call-count assertions
-    # cover only the label/ready/trigger sequence they exercise; the
-    # capacity-selection and immutability behavior they patch away has its
-    # own dedicated tests further down.
-    #
-    # The lookup is patched with a *sequence*, not a constant, because
-    # assignment now re-reads the live labels immediately before and after the
-    # add-label write to detect a concurrent finalizer. The realistic sequence
-    # for an unassigned PR that this call assigns is therefore
-    # (None, None, <service>): unassigned, still unassigned, then ours.
-    def canned_evidence(self, service):
-        return {
-            "schema": "aru.review-capacity-selection.v1",
-            "as_of": "2026-08-24T12:00:00Z",
-            "candidates": list(create_pr.REVIEW_SERVICES),
-            "eligible": list(create_pr.REVIEW_SERVICES),
-            "excluded": [],
-            "selected": service,
-            "rationale": f"selected '{service}' for test",
-        }
-
     @patch.object(create_pr, "run_cmd")
     @patch.object(create_pr, "ensure_label", return_value=True)
     @patch.object(create_pr, "existing_review_assignment",
-                  side_effect=[None, None, "codeant"])
-    def test_codeant_assignment_labels_readys_and_triggers_review_after_ready(self, _existing, _label, run):
-        with patch.object(create_pr, "select_review_service", return_value=self.canned_evidence("codeant")):
-            run.side_effect = [
-                (0, "", ""),  # capacity evidence comment
-                (0, "", ""),  # add-label
-                (0, "", ""),  # ready
-                (0, "", ""),  # @codeant-ai: review trigger
-            ]
-            self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-        evidence_cmd = run.call_args_list[0].args[0]
-        self.assertEqual(evidence_cmd[:3], ["gh", "pr", "comment"])
-        label_cmd = run.call_args_list[1].args[0]
+                  side_effect=[None, None, "coderabbit"])
+    def test_new_assignment_adds_only_coderabbit_and_marks_ready(self, _existing, label, run):
+        run.side_effect = [(0, "", ""), (0, "", "")]
+        self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        label.assert_called_once_with(
+            "review:coderabbit", "0e8a16", "Authoritative review service: coderabbit",
+        )
+        label_cmd = run.call_args_list[0].args[0]
         self.assertEqual(label_cmd[:4], ["gh", "pr", "edit", "https://x/pull/9"])
-        self.assertIn("review:codeant", label_cmd)
-        ready_cmd = run.call_args_list[2].args[0]
+        self.assertEqual(label_cmd[-2:], ["--add-label", "review:coderabbit"])
+        ready_cmd = run.call_args_list[1].args[0]
         self.assertEqual(ready_cmd[:4], ["gh", "pr", "ready", "https://x/pull/9"])
-        comment_cmd = run.call_args_list[3].args[0]
-        self.assertEqual(comment_cmd[:3], ["gh", "pr", "comment"])
-        self.assertIn("@codeant-ai: review", comment_cmd)
-
-    @patch.object(create_pr, "run_cmd")
-    @patch.object(create_pr, "ensure_label", return_value=True)
-    def test_review_assignment_stops_safely_when_label_or_ready_fails(self, _label, run):
-        # A failed add-label never reaches the post-write confirmation, so that
-        # case sees only the two pre-write lookups.
-        cases = (
-            ([(0, "", ""), (1, "", "label failed")], [None, None], 2),
-            ([(0, "", ""), (0, "", ""), (1, "", "ready failed")], [None, None, "codeant"], 3),
-        )
-        for side_effect, seen, expected_calls in cases:
-            with self.subTest(expected_calls=expected_calls):
-                run.reset_mock(side_effect=True)
-                run.side_effect = side_effect
-                with patch.object(create_pr, "select_review_service",
-                                   return_value=self.canned_evidence("codeant")), \
-                        patch.object(create_pr, "existing_review_assignment",
-                                      side_effect=seen):
-                    self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-                self.assertEqual(run.call_count, expected_calls)
 
     @patch.object(create_pr, "run_cmd")
     @patch.object(create_pr, "ensure_label", return_value=True)
     @patch.object(create_pr, "existing_review_assignment",
-                  side_effect=[None, None, "codeant"])
-    def test_codeant_trigger_failure_restores_draft_state(self, _existing, _label, run):
+                  side_effect=[None, None])
+    def test_failed_label_write_stops_before_ready(self, _existing, _label, run):
+        run.return_value = (1, "", "label failed")
+        self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("--add-label", run.call_args.args[0])
+
+    @patch.object(create_pr, "run_cmd")
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    @patch.object(create_pr, "existing_review_assignment",
+                  side_effect=[None, None, "coderabbit"])
+    def test_failed_ready_state_is_not_reported_as_finalized(self, _existing, _label, run):
         run.side_effect = [
-            (0, "", ""), (0, "", ""), (0, "", ""),
-            (1, "", "trigger failed"),
             (0, "", ""),
+            (1, "", "ready failed"),
+            (0, '{"isDraft": true}', ""),
         ]
-
-        with patch.object(create_pr, "select_review_service", return_value=self.canned_evidence("codeant")):
-            self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-
-        self.assertEqual(
-            run.call_args_list[4].args[0],
-            ["gh", "pr", "ready", "https://x/pull/9", "--undo"],
-        )
+        self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        self.assertEqual(run.call_args_list[-1].args[0][-1], "isDraft")
 
     @patch.object(create_pr, "run_cmd")
-    @patch.object(create_pr, "ensure_label", return_value=True)
+    @patch.object(create_pr, "ensure_label")
     @patch.object(create_pr, "existing_review_assignment",
-                  side_effect=[None, None, "codeant"])
-    def test_codeant_trigger_failure_reports_failed_draft_rollback(self, _existing, _label, run):
+                  side_effect=["coderabbit", "coderabbit", "coderabbit"])
+    def test_retry_accepts_an_already_ready_coderabbit_pr(self, _existing, label, run):
         run.side_effect = [
-            (0, "", ""), (0, "", ""), (0, "", ""),
-            (1, "", "trigger failed"),
-            (1, "", "rollback failed"),
+            (1, "", "already ready"),
+            (0, '{"isDraft": false}', ""),
         ]
-
-        with patch.object(create_pr, "select_review_service", return_value=self.canned_evidence("codeant")):
-            self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-        self.assertEqual(run.call_count, 5)
-
-    def test_codeant_finalization_can_retry_after_trigger_rollback(self):
-        """A prior codeant-trigger failure leaves the review:codeant label on the
-        PR (only 'ready' was rolled back), so the retry must resume from that
-        stable label -- not reselect or re-post capacity evidence."""
-        with patch.object(create_pr, "run_cmd") as run, \
-                patch.object(create_pr, "ensure_label", return_value=True), \
-                patch.object(create_pr, "existing_review_assignment",
-                              side_effect=[None, None, "codeant"]), \
-                patch.object(create_pr, "select_review_service",
-                              return_value=self.canned_evidence("codeant")) as select:
-            run.side_effect = [
-                (0, "", ""), (0, "", ""), (0, "", ""), (1, "", "trigger failed"), (0, "", ""),
-            ]
-            self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-            select.assert_called_once()
-
-        with patch.object(create_pr, "run_cmd") as retry_run, \
-                patch.object(create_pr, "ensure_label", return_value=True), \
-                patch.object(create_pr, "existing_review_assignment", return_value="codeant"), \
-                patch.object(create_pr, "select_review_service") as select:
-            retry_run.side_effect = [(0, "", ""), (0, "", "")]
-            self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-            select.assert_not_called()
-        retry_calls = [call.args[0] for call in retry_run.call_args_list]
-        self.assertEqual(retry_calls[0][:3], ["gh", "pr", "ready"])
-        self.assertEqual(retry_calls[1][:3], ["gh", "pr", "comment"])
-        self.assertIn("@codeant-ai: review", retry_calls[1])
-
-    @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
-    @patch.object(create_pr, "ensure_label", return_value=True)
-    @patch.object(create_pr, "existing_review_assignment",
-                  side_effect=[None, None, "sourcery"])
-    def test_sourcery_assignment_marks_ready_without_codeant_trigger(self, _existing, _label, run):
-        with patch.object(create_pr, "select_review_service", return_value=self.canned_evidence("sourcery")):
-            self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/8", 8))
-        self.assertEqual(len(run.call_args_list), 3)
-        self.assertIn("review:sourcery", run.call_args_list[1].args[0])
-
-    @patch.object(create_pr, "run_cmd")
-    @patch.object(create_pr, "existing_review_assignment", return_value="sourcery")
-    def test_stable_existing_assignment_is_never_recomputed(self, _existing, run):
-        """Authority is immutable once assigned: even if capacity now excludes the
-        already-assigned service, or issue-id rotation would pick differently, a
-        PR carrying review:sourcery must keep it -- no relabel, no reselection."""
-        run.side_effect = [(0, "", "")]
-        with patch.object(create_pr, "select_review_service") as select:
-            self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-            select.assert_not_called()
-        # Only "gh pr ready" runs; no evidence comment, no add-label call.
-        self.assertEqual(len(run.call_args_list), 1)
+        self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        label.assert_not_called()
         self.assertEqual(run.call_args_list[0].args[0][:3], ["gh", "pr", "ready"])
+        self.assertEqual(run.call_args_list[1].args[0][-1], "isDraft")
 
+    @patch("builtins.print")
     @patch.object(create_pr, "run_cmd")
-    @patch.object(create_pr, "existing_review_assignment", return_value=None)
-    def test_no_eligible_service_leaves_pr_draft_with_waiting_evidence(self, _existing, run):
-        """If nothing is eligible, the PR must stay draft: no label, no 'gh pr
-        ready', only the waiting-for-capacity evidence comment -- and the call
-        still reports success since this is the correct governed outcome."""
-        run.side_effect = [(0, "", "")]
-        waiting_evidence = self.canned_evidence(None)
-        waiting_evidence["eligible"] = []
-        waiting_evidence["excluded"] = [
-            {"service": s, "state": "outage", "reason": "r", "source": "s",
-             "observed_at": "2026-08-24T11:00:00Z", "retry_at": "2026-08-24T13:00:00Z"}
-            for s in create_pr.REVIEW_SERVICES
-        ]
-        with patch.object(create_pr, "select_review_service", return_value=waiting_evidence):
-            self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-        self.assertEqual(len(run.call_args_list), 1)
-        evidence_cmd = run.call_args_list[0].args[0]
-        self.assertEqual(evidence_cmd[:3], ["gh", "pr", "comment"])
-        body = evidence_cmd[evidence_cmd.index("--body") + 1]
-        self.assertIn('"selected": null', body)
-        self.assertIn(create_pr.CAPACITY_EVIDENCE_START, body)
+    @patch.object(create_pr, "ensure_label")
+    @patch.object(create_pr, "existing_review_assignment",
+                  side_effect=["coderabbit", "coderabbit", None])
+    def test_already_ready_retry_reports_lost_assignment(self, _existing, label, run, output):
+        run.side_effect = [(1, "", "already ready"), (0, '{"isDraft": false}', "")]
+        self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        label.assert_not_called()
+        self.assertTrue(any("no longer carries review:coderabbit" in str(call)
+                            for call in output.call_args_list))
 
     @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
     @patch.object(create_pr, "ensure_label", return_value=True)
@@ -337,107 +214,6 @@ class IdentityStampTests(unittest.TestCase):
         self.assertIn("No automated account should post a review", body)
 
 
-def unavailable_ledger(*entries):
-    return {"schema": "aru.review-service-unavailability-ledger.v1", "entries": list(entries)}
-
-
-def unavailable_entry(service, *, state="cooldown", reason="rate limited",
-                       source="review-status-webhook",
-                       observed_at="2026-08-24T11:30:00Z", retry_at="2026-08-24T13:00:00Z"):
-    return {
-        "service": service, "state": state, "reason": reason,
-        "observed_at": observed_at, "retry_at": retry_at, "source": source,
-    }
-
-
-class CapacitySelectionTests(unittest.TestCase):
-    """select_review_service() is the capacity-aware kernel: it loads fresh
-    known-unavailable evidence, excludes only what that evidence proves is
-    unavailable, and routes deterministically over whatever remains."""
-
-    AS_OF = "2026-08-24T12:00:00Z"
-
-    def test_empty_ledger_matches_legacy_rotation_exactly(self):
-        # Backward compatibility: with no evidence, capacity-aware selection
-        # must reproduce review_service_for_issue()'s original rotation.
-        for issue_id in range(1, 8):
-            with self.subTest(issue_id=issue_id):
-                evidence = create_pr.select_review_service(
-                    issue_id, as_of=self.AS_OF, snapshot=unavailable_ledger(),
-                )
-                self.assertEqual(evidence["selected"], create_pr.review_service_for_issue(issue_id))
-                self.assertEqual(evidence["eligible"], list(create_pr.REVIEW_SERVICES))
-                self.assertEqual(evidence["excluded"], [])
-
-    def test_excluded_service_is_never_selected_and_pool_rotates_evenly(self):
-        snapshot = unavailable_ledger(unavailable_entry("sourcery", state="quota_exhausted"))
-        picks = [
-            create_pr.select_review_service(issue_id, as_of=self.AS_OF, snapshot=snapshot)["selected"]
-            for issue_id in range(1, 11)
-        ]
-        self.assertNotIn("sourcery", picks)
-        self.assertEqual(set(picks), {"coderabbit", "codeant"})
-        # Deterministic: the same issue id always resolves to the same service.
-        self.assertEqual(
-            picks,
-            [create_pr.select_review_service(i, as_of=self.AS_OF, snapshot=snapshot)["selected"]
-             for i in range(1, 11)],
-        )
-        # Approximately even across the eligible pair over 10 consecutive issues.
-        self.assertEqual(picks.count("coderabbit"), 5)
-        self.assertEqual(picks.count("codeant"), 5)
-
-    def test_excluded_service_evidence_and_rationale_are_recorded(self):
-        snapshot = unavailable_ledger(unavailable_entry("sourcery", state="outage", reason="5xx storm"))
-        evidence = create_pr.select_review_service(2, as_of=self.AS_OF, snapshot=snapshot)
-        self.assertEqual(evidence["candidates"], list(create_pr.REVIEW_SERVICES))
-        self.assertEqual(evidence["eligible"], ["coderabbit", "codeant"])
-        self.assertEqual(len(evidence["excluded"]), 1)
-        self.assertEqual(evidence["excluded"][0]["service"], "sourcery")
-        self.assertEqual(evidence["excluded"][0]["state"], "outage")
-        self.assertEqual(evidence["excluded"][0]["reason"], "5xx storm")
-        self.assertIn(evidence["selected"], evidence["eligible"])
-        self.assertTrue(evidence["rationale"])
-
-    def test_all_services_unavailable_selects_nothing(self):
-        snapshot = unavailable_ledger(*[
-            unavailable_entry(service, state="cooldown") for service in create_pr.REVIEW_SERVICES
-        ])
-        evidence = create_pr.select_review_service(5, as_of=self.AS_OF, snapshot=snapshot)
-        self.assertIsNone(evidence["selected"])
-        self.assertEqual(evidence["eligible"], [])
-        self.assertEqual({item["service"] for item in evidence["excluded"]}, set(create_pr.REVIEW_SERVICES))
-
-    def test_stale_and_malformed_evidence_does_not_exclude_indefinitely(self):
-        stale = unavailable_entry(
-            "coderabbit", observed_at="2026-08-24T09:00:00Z", retry_at="2026-08-24T23:00:00Z",
-        )
-        spoofed = {"service": "codeant", "state": "made-up-state", "reason": "x",
-                   "observed_at": self.AS_OF, "retry_at": self.AS_OF, "source": "x"}
-        evidence = create_pr.select_review_service(
-            1, as_of=self.AS_OF, snapshot=unavailable_ledger(stale, spoofed),
-        )
-        self.assertEqual(evidence["selected"], create_pr.review_service_for_issue(1))
-        self.assertEqual(evidence["eligible"], list(create_pr.REVIEW_SERVICES))
-
-    def test_reads_the_real_shared_ledger_when_no_snapshot_is_given(self):
-        """End-to-end through create_pr.py's lazy import of the audit module,
-        proving the two files are actually wired together via the shared
-        cross-repository ledger, not just unit-tested in isolation."""
-        import audit_review_service_capacity as audit
-
-        with tempfile.TemporaryDirectory() as directory:
-            shared_path = Path(directory) / "shared-ledger.json"
-            with patch.dict(os.environ, {audit.CAPACITY_LEDGER_ENV: str(shared_path)}):
-                audit.record_unavailability(
-                    "coderabbit", "outage", "provider 5xx", "2026-08-25T00:00:00Z",
-                    source="status-page-poll",
-                )
-                evidence = create_pr.select_review_service(1)
-        self.assertNotEqual(evidence["selected"], "coderabbit")
-        self.assertIn("coderabbit", {item["service"] for item in evidence["excluded"]})
-
-
 class FailClosedAssignmentTests(unittest.TestCase):
     """Every ambiguous or unreadable authority state must stop finalization.
 
@@ -447,17 +223,6 @@ class FailClosedAssignmentTests(unittest.TestCase):
     duplicates an authority the routing contract promises is immutable.
     """
 
-    def canned_evidence(self, service):
-        return {
-            "schema": "aru.review-capacity-selection.v1",
-            "as_of": "2026-08-24T12:00:00Z",
-            "candidates": list(create_pr.REVIEW_SERVICES),
-            "eligible": list(create_pr.REVIEW_SERVICES),
-            "excluded": [],
-            "selected": service,
-            "rationale": f"selected '{service}' for test",
-        }
-
     def test_failed_label_lookup_is_not_read_as_unassigned(self):
         with patch.object(create_pr, "run_cmd", return_value=(1, "", "gh: not authenticated")):
             with self.assertRaises(create_pr.ReviewAssignmentLookupError):
@@ -466,85 +231,78 @@ class FailClosedAssignmentTests(unittest.TestCase):
     def test_malformed_label_json_is_not_read_as_unassigned(self):
         # Valid exit code, unusable payload: HTML error pages, truncated
         # output, and a labels field of the wrong type all land here.
-        for payload in ("not json", "", "[]", '{"labels": null}', '{"labels": "review:sourcery"}'):
+        for payload in (
+            "not json", "", "[]", '{"labels": null}',
+            '{"labels": "review:coderabbit"}', '{"labels": [null]}', '{"labels": [{}]}',
+        ):
             with self.subTest(payload=payload):
                 with patch.object(create_pr, "run_cmd", return_value=(0, payload, "")):
                     with self.assertRaises(create_pr.ReviewAssignmentLookupError):
                         create_pr.existing_review_assignment("https://x/pull/9")
 
-    def test_multiple_review_labels_are_rejected_not_silently_resolved(self):
-        # Returning the first match in REVIEW_SERVICES order would hand back a
-        # single confident answer for a PR whose reviewer is genuinely
-        # ambiguous, and leave both labels in place for later consumers.
-        payload = json.dumps({"labels": [
-            {"name": "review:codeant"}, {"name": "review:sourcery"}, {"name": "needs-review"},
-        ]})
-        with patch.object(create_pr, "run_cmd", return_value=(0, payload, "")):
-            with self.assertRaises(create_pr.ReviewAssignmentLookupError) as caught:
-                create_pr.existing_review_assignment("https://x/pull/9")
-        message = str(caught.exception)
-        self.assertIn("review:sourcery", message)
-        self.assertIn("review:codeant", message)
+    def test_legacy_unknown_and_case_variant_review_labels_are_rejected(self):
+        for review_label in (
+            "review:sourcery", "review:codeant", "review:unknown",
+            "Review:coderabbit", "review:coderabbit ",
+        ):
+            with self.subTest(review_label=review_label):
+                payload = json.dumps({"labels": [{"name": review_label}]})
+                with patch.object(create_pr, "run_cmd", return_value=(0, payload, "")):
+                    with self.assertRaises(create_pr.ReviewAssignmentLookupError):
+                        create_pr.existing_review_assignment("https://x/pull/9")
 
-    def test_exactly_one_review_label_still_resolves(self):
-        payload = json.dumps({"labels": [{"name": "needs-review"}, {"name": "review:sourcery"}]})
+    def test_duplicate_or_mixed_review_labels_are_rejected(self):
+        for review_labels in (
+            ["review:coderabbit", "review:coderabbit"],
+            ["review:coderabbit", "review:sourcery"],
+            ["review:unknown", "review:codeant"],
+        ):
+            with self.subTest(review_labels=review_labels):
+                payload = json.dumps({"labels": [{"name": name} for name in review_labels]})
+                with patch.object(create_pr, "run_cmd", return_value=(0, payload, "")):
+                    with self.assertRaises(create_pr.ReviewAssignmentLookupError):
+                        create_pr.existing_review_assignment("https://x/pull/9")
+
+    def test_exact_coderabbit_label_resolves(self):
+        payload = json.dumps({
+            "labels": [{"name": "needs-review"}, {"name": "review:coderabbit"}],
+        })
         with patch.object(create_pr, "run_cmd", return_value=(0, payload, "")):
-            self.assertEqual(create_pr.existing_review_assignment("https://x/pull/9"), "sourcery")
+            self.assertEqual(create_pr.existing_review_assignment("https://x/pull/9"), "coderabbit")
 
     def test_no_review_label_is_the_only_unassigned_answer(self):
-        payload = json.dumps({"labels": [{"name": "needs-review"}, None]})
+        payload = json.dumps({"labels": [{"name": "needs-review"}]})
         with patch.object(create_pr, "run_cmd", return_value=(0, payload, "")):
             self.assertIsNone(create_pr.existing_review_assignment("https://x/pull/9"))
 
-    @patch.object(create_pr, "ensure_label", return_value=True)
-    def test_unreadable_authority_blocks_assignment_entirely(self, _label):
+    @patch.object(create_pr, "ensure_label")
+    def test_unreadable_authority_blocks_assignment_entirely(self, label):
         error = create_pr.ReviewAssignmentLookupError("gh failed")
         with patch.object(create_pr, "run_cmd") as run, \
-                patch.object(create_pr, "existing_review_assignment", side_effect=error), \
-                patch.object(create_pr, "select_review_service") as select:
+                patch.object(create_pr, "existing_review_assignment", side_effect=error):
             self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-            select.assert_not_called()
-        run.assert_not_called()  # no comment, no label, no ready
+        run.assert_not_called()
+        label.assert_not_called()
 
     @patch.object(create_pr, "ensure_label", return_value=True)
-    def test_missing_capacity_evidence_comment_stops_before_labeling(self, _label):
-        """The evidence comment is the audit record; assigning without it would
-        leave a PR whose reviewer cannot be justified after the fact."""
-        with patch.object(create_pr, "run_cmd") as run, \
-                patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "select_review_service",
-                              return_value=self.canned_evidence("codeant")):
-            run.side_effect = [(1, "", "comment rejected")]
-            self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-        self.assertEqual(run.call_count, 1)
-        self.assertEqual(run.call_args_list[0].args[0][:3], ["gh", "pr", "comment"])
-
-    def test_failed_waiting_evidence_is_not_reported_as_success(self):
-        """The bounded waiting-for-capacity state is only real if it was
-        recorded; a failed comment leaves a draft PR with no explanation."""
-        waiting = self.canned_evidence(None)
-        waiting["eligible"] = []
-        with patch.object(create_pr, "run_cmd", return_value=(1, "", "comment rejected")) as run, \
-                patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "select_review_service", return_value=waiting):
-            self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-        self.assertEqual(run.call_count, 1)
-
-    @patch.object(create_pr, "ensure_label", return_value=True)
-    def test_concurrent_assignment_detected_before_the_write_is_not_overwritten(self, _label):
-        """A second finalizer that labelled the PR while this one was selecting
-        wins; this one must not add a competing label."""
+    def test_concurrent_coderabbit_assignment_is_idempotent(self, _label):
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "existing_review_assignment",
-                              side_effect=[None, "sourcery"]), \
-                patch.object(create_pr, "select_review_service",
-                              return_value=self.canned_evidence("codeant")):
-            run.side_effect = [(0, "", "")]
-            self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+                              side_effect=[None, "coderabbit", "coderabbit"]):
+            run.return_value = (0, "", "")
+            self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         commands = [call.args[0] for call in run.call_args_list]
         self.assertEqual(len(commands), 1)
-        self.assertEqual(commands[0][:3], ["gh", "pr", "comment"])
-        self.assertNotIn("--add-label", commands[0])
+        self.assertEqual(commands[0][:3], ["gh", "pr", "ready"])
+
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    def test_concurrent_legacy_assignment_blocks_before_write(self, _label):
+        conflict = create_pr.ReviewAssignmentLookupError("unsupported review label")
+        with patch.object(create_pr, "run_cmd") as run, \
+                patch.object(create_pr, "existing_review_assignment",
+                              side_effect=[None, conflict]):
+            self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        run.assert_not_called()
 
     @patch.object(create_pr, "ensure_label", return_value=True)
     def test_concurrent_assignment_landing_during_the_write_is_not_marked_ready(self, _label):
@@ -554,93 +312,22 @@ class FailClosedAssignmentTests(unittest.TestCase):
         conflict = create_pr.ReviewAssignmentLookupError("conflicting review labels")
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "existing_review_assignment",
-                              side_effect=[None, None, conflict]), \
-                patch.object(create_pr, "select_review_service",
-                              return_value=self.canned_evidence("codeant")):
-            run.side_effect = [(0, "", ""), (0, "", "")]
+                              side_effect=[None, None, conflict]):
+            run.return_value = (0, "", "")
             self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 1)
+        self.assertIn("--add-label", commands[0])
         self.assertNotIn(["gh", "pr", "ready", "https://x/pull/9"], commands)
 
     @patch.object(create_pr, "ensure_label", return_value=True)
     def test_assignment_that_does_not_stick_is_not_marked_ready(self, _label):
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "existing_review_assignment",
-                              side_effect=[None, None, "sourcery"]), \
-                patch.object(create_pr, "select_review_service",
-                              return_value=self.canned_evidence("codeant")):
-            run.side_effect = [(0, "", ""), (0, "", "")]
+                              side_effect=[None, None, None]):
+            run.return_value = (0, "", "")
             self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-        self.assertEqual(run.call_count, 2)
-
-
-class MergeAuthoritySequencingTests(unittest.TestCase):
-    """A rerouted assignment is withheld until #403 teaches the merge gate.
-
-    merge_pr.assigned_review_service() still recomputes review_service_for_issue()
-    and rejects any disagreeing label, so shipping a capacity-rerouted
-    assignment would produce a correctly-routed, permanently unmergeable PR.
-    Waiting in draft is recoverable; that is not.
-    """
-
-    def evidence(self, selected, eligible):
-        return {
-            "schema": "aru.review-capacity-selection.v1",
-            "as_of": "2026-08-24T12:00:00Z",
-            "candidates": list(create_pr.REVIEW_SERVICES),
-            "eligible": list(eligible),
-            "excluded": [],
-            "selected": selected,
-            "rationale": "test",
-        }
-
-    def test_matching_selection_passes_through_untouched(self):
-        # Issue 9 -> codeant under both the formula and the full eligible pool.
-        original = self.evidence("codeant", create_pr.REVIEW_SERVICES)
-        self.assertEqual(create_pr.gate_divergent_selection(original, 9), original)
-
-    def test_divergent_selection_is_withheld_with_auditable_reason(self):
-        gated = create_pr.gate_divergent_selection(
-            self.evidence("coderabbit", ["coderabbit", "sourcery"]), 9)
-        self.assertIsNone(gated["selected"])
-        self.assertEqual(gated["withheld_selection"], "coderabbit")
-        self.assertIn(str(create_pr.MERGE_AUTHORITY_FOLLOWUP), gated["withheld_reason"])
-        self.assertIn("codeant", gated["rationale"])
-        self.assertEqual(gated["eligible"], ["coderabbit", "sourcery"])
-
-    def test_empty_pool_stays_the_ordinary_waiting_state(self):
-        original = self.evidence(None, [])
-        self.assertEqual(create_pr.gate_divergent_selection(original, 9), original)
-
-    def test_withheld_selection_leaves_the_pr_draft_and_unlabelled(self):
-        with patch.object(create_pr, "run_cmd") as run, \
-                patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "ensure_label") as label, \
-                patch.object(create_pr, "select_review_service",
-                              return_value=self.evidence("coderabbit", ["coderabbit", "sourcery"])):
-            run.side_effect = [(0, "", "")]
-            # Reported as success: waiting for capacity is the correct governed
-            # outcome, and --finalize-review retries it once #403 lands.
-            self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-            label.assert_not_called()
-        commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(len(commands), 1)
-        self.assertEqual(commands[0][:3], ["gh", "pr", "comment"])
-        body = commands[0][commands[0].index("--body") + 1]
-        self.assertIn('"selected": null', body)
-        self.assertIn('"withheld_selection": "coderabbit"', body)
-
-    def test_every_withheld_assignment_would_be_rejected_by_the_live_merge_gate(self):
-        """Proves the gate is load-bearing rather than defensive: the withheld
-        service is exactly what merge_pr.py refuses today."""
-        pr = {
-            "labels": [{"name": "review:coderabbit"}],
-            "body": "Closes #9",
-        }
-        self.assertIsNone(merge_pr.assigned_review_service(pr))
-        pr["labels"] = [{"name": "review:codeant"}]
-        self.assertEqual(merge_pr.assigned_review_service(pr), "codeant")
+        self.assertEqual(run.call_count, 1)
 
 
 class FinalizeReviewCliTests(unittest.TestCase):
@@ -655,9 +342,7 @@ class FinalizeReviewCliTests(unittest.TestCase):
         finalize.assert_called_once_with("42", 9)
 
     def test_non_positive_issue_is_refused_before_any_assignment(self):
-        """`(issue_id - 1) % len(eligible)` is a valid index for 0 and for
-        negatives, so an invalid issue number produces a confident assignment
-        for an issue that does not exist rather than an error."""
+        """Retry retains a real positive linked-issue contract."""
         for issue in ("0", "-3"):
             with self.subTest(issue=issue):
                 argv = ["create_pr.py", "--issue", issue, "--finalize-review", "42",

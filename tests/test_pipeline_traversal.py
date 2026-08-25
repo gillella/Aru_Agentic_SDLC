@@ -90,13 +90,25 @@ def canonical_pr(**overrides) -> dict:
         "labels": [
             {"name": "author:agent-1"},
             {"name": "family:anthropic"},
-            {"name": "reviewed-by:agent-2"},
+            {"name": "review:coderabbit"},
             {"name": "status:in-review"},
         ],
-        "reviews": [{"state": "APPROVED", "author": {"login": "agent-2"},
-                     "submittedAt": "2026-08-19T00:00:00Z"}],
+        "reviews": [{
+            "id": "coderabbit-review-293",
+            "state": "APPROVED",
+            "body": "CodeRabbit reviewed the canonical lifecycle fixture.",
+            "author": {"login": "coderabbitai", "__typename": "Bot"},
+            "submittedAt": "2026-08-19T00:00:00Z",
+            "commit": {"oid": "1111111111111111111111111111111111111111"},
+        }],
         "statusCheckRollup": [
             {"name": "Lint, Verify & Test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {
+                "__typename": "StatusContext",
+                "context": "CodeRabbit",
+                "state": "SUCCESS",
+                "creator": {"login": "coderabbitai", "__typename": "Bot"},
+            },
         ],
     }
     pr.update(overrides)
@@ -107,11 +119,32 @@ def canonical_evidence(**overrides) -> dict:
     evidence = {
         "unresolved": 0,
         "unfixed": 0,
+        "outdated_unfixed": 0,
         "withdrawn": 0,
         "reviewed_head": True,
-        "head_sha": "1111111111111111111111111111111111111111",
-        "reviews": [{"state": "APPROVED", "author": {"login": "agent-2"},
-                     "submittedAt": "2026-08-19T00:00:00Z"}],
+        "github_review_evidence": True,
+        "head_oid": "1111111111111111111111111111111111111111",
+        "reviews": [{
+            "id": "coderabbit-review-293",
+            "state": "APPROVED",
+            "body": "CodeRabbit reviewed the canonical lifecycle fixture.",
+            "author": {"login": "coderabbitai", "__typename": "Bot"},
+            "submittedAt": "2026-08-19T00:00:00Z",
+            "commit": {"oid": "1111111111111111111111111111111111111111"},
+        }],
+        "coderabbit_status": [{
+            "__typename": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+            "creator": {"login": "coderabbitai", "__typename": "Bot"},
+        }],
+        "service_threads": {
+            "coderabbit": {
+                "unresolved": 0,
+                "unfixed": 0,
+                "outdated_unfixed": 0,
+            },
+        },
     }
     evidence.update(overrides)
     return evidence
@@ -175,20 +208,24 @@ class LifecycleTransitionTests(unittest.TestCase):
             rc.return_value = (0, "", "")
             self.assertTrue(issue_status.update_status(293, "In Progress"))
 
-    def test_review_requires_distinct_reviewer(self):
+    def test_review_requires_exact_head_coderabbit_authority(self):
         ok, msg = merge_pr.check_reviews(canonical_pr(), canonical_evidence())
         self.assertTrue(ok, msg)
 
-    def test_self_review_is_not_a_traversal(self):
-        pr = canonical_pr(labels=[
-            {"name": "author:agent-1"},
-            {"name": "reviewed-by:agent-1"},
-        ])
+    def test_coding_agent_review_is_not_a_traversal(self):
+        pr = canonical_pr()
         evidence = canonical_evidence(
-            reviews=[{"state": "APPROVED", "author": {"login": "agent-1"}}],
+            reviews=[{
+                "id": "agent-review-293",
+                "state": "APPROVED",
+                "body": "Coding-agent approval is not positive authority.",
+                "author": {"login": "agent-1", "__typename": "User"},
+                "submittedAt": "2026-08-19T00:00:00Z",
+                "commit": {"oid": "1111111111111111111111111111111111111111"},
+            }],
         )
         ok, _ = merge_pr.check_reviews(pr, evidence)
-        self.assertFalse(ok, "a self-review must not satisfy the review gate")
+        self.assertFalse(ok, "a coding-agent review must not satisfy the review gate")
 
 
 class DefinitionOfDoneTests(unittest.TestCase):
@@ -211,7 +248,7 @@ class DefinitionOfDoneTests(unittest.TestCase):
             "issue link": "author",
             "verification": "author",
             "ci": "author",
-            "review": "distinct reviewer then author",
+            "review": "CodeRabbit then author remediation",
             "rebased": "author",
             "size": "author (size-waiver) or split",
             "tests": "author",

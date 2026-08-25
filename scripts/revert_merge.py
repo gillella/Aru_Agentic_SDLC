@@ -6,10 +6,8 @@ revert_merge.py - Governed reverse gear for Aru_Agentic_SDLC.
 Reverts a merged PR safely:
 1. Locates the merge commit via the PR metadata or checkpoint tag.
 2. Creates an isolated worktree branch 'revert/pr-<id>-<slug>' off origin/<baseRefName>.
-3. Executes git revert. If clean, opens a revert PR linking 'Reverts #<id>'
-   and 'Closes #<revert_issue>' for the claimed tracking issue.
-4. Reopens affected issues on GitHub and moves them from 'Done' back to 'Ready'
-   (or specified target status) with an explanatory comment.
+3. Executes git revert and opens a tracked revert PR when clean.
+4. Reopens affected issues and restores their active board status.
 5. If the revert encounters git conflicts, refuses with the exact conflict files
    and manual remediation instructions.
 """
@@ -26,7 +24,7 @@ from common import (
     run_cmd,
     run_gh_json,
 )
-from create_pr import MODEL_FAMILIES, apply_identity, enqueue_review
+from create_pr import MODEL_FAMILIES, apply_identity, finalize_review_assignment
 from update_issue_status import VALID_STATUSES, update_status
 
 EXIT_OK = 0
@@ -419,7 +417,7 @@ def revert_merge_pr(  # noqa: C901, PLR0912, PLR0915
             f"{closure_text}\n"
         )
 
-        pr_cmd = ["gh", "pr", "create", "--title", pr_title, "--body", pr_body, "--head", revert_branch, "--base", base_ref]
+        pr_cmd = ["gh", "pr", "create", "--draft", "--title", pr_title, "--body", pr_body, "--head", revert_branch, "--base", base_ref]
         code_pr, pr_out, err_pr = run_cmd(pr_cmd, check=False, cwd=actual_path)
         if code_pr != 0:
             print(f"[ERROR] Failed to open revert PR: {err_pr}", file=sys.stderr)
@@ -429,11 +427,13 @@ def revert_merge_pr(  # noqa: C901, PLR0912, PLR0915
         revert_pr_num = revert_pr_url.split("/")[-1] if "/" in revert_pr_url else revert_pr_url
         print(f"✅ Revert PR #{revert_pr_num} created: {revert_pr_url}")
 
-    # Stamp identity and enqueue for review (failing closed if identity stamp fails)
+    # Affected issues stay closed until identity and CodeRabbit finalization succeed.
     if not apply_identity(revert_pr_num, agent=agent, family=family):
         print(f"[ERROR] Failed to stamp author identity on Revert PR #{revert_pr_num}.", file=sys.stderr)
         return EXIT_ERROR
-    enqueue_review(revert_pr_num)
+    if not finalize_review_assignment(revert_pr_num, revert_issue):
+        print(f"[ERROR] Failed to finalize CodeRabbit review for Revert PR #{revert_pr_num}; affected issues remain closed.", file=sys.stderr)
+        return EXIT_ERROR
 
     # Reopen affected issues & update board state (failing closed on any failure)
     failed_issues = []
@@ -470,7 +470,7 @@ def revert_merge_pr(  # noqa: C901, PLR0912, PLR0915
         print("Manual remediation or re-running revert_merge.py is required.", file=sys.stderr)
         return EXIT_ERROR
 
-    print(f"\n🎉 Governed revert of PR #{pr_id} complete. Revert PR #{revert_pr_num} is now in queue for review.")
+    print(f"\n🎉 Governed revert of PR #{pr_id} complete. Revert PR #{revert_pr_num} is assigned to CodeRabbit.")
     return EXIT_OK
 
 

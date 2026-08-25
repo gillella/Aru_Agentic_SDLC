@@ -149,13 +149,14 @@ class TestRevertMerge(unittest.TestCase):
     @patch("revert_merge.claimed_by", return_value="gemini-1")
     @patch("revert_merge.get_issue")
     @patch("revert_merge.update_status")
-    @patch("revert_merge.enqueue_review")
+    @patch("revert_merge.finalize_review_assignment", return_value=True)
     @patch("revert_merge.apply_identity", return_value=True)
     @patch("revert_merge.is_merge_commit", return_value=True)
     @patch("revert_merge.run_cmd")
     @patch("revert_merge.fetch_pr_details")
     def test_revert_runs_when_log_contains_unrelated_revert_text(
-        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_enqueue, mock_update_status, mock_get_issue, mock_claimed, mock_find_pr
+        self, mock_fetch, mock_run_cmd, mock_is_merge, mock_identity, mock_finalize,
+        mock_update_status, mock_get_issue, mock_claimed, mock_find_pr,
     ):
         mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
         mock_fetch.return_value = {
@@ -191,10 +192,12 @@ class TestRevertMerge(unittest.TestCase):
         )
         mock_update_status.assert_called_once_with(30, "Ready", require_board=True)
         mock_identity.assert_called_once_with("99", agent="gemini-1", family="google")
+        mock_finalize.assert_called_once_with("99", 94)
 
         # Verify PR creation body contains Reverts #20, Reopens #30, and Closes #94 (revert issue), but not Closes #30
         pr_cmd = mock_run_cmd.call_args_list[6][0][0]
         self.assertIn("gh", pr_cmd)
+        self.assertIn("--draft", pr_cmd)
         body_idx = pr_cmd.index("--body") + 1
         pr_body = pr_cmd[body_idx]
         self.assertIn("Reverts #20", pr_body)
@@ -206,12 +209,13 @@ class TestRevertMerge(unittest.TestCase):
     @patch("revert_merge.claimed_by", return_value="gemini-1")
     @patch("revert_merge.get_issue")
     @patch("revert_merge.update_status")
-    @patch("revert_merge.enqueue_review")
+    @patch("revert_merge.finalize_review_assignment", return_value=True)
     @patch("revert_merge.apply_identity", return_value=True)
     @patch("revert_merge.run_cmd")
     @patch("revert_merge.fetch_pr_details")
     def test_revert_resume_from_existing_pr(
-        self, mock_fetch, mock_run_cmd, mock_identity, mock_enqueue, mock_update_status, mock_get_issue, mock_claimed, mock_find_pr
+        self, mock_fetch, mock_run_cmd, mock_identity, mock_finalize,
+        mock_update_status, mock_get_issue, mock_claimed, mock_find_pr,
     ):
         mock_get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
         mock_fetch.return_value = {
@@ -254,8 +258,43 @@ class TestRevertMerge(unittest.TestCase):
         self.assertEqual(res, revert_merge.EXIT_OK)
         # Should not have called git fetch, worktree add, or pr create
         mock_identity.assert_called_once_with("99", agent="gemini-1", family="google")
-        mock_enqueue.assert_called_once_with("99")
+        mock_finalize.assert_called_once_with("99", 94)
         mock_update_status.assert_called_once_with(30, "Ready", require_board=True)
+
+    @patch("revert_merge.find_existing_revert_pr")
+    @patch("revert_merge.claimed_by", return_value="gemini-1")
+    @patch("revert_merge.get_issue")
+    @patch("revert_merge.update_status")
+    @patch("revert_merge.finalize_review_assignment", return_value=False)
+    @patch("revert_merge.apply_identity", return_value=True)
+    @patch("revert_merge.run_cmd")
+    @patch("revert_merge.fetch_pr_details")
+    def test_review_finalization_failure_stops_before_reopening_issues(self, mock_fetch, run, identity, finalize, update_status, get_issue, _claimed, find_pr):
+        get_issue.return_value = {"number": 94, "state": "OPEN", "labels": [{"name": "agent:gemini-1"}]}
+        mock_fetch.return_value = {
+            "number": 20,
+            "title": "feat: add feature",
+            "body": "Closes #30",
+            "state": "MERGED",
+            "mergeCommit": {"oid": "mergecommitsha123"},
+        }
+        find_pr.return_value = {
+            "number": 99,
+            "headRefName": "revert/pr-20-feat-add-feature",
+            "baseRefName": "main",
+            "headRefOid": "revertcommitsha123",
+            "body": "<!-- aru-revert:v1 source-pr=20 merge-commit=mergecommitsha123 -->\nReverts #20\nCloses #94\n",
+            "commits": [{
+                "oid": "revertcommitsha123",
+                "messageBody": "This reverts commit mergecommitsha123.",
+            }],
+        }
+        result = revert_merge.revert_merge_pr(20, agent="gemini-1", family="google", revert_issue=94)
+        self.assertEqual(result, revert_merge.EXIT_ERROR)
+        identity.assert_called_once_with("99", agent="gemini-1", family="google")
+        finalize.assert_called_once_with("99", 94)
+        update_status.assert_not_called()
+        run.assert_not_called()
 
     @patch("revert_merge.find_existing_revert_pr")
     @patch("revert_merge.claimed_by", return_value="gemini-1")
