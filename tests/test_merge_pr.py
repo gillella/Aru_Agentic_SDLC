@@ -1,8 +1,10 @@
 # line-ceiling: 6884
 from contextlib import nullcontext
 from datetime import datetime, timezone
+import inspect
 import json
 import os
+import shutil
 import sys
 import subprocess
 import tempfile
@@ -833,6 +835,102 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         ]
 
         self.assertIsNone(merge_pr.review_evidence(162))
+
+
+class AcceptanceEnvironmentTests(unittest.TestCase):
+    """#429: a refused merge must not corrupt the PR it refused."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _make_venv_runner(self, name, root=".venv"):
+        binaries = os.path.join(self.tmp, root, "bin")
+        os.makedirs(binaries, exist_ok=True)
+        path = os.path.join(binaries, name)
+        with open(path, "w") as handle:
+            handle.write("#!/bin/sh\nexit 0\n")
+        os.chmod(path, 0o755)
+        return path
+
+    def test_project_virtualenv_wins_over_ambient_path(self):
+        expected = self._make_venv_runner("python3")
+        resolved, error = merge_pr.resolve_project_runner("python3", self.tmp)
+        self.assertIsNone(error)
+        self.assertEqual(resolved, expected)
+
+    def test_legacy_venv_directory_is_also_honoured(self):
+        expected = self._make_venv_runner("python3", root="venv")
+        resolved, error = merge_pr.resolve_project_runner("python3", self.tmp)
+        self.assertIsNone(error)
+        self.assertEqual(resolved, expected)
+
+    def test_falls_back_to_path_when_no_project_virtualenv(self):
+        with patch.object(merge_pr.shutil, "which", return_value="/usr/bin/python3"):
+            resolved, error = merge_pr.resolve_project_runner("python3", self.tmp)
+        self.assertIsNone(error)
+        self.assertEqual(resolved, "/usr/bin/python3")
+
+    def test_unresolvable_runner_is_an_environment_fault(self):
+        with patch.object(merge_pr.shutil, "which", return_value=None):
+            resolved, error = merge_pr.resolve_project_runner("python3", self.tmp)
+        self.assertIsNone(resolved)
+        self.assertIn("environment fault", error)
+        self.assertIn("python3", error)
+
+    def test_malformed_runner_name_fails_closed(self):
+        for name in (None, "", 7, []):
+            with self.subTest(name=name):
+                resolved, error = merge_pr.resolve_project_runner(name, self.tmp)
+                self.assertIsNone(resolved)
+                self.assertTrue(error)
+
+    def test_resolution_reports_the_first_fault_without_running_anything(self):
+        criteria = merge_pr.acceptance_runner.parse_criteria(
+            "## Acceptance Criteria\n\n"
+            "- [x] one (verify: `python3 -m unittest tests.test_a`)\n"
+        )
+        with patch.object(merge_pr.shutil, "which", return_value=None):
+            resolved, error = merge_pr.resolve_acceptance_runners(criteria, self.tmp)
+        self.assertIsNone(resolved)
+        self.assertIn("environment fault", error)
+
+    def test_runner_rewrites_argv0_to_the_resolved_interpreter(self):
+        seen = {}
+
+        def fake_run(argv, cwd=None, evidence=None, check=False):
+            seen["argv"] = list(argv)
+            return 0, "", ""
+
+        runner = merge_pr.acceptance_run_cmd({"python3": "/proj/.venv/bin/python3"})
+        with patch.object(merge_pr.acceptance_runner, "_run_verify", fake_run):
+            runner(["python3", "-m", "unittest", "tests.test_a"], cwd="/tmp")
+        self.assertEqual(
+            seen["argv"], ["/proj/.venv/bin/python3", "-m", "unittest", "tests.test_a"],
+        )
+
+    def test_unmapped_runner_is_passed_through_unchanged(self):
+        seen = {}
+
+        def fake_run(argv, cwd=None, evidence=None, check=False):
+            seen["argv"] = list(argv)
+            return 0, "", ""
+
+        runner = merge_pr.acceptance_run_cmd({})
+        with patch.object(merge_pr.acceptance_runner, "_run_verify", fake_run):
+            runner(["ruff", "check", "scripts/merge_pr.py"])
+        self.assertEqual(seen["argv"], ["ruff", "check", "scripts/merge_pr.py"])
+
+    def test_failing_acceptance_never_persists_evidence(self):
+        """The corruption itself: a refusal must not write to the PR body."""
+        source = inspect.getsource(merge_pr.main)
+        marker = "if not passed:"
+        self.assertIn(marker, source)
+        tail = source.split(marker, 1)[1].split("persisted, persist_msg", 1)[0]
+        self.assertNotIn(
+            "persist_acceptance_evidence", tail,
+            "a refused acceptance run must not persist records into the PR body",
+        )
 
 
 class CiGateTests(unittest.TestCase):

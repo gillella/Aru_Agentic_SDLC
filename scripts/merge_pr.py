@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# line-ceiling: 4650
+# +10 for the #429 fix; #414 ratchets this file to 4,500.
+# line-ceiling: 4660
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -2577,6 +2578,58 @@ def release_pr_head_checkout(path, repo_root=None):
     shutil.rmtree(path, ignore_errors=True)
 
 
+PROJECT_VENV_DIRS = (".venv", "venv")
+
+
+def resolve_project_runner(runner, repo_root=None):
+    """Map an allowlisted bare runner name onto this project's own executable.
+
+    Resolving argv[0] from the ambient PATH runs whatever interpreter the shell
+    exposes -- often a shim lacking this project's dependencies -- so the gate
+    blames the code for an environment mismatch (#429). Prefers the repository
+    virtualenv, then VIRTUAL_ENV, then PATH. An error is an environment fault,
+    never a verification failure.
+    """
+    if not isinstance(runner, str) or not runner:
+        return None, "acceptance runner name is missing or malformed"
+    roots = [os.path.join(repo_root, n) for n in PROJECT_VENV_DIRS] if repo_root else []
+    if os.environ.get("VIRTUAL_ENV"):
+        roots.append(os.environ["VIRTUAL_ENV"])
+    for root in roots:
+        candidate = os.path.join(root, "bin", runner)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate, None
+    found = shutil.which(runner)
+    if found:
+        return found, None
+    return None, (
+        f"cannot resolve the project interpreter for {runner!r}: no project "
+        "virtualenv, no VIRTUAL_ENV, and nothing on PATH provides it. This is "
+        "an environment fault, not a verification failure; nothing was recorded."
+    )
+
+
+def resolve_acceptance_runners(criteria, repo_root=None):
+    """Resolve every runner up front, so a bad environment refuses before running."""
+    resolved = {}
+    for item in criteria:
+        if not item.argv or item.argv[0] in resolved:
+            continue
+        resolved[item.argv[0]], error = resolve_project_runner(item.argv[0], repo_root)
+        if error:
+            return None, error
+    return resolved, None
+
+
+def acceptance_run_cmd(resolved):
+    """Wrap the acceptance runner so argv[0] becomes the resolved executable."""
+    def _runner(argv, check=False, cwd=None, evidence=None):
+        if isinstance(argv, list) and argv:
+            argv = [resolved.get(argv[0], argv[0]), *argv[1:]]
+        return acceptance_runner._run_verify(argv, cwd=cwd, evidence=evidence, check=check)
+    return _runner
+
+
 def persist_acceptance_evidence(pr_id, pr, records):
     """Writes live verify: records into the PR's durable evidence block."""
     if not records:
@@ -4411,15 +4464,31 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 print(f"\n🚫 Not merged. Unmet: accept. {checkout_err}")
                 return EXIT_BLOCKED
             try:
+                # Resolve runners first: an unresolvable interpreter must
+                # refuse before anything runs, so nothing partial is recorded.
+                all_criteria = [
+                    item
+                    for body in issue_bodies.values()
+                    for item in acceptance_runner.parse_criteria(body)
+                ]
+                resolved, resolve_err = resolve_acceptance_runners(
+                    all_criteria, repository_root(),
+                )
+                if resolve_err:
+                    print(f"\n🚫 Not merged. Unmet: accept. {resolve_err}")
+                    return EXIT_BLOCKED
+                run_cmd_fn = acceptance_run_cmd(resolved)
                 records = []
                 for num in issue_nums:
                     passed, message = check_acceptance(
                         num, issue_bodies.get(num, ""), cwd=checkout, execute=True,
-                        records_out=records,
+                        records_out=records, run_cmd_fn=run_cmd_fn,
                     )
                     print(f"  {'✅' if passed else '❌'} accept #{num:<4} {message}")
                     if not passed:
-                        persist_acceptance_evidence(args.pr, pr, records)
+                        # Deliberately does NOT persist: writing these records
+                        # flips the evidence block to failed and blocks the next
+                        # attempt on a gate the author never failed (#429).
                         return EXIT_BLOCKED
                 persisted, persist_msg = persist_acceptance_evidence(args.pr, pr, records)
                 print(f"  {'✅' if persisted else '❌'} evidence    {persist_msg}")
