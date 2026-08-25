@@ -66,6 +66,14 @@ class GovernedBoardInventoryTests(unittest.TestCase):
                     inventory.governed_board_inventory("owner/repo", {1})
                 )
 
+    def test_stages_only_the_expected_ready_issue_as_backlog(self):
+        issues = [{"number": 1, "labels": [
+            {"name": "status:ready"}, {"name": "priority:p0"},
+        ]}]
+        staged = inventory.stage_expected_ready_for_triage(issues, 1)
+        self.assertEqual(staged[0]["labels"][1]["name"], "status:backlog")
+        self.assertIsNone(inventory.stage_expected_ready_for_triage(issues, None))
+
 
 if __name__ == "__main__":
     unittest.main()

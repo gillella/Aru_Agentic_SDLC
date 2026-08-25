@@ -1337,7 +1337,7 @@ class IdleBacklogPromotionTests(unittest.TestCase):
         self.inventory_reads = 0
         self.select_reads = 0
         def inventory(_slug, numbers):
-            self.inventory_reads += 1; return ({number: "Backlog" for number in numbers}, int(self.inventory_reads >= 3))  # noqa: E702
+            self.inventory_reads += 1; return ({number: ("Ready" if self.inventory_reads >= 3 and number == 10 else "Backlog") for number in numbers}, int(self.inventory_reads >= 3))  # noqa: E702
         def select(*_args):
             self.select_reads += 1; return {"work": ({"type": "issue", "issue": 10} if self.select_reads >= 3 else {"type": "idle"})}  # noqa: E702
         self.enterContext(patch.object(merge_pr, "repository_merge_lock",
@@ -1368,7 +1368,7 @@ class IdleBacklogPromotionTests(unittest.TestCase):
         issues = [self._issue(20, "p2"), self._issue(30, "p0"), self._issue(10, "p0")]
         post = self._issue(10, "p0", status="ready")
         with patch.object(fnw, "list_open_issues",
-                          side_effect=[issues, issues, [post]]), \
+                          side_effect=[issues, issues, [post], [post]]), \
              patch.object(fnw, "list_work_prs", return_value=[]), \
              patch.object(fnw, "active_increment_scope", return_value=None), \
              patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \

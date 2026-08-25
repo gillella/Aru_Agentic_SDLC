@@ -2,9 +2,8 @@
 # line-ceiling: 1226
 """Return the highest-priority work one governed factory agent can perform.
 Finishing beats starting: author feedback, merge-ready work, resumable issues,
-then Ready issues. External review services remain outside the coding-agent queue.
-A claiming picker that is truly idle may promote one fully qualified
-Backlog issue, reselect it, and use the ordinary optimistic claim protocol.
+then Ready issues. External review services stay outside the coding-agent queue;
+a truly idle claiming picker may promote one qualified Backlog issue and reselect it.
 """
 
 import argparse
@@ -51,7 +50,7 @@ from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # reviewed-but-since-pushed PRs reach no agent at all.
 from merge_pr import review_evidence
 from update_issue_status import update_status
-from picker_board_inventory import governed_board_inventory as _governed_open_issue_statuses
+from picker_board_inventory import governed_board_inventory as _governed_open_issue_statuses, stage_expected_ready_for_triage
 
 
 # Seats disambiguate concurrent sessions sharing one checkout -- the only case a
@@ -870,9 +869,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     }
 
 
-def _idle_backlog_candidate(  # noqa: C901
-    agent: str,
-) -> tuple[dict[str, Any] | None, str | None]:
+def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None) -> tuple[dict[str, Any] | None, str | None]:  # noqa: C901
     """Return the one issue triage and the ordinary picker would admit."""
     from triage_backlog import partition, ready_gaps, split_reasons
 
@@ -892,13 +889,16 @@ def _idle_backlog_candidate(  # noqa: C901
               file=sys.stderr)
         return None, repo_slug
     _board_statuses, ready_count = inventory
-    if ready_count:
+    expected_ready_count = int(expected_ready_issue is not None)
+    target_ready = _board_statuses.get(expected_ready_issue, "").lower() == "ready"
+    if ready_count != expected_ready_count or (
+            expected_ready_issue is not None and not target_ready):
         return None, repo_slug
-    if any("status:ready" in {name.lower() for name in issue_label_names(issue)}
-           for issue in issues):
+    triage_issues = stage_expected_ready_for_triage(issues, expected_ready_issue)
+    if triage_issues is None:
         return None, repo_slug
 
-    backlog, ready, _held = partition(issues)
+    backlog, ready, _held = partition(triage_issues)
     if ready or not backlog:
         return None, None
 
@@ -924,7 +924,7 @@ def _idle_backlog_candidate(  # noqa: C901
         return None, repo_slug
 
     staged_issues = []
-    for issue in issues:
+    for issue in triage_issues:
         if issue["number"] not in qualified_numbers:
             staged_issues.append(issue)
             continue
@@ -1026,8 +1026,8 @@ def _promote_one_idle_backlog_issue_locked(
         )
     post_issues = list_open_issues()
     post = next((issue for issue in post_issues if issue["number"] == number), None)
-    post_inventory = None if len(post_issues) >= 500 else _governed_open_issue_statuses(
-        repo_slug, {issue["number"] for issue in post_issues})
+    post_candidate, _post_slug = _idle_backlog_candidate(
+        agent, expected_ready_issue=number)
     post_statuses = {
         name.lower() for name in issue_label_names(post or {})
         if name.lower().startswith("status:")
@@ -1048,7 +1048,7 @@ def _promote_one_idle_backlog_issue_locked(
     post_work = select(agent, family, round_cap, cross_family_wait)["work"]
     if (post_statuses != {"status:ready"} or post_agents
             or post_labels != expected_labels or not stable
-            or post_inventory is None or post_inventory[1] != 1
+            or post_candidate is None or post_candidate.get("number") != number
             or post_work.get("type") != "issue" or post_work.get("issue") != number
             or board_status() != "ready"):
         update_status(

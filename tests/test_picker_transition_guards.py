@@ -11,9 +11,9 @@ import fetch_next_issue  # noqa: E402
 import fetch_next_work as fnw  # noqa: E402
 
 
-def qualified_issue(*, status="backlog", extra_labels=()):
+def qualified_issue(number=10, priority="p0", *, status="backlog", extra_labels=()):
     return {
-        "number": 10,
+        "number": number,
         "title": "qualified",
         "body": (
             "## Acceptance Criteria\n"
@@ -25,7 +25,7 @@ def qualified_issue(*, status="backlog", extra_labels=()):
             "depends-on: none\n"
         ),
         "labels": [
-            {"name": f"status:{status}"}, {"name": "priority:p0"},
+            {"name": f"status:{status}"}, {"name": f"priority:{priority}"},
             {"name": "type:feat"},
             *({"name": name} for name in extra_labels),
         ],
@@ -38,15 +38,19 @@ class PickerTransitionGuardTests(unittest.TestCase):
     def setUp(self):
         self.inventory_reads = 0
         self.select_reads = 0
+        self.post_ready_issue = 10
+        self.post_selected_issue = 10
 
         def inventory(_slug, numbers):
             self.inventory_reads += 1
-            return ({number: "Backlog" for number in numbers},
+            return ({number: ("Ready" if self.inventory_reads >= 3
+                              and number == self.post_ready_issue
+                              else "Backlog") for number in numbers},
                     int(self.inventory_reads >= 3))
 
         def select(*_args):
             self.select_reads += 1
-            return {"work": ({"type": "issue", "issue": 10}
+            return {"work": ({"type": "issue", "issue": self.post_selected_issue}
                              if self.select_reads >= 3 else {"type": "idle"})}
 
         self.enterContext(patch.object(
@@ -75,7 +79,7 @@ class PickerTransitionGuardTests(unittest.TestCase):
         issue = qualified_issue()
         changed = qualified_issue(status="ready", extra_labels=("needs-human",))
         with patch.object(fnw, "list_open_issues",
-                          side_effect=[[issue], [issue], [changed]]), \
+                          side_effect=[[issue], [issue], [changed], [changed]]), \
              self.qualification_context()[0], self.qualification_context()[1], \
              self.qualification_context()[2], self.qualification_context()[3], \
              self.qualification_context()[4], self.qualification_context()[5], \
@@ -135,7 +139,7 @@ class PickerTransitionGuardTests(unittest.TestCase):
         post = qualified_issue(status="ready")
         contexts = self.qualification_context()
         with patch.object(fnw, "list_open_issues",
-                          side_effect=[[issue], [issue], [post]]), \
+                          side_effect=[[issue], [issue], [post], [post]]), \
              contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
              contexts[5], patch.object(fnw, "select", side_effect=[
                  {"work": {"type": "idle"}}, {"work": {"type": "idle"}},
@@ -154,6 +158,24 @@ class PickerTransitionGuardTests(unittest.TestCase):
              patch.object(fetch_next_issue, "DeliveryIncrementStore"):
             with self.assertRaisesRegex(RuntimeError, "repository identity"):
                 fetch_next_issue.active_increment_scope(fail_on_error=True)
+
+    def test_post_ranking_rolls_back_for_new_higher_priority_backlog(self):
+        selected = qualified_issue(20, "p1")
+        post = qualified_issue(20, "p1", status="ready")
+        higher = qualified_issue(10, "p0")
+        self.post_ready_issue = self.post_selected_issue = 20
+        contexts = self.qualification_context()
+        with patch.object(fnw, "list_open_issues", side_effect=[
+                 [selected], [selected], [post, higher], [post, higher],
+             ]), contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
+             contexts[5], patch.object(fnw, "query_issue_project_items",
+                                        return_value=[{"status": {"name": "Backlog"}}]), \
+             patch.object(fnw, "select_governed_project_items",
+                          side_effect=lambda items, _slug: items), \
+             patch.object(fnw, "update_status", return_value=True) as update:
+            with self.assertRaises(fnw.AutoTriageError):
+                fnw.promote_one_idle_backlog_issue("agent-1")
+        self.assertEqual(update.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,44 @@ from common import (
 )
 
 
+def stage_expected_ready_for_triage(
+    issues: list[dict], expected_ready_issue: int | None,
+) -> list[dict] | None:
+    """Treat one expected Ready issue as Backlog for post-write requalification."""
+    ready_numbers = {
+        issue["number"]
+        for issue in issues
+        if "status:ready" in {
+            str(label.get("name") or "").lower()
+            for label in issue.get("labels", [])
+        }
+    }
+    expected = {expected_ready_issue} if expected_ready_issue is not None else set()
+    if ready_numbers != expected:
+        return None
+    if expected_ready_issue is None:
+        return issues
+    staged_issues = []
+    for issue in issues:
+        if issue["number"] != expected_ready_issue:
+            staged_issues.append(issue)
+            continue
+        status_labels = [
+            label for label in issue.get("labels", [])
+            if str(label.get("name") or "").lower().startswith("status:")
+        ]
+        if [str(label.get("name") or "").lower() for label in status_labels] != [
+            "status:ready"
+        ]:
+            return None
+        staged = dict(issue)
+        staged["labels"] = [
+            label for label in issue.get("labels", []) if label not in status_labels
+        ] + [{"name": "status:backlog"}]
+        staged_issues.append(staged)
+    return staged_issues
+
+
 def governed_board_inventory(
     repo_slug: str, open_numbers: set[int],
 ) -> tuple[dict[int, str], int] | None:
