@@ -7,11 +7,15 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import merge_pr  # noqa: E402
 import reassign_review as rr  # noqa: E402
 
+HEAD = "0d2a6d0848b5d4e2e6ed03fff73885fbc81f832d"
 
-def pr(*labels, state="OPEN"):
-    return {"state": state, "labels": [{"name": n} for n in labels]}
+
+def pr(*labels, state="OPEN", head=HEAD):
+    return {"state": state, "headRefOid": head,
+            "labels": [{"name": n} for n in labels]}
 
 
 class CurrentAuthorityTests(unittest.TestCase):
@@ -43,39 +47,68 @@ class CurrentAuthorityTests(unittest.TestCase):
 class ReassignTests(unittest.TestCase):
     REASON = "CodeRabbit reported Review rate limited at abc1234"
 
-    def _run(self, snapshot, edit_results=((0, "", ""), (0, "", ""))):
+    def _run(self, snapshot, service="sourcery",
+             edit_results=((0, "", ""), (0, "", "")),
+             comment_results=((0, "", ""), (0, "", ""))):
         calls = []
 
         def fake_run_cmd(cmd, **kwargs):
             calls.append(cmd)
-            if "comment" in cmd:
-                return 0, "", ""
-            return edit_results[min(len([c for c in calls if "edit" in c]) - 1,
-                                    len(edit_results) - 1)]
+            group = "comment" if "comment" in cmd else "edit"
+            results = comment_results if group == "comment" else edit_results
+            index = len([c for c in calls if (group in c)]) - 1
+            return results[min(index, len(results) - 1)]
 
         with patch.object(rr, "run_gh_json", return_value=snapshot), \
              patch.object(rr, "ensure_label", return_value=True), \
              patch.object(rr, "run_cmd", side_effect=fake_run_cmd):
-            code = rr.reassign(433, "sourcery", self.REASON)
+            code = rr.reassign(433, service, self.REASON)
         return code, calls
+
+    @staticmethod
+    def _comments(calls):
+        return [c[-1] for c in calls if "comment" in c]
 
     def test_clean_swap_adds_before_removing(self):
         code, calls = self._run(pr("review:coderabbit", "author:x"))
         self.assertEqual(code, rr.EXIT_OK)
         edits = [c for c in calls if "edit" in c]
         self.assertIn("--add-label", edits[0])
+        self.assertIn("review:sourcery", edits[0])
         self.assertIn("--remove-label", edits[1])
+        self.assertIn("review:coderabbit", edits[1])
 
-    def test_reason_is_recorded_on_the_pull_request(self):
+    def test_reason_and_head_are_recorded_on_the_pull_request(self):
         _, calls = self._run(pr("review:coderabbit"))
-        comment = [c for c in calls if "comment" in c]
-        self.assertTrue(comment, "reassignment must stay auditable")
-        self.assertIn(self.REASON, " ".join(comment[0]))
+        audit = self._comments(calls)[0]
+        self.assertIn(self.REASON, audit)
+        self.assertIn(HEAD, audit)
+        self.assertIn("review:sourcery", audit)
+
+    def test_each_service_is_triggered_with_its_own_command(self):
+        for service in sorted(rr.FALLBACK_LABELS):
+            with self.subTest(service=service):
+                code, calls = self._run(pr("review:coderabbit"), service=service)
+                self.assertEqual(code, rr.EXIT_OK)
+                self.assertEqual(self._comments(calls)[1],
+                                 rr.SERVICE_TRIGGERS[service])
+
+    def test_codeant_is_a_supported_target(self):
+        code, calls = self._run(pr("review:coderabbit"), service="codeant")
+        self.assertEqual(code, rr.EXIT_OK)
+        self.assertIn("review:codeant", [c[-1] for c in calls if "--add-label" in c])
 
     def test_already_switched_pr_is_refused(self):
-        code, calls = self._run(pr("review:sourcery"))
+        for service, label in sorted(rr.FALLBACK_LABELS.items()):
+            with self.subTest(service=service):
+                code, calls = self._run(pr(label), service=service)
+                self.assertEqual(code, rr.EXIT_CONFLICT)
+                self.assertEqual([c for c in calls if "edit" in c], [])
+
+    def test_switching_between_fallbacks_is_refused(self):
+        """Only the default assignment may move; a second hop is not authorized."""
+        code, _ = self._run(pr("review:codeant"), service="sourcery")
         self.assertEqual(code, rr.EXIT_CONFLICT)
-        self.assertEqual([c for c in calls if "edit" in c], [])
 
     def test_unknown_existing_authority_is_refused(self):
         code, _ = self._run(pr("review:manual"))
@@ -97,6 +130,14 @@ class ReassignTests(unittest.TestCase):
         code, _ = self._run(None)
         self.assertEqual(code, rr.EXIT_ERROR)
 
+    def test_unreadable_head_fails_closed(self):
+        """The audit record is exact-head bound, like the gate it feeds."""
+        for head in (None, "", "abc", 7, "z" * 40):
+            with self.subTest(head=head):
+                code, calls = self._run(pr("review:coderabbit", head=head))
+                self.assertEqual(code, rr.EXIT_ERROR)
+                self.assertEqual([c for c in calls if "edit" in c], [])
+
     def test_failed_add_leaves_the_original_assignment_intact(self):
         """A partial swap must never strip the only reviewer."""
         code, calls = self._run(pr("review:coderabbit"),
@@ -109,10 +150,24 @@ class ReassignTests(unittest.TestCase):
                             edit_results=((0, "", ""), (1, "", "denied")))
         self.assertEqual(code, rr.EXIT_ERROR)
 
+    def test_unrecorded_reason_fails_closed(self):
+        """A reassignment nobody can audit is a reassignment that did not happen."""
+        code, calls = self._run(pr("review:coderabbit"),
+                                comment_results=((1, "", "denied"), (0, "", "")))
+        self.assertEqual(code, rr.EXIT_ERROR)
+        self.assertEqual(len(self._comments(calls)), 1)
+
+    def test_failed_trigger_fails_closed(self):
+        code, _ = self._run(pr("review:coderabbit"),
+                            comment_results=((0, "", ""), (1, "", "denied")))
+        self.assertEqual(code, rr.EXIT_ERROR)
+
 
 class ArgumentTests(unittest.TestCase):
     def test_unknown_service_is_refused(self):
-        self.assertEqual(rr.reassign(1, "codeant", "why"), rr.EXIT_ERROR)
+        for service in ("qodo", "claude", "", None):
+            with self.subTest(service=service):
+                self.assertEqual(rr.reassign(1, service, "why"), rr.EXIT_ERROR)
 
     def test_empty_reason_is_refused(self):
         for reason in ("", "   ", None):
@@ -122,6 +177,13 @@ class ArgumentTests(unittest.TestCase):
     def test_coderabbit_is_not_a_fallback_target(self):
         """The default is what we fall back *from*; it is never a target."""
         self.assertNotIn("coderabbit", rr.FALLBACK_LABELS)
+
+    def test_every_target_is_an_authority_the_merge_gate_recognises(self):
+        """A label this helper can apply but the gate cannot read strands the PR."""
+        for label in rr.FALLBACK_LABELS.values():
+            with self.subTest(label=label):
+                self.assertIn(label, merge_pr.REVIEW_SERVICE_LABELS)
+        self.assertEqual(set(rr.SERVICE_TRIGGERS), set(rr.FALLBACK_LABELS))
 
 
 if __name__ == "__main__":

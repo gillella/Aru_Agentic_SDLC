@@ -1,3 +1,4 @@
+# line-ceiling: 420
 """Hermetic proof that the issue lifecycle is traversable end to end.
 
 Issue #293 - every governance gate in this repository is individually
@@ -14,6 +15,7 @@ Hermetic contract:
   * Finishes far under 30 seconds so it can live in the default CI job.
 """
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -22,6 +24,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import merge_pr
+import reassign_review
 import update_issue_status as issue_status
 from common import parse_touches
 from fetch_next_issue import is_parallel_eligible
@@ -150,6 +153,64 @@ def canonical_evidence(**overrides) -> dict:
     return evidence
 
 
+def reassigned_pr(service: str, **overrides) -> dict:
+    """The canonical PR after an operator moved it off CodeRabbit (#435).
+
+    Only the authority label and the provider's own check surface change: every
+    other field stays byte-identical to the canonical fixture, so a gate that
+    starts passing or failing here did so because of the reassignment.
+    """
+    pr = canonical_pr()
+    pr["labels"] = [lab for lab in pr["labels"]
+                    if lab["name"] != "review:coderabbit"]
+    pr["labels"].append({"name": f"review:{service}"})
+    pr["statusCheckRollup"] = [pr["statusCheckRollup"][0]]
+    if service == "sourcery":
+        pr["statusCheckRollup"].append({
+            "__typename": "CheckRun", "name": "Sourcery review",
+            "status": "COMPLETED", "conclusion": "SUCCESS",
+        })
+    pr.update(overrides)
+    return pr
+
+
+def reassigned_evidence(service: str, **overrides) -> dict:
+    """Exact-head evidence in the shape the named service actually produces.
+
+    Neither fallback leaves a CodeRabbit review object or status context
+    behind, so both are dropped: the gate has to pass on the incoming
+    provider's own proof or not at all.
+    """
+    head = canonical_pr()["headRefOid"]
+    base = canonical_pr()["baseRefOid"]
+    evidence = canonical_evidence(reviews=[])
+    evidence.pop("coderabbit_status")
+    evidence["service_threads"] = {
+        service: {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+    }
+    if service == "sourcery":
+        evidence["sourcery_check_runs"] = [{
+            "name": "Sourcery review", "app": {"slug": "sourcery-ai"},
+            "head_sha": head, "status": "completed", "conclusion": "success",
+            "pull_requests": [{"number": 293, "head": {"sha": head},
+                               "base": {"sha": base}}],
+        }]
+    else:
+        record = {"label": "CodeAnt review", "commit": head,
+                  "started": "2026-08-19T00:00:00Z",
+                  "finished": "2026-08-19T00:02:00Z", "done": True}
+        evidence["codeant_status_comments"] = [{
+            "author": {"login": "codeant-ai", "__typename": "Bot"},
+            "body": (merge_pr.CODEANT_STATUS_MARKER_PREFIX
+                     + json.dumps([record]) + "-->"),
+        }]
+    evidence.update(overrides)
+    return evidence
+
+
+FALLBACK_SERVICES = ("sourcery", "codeant")
+
+
 def _issue(number: int, status: str) -> dict:
     return {
         "number": number,
@@ -226,6 +287,85 @@ class LifecycleTransitionTests(unittest.TestCase):
         )
         ok, _ = merge_pr.check_reviews(pr, evidence)
         self.assertFalse(ok, "a coding-agent review must not satisfy the review gate")
+
+
+class FallbackReviewTraversalTests(unittest.TestCase):
+    """#435: a reassigned PR must still be traversable, and no easier.
+
+    The reassignment path exists to unstick a PR CodeRabbit cannot review. It
+    would be worth nothing if the fallback route reached merge by relaxing a
+    gate, so each service is driven through the same full conjunction as the
+    canonical fixture and then shown to still fail the review gate on its own
+    missing evidence.
+    """
+
+    def _dod(self, pr, evidence):
+        with patch.object(merge_pr, "check_spec_sync") as spec_sync, \
+             patch.object(merge_pr, "_behind_by", return_value=0):
+            spec_sync.return_value = (True, "specifications synchronized.")
+            return merge_pr.evaluate_dod(
+                pr, {293: CANONICAL_ISSUE_BODY}, evidence)
+
+    def test_every_reassignment_target_is_traversable(self):
+        for service in FALLBACK_SERVICES:
+            with self.subTest(service=service):
+                ok, gates = self._dod(reassigned_pr(service),
+                                      reassigned_evidence(service))
+                self.assertTrue(
+                    ok, [f"{n}: {m}" for n, p, m in gates if not p])
+                self.assertEqual({name for name, _, _ in gates},
+                                 EXPECTED_GATES | {"accept #293"})
+
+    def test_reassignment_helper_targets_exactly_the_traversed_services(self):
+        """A target nobody proved traversable is a PR the operator can strand."""
+        self.assertEqual(set(reassign_review.FALLBACK_LABELS),
+                         set(FALLBACK_SERVICES))
+
+    def test_fallback_without_its_own_evidence_blocks_on_review_alone(self):
+        """The reassignment moves authority; it never satisfies authority."""
+        for service in FALLBACK_SERVICES:
+            with self.subTest(service=service):
+                evidence = reassigned_evidence(service)
+                evidence.pop("sourcery_check_runs", None)
+                evidence["codeant_status_comments"] = []
+                ok, gates = self._dod(reassigned_pr(service), evidence)
+                self.assertFalse(ok)
+                self.assertEqual(
+                    [name for name, passed, _ in gates if not passed],
+                    ["review"])
+
+    def test_coding_agent_review_is_not_a_traversal_for_a_fallback_either(self):
+        for service in FALLBACK_SERVICES:
+            with self.subTest(service=service):
+                evidence = reassigned_evidence(service, reviews=[{
+                    "id": "agent-review-293",
+                    "state": "APPROVED",
+                    "body": "Coding-agent approval is not positive authority.",
+                    "author": {"login": "agent-1", "__typename": "User"},
+                    "submittedAt": "2026-08-19T00:00:00Z",
+                    "commit": {"oid": canonical_pr()["headRefOid"]},
+                }])
+                evidence.pop("sourcery_check_runs", None)
+                evidence["codeant_status_comments"] = []
+                self.assertFalse(
+                    merge_pr.check_reviews(reassigned_pr(service), evidence)[0])
+
+    def test_stale_fallback_evidence_does_not_survive_a_push(self):
+        """Exact-head binding is the whole contract; a new head resets it."""
+        pushed = "3" * 40
+        for service in FALLBACK_SERVICES:
+            with self.subTest(service=service):
+                pr = reassigned_pr(service, headRefOid=pushed)
+                evidence = reassigned_evidence(service, head_oid=pushed)
+                self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
+
+    def test_two_authority_labels_are_never_traversable(self):
+        """Reassignment is a swap, not an accumulation."""
+        pr = reassigned_pr("sourcery")
+        pr["labels"].append({"name": "review:codeant"})
+        self.assertIsNone(merge_pr.assigned_review_service(pr))
+        self.assertFalse(
+            merge_pr.check_reviews(pr, reassigned_evidence("sourcery"))[0])
 
 
 class DefinitionOfDoneTests(unittest.TestCase):

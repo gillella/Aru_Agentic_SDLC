@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# line-ceiling: 200
+# line-ceiling: 260
 """reassign_review.py - move one stalled pull request to a fallback reviewer.
 
 CodeRabbit is the default and the only authority `create_pr.py` ever assigns.
 When it is demonstrably unavailable for a specific pull request -- a pause, a
 rate limit, an outage -- this command moves that one pull request to Sourcery
-and records why.
+or CodeAnt and records why.
 
 Deliberately not a scheduler. There is no rotation, no capacity ledger, and no
 automatic failover: authority moves only when an operator names a pull request
@@ -16,17 +16,30 @@ Exactly one authority label exists on a pull request at any time. The swap is
 ordered add-then-remove: a crash between the two leaves two labels, which the
 merge gate refuses loudly, whereas remove-then-add could leave a pull request
 with no reviewer at all and nothing to notice it.
+
+Every failure after the read leaves the pull request in a state this command
+names, with the manual step needed to finish or undo it.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 from common import ensure_label, run_cmd, run_gh_json
 
 CODERABBIT_LABEL = "review:coderabbit"
-FALLBACK_LABELS = {"sourcery": "review:sourcery"}
+FALLBACK_LABELS = {"sourcery": "review:sourcery", "codeant": "review:codeant"}
+# Relabelling alone does not summon a reviewer. `.coderabbit.yaml` filters
+# CodeRabbit's queue by label, so a moved pull request silently leaves that
+# queue; the incoming service has to be asked. These are the providers' own
+# documented request commands.
+SERVICE_TRIGGERS = {
+    "sourcery": "@sourcery-ai review",
+    "codeant": "@codeant-ai: review",
+}
+_HEAD_RE = re.compile(r"[0-9a-fA-F]{40}")
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CONFLICT = 2
@@ -55,7 +68,43 @@ def current_authority(labels):
     return names[0], None
 
 
-def reassign(pr_id: int, service: str, reason: str) -> int:
+def _comment(pr_id: int, body: str):
+    """Post one PR comment; returns (ok, stderr)."""
+    code, _, err = run_cmd(["gh", "pr", "comment", str(pr_id), "--body", body],
+                           check=False)
+    return code == 0, (err or "").strip()
+
+
+def audit_body(existing: str, target: str, service: str, reason: str, head: str) -> str:
+    """The auditable record of why authority moved, naming the head it moved at.
+
+    The head matters because the merge gate is exact-head bound: a reader
+    comparing this record against later evidence needs to know which commit was
+    live when the reassignment happened.
+    """
+    return (f"Review authority reassigned from `{existing}` to `{target}`.\n\n"
+            f"Reason: {reason.strip()}\n\n"
+            f"Head at reassignment: `{head}`\n\n"
+            "CodeRabbit remains the default for new pull requests; this is a "
+            "per-pull-request fallback, not a rotation. The merge gate now "
+            f"requires {service}'s producer-validated evidence bound to this "
+            "pull request's exact current head.")
+
+
+def _validated_snapshot(pr_id: int):
+    """Read the PR's state, labels, and live head, or (None, message)."""
+    pr = run_gh_json(
+        ["gh", "pr", "view", str(pr_id), "--json", "labels,state,headRefOid"])
+    if not isinstance(pr, dict):
+        return None, f"could not read PR #{pr_id}"
+    head = pr.get("headRefOid")
+    if not isinstance(head, str) or _HEAD_RE.fullmatch(head) is None:
+        return None, (f"could not read a well-formed head commit for PR #{pr_id}; "
+                      "refusing rather than reassigning against unknown state")
+    return pr, None
+
+
+def reassign(pr_id: int, service: str, reason: str) -> int:  # noqa: C901, PLR0911
     target = FALLBACK_LABELS.get(service)
     if not target:
         print(f"[ERROR] Unknown fallback service {service!r}; supported: "
@@ -66,9 +115,9 @@ def reassign(pr_id: int, service: str, reason: str) -> int:
               file=sys.stderr)
         return EXIT_ERROR
 
-    pr = run_gh_json(["gh", "pr", "view", str(pr_id), "--json", "labels,state"])
-    if not isinstance(pr, dict):
-        print(f"[ERROR] Could not read PR #{pr_id}.", file=sys.stderr)
+    pr, problem = _validated_snapshot(pr_id)
+    if problem:
+        print(f"[ERROR] {problem[0].upper()}{problem[1:]}.", file=sys.stderr)
         return EXIT_ERROR
     if pr.get("state") != "OPEN":
         print(f"[CONFLICT] PR #{pr_id} is {pr.get('state')}; only an open pull "
@@ -104,21 +153,30 @@ def reassign(pr_id: int, service: str, reason: str) -> int:
     if code != 0:
         print(f"[ERROR] Added {target} but could not remove {existing} from PR "
               f"#{pr_id}: {err.strip()}. The pull request now carries two authority "
-              "labels and the merge gate will refuse it; remove one manually.",
-              file=sys.stderr)
+              f"labels and the merge gate will refuse it; remove {existing} manually "
+              "or remove the new label to undo the reassignment.", file=sys.stderr)
         return EXIT_ERROR
 
-    body = (f"Review authority reassigned from `{existing}` to `{target}`.\n\n"
-            f"Reason: {reason.strip()}\n\n"
-            "CodeRabbit remains the default for new pull requests; this is a "
-            "per-pull-request fallback, not a rotation. The merge gate now "
-            f"requires {service}'s producer-validated evidence bound to this "
-            "pull request's exact current head.")
-    code, _, err = run_cmd(["gh", "pr", "comment", str(pr_id), "--body", body], check=False)
-    if code != 0:
-        print(f"[WARN] Reassigned, but could not record the reason on PR #{pr_id}: "
-              f"{err.strip()}", file=sys.stderr)
-    print(f"✅ PR #{pr_id} reassigned to {service}.")
+    ok, err = _comment(pr_id, audit_body(existing, target, service,
+                                         reason, pr["headRefOid"]))
+    if not ok:
+        print(f"[ERROR] PR #{pr_id} now carries {target}, but the reason could not "
+              f"be recorded: {err}. An unaudited reassignment is not acceptable; "
+              "post the reason manually or restore "
+              f"{existing}.", file=sys.stderr)
+        return EXIT_ERROR
+
+    trigger = SERVICE_TRIGGERS[service]
+    ok, err = _comment(pr_id, trigger)
+    if not ok:
+        print(f"[ERROR] PR #{pr_id} is reassigned and audited, but {service} could "
+              f"not be triggered: {err}. Post `{trigger}` on the pull request; "
+              "until the service reviews the current head the merge gate will "
+              "refuse it.", file=sys.stderr)
+        return EXIT_ERROR
+
+    print(f"✅ PR #{pr_id} reassigned to {service} at head {pr['headRefOid'][:12]} "
+          f"and triggered with `{trigger}`.")
     return EXIT_OK
 
 
@@ -126,7 +184,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Move one stalled PR from CodeRabbit to a fallback reviewer.")
     parser.add_argument("--pr", type=int, required=True)
-    parser.add_argument("--to", default="sourcery", choices=sorted(FALLBACK_LABELS))
+    parser.add_argument("--to", required=True, choices=sorted(FALLBACK_LABELS))
     parser.add_argument("--reason", required=True,
                         help="Concrete unavailability, e.g. 'CodeRabbit rate limited at <sha>'")
     args = parser.parse_args()
