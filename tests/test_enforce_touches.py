@@ -1,7 +1,8 @@
-# line-ceiling: 2237
+# line-ceiling: 2288
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -2231,6 +2232,55 @@ class ChainedPriorHookTests(unittest.TestCase):
 
             self.assertTrue(first_marker.exists(), "base .pre-aru hook did not run")
             self.assertTrue(second_marker.exists(), "numbered .pre-aru.1 hook did not run")
+
+
+class UnifiedWorkDispatchAndIndependenceTests(unittest.TestCase):
+    """Regression assertions for unified work dispatch reference and workflow independence."""
+
+    def test_docstring_references_unified_work_dispatch(self):
+        doc = et.__doc__ or ""
+        self.assertIn("fetch_next_work.py", doc)
+        self.assertNotIn("fetch_next_issue.py", doc)
+        self.assertIn("path-conflict", doc)
+        self.assertNotIn("only thing", doc.lower())
+
+    def test_hook_imports_no_workflow_scripts(self):
+        hook_path = ROOT / "hooks" / "enforce_touches.py"
+        source = hook_path.read_text(encoding="utf-8")
+        disallowed_scripts = [
+            "fetch_next_work",
+            "fetch_next_issue",
+            "claim_issue",
+            "create_pr",
+            "merge_pr",
+            "triage_backlog",
+            "agent_presence",
+            "slack_notify",
+            "common",
+        ]
+        for script_name in disallowed_scripts:
+            with self.subTest(script=script_name):
+                self.assertNotRegex(
+                    source,
+                    rf"^\s*(?:from\s+{re.escape(script_name)}\s+import|import\s+{re.escape(script_name)})\b",
+                )
+
+    def test_hook_cannot_authorize_lifecycle_transition(self):
+        self.assertTrue(hasattr(et, "EXIT_ALLOW"))
+        self.assertTrue(hasattr(et, "EXIT_BLOCK"))
+        self.assertEqual(et.EXIT_ALLOW, 0)
+        self.assertEqual(et.EXIT_BLOCK, 2)
+        lifecycle_mutation_methods = [
+            "transition_issue",
+            "update_board",
+            "claim_work",
+            "claim_issue",
+            "merge_pr",
+            "create_pr",
+        ]
+        for method in lifecycle_mutation_methods:
+            with self.subTest(method=method):
+                self.assertFalse(hasattr(et, method))
 
 
 if __name__ == "__main__":
