@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 560
+# line-ceiling: 565
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -32,6 +32,7 @@ from common import (
     get_issue,
     run_cmd,
 )
+from github_pr_transport import open_pull_request_with_fallback
 
 NEEDS_REVIEW_LABEL = "needs-review"
 REVIEW_LABEL_PREFIX = "review:"
@@ -433,6 +434,8 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
     ]
 
     code, out, err = run_cmd(cmd, check=False)
+    code, out, err = open_pull_request_with_fallback(
+        run_cmd, code, out, err, title, full_body, current_branch)
     if code != 0:
         print(f"[ERROR] Failed to open PR: {err}", file=sys.stderr)
         return False

@@ -986,6 +986,7 @@ class AgentResolutionTests(unittest.TestCase):
                 "claimable_issues": [], "mergeable_detail": [],
                 "reviewable_detail": []}
         with patch.object(fnw, "select", return_value=idle) as select_mock, \
+             patch.object(fnw, "_reserve_derived_identity", return_value=None), \
              patch.dict("os.environ", env or {}, clear=True), \
              patch("sys.argv", [*argv, "--reap-after", "0"]):
             rc = fnw.main()
@@ -1234,13 +1235,14 @@ class WorkPickerTests(unittest.TestCase):
 
     def test_default_reap_threshold(self):
         with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1"]), \
-             patch.object(fnw, "reap_stale_merges") as mock_merges, \
-             patch.object(fnw, "reap_stale_claims") as mock_claims, \
+             patch.object(fnw, "reap_stale_merges", return_value=[]) as mock_merges, \
+             patch.object(fnw, "reap_stale_claims", return_value=[]) as mock_claims, \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "select", return_value=self._dummy_select()):
             fnw.main()
-            mock_merges.assert_called_once_with(4)
-            mock_claims.assert_called_once_with([], 4)
+            mock_merges.assert_called_once_with(4, prs_snapshot=[])
+            mock_claims.assert_called_once_with([], 4, open_prs_snapshot=[])
 
     def test_reap_disabled_by_zero(self):
         with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--reap-after", "0"]), \
@@ -1256,6 +1258,8 @@ class WorkPickerTests(unittest.TestCase):
         fake_stderr = io.StringIO()
         with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1"]), \
              patch("sys.stderr", fake_stderr), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "reap_stale_merges", side_effect=RuntimeError("transient network failure")), \
              patch.object(fnw, "select", return_value=self._dummy_select()):
             fnw.main()
