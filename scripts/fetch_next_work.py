@@ -54,7 +54,7 @@ from picker_board_inventory import governed_board_inventory as _governed_open_is
 
 
 class AutoTriageError(RuntimeError):
-    """An attempted automatic promotion left unverifiable lifecycle state."""
+    """Automatic promotion could not prove or preserve lifecycle state."""
 
 
 def _reserve_derived_identity(agent_id: str) -> int | None:
@@ -887,7 +887,7 @@ def select(  # noqa: C901, PLR0912, PLR0915
     }
 
 
-def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None) -> tuple[dict[str, Any] | None, str | None]:  # noqa: C901
+def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None) -> tuple[dict[str, Any] | None, str | None]:  # noqa: C901, PLR0912
     """Return the one issue triage and the ordinary picker would admit."""
     from triage_backlog import partition, ready_gaps, split_reasons
 
@@ -903,8 +903,8 @@ def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None)
     open_numbers = {issue["number"] for issue in issues}
     inventory = _governed_open_issue_statuses(repo_slug or "", open_numbers)
     if inventory is None:
-        print("[WARN] Governed board inventory is incomplete; refusing auto-triage.",
-              file=sys.stderr)
+        if expected_ready_issue is None:
+            raise AutoTriageError("Project inventory unavailable; cannot prove Ready is empty")
         return None, repo_slug
     _board_statuses, ready_count = inventory
     expected_ready_count = int(expected_ready_issue is not None)

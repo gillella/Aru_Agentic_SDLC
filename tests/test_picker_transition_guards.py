@@ -1,3 +1,5 @@
+import io
+import json
 import sys
 import unittest
 from contextlib import nullcontext
@@ -112,6 +114,79 @@ class PickerTransitionGuardTests(unittest.TestCase):
             candidate, _slug = fnw._idle_backlog_candidate("agent-1")
         self.assertIsNone(candidate)
         update.assert_not_called()
+
+    def test_unavailable_board_inventory_is_an_error_not_idle(self):
+        issue = qualified_issue()
+        contexts = self.qualification_context()
+        with patch.object(fnw, "list_open_issues", return_value=[issue]), \
+             contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
+             contexts[5], patch.object(
+                 fnw, "_governed_open_issue_statuses", return_value=None,
+             ), patch.object(fnw, "update_status") as update:
+            with self.assertRaisesRegex(
+                fnw.AutoTriageError,
+                "cannot prove Ready is empty",
+            ):
+                fnw.promote_one_idle_backlog_issue("agent-1")
+        update.assert_not_called()
+
+    def test_lost_board_readback_after_write_rolls_back(self):
+        issue = qualified_issue()
+        post = qualified_issue(status="ready")
+        contexts = self.qualification_context()
+        backlog = ({issue["number"]: "Backlog"}, 0)
+        with patch.object(
+                 fnw, "list_open_issues",
+                 side_effect=[[issue], [issue], [post], [post]],
+             ), contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
+             contexts[5], patch.object(
+                 fnw, "_governed_open_issue_statuses",
+                 side_effect=[backlog, backlog, None],
+             ), patch.object(
+                 fnw, "query_issue_project_items",
+                 return_value=[{"status": {"name": "Backlog"}}],
+             ), patch.object(
+                 fnw, "select_governed_project_items",
+                 side_effect=lambda items, _slug: items,
+             ), patch.object(fnw, "update_status", return_value=True) as update:
+            with self.assertRaisesRegex(
+                fnw.AutoTriageError,
+                "failed authoritative readback",
+            ):
+                fnw.promote_one_idle_backlog_issue("agent-1")
+        self.assertEqual(update.call_args_list, [
+            call(10, "Ready", require_board=True, expected_status="Backlog",
+                 require_unclaimed=True,
+                 expected_updated_at="2026-08-25T18:00:00Z"),
+            call(10, "Backlog", require_board=True, expected_status="Ready",
+                 require_unclaimed=True),
+        ])
+
+    def test_claiming_picker_reports_unavailable_board_instead_of_idle(self):
+        idle = {
+            "agent": "agent-1", "family": "openai",
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [], "merge_skipped": [], "claimable_issues": [],
+        }
+        stdout = io.StringIO()
+        with patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "select", return_value=idle), \
+             patch.object(
+                 fnw, "promote_one_idle_backlog_issue",
+                 side_effect=fnw.AutoTriageError(
+                     "Project inventory unavailable; cannot prove Ready is empty"
+                 ),
+             ), patch(
+                 "sys.argv",
+                 ["fetch_next_work.py", "--agent", "agent-1", "--family", "openai",
+                  "--claim", "--json", "--reap-after", "0"],
+             ), patch("sys.stdout", stdout):
+            result = fnw.main()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(result, 1)
+        self.assertEqual(payload["work"]["type"], "error")
+        self.assertIn("cannot prove Ready is empty", payload["work"]["reason"])
 
     def test_claim_refuses_when_lifecycle_lock_is_busy(self):
         with patch.object(
