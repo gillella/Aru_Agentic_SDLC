@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 4650
+# line-ceiling: 4741
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -91,7 +91,12 @@ ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
 CODERABBIT_LOGINS = {"coderabbitai", "coderabbitai[bot]"}
 CODERABBIT_APP_SLUGS = {"coderabbitai"}
 CODERABBIT_ACTOR_TYPES = {"Bot"}
-REVIEW_SERVICE_LABELS = ("review:coderabbit",)
+REVIEW_SERVICE_LABELS = ("review:coderabbit", "review:sourcery")
+# Sourcery publishes a commit-scoped REST check run. The app slug is the
+# producer identity: a check merely *named* "Sourcery review" proves nothing,
+# because any app may choose that name.
+SOURCERY_REST_APP_SLUGS = {"sourcery-ai"}
+SOURCERY_CHECK_NAME = "sourcery review"
 CODERABBIT_FULL_REVIEW_REQUEST = "@coderabbitai full review"
 CODERABBIT_FULL_REVIEW_FINISHED = "Full review finished."
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
@@ -1125,9 +1130,9 @@ def assigned_review_service(pr):
             return None
         if label["name"].startswith("review:"):
             labels.append(label["name"])
-    if labels != [REVIEW_SERVICE_LABELS[0]]:
+    if len(labels) != 1 or labels[0] not in REVIEW_SERVICE_LABELS:
         return None
-    return "coderabbit"
+    return labels[0].split(":", 1)[1]
 
 
 def _service_thread_counts(evidence, service):
@@ -1622,6 +1627,119 @@ def _coderabbit_latest_review(evidence):  # noqa: C901, PLR0912
     return selected
 
 
+def _sourcery_unique_match(runs):
+    """The sole "Sourcery review" entry, False when ambiguous, None when malformed."""
+    matches = []
+    for item in runs:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name") or item.get("context") or ""
+        if str(name).strip().lower() == SOURCERY_CHECK_NAME:
+            matches.append(item)
+    if len(matches) != 1:
+        # Zero is missing evidence; two or more is a signal this gate cannot
+        # arbitrate between. Both block.
+        return False
+    return matches[0]
+
+
+def _sourcery_match_binds_this_head(pr, evidence, match):
+    """True only when the check run is bound to this exact PR, head, and base.
+
+    Without the linked pull-request check, a run from a different PR that
+    happens to share a head SHA would satisfy the gate.
+    """
+    if str(((match.get("app") or {}).get("slug")) or "").lower() not in SOURCERY_REST_APP_SLUGS:
+        return False
+    expected_head = (evidence.get("head_oid") if isinstance(evidence, dict) else None) or pr.get("headRefOid")
+    if not expected_head or not heads_match(expected_head, match.get("head_sha")):
+        return False
+    linked = match.get("pull_requests")
+    if not isinstance(linked, list) or not linked:
+        return False
+    number, base = pr.get("number"), pr.get("baseRefOid")
+    return any(
+        isinstance(item, dict)
+        and (not isinstance(number, int) or item.get("number") == number)
+        and heads_match(expected_head, ((item.get("head") or {}).get("sha")))
+        and (not base or heads_match(base, ((item.get("base") or {}).get("sha"))))
+        for item in linked
+    )
+
+
+def _sourcery_check(pr, evidence):
+    """True/False/None for Sourcery's exact-current-head verdict."""
+    runs = evidence.get("sourcery_check_runs") if isinstance(evidence, dict) else None
+    if isinstance(evidence, dict) and evidence.get("github_review_evidence") and runs is None:
+        return None
+    if runs is None:
+        runs = pr.get("statusCheckRollup") or []
+    if not isinstance(runs, list):
+        return None
+    match = _sourcery_unique_match(runs)
+    if match is None:
+        return None
+    if match is False or not _sourcery_match_binds_this_head(pr, evidence, match):
+        return False
+    if str(match.get("status") or "").upper() != "COMPLETED":
+        return False
+    return str(match.get("conclusion") or "").upper() == "SUCCESS"
+
+
+def has_authoritative_sourcery_review(pr, evidence):
+    """True only when Sourcery completed successfully against the current head."""
+    if not isinstance(pr, dict) or not isinstance(evidence, dict):
+        return False
+    return _sourcery_check(pr, evidence) is True
+
+
+def _sourcery_check_runs(owner, name, expected_head):
+    """Commit-scoped check runs for the exact head, or None when unreadable."""
+    if not expected_head:
+        return None
+    data = _gh_json([
+        "gh", "api", f"repos/{owner}/{name}/commits/{expected_head}/check-runs",
+        "--paginate",
+    ])
+    if not isinstance(data, dict):
+        return None
+    runs = data.get("check_runs")
+    return runs if isinstance(runs, list) else None
+
+
+def _with_sourcery_runs(pr_id, evidence):
+    """Bind review evidence to producer-identified Sourcery check runs."""
+    del pr_id
+    if not isinstance(evidence, dict):
+        return None
+    if not evidence.get("github_review_evidence"):
+        return evidence
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    owner, name = slug.split("/", 1)
+    runs = _sourcery_check_runs(owner, name, evidence.get("head_oid"))
+    if runs is None:
+        return None
+    combined = dict(evidence)
+    combined["sourcery_check_runs"] = runs
+    return combined
+
+
+def with_service_evidence(pr, pr_id, evidence):
+    """Enrich evidence with whichever provider this PR's authority label names.
+
+    Each service attests differently -- CodeRabbit through a status context,
+    Sourcery through a commit-scoped check run -- so the fetch must follow the
+    assignment. An unrecognized or absent assignment enriches nothing; the
+    review gate then refuses on the label itself.
+    """
+    service = assigned_review_service(pr) if isinstance(pr, dict) else None
+    if service == "sourcery":
+        return _with_sourcery_runs(pr_id, evidence)
+    return _with_coderabbit_status(pr_id, evidence)
+
+
 def has_authoritative_coderabbit_review(pr, evidence):
     """True only when CodeRabbit reviewed this PR and attested the current head."""
     if not isinstance(pr, dict) or not isinstance(evidence, dict):
@@ -1634,12 +1752,28 @@ def has_authoritative_coderabbit_review(pr, evidence):
     return _coderabbit_check(evidence) is True
 
 
+def has_authoritative_assigned_review(pr, evidence):
+    """Positive review authority for whichever service this PR is assigned to.
+
+    An unreadable or absent assignment falls through to the CodeRabbit check
+    rather than returning False outright. check_reviews already refuses on the
+    label itself before reaching here, so this path only serves read-only
+    callers such as status reporting, where a missing label should not be
+    reported as "reviewed by nobody" for the default provider.
+    """
+    service = assigned_review_service(pr) if isinstance(pr, dict) else None
+    if service == "sourcery":
+        return has_authoritative_sourcery_review(pr, evidence)
+    return has_authoritative_coderabbit_review(pr, evidence)
+
+
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     service = assigned_review_service(pr) if isinstance(pr, dict) else None
     if service is None:
         return False, (
             "PR must carry exactly one authoritative review label: "
-            "review:coderabbit. Missing, legacy, unknown, mixed, or duplicate "
+            + " or ".join(REVIEW_SERVICE_LABELS)
+            + ". Missing, legacy, unknown, mixed, or duplicate "
             "review labels block merge."
         )
     counts = _service_thread_counts(evidence, service)
@@ -1685,6 +1819,22 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
 
     if not submitted:
         return False, "No review on this PR. At least one review is required."
+
+    if service == "sourcery":
+        # Sourcery attests through a commit-scoped check run rather than a
+        # review object, so there is no verdict history to collapse; the
+        # human-blocking and thread checks above already ran for every service.
+        if not has_authoritative_sourcery_review(pr, evidence):
+            return False, (
+                "Sourcery has not supplied a successful check run bound to this "
+                f"PR's exact current head {str((evidence or {}).get('head_oid') or '')[:12]}. "
+                "Missing, pending, failed, stale, ambiguous, or unbound evidence "
+                "blocks merge."
+            )
+        return True, (
+            "Sourcery review is complete on current head "
+            f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved threads."
+        )
 
     latest_coderabbit_review = _coderabbit_latest_review(evidence)
     if latest_coderabbit_review is None:
@@ -3809,7 +3959,7 @@ def dod_status(pr_id):
         if issue is None:
             return False, f"could not read issue #{num}"
         issue_bodies[num] = issue.get("body") or ""
-    evidence = _with_coderabbit_status(pr_id, review_evidence(pr_id))
+    evidence = with_service_evidence(pr, pr_id, review_evidence(pr_id))
     evidence_head = evidence.get("head_oid") if evidence else None
     snapshot_head = pr.get("headRefOid")
     if not heads_match(snapshot_head, evidence_head):
@@ -4364,7 +4514,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 return EXIT_ERROR
             issue_bodies[num] = issue.get("body") or ""
 
-        evidence = _with_coderabbit_status(args.pr, review_evidence(args.pr))
+        evidence = with_service_evidence(pr, args.pr, review_evidence(args.pr))
         evidence_head = evidence.get("head_oid") if evidence else None
         if not heads_match(gated_head, evidence_head):
             reason = (
@@ -4464,8 +4614,8 @@ def main():  # noqa: C901, PLR0912, PLR0915
             # Review, status, and thread evidence can change without moving the
             # head. Re-read it under the merge lock immediately before the
             # server-side mutation, then rerun every gate that consumes it.
-            final_evidence = _with_coderabbit_status(
-                args.pr, review_evidence(args.pr)
+            final_evidence = with_service_evidence(
+                fresh, args.pr, review_evidence(args.pr)
             )
             final_head = final_evidence.get("head_oid") if final_evidence else None
             if not heads_match(live, final_head):

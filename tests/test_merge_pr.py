@@ -835,6 +835,116 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         self.assertIsNone(merge_pr.review_evidence(162))
 
 
+class SourceryEvidenceTests(unittest.TestCase):
+    """#435: Sourcery satisfies the gate only on producer-validated exact-head proof."""
+
+    HEAD = "b" * 40
+    BASE = "c" * 40
+
+    def pr(self):
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr.update({"number": 433, "headRefOid": self.HEAD, "baseRefOid": self.BASE,
+                   "body": "Closes #413"})
+        return pr
+
+    def run_entry(self, **over):
+        entry = {
+            "name": "Sourcery review", "app": {"slug": "sourcery-ai"},
+            "head_sha": self.HEAD, "status": "completed", "conclusion": "success",
+            "pull_requests": [{"number": 433, "head": {"sha": self.HEAD},
+                               "base": {"sha": self.BASE}}],
+        }
+        entry.update(over)
+        return entry
+
+    def evidence(self, runs):
+        return {"github_review_evidence": True, "head_oid": self.HEAD,
+                "sourcery_check_runs": runs, "unresolved": 0, "unfixed": 0,
+                "outdated_unfixed": 0}
+
+    def test_valid_current_head_run_is_authoritative(self):
+        self.assertTrue(merge_pr.has_authoritative_sourcery_review(
+            self.pr(), self.evidence([self.run_entry()])))
+
+    def test_wrong_producer_app_is_refused(self):
+        """A check merely named "Sourcery review" proves nothing."""
+        for slug in ("not-sourcery", "", None, "github-actions"):
+            with self.subTest(slug=slug):
+                run = self.run_entry(app={"slug": slug} if slug is not None else {})
+                self.assertFalse(merge_pr.has_authoritative_sourcery_review(
+                    self.pr(), self.evidence([run])))
+
+    def test_prior_head_run_does_not_carry_forward(self):
+        run = self.run_entry(head_sha="9" * 40)
+        self.assertFalse(merge_pr.has_authoritative_sourcery_review(
+            self.pr(), self.evidence([run])))
+
+    def test_two_sourcery_runs_are_ambiguous_and_block(self):
+        self.assertFalse(merge_pr.has_authoritative_sourcery_review(
+            self.pr(), self.evidence([self.run_entry(), self.run_entry()])))
+
+    def test_missing_run_blocks(self):
+        self.assertFalse(merge_pr.has_authoritative_sourcery_review(
+            self.pr(), self.evidence([])))
+
+    def test_unlinked_run_blocks(self):
+        """Without a linked PR, a run from another PR sharing a head would pass."""
+        for linked in ([], None, "nope"):
+            with self.subTest(linked=linked):
+                self.assertFalse(merge_pr.has_authoritative_sourcery_review(
+                    self.pr(), self.evidence([self.run_entry(pull_requests=linked)])))
+
+    def test_run_linked_to_a_different_pr_blocks(self):
+        run = self.run_entry(pull_requests=[{"number": 999,
+                                             "head": {"sha": self.HEAD},
+                                             "base": {"sha": self.BASE}}])
+        self.assertFalse(merge_pr.has_authoritative_sourcery_review(
+            self.pr(), self.evidence([run])))
+
+    def test_run_linked_to_a_different_base_blocks(self):
+        run = self.run_entry(pull_requests=[{"number": 433,
+                                             "head": {"sha": self.HEAD},
+                                             "base": {"sha": "d" * 40}}])
+        self.assertFalse(merge_pr.has_authoritative_sourcery_review(
+            self.pr(), self.evidence([run])))
+
+    def test_incomplete_or_failed_run_blocks(self):
+        for over in ({"status": "in_progress"}, {"conclusion": "failure"},
+                     {"conclusion": "neutral"}, {"conclusion": None}, {"status": None}):
+            with self.subTest(over=over):
+                self.assertFalse(merge_pr.has_authoritative_sourcery_review(
+                    self.pr(), self.evidence([self.run_entry(**over)])))
+
+    def test_malformed_payloads_fail_closed(self):
+        for runs in ([None], ["str"], [7]):
+            with self.subTest(runs=runs):
+                self.assertFalse(merge_pr.has_authoritative_sourcery_review(
+                    self.pr(), self.evidence(runs)))
+
+    def test_unreadable_runs_block_rather_than_falling_back(self):
+        ev = {"github_review_evidence": True, "head_oid": self.HEAD,
+              "unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}
+        self.assertIsNone(merge_pr._sourcery_check(self.pr(), ev))
+        self.assertFalse(merge_pr.has_authoritative_sourcery_review(self.pr(), ev))
+
+    def test_unresolved_threads_still_block_a_clean_sourcery_run(self):
+        ev = self.evidence([self.run_entry()])
+        ev["unresolved"] = 1
+        self.assertFalse(merge_pr.check_reviews(self.pr(), ev)[0])
+
+    def test_gate_passes_end_to_end_on_clean_evidence(self):
+        ok, message = merge_pr.check_reviews(self.pr(), self.evidence([self.run_entry()]))
+        self.assertTrue(ok, message)
+        self.assertIn("Sourcery review is complete", message)
+
+    def test_enrichment_follows_the_assigned_service(self):
+        with patch.object(merge_pr, "_with_sourcery_runs", return_value={"picked": "sourcery"}), \
+             patch.object(merge_pr, "_with_coderabbit_status", return_value={"picked": "cr"}):
+            self.assertEqual(merge_pr.with_service_evidence(self.pr(), 433, {}), {"picked": "sourcery"})
+            cr = labelled("author:agent-1", "review:coderabbit")
+            self.assertEqual(merge_pr.with_service_evidence(cr, 1, {}), {"picked": "cr"})
+
+
 class CiGateTests(unittest.TestCase):
     def test_all_successful_passes(self):
         pr = {"statusCheckRollup": [
@@ -1143,17 +1253,19 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn("CodeRabbit", msg)
 
-    def test_coderabbit_label_is_the_only_authority(self):
+    def test_coderabbit_remains_the_default_authority(self):
         pr = self.coderabbit_pr("author:agent-1", "review:coderabbit")
         pr["body"] = "Closes #341"
         self.assertEqual(merge_pr.assigned_review_service(pr), "coderabbit")
         ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
         self.assertTrue(ok, msg)
+        self.assertFalse(merge_pr.check_reviews(pr, None)[0])
 
-        wrong_service = labelled("author:agent-1", "review:sourcery")
-        wrong_service["body"] = "Closes #341"
-        self.assertIsNone(merge_pr.assigned_review_service(wrong_service))
-        self.assertFalse(merge_pr.check_reviews(wrong_service, None)[0])
+    def test_sourcery_is_recognised_as_a_fallback_authority(self):
+        """#435: an explicitly reassigned PR routes to Sourcery, not to nothing."""
+        pr = labelled("author:agent-1", "review:sourcery")
+        pr["body"] = "Closes #341"
+        self.assertEqual(merge_pr.assigned_review_service(pr), "sourcery")
         self.assertFalse(merge_pr.check_reviews(pr, None)[0])
 
     def test_remediation_head_status_cannot_reuse_prior_head_review(self):
@@ -1548,11 +1660,13 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(merge_pr.check_issue_link(pr)[0])
 
     def test_legacy_unknown_and_duplicate_review_labels_fail_closed(self):
+        # review:sourcery is a recognised fallback since #435 and is covered
+        # separately; CodeAnt stays unknown until #438 installs and validates it.
         cases = (
-            ("review:sourcery",),
             ("review:codeant",),
             ("review:manual",),
             ("review:coderabbit", "review:coderabbit"),
+            ("review:coderabbit", "review:sourcery"),
         )
         for labels in cases:
             with self.subTest(labels=labels):

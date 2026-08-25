@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1760
+# line-ceiling: 1764
 """
 fleet_status.py - Authoritative state calculation for Aru_Agentic_SDLC factory.
 
@@ -447,6 +447,27 @@ def _has_reviewed_by(pr: Dict[str, Any]) -> bool:
     )
 
 
+def _has_assigned_service_check(pr: Dict[str, Any]) -> bool:
+    """True when the rollup carries a check published by this PR's own reviewer.
+
+    Each service publishes under its own name, so the pre-filter follows the
+    assignment rather than accepting any known reviewer's name from any PR
+    (#435). An unreadable assignment falls back to the CodeRabbit default.
+    """
+    try:
+        import merge_pr as mp
+        service = mp.assigned_review_service(pr)
+    except Exception:
+        service = None
+    expected = "sourcery review" if service == "sourcery" else "coderabbit"
+    return any(
+        isinstance(item, dict)
+        and isinstance(item.get("name") or item.get("context"), str)
+        and (item.get("name") or item.get("context")).strip().lower() == expected
+        for item in (pr.get("statusCheckRollup") or [])
+    )
+
+
 def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # noqa: C901
     if "_review_evidence" in pr:
         return pr["_review_evidence"]
@@ -476,20 +497,14 @@ def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # noqa: C
         if any(not node.get("isResolved") for node in threads if isinstance(node, dict)):
             pr["_review_evidence"] = None
             return None
-    rollup = pr.get("statusCheckRollup") or []
-    if not any(
-        isinstance(item, dict)
-        and isinstance(item.get("name") or item.get("context"), str)
-        and (item.get("name") or item.get("context")).strip().lower() == "coderabbit"
-        for item in rollup
-    ):
+    if not _has_assigned_service_check(pr):
         pr["_review_evidence"] = None
         return None
     try:
         import merge_pr as mp
 
         evidence = mp.review_evidence(pr["number"])
-        evidence = mp._with_coderabbit_status(pr["number"], evidence)
+        evidence = mp.with_service_evidence(pr, pr["number"], evidence)
     except Exception as exc:
         print(f"[WARN] Could not load review evidence for PR #{pr['number']}: {exc}", file=sys.stderr)
         evidence = None
@@ -533,7 +548,7 @@ def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
         import merge_pr as mp
     except ImportError:
         return None
-    if not mp.has_authoritative_coderabbit_review(pr, evidence):
+    if not mp.has_authoritative_assigned_review(pr, evidence):
         return None
     if (
         int(evidence.get("unresolved") or 0) > 0
@@ -1194,7 +1209,7 @@ def evaluate_queue_row(
 
     evidence = review_evidence_fn(number)
     if evidence is not None:
-        evidence = mp._with_coderabbit_status(number, evidence)
+        evidence = mp.with_service_evidence(pr, number, evidence)
     # None means the GraphQL/auth query failed — fail closed for this row.
     # Do not coerce to {} or check_reviews will KeyError on missing keys.
     if evidence is None or evidence.get("error"):
