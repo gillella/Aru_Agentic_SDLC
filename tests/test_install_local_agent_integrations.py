@@ -144,14 +144,26 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertTrue(len(backups) > 0, "Backup directory was not created")
         self.assertTrue((backups[0] / "custom.txt").exists())
 
-    def test_cursor_installer_compatibility(self):
-        cmd = [
-            str(CURSOR_INSTALLER),
-            "--target-home", str(self.target_home),
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, ARU_SDLC_HOME=str(ROOT)))
-        self.assertEqual(res.returncode, 0, f"Cursor installer failed: {res.stderr}")
+    def test_detection_recognizes_cursor_agent_and_agy_binaries(self):
+        fake_bin = self.target_home / "bin"
+        fake_bin.mkdir()
+        for binary in ("cursor-agent", "agy"):
+            path = fake_bin / binary
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+
+        res = subprocess.run(
+            [str(INSTALLER), "--aru-home", str(ROOT), "--target-home", str(self.target_home)],
+            capture_output=True, text=True,
+            env={"HOME": str(self.target_home), "PATH": f"{fake_bin}:/usr/bin:/bin"},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue((self.target_home / ".cursor" / "skills" / "run-aru-factory").is_symlink())
+        self.assertTrue(
+            (self.target_home / ".gemini" / "antigravity" / "skills" / "run-aru-factory").is_symlink()
+        )
+        self.assertFalse((self.target_home / ".codex" / "skills").exists())
+        self.assertFalse((self.target_home / ".claude" / "skills").exists())
 
     def test_malformed_managed_block_fails_closed(self):
         claude_dir = self.target_home / ".claude"
@@ -377,4 +389,3 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
