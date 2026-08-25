@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # +51 for the #344 terminal merge lease guard.
-# line-ceiling: 1630
+# line-ceiling: 1656
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 

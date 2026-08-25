@@ -113,7 +113,10 @@ class CreateBranchPlanGateTests(unittest.TestCase):
         mock_has_plan.return_value = True
         mock_worktree.return_value = ".worktrees/feat-issue-999-planned-feature"
 
-        path = cb.create_branch(999, branch_type="feat", use_worktree=True, fetch_remote=True)
+        with patch.object(cb, "terminal_merge_lease", return_value=None):
+            path = cb.create_branch(
+                999, branch_type="feat", use_worktree=True, fetch_remote=True,
+            )
         self.assertEqual(path, ".worktrees/feat-issue-999-planned-feature")
         mock_worktree.assert_called_once_with("feat/issue-999-planned-feature", agent="")
 
