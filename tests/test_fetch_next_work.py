@@ -1,4 +1,4 @@
-# line-ceiling: 1500
+# line-ceiling: 1530
 import io
 import json
 import sys
@@ -159,7 +159,8 @@ class EligibilityTests(unittest.TestCase):
     def test_coding_agents_are_never_eligible_for_review(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic"))
         self.assertFalse(verdict["eligible"])
-        self.assertIn("CodeRabbit", verdict["reason"])
+        self.assertIn("never selected from the normal queue", verdict["reason"])
+        self.assertIn("review:agent", verdict["reason"])
 
     def test_picker_json_top_level_agent_is_resolved_identity(self):
         parts = {
@@ -230,6 +231,30 @@ class PriorityTests(unittest.TestCase):
         res = self._select([], candidates=[7], in_flight=4)
         self.assertEqual(res["work"]["issue"], 4)
         self.assertTrue(res["work"]["resuming"])
+
+    def test_explicit_agent_review_resumes_before_issue_work(self):
+        assigned = pr(2, "author:agent-1", "review:agent", "reviewer:agent-2",
+                      checks="pending", title="emergency review")
+        res = self._select([assigned], candidates=[7], in_flight=4)
+        self.assertEqual(res["work"]["type"], "review")
+        self.assertEqual(res["work"]["pr"], 2)
+        self.assertTrue(res["work"]["resuming"])
+
+    def test_emergency_review_is_not_a_general_agent_queue(self):
+        assigned = pr(2, "author:agent-1", "review:agent", "reviewer:agent-3",
+                      checks="pending")
+        self.assertEqual(
+            self._select([assigned], candidates=[7])["work"]["type"], "issue")
+        self_review = pr(3, "author:agent-2", "review:agent", "reviewer:agent-2",
+                         checks="pending")
+        self.assertEqual(
+            self._select([self_review], candidates=[7])["work"]["type"], "issue")
+
+    def test_completed_emergency_review_is_not_offered_again(self):
+        completed = pr(2, "author:agent-1", "review:agent", "reviewer:agent-2",
+                       "reviewed-by:agent-2", checks="pending")
+        self.assertEqual(
+            self._select([completed], candidates=[7])["work"]["type"], "issue")
 
     def test_idle_when_there_is_nothing_at_all(self):
         self.assertEqual(self._select([], candidates=[])["work"]["type"], "idle")

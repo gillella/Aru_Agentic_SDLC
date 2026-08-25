@@ -35,7 +35,7 @@ and refuse to invent a second copy of these skills inside the target repo.
 | File a bug/feature/task | `create-github-issue` |
 | Research board item / `type:research` / `research:` title | `research` |
 | Promote Backlog → Ready; board has no ready work | `triage-backlog` |
-| Review someone else's PR | Refuse: the assigned review-pool service alone reviews. Coding agents never review; route findings with `address-pr-feedback` |
+| Review someone else's PR | `code-review`, but only for a preassigned `review:agent` emergency fallback; otherwise refuse |
 | Fix red CI on an open PR | `remediate-ci-failure` |
 | Address review comments on your PR | `address-pr-feedback` |
 
@@ -51,7 +51,9 @@ execute it exactly. Do not skip worktree isolation, local tests, or
   MCP GitHub is optional and non-authoritative.
 - **No direct pushes** to `main` / `master`.
 - **Worktrees** under `.worktrees/` for feature/remediation work.
-- **Review authority**: the assigned review-pool service only. Coding agents never review.
+- **Review authority**: CodeRabbit by default, explicit Sourcery/CodeAnt fallback,
+  then one operator-assigned independent coding agent only after external
+  exhaustion or an excessive wait. No coding-agent review queue or self-review.
 - **Local tests green** before commit/push.
 - **CI green** before merge; remediate rather than weaken gates.
 - **Session recovery first**: inspect git log, branches, open PRs, and board

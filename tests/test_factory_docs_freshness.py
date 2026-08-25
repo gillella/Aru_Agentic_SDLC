@@ -188,31 +188,27 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                     ),
                 )
 
-    def test_current_review_policy_keeps_agents_out_of_review_role(self):
+    def test_current_review_policy_keeps_agent_fallback_explicit_and_narrow(self):
         plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
         introduction = section(
             plan,
             plan.splitlines()[0],
             "## Lifecycle status vocabulary",
         )
-        normalized_intro = introduction.replace("> ", "")
-        self.assertRegex(
-            normalized_intro,
-            re.compile(
-                r"implement,\s+remediate,\s+and\s+mechanically\s+merge.*they never review",
-                re.IGNORECASE | re.DOTALL,
-            ),
-        )
+        normalized_intro = " ".join(introduction.replace("> ", "").split())
+        self.assertIn("CodeRabbit reviews ordinary PRs by default", normalized_intro)
+        self.assertIn("one independent coding agent", normalized_intro)
+        self.assertIn("no reviewer rotation, fleet, queue, or second scheduler", normalized_intro)
         operator = section(plan, "## 4. The operator visibility and intervention interface", "### 4.1")
         self.assertNotIn("independent-agent review", operator)
         principle = section(plan, "### 4.3 The operating principle", "---")
-        self.assertIn("assigned review-pool service reviews", principle)
-        self.assertNotIn("A distinct agent reviews", principle)
+        self.assertIn("explicitly assigned reviewer reviews", principle)
+        self.assertIn("explicit emergency assignment", principle)
         self.assertNotIn("CodeRabbit is the reviewer of record", principle)
         cursor = (ROOT / "docs/cursor-integration.md").read_text(encoding="utf-8")
         policy = (ROOT / "skills/code-review/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("assigned-service review is external evidence", cursor)
-        self.assertIn("assigned review-pool service", policy)
+        self.assertIn("external review is normal", cursor)
+        self.assertIn("review:agent", policy)
         self.assertNotIn("never supplied by CodeRabbit review", policy)
         intervention = section(plan, "### 4.1 The one mandatory human intervention", "### 4.2")
         self.assertIn("implementation/remediation/mechanical-merge loop", intervention)

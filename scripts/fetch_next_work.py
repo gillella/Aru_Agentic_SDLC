@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# line-ceiling: 1226
+# line-ceiling: 1260
 """Return the highest-priority work one governed factory agent can perform.
 Finishing beats starting: author feedback, merge-ready work, resumable issues,
 then Ready issues. External review services stay outside the coding-agent queue;
-a truly idle claiming picker may promote one qualified Backlog issue and reselect it.
+only a preassigned emergency agent review can resume here. A truly idle claiming
+picker may promote one qualified Backlog issue and reselect it.
 """
 
 import argparse
@@ -661,15 +662,31 @@ def author_gate_fix(pr: dict[str, Any], agent: str,
 def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
                        round_cap: int, cross_family_wait: int,
                        merge_reason: str | None = None) -> dict[str, Any]:
-    """Legacy API that always refuses coding-agent review work."""
+    """Legacy API: ordinary coding-agent review is never queue-eligible."""
     return {
         "eligible": False,
-        "reason": ("CodeRabbit is the sole positive code-review authority "
-                   "for this PR; coding agents implement and remediate findings only"),
+        "reason": ("coding-agent review is never selected from the normal queue; "
+                   "only an explicit emergency review:agent assignment is resumable"),
         "cross_family": False,
         "degraded": False,
         "stale_attribution": False,
     }
+
+
+def assigned_agent_review(pr: dict[str, Any], agent: str) -> bool:
+    """True only for an explicit emergency assignment to this exact agent."""
+    if pr.get("isDraft") or is_merged(pr):
+        return False
+    labels = label_names(pr)
+    authorities = [name for name in labels if name.startswith("review:")]
+    reviewers = [name[len("reviewer:"):] for name in labels
+                 if name.startswith("reviewer:")]
+    authors = [name[len("author:"):] for name in labels
+               if name.startswith("author:")]
+    completed = [name[len("reviewed-by:"):] for name in labels
+                 if name.startswith("reviewed-by:")]
+    return (authorities == ["review:agent"] and reviewers == [agent]
+            and len(authors) == 1 and authors[0] != agent and agent not in completed)
 
 
 def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa: C901, PLR0912
@@ -801,9 +818,15 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         if gate_fix:
             break
 
-    # CodeRabbit owns PR review. Coding-agent queue state deliberately contains
-    # no review candidates; findings are surfaced through `feedback` above.
-    reviewable, skipped = [], []
+    # Normal coding-agent review remains absent. This resumes only a PR the
+    # operator already moved to review:agent and assigned to this exact id.
+    reviewable = [
+        (pr, {"cross_family": False, "degraded": True,
+              "stale_attribution": False})
+        for pr in sorted(prs, key=lambda item: item["number"])
+        if assigned_agent_review(pr, agent)
+    ]
+    skipped = []
 
     # 4. Otherwise start something new - unchanged issue selection.
     issues = list_open_issues()
@@ -828,6 +851,10 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
                 "unmet_gates": gate_fix["unmet_gates"], "reason": gate_fix["reason"]}
         if gate_fix.get("gate_details"):
             work["gate_details"] = gate_fix["gate_details"]
+    elif reviewable:
+        pr = reviewable[0][0]
+        work = {"type": "review", "pr": pr["number"], "title": pr["title"],
+                "skill": "code-review", "resuming": True}
     elif parts["my_in_flight"]:
         issue = parts["my_in_flight"]
         work = {"type": "issue", "issue": issue["number"], "title": issue["title"],
@@ -1198,6 +1225,9 @@ def main():  # noqa: C901, PLR0912, PLR0915
     elif work["type"] == "issue":
         verb = "Resume" if work.get("resuming") else "Implement"
         print(f"🛠️  {verb} issue #{work['issue']}")
+        print(f"   → {work['skill']}: {work['title']}")
+    elif work["type"] == "review":
+        print(f"🔎 Resume explicitly assigned emergency review for PR #{work['pr']}")
         print(f"   → {work['skill']}: {work['title']}")
     elif work["type"] == "error":
         print(f"⛔ Picker error: {work.get('reason')}")

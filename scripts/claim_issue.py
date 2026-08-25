@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1514
+# line-ceiling: 1565
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -754,30 +754,34 @@ def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
     return code == 0
 
 
-def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
-    """Reject retired coding-agent review claims."""
-    print(
-        "[CONFLICT] The assigned review-pool service is the sole PR code-review "
-        "authority; coding agents may implement or remediate findings but "
-        "cannot claim review.",
-        file=sys.stderr,
-    )
-    return EXIT_CONFLICT
-
-    # Retained unreachable implementation documents the legacy label protocol
-    # for release/reaping compatibility with already-open PRs.
+def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901, PLR0912
+    """Resume only an operator-assigned emergency coding-agent review."""
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+    authorities = [name for name in labels if name.startswith("review:")]
+    holder = review_claimant(labels)
+    if authorities != ["review:agent"] or holder != agent:
+        print("[CONFLICT] Coding agents cannot claim normal review work. The PR "
+              "must already carry exactly review:agent and reviewer:<this-agent> "
+              "from the emergency reassignment helper.", file=sys.stderr)
+        return EXIT_CONFLICT
 
     # Refuse the PR's own author here, not only in the picker. fetch_next_work
     # filters own-authored PRs when it hands out review work, but a direct
     # `--pr <n> --agent <me>` bypasses that, and merge_pr.py now treats this
     # claim as the identity of the reviewer. The guarantee has to live where
     # the label is written.
-    author = pr_author(labels)
-    if author and author == agent:
+    authors = [name[len(AUTHOR_LABEL_PREFIX):] for name in labels
+               if name.startswith(AUTHOR_LABEL_PREFIX)
+               and name[len(AUTHOR_LABEL_PREFIX):]]
+    if len(authors) != 1:
+        print(f"[CONFLICT] PR #{pr_id} must carry exactly one non-empty "
+              "author:<id> before emergency review.", file=sys.stderr)
+        return EXIT_CONFLICT
+    author = authors[0]
+    if author == agent:
         print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}'. "
               "An agent may not claim review of its own PR.", file=sys.stderr)
         return EXIT_CONFLICT
@@ -842,6 +846,9 @@ def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
 
 REVIEWED_BY_LABEL_PREFIX = "reviewed-by:"
 REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
+AGENT_REVIEW_ATTESTATION_VERSION = "aru-agent-review:v1"
+AGENT_REVIEW_LABEL = "review:agent"
+AGENT_REVIEW_DISPOSITIONS = {"no-findings", "findings-resolved"}
 
 
 REVIEWER_FAMILY_LABEL_PREFIX = "reviewer-family:"
@@ -870,15 +877,22 @@ def _reviewed_head_for_completion(pr_id: int) -> str | None:
     return head.lower()
 
 
-def _review_head_attestation(agent: str, head: str) -> str:
+def _review_head_attestation(agent: str, head: str, family: str,
+                             disposition: str) -> str:
+    completed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload = json.dumps(
-        {"agent": agent, "head": head}, sort_keys=True, separators=(",", ":")
+        {"agent": agent, "completed_at": completed_at,
+         "disposition": disposition, "family": family, "head": head,
+         "status": "completed"}, sort_keys=True, separators=(",", ":")
     )
     return (
-        f"<!-- {REVIEW_HEAD_ATTESTATION_VERSION} {payload} -->\n"
-        "## Review completion\n\n"
+        f"<!-- {AGENT_REVIEW_ATTESTATION_VERSION} {payload} -->\n"
+        "## Emergency independent-agent review completion\n\n"
         f"- reviewed-by: `{agent}`\n"
         f"- reviewed-head: `{head}`\n"
+        f"- reviewer-family: `{family}`\n"
+        f"- disposition: `{disposition}`\n"
+        f"- completed-at: `{completed_at}`\n"
     )
 
 
@@ -907,8 +921,9 @@ def _stamp_reviewer_family(pr_id: int, agent: str, family: str) -> None:
         print(f"[WARN] Could not apply '{stamp}': {err}", file=sys.stderr)
 
 
-def complete_review(pr_id: int, agent: str, family: str = "") -> int:
-    """Reject retired coding-agent review completion.
+def complete_review(pr_id: int, agent: str, family: str = "",  # noqa: C901, PLR0912
+                    disposition: str = "") -> int:
+    """Complete an explicitly assigned emergency independent-agent review.
 
     This exists because the step had no command. `fleet-worker.md` told the
     reviewing agent to "label the PR reviewed-by:<id>" in prose and gave a
@@ -920,19 +935,19 @@ def complete_review(pr_id: int, agent: str, family: str = "") -> int:
     a window where the PR is neither claimed nor attributed, and another agent
     could pick it up for a review that had already happened.
     """
-    print(
-        "[CONFLICT] Coding-agent review completion is retired; only "
-        "authoritative CodeRabbit evidence can satisfy merge review.",
-        file=sys.stderr,
-    )
-    return EXIT_CONFLICT
-
-    # Legacy implementation remains unreachable so old claims can still be
-    # understood and explicitly released without becoming merge authority.
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+    authorities = [name for name in labels if name.startswith("review:")]
+    if authorities != [AGENT_REVIEW_LABEL]:
+        print("[CONFLICT] Coding-agent completion is allowed only for one explicit "
+              "review:agent emergency assignment.", file=sys.stderr)
+        return EXIT_CONFLICT
+    if not family or disposition not in AGENT_REVIEW_DISPOSITIONS:
+        print("[CONFLICT] Agent completion requires --model-family and "
+              "--review-disposition no-findings|findings-resolved.", file=sys.stderr)
+        return EXIT_CONFLICT
 
     # Attribution is not something a passer-by may write. Requiring the claim
     # keeps "who reviewed this" tied to the agent that actually took the work.
@@ -943,8 +958,14 @@ def complete_review(pr_id: int, agent: str, family: str = "") -> int:
               file=sys.stderr)
         return EXIT_CONFLICT
 
-    author = pr_author(labels)
-    if author and author == agent:
+    authors = [name[len(AUTHOR_LABEL_PREFIX):] for name in labels
+               if name.startswith(AUTHOR_LABEL_PREFIX)
+               and name[len(AUTHOR_LABEL_PREFIX):]]
+    if len(authors) != 1:
+        print(f"[CONFLICT] PR #{pr_id} must carry exactly one non-empty "
+              "author:<id> before emergency review completion.", file=sys.stderr)
+        return EXIT_CONFLICT
+    if authors[0] == agent:
         print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}'. "
               "An agent may not attribute a review of its own PR.", file=sys.stderr)
         return EXIT_CONFLICT
@@ -958,14 +979,29 @@ def complete_review(pr_id: int, agent: str, family: str = "") -> int:
         )
         return EXIT_CONFLICT
 
-    code, _, err = run_cmd(
-        ["gh", "pr", "comment", str(pr_id), "--body",
-         _review_head_attestation(agent, reviewed_head)],
-        check=False,
-    )
-    if code != 0:
-        print(f"[ERROR] Could not stamp reviewed-head evidence: {err}", file=sys.stderr)
+    evidence = merge_pr.review_evidence(pr_id)
+    if not isinstance(evidence, dict) or evidence.get("head_oid") != reviewed_head:
+        print("[ERROR] Could not read head-stable completion evidence; refusing "
+              "rather than risking a duplicate marker.", file=sys.stderr)
         return EXIT_ERROR
+    current = [record for record in evidence.get("agent_review_attestations", [])
+               if record.get("head") == reviewed_head]
+    expected = {"agent": agent, "family": family, "disposition": disposition}
+    if evidence.get("agent_review_marker_errors") or len(current) > 1 or (
+        current and any(current[0].get(key) != value for key, value in expected.items())
+    ):
+        print("[CONFLICT] Existing emergency completion evidence is malformed, "
+              "duplicated, or belongs to a different reviewer.", file=sys.stderr)
+        return EXIT_CONFLICT
+    if not current:
+        code, _, err = run_cmd(
+            ["gh", "pr", "comment", str(pr_id), "--body",
+             _review_head_attestation(agent, reviewed_head, family, disposition)],
+            check=False,
+        )
+        if code != 0:
+            print(f"[ERROR] Could not stamp reviewed-head evidence: {err}", file=sys.stderr)
+            return EXIT_ERROR
 
     stamp = _reviewed_by_label_for(agent)
     if not ensure_label(stamp, "0e8a16", f"Reviewed by agent '{agent}'"):
@@ -1046,7 +1082,8 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     """Claims a pull request for mechanical merge. Same exit codes as claim_issue.
 
     The author may hold this coordination claim. ``merge_pr.py`` remains the
-    authority and independently requires exact-current-head CodeRabbit review.
+    authority and independently requires exact-current-head assigned-reviewer
+    evidence.
     """
     labels = _pr_labels(pr_id)
     if labels is None:
@@ -1460,6 +1497,10 @@ def main():
                              "--complete-review, stamps "
                              "reviewer-family:<id>:<family> so the merge gate "
                              "can compare identity as (id, family).")
+    parser.add_argument("--review-disposition", default="",
+                        choices=sorted(AGENT_REVIEW_DISPOSITIONS),
+                        help="Required with emergency --complete-review: "
+                             "no-findings or findings-resolved.")
     parser.add_argument("--adopt", action="store_true",
                         help="With --pr: take over an abandoned PR, moving "
                              "author: and family: to this agent and recording "
@@ -1491,7 +1532,8 @@ def main():
                   else claim_merge(args.pr, args.agent))
             sys.exit(rc)
         if args.complete:
-            sys.exit(complete_review(args.pr, args.agent, args.family))
+            sys.exit(complete_review(args.pr, args.agent, args.family,
+                                     args.review_disposition))
         rc = release_review(args.pr, args.agent) if args.release else claim_review(args.pr, args.agent)
         sys.exit(rc)
 

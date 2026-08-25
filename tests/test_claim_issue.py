@@ -1,4 +1,4 @@
-# line-ceiling: 1162
+# line-ceiling: 1170
 import io
 import json
 import sys
@@ -1088,11 +1088,14 @@ class DummyRecord:
 
 
 class ClaimIssueTests(unittest.TestCase):
-    def test_review_claim_conflict_message_references_review_pool(self):
-        with patch("sys.stderr") as stderr:
+    def test_normal_review_claim_conflict_names_emergency_assignment(self):
+        with patch.object(claim_issue, "_pr_labels",
+                          return_value=["review:coderabbit", "author:agent-1"]), \
+                patch("sys.stderr") as stderr:
             code = claim_issue.claim_review(17, "codex-review-pool")
         self.assertEqual(code, claim_issue.EXIT_CONFLICT)
-        self.assertIn("review-pool", "".join(call.args[0] for call in stderr.write.call_args_list).lower())
+        self.assertIn("emergency", "".join(
+            call.args[0] for call in stderr.write.call_args_list).lower())
 
     def test_absent_agent_reduced_reap_threshold(self):
         store = DummyPresenceStore(records={})
