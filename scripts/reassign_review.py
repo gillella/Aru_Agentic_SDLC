@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 300
+# line-ceiling: 370
 """reassign_review.py - move one stalled pull request to a fallback reviewer.
 
 CodeRabbit is the default and the only authority `create_pr.py` ever assigns.
@@ -167,6 +167,76 @@ def _verify_live_pre_remove(pr_id: int, target: str, initial_head: str, existing
     return True, EXIT_OK
 
 
+def _rollback_post_remove(pr_id: int, existing: str, target: str) -> bool:
+    """Attempt bounded recovery by restoring existing authority and removing target."""
+    add_code, _, _ = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--add-label", existing], check=False
+    )
+    rem_code, _, _ = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--remove-label", target], check=False
+    )
+    return add_code == 0 and rem_code == 0
+
+
+def _verify_live_post_remove(
+    pr_id: int, target: str, initial_head: str, existing: str
+) -> tuple[bool, int]:
+    """Verify live state immediately after removing existing label, rolling back if invalid."""
+    live_pr, problem = _validated_snapshot(pr_id)
+    if problem:
+        print(f"[ERROR] Removed {existing} from PR #{pr_id}, but post-mutation verification "
+              f"failed: {problem}.", file=sys.stderr)
+        if not _rollback_post_remove(pr_id, existing, target):
+            print(f"[ERROR] Rollback recovery for PR #{pr_id} failed; resolve manually.",
+                  file=sys.stderr)
+        return False, EXIT_ERROR
+
+    if live_pr.get("state") != "OPEN":
+        print(f"[CONFLICT] PR #{pr_id} changed state to {live_pr.get('state')} "
+              "during reassignment.", file=sys.stderr)
+        if not _rollback_post_remove(pr_id, existing, target):
+            print(f"[ERROR] Rollback recovery for PR #{pr_id} failed; resolve manually.",
+                  file=sys.stderr)
+        return False, EXIT_CONFLICT
+
+    if live_pr.get("headRefOid") != initial_head:
+        print(f"[CONFLICT] PR #{pr_id} head changed from {initial_head[:12]} to "
+              f"{str(live_pr.get('headRefOid'))[:12]} during reassignment; "
+              "refusing to complete reassignment against modified state.", file=sys.stderr)
+        if not _rollback_post_remove(pr_id, existing, target):
+            print(f"[ERROR] Rollback recovery for PR #{pr_id} failed; resolve manually.",
+                  file=sys.stderr)
+        return False, EXIT_CONFLICT
+
+    labels = live_pr.get("labels")
+    if not isinstance(labels, list):
+        print(f"[ERROR] Removed {existing} from PR #{pr_id}, but could not read labels "
+              "after reassignment.", file=sys.stderr)
+        if not _rollback_post_remove(pr_id, existing, target):
+            print(f"[ERROR] Rollback recovery for PR #{pr_id} failed; resolve manually.",
+                  file=sys.stderr)
+        return False, EXIT_ERROR
+
+    review_labels = [
+        item["name"] for item in labels
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+        and item["name"].startswith("review:")
+    ]
+    if set(review_labels) != {target} or len(review_labels) != 1:
+        if target not in review_labels:
+            desc = f"missing target authority {target} (found {sorted(review_labels)})"
+        else:
+            desc = f"conflicting review labels {sorted(review_labels)} instead of {[target]}"
+        print(f"[CONFLICT] PR #{pr_id} review authority corrupted during reassignment: "
+              f"{desc}.", file=sys.stderr)
+        if not _rollback_post_remove(pr_id, existing, target):
+            print(f"[ERROR] Rollback recovery for PR #{pr_id} failed; resolve manually.",
+                  file=sys.stderr)
+        return False, EXIT_CONFLICT
+
+    return True, EXIT_OK
+
+
 def _validate_initial_reassign(
     pr_id: int, service: str, reason: str, target: str,
 ) -> tuple[dict | None, str | None, int]:
@@ -248,6 +318,10 @@ def reassign(pr_id: int, service: str, reason: str) -> int:
               f"labels and the merge gate will refuse it; remove {existing} manually "
               "or remove the new label to undo the reassignment.", file=sys.stderr)
         return EXIT_ERROR
+
+    ok, code = _verify_live_post_remove(pr_id, target, initial_head, existing)
+    if not ok:
+        return code
 
     ok, err = _comment(pr_id, audit_body(existing, target, service,
                                          reason, initial_head))

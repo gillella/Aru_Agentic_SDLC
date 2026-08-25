@@ -249,6 +249,102 @@ class ReassignTests(unittest.TestCase):
         self.assertEqual(len(edits), 1)
         self.assertIn("--add-label", edits[0])
 
+    def test_concurrent_extra_authority_at_post_readback_fails_closed(self):
+        snapshots = [
+            pr("review:coderabbit"),
+            pr("review:coderabbit"),
+            pr("review:coderabbit", "review:sourcery"),
+            pr("review:sourcery", "review:codeant"),
+        ]
+        code, calls = self._run(None, snapshots=snapshots)
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        edits = [c for c in calls if "edit" in c]
+        self.assertEqual(len(edits), 4)
+        self.assertIn("--add-label", edits[0])
+        self.assertIn("review:sourcery", edits[0])
+        self.assertIn("--remove-label", edits[1])
+        self.assertIn("review:coderabbit", edits[1])
+        self.assertIn("--add-label", edits[2])
+        self.assertIn("review:coderabbit", edits[2])
+        self.assertIn("--remove-label", edits[3])
+        self.assertIn("review:sourcery", edits[3])
+        self.assertEqual(self._comments(calls), [])
+
+    def test_concurrent_missing_target_at_post_readback_fails_closed(self):
+        snapshots = [
+            pr("review:coderabbit"),
+            pr("review:coderabbit"),
+            pr("review:coderabbit", "review:sourcery"),
+            pr("author:x"),
+        ]
+        code, calls = self._run(None, snapshots=snapshots)
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        edits = [c for c in calls if "edit" in c]
+        self.assertEqual(len(edits), 4)
+        self.assertIn("--add-label", edits[2])
+        self.assertIn("review:coderabbit", edits[2])
+        self.assertIn("--remove-label", edits[3])
+        self.assertIn("review:sourcery", edits[3])
+        self.assertEqual(self._comments(calls), [])
+
+    def test_concurrent_head_change_at_post_readback_fails_closed(self):
+        other_head = "3333333333333333333333333333333333333333"
+        snapshots = [
+            pr("review:coderabbit", head=HEAD),
+            pr("review:coderabbit", head=HEAD),
+            pr("review:coderabbit", "review:sourcery", head=HEAD),
+            pr("review:sourcery", head=other_head),
+        ]
+        code, calls = self._run(None, snapshots=snapshots)
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        edits = [c for c in calls if "edit" in c]
+        self.assertEqual(len(edits), 4)
+        self.assertEqual(self._comments(calls), [])
+
+    def test_concurrent_state_closed_at_post_readback_fails_closed(self):
+        snapshots = [
+            pr("review:coderabbit"),
+            pr("review:coderabbit"),
+            pr("review:coderabbit", "review:sourcery"),
+            pr("review:sourcery", state="CLOSED"),
+        ]
+        code, calls = self._run(None, snapshots=snapshots)
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        edits = [c for c in calls if "edit" in c]
+        self.assertEqual(len(edits), 4)
+        self.assertEqual(self._comments(calls), [])
+
+    def test_unreadable_snapshot_at_post_readback_fails_closed(self):
+        snapshots = [
+            pr("review:coderabbit"),
+            pr("review:coderabbit"),
+            pr("review:coderabbit", "review:sourcery"),
+            None,
+        ]
+        code, calls = self._run(None, snapshots=snapshots)
+        self.assertEqual(code, rr.EXIT_ERROR)
+        edits = [c for c in calls if "edit" in c]
+        self.assertEqual(len(edits), 4)
+        self.assertEqual(self._comments(calls), [])
+
+    def test_recovery_failure_at_post_readback_reports_manual_resolution(self):
+        other_head = "3333333333333333333333333333333333333333"
+        snapshots = [
+            pr("review:coderabbit", head=HEAD),
+            pr("review:coderabbit", head=HEAD),
+            pr("review:coderabbit", "review:sourcery", head=HEAD),
+            pr("review:sourcery", head=other_head),
+        ]
+        code, calls = self._run(
+            None,
+            snapshots=snapshots,
+            edit_results=((0, "", ""), (0, "", ""), (1, "", "denied")),
+        )
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        edits = [c for c in calls if "edit" in c]
+        self.assertEqual(len(edits), 4)
+        self.assertEqual(self._comments(calls), [])
+
 
 class ArgumentTests(unittest.TestCase):
     def test_unknown_service_is_refused(self):
