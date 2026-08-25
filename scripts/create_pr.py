@@ -37,6 +37,11 @@ NEEDS_REVIEW_LABEL = "needs-review"
 REVIEW_SERVICES = ("coderabbit", "sourcery", "codeant")
 REVIEW_LABEL_PREFIX = "review:"
 
+# PR #356 already carries the operator-approved CodeRabbit assignment. Keep
+# that assignment deterministic until the following trim slice deletes the
+# legacy provider rotation altogether.
+LEGACY_REVIEW_SERVICE_PINS = {341: "coderabbit"}
+
 # Kept explicit rather than free-form: a typo like "anthropc" would silently
 # make every PR look cross-family to the picker, which is the one failure mode
 # this label exists to prevent.
@@ -62,8 +67,12 @@ def review_service_for_issue(issue_id: int) -> str:
     Capacity-unaware by design: merge_pr.py and audit_review_assignment.py
     recompute this from every linked issue to prove a PR's label was not
     edited after the fact, so it must stay a pure function of issue_id alone.
-    select_review_service() below is where capacity evidence is applied.
+    Explicit migration pins preserve already-assigned authority while the
+    provider-removal slice is in flight. select_review_service() below is
+    where capacity evidence is applied.
     """
+    if issue_id in LEGACY_REVIEW_SERVICE_PINS:
+        return LEGACY_REVIEW_SERVICE_PINS[issue_id]
     return REVIEW_SERVICES[(issue_id - 1) % len(REVIEW_SERVICES)]
 
 

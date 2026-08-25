@@ -1,4 +1,4 @@
-# line-ceiling: 6870
+# line-ceiling: 6884
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -1003,6 +1003,20 @@ class ReviewGateTests(unittest.TestCase):
         )
         self.assertTrue(ok, msg)
         self.assertIn("CodeRabbit", msg)
+
+    def test_issue_341_coderabbit_pin_is_deterministic_and_fail_closed(self):
+        pr = self.coderabbit_pr("author:agent-1", "review:coderabbit")
+        pr["body"] = "Closes #341"
+        self.assertEqual(merge_pr.review_service_for_issue(341), "coderabbit")
+        self.assertEqual(merge_pr.assigned_review_service(pr), "coderabbit")
+        ok, msg = merge_pr.check_reviews(pr, self.coderabbit_evidence())
+        self.assertTrue(ok, msg)
+
+        wrong_service = labelled("author:agent-1", "review:sourcery")
+        wrong_service["body"] = "Closes #341"
+        self.assertIsNone(merge_pr.assigned_review_service(wrong_service))
+        self.assertFalse(merge_pr.check_reviews(wrong_service, None)[0])
+        self.assertFalse(merge_pr.check_reviews(pr, None)[0])
 
     def test_remediation_head_status_can_bind_new_head_after_prior_review(self):
         old_head = "a" * 40
