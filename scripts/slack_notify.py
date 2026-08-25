@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1036
+# line-ceiling: 1045
 """Post stamped Slack events for the Aru factory control room.
 
 GitHub remains the work queue. Slack downtime must not halt factory work.
@@ -248,7 +248,7 @@ def read_alert_payload_file(path: Path) -> str:
             raise ValueError("alert payload file is not owned by the current operator")
         if metadata.st_mode & 0o077:
             raise ValueError("alert payload file permissions must be 0600 or stricter")
-        return handle.read(MAX_ALERT_TEXT_CHARS + 1).rstrip("\r\n")
+        return handle.read().rstrip("\r\n")
 
 
 def config_for_project(config: SlackConfig, project: Any) -> SlackConfig:
@@ -294,10 +294,12 @@ def validate_alert_event(event: Dict[str, Any]) -> None:  # noqa: C901, PLR0912
     if kind == "hitl" and not str(event.get("text") or "").strip():
         raise ValueError("hitl requires decision text")
     text = str(event.get("text") or "")
-    if len(text) > MAX_ALERT_TEXT_CHARS or len(text.splitlines()) > MAX_ALERT_TEXT_LINES:
+    char_count = len(text)
+    line_count = len(text.splitlines())
+    if char_count > MAX_ALERT_TEXT_CHARS or line_count > MAX_ALERT_TEXT_LINES:
         raise ValueError(
-            f"alert summary exceeds {MAX_ALERT_TEXT_CHARS} characters or "
-            f"{MAX_ALERT_TEXT_LINES} lines"
+            f"alert summary exceeds size limit ({char_count}/{MAX_ALERT_TEXT_CHARS} characters, "
+            f"{line_count}/{MAX_ALERT_TEXT_LINES} lines); nothing delivered to Slack or GitHub"
         )
     forbidden_field = _forbidden_content_field(event)
     if forbidden_field:
@@ -344,8 +346,13 @@ def validate_availability_event(event: Dict[str, Any]) -> None:  # noqa: C901, P
         if parsed_retry.tzinfo is None:
             raise ValueError("retry_at must include a timezone")
     text = str(event.get("text") or "")
-    if len(text) > MAX_ALERT_TEXT_CHARS or len(text.splitlines()) > MAX_ALERT_TEXT_LINES:
-        raise ValueError("availability summary exceeds concise message limits")
+    char_count = len(text)
+    line_count = len(text.splitlines())
+    if char_count > MAX_ALERT_TEXT_CHARS or line_count > MAX_ALERT_TEXT_LINES:
+        raise ValueError(
+            f"availability summary exceeds size limit ({char_count}/{MAX_ALERT_TEXT_CHARS} characters, "
+            f"{line_count}/{MAX_ALERT_TEXT_LINES} lines); nothing delivered to Slack or GitHub"
+        )
     forbidden_field = _forbidden_content_field(event)
     if forbidden_field:
         raise ValueError(f"forbidden availability content in {forbidden_field}")
@@ -1010,8 +1017,15 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901, PLR0912, PLR09
 
     result = post_event(config, event, cache=FileDedupeCache())
     if not result.get("ok"):
-        print(f"[WARN] Slack notify failed: {result.get('error')}", file=sys.stderr)
-        if result.get("error") == "invalid_availability":
+        error_msg = result.get("detail") or result.get("error")
+        print(f"[WARN] Slack notify failed: {error_msg}", file=sys.stderr)
+        if result.get("error") in (
+            "invalid_availability",
+            "invalid_alert",
+            "forbidden_event_type",
+            "invalid_operator_user_id",
+            "invalid_escalation_user_id",
+        ):
             return 2
         return 0
     if result.get("deduped"):

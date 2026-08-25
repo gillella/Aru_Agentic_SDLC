@@ -1,4 +1,5 @@
-# line-ceiling: 1565
+# line-ceiling: 1860
+import io
 import sys
 import tempfile
 import unittest
@@ -85,6 +86,32 @@ class SlackNotifyTests(unittest.TestCase):
         self.addCleanup(
             setattr, notify_alert, "__kwdefaults__", original_defaults
         )
+
+    def _setup_cli_environment(self):
+        checkout = self.default_root / "repo"
+        checkout.mkdir(exist_ok=True)
+        env_file = self.default_root / "slack.env"
+        env_file.write_text(
+            "SLACK_BOT_TOKEN=xoxb-" + ("a" * 40)
+            + "\nSLACK_TEAM_ID=T01234567\nSLACK_CHANNEL_ID=C01234567\nSLACK_OPERATOR_USER_ID=U01234567\n",
+            encoding="utf-8",
+        )
+        registry_path = self.default_root / "projects.json"
+        audit_path = self.default_root / "slack-audit.json"
+
+        def identity(path):
+            return {
+                "github_repo_id": "R_repo",
+                "github_repo_database_id": 1,
+                "project_v2_id": "P_project",
+                "repo_slug": "owner/repo",
+                "local_path": str(path.resolve()),
+            }
+
+        record = ProjectRegistry(registry_path, audit_path, identity).create(
+            checkout, "T01234567", "C01234567", "operator", "proj_test"
+        )
+        return checkout, record, env_file, registry_path
 
     def test_redact_strips_configured_secrets(self):
         secret = "arbitrary-signing-secret-value"
@@ -1559,6 +1586,263 @@ class SlackNotifyTests(unittest.TestCase):
         )
         self.assertTrue(third["ok"])
         self.assertEqual(delivered, ["posted", "posted"])
+
+    def test_alert_rejected_for_character_overflow_exits_nonzero_with_diagnostic(self):
+        checkout, record, env_file, registry_path = self._setup_cli_environment()
+        oversize_chars = "x" * 1001
+        slack_calls = []
+        github_calls = []
+
+        def mock_transport(*a, **k):
+            slack_calls.append(a)
+            return {"ok": True}
+
+        def mock_comment(*a, **k):
+            github_calls.append(a)
+            return True
+
+        with (
+            patch.dict(
+                sn.notify_alert.__kwdefaults__,
+                {"transport": mock_transport, "comment": mock_comment},
+            ),
+            patch("sys.stderr", new_callable=io.StringIO) as mock_stderr,
+        ):
+            code = main([
+                "--agent", "cursor-1", "--family", "openai", "--event", "blocked",
+                "--project-id", record.project_id, "--issue", "1",
+                "--text", oversize_chars,
+                "--registry-file", str(registry_path), "--env-file", str(env_file),
+            ])
+        self.assertEqual(code, 2)
+        stderr_output = mock_stderr.getvalue()
+        self.assertIn("nothing delivered to Slack or GitHub", stderr_output)
+        self.assertIn("1001/1000 characters", stderr_output)
+        self.assertIn("1/12 lines", stderr_output)
+        self.assertEqual(slack_calls, [])
+        self.assertEqual(github_calls, [])
+
+    def test_alert_rejected_for_line_overflow_exits_nonzero_with_diagnostic(self):
+        checkout, record, env_file, registry_path = self._setup_cli_environment()
+        oversize_lines = "\n".join(["line"] * 13)
+        slack_calls = []
+        github_calls = []
+
+        def mock_transport(*a, **k):
+            slack_calls.append(a)
+            return {"ok": True}
+
+        def mock_comment(*a, **k):
+            github_calls.append(a)
+            return True
+
+        with (
+            patch.dict(
+                sn.notify_alert.__kwdefaults__,
+                {"transport": mock_transport, "comment": mock_comment},
+            ),
+            patch("sys.stderr", new_callable=io.StringIO) as mock_stderr,
+        ):
+            code = main([
+                "--agent", "cursor-1", "--family", "openai", "--event", "blocked",
+                "--project-id", record.project_id, "--issue", "1",
+                "--text", oversize_lines,
+                "--registry-file", str(registry_path), "--env-file", str(env_file),
+            ])
+        self.assertEqual(code, 2)
+        stderr_output = mock_stderr.getvalue()
+        self.assertIn("nothing delivered to Slack or GitHub", stderr_output)
+        self.assertIn(f"{len(oversize_lines)}/1000 characters", stderr_output)
+        self.assertIn("13/12 lines", stderr_output)
+        self.assertEqual(slack_calls, [])
+        self.assertEqual(github_calls, [])
+
+    def test_alert_rejected_via_decision_file_preserves_full_diagnostic_counts(self):
+        checkout, record, env_file, registry_path = self._setup_cli_environment()
+        decision_file = self.default_root / "decision.txt"
+        decision_text = "\n".join([f"line {i:02d}: " + ("z" * 70) for i in range(27)])
+        decision_file.write_text(decision_text + "\n", encoding="utf-8")
+        decision_file.chmod(0o600)
+        slack_calls = []
+        github_calls = []
+
+        def mock_transport(*a, **k):
+            slack_calls.append(a)
+            return {"ok": True}
+
+        def mock_comment(*a, **k):
+            github_calls.append(a)
+            return True
+
+        with (
+            patch.dict(
+                sn.notify_alert.__kwdefaults__,
+                {"transport": mock_transport, "comment": mock_comment},
+            ),
+            patch("sys.stderr", new_callable=io.StringIO) as mock_stderr,
+        ):
+            code = main([
+                "--agent", "cursor-1", "--family", "openai", "--event", "hitl",
+                "--project-id", record.project_id, "--issue", "435", "--pr", "439",
+                "--decision-file", str(decision_file),
+                "--registry-file", str(registry_path), "--env-file", str(env_file),
+            ])
+        self.assertEqual(code, 2)
+        stderr_output = mock_stderr.getvalue()
+        self.assertIn("nothing delivered to Slack or GitHub", stderr_output)
+        self.assertIn(f"{len(decision_text)}/1000 characters", stderr_output)
+        self.assertIn("27/12 lines", stderr_output)
+        self.assertEqual(slack_calls, [])
+        self.assertEqual(github_calls, [])
+
+    def test_other_validation_rejections_exit_nonzero_and_deliver_nothing(self):
+        checkout, record, env_file, registry_path = self._setup_cli_environment()
+        bad_invocations = [
+            # forbidden event type
+            (
+                [
+                    "--agent", "cursor-1", "--family", "openai", "--event", "heartbeat",
+                    "--project-id", record.project_id, "--issue", "1",
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ],
+                2,
+            ),
+            # forbidden payload content
+            (
+                [
+                    "--agent", "cursor-1", "--family", "openai", "--event", "blocked",
+                    "--project-id", record.project_id, "--issue", "1",
+                    "--text", "raw diff: +secret",
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ],
+                2,
+            ),
+            # hitl missing decision text
+            (
+                [
+                    "--agent", "cursor-1", "--family", "openai", "--event", "hitl",
+                    "--project-id", record.project_id, "--issue", "1",
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ],
+                2,
+            ),
+            # waiting-on missing waiting_on_agent
+            (
+                [
+                    "--agent", "cursor-1", "--family", "openai", "--event", "waiting-on",
+                    "--project-id", record.project_id, "--issue", "1",
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ],
+                2,
+            ),
+            # --no-github-comment
+            (
+                [
+                    "--agent", "cursor-1", "--family", "openai", "--event", "blocked",
+                    "--project-id", record.project_id, "--issue", "1",
+                    "--text", "blocked", "--no-github-comment",
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ],
+                2,
+            ),
+        ]
+        for argv, expected_code in bad_invocations:
+            slack_calls = []
+            github_calls = []
+
+            def mock_transport(*a, **k):
+                slack_calls.append(a)
+                return {"ok": True}
+
+            def mock_comment(*a, **k):
+                github_calls.append(a)
+                return True
+
+            with (
+                patch.dict(
+                    sn.notify_alert.__kwdefaults__,
+                    {"transport": mock_transport, "comment": mock_comment},
+                ),
+                patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                code = main(argv)
+            self.assertEqual(code, expected_code, f"Failed for argv: {argv}")
+            self.assertEqual(slack_calls, [], f"Slack called for argv: {argv}")
+            self.assertEqual(github_calls, [], f"GitHub called for argv: {argv}")
+
+    def test_posted_success_and_deduped_success_exit_zero(self):
+        checkout, record, env_file, registry_path = self._setup_cli_environment()
+        slack_calls = []
+        github_calls = []
+        argv = [
+            "--agent", "cursor-1", "--family", "openai", "--event", "blocked",
+            "--project-id", record.project_id, "--issue", "1",
+            "--text", "legitimate blocker summary",
+            "--registry-file", str(registry_path), "--env-file", str(env_file),
+        ]
+
+        def mock_transport(*a, **k):
+            slack_calls.append(a)
+            return {"ok": True, "ts": "123.456"}
+
+        def mock_comment(*a, **k):
+            github_calls.append(a)
+            return True
+
+        with (
+            patch.dict(
+                sn.notify_alert.__kwdefaults__,
+                {"transport": mock_transport, "comment": mock_comment},
+            ),
+            patch("sys.stdout", new_callable=io.StringIO) as mock_stdout,
+        ):
+            first_code = main(argv)
+        self.assertEqual(first_code, 0)
+        self.assertIn("posted", mock_stdout.getvalue())
+        self.assertEqual(len(slack_calls), 1)
+        self.assertEqual(len(github_calls), 1)
+
+        with (
+            patch.dict(
+                sn.notify_alert.__kwdefaults__,
+                {"transport": mock_transport, "comment": mock_comment},
+            ),
+            patch("sys.stdout", new_callable=io.StringIO) as mock_stdout_second,
+        ):
+            second_code = main(argv)
+        self.assertEqual(second_code, 0)
+        self.assertIn("deduped", mock_stdout_second.getvalue())
+        self.assertEqual(len(slack_calls), 1)
+        self.assertEqual(len(github_calls), 1)
+
+    def test_slack_transport_failure_with_durable_github_comment_exits_zero(self):
+        checkout, record, env_file, registry_path = self._setup_cli_environment()
+        github_calls = []
+
+        def failing_transport(*_a, **_k):
+            raise URLError("connection refused")
+
+        def mock_comment(*a, **k):
+            github_calls.append(a)
+            return True
+
+        argv = [
+            "--agent", "cursor-1", "--family", "openai", "--event", "blocked",
+            "--project-id", record.project_id, "--issue", "1",
+            "--text", "legitimate blocker summary",
+            "--registry-file", str(registry_path), "--env-file", str(env_file),
+        ]
+        with (
+            patch.dict(
+                sn.notify_alert.__kwdefaults__,
+                {"transport": failing_transport, "comment": mock_comment},
+            ),
+            patch("sys.stderr", new_callable=io.StringIO) as mock_stderr,
+        ):
+            code = main(argv)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(github_calls), 1)
+        self.assertIn("Slack notify failed: slack_unavailable", mock_stderr.getvalue())
 
 
 if __name__ == "__main__":
