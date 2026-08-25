@@ -1,4 +1,4 @@
-# line-ceiling: 405
+# line-ceiling: 412
 """Contract tests for the run-aru-factory entrypoint skill.
 
 The skill is prose, so these assert the properties a reader depends on rather

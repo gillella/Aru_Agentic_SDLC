@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1924
+# line-ceiling: 1913
 """
 init_project.py - Automation script for bootstrapping a brand-new repository under
 Aru_Agentic_SDLC governance, scaffolding AGENTS.md, CI workflows, issue/PR templates,
@@ -145,7 +145,7 @@ governed remediation.
    - CI Failure Remediation: `remediate-ci-failure/SKILL.md`
    - PR Review Feedback: `address-pr-feedback/SKILL.md`
 2. **Worktree Isolation**:
-   - Always run feature work inside `.worktrees/` directories to keep the main workspace clean.
+   - Always run feature and remediation work inside `.worktrees/` directories.
 3. **Local Test Verification First**:
    - Run `{test_runner}` and confirm all tests pass before committing.
 4. **Mandatory Issue Linking**:
