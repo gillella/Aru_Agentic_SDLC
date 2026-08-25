@@ -1,5 +1,5 @@
-# +40 for the #344 terminal merge lease tests.
-# line-ceiling: 1235
+# +59 for the #344 terminal merge lease tests.
+# line-ceiling: 1255
 import io
 import json
 import sys
@@ -1222,6 +1222,25 @@ class TerminalLeaseClaimTests(unittest.TestCase):
         """A failed governance lookup must surface, not read as 'not merged'."""
         with patch.object(claim_issue, "run_gh_json", return_value=None):
             self.assertIsNotNone(claim_issue._terminally_merged(87))
+
+    def test_malformed_closing_pr_reference_list_blocks_the_claim(self):
+        """A non-list references payload is unknown, not "nothing merged"."""
+        for payload in ({"nope": 1}, "refs", 7):
+            with self.subTest(payload=payload):
+                with patch.object(claim_issue, "run_gh_json", return_value={
+                    "state": "CLOSED", "closedByPullRequestsReferences": payload,
+                }):
+                    self.assertIsNotNone(claim_issue._terminally_merged(87))
+
+    def test_unidentifiable_closing_pr_reference_blocks_the_claim(self):
+        """A reference with no resolvable number cannot clear the merge check."""
+        for ref in ({"number": None}, {}, "89", None):
+            with self.subTest(ref=ref):
+                with patch.object(claim_issue, "run_gh_json", return_value={
+                    "state": "CLOSED", "closedByPullRequestsReferences": [ref],
+                }) as gh:
+                    self.assertIsNotNone(claim_issue._terminally_merged(87))
+                self.assertEqual(gh.call_count, 1, "must not look past a bad reference")
 
     def test_unreadable_closing_pr_blocks_the_claim(self):
         def gh(cmd):

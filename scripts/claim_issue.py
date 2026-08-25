@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# +42 for the #344 terminal merge lease guard.
-# line-ceiling: 1620
+# +51 for the #344 terminal merge lease guard.
+# line-ceiling: 1630
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -426,10 +426,19 @@ def _terminally_merged(issue_id: int, issue=None):
                 "rather than risk continuing terminally merged work.")
     if data.get("state") != "CLOSED":
         return None
-    for ref in data.get("closedByPullRequestsReferences") or []:
+    refs = data.get("closedByPullRequestsReferences") or []
+    # A malformed reference list is another shape of "cannot read merge state".
+    # Skipping the entries we cannot parse would let a closed-by-merge issue be
+    # re-claimed on garbage data, which is the same fail-open the readable-lookup
+    # guard above closes (CodeRabbit, #344).
+    if not isinstance(refs, list):
+        return (f"Closing-PR references for issue #{issue_id} were malformed; refusing "
+                "to claim while merge state is unknown.")
+    for ref in refs:
         number = ref.get("number") if isinstance(ref, dict) else None
         if not number:
-            continue
+            return (f"Issue #{issue_id} lists a closing pull request that could not be "
+                    "identified; refusing to claim while merge state is unknown.")
         pr = run_gh_json(["gh", "pr", "view", str(number), "--json", "state,headRefName"])
         if not isinstance(pr, dict):
             return (f"Could not read the state of PR #{number}, which closed issue "
