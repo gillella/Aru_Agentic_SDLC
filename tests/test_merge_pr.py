@@ -1446,6 +1446,41 @@ class StaleWriterEscalationTests(unittest.TestCase):
         self.assertIn('("stale writer", lambda: detect_stale_writer(', source)
 
 
+class TerminalLeaseRecordingTests(unittest.TestCase):
+    """#344 criterion 1/4: the merge records a lease that no reap path clears."""
+
+    def test_label_is_derived_from_the_gated_sha(self):
+        self.assertEqual(common.terminal_lease_label("A" * 40), "terminal-lease:" + "a" * 12)
+
+    def test_label_round_trips_through_the_reader(self):
+        label = common.terminal_lease_label("abcdef1234567890")
+        self.assertEqual(common.terminal_lease_sha([label]), "abcdef123456")
+
+    def test_reader_ignores_unrelated_labels(self):
+        self.assertIsNone(common.terminal_lease_sha(["status:done", "agent:x", None, 7]))
+
+    def test_recording_stamps_the_pr(self):
+        with patch.object(merge_pr, "ensure_label", return_value=True), \
+             patch.object(merge_pr, "run_cmd", return_value=(0, "", "")) as run:
+            ok, message = merge_pr.record_terminal_lease(89, "a" * 40)
+        self.assertTrue(ok)
+        self.assertIn("terminal-lease:" + "a" * 12, message)
+        self.assertIn("--add-label", run.call_args[0][0])
+
+    def test_recording_failure_warns_without_failing_a_completed_merge(self):
+        """The marker is convenience; the derived lease is the protection."""
+        with patch.object(merge_pr, "ensure_label", return_value=True), \
+             patch.object(merge_pr, "run_cmd", return_value=(1, "", "denied")):
+            ok, message = merge_pr.record_terminal_lease(89, "a" * 40)
+        self.assertTrue(ok, "a failed marker must not strand a completed merge")
+        self.assertIn("[WARN]", message)
+        self.assertIn("derived merged-PR lease still blocks", message)
+
+    def test_close_out_records_the_lease(self):
+        self.assertIn('("terminal lease", lambda: record_terminal_lease(',
+                      inspect.getsource(merge_pr))
+
+
 class CiGateTests(unittest.TestCase):
     def test_all_successful_passes(self):
         pr = {"statusCheckRollup": [

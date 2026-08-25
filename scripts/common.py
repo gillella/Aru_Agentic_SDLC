@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # +60 for the #344 terminal merge lease shared by all four helpers.
-# line-ceiling: 1543
+# line-ceiling: 1570
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -1463,7 +1463,34 @@ def check_version_compatibility(
     return True
 
 
-TERMINAL_MERGE_LEASE_LABEL = "lease:merged"
+TERMINAL_LEASE_LABEL_PREFIX = "terminal-lease:"
+
+
+def terminal_lease_label(gated_sha: str) -> str:
+    """Label recording that a governed merge accepted this PR at ``gated_sha``.
+
+    Written once, immediately after GitHub accepts the merge, and never removed
+    by any claim-clearing or reap path -- so its presence is both the "recorded"
+    and the "still queryable" half of the lease. Truncated to 12 hex characters
+    to stay inside GitHub's 50-character label limit while remaining collision-
+    proof in practice.
+    """
+    return f"{TERMINAL_LEASE_LABEL_PREFIX}{(gated_sha or '').strip().lower()[:12]}"
+
+
+def terminal_lease_sha(labels) -> Optional[str]:
+    """The gated-SHA prefix recorded by a terminal-lease label, or None.
+
+    Presence means a governed merge already accepted this PR, so every claim
+    path must treat it as terminal rather than trusting claim labels that
+    still look open.
+    """
+    for name in labels or []:
+        if isinstance(name, str) and name.startswith(TERMINAL_LEASE_LABEL_PREFIX):
+            value = name[len(TERMINAL_LEASE_LABEL_PREFIX):].strip().lower()
+            if value:
+                return value
+    return None
 
 
 def terminal_merge_lease(branch: str) -> Optional[Dict[str, Any]]:

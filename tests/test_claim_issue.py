@@ -1190,3 +1190,15 @@ class TerminalLeaseClaimTests(unittest.TestCase):
     def test_closed_without_a_merged_pr_is_not_terminal(self):
         with patch.object(claim_issue, "run_gh_json", side_effect=self._gh("CLOSED", "CLOSED")):
             self.assertIsNone(claim_issue._terminally_merged(87))
+
+    def test_merge_claim_is_refused_on_a_terminally_merged_pr(self):
+        """Criterion 4: the lease blocks continuation of a merged claim."""
+        labels = ["author:agent-a", "terminal-lease:abcdef123456"]
+        with patch.object(claim_issue, "_pr_labels", return_value=labels):
+            self.assertEqual(claim_issue.claim_merge(89, "agent-a"),
+                             claim_issue.EXIT_CONFLICT)
+
+    def test_merge_claim_still_works_without_a_lease(self):
+        with patch.object(claim_issue, "_pr_labels", return_value=["author:agent-a"]):
+            self.assertNotEqual(claim_issue.claim_merge(89, "agent-a"),
+                                claim_issue.EXIT_CONFLICT)

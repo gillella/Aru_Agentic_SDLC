@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # +42 for the #344 terminal merge lease guard.
-# line-ceiling: 1607
+# line-ceiling: 1615
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -28,6 +28,7 @@ import merge_pr
 from common import (
     AGENT_LABEL_PREFIX,
     terminal_lease_refusal,
+    terminal_lease_sha,
     terminal_merge_lease,
     agent_labels,
     claimed_by,
@@ -1131,6 +1132,17 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+
+    # A PR that already carries a terminal lease was merged by a governed run.
+    # Claiming it again is a stale worker continuing finished work (#344).
+    # claim_review and complete_review need no equivalent guard: #412 retired
+    # coding-agent review, so both are already unconditional refusals.
+    lease_sha = terminal_lease_sha(labels)
+    if lease_sha:
+        print(f"[CONFLICT] PR #{pr_id} carries a terminal lease (merged at "
+              f"{lease_sha}); it cannot be claimed for merge again. File a new "
+              "governed issue and branch for follow-up work.", file=sys.stderr)
+        return EXIT_CONFLICT
 
     holder = merge_claimant(labels)
     if holder and holder != agent:
