@@ -945,6 +945,89 @@ class SourceryEvidenceTests(unittest.TestCase):
             self.assertEqual(merge_pr.with_service_evidence(cr, 1, {}), {"picked": "cr"})
 
 
+class SourceryCheckRunPaginationTests(unittest.TestCase):
+    """#435: a partial check-run read must never look like complete evidence.
+
+    ``total_count`` covers the whole reference while the endpoint caps its
+    result set, so a short read can hide a second "Sourcery review" run outside
+    the returned window - which would turn an ambiguous verdict into an
+    apparently sole authoritative match and open the gate.
+    """
+
+    HEAD = "b" * 40
+
+    def page(self, total, count, name="Sourcery review"):
+        return {"total_count": total,
+                "check_runs": [{"name": name} for _ in range(count)]}
+
+    def read(self, payload):
+        with patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(merge_pr, "_gh_json", return_value=payload) as gh:
+            return merge_pr._sourcery_check_runs("owner", "repo", self.HEAD), gh
+
+    def test_reader_slurps_so_multi_page_json_stays_parseable(self):
+        """Without --slurp, --paginate concatenates objects and page 2 is lost."""
+        _, gh = self.read([self.page(1, 1)])
+        self.assertIn("--slurp", gh.call_args[0][0])
+
+    def test_all_pages_are_aggregated_when_the_total_is_proven(self):
+        runs, _ = self.read([self.page(5, 2), self.page(5, 2), self.page(5, 1)])
+        self.assertEqual(len(runs or []), 5)
+
+    def test_single_page_and_empty_reference_still_read(self):
+        """An empty reference reads as no evidence, not as an unreadable one."""
+        self.assertEqual(len(self.read([self.page(1, 1)])[0]), 1)
+        self.assertEqual(self.read([self.page(0, 0)])[0], [])
+
+    def test_short_read_against_declared_total_fails_closed(self):
+        """The capped/truncated case CodeRabbit flagged: 2 of 3 runs returned."""
+        self.assertIsNone(self.read([self.page(3, 2)])[0])
+
+    def test_over_long_read_against_declared_total_fails_closed(self):
+        self.assertIsNone(self.read([self.page(1, 2)])[0])
+
+    def test_totals_disagreeing_across_pages_fail_closed(self):
+        self.assertIsNone(self.read([self.page(4, 2), self.page(9, 2)])[0])
+
+    def test_missing_or_malformed_total_fails_closed(self):
+        for total in (None, "5", 5.0, True, [5], float("nan")):
+            with self.subTest(total=total):
+                page = {"total_count": total, "check_runs": [{"name": "x"}]}
+                self.assertIsNone(self.read([page])[0])
+
+    def test_absent_total_key_fails_closed(self):
+        self.assertIsNone(self.read([{"check_runs": []}])[0])
+
+    def test_malformed_pages_and_run_lists_fail_closed(self):
+        for payload in (None, {}, [], "pages", [None], ["page"], [[]],
+                        [{"total_count": 0, "check_runs": None}],
+                        [{"total_count": 1, "check_runs": {"name": "x"}}],
+                        [self.page(2, 1), "page-2"]):
+            with self.subTest(payload=payload):
+                self.assertIsNone(self.read(payload)[0])
+
+    def test_a_hidden_duplicate_run_can_no_longer_pass_as_the_sole_match(self):
+        """The truncated page holds one run; the total says a second exists."""
+        truncated = self.page(2, 1)
+        self.assertIsNone(self.read([truncated])[0])
+        # That payload is exactly what would have read as unique before the fix.
+        self.assertIs(merge_pr._sourcery_unique_match(truncated["check_runs"]),
+                      truncated["check_runs"][0])
+
+    def test_unreadable_response_keeps_the_gate_closed(self):
+        with patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(merge_pr, "_gh_json", return_value=[self.page(3, 2)]):
+            self.assertIsNone(merge_pr._with_sourcery_runs(
+                433, {"github_review_evidence": True, "head_oid": self.HEAD}))
+
+    def test_missing_head_is_never_queried(self):
+        for head in (None, ""):
+            with self.subTest(head=head):
+                with patch.object(merge_pr, "_gh_json") as gh:
+                    self.assertIsNone(merge_pr._sourcery_check_runs("o", "r", head))
+                gh.assert_not_called()
+
+
 class CodeAntEvidenceTests(unittest.TestCase):
     """#435: CodeAnt satisfies the gate only on producer-validated exact-head proof.
 
