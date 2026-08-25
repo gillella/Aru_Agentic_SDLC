@@ -1,15 +1,10 @@
 # line-ceiling: 513
-"""Hermetic board and local-agent adapters for the full fleet lifecycle.
-
-The fixture deliberately models GitHub as the durable queue while exercising
-the real :class:`run_fleet.FleetRunner` orchestration boundary.  It performs no
-network calls, launches no paid agent, and writes no developer configuration.
-"""
+"""Hermetic board and local-agent adapters for the full fleet lifecycle."""
 
 from __future__ import annotations
 
 import json
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -20,16 +15,13 @@ import fetch_next_issue
 import fetch_next_work
 import merge_pr
 import run_fleet
-
+from fixtures.fleet.review_route import completion_evidence, different_family_reviewer
 
 @dataclass
 class Issue:
     number: int
     touches: tuple[str, ...]
     depends_on: tuple[int, ...] = ()
-    # The picker's priority-integrity gate fails an issue closed when it carries
-    # no priority:pN label, so a fixture issue without one is never claimable and
-    # every scenario silently reports idle. Default it; scenarios may override.
     priority: str = "p1"
     high_risk: bool = False
     unresolved_decision: str = ""
@@ -37,7 +29,6 @@ class Issue:
     claim: str | None = None
     implementations: int = 0
     workspace_clean: bool = True
-
 
 @dataclass
 class PullRequest:
@@ -174,11 +165,12 @@ class HermeticFleet:
         return [{"name": "fixture-ci", "status": "IN_PROGRESS", "conclusion": ""}]
 
     def _pr_labels(self, pr: PullRequest) -> list[str]:
-        labels = [f"author:{pr.author}", f"family:{pr.family}"]
+        labels = [f"author:{pr.author}", f"family:{pr.family}", "review:agent"]
         if pr.reviewer_claim:
             labels.append(f"reviewer:{pr.reviewer_claim}")
         if pr.reviewed_by:
             labels.append(f"reviewed-by:{pr.reviewed_by}")
+            labels.append(f"reviewer-family:{pr.reviewed_by}:{self.workers[pr.reviewed_by]}")
         if pr.merger_claim:
             labels.append(f"merger:{pr.merger_claim}")
         return labels
@@ -220,24 +212,10 @@ class HermeticFleet:
 
     def dod_status(self, pr_number: int) -> tuple[bool, str]:
         pr = self.pull_requests[pr_number]
-        evidence = {
-            "head_oid": f"head-{pr.head}",
-            "review_attestations": ([{
-                "agent": pr.reviewed_by,
-                "head": f"head-{pr.review_head}",
-                "github_login": "fixture-account",
-            }] if pr.reviewed_by else []),
-            "unresolved": 0,
-            "unfixed": 0,
-            "reviewed_head": bool(pr.reviewed_by and pr.review_head == pr.head),
-            "withdrawn": 0,
-        }
+        evidence = completion_evidence(self.pull_requests, pr_number, self.workers)
         issue_body = "## Acceptance Criteria\n- [x] fixture acceptance"
         ok, gates = merge_pr.evaluate_dod(
             self._pr_record(pr), {pr.issue: issue_body}, evidence,
-            # The rebased gate resolves ancestry through git and the compare
-            # API, and fails closed when it cannot. There is no repository here,
-            # so state the fixture's own truth: simulated branches are current.
             behind_resolver=lambda _base, _head: 0,
         )
         blocked = [name for name, passed, _message in gates if not passed]
@@ -250,6 +228,7 @@ class HermeticFleet:
             patch.object(fetch_next_work, "list_work_prs", side_effect=self._pr_records),
             patch.object(fetch_next_work, "list_open_issues", side_effect=self._issue_records),
             patch.object(fetch_next_work, "dod_status", side_effect=self.dod_status),
+            patch.object(fetch_next_work, "active_increment_scope", return_value=None),
             patch.object(
                 fetch_next_issue, "repository_owner_login",
                 return_value="fixture-account",
@@ -302,9 +281,14 @@ class HermeticFleet:
     def _claim_transport(self):
         with ExitStack() as stack:
             stack.enter_context(patch.object(
+                claim_helpers.merge_pr, "repository_merge_lock",
+                return_value=nullcontext((True, "locked")),
+            ))
+            stack.enter_context(patch.object(
                 claim_helpers, "get_issue",
                 side_effect=lambda number: self._issue_record(self.issues[number]),
             ))
+            stack.enter_context(patch.object(claim_helpers, "_required_board_preflight", return_value=True))
             stack.enter_context(patch.object(claim_helpers, "update_status", self._set_issue_status))
             stack.enter_context(patch.object(claim_helpers, "ensure_label", return_value=True))
             stack.enter_context(patch.object(claim_helpers, "run_cmd", self._transport_command))
@@ -324,8 +308,13 @@ class HermeticFleet:
                 claim_helpers, "_reviewed_head_for_completion",
                 side_effect=lambda number: f"{self.pull_requests[number].head:040x}",
             ))
+            stack.enter_context(patch.object(
+                claim_helpers.merge_pr, "review_evidence",
+                side_effect=lambda number: completion_evidence(
+                    self.pull_requests, number, self.workers
+                ),
+            ))
             yield
-
     def _claim_with_helpers(self, work: dict[str, Any], agent: str) -> None:
         with self._claim_transport():
             if work["type"] == "issue":
@@ -365,6 +354,7 @@ class HermeticFleet:
             author=agent,
             family=self.workers[agent],
             ci=self.initial_ci.get(issue.number, "green"),
+            reviewer_claim=different_family_reviewer(self.workers, agent),
         )
         self.next_pr += 1
         self.pull_requests[pr.number] = pr
@@ -394,6 +384,8 @@ class HermeticFleet:
             self.record("ci_remediated", pr=pr.number, issue=pr.issue, agent=agent)
         else:
             raise AssertionError("feedback work had no actionable state")
+        if pr.reviewed_by is None:
+            pr.reviewer_claim = different_family_reviewer(self.workers, agent)
         return 0
 
     def _review(self, pr: PullRequest, agent: str) -> int:
@@ -413,7 +405,7 @@ class HermeticFleet:
             return 0
         pr.review_head = pr.head
         with self._claim_transport():
-            result = claim_helpers.complete_review(pr.number, agent)
+            result = claim_helpers.complete_review(pr.number, agent, self.workers[agent], "findings-resolved")
         if result != claim_helpers.EXIT_OK:
             raise AssertionError(f"real claim helper could not complete review #{pr.number}")
         self.record("review_completed", pr=pr.number, issue=pr.issue, agent=agent)

@@ -3,6 +3,7 @@
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import fetch_next_issue  # noqa: E402
 import fetch_next_work as fnw  # noqa: E402
+import run_fleet  # noqa: E402
 
 
 def rest_pr(number):
@@ -27,6 +29,27 @@ def rest_pr(number):
 
 
 class RestFallbackTests(unittest.TestCase):
+    def test_non_coderabbit_gate_fix_skips_review_evidence_query(self):
+        pr = {"number": 9, "labels": [{"name": "review:agent"}]}
+        with patch.object(fnw, "review_evidence") as evidence:
+            self.assertFalse(fnw._author_can_repair_review(pr))
+        evidence.assert_not_called()
+
+    def test_rich_pr_snapshot_does_not_repeat_the_file_query(self):
+        rich = [{
+            "number": 7, "title": "PR 7", "isDraft": False, "labels": [],
+            "reviews": [], "statusCheckRollup": [], "updatedAt": "now",
+            "createdAt": "now", "headRefName": "fix/7", "headRefOid": "abc",
+            "body": "Closes #7", "reviewDecision": "", "state": "OPEN",
+            "mergedAt": None, "files": [{"path": "a.py"}], "changedFiles": 1,
+        }]
+        with patch.object(
+            fnw, "run_cmd", return_value=(0, json.dumps(rich), ""),
+        ) as run:
+            self.assertEqual(fnw.list_open_prs(), rich)
+
+        run.assert_called_once()
+
     def test_failed_graphql_list_uses_two_bounded_calls_total(self):
         output = "\n".join(json.dumps(rest_pr(number)) for number in (7, 8))
         with patch.object(fnw, "get_repo_slug", return_value="acme/widgets"), \
@@ -186,6 +209,66 @@ class CycleSnapshotTests(unittest.TestCase):
         claims.assert_called_once_with(issues, 4, open_prs_snapshot=prs)
         self.assertIs(select.call_args.kwargs["prs_snapshot"], prs)
         self.assertIs(select.call_args.kwargs["issues_snapshot"], issues)
+
+    def test_post_promotion_selector_reuses_authoritative_readback_snapshots(self):
+        idle = self.idle()
+        selected = {**idle, "work": {"type": "issue", "issue": 7}}
+        post = {
+            "prs": [{"number": 1}], "issues": [{"number": 7}],
+            "_selection": selected,
+        }
+
+        def promote(*_args, **kwargs):
+            kwargs["post_snapshot_out"].update(post)
+            return 7
+
+        with patch("sys.argv", [
+            "fetch_next_work.py", "--agent", "agent-1", "--claim", "--json",
+            "--reap-after", "0",
+        ]), patch("sys.stdout", io.StringIO()), \
+             patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "select", return_value=idle) as select, \
+             patch.object(fnw, "promote_one_idle_backlog_issue", side_effect=promote), \
+             patch("claim_issue.claim_issue", return_value=fnw.EXIT_OK):
+            fnw.main()
+
+        select.assert_called_once()
+
+
+class DurableRunnerBudgetTests(unittest.TestCase):
+    def runner(self, root, command_runner=lambda *_: None):
+        config = run_fleet.RunnerConfig(
+            repo=Path(root), aru_home=Path(root), agent="agent-1", family="openai",
+            state_dir=Path(root) / "state",
+        )
+        return run_fleet.FleetRunner(
+            config, command_runner=command_runner, agent_runner=lambda *_: 0,
+        )
+
+    def test_picker_promotes_idle_without_preclaiming_child_work(self):
+        seen = []
+        def command(argv, _cwd):
+            seen.append(argv)
+            return run_fleet.CommandResult(0, json.dumps({"work": {"type": "idle"}}))
+        with tempfile.TemporaryDirectory() as root:
+            self.runner(root, command)._run_picker()
+        self.assertIn("--promote-idle", seen[0])
+        self.assertNotIn("--claim", seen[0])
+
+    def test_active_followup_skips_duplicate_full_fleet_inventory(self):
+        with tempfile.TemporaryDirectory() as root:
+            runner = self.runner(root)
+            with patch.object(
+                runner, "_run_fleet_status", return_value={"state": "waiting"},
+            ) as fleet, patch.object(
+                runner, "_run_picker", side_effect=[
+                    {"work": {"type": "issue", "issue": 45}},
+                    {"work": {"type": "issue", "issue": 46}},
+                ],
+            ):
+                runner.run_iteration()
+                runner.run_iteration()
+        self.assertEqual(fleet.call_count, 1)
 
 
 if __name__ == "__main__":

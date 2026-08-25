@@ -13,7 +13,6 @@ import os
 import re
 import socket
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,16 +24,14 @@ from claim_issue import (
     reap_stale_merges,
 )
 from common import (
+    get_repo_projects,
     get_repo_slug,
     list_open_issues,
-    query_issue_project_items,
     run_cmd,
-    select_governed_project_items,
     label_names as issue_label_names,
 )
 from fetch_next_issue import (
     active_increment_scope,
-    attach_open_pr_file_snapshots,
     build_candidates,
     priority_rank,
     pr_files_by_issue_from_prs,
@@ -142,7 +139,12 @@ def list_open_prs() -> list[dict[str, Any]] | None:
         return _rest_open_prs()
     if not isinstance(prs, list):
         return _rest_open_prs()
-    return attach_open_pr_file_snapshots(prs)
+    # ``PR_FIELDS`` already includes both files and changedFiles.  The old
+    # overlay immediately queried the same open-PR file connection again,
+    # doubling GraphQL reads on every picker cycle.  Downstream validation
+    # rejects a truncated/malformed file list and falls back to declared
+    # touches, so the duplicate snapshot provided no additional authority.
+    return prs
 
 
 def _rest_open_prs() -> list[dict[str, Any]] | None:
@@ -388,30 +390,6 @@ def review_thread_count(pr: dict[str, Any]) -> int | None:
     return None if feedback is None else len(feedback)
 
 
-def _authored_via_branch(pr: dict[str, Any], agent: str) -> bool:
-    """Infers authorship from the linked issue's retained agent label.
-
-    `create_pr.py` now requires --agent and fails loudly on a bad stamp, so new
-    PRs opened through it always carry author:<id>. This covers what that cannot
-    reach: PRs predating stamping, and PRs a human opened by hand with `gh`.
-    Those leave no author on the PR. The branch still encodes
-    the issue number, and an In Review issue retains the implementing agent's
-    label as a legacy authorship backstop even though it no longer consumes an
-    active implementation slot.
-    """
-    match = re.search(r"issue-(\d+)", pr.get("headRefName") or "", re.IGNORECASE)
-    if not match:
-        return False
-    code, out, _ = run_cmd(
-        ["gh", "issue", "view", match.group(1), "--json", "labels",
-         "-q", "[.labels[].name] | join(\"\\n\")"],
-        check=False,
-    )
-    if code != 0:
-        return False
-    return f"agent:{agent}" in [line.strip() for line in out.splitlines()]
-
-
 def ci_state(pr: dict[str, Any]) -> str:
     """Returns 'green', 'red', 'pending', or 'none'.
 
@@ -433,15 +411,6 @@ def ci_state(pr: dict[str, Any]) -> str:
         }:
             pending = True
     return "pending" if pending else "green"
-
-
-def waiting_minutes(pr: dict[str, Any]) -> float:
-    stamp = pr.get("updatedAt") or pr.get("createdAt")
-    try:
-        ts = datetime.fromisoformat((stamp or "").replace("Z", "+00:00"))
-    except ValueError:
-        return 0.0
-    return (datetime.now(timezone.utc) - ts).total_seconds() / 60.0
 
 
 def needs_my_attention(pr: dict[str, Any], agent: str) -> bool:
@@ -538,10 +507,10 @@ def _dod_gate_details(pr_number: int) -> dict[str, str] | None:
 
 def _author_can_repair_review(pr: dict[str, Any]) -> bool:
     """True when DoD `review` fails only because resolved threads lack evidence."""
+    if merge_pr.assigned_review_service(pr) != "coderabbit":
+        return False
     evidence = review_evidence(pr["number"])
     if not evidence:
-        return False
-    if merge_pr.assigned_review_service(pr) != "coderabbit":
         return False
     evidence = merge_pr._with_coderabbit_status(pr["number"], evidence)
     if not evidence:
@@ -685,52 +654,21 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa
             return no("unmet: ci")
         return no(f"CI is {state}")
 
-    threads = review_thread_count(pr)
-    if threads is None:
-        return no("review thread state is unavailable")
-    if threads:
-        return no(f"{threads} active review feedback item(s); waiting on author")
+    # The author-routing pass already queried and cached feedback for this
+    # agent's PRs. For somebody else's green PR, the authoritative DoD call
+    # below includes the same thread gate; querying feedback first duplicated
+    # a GraphQL request for every near-ready candidate.
+    if "_active_review_feedback" in pr or _label_value(labels, "author:") == agent:
+        threads = review_thread_count(pr)
+        if threads is None:
+            return no("review thread state is unavailable")
+        if threads:
+            return no(f"{threads} active review feedback item(s); waiting on author")
 
     ok, reason = dod_status(pr["number"])
     if not ok:
         return no(reason)
     return {"eligible": True, "reason": reason}
-
-
-def mark(pr_number: int, label: str, colour: str, description: str) -> None:
-    """Applies an advisory label. Never fatal - it is a signal, not a gate."""
-    run_cmd(["gh", "label", "create", label, "--color", colour, "--description", description],
-            check=False)
-    code, _, err = run_cmd(["gh", "pr", "edit", str(pr_number), "--add-label", label],
-                           check=False)
-    if code != 0:
-        print(f"[WARN] Could not label PR #{pr_number} '{label}': {err.strip()}", file=sys.stderr)
-
-
-def record_review_claim(pr_number: int, agent: str, created_at: str | None) -> None:
-    """Persist open-to-claim latency for the telemetry epic. Never a gate."""
-    claimed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    wait_line = "wait-minutes: unknown\n"
-    if created_at:
-        try:
-            opened = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            waited = (datetime.now(timezone.utc) - opened).total_seconds() / 60.0
-            wait_line = f"wait-minutes: {waited:.1f}\n"
-        except ValueError:
-            pass
-    body = (
-        "## Review claim\n"
-        f"review-claimed-at: {claimed_at}\n"
-        f"reviewer: {agent}\n"
-        f"{wait_line}"
-    )
-    code, _, err = run_cmd(
-        ["gh", "pr", "comment", str(pr_number), "--body", body],
-        check=False,
-    )
-    if code != 0:
-        print(f"[WARN] Could not record review-claimed-at on #{pr_number}: "
-              f"{err.strip()}", file=sys.stderr)
 
 
 def select(  # noqa: C901, PLR0912, PLR0915
@@ -887,11 +825,20 @@ def select(  # noqa: C901, PLR0912, PLR0915
     }
 
 
-def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None) -> tuple[dict[str, Any] | None, str | None]:  # noqa: C901, PLR0912
+def _idle_backlog_candidate(  # noqa: C901, PLR0912
+    agent: str,
+    expected_ready_issue: int | None = None,
+    *,
+    issues_snapshot: Any = _UNSET,
+    prs_snapshot: Any = _UNSET,
+    repo_slug_snapshot: str | None = None,
+    projects_snapshot: list[dict[str, Any]] | None = None,
+    snapshot_out: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     """Return the one issue triage and the ordinary picker would admit."""
     from triage_backlog import partition, ready_gaps, split_reasons
 
-    issues = list_open_issues()
+    issues = list_open_issues() if issues_snapshot is _UNSET else issues_snapshot
     if not issues:
         return None, None
     if len(issues) >= 500:
@@ -899,9 +846,15 @@ def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None)
               file=sys.stderr)
         return None, None
 
-    repo_slug = get_repo_slug()
+    repo_slug = repo_slug_snapshot or get_repo_slug()
     open_numbers = {issue["number"] for issue in issues}
-    inventory = _governed_open_issue_statuses(repo_slug or "", open_numbers)
+    inventory = (
+        _governed_open_issue_statuses(
+            repo_slug or "", open_numbers, projects=projects_snapshot,
+        )
+        if projects_snapshot is not None
+        else _governed_open_issue_statuses(repo_slug or "", open_numbers)
+    )
     if inventory is None:
         if expected_ready_issue is None:
             raise AutoTriageError("Project inventory unavailable; cannot prove Ready is empty")
@@ -915,6 +868,9 @@ def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None)
     triage_issues = stage_expected_ready_for_triage(issues, expected_ready_issue)
     if triage_issues is None:
         return None, repo_slug
+    triage_board_statuses = dict(_board_statuses)
+    if expected_ready_issue is not None:
+        triage_board_statuses[expected_ready_issue] = "Backlog"
 
     backlog, ready, _held = partition(triage_issues)
     if ready or not backlog:
@@ -923,7 +879,8 @@ def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None)
     qualified_numbers = {
         issue["number"]
         for issue in backlog
-        if [
+        if triage_board_statuses.get(issue["number"], "").lower() == "backlog"
+        and [
             (label.get("name") or "").lower()
             for label in issue.get("labels", [])
             if (label.get("name") or "").lower().startswith("status:")
@@ -954,7 +911,7 @@ def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None)
         ] + [{"name": "status:ready"}]
         staged_issues.append(staged)
 
-    prs = list_work_prs()
+    prs = list_work_prs() if prs_snapshot is _UNSET else prs_snapshot
     if prs is None:
         print("[WARN] Cannot triage while the pull request queue is unreadable.",
               file=sys.stderr)
@@ -963,6 +920,8 @@ def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None)
         print("[WARN] Open pull request inventory may be truncated; refusing auto-triage.",
               file=sys.stderr)
         return None, repo_slug
+    if snapshot_out is not None:
+        snapshot_out.update({"issues": issues, "prs": prs})
     increment_scope = _auto_triage_increment_scope()
     if increment_scope is False:
         return None, repo_slug
@@ -988,30 +947,41 @@ def _auto_triage_increment_scope() -> set | None | bool:
 
 
 def _promote_one_idle_backlog_issue_locked(
-    agent: str, family: str | None, round_cap: int, cross_family_wait: int,
+    agent: str,
+    family: str | None,
+    round_cap: int,
+    cross_family_wait: int,
+    *,
+    current_selection: dict[str, Any] | None = None,
+    issues_snapshot: Any = _UNSET,
+    prs_snapshot: Any = _UNSET,
+    post_snapshot_out: dict[str, Any] | None = None,
 ) -> int | None:
     """Promote one qualified Backlog issue when no Ready item exists.
 
     This is deliberately narrower than ``triage_backlog.py --promote``. The
-    candidate must clear the triage and picker contracts twice without changing
-    and still be Backlog on the governed board immediately before the write.
+    candidate clears triage and ordinary picker contracts before the write,
+    then a fresh post-write snapshot must prove the expected Ready state.
     """
-    current = select(agent, family, round_cap, cross_family_wait)
+    current = current_selection or select(agent, family, round_cap, cross_family_wait)
     if current["work"]["type"] != "idle":
         return None
-    candidate, repo_slug = _idle_backlog_candidate(agent)
-    fresh, fresh_slug = _idle_backlog_candidate(agent)
-    if candidate is None or fresh is None or not repo_slug or fresh_slug != repo_slug:
+    repo_slug_snapshot = get_repo_slug()
+    projects_snapshot = (
+        get_repo_projects(repo_slug_snapshot)
+        if repo_slug_snapshot and post_snapshot_out is not None else None
+    )
+    fresh, repo_slug = _idle_backlog_candidate(
+        agent,
+        issues_snapshot=issues_snapshot,
+        prs_snapshot=prs_snapshot,
+        repo_slug_snapshot=repo_slug_snapshot,
+        projects_snapshot=projects_snapshot,
+        snapshot_out=post_snapshot_out,
+    )
+    if fresh is None or not repo_slug:
         return None
 
-    compared_fields = (
-        "number", "body", "labels", "author", "editor", "authorAssociation",
-        "editorAssociation", "trustIdentityResolved", "updatedAt",
-    )
-    if any(candidate.get(field) != fresh.get(field) for field in compared_fields):
-        print("[WARN] Backlog candidate changed during triage; leaving it untouched.",
-              file=sys.stderr)
-        return None
     if not fresh.get("updatedAt"):
         print("[WARN] Candidate update time is missing; refusing auto-triage.",
               file=sys.stderr)
@@ -1021,19 +991,6 @@ def _promote_one_idle_backlog_issue_locked(
         return None
 
     number = fresh["number"]
-
-    def board_status() -> str:
-        items = query_issue_project_items(number)
-        governed = select_governed_project_items(items or [], repo_slug)
-        return (
-            ((governed[0].get("status") or {}).get("name") or "").lower()
-            if len(governed) == 1 else ""
-        )
-
-    if board_status() != "backlog":
-        print(f"[WARN] Issue #{number} is not authoritatively Backlog on the board.",
-              file=sys.stderr)
-        return None
     if not update_status(
         number, "Ready", require_board=True,
         expected_status="Backlog", require_unclaimed=True,
@@ -1042,10 +999,13 @@ def _promote_one_idle_backlog_issue_locked(
         raise AutoTriageError(
             f"qualified Backlog issue #{number} could not be promoted cleanly"
         )
-    post_issues = list_open_issues()
-    post = next((issue for issue in post_issues if issue["number"] == number), None)
     post_candidate, _post_slug = _idle_backlog_candidate(
-        agent, expected_ready_issue=number)
+        agent,
+        expected_ready_issue=number,
+        repo_slug_snapshot=repo_slug_snapshot,
+        projects_snapshot=projects_snapshot,
+    )
+    post = post_candidate
     post_statuses = {
         name.lower() for name in issue_label_names(post or {})
         if name.lower().startswith("status:")
@@ -1063,12 +1023,24 @@ def _promote_one_idle_backlog_issue_locked(
     stable = post is not None and all(
         post.get(field) == fresh.get(field) for field in stable_fields
     )
-    post_work = select(agent, family, round_cap, cross_family_wait)["work"]
+    if post_candidate is None:
+        post_selection = {"work": {"type": "idle"}}
+    elif post_snapshot_out is None:
+        post_selection = select(agent, family, round_cap, cross_family_wait)
+    else:
+        post_selection = select(
+            agent, family, round_cap, cross_family_wait,
+            prs_snapshot=post_snapshot_out.get("prs", _UNSET),
+            issues_snapshot=post_snapshot_out.get("issues", _UNSET),
+        )
+    post_work = post_selection["work"]
+    if post_snapshot_out is not None:
+        post_snapshot_out["_selection"] = post_selection
     if (post_statuses != {"status:ready"} or post_agents
             or post_labels != expected_labels or not stable
             or post_candidate is None or post_candidate.get("number") != number
             or post_work.get("type") != "issue" or post_work.get("issue") != number
-            or board_status() != "ready"):
+            or _post_slug != repo_slug):
         rolled_back = update_status(
             number, "Backlog", require_board=True,
             expected_status="Ready", require_unclaimed=True,
@@ -1086,6 +1058,11 @@ def promote_one_idle_backlog_issue(
     family: str | None = None,
     round_cap: int = DEFAULT_ROUND_CAP,
     cross_family_wait: int = DEFAULT_CROSS_FAMILY_WAIT_MIN,
+    *,
+    current_selection: dict[str, Any] | None = None,
+    issues_snapshot: Any = _UNSET,
+    prs_snapshot: Any = _UNSET,
+    post_snapshot_out: dict[str, Any] | None = None,
 ) -> int | None:
     """Serialize one auto-triage transition against other lifecycle writes."""
     with merge_pr.repository_merge_lock() as (locked, message):
@@ -1094,6 +1071,10 @@ def promote_one_idle_backlog_issue(
             return None
         return _promote_one_idle_backlog_issue_locked(
             agent, family, round_cap, cross_family_wait,
+            current_selection=current_selection,
+            issues_snapshot=issues_snapshot,
+            prs_snapshot=prs_snapshot,
+            post_snapshot_out=post_snapshot_out,
         )
 
 
@@ -1106,6 +1087,10 @@ def main():  # noqa: C901, PLR0912, PLR0915
                         help="This agent's model family (anthropic, openai, ...). "
                              "Omitting it means every PR looks cross-family.")
     parser.add_argument("--claim", action="store_true", help="Claim the selected work item")
+    parser.add_argument(
+        "--promote-idle", action="store_true",
+        help="Promote one qualified Backlog item when idle without claiming it",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument(
         "--round-cap", type=int, default=DEFAULT_ROUND_CAP,
@@ -1157,19 +1142,28 @@ def main():  # noqa: C901, PLR0912, PLR0915
     # A read-only picker call remains read-only. A loop asking to claim work may
     # promote one mechanically qualified Backlog item, then immediately run the
     # ordinary selector again so normal claim arbitration still applies.
-    if args.claim and work["type"] == "idle":
+    if (args.claim or args.promote_idle) and work["type"] == "idle":
+        post_promotion_snapshot: dict[str, Any] = {}
         try:
             promoted = promote_one_idle_backlog_issue(
                 args.agent, (args.family or "").lower() or None,
                 args.round_cap, args.cross_family_wait,
+                current_selection=res,
+                issues_snapshot=issues_snapshot,
+                prs_snapshot=prs_snapshot,
+                post_snapshot_out=post_promotion_snapshot,
             )
         except AutoTriageError as exc:
             promoted = None
             res["work"] = {"type": "error", "skill": None, "reason": str(exc)}
             work = res["work"]
         if promoted is not None:
-            res = select(args.agent, (args.family or "").lower() or None,
-                         args.round_cap, args.cross_family_wait)
+            res = post_promotion_snapshot.get("_selection") or select(
+                args.agent, (args.family or "").lower() or None,
+                args.round_cap, args.cross_family_wait,
+                prs_snapshot=post_promotion_snapshot.get("prs", _UNSET),
+                issues_snapshot=post_promotion_snapshot.get("issues", _UNSET),
+            )
             res["auto_promoted_issue"] = promoted
             work = res["work"]
 

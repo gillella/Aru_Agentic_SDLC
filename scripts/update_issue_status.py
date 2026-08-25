@@ -104,7 +104,11 @@ def update_status(
     # When the board is mandatory, move it first.  This prevents a failed
     # board lookup from changing the label and leaving the two representations
     # out of sync while still returning an error to the caller.
-    board_ok = set_board_status(issue_id, canonical)
+    board_ok = (
+        set_board_status(issue_id, canonical, expected_status=expected_status)
+        if expected_status is not None
+        else set_board_status(issue_id, canonical)
+    )
     if board_ok:
         print(f"✅ Project board item moved to '{canonical}'.")
     else:

@@ -30,13 +30,13 @@ from common import (
     get_repo_projects,
     get_repo_slug,
     label_names,
-    query_issue_project_items,
     query_open_issues,
     run_cmd,
     run_gh_json,
-    select_governed_project_items,
     select_governed_projects,
 )
+from picker_board_inventory import governed_board_inventory
+from github_inventory import open_pull_requests as rest_open_pull_requests
 
 EXIT_COMPLETE = 0
 EXIT_ERROR = 1
@@ -113,17 +113,10 @@ CODE_FILE_SUFFIXES = frozenset({
     ".graphql", ".gql",
 })
 
-PR_FIELDS = (
-    "number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
-    "createdAt,headRefName,body,comments,reviewDecision,mergeStateStatus,state"
-)
-
-
 def list_open_prs_details() -> Optional[List[Dict[str, Any]]]:
-    """Fetches list of open PRs via gh CLI."""
-    cmd = ["gh", "pr", "list", "--state", "open", "--limit", "200", "--json", PR_FIELDS]
-    res = run_gh_json(cmd)
-    return res if isinstance(res, list) else None
+    """Fetch open PRs through REST without spending GraphQL quota."""
+    slug = get_repo_slug()
+    return rest_open_pull_requests(run_cmd, slug) if slug else None
 
 
 def list_worktree_branches() -> List[str]:
@@ -249,17 +242,19 @@ def _merged_pr_search(now: Optional[datetime] = None) -> str:
     return f"is:pr is:merged merged:>={since}"
 
 
-def most_recent_merge_history() -> Tuple[Optional[datetime], bool]:
+def most_recent_merge_history(repo_slug: Optional[str] = None) -> Tuple[Optional[datetime], bool]:
     """Newest mergedAt in the stall lookback, plus whether the lookup succeeded.
 
     A failed ``gh`` call is not the same as an empty merge history. Callers
     must not report a stall when this returns ``(None, False)``.
     """
+    slug = repo_slug or get_repo_slug()
+    if not slug:
+        return None, False
     res = run_gh_json([
-        "gh", "pr", "list",
-        "--search", _merged_pr_search(),
-        "--limit", str(STALL_MERGE_WINDOW),
-        "--json", "mergedAt",
+        "gh", "api", "--method", "GET", f"repos/{slug}/pulls",
+        "-f", "state=closed", "-f", "sort=updated", "-f", "direction=desc",
+        "-f", f"per_page={STALL_MERGE_WINDOW}",
     ])
     if not isinstance(res, list):
         return None, False
@@ -267,7 +262,7 @@ def most_recent_merge_history() -> Tuple[Optional[datetime], bool]:
     for row in res:
         if not isinstance(row, dict):
             continue
-        parsed = _parse_ts(row.get("mergedAt"))
+        parsed = _parse_ts(row.get("merged_at") or row.get("mergedAt"))
         if parsed is not None:
             stamps.append(parsed)
     return (max(stamps) if stamps else None), True
@@ -448,53 +443,11 @@ def _has_reviewed_by(pr: Dict[str, Any]) -> bool:
 
 
 def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # noqa: C901
-    if "_review_evidence" in pr:
-        return pr["_review_evidence"]
-    # Review evidence is the expensive path: several GraphQL pages per PR.
-    # Cheap snapshot fields can already prove these PRs are not review-ready.
-    if pr.get("isDraft"):
-        pr["_review_evidence"] = None
-        return None
-    cached_feedback = pr.get("_active_review_feedback")
-    if cached_feedback is not None and len(cached_feedback) > 0:
-        pr["_review_evidence"] = None
-        return None
-    unresolved = pr.get("unresolvedReviewThreadsCount")
-    if unresolved is not None:
-        try:
-            if int(unresolved) > 0:
-                pr["_review_evidence"] = None
-                return None
-        except (TypeError, ValueError):
-            pass
-    threads = pr.get("reviewThreads")
-    if isinstance(threads, dict) and isinstance(threads.get("nodes"), list):
-        if any(not node.get("isResolved") for node in threads["nodes"] if isinstance(node, dict)):
-            pr["_review_evidence"] = None
-            return None
-    elif isinstance(threads, list):
-        if any(not node.get("isResolved") for node in threads if isinstance(node, dict)):
-            pr["_review_evidence"] = None
-            return None
-    rollup = pr.get("statusCheckRollup") or []
-    if not any(
-        isinstance(item, dict)
-        and isinstance(item.get("name") or item.get("context"), str)
-        and (item.get("name") or item.get("context")).strip().lower() == "coderabbit"
-        for item in rollup
-    ):
-        pr["_review_evidence"] = None
-        return None
-    try:
-        import merge_pr as mp
-
-        evidence = mp.review_evidence(pr["number"])
-        evidence = mp._with_coderabbit_status(pr["number"], evidence)
-    except Exception as exc:
-        print(f"[WARN] Could not load review evidence for PR #{pr['number']}: {exc}", file=sys.stderr)
-        evidence = None
-    pr["_review_evidence"] = evidence
-    return evidence
+    # Exact-head merge authority belongs to merge_pr.py. Re-running its
+    # multi-query evidence gate for every open PR made one harmless status
+    # refresh consume most of the GraphQL budget.
+    cached = pr.get("_review_evidence")
+    return cached if isinstance(cached, dict) else None
 
 
 def _has_active_review_feedback(pr: Dict[str, Any]) -> bool:
@@ -510,19 +463,7 @@ def _has_active_review_feedback(pr: Dict[str, Any]) -> bool:
             return sum(1 for t in threads["nodes"] if not t.get("isResolved")) > 0
         if isinstance(threads, list):
             return sum(1 for t in threads if not t.get("isResolved")) > 0
-    try:
-        from fetch_pr_feedback import fetch_active_review_feedback
-
-        feedback = fetch_active_review_feedback(pr["number"])
-        if feedback is None:
-            pr["_active_review_feedback"] = None
-            return True
-        pr["_active_review_feedback"] = feedback
-        return len(feedback) > 0
-    except Exception as exc:
-        print(f"[WARN] Could not load active review feedback for PR #{pr['number']}: {exc}", file=sys.stderr)
-        pr["_active_review_feedback"] = None
-        return True
+    return str(pr.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED"
 
 
 def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
@@ -1119,9 +1060,13 @@ def evaluate_queue_row(
 
     fetch_pr_fn = fetch_pr_fn or mp.fetch_pr
     linked_issues_fn = linked_issues_fn or mp.linked_issues
-    issue_body_fn = issue_body_fn or (
-        lambda num: (mp._gh_json(["gh", "issue", "view", str(num), "--json", "body"]) or {}).get("body") or ""
-    )
+    if issue_body_fn is None:
+        slug = get_repo_slug()
+
+        def issue_body_fn(num):
+            return (
+                mp._gh_json(["gh", "api", f"repos/{slug}/issues/{num}"]) or {}
+            ).get("body") or ""
     review_evidence_fn = review_evidence_fn or mp.review_evidence
     evaluate_dod_fn = evaluate_dod_fn or mp.evaluate_dod
 
@@ -1419,6 +1364,24 @@ def _evaluate_current_repo(  # noqa: C901, PLR0912, PLR0915
 
     worktree_branches = list_worktree_branches()
 
+    if issues:
+        board_inventory = governed_board_inventory(
+            slug,
+            {int(issue["number"]) for issue in issues},
+            projects=projects,
+            require_complete=False,
+        )
+        if board_inventory is None:
+            return _error(
+                "Failed to query the governed project-board inventory.",
+                "ERROR: Could not query issue project-board state.",
+            )
+        board_statuses, _literal_ready_count = board_inventory
+    else:
+        # No issue can be orphaned or drifted, so a board-item query would be
+        # pure polling overhead on the factory's most common idle snapshot.
+        board_statuses = {}
+
     blocked_reasons: List[str] = []
     waiting_reasons: List[str] = []
     drifted_issues: List[int] = []
@@ -1435,25 +1398,11 @@ def _evaluate_current_repo(  # noqa: C901, PLR0912, PLR0915
             active_claims.append({"type": "issue", "number": num, "agent": holder})
 
         # Board drift check
-        items = query_issue_project_items(num)
-        if items is None:
-            return _error(
-                f"Failed to query project-board items for issue #{num}.",
-                "ERROR: Could not query issue project-board state.",
-            )
-        gov_items = select_governed_project_items(items, slug)
-        if not gov_items:
+        board_status = board_statuses.get(num)
+        if board_status is None:
             orphan_issues.append(num)
             waiting_reasons.append(f"Issue #{num} is open but not on board '{board_title}'.")
         else:
-            status_value = gov_items[0].get("status") or {}
-            board_status = status_value.get("name")
-            if not board_status:
-                p_field = (gov_items[0].get("project") or {}).get("field") or {}
-                board_options = {
-                    o["id"]: o["name"] for o in p_field.get("options", [])
-                }
-                board_status = board_options.get(gov_items[0].get("statusOptionId"))
             # Label vs Board alignment check
             current_status_label = next(
                 (name.replace("status:", "") for name in labels if name.startswith("status:")),
@@ -1509,7 +1458,7 @@ def _evaluate_current_repo(  # noqa: C901, PLR0912, PLR0915
 
     # Stall is a fleet-level condition: no per-agent branch can observe zero
     # global throughput, because every waiting agent is locally in a valid state.
-    newest_merge, merge_lookup_ok = most_recent_merge_history()
+    newest_merge, merge_lookup_ok = most_recent_merge_history(slug)
     hours_since_last_merge = (
         _hours_ago(newest_merge, datetime.now(timezone.utc)) if merge_lookup_ok else None
     )

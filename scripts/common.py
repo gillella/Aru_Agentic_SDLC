@@ -21,9 +21,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from github_inventory import (
     board_agent_identities as rest_board_agent_identities,
+    issue_details as rest_issue_details,
     local_repo_slug,
     open_issues as rest_open_issues,
 )
+from github_issue_trust import query_issue_trust_identity
 
 
 VERIFICATION_EVIDENCE_SCHEMA = "aru.verification.v1"
@@ -868,14 +870,27 @@ def touches_conflict(a_paths: List[str], b_paths: List[str]) -> Optional[Tuple[s
 
 
 def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
-    """Fetches single issue details via gh CLI, plus GraphQL trust identity."""
-    cmd = [
-        "gh", "issue", "view", str(issue_id),
-        "--json", "number,title,labels,assignees,body,state,author,updatedAt",
-    ]
-    res = run_gh_json(cmd)
-    if not isinstance(res, dict):
+    """Fetch one issue through REST, using GraphQL only for outsider edits.
+
+    The claim path calls this repeatedly for optimistic concurrency checks.
+    ``gh issue view`` made every one of those reads a GraphQL request even
+    though REST already returns all ordinary issue fields and the author's
+    repository association.  The only missing trust datum is the last editor,
+    and that matters only when the original author is not already trusted.
+    """
+    slug = get_repo_slug()
+    if not slug:
         return None
+    res = rest_issue_details(run_gh_json, slug, issue_id)
+    if not res:
+        return None
+    association = res.get("authorAssociation")
+    if isinstance(association, str) and association.upper() in TRUSTED_AUTHOR_ASSOCIATIONS:
+        # REST supplied enough information to establish trust.  Do not spend a
+        # GraphQL request merely to learn an editor that cannot reduce trust.
+        res["trustIdentityResolved"] = True
+        return res
+
     trust = _issue_trust_identity(issue_id)
     res["trustIdentityResolved"] = trust is not None
     if trust:
@@ -886,47 +901,9 @@ def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
     return res
 
 
-_ISSUE_TRUST_QUERY = """
-query($owner:String!, $repo:String!, $number:Int!) {
-  repository(owner:$owner, name:$repo) {
-    issue(number:$number) {
-      editor { login }
-      authorAssociation
-    }
-  }
-}
-"""
-
-
 def _issue_trust_identity(issue_id: int) -> Optional[Dict[str, Any]]:
     """Editor and association fields that `gh issue view --json` cannot return."""
-    slug = get_repo_slug()
-    if not slug or "/" not in slug:
-        return None
-    owner, repo = slug.split("/", 1)
-    cmd = [
-        "gh", "api", "graphql",
-        "-f", f"query={_ISSUE_TRUST_QUERY}",
-        "-F", f"owner={owner}",
-        "-F", f"repo={repo}",
-        "-F", f"number={issue_id}",
-    ]
-    payload = run_gh_json(cmd)
-    if not isinstance(payload, dict) or payload.get("errors"):
-        return None
-    try:
-        node = payload["data"]["repository"]["issue"]
-    except (KeyError, TypeError):
-        return None
-    if not isinstance(node, dict):
-        return None
-    trust: Dict[str, Any] = {}
-    if "editor" in node:
-        trust["editor"] = node.get("editor")
-    association = node.get("authorAssociation")
-    if isinstance(association, str) and association:
-        trust["authorAssociation"] = association
-    return trust
+    return query_issue_trust_identity(issue_id, get_repo_slug, run_gh_json)
 
 
 def fetch_pr_comments(pr_id: int) -> List[Dict[str, Any]]:
@@ -1195,7 +1172,12 @@ def attach_issue_to_governed_project(issue_number: int) -> bool:
     return add_issue_to_project(issue_number, int(project_number), owner)
 
 
-def set_board_status(issue_number: int, status: str) -> bool:
+def set_board_status(
+    issue_number: int,
+    status: str,
+    *,
+    expected_status: Optional[str] = None,
+) -> bool:
     """Moves an issue's board item(s) to the named Status option.
 
     Returns True only if at least one board item actually moved, so callers can
@@ -1218,6 +1200,19 @@ def set_board_status(issue_number: int, status: str) -> bool:
             file=sys.stderr,
         )
         return False
+
+    if expected_status is not None:
+        current = {
+            str((item.get("status") or {}).get("name") or "").lower()
+            for item in items
+        }
+        if current != {expected_status.lower()}:
+            print(
+                f"[CONFLICT] Issue #{issue_number} board status is not exactly "
+                f"'{expected_status}'; refusing conditional move.",
+                file=sys.stderr,
+            )
+            return False
 
     moved = False
     for item in items:

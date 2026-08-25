@@ -10,6 +10,29 @@ Runner = Callable[..., Tuple[int, str, str]]
 IDENTITY_LABEL_PREFIXES = ("agent:", "reviewer:", "merger:", "author:")
 
 
+def issue_details(run_json, slug: str, issue_id: int) -> Optional[Dict[str, Any]]:
+    """Read and normalize one issue through REST."""
+    raw = run_json(["gh", "api", f"repos/{slug}/issues/{issue_id}"])
+    if (
+        not isinstance(raw, dict) or raw.get("pull_request") is not None
+        or not isinstance(raw.get("number"), int)
+        or not isinstance(raw.get("title"), str)
+        or not isinstance(raw.get("labels"), list)
+        or not isinstance(raw.get("assignees"), list)
+        or not isinstance(raw.get("state"), str)
+        or not isinstance(raw.get("user"), dict)
+        or not isinstance((raw.get("user") or {}).get("login"), str)
+    ):
+        return None
+    return {
+        "number": raw["number"], "title": raw["title"], "labels": raw["labels"],
+        "assignees": raw["assignees"], "body": raw.get("body") or "",
+        "state": raw["state"].upper(), "author": {"login": raw["user"]["login"]},
+        "updatedAt": raw.get("updated_at"),
+        "authorAssociation": raw.get("author_association"),
+    }
+
+
 def hydrate_renamed_files(records, owner, repo, rename_types, rest_loader):
     """Use REST only when GraphQL identifies a rename needing its old path."""
     for record in records:
@@ -133,3 +156,53 @@ def open_issues(run: Runner, slug: str) -> Optional[List[Dict[str, Any]]]:
             "authorAssociation": row.get("author_association"),
         })
     return issues
+
+
+def open_pull_requests(run: Runner, slug: str) -> Optional[List[Dict[str, Any]]]:
+    """Read a complete REST open-PR snapshot for status diagnostics.
+
+    This intentionally contains only facts exposed by the list endpoint.
+    Fleet status is diagnostic, not merge authority, so it must not perform
+    per-PR review/thread/check queries merely to say that an open PR is waiting.
+    """
+    command = [
+        "gh", "api", "--paginate", f"repos/{slug}/pulls?state=open&per_page=100",
+        "--jq", ".[]",
+    ]
+    code, stdout, _ = run(command, check=False)
+    rows = json_lines(stdout) if code == 0 else None
+    if rows is None:
+        return None
+    prs: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for row in rows:
+        number = row.get("number") if isinstance(row, dict) else None
+        labels = row.get("labels") if isinstance(row, dict) else None
+        head = row.get("head") if isinstance(row, dict) else None
+        if (
+            not isinstance(number, int) or number in seen
+            or not isinstance(labels, list)
+            or any(not isinstance(label, dict) or not isinstance(label.get("name"), str)
+                   for label in labels)
+            or not isinstance(head, dict)
+        ):
+            return None
+        seen.add(number)
+        prs.append({
+            "number": number,
+            "title": row.get("title") or "",
+            "isDraft": bool(row.get("draft")),
+            "labels": labels,
+            "reviews": [],
+            "statusCheckRollup": [],
+            "updatedAt": row.get("updated_at"),
+            "createdAt": row.get("created_at"),
+            "headRefName": head.get("ref") or "",
+            "headRefOid": head.get("sha") or "",
+            "body": row.get("body") or "",
+            "comments": [],
+            "reviewDecision": "",
+            "mergeStateStatus": "",
+            "state": "OPEN",
+        })
+    return prs

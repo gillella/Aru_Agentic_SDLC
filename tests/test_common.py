@@ -269,54 +269,6 @@ class MetadataTrustTests(unittest.TestCase):
             {"acme-corp", "alice", "bob"},
         )
 
-    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
-    @patch.object(common, "run_gh_json")
-    def test_get_issue_merges_graphql_trust_identity(self, gh_json, _slug):
-        gh_json.side_effect = [
-            {
-                "number": 7,
-                "title": "t",
-                "labels": [],
-                "author": {"login": "alice"},
-            },
-            {
-                "data": {
-                    "repository": {
-                        "issue": {
-                            "editor": {"login": "owner"},
-                            "authorAssociation": "COLLABORATOR",
-                        }
-                    }
-                }
-            },
-        ]
-        issue = common.get_issue(7)
-        self.assertEqual(issue["author"], {"login": "alice"})
-        self.assertEqual(issue["editor"], {"login": "owner"})
-        self.assertEqual(issue["authorAssociation"], "COLLABORATOR")
-        self.assertTrue(issue["trustIdentityResolved"])
-
-    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
-    @patch.object(common, "run_gh_json")
-    def test_get_issue_failed_trust_lookup_rejects_rewrite_label(
-        self, gh_json, _slug
-    ):
-        gh_json.side_effect = [
-            {
-                "number": 7,
-                "title": "t",
-                "labels": [{"name": common.TRUSTED_REWRITE_LABEL}],
-                "author": {"login": "attacker"},
-            },
-            {"errors": [{"message": "timeout"}]},
-        ]
-        issue = common.get_issue(7)
-        self.assertFalse(issue["trustIdentityResolved"])
-        self.assertNotIn("editor", issue)
-        self.assertFalse(
-            common.is_trusted_metadata_author(issue, owner="gillella"))
-
-
 class ProseAndCodeBlockExclusionTests(unittest.TestCase):
     """#294: line-anchored metadata must not treat code or prose as paths.
 

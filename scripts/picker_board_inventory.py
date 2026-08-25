@@ -48,10 +48,23 @@ def stage_expected_ready_for_triage(
 
 
 def governed_board_inventory(
-    repo_slug: str, open_numbers: set[int],
+    repo_slug: str,
+    open_numbers: set[int],
+    *,
+    projects: list[dict] | None = None,
+    require_complete: bool = True,
 ) -> tuple[dict[int, str], int] | None:
-    """Return complete open-issue statuses and the board's literal Ready count."""
-    governed = select_governed_projects(get_repo_projects(repo_slug) or [], repo_slug)
+    """Return open-issue statuses and the board's literal Ready count.
+
+    Callers that already loaded repository project metadata can pass it so a
+    cycle does not repeat the same Projects query.  ``require_complete=False``
+    is for status diagnostics: missing open issues are then reported as board
+    orphans instead of making the single inventory unreadable.
+    """
+    available = projects if projects is not None else get_repo_projects(repo_slug)
+    if available is None:
+        return None
+    governed = select_governed_projects(available, repo_slug)
     if len(governed) != 1:
         return None
     project = governed[0]
@@ -86,4 +99,6 @@ def governed_board_inventory(
         if issue_number in statuses or not isinstance(status, str) or not status:
             return None
         statuses[issue_number] = status
-    return (statuses, ready_count) if set(statuses) == open_numbers else None
+    if require_complete and set(statuses) != open_numbers:
+        return None
+    return statuses, ready_count
