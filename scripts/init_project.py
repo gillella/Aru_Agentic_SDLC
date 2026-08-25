@@ -119,7 +119,7 @@ branch, or merge around the Definition-of-Done gate.
   non-authoritative here.
 - Brainstorming frameworks supply input to Aru's plan gate rather than running
   a parallel lifecycle.
-- Memory tools provide context only. **CodeRabbit is the default PR code-review authority, with an explicit per-pull-request fallback.** `create_pr.py` assigns exactly `review:coderabbit` and never rotates; that label selects the oracle but never satisfies review by itself. When CodeRabbit is demonstrably unavailable for one pull request, an operator may move that pull request to `review:sourcery` via `reassign_review.py`, which records the reason. Exactly one authority label exists at a time, and the merge gate still requires that service's producer-validated evidence bound to the exact current head. Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
+- Memory tools provide context only. **CodeRabbit is the sole positive PR code-review authority.** `create_pr.py` assigns exactly `review:coderabbit`; that label selects the oracle but never satisfies review by itself. Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
 
 After the uniquely newest authenticated completed exact-head CodeRabbit Review is present—
 `APPROVED` may have an empty body; `COMMENTED` must be substantive unless the ordered full-review no-findings proof exists; `CHANGES_REQUESTED` blocks—along with a producer-authenticated successful CodeRabbit status for that head,
@@ -142,7 +142,7 @@ governed remediation.
    - Router: `aru-agentic-sdlc/SKILL.md`
    - Primary Skill: `implement-next-issue/SKILL.md`
    - Issue Creation: `create-github-issue/SKILL.md`
-   - Code Review Skill: `code-review/SKILL.md` (refusal; only the assigned external service supplies positive review authority)
+   - Code Review Skill: `code-review/SKILL.md` (refusal; CodeRabbit alone supplies positive review authority)
    - CI Failure Remediation: `remediate-ci-failure/SKILL.md`
    - PR Review Feedback: `address-pr-feedback/SKILL.md`
 2. **Worktree Isolation**:

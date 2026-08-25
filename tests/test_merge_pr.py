@@ -945,6 +945,293 @@ class SourceryEvidenceTests(unittest.TestCase):
             self.assertEqual(merge_pr.with_service_evidence(cr, 1, {}), {"picked": "cr"})
 
 
+class CodeAntEvidenceTests(unittest.TestCase):
+    """#435: CodeAnt satisfies the gate only on producer-validated exact-head proof.
+
+    CodeAnt is the one assigned service with two legitimate shapes of positive
+    evidence: a Review object, and -- when a run finds nothing and so leaves no
+    Review object behind -- its provider-owned rolling status comment. Both
+    paths are exercised here, together with the ways each one is spoofable.
+    """
+
+    HEAD = "e" * 40
+    PRIOR = "f" * 40
+
+    def pr(self):
+        pr = labelled("author:agent-1", "review:codeant")
+        pr.update({"number": 434, "headRefOid": self.HEAD, "body": "Closes #413"})
+        return pr
+
+    def review(self, **over):
+        entry = {
+            "id": "codeant-review-1",
+            "state": "COMMENTED",
+            "body": "CodeAnt reviewed this head.",
+            "submittedAt": "2026-08-20T10:00:00Z",
+            "author": {"login": "codeant-ai", "__typename": "Bot"},
+            "commit": {"oid": self.HEAD},
+        }
+        entry.update(over)
+        return entry
+
+    def record(self, **over):
+        entry = {
+            "label": "CodeAnt review",
+            "commit": self.HEAD,
+            "started": "2026-08-20T10:00:00Z",
+            "finished": "2026-08-20T10:04:00Z",
+            "done": True,
+        }
+        entry.update(over)
+        return entry
+
+    def status_comment(self, records, *, login="codeant-ai", typename="Bot",
+                       body=None):
+        if body is None:
+            body = (f"### CodeAnt status\n{merge_pr.CODEANT_STATUS_MARKER_PREFIX}"
+                    f"{json.dumps(records)}-->")
+        return {"body": body, "author": {"login": login, "__typename": typename}}
+
+    def evidence(self, *, reviews=(), comments=(), **over):
+        ev = {"github_review_evidence": True, "head_oid": self.HEAD,
+              "reviews": list(reviews), "codeant_status_comments": list(comments),
+              "unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}
+        ev.update(over)
+        return ev
+
+    # -- Review-object path -------------------------------------------------
+
+    def test_exact_head_review_object_is_authoritative(self):
+        for state in ("COMMENTED", "APPROVED"):
+            with self.subTest(state=state):
+                ev = self.evidence(reviews=[self.review(state=state)])
+                self.assertTrue(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_gate_passes_end_to_end_on_a_review_object(self):
+        ok, message = merge_pr.check_reviews(
+            self.pr(), self.evidence(reviews=[self.review()]))
+        self.assertTrue(ok, message)
+        self.assertIn("CodeAnt review is complete", message)
+
+    def test_changes_requested_blocks_until_re_review(self):
+        ev = self.evidence(reviews=[self.review(state="CHANGES_REQUESTED")])
+        self.assertFalse(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+        ok, message = merge_pr.check_reviews(self.pr(), ev)
+        self.assertFalse(ok)
+        self.assertIn("requested changes", message)
+
+    def test_another_account_naming_itself_codeant_is_not_codeant(self):
+        """Only the ``codeant-ai`` Bot identity attests; a lookalike is history."""
+        for author in ({"login": "codeant", "__typename": "Bot"},
+                       {"login": "codeant-ai-reviews", "__typename": "Bot"},
+                       {"login": "gillella", "__typename": "User"}):
+            with self.subTest(author=author["login"]):
+                ev = self.evidence(reviews=[self.review(author=author)])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_codeant_login_on_a_non_bot_actor_blocks_both_paths(self):
+        """A human who took the login is a spoof, not a fallback to status."""
+        ev = self.evidence(
+            reviews=[self.review(author={"login": "codeant-ai",
+                                         "__typename": "User"})],
+            comments=[self.status_comment([self.record()])])
+        self.assertIs(merge_pr._codeant_latest_review(ev),
+                      merge_pr.CODEANT_REVIEW_UNUSABLE)
+        self.assertFalse(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+        ok, message = merge_pr.check_reviews(self.pr(), ev)
+        self.assertFalse(ok)
+        self.assertIn("untrustworthy Review object", message)
+
+    def test_pending_review_at_head_blocks_trusted_status(self):
+        """A run still in flight must not be overtaken by an older status row."""
+        ev = self.evidence(reviews=[self.review(state="PENDING",
+                                                submittedAt=None)],
+                           comments=[self.status_comment([self.record()])])
+        self.assertIs(merge_pr._codeant_latest_review(ev),
+                      merge_pr.CODEANT_REVIEW_UNUSABLE)
+        self.assertFalse(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_malformed_current_head_review_blocks(self):
+        for over in ({"id": ""}, {"id": 7}, {"submittedAt": None},
+                     {"submittedAt": "not-a-time"}, {"body": None},
+                     {"state": "COMMENTED", "body": "   "},
+                     {"state": "APPROVED_MAYBE"}, {"commit": None},
+                     {"commit": {"oid": "not-a-sha"}}):
+            with self.subTest(over=over):
+                ev = self.evidence(reviews=[self.review(**over)])
+                self.assertIs(merge_pr._codeant_latest_review(ev),
+                              merge_pr.CODEANT_REVIEW_UNUSABLE)
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_two_current_head_reviews_at_the_same_instant_are_ambiguous(self):
+        ev = self.evidence(reviews=[self.review(),
+                                    self.review(id="codeant-review-2",
+                                                state="CHANGES_REQUESTED")])
+        self.assertIs(merge_pr._codeant_latest_review(ev),
+                      merge_pr.CODEANT_REVIEW_UNUSABLE)
+        self.assertFalse(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_newest_current_head_review_wins_over_an_earlier_one(self):
+        ev = self.evidence(reviews=[
+            self.review(state="CHANGES_REQUESTED",
+                        submittedAt="2026-08-20T10:00:00Z"),
+            self.review(id="codeant-review-2", state="APPROVED",
+                        submittedAt="2026-08-20T11:00:00Z"),
+        ])
+        self.assertTrue(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_prior_head_review_is_history_not_current_evidence(self):
+        review = self.review(commit={"oid": self.PRIOR})
+        self.assertIsNone(
+            merge_pr._codeant_latest_review(self.evidence(reviews=[review])))
+        self.assertFalse(merge_pr.has_authoritative_codeant_review(
+            self.pr(), self.evidence(reviews=[review])))
+        # ... and it must not veto a trusted status record for the live head.
+        self.assertTrue(merge_pr.has_authoritative_codeant_review(
+            self.pr(), self.evidence(reviews=[review],
+                                     comments=[self.status_comment(
+                                         [self.record()])])))
+
+    def test_dismissed_review_falls_through_to_status(self):
+        ev = self.evidence(reviews=[self.review(state="DISMISSED")],
+                           comments=[self.status_comment([self.record()])])
+        self.assertTrue(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    # -- Status-record path -------------------------------------------------
+
+    def test_clean_run_status_record_is_authoritative(self):
+        ev = self.evidence(comments=[self.status_comment([self.record()])])
+        self.assertTrue(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+        ok, message = merge_pr.check_reviews(self.pr(), ev)
+        self.assertTrue(ok, message)
+        self.assertIn("CodeAnt clean-review status is complete", message)
+
+    def test_status_history_may_carry_prior_heads_alongside_the_live_one(self):
+        ev = self.evidence(comments=[self.status_comment([
+            self.record(commit=self.PRIOR, done=False),
+            self.record(),
+        ])])
+        self.assertTrue(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_spoofed_status_author_is_refused(self):
+        for login, typename in (("gillella", "User"), ("codeant", "Bot"),
+                                ("codeant-ai", "User"),
+                                ("codeant-ai", "Organization")):
+            with self.subTest(login=login, typename=typename):
+                ev = self.evidence(comments=[self.status_comment(
+                    [self.record()], login=login, typename=typename)])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_unfinished_or_failed_record_at_head_blocks(self):
+        for over in ({"done": False}, {"done": "true"}, {"finished": None},
+                     {"started": "whenever"}, {"label": "   "}, {"label": 7}):
+            with self.subTest(over=over):
+                ev = self.evidence(comments=[self.status_comment(
+                    [self.record(**over)])])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_unexpected_record_shape_at_head_blocks(self):
+        extra = self.record()
+        extra["verdict"] = "clean"
+        missing = self.record()
+        del missing["finished"]
+        for record in (extra, missing):
+            with self.subTest(keys=sorted(record)):
+                ev = self.evidence(comments=[self.status_comment([record])])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_records_that_name_no_live_head_are_missing_evidence(self):
+        for over in ({"commit": self.PRIOR}, {"commit": "abc123"},
+                     {"commit": None}, {"commit": self.HEAD[:39]}):
+            with self.subTest(over=over):
+                ev = self.evidence(comments=[self.status_comment(
+                    [self.record(**over)])])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_head_comparison_is_case_insensitive(self):
+        ev = self.evidence(comments=[self.status_comment(
+            [self.record(commit=self.HEAD.upper())])])
+        self.assertTrue(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_two_trusted_status_comments_are_ambiguous(self):
+        ev = self.evidence(comments=[self.status_comment([self.record()]),
+                                     self.status_comment([self.record()])])
+        self.assertFalse(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_duplicated_marker_in_one_comment_yields_nothing_usable(self):
+        marker = (f"{merge_pr.CODEANT_STATUS_MARKER_PREFIX}"
+                  f"{json.dumps([self.record()])}-->")
+        ev = self.evidence(comments=[self.status_comment(None,
+                                                         body=marker + marker)])
+        self.assertFalse(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_malformed_marker_payloads_yield_nothing_usable(self):
+        for payload in ("not json", "{}", '"clean"', "[", "null"):
+            with self.subTest(payload=payload):
+                body = (f"{merge_pr.CODEANT_STATUS_MARKER_PREFIX}{payload}-->")
+                ev = self.evidence(comments=[self.status_comment(None, body=body)])
+                self.assertIsNone(merge_pr._codeant_status_records(body))
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_absent_or_malformed_status_collection_blocks(self):
+        for comments in (None, "nope", 7):
+            with self.subTest(comments=comments):
+                ev = self.evidence()
+                ev["codeant_status_comments"] = comments
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+        ev = self.evidence()
+        del ev["codeant_status_comments"]
+        self.assertFalse(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_no_evidence_of_any_kind_blocks_with_recovery_wording(self):
+        ok, message = merge_pr.check_reviews(self.pr(), self.evidence())
+        self.assertFalse(ok)
+        self.assertIn("CodeAnt has not supplied", message)
+
+    def test_unknown_head_blocks_every_path(self):
+        for head in (None, "", 7):
+            with self.subTest(head=head):
+                ev = self.evidence(reviews=[self.review()],
+                                   comments=[self.status_comment(
+                                       [self.record()])],
+                                   head_oid=head)
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    # -- Interaction with the shared gates ----------------------------------
+
+    def test_unresolved_codeant_threads_still_block_a_clean_status(self):
+        ev = self.evidence(comments=[self.status_comment([self.record()])])
+        ev["service_threads"] = {"codeant": {"unresolved": 1, "unfixed": 0,
+                                             "outdated_unfixed": 0}}
+        ok, message = merge_pr.check_reviews(self.pr(), ev)
+        self.assertFalse(ok)
+        self.assertIn("unresolved review thread", message)
+
+    def test_enrichment_needs_no_second_round_trip_for_codeant(self):
+        """Fetching CodeRabbit's status here would buy evidence nobody reads."""
+        with patch.object(merge_pr, "_with_coderabbit_status",
+                          return_value={"picked": "cr"}), \
+             patch.object(merge_pr, "_with_sourcery_runs",
+                          return_value={"picked": "sourcery"}):
+            self.assertEqual(
+                merge_pr.with_service_evidence(self.pr(), 434, {"picked": None}),
+                {"picked": None})
+
+    def test_codeant_is_recognised_as_a_fallback_authority(self):
+        self.assertEqual(merge_pr.assigned_review_service(self.pr()), "codeant")
+        self.assertIn("review:codeant", merge_pr.REVIEW_SERVICE_LABELS)
+
+
 class CiGateTests(unittest.TestCase):
     def test_all_successful_passes(self):
         pr = {"statusCheckRollup": [
@@ -1660,13 +1947,13 @@ class ReviewGateTests(unittest.TestCase):
         self.assertFalse(merge_pr.check_issue_link(pr)[0])
 
     def test_legacy_unknown_and_duplicate_review_labels_fail_closed(self):
-        # review:sourcery is a recognised fallback since #435 and is covered
-        # separately; CodeAnt stays unknown until #438 installs and validates it.
+        # review:sourcery and review:codeant are recognised fallbacks since
+        # #435 and are covered separately; every other shape still fails closed.
         cases = (
-            ("review:codeant",),
             ("review:manual",),
             ("review:coderabbit", "review:coderabbit"),
             ("review:coderabbit", "review:sourcery"),
+            ("review:sourcery", "review:codeant"),
         )
         for labels in cases:
             with self.subTest(labels=labels):
@@ -5434,6 +5721,7 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
                 return_value={
                     "attestations": [{"agent": "agent-2", "head": self.HEAD}],
                     "coderabbit_full_review_comments": [],
+                    "codeant_status_comments": [],
                 },
             ),
             patch.object(merge_pr, "_gh_json", return_value=self.thread_page(comments)),
