@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # +64 for the #344 terminal lease and stale-writer escalation.
-# line-ceiling: 5299
+# line-ceiling: 5305
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -4360,7 +4360,14 @@ def detect_stale_writer(repo_root, pr, branch, gated_sha, head_repo_slug):
         check=False, cwd=repo_root,
     )
     if code != 0:
-        return True, "Could not re-inspect the remote branch; no stale write asserted."
+        # Fail closed. A stale worker can recreate the branch between the
+        # delete and this re-read, so an unreadable remote is exactly when a
+        # stale write is most likely -- reporting success here would let
+        # close-out clear the merger claim with no escalation and no retry.
+        return False, (
+            "Could not re-inspect the remote branch after deletion; cannot rule out "
+            "a stale write. Close-out stays incomplete so recovery re-runs it."
+        )
     if not out.strip():
         return True, "No recreated branch."
     actual = out.split()[0]

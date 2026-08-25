@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # +42 for the #344 terminal merge lease guard.
-# line-ceiling: 1615
+# line-ceiling: 1620
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -418,14 +418,23 @@ def _terminally_merged(issue_id: int, issue=None):
         "gh", "issue", "view", str(issue_id),
         "--json", "state,closedByPullRequestsReferences",
     ])
-    if not isinstance(data, dict) or data.get("state") != "CLOSED":
+    # An unreadable lookup is not "not merged". A closed issue still carrying
+    # status:ready would otherwise sail through on a failed API call, so an
+    # unknown answer blocks on this governance path (CodeRabbit, #344).
+    if not isinstance(data, dict):
+        return (f"Could not read merge state for issue #{issue_id}; refusing to claim "
+                "rather than risk continuing terminally merged work.")
+    if data.get("state") != "CLOSED":
         return None
     for ref in data.get("closedByPullRequestsReferences") or []:
         number = ref.get("number") if isinstance(ref, dict) else None
         if not number:
             continue
         pr = run_gh_json(["gh", "pr", "view", str(number), "--json", "state,headRefName"])
-        if not isinstance(pr, dict) or pr.get("state") != "MERGED":
+        if not isinstance(pr, dict):
+            return (f"Could not read the state of PR #{number}, which closed issue "
+                    f"#{issue_id}; refusing to claim while merge state is unknown.")
+        if pr.get("state") != "MERGED":
             continue
         lease = terminal_merge_lease(pr.get("headRefName") or "")
         if lease:
@@ -1121,6 +1130,34 @@ def _remove_merger_label(pr_id: int, agent: str) -> bool:
     return code == 0
 
 
+def _terminal_lease_conflict(pr_id: int, labels):
+    """Exit code when a terminal lease blocks a merge claim, else None.
+
+    The terminal-lease label is only a cache. Labels are writable by anyone
+    with triage rights, so honouring one on its own would let an outsider
+    freeze any PR (CWE-345); the merged-PR record is the authority and the
+    label merely says when it is worth asking. claim_review and
+    complete_review need no equivalent guard, because #412 retired
+    coding-agent review and both are already unconditional refusals.
+    """
+    lease_sha = terminal_lease_sha(labels)
+    if not lease_sha:
+        return None
+    state = run_gh_json(["gh", "pr", "view", str(pr_id), "--json", "state"])
+    if not isinstance(state, dict):
+        print(f"[ERROR] PR #{pr_id} carries a terminal-lease label but its merge "
+              "state could not be read; refusing rather than guessing.", file=sys.stderr)
+        return EXIT_ERROR
+    if state.get("state") == "MERGED":
+        print(f"[CONFLICT] PR #{pr_id} was merged by a governed run (lease "
+              f"{lease_sha}); it cannot be claimed for merge again. File a new "
+              "governed issue and branch for follow-up work.", file=sys.stderr)
+        return EXIT_CONFLICT
+    print(f"[WARN] PR #{pr_id} carries terminal-lease:{lease_sha} but GitHub reports "
+          "it unmerged; ignoring the label and continuing.", file=sys.stderr)
+    return None
+
+
 def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     """Claims a pull request for mechanical merge. Same exit codes as claim_issue.
 
@@ -1133,16 +1170,9 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
 
-    # A PR that already carries a terminal lease was merged by a governed run.
-    # Claiming it again is a stale worker continuing finished work (#344).
-    # claim_review and complete_review need no equivalent guard: #412 retired
-    # coding-agent review, so both are already unconditional refusals.
-    lease_sha = terminal_lease_sha(labels)
-    if lease_sha:
-        print(f"[CONFLICT] PR #{pr_id} carries a terminal lease (merged at "
-              f"{lease_sha}); it cannot be claimed for merge again. File a new "
-              "governed issue and branch for follow-up work.", file=sys.stderr)
-        return EXIT_CONFLICT
+    blocked = _terminal_lease_conflict(pr_id, labels)
+    if blocked is not None:
+        return blocked
 
     holder = merge_claimant(labels)
     if holder and holder != agent:

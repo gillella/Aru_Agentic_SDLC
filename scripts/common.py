@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # +60 for the #344 terminal merge lease shared by all four helpers.
-# line-ceiling: 1570
+# line-ceiling: 1576
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -1510,13 +1510,19 @@ def terminal_merge_lease(branch: str) -> Optional[Dict[str, Any]]:
     """
     if not branch or not isinstance(branch, str):
         return None
+    limit = 20
     rows = run_gh_json([
-        "gh", "pr", "list", "--state", "merged", "--head", branch, "--limit", "20",
+        "gh", "pr", "list", "--state", "merged", "--head", branch,
+        "--limit", str(limit),
         "--json", "number,headRefName,headRefOid,mergeCommit,mergedAt,author",
     ])
-    if rows is None:
-        return {"branch": branch, "unreadable": True, "pr": None,
-                "gated_sha": None, "merged_sha": None, "holder": None}
+    unreadable = {"branch": branch, "unreadable": True, "pr": None,
+                  "gated_sha": None, "merged_sha": None, "holder": None}
+    # A non-list payload is malformed, not "no matches", and a full page may be
+    # hiding a further match. Either way the answer is unknown, and on a
+    # governance path unknown must block rather than permit (CodeRabbit, #344).
+    if not isinstance(rows, list) or len(rows) >= limit:
+        return unreadable
     exact = [r for r in rows if isinstance(r, dict) and r.get("headRefName") == branch]
     if not exact:
         return None

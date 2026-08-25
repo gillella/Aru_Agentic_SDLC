@@ -1,5 +1,5 @@
 # +40 for the #344 terminal merge lease tests.
-# line-ceiling: 1210
+# line-ceiling: 1235
 import io
 import json
 import sys
@@ -1191,14 +1191,41 @@ class TerminalLeaseClaimTests(unittest.TestCase):
         with patch.object(claim_issue, "run_gh_json", side_effect=self._gh("CLOSED", "CLOSED")):
             self.assertIsNone(claim_issue._terminally_merged(87))
 
-    def test_merge_claim_is_refused_on_a_terminally_merged_pr(self):
-        """Criterion 4: the lease blocks continuation of a merged claim."""
-        labels = ["author:agent-a", "terminal-lease:abcdef123456"]
-        with patch.object(claim_issue, "_pr_labels", return_value=labels):
-            self.assertEqual(claim_issue.claim_merge(89, "agent-a"),
-                             claim_issue.EXIT_CONFLICT)
+    LEASED = ["author:agent-a", "terminal-lease:abcdef123456"]
 
-    def test_merge_claim_still_works_without_a_lease(self):
-        with patch.object(claim_issue, "_pr_labels", return_value=["author:agent-a"]):
-            self.assertNotEqual(claim_issue.claim_merge(89, "agent-a"),
-                                claim_issue.EXIT_CONFLICT)
+    def test_merge_claim_is_refused_when_the_pr_really_is_merged(self):
+        """Criterion 4: the lease blocks continuation of a merged claim."""
+        with patch.object(claim_issue, "run_gh_json", return_value={"state": "MERGED"}):
+            self.assertEqual(
+                claim_issue._terminal_lease_conflict(89, self.LEASED),
+                claim_issue.EXIT_CONFLICT,
+            )
+
+    def test_a_forged_lease_label_cannot_freeze_an_unmerged_pr(self):
+        """CWE-345: the label is a cache; the merged-PR record is the authority."""
+        with patch.object(claim_issue, "run_gh_json", return_value={"state": "OPEN"}):
+            self.assertIsNone(claim_issue._terminal_lease_conflict(89, self.LEASED))
+
+    def test_unreadable_merge_state_refuses_rather_than_guessing(self):
+        with patch.object(claim_issue, "run_gh_json", return_value=None):
+            self.assertEqual(
+                claim_issue._terminal_lease_conflict(89, self.LEASED),
+                claim_issue.EXIT_ERROR,
+            )
+
+    def test_no_lease_label_costs_no_lookup(self):
+        with patch.object(claim_issue, "run_gh_json") as gh:
+            self.assertIsNone(claim_issue._terminal_lease_conflict(89, ["author:agent-a"]))
+        gh.assert_not_called()
+
+    def test_unreadable_issue_lookup_blocks_the_claim(self):
+        """A failed governance lookup must surface, not read as 'not merged'."""
+        with patch.object(claim_issue, "run_gh_json", return_value=None):
+            self.assertIsNotNone(claim_issue._terminally_merged(87))
+
+    def test_unreadable_closing_pr_blocks_the_claim(self):
+        def gh(cmd):
+            return ({"state": "CLOSED", "closedByPullRequestsReferences": [{"number": 89}]}
+                    if "issue" in cmd else None)
+        with patch.object(claim_issue, "run_gh_json", side_effect=gh):
+            self.assertIsNotNone(claim_issue._terminally_merged(87))
