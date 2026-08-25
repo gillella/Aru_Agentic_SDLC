@@ -582,12 +582,12 @@ def _author_can_repair_review(pr: dict[str, Any]) -> bool:
     evidence = review_evidence(pr["number"])
     if not evidence:
         return False
-    if merge_pr.assigned_review_service(pr) != "coderabbit":
+    if merge_pr.assigned_review_service(pr) is None:
         return False
-    evidence = merge_pr._with_coderabbit_status(pr["number"], evidence)
+    evidence = merge_pr.with_service_evidence(pr, pr["number"], evidence)
     if not evidence:
         return False
-    if not merge_pr.has_authoritative_coderabbit_review(pr, evidence):
+    if not merge_pr.has_authoritative_assigned_review(pr, evidence):
         return False
     if int(evidence.get("unresolved") or 0) > 0:
         return False
