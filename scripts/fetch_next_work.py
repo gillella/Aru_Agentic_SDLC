@@ -49,13 +49,13 @@ merge execution after every Definition-of-Done gate passes.
 
 import argparse
 import json
-import os
 import re
-import socket
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from agent_identity import resolve_agent_id
 
 from claim_issue import (
     EXIT_CONFLICT,
@@ -65,7 +65,6 @@ from claim_issue import (
     reap_stale_merges,
 )
 from common import (
-    board_agent_identities,
     get_repo_slug,
     list_open_issues,
     run_cmd,
@@ -89,153 +88,9 @@ from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 from merge_pr import review_evidence
 
 
-# Seats disambiguate concurrent sessions sharing one checkout -- the only case a
-# fingerprint alone cannot separate. Small on purpose: more than a handful of
-# agents in one working copy is a misconfiguration, not a fleet.
-MAX_WORKER_SEATS = 8
-
-
-def _fingerprint_assign_identity(args, session_id):
-    """Derive this worker's identity from where it runs (#310).
-
-    The pool model assigned a name per *process*, so a restart -- a new PID with
-    no link to the worker that had been running -- took a different name, and two
-    machines each arbitrating from their own local registry both took ring[0].
-    A fingerprint over machine, checkout, and family is stable across restarts
-    and distinct across machines, so an id can never be reissued to a different
-    worker.
-
-    No board query is needed here: a board claim carrying this id is, by
-    construction, this worker's own earlier work. That is what makes a restart
-    reclaim its issue instead of treating it as somebody else's.
-    """
-    from agent_presence import (
-        DEFAULT_PRESENCE_PATH,
-        PresenceError,
-        PresenceStore,
-        fingerprint_agent_id,
-    )
-    family = (args.family or "").lower()
-    # The seat ladder is the pool. resolve_free_identity skips seats held by
-    # another *live* session and records the claim atomically, so a restart
-    # (whose old claim has aged out) lands back on seat 1, while a genuinely
-    # concurrent second session on the same checkout gets seat 2.
-    ladder = [fingerprint_agent_id(family, seat=seat)
-              for seat in range(1, MAX_WORKER_SEATS + 1)]
-    store = PresenceStore(DEFAULT_PRESENCE_PATH)
-    try:
-        args.agent = store.resolve_free_identity(ladder, session_id)
-    except PresenceError as exc:
-        print(f"[ERROR] {exc}", file=sys.stderr)
-        return 1
-    print(f"[presence] worker identity '{args.agent}' for session '{session_id}'",
-          file=sys.stderr)
-    return None
-
-
-def _auto_assign_identity(args, session_id):
-    """Settle an identity when none was named on the command line.
-
-    An operator-pinned ARU_AGENT_ID wins, then the fingerprint, then the legacy
-    named pool for fleets that want fixed readable names.
-    """
-    from agent_presence import configured_agent_id
-
-    pinned = configured_agent_id()
-    if pinned:
-        args.agent = pinned
-        return _explicit_identity(args, session_id)
-    if not getattr(args, "agent_pool", False):
-        return _fingerprint_assign_identity(args, session_id)
-    return _pool_assign_identity(args, session_id)
-
-
-def _pool_assign_identity(args, session_id):
-    """Pick a free identity from the named pool, consulting GitHub first.
-
-    The registry alone was never enough: its 300-second heartbeat TTL freed an
-    id that the board still showed holding an issue claim and authoring an open
-    PR, so a live agent's id was reissued to a second session (#304). The
-    registry stays as fast-path advisory state; GitHub decides liveness. Only
-    reachable via --agent-pool now that #310 makes derived ids the default.
-    """
-    from agent_presence import (
-        DEFAULT_AGENT_RING,
-        DEFAULT_PRESENCE_PATH,
-        PresenceError,
-        PresenceStore,
-    )
-    holders, error = board_agent_identities()
-    if holders is None:
-        # Fail closed. Assigning under an unreadable board risks handing out an
-        # id another agent is demonstrably using, which is the defect itself.
-        print(f"[ERROR] Cannot verify agent id ownership on GitHub: {error}. "
-              "Refusing to auto-assign an identity; pass --agent explicitly if "
-              "you know the id is free.", file=sys.stderr)
-        return 1
-
-    store = PresenceStore(DEFAULT_PRESENCE_PATH)
-    try:
-        registered = sorted(store._read().get("agents") or {})
-        pool = registered or list(DEFAULT_AGENT_RING)
-        free_pool = [a for a in pool if a not in holders]
-        if not free_pool:
-            taken = ", ".join(
-                f"{a} held by {holders[a][0]}" for a in pool if a in holders)
-            print(f"[ERROR] Every agent id in the pool is in use on the board: "
-                  f"{taken}. Refusing to reuse a live id -- add ids to the pool "
-                  "or wait for that work to close.", file=sys.stderr)
-            return 1
-        args.agent = store.resolve_free_identity(free_pool, session_id)
-        print(
-            f"[presence] auto-assigned agent id '{args.agent}' for session '{session_id}'",
-            file=sys.stderr,
-        )
-    except PresenceError as exc:
-        print(f"[ERROR] {exc}", file=sys.stderr)
-        return 1
-    return None
-
-
-def _explicit_identity(args, session_id):
-    """Refuse an explicitly named identity that another live session holds.
-
-    The board is consulted for evidence, not as an extra refusal trigger. An
-    agent legitimately keeps its id while it holds an issue claim and while its
-    PR sits in review, so board presence alone cannot mean "taken" here without
-    stopping an agent from ever picking up its next item. What the board adds is
-    a message that names the work the conflicting session is on, instead of only
-    an opaque session token.
-    """
-    from agent_presence import DEFAULT_PRESENCE_PATH, PresenceStore
-
-    holder = PresenceStore(DEFAULT_PRESENCE_PATH).identity_holder(
-        args.agent, session_id
-    )
-    if holder is None:
-        return None
-    holders, _error = board_agent_identities()
-    where = (holders or {}).get(args.agent) or []
-    evidence = f" It currently holds {', '.join(where)}." if where else ""
-    print(
-        f"[ERROR] agent '{args.agent}' already has a live heartbeat from "
-        f"session '{holder}'.{evidence} Omit --agent to auto-assign a free "
-        "identity, or wait for that session to expire.",
-        file=sys.stderr,
-    )
-    return 1
-
-
-def _resolve_identity(args, session_id):
-    """Settle args.agent. Returns an exit code to abort on, or None to proceed."""
-    if args.agent is None:
-        return _auto_assign_identity(args, session_id)
-    return _explicit_identity(args, session_id)
-
-
-def _default_session_id() -> str:
-    """A per-invocation session token so live claims are attributable."""
-    return f"{socket.gethostname().split('.')[0]}|{os.getpid()}"
+def _resolve_identity(args):
+    """Resolve identity without a presence registry, seat, or board query."""
+    args.agent = resolve_agent_id(args.agent, family=(args.family or "").lower())
 
 
 def skill_for_issue(issue: dict[str, Any]) -> str:
@@ -904,19 +759,11 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
 def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Pick the next work item for one agent.")
     parser.add_argument("--agent", required=False, default=None,
-                        help="Agent id. Omit to auto-assign a free identity from the "
-                             "presence registry (see --session-id).")
-    parser.add_argument("--session-id", default=None,
-                        help="Identity of this loop session. Defaults to "
-                             "hostname|pid. Used to attribute live presence claims "
-                             "so two sessions never share an identity.")
+                        help="Agent id. Omit to use ARU_AGENT_ID or a stable "
+                             "machine + checkout + family fingerprint.")
     parser.add_argument("--family", default=None,
                         help="This agent's model family (anthropic, openai, ...). "
                              "Omitting it means every PR looks cross-family.")
-    parser.add_argument("--agent-pool", action="store_true",
-                        help="Assign an id from the named pool (claude-1, ...) "
-                             "instead of deriving one from this worker. Legacy "
-                             "path for fleets that want fixed readable names.")
     parser.add_argument("--claim", action="store_true", help="Claim the selected work item")
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument(
@@ -929,10 +776,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
                         help="Release issue and review claims idle longer than HOURS (default: 4h; 0 disables)")
     args = parser.parse_args()
 
-    session_id = args.session_id or _default_session_id()
-    rc = _resolve_identity(args, session_id)
-    if rc is not None:
-        return rc
+    _resolve_identity(args)
 
     if args.reap_after > 0:
         try:

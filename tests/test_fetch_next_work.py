@@ -2,7 +2,6 @@
 import io
 import json
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fetch_next_work as fnw
 import fetch_next_issue  # noqa: E402
 import merge_pr
-import agent_presence as ap
 
 
 def ts(minutes_ago):
@@ -948,74 +946,57 @@ def stale_evidence(peer="agent-9"):
 
 
 class AgentResolutionTests(unittest.TestCase):
-    def setUp(self):
-        import tempfile
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.presence = Path(self.temporary.name)
-        self._patch_path = patch.object(ap, "DEFAULT_PRESENCE_PATH",
-                                        self.presence / "agent-presence.json")
-        self._patch_path.start()
-        self.addCleanup(self._patch_path.stop)
+    @staticmethod
+    def _idle():
+        return {
+            "agent": "unused",
+            "family": None,
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [],
+            "merge_skipped": [],
+            "claimable_issues": [],
+            "mergeable_detail": [],
+            "reviewable_detail": [],
+        }
 
-    def _capture(self):
-        import io
-        return patch("sys.stdout", new_callable=io.StringIO), \
-               patch("sys.stderr", new_callable=io.StringIO)
-
-    def _board(self, holders=None, readable=True):
-        """Stub the GitHub-side identity query (#304)."""
-        value = (holders if readable else None, "" if readable else "boom")
-        return patch.object(fnw, "board_agent_identities", return_value=value)
-
-    def test_omitting_agent_auto_assigns_a_free_identity(self):
-        store = ap.PresenceStore(self.presence / "agent-presence.json")
-        store.resolve_free_identity(["gemini-1"], "setup-session")
+    def _run(self, argv, env=None):
         idle = {"agent": "unused", "family": None, "work": {"type": "idle",
                 "skill": None}, "skipped_prs": [], "merge_skipped": [],
                 "claimable_issues": [], "mergeable_detail": [],
                 "reviewable_detail": []}
-        out, err = self._capture()
         with patch.object(fnw, "select", return_value=idle) as select_mock, \
-             self._board({}), \
-             patch("sys.argv", ["fetch_next_work.py", "--agent-pool"]), out as _o, err as _e:
+             patch.dict("os.environ", env or {}, clear=True), \
+             patch("sys.argv", [*argv, "--reap-after", "0"]):
             rc = fnw.main()
-        self.assertEqual(rc, None)  # success
-        # A free agent from the pool was assigned and passed to select.
-        args, _kwargs = select_mock.call_args
-        self.assertEqual(args[0], "claude-1")
-        self.assertIn("auto-assigned agent id", _e.getvalue())
+        return rc, select_mock
 
-    def test_explicit_agent_held_by_another_session_exits_nonzero(self):
-        store = ap.PresenceStore(self.presence / "agent-presence.json")
-        store.resolve_free_identity(["gemini-1"], "session-other")
-        idle = {"agent": "unused", "family": None, "work": {"type": "idle",
-                "skill": None}, "skipped_prs": [], "merge_skipped": [],
-                "claimable_issues": []}
-        out, err = self._capture()
-        with patch.object(fnw, "select", return_value=idle) as select_mock, \
-             self._board({}), \
-             patch("sys.argv", ["fetch_next_work.py", "--agent", "gemini-1"]), \
-             out as _o, err as _e:
-            rc = fnw.main()
-        self.assertEqual(rc, 1)
-        select_mock.assert_not_called()
-        self.assertIn("live heartbeat", _e.getvalue())
+    def test_omitting_agent_derives_a_stable_identity(self):
+        rc, select_mock = self._run(["fetch_next_work.py", "--family", "openai"])
+        self.assertIsNone(rc)
+        self.assertTrue(select_mock.call_args.args[0].startswith("codex-"))
 
-    def test_explicit_agent_with_no_conflict_proceeds(self):
-        idle = {"agent": "unused", "family": None, "work": {"type": "idle",
-                "skill": None}, "skipped_prs": [], "merge_skipped": [],
-                "claimable_issues": []}
-        out, err = self._capture()
-        with patch.object(fnw, "select", return_value=idle) as select_mock, \
-             self._board({}), \
-             patch("sys.argv", ["fetch_next_work.py", "--agent", "claude-1",
-                                "--session-id", "me"]), \
-             out as _o, err as _e:
-            rc = fnw.main()
-        self.assertEqual(rc, None)
-        args, _kwargs = select_mock.call_args
-        self.assertEqual(args[0], "claude-1")
+    def test_environment_override_wins_over_fingerprint(self):
+        rc, select_mock = self._run(
+            ["fetch_next_work.py", "--family", "openai"],
+            {"ARU_AGENT_ID": "operator-agent"},
+        )
+        self.assertIsNone(rc)
+        self.assertEqual(select_mock.call_args.args[0], "operator-agent")
+
+    def test_explicit_agent_wins_without_presence_lookup(self):
+        rc, select_mock = self._run(
+            ["fetch_next_work.py", "--agent", "claude-1"],
+            {"ARU_AGENT_ID": "operator-agent"},
+        )
+        self.assertIsNone(rc)
+        self.assertEqual(select_mock.call_args.args[0], "claude-1")
+
+    def test_presence_allocation_flags_are_removed(self):
+        for flag in ("--session-id", "--agent-pool"):
+            with self.subTest(flag=flag), patch(
+                "sys.argv", ["fetch_next_work.py", flag, "legacy"]
+            ), self.assertRaises(SystemExit):
+                fnw.main()
 
 class NoFastTrackInThePickerTests(unittest.TestCase):
     """Merge eligibility requires review attribution again (#321).
@@ -1067,96 +1048,16 @@ class NoFastTrackInThePickerTests(unittest.TestCase):
         self.assertFalse(hasattr(fnw, "_fast_track"))
 
 
-class BoardIdentityUniquenessTests(unittest.TestCase):
-    """Identity resolution consults GitHub, not only the local registry (#304).
-
-    The registry's 300s heartbeat TTL freed an id that the board still showed
-    holding an issue claim and authoring an open PR, so the id was reissued and
-    two open PRs ended up stamped with one author: label and two family: labels.
-    """
-
-    def setUp(self):
-        import tempfile
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.presence = Path(self.temporary.name) / "agent-presence.json"
-        patcher = patch.object(ap, "DEFAULT_PRESENCE_PATH", self.presence)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def _idle(self):
-        return {"agent": "unused", "family": None,
-                "work": {"type": "idle", "skill": None}, "skipped_prs": [],
-                "merge_skipped": [], "claimable_issues": [],
-                "mergeable_detail": [], "reviewable_detail": []}
-
-    def _run(self, argv, holders, readable=True):
-        argv = list(argv)
-        if "--agent" not in argv:
-            argv.append("--agent-pool")
-        import io
-        value = (holders if readable else None, "" if readable else "boom")
-        out = patch("sys.stdout", new_callable=io.StringIO)
-        err = patch("sys.stderr", new_callable=io.StringIO)
-        with patch.object(fnw, "select", return_value=self._idle()) as select_mock, \
-             patch.object(fnw, "board_agent_identities", return_value=value), \
-             patch("sys.argv", argv), out as _o, err as _e:
-            rc = fnw.main()
-        return rc, select_mock, _e.getvalue()
-
-    def test_stale_heartbeat_does_not_free_an_id_github_shows_in_use(self):
-        # The exact #304 scenario: registry says free, board says otherwise.
-        holders = {"gemini-1": ["issue #3 (agent:gemini-1)",
-                                "PR #27 (author:gemini-1)"]}
-        rc, select_mock, _err = self._run(["fetch_next_work.py"], holders)
-        self.assertIsNone(rc)
-        # gemini-1 is first in the default ring; the board must exclude it.
-        self.assertNotEqual(select_mock.call_args[0][0], "gemini-1")
-
-    def test_an_id_free_on_both_github_and_the_registry_is_still_assigned(self):
-        # The zero-config path keeps working without operator action.
-        rc, select_mock, err = self._run(["fetch_next_work.py"], {})
-        self.assertIsNone(rc)
-        self.assertEqual(select_mock.call_args[0][0], "gemini-1")
-        self.assertIn("auto-assigned agent id", err)
-
-    def test_exhausted_pool_fails_rather_than_reusing_an_id(self):
-        holders = {a: [f"issue #1 (agent:{a})"] for a in ap.DEFAULT_AGENT_RING}
-        rc, select_mock, err = self._run(["fetch_next_work.py"], holders)
-        self.assertEqual(rc, 1)
-        select_mock.assert_not_called()
-        self.assertIn("Every agent id in the pool is in use", err)
-        self.assertIn("gemini-1", err)
-
-    def test_unreadable_board_fails_closed(self):
-        # A GitHub or network failure must refuse, not assign optimistically.
-        rc, select_mock, err = self._run(["fetch_next_work.py"], None, readable=False)
-        self.assertEqual(rc, 1)
-        select_mock.assert_not_called()
-        self.assertIn("Cannot verify agent id ownership", err)
-
-    def test_explicit_conflict_names_the_work_not_only_the_session(self):
-        store = ap.PresenceStore(self.presence)
-        store.resolve_free_identity(["gemini-1"], "session-other")
-        holders = {"gemini-1": ["PR #27 (author:gemini-1)"]}
-        rc, select_mock, err = self._run(
-            ["fetch_next_work.py", "--agent", "gemini-1"], holders)
-        self.assertEqual(rc, 1)
-        select_mock.assert_not_called()
-        self.assertIn("PR #27", err)
-        self.assertIn("session-other", err)
-
-    def test_explicit_agent_keeps_its_id_while_holding_board_work(self):
-        # An agent legitimately holds its id across the issue it claimed and the
-        # PR it left in review; board presence alone must not lock it out of
-        # picking up its next item.
-        holders = {"claude-1": ["issue #5 (agent:claude-1)",
-                                "PR #9 (author:claude-1)"]}
-        rc, select_mock, _err = self._run(
-            ["fetch_next_work.py", "--agent", "claude-1", "--session-id", "me"],
-            holders)
-        self.assertIsNone(rc)
-        self.assertEqual(select_mock.call_args[0][0], "claude-1")
+class PureIdentityBoundaryTests(unittest.TestCase):
+    def test_picker_has_no_presence_allocation_helpers(self):
+        for name in (
+            "_fingerprint_assign_identity",
+            "_auto_assign_identity",
+            "_pool_assign_identity",
+            "_explicit_identity",
+            "_default_session_id",
+        ):
+            self.assertFalse(hasattr(fnw, name), name)
 
 
 class IssueClaimFailureTests(unittest.TestCase):
@@ -1286,17 +1187,6 @@ class MergeClaimFailureTests(unittest.TestCase):
 
 
 class WorkPickerTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        patcher = patch.object(
-            ap,
-            "DEFAULT_PRESENCE_PATH",
-            Path(self.temporary.name) / "agent-presence.json",
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def _dummy_select(self):
         return {
             "work": {"type": "idle", "skill": None},

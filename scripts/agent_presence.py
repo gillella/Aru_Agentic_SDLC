@@ -14,15 +14,23 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
-import platform
 import re
-import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
+
+from agent_identity import (
+    AGENT_ID_ENV_VAR as AGENT_ID_ENV_VAR,
+    AGENT_ID_RE as AGENT_ID_RE,
+    FAMILY_TO_PRODUCT as FAMILY_TO_PRODUCT,
+    FINGERPRINT_LENGTH as FINGERPRINT_LENGTH,
+    configured_agent_id as configured_agent_id,
+    fingerprint_agent_id as fingerprint_agent_id,
+    product_for_family as product_for_family,
+    worker_fingerprint as worker_fingerprint,
+)
 
 from slack_projects import (
     PROJECT_ID_RE,
@@ -35,12 +43,7 @@ SCHEMA_VERSION = 1
 SCHEMA_NAME = "aru.agent-presence/v1"
 DEFAULT_PRESENCE_PATH = Path.home() / ".aru" / "agent-presence.json"
 DEFAULT_HEARTBEAT_TTL_SECONDS = 300
-AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 FAMILY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-# Default ring used to auto-assign a free identity when the registry has no
-# registered agents yet. Registered identities from `list` take precedence.
-DEFAULT_AGENT_RING = ("gemini-1", "claude-1", "codex-1", "cursor-1", "cursor-2")
 
 AVAILABILITY_STATES = frozenset({
     "available",
@@ -57,97 +60,6 @@ COOLDOWN_REASONS = frozenset({
     "provider-outage",
     "child-crash",
 })
-
-# Map runner / product family hints onto doctor product keys.
-FAMILY_TO_PRODUCT = {
-    "openai": "codex",
-    "anthropic": "claude",
-    "google": "antigravity",
-    "cursor": "cursor",
-}
-
-# --- Worker fingerprint identity (#310) ------------------------------------
-# Agent ids used to come from a shared pool, assigned per process. A restart was
-# a new PID with no link to the worker that had been running, so it auto-assigned
-# a different name; and two machines each arbitrated the pool from their own
-# local registry, so both picked ring[0]. Deriving the id from *where the agent
-# runs* makes it stable across restarts and distinct across machines without any
-# coordination, which removes the collision class rather than policing it.
-
-# Environment override for operators who want to name a worker themselves.
-AGENT_ID_ENV_VAR = "ARU_AGENT_ID"
-FINGERPRINT_LENGTH = 6
-
-
-def _machine_identifier() -> str:
-    """A value stable for the life of this machine.
-
-    Deliberately not the MAC address or a hardware UUID: those need platform
-    -specific probes and add failure modes for something that only has to be
-    locally unique and locally stable.
-    """
-    return platform.node() or "unknown-host"
-
-
-def _checkout_root(repo_root: Optional[str] = None) -> str:
-    """The checkout the agent works in, not the directory it was started from.
-
-    Defaulting to os.getcwd() would fingerprint the *launch* directory, so the
-    same worker started from a subdirectory -- or from a worktree under
-    .worktrees/ -- would derive a different id and lose the stability the whole
-    scheme exists to provide.
-    """
-    if repo_root:
-        return os.path.realpath(repo_root)
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            return os.path.realpath(result.stdout.strip())
-    except OSError:
-        pass
-    return os.path.realpath(os.getcwd())
-
-
-def worker_fingerprint(repo_root: Optional[str] = None, family: str = "",
-                       machine: Optional[str] = None) -> str:
-    """Short, stable hash of machine + checkout + family.
-
-    The checkout path is hashed, never embedded: the id ends up in public
-    GitHub labels, and an absolute path names the operator's home directory.
-    """
-    root = _checkout_root(repo_root)
-    parts = "\x00".join([
-        machine or _machine_identifier(),
-        root,
-        (family or "").strip().lower(),
-    ])
-    return hashlib.sha256(parts.encode("utf-8")).hexdigest()[:FINGERPRINT_LENGTH]
-
-
-def product_for_family(family: str) -> str:
-    """Readable prefix for an id, e.g. 'claude' for the anthropic family."""
-    return FAMILY_TO_PRODUCT.get((family or "").strip().lower()) or "agent"
-
-
-def fingerprint_agent_id(family: str = "", repo_root: Optional[str] = None,
-                         machine: Optional[str] = None, seat: int = 1) -> str:
-    """The id this worker resolves to, e.g. 'claude-a3f19c'.
-
-    `seat` disambiguates a second live session sharing one checkout, which is
-    the only case the fingerprint alone cannot separate. Seat 1 carries no
-    suffix so the ordinary id stays short.
-    """
-    base = f"{product_for_family(family)}-{worker_fingerprint(repo_root, family, machine)}"
-    return base if seat <= 1 else f"{base}-{seat}"
-
-
-def configured_agent_id(env: Optional[Dict[str, str]] = None) -> str:
-    """An operator-pinned id from the environment, or '' when unset."""
-    source = env if env is not None else os.environ
-    return (source.get(AGENT_ID_ENV_VAR) or "").strip()
-
 
 PHASE_TO_AVAILABILITY = {
     "starting": "available",
