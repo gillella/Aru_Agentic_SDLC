@@ -1,4 +1,4 @@
-# line-ceiling: 2237
+# line-ceiling: 2448
 import io
 import json
 import os
@@ -2231,6 +2231,217 @@ class ChainedPriorHookTests(unittest.TestCase):
 
             self.assertTrue(first_marker.exists(), "base .pre-aru hook did not run")
             self.assertTrue(second_marker.exists(), "numbered .pre-aru.1 hook did not run")
+
+
+class RedirectWorkingDirectoryTests(unittest.TestCase):
+    """A relative redirect target belongs to the directory the command is in.
+
+    `_redirect_targets` returns bare strings, so `main` resolved every relative
+    target against the *session* root. A `cd` earlier in the command moves the
+    write somewhere the session root says nothing about, and the mismatch bit
+    in both directions:
+
+      * `cd ~/.claude/... && echo x >> MEMORY.md` was reported as a write to
+        `<repo>/MEMORY.md` and refused on `main`, even though the file is user
+        config outside the repository and outside the Issue-First Law's scope.
+      * `cd <main-checkout> && echo x >> app.py` from an issue worktree was
+        measured against the *worktree's* declaration. When the path happened
+        to be declared, the write into the protected checkout was allowed -
+        the same escape `_git_write_violation` closes for git subcommands.
+
+    Absolute targets were never affected and are pinned here so the fix cannot
+    regress them.
+    """
+
+    AGENTS_MD = "# AGENTS\n\n## Core Governance Directive: The Issue-First Law\n\nBody.\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+
+        def git(*args, cwd):
+            subprocess.run(
+                ["git", *args], cwd=str(cwd), check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+        cls.main_root = base / "repo"
+        cls.main_root.mkdir()
+        git("init", "-b", "main", cwd=cls.main_root)
+        git("config", "user.email", "t@example.com", cwd=cls.main_root)
+        git("config", "user.name", "t", cwd=cls.main_root)
+        (cls.main_root / "AGENTS.md").write_text(cls.AGENTS_MD, encoding="utf-8")
+        (cls.main_root / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (cls.main_root / "MEMORY.md").write_text("- repo copy\n", encoding="utf-8")
+        git("add", "-A", cwd=cls.main_root)
+        git("commit", "-m", "init", cwd=cls.main_root)
+
+        cls.wt = cls.main_root / ".worktrees" / "fix-issue-11"
+        git("worktree", "add", "-b", "fix/issue-11-a", str(cls.wt), cwd=cls.main_root)
+
+        # User config outside any repository - the `~/.claude/` case. Its
+        # basename deliberately collides with a file that exists in the repo.
+        cls.config_dir = base / "userconfig" / "memory"
+        cls.config_dir.mkdir(parents=True)
+        (cls.config_dir / "MEMORY.md").write_text("- user copy\n", encoding="utf-8")
+
+        # A symlink pointing back into the repository. Traversal through it
+        # must still land inside the repo and stay governed.
+        cls.link_dir = base / "link-to-repo"
+        os.symlink(str(cls.main_root), str(cls.link_dir))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def bash(self, cwd, command, touches=("app.py",)):
+        payload = {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": str(cwd),
+        }
+        # Only the GitHub lookup is stubbed; all git and path resolution is real.
+        with patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             patch.object(et, "touches_for", return_value=list(touches)):
+            return et.main()
+
+    # --- (a) still blocked: the path really is inside the repo ------------
+
+    def test_relative_target_without_cd_is_still_blocked_on_main(self):
+        """The base case must not become collateral damage of the fix."""
+        self.assertEqual(
+            self.bash(self.main_root, "echo x >> MEMORY.md"), et.EXIT_BLOCK
+        )
+
+    def test_absolute_target_inside_repo_is_still_blocked_on_main(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"echo x >> {self.main_root / 'MEMORY.md'}"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_cd_within_the_repo_still_resolves_inside_it(self):
+        """A `cd` that stays inside the repo keeps the write governed."""
+        (self.main_root / "pkg").mkdir(exist_ok=True)
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.main_root / 'pkg'} && echo x >> f.py"),
+            et.EXIT_BLOCK,
+        )
+
+    # --- (b) allowed: absolute path outside the repository ----------------
+
+    def test_absolute_path_outside_the_repo_is_allowed(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"echo x >> {self.config_dir / 'MEMORY.md'}"),
+            et.EXIT_ALLOW,
+        )
+
+    # --- (c) allowed: basename collides, but the file is outside ----------
+
+    def test_cd_outside_the_repo_then_relative_write_is_allowed(self):
+        """The reported false refusal, reduced to its fixture.
+
+        `MEMORY.md` exists in the repo too, so resolving the bare name against
+        the session root produced a plausible-looking repo-relative path and a
+        refusal that named a file the command never touched.
+        """
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.config_dir} && echo x >> MEMORY.md"),
+            et.EXIT_ALLOW,
+        )
+
+    def test_cd_outside_the_repo_then_heredoc_append_is_allowed(self):
+        command = f"cd {self.config_dir} && cat >> MEMORY.md <<'EOF'\n- entry\nEOF"
+        self.assertEqual(self.bash(self.main_root, command), et.EXIT_ALLOW)
+
+    def test_pushd_outside_the_repo_then_relative_write_is_allowed(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"pushd {self.config_dir} && echo x >> MEMORY.md"),
+            et.EXIT_ALLOW,
+        )
+
+    def test_cd_outside_the_repo_then_relative_tee_is_allowed(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.config_dir} && echo x | tee -a MEMORY.md"),
+            et.EXIT_ALLOW,
+        )
+
+    # --- (d) still blocked: traversal that really lands in the repo -------
+
+    def test_dotdot_traversal_back_into_the_repo_is_blocked(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.config_dir} && echo x >> {self.main_root}/../repo/app.py"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_relative_dotdot_from_outside_back_into_the_repo_is_blocked(self):
+        """The `cd` moves the base; `..` then walks back in. Still governed."""
+        relative = os.path.relpath(str(self.main_root / "app.py"), str(self.config_dir))
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.config_dir} && echo x >> {relative}"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_symlinked_path_into_the_repo_is_blocked(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.link_dir} && echo x >> app.py"),
+            et.EXIT_BLOCK,
+        )
+
+    # --- the protected-branch escape --------------------------------------
+
+    def test_cd_into_main_then_relative_write_is_blocked_from_a_worktree(self):
+        """The dangerous half: a declared path is not a licence to write `main`.
+
+        `app.py` is inside the worktree issue's declaration, so measuring the
+        target against the worktree let this through even though the file it
+        actually appends to is in the checkout that has `main` out.
+        """
+        self.assertEqual(
+            self.bash(self.wt, f"cd {self.main_root} && echo x >> app.py"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_relative_write_inside_own_worktree_is_still_allowed(self):
+        self.assertEqual(self.bash(self.wt, "echo x >> app.py"), et.EXIT_ALLOW)
+
+    def test_cd_into_own_worktree_from_the_repo_root_is_allowed(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.wt} && echo x >> app.py"),
+            et.EXIT_ALLOW,
+        )
+
+    def test_cd_after_the_redirect_does_not_retarget_it(self):
+        """Word order is the shell's, not a bag of tokens.
+
+        The redirect runs in the repo root; a later `cd` cannot excuse it.
+        """
+        self.assertEqual(
+            self.bash(self.main_root, f"echo x >> MEMORY.md && cd {self.config_dir}"),
+            et.EXIT_BLOCK,
+        )
+
+    # --- unknowable base --------------------------------------------------
+
+    def test_unresolvable_cd_makes_the_target_unknowable_and_allowed(self):
+        """A base this process cannot see is not evidence of a violation.
+
+        The same rule `_resolve_target` already applies to a leading expansion
+        on this code path: report only what can be located. Absolute targets
+        and resolvable `cd`s still carry the guard, so this is not a bypass.
+        """
+        self.assertEqual(
+            self.bash(self.main_root, "cd $(cat somewhere) && echo x >> MEMORY.md"),
+            et.EXIT_ALLOW,
+        )
+
+    def test_cd_through_an_environment_variable_is_resolved(self):
+        """`_resolve_dir` reads the process environment, so this is knowable."""
+        with patch.dict(os.environ, {"ARU_TEST_CFG": str(self.config_dir)}):
+            self.assertEqual(
+                self.bash(self.main_root, "cd $ARU_TEST_CFG && echo x >> MEMORY.md"),
+                et.EXIT_ALLOW,
+            )
 
 
 if __name__ == "__main__":

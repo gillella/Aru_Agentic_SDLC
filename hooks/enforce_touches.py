@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1709
+# line-ceiling: 1783
 """PreToolUse hook: enforces the write budget an agent declared on its issue.
 
 Why this exists as a hook rather than a rule in AGENTS.md: prompt-level rules
@@ -1467,19 +1467,80 @@ def _shell_tokens(command):  # noqa: C901, PLR0912, PLR0915
     return tokens
 
 
-def _redirect_targets(command):  # noqa: C901
-    """Best-effort extraction of shell writes: redirects, tee, sed -i.
+# `sed -i` and `sed -i.bak` rewrite a file in place. Matched as a whole word
+# because the scanner has already split the command; the previous raw-text
+# form needed `\s-i` to say the same thing.
+_SED_IN_PLACE = re.compile(r"-i(?:\.\S+)?")
+
+
+def _redirect_writes(command, cwd=None):  # noqa: C901
+    """Best-effort extraction of shell writes, each paired with its base dir.
 
     Intentionally incomplete - a shell can write a file in ways no lexer will
     catch. This covers the honest-mistake cases; adversarial evasion is out of
     scope and is handled by review and by the pre-push hook.
+
+    A *relative* target belongs to whatever directory the command is standing
+    in at that point, not to the session's cwd, so the pairing has to be
+    produced during the walk. Returning bare names let the caller resolve
+    every relative target against the session root, which was wrong in both
+    directions: `cd <outside-the-repo> && echo x >> f` was refused as a write
+    to `<repo>/f`, naming a file the command never touched; and `cd <main
+    checkout> && echo x >> f` issued from an issue worktree was measured
+    against that worktree's declaration instead of the protected branch it
+    actually appends to, so a declared path became a licence to write `main`.
+
+    Resolution order mirrors `_git_write_violation`: a `cd`/`pushd` earlier in
+    the command moves the base, and one appearing *after* a redirect cannot
+    retarget it, which is why word order is walked rather than the command
+    being scanned as a bag of tokens.
+
+    `base` is None when the directory is unknowable - a command substitution,
+    or a variable assigned inside the command. The caller then reports nothing
+    for that target, which is the rule `_resolve_target` already applies to an
+    unknowable target on this same code path. This half of the module fails
+    open by contract; `_git_write_violation` is the half that fails closed,
+    and it still refuses an unresolvable `cd` before a git write.
     """
     tokens = _shell_tokens(command)
     if not tokens:
         return []
 
     found = []
+    base, base_unknown = cwd, False
+    words, pending = [], []
+
+    def close_simple_command():
+        """Emits this command's writes, then applies its own `cd`."""
+        nonlocal base, base_unknown, words, pending
+        # sed -i rewrites its last argument. The script itself may contain
+        # spaces and quotes, so pick the final word rather than trying to
+        # parse sed's own grammar.
+        if "sed" in words and any(_SED_IN_PLACE.fullmatch(word) for word in words):
+            pending.append(words[-1])
+        for target in pending:
+            # A `cd` in this same simple command runs after its redirect, so
+            # the base recorded here is the one in force while it ran.
+            found.append((target, None if base_unknown else base))
+        exe, args = _unwrap_simple_command(words)[:2]
+        if exe in ("cd", "pushd"):
+            operand = args[0] if args else None
+            if operand is None or operand.startswith("-") or base is None:
+                # `cd -`, a bare `cd`, or a move from an already-unknown base.
+                base_unknown = True
+            else:
+                moved = _resolve_dir(operand, base)
+                if moved is None:
+                    base_unknown = True
+                else:
+                    base, base_unknown = moved, False
+        words, pending = [], []
+
     for index, (kind, text) in enumerate(tokens):
+        if kind == "control":
+            close_simple_command()
+            continue
+
         # Only an 'op' token is a real operator. Quoted and escaped angle
         # brackets are folded into words by the scanner, so `echo ">" file.txt`
         # and `-m "> fix parser"` never reach here.
@@ -1496,30 +1557,33 @@ def _redirect_targets(command):  # noqa: C901
                     and not _IS_DESCRIPTOR.match(target)
                     and not _HAS_EXPANSION.search(target)
                 ):
-                    found.append(target)
+                    pending.append(target)
             elif target is not None:
-                found.append(target)
+                pending.append(target)
             continue
 
+        words.append(text)
         if text == "tee":
             # Skip tee's own flags to reach the first path argument.
             for kind_after, candidate in tokens[index + 1:]:
                 if kind_after != "word" or candidate.startswith("-"):
                     continue
-                found.append(candidate)
+                pending.append(candidate)
                 break
 
-    # sed -i rewrites its last argument. The script itself may contain spaces
-    # and quotes, so pick the final token of the segment rather than trying to
-    # parse sed's own grammar.
-    for segment in re.split(r"[;|&]+", command or ""):
-        if re.search(r"\bsed\b[^\n]*\s-i(\.\S+)?\b", segment):
-            segment_tokens = segment.split()
-            if segment_tokens:
-                found.append(segment_tokens[-1].strip("'\""))
+    close_simple_command()
 
     # The scanner already resolved quoting, so these are values, not spellings.
-    return [value for value in found if value and not value.startswith("-")]
+    return [
+        (value, value_base)
+        for value, value_base in found
+        if value and not value.startswith("-")
+    ]
+
+
+def _redirect_targets(command):
+    """The write targets alone, for callers with no directory to resolve against."""
+    return [target for target, _ in _redirect_writes(command)]
 
 
 def deny(reason, detail):
@@ -1566,7 +1630,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 "If the target directory is correct, name it literally "
                 "(git -C <path>) so the checkout can be resolved.",
             )
-        targets = _redirect_targets(command)
+        writes = _redirect_writes(command, cwd)
         # A shell redirect can name a path in any checkout, so each target is
         # judged by the one that owns it - the same rule the write path uses.
         # Both checks have to key off the owner, not the shell: running them
@@ -1575,13 +1639,23 @@ def main():  # noqa: C901, PLR0912, PLR0915
         # and `_norm` returned None. The equivalent Write was refused, so the
         # redirect became a way around the write path.
         touches_by_owner = {}
-        for raw_target in targets:
+        for raw_target, target_base in writes:
             # A leading expansion means the destination is not knowable, and a
             # path the hook cannot locate must never be reported as a
             # `touches:` violation - the declaration is not what is wrong.
             target = _resolve_target(raw_target)
             if target is None:
                 continue
+            # A relative target belongs to the directory the command is
+            # standing in, which a `cd` may have moved off the session's cwd.
+            # Resolving it against the session root instead reported writes at
+            # paths the command never touched, and hid writes into the main
+            # checkout behind an issue worktree's declaration.
+            target = os.path.expanduser(target)
+            if not os.path.isabs(target):
+                if target_base is None:
+                    continue  # Unknowable directory; nothing can be proven.
+                target = os.path.join(target_base, target)
             owned = owning_checkout(target, root, branch)
             if owned is None:
                 continue
