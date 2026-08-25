@@ -1,4 +1,4 @@
-# line-ceiling: 660
+# line-ceiling: 667
 import json
 import os
 import sys
@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -648,6 +649,12 @@ class FreeIdentityResolutionTests(unittest.TestCase):
         self.assertEqual(self.store.identity_holder("gemini-1", "session-b"), None)
         # And it can be handed to another session now.
         chosen = self.store.resolve_free_identity(["gemini-1"], "session-b")
+        self.assertEqual(chosen, "gemini-1")
+
+    def test_dead_local_session_does_not_block_a_restart(self):
+        self.store.resolve_free_identity(["gemini-1"], "host-a|101")
+        with patch.object(ap, "_is_live_session", return_value=False):
+            chosen = self.store.resolve_free_identity(["gemini-1"], "host-a|202")
         self.assertEqual(chosen, "gemini-1")
 
     def test_no_free_identity_raises(self):

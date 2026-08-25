@@ -14,7 +14,7 @@ This repository is governed by **Aru_Agentic_SDLC**.
    - `run-aru-factory` — `aru code` (synonyms software/dev/sdlc), "please continue", work the board, loop
    - `implement-next-issue` — claim/implement/PR for a named or next issue
    - `create-github-issue` — file work
-   - `code-review` — refuse coding-agent review; the assigned review-pool service alone reviews
+   - `code-review` — review only a preassigned `review:agent` emergency fallback; otherwise refuse and await external review
    - `remediate-ci-failure` — fix red CI
    - `address-pr-feedback` — resolve review threads
    - `init-agent-project` — bootstrap a new governed repo

@@ -265,10 +265,13 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(status["drifted"], [18])
         self.assertIn("drifts from board status", " ".join(status["reasons"]))
 
-    @patch("common.run_gh_json", return_value=None)
+    @patch("common.run_cmd", return_value=(1, "", "failed"))
+    @patch("common.get_repo_slug", return_value="octocat/widgets")
     @patch("fleet_status.get_repo_projects", return_value=[mock_project()])
     @patch("fleet_status.get_repo_slug", return_value="octocat/widgets")
-    def test_error_state_on_real_issue_query_failure(self, _slug, _projects, _run_gh):
+    def test_error_state_on_real_issue_query_failure(
+        self, _slug, _projects, _common_slug, _run
+    ):
         status = evaluate_fleet_status(".")
 
         self.assertEqual(status["state"], "error")
