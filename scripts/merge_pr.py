@@ -887,7 +887,11 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                 "service_threads": service_threads,
             }
         next_cursor = page_info.get("endCursor")
-        if not next_cursor or next_cursor in seen_cursors:
+        if (
+            not isinstance(next_cursor, str)
+            or not next_cursor
+            or next_cursor in seen_cursors
+        ):
             return None
         seen_cursors.add(next_cursor)
         cursor = next_cursor
@@ -1295,22 +1299,6 @@ def self_review_message(author, unresolved):
             "labels if that is what happened. The gate will not assume a family."
         )
     return message
-
-
-def _attested_head_peers(evidence, peers):
-    """Attributed peer agents whose completion stamp matches this exact head."""
-    if not evidence or "review_attestations" not in evidence:
-        return None
-    head = evidence.get("head_oid")
-    if not isinstance(head, str) or not head:
-        return []
-    peer_set = set(peers)
-    return sorted({
-        item.get("agent") for item in evidence.get("review_attestations") or []
-        if isinstance(item, dict)
-        and item.get("agent") in peer_set
-        and item.get("head") == head.lower()
-    })
 
 
 def _evidence_note(evidence):

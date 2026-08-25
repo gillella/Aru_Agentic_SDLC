@@ -669,6 +669,30 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
+    def test_thread_pagination_rejects_non_string_cursors(
+        self, gh_json, _slug,
+    ):
+        for cursor in (7, ["next"], {"cursor": "next"}):
+            with self.subTest(cursor=cursor):
+                thread_page = self.thread_page()
+                thread_page["data"]["repository"]["pullRequest"][
+                    "reviewThreads"
+                ]["pageInfo"] = {
+                    "hasNextPage": True,
+                    "endCursor": cursor,
+                }
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.side_effect = [
+                    self.review_page(),
+                    self.attestation_page(),
+                    thread_page,
+                ]
+
+                self.assertIsNone(merge_pr.review_evidence(162))
+                self.assertEqual(gh_json.call_count, 3)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
     def test_review_head_change_returns_unknown(self, gh_json, _slug):
         gh_json.side_effect = [
             self.review_page(has_next=True, cursor="next"),
