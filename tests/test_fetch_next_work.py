@@ -1334,26 +1334,25 @@ class WorkPickerTests(unittest.TestCase):
 
 class IdleBacklogPromotionTests(unittest.TestCase):
     def setUp(self):
+        self.inventory_reads = 0
+        def inventory(_slug, numbers):
+            self.inventory_reads += 1; return ({number: "Backlog" for number in numbers}, int(self.inventory_reads >= 3))  # noqa: E702
         self.enterContext(patch.object(merge_pr, "repository_merge_lock",
             return_value=nullcontext((True, "locked"))))
         self.enterContext(patch.object(
             fnw, "select", return_value={"work": {"type": "idle"}}))
-        self.enterContext(patch.object(fnw, "_governed_open_issue_statuses",
-            side_effect=lambda _slug, numbers: {number: "Backlog" for number in numbers}))
+        self.enterContext(patch.object(
+            fnw, "_governed_open_issue_statuses", side_effect=inventory))
     @staticmethod
     def _issue(number, priority="p1", *, status="backlog", body=None, labels=()):
         return {
             "number": number,
             "title": f"issue {number}",
             "body": body or (
-                "## Acceptance Criteria\n"
-                "- [ ] Works (verify: `python3 -m unittest tests.test_example`)\n\n"
-                "## Decision Boundaries\n- Default: bounded\n\n"
-                "## Non-Goals\n- No extras\n\n"
-                "## Verification\n"
-                "- `python3 -m unittest tests.test_example`\n\n"
-                "touches: scripts/example.py, tests/test_example.py\n"
-                "depends-on: none\n"
+                "## Acceptance Criteria\n- [ ] Works (verify: `python3 -m unittest tests.test_example`)\n\n"
+                "## Decision Boundaries\n- Default: bounded\n\n## Non-Goals\n- No extras\n\n"
+                "## Verification\n- `python3 -m unittest tests.test_example`\n\n"
+                "touches: scripts/example.py, tests/test_example.py\ndepends-on: none\n"
             ),
             "labels": [
                 {"name": f"status:{status}"},
@@ -1362,6 +1361,7 @@ class IdleBacklogPromotionTests(unittest.TestCase):
                 *({"name": label} for label in labels),
             ],
             "author": {"login": "owner"},
+            "updatedAt": "2026-08-25T18:00:00Z",
         }
 
     def test_promotes_only_highest_priority_picker_eligible_issue(self):
@@ -1386,9 +1386,9 @@ class IdleBacklogPromotionTests(unittest.TestCase):
              patch.object(fnw, "update_status", return_value=True) as update:
             promoted = fnw.promote_one_idle_backlog_issue("agent-1")
         self.assertEqual(promoted, 10)
-        update.assert_called_once_with(10, "Ready", require_board=True,
-            expected_status="Backlog", require_unclaimed=True,
-        )
+        update.assert_called_once_with(
+            10, "Ready", require_board=True, expected_status="Backlog",
+            require_unclaimed=True, expected_updated_at="2026-08-25T18:00:00Z")
 
     def test_does_not_promote_when_any_ready_issue_exists(self):
         issues = [self._issue(1, status="ready"), self._issue(2)]

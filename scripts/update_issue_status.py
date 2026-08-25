@@ -27,7 +27,15 @@ def _transition_precondition_holds(
     current_labels: set[str],
     expected_status: str | None,
     require_unclaimed: bool,
+    expected_updated_at: str | None,
 ) -> bool:
+    if expected_updated_at is not None and issue.get("updatedAt") != expected_updated_at:
+        print(
+            f"[CONFLICT] Issue #{issue_id} changed after qualification; "
+            "refusing conditional status transition.",
+            file=sys.stderr,
+        )
+        return False
     if expected_status is not None:
         expected_label = _slug(expected_status)
         current_statuses = sorted(
@@ -55,6 +63,7 @@ def update_status(
     require_board: bool = False,
     expected_status: str | None = None,
     require_unclaimed: bool = False,
+    expected_updated_at: str | None = None,
 ) -> bool:
     canonical = next((s for s in VALID_STATUSES if s.lower() == status.lower()), None)
     if not canonical:
@@ -73,6 +82,7 @@ def update_status(
     current_labels = set(label_names(issue))
     if not _transition_precondition_holds(
         issue_id, issue, current_labels, expected_status, require_unclaimed,
+        expected_updated_at,
     ):
         return False
     stale_labels = [

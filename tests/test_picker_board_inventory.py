@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import fetch_next_work as fnw  # noqa: E402
+import picker_board_inventory as inventory  # noqa: E402
 
 
 class GovernedBoardInventoryTests(unittest.TestCase):
@@ -18,12 +18,12 @@ class GovernedBoardInventoryTests(unittest.TestCase):
             "repositories": {"nodes": [{"nameWithOwner": "owner/repo"}]},
         }
 
-    @patch.object(fnw, "run_cmd")
-    @patch.object(fnw, "get_repo_projects")
+    @patch.object(inventory, "run_cmd")
+    @patch.object(inventory, "get_repo_projects")
     def test_returns_exact_status_map_for_complete_inventory(self, projects, run_cmd):
         projects.return_value = [self.project]
         run_cmd.return_value = (0, json.dumps({
-            "totalCount": 3,
+            "totalCount": 4,
             "items": [
                 {"status": "Backlog", "content": {
                     "number": 1, "repository": "owner/repo",
@@ -34,15 +34,16 @@ class GovernedBoardInventoryTests(unittest.TestCase):
                 {"status": "Backlog", "content": {
                     "number": 8, "repository": "other/repo",
                 }},
+                {"status": "Ready", "content": {"type": "DraftIssue"}},
             ],
         }), "")
 
-        result = fnw._governed_open_issue_statuses("owner/repo", {1, 2})
+        result = inventory.governed_board_inventory("owner/repo", {1, 2})
 
-        self.assertEqual(result, {1: "Backlog", 2: "Ready"})
+        self.assertEqual(result, ({1: "Backlog", 2: "Ready"}, 2))
 
-    @patch.object(fnw, "run_cmd")
-    @patch.object(fnw, "get_repo_projects")
+    @patch.object(inventory, "run_cmd")
+    @patch.object(inventory, "get_repo_projects")
     def test_fails_closed_for_missing_duplicate_or_truncated_items(
         self, projects, run_cmd,
     ):
@@ -62,7 +63,7 @@ class GovernedBoardInventoryTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 run_cmd.return_value = (0, json.dumps(payload), "")
                 self.assertIsNone(
-                    fnw._governed_open_issue_statuses("owner/repo", {1})
+                    inventory.governed_board_inventory("owner/repo", {1})
                 )
 
 

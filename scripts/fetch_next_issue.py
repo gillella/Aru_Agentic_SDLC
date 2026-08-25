@@ -79,13 +79,11 @@ def priority_rank(labels: List[Dict[str, Any]]) -> "tuple[Optional[int], Optiona
     return PRIORITY_RANK[unique[0]], None
 
 
-def active_increment_scope(project_id: Optional[str] = None) -> Optional[set]:
+def active_increment_scope(project_id: Optional[str] = None, *,
+                           fail_on_error: bool = False) -> Optional[set]:
     """Resolves the active operator-authorized increment's issue scope.
 
-    Returns the set of in-scope issue numbers, or ``None`` when no active
-    increment exists or its state cannot be resolved unambiguously (callers
-    fail closed on ``IncrementError``). The store is the durable record
-    authorized by the operator through the #205 flow.
+    ``None`` means no active increment; ``fail_on_error`` distinguishes failure.
     """
     try:
         store = DeliveryIncrementStore()
@@ -93,6 +91,8 @@ def active_increment_scope(project_id: Optional[str] = None) -> Optional[set]:
             project_id = repo_project_id()
         increment = store.active(project_id) if project_id else None
     except Exception:
+        if fail_on_error:
+            raise
         return None
     if not increment:
         return None

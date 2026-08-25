@@ -49,6 +49,9 @@ class StatusSynchronizationTests(unittest.TestCase):
                 {"name": "status:backlog"}, {"name": "agent:other"},
             ]},
             {"state": "CLOSED", "labels": [{"name": "status:backlog"}]},
+            {"state": "OPEN", "updatedAt": "new", "labels": [
+                {"name": "status:backlog"},
+            ]},
         ]
         for issue in cases:
             with self.subTest(issue=issue):
@@ -56,6 +59,7 @@ class StatusSynchronizationTests(unittest.TestCase):
                 self.assertFalse(update_issue_status.update_status(
                     9, "Ready", require_board=True,
                     expected_status="Backlog", require_unclaimed=True,
+                    expected_updated_at=("old" if issue.get("updatedAt") else None),
                 ))
         set_board_status.assert_not_called()
         run_cmd.assert_not_called()

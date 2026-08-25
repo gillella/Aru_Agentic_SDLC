@@ -26,13 +26,11 @@ from claim_issue import (
 )
 from common import (
     board_agent_identities,
-    get_repo_projects,
     get_repo_slug,
     list_open_issues,
     query_issue_project_items,
     run_cmd,
     select_governed_project_items,
-    select_governed_projects,
     label_names as issue_label_names,
 )
 from fetch_next_issue import (
@@ -53,6 +51,7 @@ from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
 # reviewed-but-since-pushed PRs reach no agent at all.
 from merge_pr import review_evidence
 from update_issue_status import update_status
+from picker_board_inventory import governed_board_inventory as _governed_open_issue_statuses
 
 
 # Seats disambiguate concurrent sessions sharing one checkout -- the only case a
@@ -871,48 +870,9 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     }
 
 
-def _governed_open_issue_statuses(
-    repo_slug: str, open_numbers: set[int],
-) -> dict[int, str] | None:
-    """Read the governed board once and prove its open-issue inventory complete."""
-    projects = get_repo_projects(repo_slug)
-    governed = select_governed_projects(projects or [], repo_slug)
-    if len(governed) != 1:
-        return None
-    project = governed[0]
-    owner = (project.get("owner") or {}).get("login")
-    number = project.get("number")
-    if not owner or not isinstance(number, int):
-        return None
-    code, stdout, _stderr = run_cmd([
-        "gh", "project", "item-list", str(number), "--owner", owner,
-        "--limit", "1000", "--format", "json",
-    ], check=False)
-    if code != 0:
-        return None
-    try:
-        payload = json.loads(stdout)
-        items = payload["items"]
-        total = payload["totalCount"]
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(items, list) or total != len(items) or len(items) >= 1000:
-        return None
-    statuses: dict[int, str] = {}
-    for item in items:
-        content = item.get("content") or {}
-        issue_number = content.get("number")
-        repository = content.get("repository") or item.get("repository")
-        if issue_number not in open_numbers or repository != repo_slug:
-            continue
-        status = item.get("status")
-        if issue_number in statuses or not isinstance(status, str) or not status:
-            return None
-        statuses[issue_number] = status
-    return statuses if set(statuses) == open_numbers else None
-
-
-def _idle_backlog_candidate(agent: str) -> tuple[dict[str, Any] | None, str | None]:
+def _idle_backlog_candidate(  # noqa: C901
+    agent: str,
+) -> tuple[dict[str, Any] | None, str | None]:
     """Return the one issue triage and the ordinary picker would admit."""
     from triage_backlog import partition, ready_gaps, split_reasons
 
@@ -926,12 +886,13 @@ def _idle_backlog_candidate(agent: str) -> tuple[dict[str, Any] | None, str | No
 
     repo_slug = get_repo_slug()
     open_numbers = {issue["number"] for issue in issues}
-    board_statuses = _governed_open_issue_statuses(repo_slug or "", open_numbers)
-    if board_statuses is None:
+    inventory = _governed_open_issue_statuses(repo_slug or "", open_numbers)
+    if inventory is None:
         print("[WARN] Governed board inventory is incomplete; refusing auto-triage.",
               file=sys.stderr)
         return None, repo_slug
-    if any(status.lower() == "ready" for status in board_statuses.values()):
+    _board_statuses, ready_count = inventory
+    if ready_count:
         return None, repo_slug
     if any("status:ready" in {name.lower() for name in issue_label_names(issue)}
            for issue in issues):
@@ -984,17 +945,28 @@ def _idle_backlog_candidate(agent: str) -> tuple[dict[str, Any] | None, str | No
         print("[WARN] Open pull request inventory may be truncated; refusing auto-triage.",
               file=sys.stderr)
         return None, repo_slug
+    increment_scope = _auto_triage_increment_scope()
+    if increment_scope is False:
+        return None, repo_slug
     parts = build_candidates(
         staged_issues,
         agent,
         pr_files_by_issue=pr_files_by_issue_from_prs(prs),
-        increment_scope=active_increment_scope(),
+        increment_scope=increment_scope,
     )
     return next(
         (issue for issue in parts["candidates"]
          if issue["number"] in qualified_numbers),
         None,
     ), repo_slug
+
+
+def _auto_triage_increment_scope() -> set | None | bool:
+    try:
+        return active_increment_scope(fail_on_error=True)
+    except Exception as exc:
+        print(f"[WARN] Active increment state is unreadable: {exc}", file=sys.stderr)
+        return False
 
 
 def _promote_one_idle_backlog_issue_locked(
@@ -1016,10 +988,14 @@ def _promote_one_idle_backlog_issue_locked(
 
     compared_fields = (
         "number", "body", "labels", "author", "editor", "authorAssociation",
-        "editorAssociation", "trustIdentityResolved",
+        "editorAssociation", "trustIdentityResolved", "updatedAt",
     )
     if any(candidate.get(field) != fresh.get(field) for field in compared_fields):
         print("[WARN] Backlog candidate changed during triage; leaving it untouched.",
+              file=sys.stderr)
+        return None
+    if not fresh.get("updatedAt"):
+        print("[WARN] Candidate update time is missing; refusing auto-triage.",
               file=sys.stderr)
         return None
 
@@ -1040,13 +1016,15 @@ def _promote_one_idle_backlog_issue_locked(
     if not update_status(
         number, "Ready", require_board=True,
         expected_status="Backlog", require_unclaimed=True,
+        expected_updated_at=fresh.get("updatedAt"),
     ):
         raise AutoTriageError(
             f"qualified Backlog issue #{number} could not be promoted cleanly"
         )
-    post = next(
-        (issue for issue in list_open_issues() if issue["number"] == number), None,
-    )
+    post_issues = list_open_issues()
+    post = next((issue for issue in post_issues if issue["number"] == number), None)
+    post_inventory = None if len(post_issues) >= 500 else _governed_open_issue_statuses(
+        repo_slug, {issue["number"] for issue in post_issues})
     post_statuses = {
         name.lower() for name in issue_label_names(post or {})
         if name.lower().startswith("status:")
@@ -1054,9 +1032,26 @@ def _promote_one_idle_backlog_issue_locked(
     post_agents = {
         name for name in issue_label_names(post or {}) if name.lower().startswith("agent:")
     }
-    if post_statuses != {"status:ready"} or post_agents or board_status() != "ready":
+    expected_labels = {
+        name.lower() for name in issue_label_names(fresh)
+        if not name.lower().startswith("status:")
+    } | {"status:ready"}
+    post_labels = {name.lower() for name in issue_label_names(post or {})}
+    stable_fields = ("number", "body", "author", "editor", "authorAssociation",
+                     "editorAssociation", "trustIdentityResolved")
+    stable = post is not None and all(
+        post.get(field) == fresh.get(field) for field in stable_fields
+    )
+    if (post_statuses != {"status:ready"} or post_agents
+            or post_labels != expected_labels or not stable
+            or post_inventory is None or post_inventory[1] != 1
+            or board_status() != "ready"):
+        update_status(
+            number, "Backlog", require_board=True,
+            expected_status="Ready", require_unclaimed=True,
+        )
         raise AutoTriageError(
-            f"issue #{number} did not read back as unclaimed Ready on board and labels"
+            f"issue #{number} changed during promotion or failed authoritative readback"
         )
     print(f"[INFO] Picker promoted qualified Backlog issue #{number} to Ready.",
           file=sys.stderr)
