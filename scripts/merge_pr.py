@@ -1985,7 +1985,7 @@ def _codeant_status_evidence(evidence):
         at_head = _codeant_status_record_at_head(record, expected_head)
         if at_head is None:
             continue
-        if at_head is False:
+        if at_head is False or has_clean_completion:
             return False
         has_clean_completion = True
     return has_clean_completion

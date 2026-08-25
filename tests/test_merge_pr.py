@@ -1317,6 +1317,40 @@ class CodeAntEvidenceTests(unittest.TestCase):
                                      self.status_comment([self.record()])])
         self.assertFalse(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
 
+    def test_duplicate_completed_records_at_current_head_block(self):
+        """Multiple well-formed done:true status records for the exact expected head
+        in a single comment are ambiguous and must fail closed."""
+        duplicate_scenarios = (
+            # Exact duplicate records
+            [self.record(), self.record()],
+            # Multiple records with different labels or timestamps for current head
+            [self.record(label="Review A"), self.record(label="Review B")],
+            [self.record(started="2026-08-20T10:00:00Z"),
+             self.record(started="2026-08-20T11:00:00Z")],
+            # Case variation on the same current head SHA
+            [self.record(commit=self.HEAD.lower()),
+             self.record(commit=self.HEAD.upper())],
+            # Multiple current head records with historical record before / between / after
+            [self.record(commit=self.PRIOR, done=True),
+             self.record(), self.record()],
+            [self.record(),
+             self.record(commit=self.PRIOR, done=True),
+             self.record()],
+            [self.record(), self.record(),
+             self.record(commit=self.PRIOR, done=True)],
+            # Three duplicate records at current head
+            [self.record(), self.record(), self.record()],
+        )
+        for records in duplicate_scenarios:
+            with self.subTest(records=records):
+                ev = self.evidence(comments=[self.status_comment(records)])
+                self.assertFalse(merge_pr._codeant_status_evidence(ev))
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+                ok, msg = merge_pr.check_reviews(self.pr(), ev)
+                self.assertFalse(ok)
+                self.assertIn("CodeAnt has not supplied", msg)
+
     def test_duplicated_marker_in_one_comment_yields_nothing_usable(self):
         marker = (f"{merge_pr.CODEANT_STATUS_MARKER_PREFIX}"
                   f"{json.dumps([self.record()])}-->")
