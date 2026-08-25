@@ -1,4 +1,4 @@
-# line-ceiling: 412
+# line-ceiling: 437
 """Contract tests for the run-aru-factory entrypoint skill.
 
 The skill is prose, so these assert the properties a reader depends on rather
@@ -26,10 +26,18 @@ DESKTOP_ADAPTERS = (
     ROOT / "templates" / "cursor" / "commands" / "run-aru-factory.md",
     ROOT / "templates" / "cursor" / "commands" / "continue.md",
 )
+REVIEW_SKILL = ROOT / "skills" / "code-review" / "SKILL.md"
 CURSOR_CODE_REVIEW = ROOT / "templates" / "cursor" / "commands" / "code-review.md"
 CURSOR_USER_RULES = ROOT / "templates" / "cursor" / "user-rules-aru-agentic-sdlc.md"
 
 MODES = ("adopt", "status", "next", "loop", "doctor")
+
+# Review machinery #412 removed and #435 did not restore. No denial in either
+# skill uses these phrasings, so a bare mention means it came back.
+RETIRED_REVIEW_MACHINERY = (
+    "reviewer rotation", "round-robin", "capacity ledger",
+    "dashboard", "failover", "reviewer pool",
+)
 
 
 def flat(text):
@@ -193,6 +201,9 @@ class GovernanceTests(unittest.TestCase):
         for provider in ("CodeRabbit", "Sourcery", "CodeAnt", "review:agent"):
             self.assertIn(provider, text, f"review path missing: {provider}")
         self.assertIn("emergency-only", text)
+        self.assertIn("review:coderabbit", text)
+        self.assertIn("reassignment is never automatic", text)
+        self.assertIn("Only an operator", text)
         self.assertIn("never creates a coding-agent review", text)
         self.assertIn("address-pr-feedback", text)
         self.assertNotIn("gh pr review --approve", text)
@@ -206,9 +217,30 @@ class GovernanceTests(unittest.TestCase):
         self.assertNotIn("never a PR you authored", text)
 
     def test_retired_review_skill_is_self_contained(self):
-        review = (ROOT / "skills" / "code-review" / "SKILL.md").read_text()
+        review = REVIEW_SKILL.read_text()
         self.assertNotIn("SKILL.md", review)
         self.assertNotIn("skills/address-pr-feedback", review)
+
+    def test_review_skill_states_the_default_and_the_explicit_fallback(self):
+        """CodeRabbit at creation; Sourcery/CodeAnt only on an operator move."""
+        review = flat(REVIEW_SKILL.read_text(encoding="utf-8"))
+        for clause in (
+            "review:coderabbit",
+            "only an operator may reassign",
+            "sourcery or codeant",
+            "reassignment is never automatic",
+            "reassign_review.py",
+            "external exhaustion",
+            "not a review queue, rotation, scheduler",
+        ):
+            self.assertIn(clause, review, f"review contract missing: {clause}")
+
+    def test_no_retired_review_machinery_is_restored(self):
+        """AC3: no rotation, ledger, dashboard, failover, or provider pool."""
+        for path in (SKILL, REVIEW_SKILL):
+            text = flat(path.read_text(encoding="utf-8"))
+            for machinery in RETIRED_REVIEW_MACHINERY:
+                self.assertNotIn(machinery, text, f"{path.name} restored: {machinery}")
 
     def test_cursor_code_review_command_is_an_emergency_router(self):
         text = CURSOR_CODE_REVIEW.read_text(encoding="utf-8")

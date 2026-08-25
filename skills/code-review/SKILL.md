@@ -5,12 +5,15 @@ description: Reviews a PR only when the operator explicitly assigned this indepe
 
 # Emergency Independent-Agent Code Review
 
-External review is normal: CodeRabbit first, then explicit Sourcery or CodeAnt
-reassignment. A coding agent may review only when `reassign_review.py` has
-already moved one PR to exactly `review:agent`, recorded external exhaustion or
-an operator-declared excessive wait, and assigned exactly
-`reviewer:<CURRENT_AGENT_ID>`. This is recovery of one explicit assignment, not
-a review queue, rotation, scheduler, or permission to select a PR yourself.
+External review is normal: `create_pr.py` labels every new PR
+`review:coderabbit`, and only an operator may reassign it to Sourcery or
+CodeAnt, recording the concrete unavailability or excessive wait that justified
+the move. Reassignment is never automatic. A coding agent may review only when
+`reassign_review.py` has already moved one PR to exactly `review:agent` after
+the operator recorded external exhaustion or an excessive wait, and assigned
+exactly `reviewer:<CURRENT_AGENT_ID>`. This is recovery of one explicit
+assignment, not a review queue, rotation, scheduler, or permission to select a
+PR yourself.
 
 Before inspecting the diff, verify all of the following from live GitHub data:
 
