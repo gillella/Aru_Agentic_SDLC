@@ -84,6 +84,7 @@ class InstallerParityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             all_home = root / "all"
+            explicit_all_home = root / "explicit-all"
             cursor_home = root / "cursor"
             clean_env = dict(os.environ, PATH="/usr/bin:/bin")
 
@@ -98,6 +99,27 @@ class InstallerParityTest(unittest.TestCase):
             ):
                 self.assertTrue((all_home / path / "run-aru-factory").is_symlink(), path)
             self.assertNotIn("not requested/detected", all_result.stdout)
+
+            explicit_all_result = subprocess.run(
+                ["bash", str(installer_path()), "--agent", "all",
+                 "--target-home", str(explicit_all_home)],
+                env=dict(clean_env, HOME=str(explicit_all_home)),
+                capture_output=True, text=True,
+            )
+            self.assertEqual(
+                explicit_all_result.returncode, 0, explicit_all_result.stderr,
+            )
+            for path in (
+                ".codex/skills", ".claude/skills", ".cursor/skills",
+                ".gemini/antigravity/skills",
+            ):
+                self.assertTrue(
+                    (explicit_all_home / path / "run-aru-factory").is_symlink(),
+                    path,
+                )
+            self.assertNotIn(
+                "not requested/detected", explicit_all_result.stdout,
+            )
 
             cursor_result = subprocess.run(
                 ["bash", str(installer_path()), "--agent", "cursor",
