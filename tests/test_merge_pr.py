@@ -236,6 +236,31 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
+    def test_commit_history_must_agree_across_thread_pages(
+        self, gh_json, _slug,
+    ):
+        # Every thread page repeats the full commit history. Two well-formed
+        # but differing histories mean the branch was pushed to between page
+        # fetches, so the pages describe different trees and the assembled
+        # evidence cannot be trusted for any one head.
+        first = self.thread_page()
+        first["data"]["repository"]["pullRequest"]["reviewThreads"][
+            "pageInfo"
+        ] = {"hasNextPage": True, "endCursor": "next"}
+        second = self.thread_page()
+        second["data"]["repository"]["pullRequest"]["commits"] = {
+            "nodes": [{"commit": {"committedDate": "2026-08-24T02:00:00Z"}}],
+        }
+
+        gh_json.side_effect = [
+            self.review_page(), self.attestation_page(), first, second,
+        ]
+
+        self.assertIsNone(merge_pr.review_evidence(162))
+        self.assertEqual(gh_json.call_count, 4)
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
     def test_thread_timestamp_must_be_timezone_aware(self, gh_json, _slug):
         page = self.thread_page(nodes=[{
             "isResolved": False,
