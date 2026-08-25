@@ -998,6 +998,9 @@ def _promote_one_idle_backlog_issue_locked(
         print("[WARN] Candidate update time is missing; refusing auto-triage.",
               file=sys.stderr)
         return None
+    if select(agent, family, round_cap, cross_family_wait)["work"]["type"] != "idle":
+        print("[WARN] Picker is no longer idle; refusing auto-triage.", file=sys.stderr)
+        return None
 
     number = fresh["number"]
 
@@ -1042,9 +1045,11 @@ def _promote_one_idle_backlog_issue_locked(
     stable = post is not None and all(
         post.get(field) == fresh.get(field) for field in stable_fields
     )
+    post_work = select(agent, family, round_cap, cross_family_wait)["work"]
     if (post_statuses != {"status:ready"} or post_agents
             or post_labels != expected_labels or not stable
             or post_inventory is None or post_inventory[1] != 1
+            or post_work.get("type") != "issue" or post_work.get("issue") != number
             or board_status() != "ready"):
         update_status(
             number, "Backlog", require_board=True,

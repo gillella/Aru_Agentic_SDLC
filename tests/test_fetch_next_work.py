@@ -1335,19 +1335,21 @@ class WorkPickerTests(unittest.TestCase):
 class IdleBacklogPromotionTests(unittest.TestCase):
     def setUp(self):
         self.inventory_reads = 0
+        self.select_reads = 0
         def inventory(_slug, numbers):
             self.inventory_reads += 1; return ({number: "Backlog" for number in numbers}, int(self.inventory_reads >= 3))  # noqa: E702
+        def select(*_args):
+            self.select_reads += 1; return {"work": ({"type": "issue", "issue": 10} if self.select_reads >= 3 else {"type": "idle"})}  # noqa: E702
         self.enterContext(patch.object(merge_pr, "repository_merge_lock",
             return_value=nullcontext((True, "locked"))))
         self.enterContext(patch.object(
-            fnw, "select", return_value={"work": {"type": "idle"}}))
+            fnw, "select", side_effect=select))
         self.enterContext(patch.object(
             fnw, "_governed_open_issue_statuses", side_effect=inventory))
     @staticmethod
     def _issue(number, priority="p1", *, status="backlog", body=None, labels=()):
         return {
-            "number": number,
-            "title": f"issue {number}",
+            "number": number, "title": f"issue {number}",
             "body": body or (
                 "## Acceptance Criteria\n- [ ] Works (verify: `python3 -m unittest tests.test_example`)\n\n"
                 "## Decision Boundaries\n- Default: bounded\n\n## Non-Goals\n- No extras\n\n"
@@ -1355,10 +1357,8 @@ class IdleBacklogPromotionTests(unittest.TestCase):
                 "touches: scripts/example.py, tests/test_example.py\ndepends-on: none\n"
             ),
             "labels": [
-                {"name": f"status:{status}"},
-                {"name": f"priority:{priority}"},
-                {"name": "type:feat"},
-                *({"name": label} for label in labels),
+                {"name": f"status:{status}"}, {"name": f"priority:{priority}"},
+                {"name": "type:feat"}, *({"name": label} for label in labels),
             ],
             "author": {"login": "owner"},
             "updatedAt": "2026-08-25T18:00:00Z",

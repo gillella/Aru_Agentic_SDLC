@@ -37,17 +37,23 @@ def qualified_issue(*, status="backlog", extra_labels=()):
 class PickerTransitionGuardTests(unittest.TestCase):
     def setUp(self):
         self.inventory_reads = 0
+        self.select_reads = 0
 
         def inventory(_slug, numbers):
             self.inventory_reads += 1
             return ({number: "Backlog" for number in numbers},
                     int(self.inventory_reads >= 3))
 
+        def select(*_args):
+            self.select_reads += 1
+            return {"work": ({"type": "issue", "issue": 10}
+                             if self.select_reads >= 3 else {"type": "idle"})}
+
         self.enterContext(patch.object(
             fnw.merge_pr, "repository_merge_lock",
             return_value=nullcontext((True, "locked"))))
         self.enterContext(patch.object(
-            fnw, "select", return_value={"work": {"type": "idle"}}))
+            fnw, "select", side_effect=select))
         self.enterContext(patch.object(
             fnw, "_governed_open_issue_statuses",
             side_effect=inventory))
@@ -111,6 +117,43 @@ class PickerTransitionGuardTests(unittest.TestCase):
             self.assertEqual(claim_issue.claim_issue(10, "agent-1"),
                              claim_issue.EXIT_ERROR)
         get_issue.assert_not_called()
+
+    def test_full_picker_must_still_be_idle_immediately_before_write(self):
+        issue = qualified_issue()
+        contexts = self.qualification_context()
+        with patch.object(fnw, "list_open_issues", side_effect=[[issue], [issue]]), \
+             contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
+             contexts[5], patch.object(fnw, "select", side_effect=[
+                 {"work": {"type": "idle"}},
+                 {"work": {"type": "feedback", "pr": 99}},
+             ]), patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_post_picker_must_select_the_same_highest_priority_issue(self):
+        issue = qualified_issue()
+        post = qualified_issue(status="ready")
+        contexts = self.qualification_context()
+        with patch.object(fnw, "list_open_issues",
+                          side_effect=[[issue], [issue], [post]]), \
+             contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
+             contexts[5], patch.object(fnw, "select", side_effect=[
+                 {"work": {"type": "idle"}}, {"work": {"type": "idle"}},
+                 {"work": {"type": "issue", "issue": 99}},
+             ]), patch.object(fnw, "query_issue_project_items",
+                              return_value=[{"status": {"name": "Backlog"}}]), \
+             patch.object(fnw, "select_governed_project_items",
+                          side_effect=lambda items, _slug: items), \
+             patch.object(fnw, "update_status", return_value=True) as update:
+            with self.assertRaises(fnw.AutoTriageError):
+                fnw.promote_one_idle_backlog_issue("agent-1")
+        self.assertEqual(update.call_count, 2)
+
+    def test_missing_repository_identity_blocks_increment_lookup(self):
+        with patch.object(fetch_next_issue, "repo_project_id", return_value=None), \
+             patch.object(fetch_next_issue, "DeliveryIncrementStore"):
+            with self.assertRaisesRegex(RuntimeError, "repository identity"):
+                fetch_next_issue.active_increment_scope(fail_on_error=True)
 
 
 if __name__ == "__main__":
