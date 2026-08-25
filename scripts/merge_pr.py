@@ -1372,7 +1372,7 @@ def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
             nodes {
               __typename
               ... on CheckRun { name status conclusion checkSuite { app { slug } } }
-              ... on StatusContext { context state creator { login __typename } }
+              ... on StatusContext { context state description creator { login __typename } }
             }
           } } } } }
         }

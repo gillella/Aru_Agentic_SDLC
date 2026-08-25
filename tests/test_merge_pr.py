@@ -1748,6 +1748,29 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
         self.assertIn("cursor=page-2", gh_json.call_args_list[1].args[0])
 
     @patch.object(merge_pr, "_gh_json")
+    def test_status_context_selection_carries_description_to_the_gate(self, gh_json):
+        """The loader must select the one field the gate reads on a status."""
+        coderabbit = {
+            "__typename": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+            "description": "Review completed",
+            "creator": {"login": "coderabbitai", "__typename": "Bot"},
+        }
+        gh_json.return_value = self.payload(total=1, nodes=[coderabbit])
+
+        statuses = merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123")
+
+        self.assertEqual(statuses, [coderabbit])
+        query = next(
+            arg for arg in gh_json.call_args.args[0] if arg.startswith("query=")
+        )
+        self.assertIn("description", query.split("on StatusContext {", 1)[1])
+        self.assertIs(
+            merge_pr._coderabbit_check({"coderabbit_status": statuses}), True
+        )
+
+    @patch.object(merge_pr, "_gh_json")
     def test_status_pagination_rejects_concurrent_head_change(self, gh_json):
         gh_json.side_effect = [
             self.payload(total=1, has_next=True, cursor="page-2"),
