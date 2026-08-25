@@ -1069,12 +1069,12 @@ def _promote_one_idle_backlog_issue_locked(
             or post_candidate is None or post_candidate.get("number") != number
             or post_work.get("type") != "issue" or post_work.get("issue") != number
             or board_status() != "ready"):
-        update_status(
+        rolled_back = update_status(
             number, "Backlog", require_board=True,
             expected_status="Ready", require_unclaimed=True,
         )
         raise AutoTriageError(
-            f"issue #{number} changed during promotion or failed authoritative readback"
+            f"issue #{number} failed authoritative readback; rollback {'succeeded' if rolled_back else 'FAILED'}"
         )
     print(f"[INFO] Picker promoted qualified Backlog issue #{number} to Ready.",
           file=sys.stderr)

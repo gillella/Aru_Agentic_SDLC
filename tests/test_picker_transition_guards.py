@@ -130,7 +130,7 @@ class PickerTransitionGuardTests(unittest.TestCase):
                 fnw.promote_one_idle_backlog_issue("agent-1")
         update.assert_not_called()
 
-    def test_lost_board_readback_after_write_rolls_back(self):
+    def test_lost_board_readback_surfaces_failed_rollback(self):
         issue = qualified_issue()
         post = qualified_issue(status="ready")
         contexts = self.qualification_context()
@@ -148,10 +148,10 @@ class PickerTransitionGuardTests(unittest.TestCase):
              ), patch.object(
                  fnw, "select_governed_project_items",
                  side_effect=lambda items, _slug: items,
-             ), patch.object(fnw, "update_status", return_value=True) as update:
+             ), patch.object(fnw, "update_status", side_effect=[True, False]) as update:
             with self.assertRaisesRegex(
                 fnw.AutoTriageError,
-                "failed authoritative readback",
+                "failed authoritative readback; rollback FAILED",
             ):
                 fnw.promote_one_idle_backlog_issue("agent-1")
         self.assertEqual(update.call_args_list, [
