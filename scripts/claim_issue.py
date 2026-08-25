@@ -1327,7 +1327,12 @@ def _effective_reap_threshold(
     return base, "live agent"
 
 
-def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:  # noqa: C901
+def reap_stale_merges(  # noqa: C901, PLR0912
+    hours: int = 4,
+    presence_store: Any = None,
+    now: Optional[datetime] = None,
+    prs_snapshot: Optional[list] = None,
+) -> list:
     """Releases merge claims that went quiet without finishing close-out.
 
     Open and merged PRs are both scanned. A crash right after server-side merge
@@ -1338,24 +1343,27 @@ def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[
     if hours <= 0:
         return []
 
-    prs = []
-    for state in ("open", "merged"):
-        code, out, _ = run_cmd(
-            ["gh", "pr", "list", "--state", state, "--limit", "200",
-             "--json", "number,labels,state,mergedAt"],
-            check=False,
-        )
-        if code != 0:
-            print(f"[WARN] Could not list {state} PRs; merge reaping incomplete.",
-                  file=sys.stderr)
-            return []
-        try:
-            batch = json.loads(out) if out else []
-        except json.JSONDecodeError:
-            print(f"[WARN] Could not parse {state} PR list; merge reaping aborted.",
-                  file=sys.stderr)
-            return []
-        prs.extend(batch)
+    if prs_snapshot is None:
+        prs = []
+        for state in ("open", "merged"):
+            code, out, _ = run_cmd(
+                ["gh", "pr", "list", "--state", state, "--limit", "200",
+                 "--json", "number,labels,state,mergedAt"],
+                check=False,
+            )
+            if code != 0:
+                print(f"[WARN] Could not list {state} PRs; merge reaping incomplete.",
+                      file=sys.stderr)
+                return []
+            try:
+                batch = json.loads(out) if out else []
+            except json.JSONDecodeError:
+                print(f"[WARN] Could not parse {state} PR list; merge reaping aborted.",
+                      file=sys.stderr)
+                return []
+            prs.extend(batch)
+    else:
+        prs = list(prs_snapshot)
 
     claims = _claims_with_timestamps(prs, MERGER_LABEL_PREFIX, merge_claimant)
     if claims is None:
