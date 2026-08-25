@@ -178,23 +178,22 @@ class GovernanceTests(unittest.TestCase):
         for rule in ("issue-first", "worktree", "touches:", "closes #"):
             self.assertIn(rule, text, f"guarantee missing: {rule}")
 
-    def test_coding_agent_review_is_refused(self):
+    def test_coding_agent_review_is_emergency_only(self):
         for text in (
             flat(skill_text()),
             flat(FLEET_PROMPT.read_text(encoding="utf-8")),
         ):
-            self.assertIn("coding agents never review", text)
+            self.assertIn("review:agent", text)
+            self.assertIn("external exhaustion", text)
+            self.assertNotIn("auto-assign a free identity", text)
 
-    def test_assigned_service_is_the_only_review_path(self):
-        """CodeRabbit is one of three assigned review-pool services, not a
-        standalone policy — the contract must name all three labels, keep the
-        coding-agent-review prohibition, and route findings back through the
-        picker for remediation rather than back to a coding agent."""
+    def test_review_paths_keep_external_default_and_agent_exception_narrow(self):
+        """The router must name every authority without creating a scheduler."""
         text = skill_text()
-        for label in ("review:coderabbit", "review:sourcery", "review:codeant"):
-            self.assertIn(label, text, f"assigned-service label missing: {label}")
-        self.assertIn("Coding agents never review", text)
-        self.assertIn("rejects coding-agent", text)
+        for provider in ("CodeRabbit", "Sourcery", "CodeAnt", "review:agent"):
+            self.assertIn(provider, text, f"review path missing: {provider}")
+        self.assertIn("emergency-only", text)
+        self.assertIn("never creates a coding-agent review", text)
         self.assertIn("address-pr-feedback", text)
         self.assertNotIn("gh pr review --approve", text)
 
@@ -211,27 +210,21 @@ class GovernanceTests(unittest.TestCase):
         self.assertNotIn("SKILL.md", review)
         self.assertNotIn("skills/address-pr-feedback", review)
 
-    def test_cursor_code_review_command_is_a_refusal_router(self):
+    def test_cursor_code_review_command_is_an_emergency_router(self):
         text = CURSOR_CODE_REVIEW.read_text(encoding="utf-8")
-        self.assertEqual(
-            text.strip(),
-            "\n".join([
-                "Refuse coding-agent pull-request review under Aru_Agentic_SDLC.",
-                "",
-                "The assigned review-pool service alone reviews pull requests in this repository; coding agents never review.",
-                "Route assigned-service review findings back to the factory picker to remediate them instead.",
-                "Do not inspect the PR, run `gh pr review`, open a review workspace, or submit review comments.",
-            ]),
-        )
+        self.assertIn("explicit", text)
+        self.assertIn("review:agent", text)
+        self.assertIn("external reviewer exhaustion", text)
+        self.assertIn("different from the", text)
+        self.assertIn("exact current head", text)
         lowered = text.lower()
-        self.assertNotIn("approve", lowered)
-        self.assertNotIn("request changes", lowered)
-        self.assertNotIn("inspect the pr and", lowered)
-        self.assertNotIn("review worktree", lowered)
+        self.assertNotIn("auto-assign", lowered)
+        self.assertNotIn("review any", lowered)
 
     def test_cursor_user_rules_route_review_to_remediation(self):
         text = CURSOR_USER_RULES.read_text(encoding="utf-8").lower()
-        self.assertIn("agents remediate findings", text)
+        self.assertIn("remediate external findings", text)
+        self.assertIn("review:agent", text)
         self.assertNotIn("auto-assign a free identity", text)
         self.assertIn("helper-specific contracts", text)
 

@@ -17,7 +17,7 @@ from typing import Mapping, Optional
 
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 AGENT_ID_ENV_VAR = "ARU_AGENT_ID"
-FINGERPRINT_LENGTH = 6
+FINGERPRINT_LENGTH = 12
 
 FAMILY_TO_PRODUCT = {
     "openai": "codex",

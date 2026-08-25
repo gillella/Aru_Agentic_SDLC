@@ -1,8 +1,9 @@
-# line-ceiling: 1500
+# line-ceiling: 1530
 import io
 import json
 import sys
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -156,7 +157,8 @@ class EligibilityTests(unittest.TestCase):
     def test_coding_agents_are_never_eligible_for_review(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic"))
         self.assertFalse(verdict["eligible"])
-        self.assertIn("CodeRabbit", verdict["reason"])
+        self.assertIn("never selected from the normal queue", verdict["reason"])
+        self.assertIn("review:agent", verdict["reason"])
 
     def test_picker_json_top_level_agent_is_resolved_identity(self):
         parts = {
@@ -227,6 +229,30 @@ class PriorityTests(unittest.TestCase):
         res = self._select([], candidates=[7], in_flight=4)
         self.assertEqual(res["work"]["issue"], 4)
         self.assertTrue(res["work"]["resuming"])
+
+    def test_explicit_agent_review_resumes_before_issue_work(self):
+        assigned = pr(2, "author:agent-1", "review:agent", "reviewer:agent-2",
+                      checks="pending", title="emergency review")
+        res = self._select([assigned], candidates=[7], in_flight=4)
+        self.assertEqual(res["work"]["type"], "review")
+        self.assertEqual(res["work"]["pr"], 2)
+        self.assertTrue(res["work"]["resuming"])
+
+    def test_emergency_review_is_not_a_general_agent_queue(self):
+        assigned = pr(2, "author:agent-1", "review:agent", "reviewer:agent-3",
+                      checks="pending")
+        self.assertEqual(
+            self._select([assigned], candidates=[7])["work"]["type"], "issue")
+        self_review = pr(3, "author:agent-2", "review:agent", "reviewer:agent-2",
+                         checks="pending")
+        self.assertEqual(
+            self._select([self_review], candidates=[7])["work"]["type"], "issue")
+
+    def test_completed_emergency_review_is_not_offered_again(self):
+        completed = pr(2, "author:agent-1", "review:agent", "reviewer:agent-2",
+                       "reviewed-by:agent-2", checks="pending")
+        self.assertEqual(
+            self._select([completed], candidates=[7])["work"]["type"], "issue")
 
     def test_idle_when_there_is_nothing_at_all(self):
         self.assertEqual(self._select([], candidates=[])["work"]["type"], "idle")
@@ -367,13 +393,6 @@ class MergeWorkTests(unittest.TestCase):
         self.assertEqual(work["pr"], 2)
         self.assertEqual(work["head_sha"], "bbb")
         self.assertIsNotNone(claimed)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-
 class UnreadableQueueTests(unittest.TestCase):
     def test_selector_fails_closed_when_prs_cannot_be_listed(self):
         # Treating an unreadable queue as empty would claim new implementation
@@ -1240,5 +1259,169 @@ class WorkPickerTests(unittest.TestCase):
             fnw.main()
             self.assertIn("[WARN] Autonomous claim reap encountered error: transient network failure", fake_stderr.getvalue())
 
-if __name__ == "__main__":
-    unittest.main()
+class IdleBacklogPromotionTests(unittest.TestCase):
+    def setUp(self):
+        self.inventory_reads = 0
+        self.select_reads = 0
+        def inventory(_slug, numbers):
+            self.inventory_reads += 1; return ({number: ("Ready" if self.inventory_reads >= 3 and number == 10 else "Backlog") for number in numbers}, int(self.inventory_reads >= 3))  # noqa: E702
+        def select(*_args):
+            self.select_reads += 1; return {"work": ({"type": "issue", "issue": 10} if self.select_reads >= 3 else {"type": "idle"})}  # noqa: E702
+        self.enterContext(patch.object(merge_pr, "repository_merge_lock",
+            return_value=nullcontext((True, "locked"))))
+        self.enterContext(patch.object(
+            fnw, "select", side_effect=select))
+        self.enterContext(patch.object(
+            fnw, "_governed_open_issue_statuses", side_effect=inventory))
+    @staticmethod
+    def _issue(number, priority="p1", *, status="backlog", body=None, labels=()):
+        return {
+            "number": number, "title": f"issue {number}",
+            "body": body or (
+                "## Acceptance Criteria\n- [ ] Works (verify: `python3 -m unittest tests.test_example`)\n\n"
+                "## Decision Boundaries\n- Default: bounded\n\n## Non-Goals\n- No extras\n\n"
+                "## Verification\n- `python3 -m unittest tests.test_example`\n\n"
+                "touches: scripts/example.py, tests/test_example.py\ndepends-on: none\n"
+            ),
+            "labels": [
+                {"name": f"status:{status}"}, {"name": f"priority:{priority}"},
+                {"name": "type:feat"}, *({"name": label} for label in labels),
+            ],
+            "author": {"login": "owner"},
+            "updatedAt": "2026-08-25T18:00:00Z",
+        }
+
+    def test_promotes_only_highest_priority_picker_eligible_issue(self):
+        issues = [self._issue(20, "p2"), self._issue(30, "p0"), self._issue(10, "p0")]
+        post = self._issue(10, "p0", status="ready")
+        with patch.object(fnw, "list_open_issues",
+                          side_effect=[issues, issues, [post], [post]]), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "active_increment_scope", return_value=None), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins",
+                          return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login",
+                          return_value="owner"), \
+             patch.object(fetch_next_issue, "is_trusted_metadata_author",
+                          return_value=True), \
+             patch.object(fnw, "query_issue_project_items",
+                          side_effect=[[{"status": {"name": "Backlog"}}],
+                                       [{"status": {"name": "Ready"}}]]), \
+             patch.object(fnw, "select_governed_project_items",
+                          side_effect=lambda items, _slug: items), \
+             patch.object(fnw, "update_status", return_value=True) as update:
+            promoted = fnw.promote_one_idle_backlog_issue("agent-1")
+        self.assertEqual(promoted, 10)
+        update.assert_called_once_with(
+            10, "Ready", require_board=True, expected_status="Backlog",
+            require_unclaimed=True, expected_updated_at="2026-08-25T18:00:00Z")
+
+    def test_does_not_promote_when_any_ready_issue_exists(self):
+        issues = [self._issue(1, status="ready"), self._issue(2)]
+        with patch.object(fnw, "list_open_issues", return_value=issues), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_refuses_conflicting_status_labels(self):
+        issue = self._issue(1)
+        issue["labels"].append({"name": "status:done"})
+        with patch.object(fnw, "list_open_issues", return_value=[issue]), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_refuses_candidate_that_changes_during_live_revalidation(self):
+        original = self._issue(1)
+        changed = {**original, "body": original["body"] + "\nchanged\n"}
+        with patch.object(fnw, "list_open_issues",
+                          side_effect=[[original], [changed]]), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "active_increment_scope", return_value=None), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins",
+                          return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login",
+                          return_value="owner"), \
+             patch.object(fetch_next_issue, "is_trusted_metadata_author",
+                          return_value=True), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_refuses_when_governed_board_is_not_backlog(self):
+        issue = self._issue(1)
+        with patch.object(fnw, "list_open_issues", return_value=[issue]), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "active_increment_scope", return_value=None), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins",
+                          return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login",
+                          return_value="owner"), \
+             patch.object(fetch_next_issue, "is_trusted_metadata_author",
+                          return_value=True), \
+             patch.object(fnw, "query_issue_project_items",
+                          return_value=[{"status": {"name": "Done"}}]), \
+             patch.object(fnw, "select_governed_project_items",
+                          side_effect=lambda items, _slug: items), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_leaves_operator_epic_incomplete_and_oversized_work_in_backlog(self):
+        incomplete = self._issue(1, body="touches: scripts/x.py")
+        operator = self._issue(2, labels=("needs-human",))
+        epic = self._issue(3, labels=("type:epic",))
+        oversized = self._issue(
+            4,
+            body=(self._issue(4)["body"]
+                  .replace("touches: scripts/example.py, tests/test_example.py",
+                           "touches: scripts/a.py, hooks/b.py, tests/test_example.py")),
+        )
+        with patch.object(
+            fnw, "list_open_issues",
+            return_value=[incomplete, operator, epic, oversized],
+        ), patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_read_only_picker_does_not_attempt_promotion(self):
+        idle = {
+            "agent": "agent-1", "family": None,
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [], "merge_skipped": [], "claimable_issues": [],
+        }
+        with patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "select", return_value=idle), \
+             patch.object(fnw, "promote_one_idle_backlog_issue") as promote, \
+             patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1",
+                                "--reap-after", "0"]), \
+             patch("sys.stdout", io.StringIO()):
+            fnw.main()
+        promote.assert_not_called()
+
+    def test_claiming_idle_picker_promotes_reselects_and_claims(self):
+        idle = {
+            "agent": "agent-1", "family": None,
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [], "merge_skipped": [], "claimable_issues": [],
+        }
+        selected = IssueClaimFailureTests.selection()
+        stdout = io.StringIO()
+        with patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "select", side_effect=[idle, selected]), \
+             patch.object(fnw, "promote_one_idle_backlog_issue", return_value=334), \
+             patch("claim_issue.claim_issue", return_value=fnw.EXIT_OK) as claim, \
+             patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1",
+                                "--claim", "--json", "--reap-after", "0"]), \
+             patch("sys.stdout", stdout):
+            result = fnw.main()
+        payload = json.loads(stdout.getvalue())
+        self.assertIsNone(result)
+        self.assertEqual(payload["auto_promoted_issue"], 334)
+        self.assertTrue(payload["work"]["claimed"])
+        claim.assert_called_once_with(334, "agent-1")

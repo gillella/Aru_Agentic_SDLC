@@ -20,7 +20,7 @@ Aru_Agentic_SDLC governance:
    - implement next issue / a named issue → `implement-next-issue`
    - new governed repo → `init-agent-project`
    - file bug/feature/task → `create-github-issue`
-   - review a PR → refuse; the assigned review-pool service alone reviews. Coding agents never review, agents remediate findings
+   - review a PR → use `code-review` only for a preassigned `review:agent` emergency fallback; otherwise refuse and remediate external findings
    - red CI → `remediate-ci-failure`
    - PR review comments → `address-pr-feedback`
 5. Use worktrees under `.worktrees/`, never push straight to main/master,

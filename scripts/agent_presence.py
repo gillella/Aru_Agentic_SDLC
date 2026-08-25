@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import socket
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -100,6 +102,26 @@ def _parse_iso(value: str) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _is_live_session(session_id: str) -> bool:
+    """Treat a dead local PID as expired while keeping remote claims TTL-bound."""
+    host, separator, pid_text = (session_id or "").partition("|")
+    if not separator or host != socket.gethostname().split(".")[0]:
+        return True
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return True
+    if pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def path_derived_project_id(checkout: Path) -> str:
@@ -379,6 +401,8 @@ class PresenceStore:
         if (now - at).total_seconds() >= self.heartbeat_ttl_seconds:
             return None
         holder = claim.get("session")
+        if not _is_live_session(holder):
+            return None
         if holder == session_id:
             return None
         return holder
@@ -406,7 +430,8 @@ class PresenceStore:
                     at = _parse_iso(claim.get("at", ""))
                 except PresenceError:
                     continue
-                if (now - at).total_seconds() < self.heartbeat_ttl_seconds:
+                if ((now - at).total_seconds() < self.heartbeat_ttl_seconds
+                        and _is_live_session(claim.get("session", ""))):
                     live[agent_id] = claim
             busy = {a for a, c in live.items() if c.get("session") != session_id}
             free = [a for a in pool if a not in busy]

@@ -58,6 +58,10 @@ class FingerprintDerivationTests(unittest.TestCase):
         self.assertRegex(agent_id, ai.AGENT_ID_RE)
         self.assertLessEqual(len(agent_id), 20)
 
+    def test_fingerprint_uses_twelve_hex_characters(self):
+        agent_id = ai.fingerprint_agent_id("anthropic", repo_root="/repo", machine="box-a")
+        self.assertRegex(agent_id, r"^claude-[0-9a-f]{12}$")
+
     def test_checkout_path_is_hashed_not_embedded(self):
         # The id lands in public GitHub labels; an absolute path would name the
         # operator's home directory.
@@ -102,12 +106,18 @@ class PickerIdentityTests(unittest.TestCase):
                 "merge_skipped": [], "claimable_issues": [],
                 "mergeable_detail": [], "reviewable_detail": []}
 
-    def _run(self, argv, env=None):
+    def _run(self, argv, env=None, reserve_identity=True):
+        from contextlib import nullcontext
         import io
         argv = [*argv, "--reap-after", "0"]
         out = patch("sys.stdout", new_callable=io.StringIO)
         err = patch("sys.stderr", new_callable=io.StringIO)
+        reserve = (
+            patch.object(fnw, "_reserve_derived_identity", return_value=None)
+            if reserve_identity else nullcontext()
+        )
         with patch.object(fnw, "select", return_value=self._idle()) as select_mock, \
+             reserve, \
              patch.dict("os.environ", env or {}, clear=True), \
              patch("sys.argv", argv), out as _o, err as _e:
             rc = fnw.main()
@@ -135,6 +145,15 @@ class PickerIdentityTests(unittest.TestCase):
         self.assertIsNone(rc)
         self.assertTrue(select_mock.call_args[0][0].startswith("claude-"))
 
+    def test_live_derived_identity_stops_before_selection(self):
+        with patch.object(fnw, "select", return_value=self._idle()) as select_mock, \
+             patch.object(fnw, "_reserve_derived_identity", return_value=1), \
+             patch.dict("os.environ", {}, clear=True), \
+             patch("sys.argv", ["fetch_next_work.py", "--family", "anthropic", "--reap-after", "0"]):
+            rc = fnw.main()
+        self.assertEqual(rc, 1)
+        select_mock.assert_not_called()
+
     def test_invalid_operator_ids_stop_before_selection(self):
         for argv, env in (
             (["fetch_next_work.py", "--agent", "bad id"], {}),
@@ -147,16 +166,20 @@ class PickerIdentityTests(unittest.TestCase):
                 self.assertIn("invalid", error)
 
     def test_env_pinned_id_wins_over_derivation(self):
-        rc, select_mock, _err = self._run(
-            ["fetch_next_work.py", "--family", "anthropic"],
-            env={"ARU_AGENT_ID": "box-agent"})
+        with patch.object(fnw, "_reserve_derived_identity") as reserve:
+            rc, select_mock, _err = self._run(
+                ["fetch_next_work.py", "--family", "anthropic"],
+                env={"ARU_AGENT_ID": "box-agent"}, reserve_identity=False)
+        reserve.assert_not_called()
         self.assertIsNone(rc)
         self.assertEqual(select_mock.call_args[0][0], "box-agent")
 
     def test_explicit_agent_still_wins_over_everything(self):
-        rc, select_mock, _err = self._run(
-            ["fetch_next_work.py", "--agent", "claude-1"],
-            env={"ARU_AGENT_ID": "box-agent"})
+        with patch.object(fnw, "_reserve_derived_identity") as reserve:
+            rc, select_mock, _err = self._run(
+                ["fetch_next_work.py", "--agent", "claude-1"],
+                env={"ARU_AGENT_ID": "box-agent"}, reserve_identity=False)
+        reserve.assert_not_called()
         self.assertIsNone(rc)
         self.assertEqual(select_mock.call_args[0][0], "claude-1")
 
