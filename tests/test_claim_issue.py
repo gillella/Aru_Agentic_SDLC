@@ -1,4 +1,4 @@
-# line-ceiling: 1051
+# line-ceiling: 1072
 import io
 import json
 import sys
@@ -68,7 +68,7 @@ class ClaimProtocolTests(unittest.TestCase):
             self.assertFalse(self.required_board_preflight(7, "In Progress"))
         self.assertIn("read:project", stderr.getvalue())
         self.assertIn("project", stderr.getvalue())
-        self.assertIn("claim was not started", stderr.getvalue())
+        self.assertIn("claim cannot proceed", stderr.getvalue())
 
     def test_project_preflight_requires_ready_state_and_target_option(self):
         item = {
@@ -103,6 +103,27 @@ class ClaimProtocolTests(unittest.TestCase):
         ensure_label.assert_not_called()
         run_cmd.assert_not_called()
         update_status.assert_not_called()
+
+    @patch.object(claim_issue, "_required_board_preflight", return_value=False)
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "ensure_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_interrupted_claim_preflight_reports_retained_state(
+        self, get_issue, ensure_label, run_cmd, update_status, _preflight
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:ready", "agent:agent-a")
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            result = claim_issue.claim_issue(7, "agent-a")
+        self.assertEqual(result, claim_issue.EXIT_ERROR)
+        ensure_label.assert_not_called()
+        run_cmd.assert_not_called()
+        update_status.assert_not_called()
+        self.assertIn("Incomplete claim state retained", stderr.getvalue())
+        self.assertIn("agent:agent-a", stderr.getvalue())
+        self.assertIn("existing assignee", stderr.getvalue())
 
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "update_status", return_value=False)

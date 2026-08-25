@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1508
+# line-ceiling: 1514
 """
 claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
 for one agent.
@@ -128,7 +128,7 @@ def _required_board_preflight(issue_id: int, target_status: str) -> bool:
     if not slug or "/" not in slug:
         print(
             f"[ERROR] Cannot resolve repository identity for issue #{issue_id}; "
-            "claim was not started.",
+            "claim cannot proceed.",
             file=sys.stderr,
         )
         return False
@@ -136,7 +136,7 @@ def _required_board_preflight(issue_id: int, target_status: str) -> bool:
     if items is None:
         print(
             f"[ERROR] Cannot read the governed Project Board for issue #{issue_id}; "
-            "claim was not started. Verify `gh auth status` and grant "
+            "claim cannot proceed. Verify `gh auth status` and grant "
             "`read:project` to inspect the board and `project` to mutate it.",
             file=sys.stderr,
         )
@@ -145,7 +145,7 @@ def _required_board_preflight(issue_id: int, target_status: str) -> bool:
     if len(governed) != 1:
         print(
             f"[ERROR] Cannot identify exactly one governed Project Board item "
-            f"for issue #{issue_id}; claim was not started.",
+            f"for issue #{issue_id}; claim cannot proceed.",
             file=sys.stderr,
         )
         return False
@@ -166,7 +166,7 @@ def _required_board_preflight(issue_id: int, target_status: str) -> bool:
     if not field.get("id") or not has_target:
         print(
             f"[ERROR] Governed Project Board has no readable Status option "
-            f"'{target_status}' for issue #{issue_id}; claim was not started.",
+            f"'{target_status}' for issue #{issue_id}; claim cannot proceed.",
             file=sys.stderr,
         )
         return False
@@ -443,13 +443,19 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
             return EXIT_OK
         if _has_ready(issue):
             print(f"[INFO] Completing interrupted claim on #{issue_id}...")
-            return (
-                _finalize_claim(
-                    issue_id, agent, status, assignee, my_label,
-                    owner=owner, trusted_logins=trusted_logins,
+            if not _required_board_preflight(issue_id, status):
+                print(
+                    f"[ERROR] Incomplete claim state retained for issue #{issue_id}: "
+                    f"`{my_label}` and any existing assignee were left unchanged "
+                    "because governed Board authority could not be proven. Retry "
+                    "with the same stable agent id after reconciliation, allow "
+                    "stale-claim reaping, or reconcile manually.",
+                    file=sys.stderr,
                 )
-                if _required_board_preflight(issue_id, status)
-                else EXIT_ERROR
+                return EXIT_ERROR
+            return _finalize_claim(
+                issue_id, agent, status, assignee, my_label,
+                owner=owner, trusted_logins=trusted_logins,
             )
         print(
             f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready or "
