@@ -148,8 +148,8 @@ family. It is therefore **stable across restarts** — a restarted session
 recomputes the same id and reclaims its own board work — and **distinct across
 machines**, so two agents can never be issued the same id.
 
-Override with `ARU_AGENT_ID`, or name one explicitly with `--agent`. Fleets that
-want fixed readable names (`claude-1`, `codex-1`) can pass `--agent-pool`.
+Override with `ARU_AGENT_ID`, or name one explicitly with `--agent`, including
+when an operator prefers a fixed readable name such as `claude-1` or `codex-1`.
 
 ## When an agent disappears
 

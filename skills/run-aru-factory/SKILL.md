@@ -46,8 +46,8 @@ Omit `--agent` and the picker derives a stable id from where
 this agent runs — `<product>-<fingerprint>`, e.g. `claude-a3f19c`. The same
 machine, checkout, and family always resolve to the same id, so a restarted
 session reclaims its own board work, and two machines can never be issued one
-id. `ARU_AGENT_ID` pins an id explicitly; `--agent-pool` selects the older
-named ring (`claude-1`, `codex-1`, …) for fleets that want fixed names.
+id. `ARU_AGENT_ID` pins an id explicitly; pass `--agent <AGENT_ID>` when a
+fixed readable name such as `claude-1` or `codex-1` is preferred.
 
 ```shell
 python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
