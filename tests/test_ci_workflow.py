@@ -55,6 +55,12 @@ class FocusedStoryContractTests(unittest.TestCase):
             for gate in ("lint", "syntax", "documentation", "build"):
                 self.assertIn(gate, text, f"{path}: missing {gate}")
 
+        board = flat(BOARD_PATH)
+        self.assertIn("every acceptance-criteria `verify:` predicate", board)
+        self.assertIn("tests directly affected by the changed behavior", board)
+        for gate in ("lint", "syntax", "documentation", "build"):
+            self.assertIn(gate, board, f"{BOARD_PATH}: missing {gate}")
+
     def test_focused_scope_never_means_zero_behavioral_evidence(self):
         for path in (PROMPT_PATH, SKILL_PATH, STANDARDS_PATH, BOARD_PATH):
             text = flat(path)
