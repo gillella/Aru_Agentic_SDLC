@@ -1,4 +1,4 @@
-# line-ceiling: 420
+# line-ceiling: 490
 """Hermetic proof that the issue lifecycle is traversable end to end.
 
 Issue #293 - every governance gate in this repository is individually
@@ -127,6 +127,7 @@ def canonical_evidence(**overrides) -> dict:
         "reviewed_head": True,
         "github_review_evidence": True,
         "head_oid": "1111111111111111111111111111111111111111",
+        "head_commit_committed_at": "2026-08-18T23:59:00Z",
         "reviews": [{
             "id": "coderabbit-review-293",
             "state": "APPROVED",
@@ -209,6 +210,44 @@ def reassigned_evidence(service: str, **overrides) -> dict:
 
 
 FALLBACK_SERVICES = ("sourcery", "codeant")
+
+
+def agent_review_pr(**overrides) -> dict:
+    pr = reassigned_pr("agent")
+    pr["labels"].extend([
+        {"name": "reviewed-by:agent-2"},
+        {"name": "reviewer-family:agent-2:openai"},
+    ])
+    pr.update(overrides)
+    return pr
+
+
+def agent_review_evidence(**overrides) -> dict:
+    head = canonical_pr()["headRefOid"]
+    evidence = canonical_evidence(reviews=[{
+        "id": "agent-review-293", "state": "COMMENTED",
+        "body": "No findings after exact-head inspection and focused tests.",
+        "author": {"login": "gillella", "__typename": "User"},
+        "submittedAt": "2026-08-19T00:02:00Z", "commit": {"oid": head},
+    }])
+    evidence.pop("coderabbit_status")
+    evidence["service_threads"] = {
+        "agent": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+    }
+    evidence["agent_review_attestations"] = [{
+        "agent": "agent-2", "completed_at": "2026-08-19T00:03:00Z",
+        "disposition": "no-findings", "family": "openai", "head": head,
+        "status": "completed", "github_login": "gillella",
+    }]
+    evidence["agent_review_marker_errors"] = 0
+    evidence["agent_review_assignments"] = [{
+        "family": "openai", "from": "review:codeant", "head": head,
+        "reason": "External reviewers busy", "reviewer": "agent-2",
+        "assigned_at": "2026-08-19T00:01:00Z", "github_login": "gillella",
+    }]
+    evidence["agent_review_assignment_errors"] = 0
+    evidence.update(overrides)
+    return evidence
 
 
 def _issue(number: int, status: str) -> dict:
@@ -319,7 +358,7 @@ class FallbackReviewTraversalTests(unittest.TestCase):
     def test_reassignment_helper_targets_exactly_the_traversed_services(self):
         """A target nobody proved traversable is a PR the operator can strand."""
         self.assertEqual(set(reassign_review.FALLBACK_LABELS),
-                         set(FALLBACK_SERVICES))
+                         set(FALLBACK_SERVICES) | {"agent"})
 
     def test_fallback_without_its_own_evidence_blocks_on_review_alone(self):
         """The reassignment moves authority; it never satisfies authority."""
@@ -366,6 +405,37 @@ class FallbackReviewTraversalTests(unittest.TestCase):
         self.assertIsNone(merge_pr.assigned_review_service(pr))
         self.assertFalse(
             merge_pr.check_reviews(pr, reassigned_evidence("sourcery"))[0])
+
+
+class EmergencyAgentReviewTraversalTests(FallbackReviewTraversalTests):
+    """The explicit last-resort agent path preserves the full DoD conjunction."""
+
+    def test_exact_head_independent_agent_review_is_traversable(self):
+        ok, gates = self._dod(agent_review_pr(), agent_review_evidence())
+        self.assertTrue(ok, [f"{n}: {m}" for n, passed, m in gates if not passed])
+
+    def test_agent_finding_blocks_until_new_head_and_fresh_review(self):
+        evidence = agent_review_evidence()
+        evidence["unresolved"] = 1
+        evidence["service_threads"]["agent"]["unresolved"] = 1
+        self.assertFalse(merge_pr.check_reviews(agent_review_pr(), evidence)[0])
+        pushed = "3" * 40
+        stale = agent_review_evidence(head_oid=pushed)
+        self.assertFalse(
+            merge_pr.check_reviews(agent_review_pr(headRefOid=pushed), stale)[0])
+
+    def test_self_review_and_duplicate_completion_fail_closed(self):
+        self_review = agent_review_pr()
+        for label in self_review["labels"]:
+            if label["name"] == "reviewed-by:agent-2":
+                label["name"] = "reviewed-by:agent-1"
+            if label["name"] == "reviewer-family:agent-2:openai":
+                label["name"] = "reviewer-family:agent-1:openai"
+        self.assertFalse(
+            merge_pr.check_reviews(self_review, agent_review_evidence())[0])
+        evidence = agent_review_evidence()
+        evidence["agent_review_attestations"] *= 2
+        self.assertFalse(merge_pr.check_reviews(agent_review_pr(), evidence)[0])
 
 
 class DefinitionOfDoneTests(unittest.TestCase):

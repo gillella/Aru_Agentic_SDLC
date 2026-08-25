@@ -49,7 +49,8 @@ class ReassignTests(unittest.TestCase):
 
     def _run(self, snapshot, service="sourcery",
              edit_results=((0, "", ""), (0, "", "")),
-             comment_results=((0, "", ""), (0, "", ""))):
+             comment_results=((0, "", ""), (0, "", "")),
+             reviewer="agent-2", family="openai"):
         calls = []
 
         def fake_run_cmd(cmd, **kwargs):
@@ -62,7 +63,7 @@ class ReassignTests(unittest.TestCase):
         with patch.object(rr, "run_gh_json", return_value=snapshot), \
              patch.object(rr, "ensure_label", return_value=True), \
              patch.object(rr, "run_cmd", side_effect=fake_run_cmd):
-            code = rr.reassign(433, service, self.REASON)
+            code = rr.reassign(433, service, self.REASON, reviewer, family)
         return code, calls
 
     @staticmethod
@@ -86,7 +87,7 @@ class ReassignTests(unittest.TestCase):
         self.assertIn("review:sourcery", audit)
 
     def test_each_service_is_triggered_with_its_own_command(self):
-        for service in sorted(rr.FALLBACK_LABELS):
+        for service in sorted(rr.EXTERNAL_FALLBACK_LABELS):
             with self.subTest(service=service):
                 code, calls = self._run(pr("review:coderabbit"), service=service)
                 self.assertEqual(code, rr.EXIT_OK)
@@ -99,7 +100,7 @@ class ReassignTests(unittest.TestCase):
         self.assertIn("review:codeant", [c[-1] for c in calls if "--add-label" in c])
 
     def test_already_switched_pr_is_refused(self):
-        for service, label in sorted(rr.FALLBACK_LABELS.items()):
+        for service, label in sorted(rr.EXTERNAL_FALLBACK_LABELS.items()):
             with self.subTest(service=service):
                 code, calls = self._run(pr(label), service=service)
                 self.assertEqual(code, rr.EXIT_CONFLICT)
@@ -109,6 +110,35 @@ class ReassignTests(unittest.TestCase):
         """Only the default assignment may move; a second hop is not authorized."""
         code, _ = self._run(pr("review:codeant"), service="sourcery")
         self.assertEqual(code, rr.EXIT_CONFLICT)
+
+    def test_agent_fallback_can_follow_any_external_authority(self):
+        for existing in ("review:coderabbit", "review:sourcery", "review:codeant"):
+            with self.subTest(existing=existing):
+                code, calls = self._run(pr(existing, "author:agent-1"), service="agent")
+                self.assertEqual(code, rr.EXIT_OK)
+                edits = [call for call in calls if "edit" in call]
+                self.assertIn("review:agent", edits[0])
+                self.assertIn("reviewer:agent-2", edits[0])
+                self.assertEqual(len(self._comments(calls)), 1)
+
+    def test_agent_fallback_records_identity_family_head_and_reason(self):
+        code, calls = self._run(pr("review:codeant", "author:agent-1"), service="agent")
+        self.assertEqual(code, rr.EXIT_OK)
+        audit = self._comments(calls)[0]
+        for expected in ("aru-agent-review-assignment:v1", "agent-2", "openai",
+                         HEAD, self.REASON):
+            self.assertIn(expected, audit)
+
+    def test_agent_fallback_rejects_self_review_and_ambiguous_author(self):
+        for snapshot, reviewer in (
+            (pr("review:coderabbit", "author:agent-1"), "agent-1"),
+            (pr("review:coderabbit"), "agent-2"),
+            (pr("review:coderabbit", "author:a", "author:b"), "agent-2"),
+        ):
+            with self.subTest(snapshot=snapshot, reviewer=reviewer):
+                code, calls = self._run(snapshot, service="agent", reviewer=reviewer)
+                self.assertEqual(code, rr.EXIT_CONFLICT)
+                self.assertFalse([call for call in calls if "edit" in call])
 
     def test_unknown_existing_authority_is_refused(self):
         code, _ = self._run(pr("review:manual"))
@@ -174,6 +204,14 @@ class ArgumentTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertEqual(rr.reassign(1, "sourcery", reason), rr.EXIT_ERROR)
 
+    def test_agent_target_requires_safe_identity_and_known_family(self):
+        for reviewer, family in (("", "openai"), ("bad/id", "openai"),
+                                 ("agent-2", ""), ("agent-2", "unknown")):
+            with self.subTest(reviewer=reviewer, family=family):
+                self.assertEqual(
+                    rr.reassign(1, "agent", "external reviewers exhausted",
+                                reviewer, family), rr.EXIT_ERROR)
+
     def test_coderabbit_is_not_a_fallback_target(self):
         """The default is what we fall back *from*; it is never a target."""
         self.assertNotIn("coderabbit", rr.FALLBACK_LABELS)
@@ -183,7 +221,8 @@ class ArgumentTests(unittest.TestCase):
         for label in rr.FALLBACK_LABELS.values():
             with self.subTest(label=label):
                 self.assertIn(label, merge_pr.REVIEW_SERVICE_LABELS)
-        self.assertEqual(set(rr.SERVICE_TRIGGERS), set(rr.FALLBACK_LABELS))
+        self.assertEqual(set(rr.SERVICE_TRIGGERS),
+                         set(rr.EXTERNAL_FALLBACK_LABELS))
 
 
 if __name__ == "__main__":

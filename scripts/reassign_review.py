@@ -3,9 +3,10 @@
 """reassign_review.py - move one stalled pull request to a fallback reviewer.
 
 CodeRabbit is the default and the only authority `create_pr.py` ever assigns.
-When it is demonstrably unavailable for a specific pull request -- a pause, a
-rate limit, an outage -- this command moves that one pull request to Sourcery
-or CodeAnt and records why.
+When it is demonstrably unavailable for a specific pull request, this command
+moves that PR to Sourcery or CodeAnt. Only after all external paths are
+unavailable, busy, or waiting too long may an operator select one independent
+coding agent. Every reassignment records why.
 
 Deliberately not a scheduler. There is no rotation, no capacity ledger, and no
 automatic failover: authority moves only when an operator names a pull request
@@ -24,13 +25,20 @@ names, with the manual step needed to finish or undo it.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 
 from common import ensure_label, run_cmd, run_gh_json
+from create_pr import MODEL_FAMILIES
 
 CODERABBIT_LABEL = "review:coderabbit"
-FALLBACK_LABELS = {"sourcery": "review:sourcery", "codeant": "review:codeant"}
+EXTERNAL_FALLBACK_LABELS = {
+    "sourcery": "review:sourcery", "codeant": "review:codeant",
+}
+AGENT_SERVICE = "agent"
+AGENT_LABEL = "review:agent"
+FALLBACK_LABELS = {**EXTERNAL_FALLBACK_LABELS, AGENT_SERVICE: AGENT_LABEL}
 # Relabelling alone does not summon a reviewer. `.coderabbit.yaml` filters
 # CodeRabbit's queue by label, so a moved pull request silently leaves that
 # queue; the incoming service has to be asked. These are the providers' own
@@ -40,6 +48,7 @@ SERVICE_TRIGGERS = {
     "codeant": "@codeant-ai: review",
 }
 _HEAD_RE = re.compile(r"[0-9a-fA-F]{40}")
+_AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CONFLICT = 2
@@ -75,17 +84,27 @@ def _comment(pr_id: int, body: str):
     return code == 0, (err or "").strip()
 
 
-def audit_body(existing: str, target: str, service: str, reason: str, head: str) -> str:
+def audit_body(existing: str, target: str, service: str, reason: str, head: str,
+               reviewer: str = "", family: str = "") -> str:
     """The auditable record of why authority moved, naming the head it moved at.
 
     The head matters because the merge gate is exact-head bound: a reader
     comparing this record against later evidence needs to know which commit was
     live when the reassignment happened.
     """
-    return (f"Review authority reassigned from `{existing}` to `{target}`.\n\n"
+    agent_record = ""
+    if service == AGENT_SERVICE:
+        payload = json.dumps({"family": family, "from": existing, "head": head,
+                              "reason": reason.strip(), "reviewer": reviewer},
+                             sort_keys=True, separators=(",", ":"))
+        agent_record = f"<!-- aru-agent-review-assignment:v1 {payload} -->\n"
+    return (agent_record
+            + f"Review authority reassigned from `{existing}` to `{target}`.\n\n"
             f"Reason: {reason.strip()}\n\n"
             f"Head at reassignment: `{head}`\n\n"
-            "CodeRabbit remains the default for new pull requests; this is a "
+            + (f"Emergency reviewer: `{reviewer}` (`{family}`).\n\n"
+               if service == AGENT_SERVICE else "")
+            + "CodeRabbit remains the default for new pull requests; this is a "
             "per-pull-request fallback, not a rotation. The merge gate now "
             f"requires {service}'s producer-validated evidence bound to this "
             "pull request's exact current head.")
@@ -104,7 +123,8 @@ def _validated_snapshot(pr_id: int):
     return pr, None
 
 
-def reassign(pr_id: int, service: str, reason: str) -> int:  # noqa: C901, PLR0911
+def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa: C901, PLR0911, PLR0912
+             family: str = "") -> int:
     target = FALLBACK_LABELS.get(service)
     if not target:
         print(f"[ERROR] Unknown fallback service {service!r}; supported: "
@@ -113,6 +133,12 @@ def reassign(pr_id: int, service: str, reason: str) -> int:  # noqa: C901, PLR09
     if not reason or not reason.strip():
         print("[ERROR] A reason is required; reassignment must stay auditable.",
               file=sys.stderr)
+        return EXIT_ERROR
+    if service == AGENT_SERVICE and (
+        _AGENT_RE.fullmatch(reviewer or "") is None or family not in MODEL_FAMILIES
+    ):
+        print("[ERROR] Agent fallback requires --reviewer with a safe agent id and "
+              f"--model-family from: {', '.join(MODEL_FAMILIES)}.", file=sys.stderr)
         return EXIT_ERROR
 
     pr, problem = _validated_snapshot(pr_id)
@@ -132,18 +158,42 @@ def reassign(pr_id: int, service: str, reason: str) -> int:  # noqa: C901, PLR09
         print(f"[CONFLICT] PR #{pr_id} is already assigned to {service}; "
               "reassignment is not a retry mechanism.", file=sys.stderr)
         return EXIT_CONFLICT
-    if existing != CODERABBIT_LABEL:
+    if service != AGENT_SERVICE and existing != CODERABBIT_LABEL:
         print(f"[CONFLICT] PR #{pr_id} carries {existing!r}, not the default "
               f"{CODERABBIT_LABEL!r}; only the default assignment may be moved to a "
               "fallback, so an already-switched pull request is never switched again.",
               file=sys.stderr)
         return EXIT_CONFLICT
+    if service == AGENT_SERVICE:
+        allowed = {CODERABBIT_LABEL, *EXTERNAL_FALLBACK_LABELS.values()}
+        if existing not in allowed:
+            print(f"[CONFLICT] {existing!r} is not a configured external "
+                  "review authority; agent fallback cannot replace it.", file=sys.stderr)
+            return EXIT_CONFLICT
+        authors = [name[len("author:"):] for name in
+                   (item["name"] for item in pr["labels"])
+                   if name.startswith("author:") and name[len("author:"):]]
+        if len(authors) != 1 or authors[0] == reviewer:
+            print("[CONFLICT] Agent fallback requires exactly one different "
+                  "author:<id>; self-review or ambiguous authorship is forbidden.",
+                  file=sys.stderr)
+            return EXIT_CONFLICT
 
-    ensure_label(target, "5319e7", f"Fallback review authority: {service}")
+    if not ensure_label(target, "5319e7", f"Fallback review authority: {service}"):
+        print(f"[ERROR] Could not provision {target}.", file=sys.stderr)
+        return EXIT_ERROR
+    reviewer_label = f"reviewer:{reviewer}" if service == AGENT_SERVICE else ""
+    if reviewer_label and not ensure_label(
+        reviewer_label, "0e8a16", f"Emergency review by agent '{reviewer}'",
+    ):
+        print(f"[ERROR] Could not provision {reviewer_label}.", file=sys.stderr)
+        return EXIT_ERROR
     # Add before remove: two labels is a state the merge gate refuses loudly,
     # while none is a pull request with no reviewer and nothing watching it.
-    code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--add-label", target],
-                           check=False)
+    add_cmd = ["gh", "pr", "edit", str(pr_id), "--add-label", target]
+    if reviewer_label:
+        add_cmd.extend(["--add-label", reviewer_label])
+    code, _, err = run_cmd(add_cmd, check=False)
     if code != 0:
         print(f"[ERROR] Could not add {target} to PR #{pr_id}: {err.strip()}. "
               "The original assignment is untouched.", file=sys.stderr)
@@ -158,13 +208,18 @@ def reassign(pr_id: int, service: str, reason: str) -> int:  # noqa: C901, PLR09
         return EXIT_ERROR
 
     ok, err = _comment(pr_id, audit_body(existing, target, service,
-                                         reason, pr["headRefOid"]))
+                                         reason, pr["headRefOid"], reviewer, family))
     if not ok:
         print(f"[ERROR] PR #{pr_id} now carries {target}, but the reason could not "
               f"be recorded: {err}. An unaudited reassignment is not acceptable; "
               "post the reason manually or restore "
               f"{existing}.", file=sys.stderr)
         return EXIT_ERROR
+
+    if service == AGENT_SERVICE:
+        print(f"✅ PR #{pr_id} assigned to independent agent {reviewer} ({family}) "
+              f"at head {pr['headRefOid'][:12]}; external exhaustion recorded.")
+        return EXIT_OK
 
     trigger = SERVICE_TRIGGERS[service]
     ok, err = _comment(pr_id, trigger)
@@ -187,8 +242,13 @@ def main() -> int:
     parser.add_argument("--to", required=True, choices=sorted(FALLBACK_LABELS))
     parser.add_argument("--reason", required=True,
                         help="Concrete unavailability, e.g. 'CodeRabbit rate limited at <sha>'")
+    parser.add_argument("--reviewer", default="",
+                        help="Independent agent id; required only with --to agent")
+    parser.add_argument("--model-family", "--family", dest="family", default="",
+                        choices=MODEL_FAMILIES,
+                        help="Independent agent model family; required with --to agent")
     args = parser.parse_args()
-    return reassign(args.pr, args.to, args.reason)
+    return reassign(args.pr, args.to, args.reason, args.reviewer, args.family)
 
 
 if __name__ == "__main__":

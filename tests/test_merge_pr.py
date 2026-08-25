@@ -1,4 +1,4 @@
-# line-ceiling: 6884
+# line-ceiling: 6935
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
@@ -318,6 +318,47 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
             },
         }}}}
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_agent_completion_marker_is_parsed_and_malformed_copy_is_counted(
+        self, gh_json, _slug,
+    ):
+        head = "a" * 40
+        payload = json.dumps({
+            "agent": "agent-2", "completed_at": "2026-08-25T10:03:00Z",
+            "disposition": "no-findings", "family": "openai", "head": head,
+            "status": "completed",
+        }, sort_keys=True, separators=(",", ":"))
+        assignment = json.dumps({
+            "family": "openai", "from": "review:codeant", "head": head,
+            "reason": "External reviewers busy", "reviewer": "agent-2",
+        }, sort_keys=True, separators=(",", ":"))
+        nodes = [
+            {"body": f"<!-- aru-agent-review-assignment:v1 {assignment} -->",
+             "createdAt": "2026-08-25T10:01:00Z",
+             "author": {"login": "gillella", "__typename": "User"}},
+            {"body": f"<!-- aru-agent-review:v1 {payload} -->",
+             "author": {"login": "gillella", "__typename": "User"}},
+            {"body": "<!-- aru-agent-review:v1 {bad} -->",
+             "author": {"login": "gillella", "__typename": "User"}},
+        ]
+        peer = {
+            "id": "peer", "state": "COMMENTED",
+            "submittedAt": "2026-08-25T10:02:00Z", "body": "No findings.",
+            "author": {"login": "gillella", "__typename": "User"},
+            "commit": {"oid": head},
+        }
+        gh_json.side_effect = [
+            self.review_page(head=head, nodes=[peer]),
+            self.attestation_page(head=head, nodes=nodes),
+            self.thread_page(head=head),
+        ]
+        evidence = merge_pr.review_evidence(162)
+        self.assertEqual(len(evidence["agent_review_attestations"]), 1)
+        self.assertEqual(evidence["agent_review_marker_errors"], 1)
+        self.assertEqual(len(evidence["agent_review_assignments"]), 1)
+        self.assertEqual(evidence["agent_review_assignment_errors"], 0)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -2051,6 +2092,103 @@ class ReviewGateTests(unittest.TestCase):
         with patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"), \
                 patch.object(merge_pr, "_coderabbit_status_evidence", return_value=None):
             self.assertIsNone(merge_pr._with_coderabbit_status(383, evidence))
+
+
+class EmergencyAgentReviewGateTests(unittest.TestCase):
+    HEAD = "a" * 40
+
+    def pr(self, *extra):
+        return labelled(
+            "author:agent-1", "family:anthropic", "review:agent",
+            "reviewed-by:agent-2", "reviewer-family:agent-2:openai", *extra,
+        )
+
+    def evidence(self, **overrides):
+        evidence = {
+            "head_oid": self.HEAD,
+            "head_commit_committed_at": "2026-08-25T10:00:00Z",
+            "unresolved": 0, "unfixed": 0, "outdated_unfixed": 0,
+            "service_threads": {
+                "agent": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+            "reviews": [{
+                "id": "agent-review", "state": "COMMENTED",
+                "submittedAt": "2026-08-25T10:02:00Z",
+                "body": "No findings after exact-head review.",
+                "author": {"login": "gillella", "__typename": "User"},
+                "commit": {"oid": self.HEAD},
+            }],
+            "agent_review_attestations": [{
+                "agent": "agent-2", "completed_at": "2026-08-25T10:03:00Z",
+                "disposition": "no-findings", "family": "openai",
+                "head": self.HEAD, "status": "completed",
+                "github_login": "gillella",
+            }],
+            "agent_review_marker_errors": 0,
+            "agent_review_assignments": [{
+                "family": "openai", "from": "review:codeant", "head": self.HEAD,
+                "reason": "External reviewers busy", "reviewer": "agent-2",
+                "assigned_at": "2026-08-25T10:01:00Z",
+                "github_login": "gillella",
+            }],
+            "agent_review_assignment_errors": 0,
+        }
+        evidence.update(overrides)
+        return evidence
+
+    def test_complete_exact_head_independent_review_passes(self):
+        ok, msg = merge_pr.check_reviews(self.pr(), self.evidence())
+        self.assertTrue(ok, msg)
+        self.assertIn("agent-2", msg)
+        self.assertTrue(merge_pr.has_authoritative_assigned_review(
+            self.pr(), self.evidence()))
+
+    def test_label_alone_and_missing_completion_fail_closed(self):
+        evidence = self.evidence(agent_review_attestations=[])
+        self.assertFalse(merge_pr.check_reviews(self.pr(), evidence)[0])
+        evidence = self.evidence(agent_review_assignments=[])
+        self.assertFalse(merge_pr.check_reviews(self.pr(), evidence)[0])
+
+    def test_self_review_missing_family_and_ambiguous_identity_fail_closed(self):
+        cases = (
+            labelled("author:agent-1", "review:agent",
+                     "reviewed-by:agent-1", "reviewer-family:agent-1:openai"),
+            labelled("author:agent-1", "review:agent", "reviewed-by:agent-2"),
+            self.pr("reviewed-by:agent-3"),
+            self.pr("reviewer-family:agent-2:google"),
+        )
+        for pr in cases:
+            with self.subTest(labels=pr["labels"]):
+                self.assertFalse(merge_pr.check_reviews(pr, self.evidence())[0])
+
+    def test_stale_malformed_duplicate_or_unmatched_evidence_fails_closed(self):
+        cases = (
+            self.evidence(head_oid="b" * 40),
+            self.evidence(agent_review_marker_errors=1),
+            self.evidence(agent_review_assignment_errors=1),
+            self.evidence(agent_review_attestations=(
+                self.evidence()["agent_review_attestations"] * 2)),
+            self.evidence(agent_review_assignments=(
+                self.evidence()["agent_review_assignments"] * 2)),
+            self.evidence(reviews=[]),
+            self.evidence(reviews=[{
+                **self.evidence()["reviews"][0], "body": "",
+            }]),
+        )
+        for evidence in cases:
+            with self.subTest(evidence=evidence):
+                self.assertFalse(merge_pr.check_reviews(self.pr(), evidence)[0])
+
+    def test_review_and_completion_times_must_follow_the_head_in_order(self):
+        too_early = self.evidence()
+        too_early["reviews"][0]["submittedAt"] = "2026-08-25T09:59:00Z"
+        completion_before_review = self.evidence()
+        completion_before_review["agent_review_attestations"][0][
+            "completed_at"] = "2026-08-25T10:01:00Z"
+        review_before_assignment = self.evidence()
+        review_before_assignment["reviews"][0]["submittedAt"] = "2026-08-25T10:00:30Z"
+        for evidence in (too_early, completion_before_review, review_before_assignment):
+            self.assertFalse(merge_pr.check_reviews(self.pr(), evidence)[0])
 
 
 class CodeRabbitStatusEvidenceTests(unittest.TestCase):

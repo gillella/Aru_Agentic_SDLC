@@ -28,13 +28,13 @@ the Definition-of-Done gate.
   non-authoritative in Aru-governed repositories.
 - Brainstorming workflows such as Superpowers supply input to Aru's plan gate;
   they do not run a parallel implementation process.
-- Memory tools provide context only. **The assigned review-pool service is the
-  sole PR code-review authority for a given PR.** `create_pr.py` deterministically
-  assigns exactly one of `review:coderabbit`, `review:sourcery`, or
-  `review:codeant`; CodeRabbit, Sourcery, and CodeAnt are review oracles only.
-  Claude, Codex, Cursor, and Antigravity implement and remediate findings only.
-  Coding agents never review and must never claim, perform, or be dispatched
-  for review. Review bots are not workflow owners or merge authorities.
+- Memory tools provide context only. `create_pr.py` assigns CodeRabbit by
+  default. An operator may explicitly move a stalled PR to Sourcery or CodeAnt.
+  Only when all external reviewers are unavailable, busy, or waiting too long
+  may the operator assign one independent coding agent with `review:agent`.
+  That emergency path is per-PR and never creates a review queue, rotation,
+  fleet, scheduler, or permission for an author to review their own work.
+  Reviewers are not workflow owners or merge authorities.
 - If lifecycle instructions conflict, follow Aru. Higher-priority explicit
   system, developer, or user instructions still take precedence.
 - During GitHub outages, coordination stops gracefully; agents may continue local
@@ -44,7 +44,7 @@ the Definition-of-Done gate.
 Routine merge execution is mechanical and may be performed by any factory
 agent, including the implementation author, only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`, after the assigned
-review-pool service has supplied authoritative exact-head evidence and every
+assigned reviewer has supplied authoritative exact-head evidence and every
 enforced gate passes. CodeRabbit keeps its current exact-head contract.
 Sourcery requires a successful head-bound `Sourcery review` check and zero
 Sourcery unresolved threads. CodeAnt requires either an authoritative
@@ -57,6 +57,11 @@ does not block the status-record fallback; a Review object that is itself
 bound to the exact current head but unusable (pending, malformed, spoofed,
 or ambiguous) still blocks. No agent or human may bypass the merge helper
 with a direct push or an ad-hoc merge.
+An emergency agent review requires exactly one different `author:` and
+`reviewer:` identity, a valid reviewer model family, a substantive GitHub
+review of the exact current head, and one matching completed
+`aru-agent-review:v1` record. Missing, stale, duplicate, self-authored, or
+malformed evidence fails closed.
 Direct pushes to `main` are also blocked server-side by branch protection;
 an ad-hoc merge (`gh pr merge` or the GitHub UI, run outside `merge_pr.py`)
 is not - branch protection requires only a green CI status check, not
@@ -64,8 +69,8 @@ assigned-service review evidence - so that half of the rule is a governance
 requirement agents and humans must follow, not a technical guarantee.
 
 Legacy `reviewed-by:<coding-agent>`, `reviewer:<coding-agent>`, and
-`aru-review-head:v1` evidence never satisfies the current review gate.
-Assigned-service identity, completed status, substantive review or check
+`aru-review-head:v1` evidence alone never satisfies the current review gate.
+Assigned-reviewer identity, completed status, substantive review or check
 evidence, current-head commit, and assigned-service thread disposition come
 from authoritative GitHub data and fail closed on missing, pending, failed,
 skipped, stale, ambiguous, duplicated, partial, or spoofed evidence.
@@ -100,9 +105,11 @@ when working from another repository.
 - **Issue creation**: [`skills/create-github-issue/SKILL.md`](skills/create-github-issue/SKILL.md)
 - **Backlog triage**: [`skills/triage-backlog/SKILL.md`](skills/triage-backlog/SKILL.md)
   - Promotes `Backlog` → `Ready` so the picker has work to hand out
-- **Code review**: assigned review-pool service only; coding agents use
+- **Code review**: external review by default; the emergency agent-review path
+  is permitted only after explicit operator assignment. See
+  [`skills/code-review/SKILL.md`](skills/code-review/SKILL.md). Authors use
   [`skills/address-pr-feedback/SKILL.md`](skills/address-pr-feedback/SKILL.md)
-  to remediate its findings.
+  to remediate findings.
 - **CI remediation**: [`skills/remediate-ci-failure/SKILL.md`](skills/remediate-ci-failure/SKILL.md)
 - **PR feedback**: [`skills/address-pr-feedback/SKILL.md`](skills/address-pr-feedback/SKILL.md)
 
@@ -128,6 +135,7 @@ Helper inventory:
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID>` — one picker for all three work types; prefer over `fetch_next_issue.py`
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_next_issue.py" --agent <AGENT_ID>` — issues only
 * `python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" [--capacity]`
+* `python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> --to <sourcery|codeant|agent> --reason <WHY> [...]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree] [--agent <id>]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --adopt --agent <id> --model-family <family>` — take over an abandoned PR
