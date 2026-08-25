@@ -4310,6 +4310,41 @@ def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
     )
 
 
+def detect_stale_writer(repo_root, pr, branch, gated_sha, head_repo_slug):
+    """P0 escalation when a merged branch reappears at a SHA we never gated.
+
+    delete_remote_branch already refuses to delete a changed ref, which is
+    correct and stays fail-closed. But a generic "left untouched" warning reads
+    like cleanup lag, and on hermes PR #89 that let a stale worker's orphan
+    commit sit unnoticed while it opened a spurious follow-up issue. The branch
+    reappearing after a governed merge is a different event from cleanup lag,
+    so it gets a different, louder message naming everything an operator needs.
+    """
+    if not branch or not gated_sha or not head_repo_slug:
+        return True, "No branch to check for stale writes."
+    base = get_repo_slug()
+    remote = "origin" if head_repo_slug == base else f"https://github.com/{head_repo_slug}.git"
+    code, out, _ = run_cmd(
+        ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+        check=False, cwd=repo_root,
+    )
+    if code != 0:
+        return True, "Could not re-inspect the remote branch; no stale write asserted."
+    if not out.strip():
+        return True, "No recreated branch."
+    actual = out.split()[0]
+    if heads_match(actual, gated_sha):
+        return True, "Remote branch still at the gated head."
+    return False, (
+        f"[P0] STALE WRITER: branch {head_repo_slug}:{branch} was recreated at {actual} "
+        f"after PR #{pr.get('number')} merged gated head {gated_sha}. "
+        f"Holder: {pr.get('author', {}).get('login') or 'unknown'}. "
+        "The branch was NOT deleted, so the orphan commit is preserved for inspection. "
+        "This work is outside governance: it did not pass a Definition-of-Done gate. "
+        "Do not adopt it into a new issue; file a new governed issue and branch instead."
+    )
+
+
 def ensure_issue_closed(issue_num):
     issue = _gh_json(["gh", "issue", "view", str(issue_num), "--json", "state"])
     if issue is None:
@@ -4470,6 +4505,9 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):  # noqa: C901, PLR09
         ("local branch", lambda: cleanup_local_branch(repo_root, branch, expected_sha)),
         ("remote branch", lambda: delete_remote_branch(
             repo_root, branch, expected_sha, head_repo_slug
+        )),
+        ("stale writer", lambda: detect_stale_writer(
+            repo_root, pr, branch, expected_sha, head_repo_slug
         )),
     ]
     for num in issue_nums:

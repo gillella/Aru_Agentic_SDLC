@@ -1,4 +1,5 @@
-# line-ceiling: 700
+# +16 for the #344 terminal merge lease tests.
+# line-ceiling: 717
 import json
 import sys
 import unittest
@@ -688,3 +689,17 @@ class VerificationEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TerminalLeasePrCreationTests(unittest.TestCase):
+    """#344 criterion 2: merged work cannot be re-proposed under a spent branch."""
+
+    LEASE = {"branch": "fix/issue-87-x", "pr": 89, "gated_sha": "a" * 40,
+             "merged_sha": "b" * 40, "holder": "codex-1"}
+
+    def test_pr_creation_from_a_leased_branch_is_refused(self):
+        with patch.object(create_pr, "get_current_branch", return_value="fix/issue-87-x"), \
+             patch.object(create_pr, "terminal_merge_lease", return_value=self.LEASE), \
+             patch.object(create_pr, "run_cmd") as run:
+            self.assertFalse(create_pr.create_pr(87, "t", "b", "agent-1", "anthropic"))
+        run.assert_not_called()

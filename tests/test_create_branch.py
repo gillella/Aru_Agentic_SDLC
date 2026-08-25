@@ -153,5 +153,32 @@ class CreateBranchPlanGateTests(unittest.TestCase):
         self.assertTrue(cb.is_substantive_plan(filled_low_risk, is_risk=False))
 
 
+
+
+class TerminalLeaseBranchReuseTests(unittest.TestCase):
+    """#344 criterion 5: a merged branch name cannot be reused."""
+
+    LEASE = {"branch": "fix/issue-87-x", "pr": 89, "gated_sha": "a" * 40,
+             "merged_sha": "b" * 40, "holder": "codex-1"}
+
+    def test_leased_branch_is_refused_instead_of_checked_out(self):
+        with patch.object(cb, "get_issue", return_value={"title": "fix: x", "labels": []}), \
+             patch.object(cb, "fetch_issue_comments", return_value=[]), \
+             patch.object(cb, "terminal_merge_lease", return_value=self.LEASE), \
+             patch.object(cb, "run_cmd") as run:
+            with self.assertRaises(SystemExit) as caught:
+                cb.create_branch(87, "fix", use_worktree=False)
+        self.assertEqual(caught.exception.code, 1)
+        run.assert_not_called()
+
+    def test_unleased_branch_still_proceeds(self):
+        with patch.object(cb, "get_issue", return_value={"title": "fix: x", "labels": []}), \
+             patch.object(cb, "fetch_issue_comments", return_value=[]), \
+             patch.object(cb, "terminal_merge_lease", return_value=None), \
+             patch.object(cb, "run_cmd", return_value=(0, "", "")):
+            name = cb.create_branch(87, "fix", use_worktree=False)
+        self.assertTrue(name.startswith("fix/issue-87-"))
+
+
 if __name__ == "__main__":
     unittest.main()

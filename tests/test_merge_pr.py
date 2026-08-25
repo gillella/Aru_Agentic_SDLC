@@ -1,6 +1,7 @@
 # line-ceiling: 6935
 from contextlib import nullcontext
 from datetime import datetime, timezone
+import inspect
 import json
 import os
 import sys
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import common
 import merge_pr
 import cleanup_worktrees
 
@@ -1354,6 +1356,94 @@ class CodeAntEvidenceTests(unittest.TestCase):
     def test_codeant_is_recognised_as_a_fallback_authority(self):
         self.assertEqual(merge_pr.assigned_review_service(self.pr()), "codeant")
         self.assertIn("review:codeant", merge_pr.REVIEW_SERVICE_LABELS)
+class TerminalMergeLeaseTests(unittest.TestCase):
+    """#344: a merged branch name is spent; later pushes are stale, not new work."""
+
+    def test_merged_branch_resolves_to_a_lease(self):
+        rows = [{"number": 425, "headRefName": "feat/x",
+                 "headRefOid": "a" * 40, "mergeCommit": {"oid": "b" * 40},
+                 "author": {"login": "someone"}, "mergedAt": "2026-08-25T00:00:00Z"}]
+        with patch.object(common, "run_gh_json", return_value=rows):
+            lease = common.terminal_merge_lease("feat/x")
+        self.assertEqual(lease["pr"], 425)
+        self.assertEqual(lease["gated_sha"], "a" * 40)
+        self.assertEqual(lease["merged_sha"], "b" * 40)
+        self.assertEqual(lease["holder"], "someone")
+
+    def test_never_merged_branch_has_no_lease(self):
+        with patch.object(common, "run_gh_json", return_value=[]):
+            self.assertIsNone(common.terminal_merge_lease("feat/live"))
+
+    def test_unreadable_lookup_fails_closed(self):
+        """Cannot-tell must block continuation, not permit it."""
+        with patch.object(common, "run_gh_json", return_value=None):
+            lease = common.terminal_merge_lease("feat/x")
+        self.assertTrue(lease["unreadable"])
+        self.assertIn("refusing", common.terminal_lease_refusal(lease, "reuse").lower())
+
+    def test_several_merged_prs_for_one_branch_fail_closed(self):
+        rows = [{"number": n, "headRefName": "feat/x", "headRefOid": "a" * 40,
+                 "mergeCommit": {"oid": "b" * 40}, "author": {"login": "x"}} for n in (1, 2)]
+        with patch.object(common, "run_gh_json", return_value=rows):
+            lease = common.terminal_merge_lease("feat/x")
+        self.assertEqual(lease["ambiguous"], [1, 2])
+
+    def test_partial_name_match_is_not_a_lease(self):
+        rows = [{"number": 1, "headRefName": "feat/x-other", "headRefOid": "a" * 40,
+                 "mergeCommit": {"oid": "b" * 40}, "author": {"login": "x"}}]
+        with patch.object(common, "run_gh_json", return_value=rows):
+            self.assertIsNone(common.terminal_merge_lease("feat/x"))
+
+    def test_blank_branch_has_no_lease(self):
+        for value in ("", None, 7):
+            with self.subTest(value=value):
+                self.assertIsNone(common.terminal_merge_lease(value))
+
+
+class StaleWriterEscalationTests(unittest.TestCase):
+    """#344 regression, modelled on hermes PR #89."""
+
+    PR = {"number": 89, "author": {"login": "codex-1"}}
+
+    def _detect(self, ls_remote_out, code=0):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "run_cmd", return_value=(code, ls_remote_out, "")):
+            return merge_pr.detect_stale_writer(
+                "/repo", self.PR, "feat/issue-87", "0" * 40, "o/r",
+            )
+
+    def test_deleted_branch_is_clean(self):
+        ok, message = self._detect("")
+        self.assertTrue(ok)
+        self.assertIn("No recreated branch", message)
+
+    def test_branch_still_at_gated_head_is_clean(self):
+        ok, _ = self._detect(f"{'0' * 40}\trefs/heads/feat/issue-87")
+        self.assertTrue(ok)
+
+    def test_recreated_branch_escalates_with_every_operator_fact(self):
+        ok, message = self._detect(f"{'3' * 40}\trefs/heads/feat/issue-87")
+        self.assertFalse(ok)
+        self.assertIn("[P0] STALE WRITER", message)
+        self.assertIn("89", message)          # PR
+        self.assertIn("0" * 40, message)      # gated SHA
+        self.assertIn("3" * 40, message)      # new SHA
+        self.assertIn("feat/issue-87", message)   # branch
+        self.assertIn("codex-1", message)     # holder
+
+    def test_escalation_never_deletes_the_orphan(self):
+        _, message = self._detect(f"{'3' * 40}\trefs/heads/feat/issue-87")
+        self.assertIn("NOT deleted", message)
+        self.assertIn("preserved for inspection", message)
+
+    def test_unreadable_remote_does_not_assert_a_stale_write(self):
+        ok, message = self._detect("", code=1)
+        self.assertTrue(ok)
+        self.assertIn("no stale write asserted", message)
+
+    def test_close_out_runs_the_stale_writer_step(self):
+        source = inspect.getsource(merge_pr)
+        self.assertIn('("stale writer", lambda: detect_stale_writer(', source)
 
 
 class CiGateTests(unittest.TestCase):

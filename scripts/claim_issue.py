@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# line-ceiling: 1565
+# +42 for the #344 terminal merge lease guard.
+# line-ceiling: 1607
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -26,6 +27,8 @@ from typing import Any, Optional
 import merge_pr
 from common import (
     AGENT_LABEL_PREFIX,
+    terminal_lease_refusal,
+    terminal_merge_lease,
     agent_labels,
     claimed_by,
     ensure_label,
@@ -397,12 +400,51 @@ def _start_fresh_issue_claim(
     )
 
 
+def _terminally_merged(issue_id: int, issue=None):
+    """Refusal text when this issue was already closed by a governed merge.
+
+    Re-claiming merged work is how a stale worker resumed a finished issue and
+    pushed an orphan commit onto its deleted branch (#344). None means the
+    issue is claimable as far as merge state is concerned.
+
+    Short-circuits on the already-fetched issue: an open issue cannot have been
+    terminally merged, so the overwhelmingly common path costs no extra API
+    call at all.
+    """
+    if isinstance(issue, dict) and issue.get("state") != "CLOSED":
+        return None
+    data = run_gh_json([
+        "gh", "issue", "view", str(issue_id),
+        "--json", "state,closedByPullRequestsReferences",
+    ])
+    if not isinstance(data, dict) or data.get("state") != "CLOSED":
+        return None
+    for ref in data.get("closedByPullRequestsReferences") or []:
+        number = ref.get("number") if isinstance(ref, dict) else None
+        if not number:
+            continue
+        pr = run_gh_json(["gh", "pr", "view", str(number), "--json", "state,headRefName"])
+        if not isinstance(pr, dict) or pr.get("state") != "MERGED":
+            continue
+        lease = terminal_merge_lease(pr.get("headRefName") or "")
+        if lease:
+            return terminal_lease_refusal(lease, f"re-claim issue #{issue_id}")
+        return (f"Issue #{issue_id} was closed by merged PR #{number}; merged work "
+                "cannot be re-claimed. File a new issue for follow-up work.")
+    return None
+
+
 def _claim_issue_locked(issue_id: int, agent: str, status: str,
                         assignee: str) -> int:
     issue = get_issue(issue_id)
     if not issue:
         print(f"[ERROR] Issue #{issue_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+
+    refusal = _terminally_merged(issue_id, issue)
+    if refusal:
+        print(f"[BLOCKED] {refusal}", file=sys.stderr)
+        return EXIT_CONFLICT
 
     my_label = _label_for(agent)
     owner = repository_owner_login()

@@ -1,4 +1,5 @@
-# line-ceiling: 1170
+# +40 for the #344 terminal merge lease tests.
+# line-ceiling: 1210
 import io
 import json
 import sys
@@ -1163,3 +1164,29 @@ class ClaimIssueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TerminalLeaseClaimTests(unittest.TestCase):
+    """#344: an issue closed by a governed merge cannot be re-claimed."""
+
+    @staticmethod
+    def _gh(issue_state, pr_state):
+        def fake(cmd):
+            if "issue" in cmd:
+                return {"state": issue_state,
+                        "closedByPullRequestsReferences": [{"number": 89}]}
+            return {"state": pr_state, "headRefName": "fix/issue-87-x"}
+        return fake
+
+    def test_issue_closed_by_a_merged_pr_is_refused(self):
+        with patch.object(claim_issue, "run_gh_json", side_effect=self._gh("CLOSED", "MERGED")), \
+             patch.object(claim_issue, "terminal_merge_lease", return_value=None):
+            self.assertIsNotNone(claim_issue._terminally_merged(87))
+
+    def test_open_issue_is_not_terminally_merged(self):
+        with patch.object(claim_issue, "run_gh_json", side_effect=self._gh("OPEN", "MERGED")):
+            self.assertIsNone(claim_issue._terminally_merged(87))
+
+    def test_closed_without_a_merged_pr_is_not_terminal(self):
+        with patch.object(claim_issue, "run_gh_json", side_effect=self._gh("CLOSED", "CLOSED")):
+            self.assertIsNone(claim_issue._terminally_merged(87))
