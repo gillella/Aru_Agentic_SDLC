@@ -5,7 +5,7 @@
 Why this exists as a hook rather than a rule in AGENTS.md: prompt-level rules
 are followed probabilistically. The parallel-agent design depends on every
 agent staying inside its issue's ``touches:`` declaration, because that is the
-only thing fetch_next_issue.py used to decide two issues were safe to run
+only thing fetch_next_work.py used to decide two issues were safe to run
 concurrently. One agent that writes outside its budget silently corrupts
 another agent's work, and the damage surfaces at merge time.
 
