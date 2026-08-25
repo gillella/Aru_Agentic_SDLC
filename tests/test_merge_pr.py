@@ -1,6 +1,6 @@
-# line-ceiling: 6870
+# line-ceiling: 7330
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
@@ -6865,6 +6865,447 @@ class DryRunJsonTests(unittest.TestCase):
         self.assertTrue(payload["already_merged"])
         self.assertTrue(payload["ok"])
 
+
+def capacity_selection(selected, *, issues=(9,), excluded=(), as_of="2026-08-24T12:00:00Z",
+                       eligible=None, candidates=None, **overrides):
+    """One v2 capacity-selection record, sealed the way create_pr.py seals one.
+
+    Built here rather than imported so a test can produce artifacts create_pr.py
+    never would -- forged exclusions, mismatched issue sets, a stale digest --
+    which is most of what the gate exists to reject.
+    """
+    excluded = [dict(item) for item in excluded]
+    names = {item.get("service") for item in excluded}
+    selection = {
+        "schema": merge_pr.CAPACITY_SELECTION_SCHEMA,
+        "as_of": as_of,
+        "candidates": list(merge_pr.REVIEW_SERVICES if candidates is None else candidates),
+        "eligible": [s for s in merge_pr.REVIEW_SERVICES if s not in names]
+        if eligible is None else list(eligible),
+        "excluded": excluded,
+        "issues": list(issues),
+        "selected": selected,
+        "rationale": "selected for test",
+    }
+    selection["snapshot"] = {
+        "source": "aru.review-service-unavailability-ledger.v1",
+        "observed_at": as_of,
+        "max_age_seconds": 3600,
+        "excluded_count": len(excluded),
+        "digest": merge_pr.capacity_selection_digest(selection),
+    }
+    selection.update(overrides)
+    return selection
+
+
+def exclusion(service, *, state="quota_exhausted", reason="monthly quota spent",
+              source="status-page-poll", observed_at="2026-08-24T11:30:00Z",
+              retry_at="2026-08-24T23:00:00Z"):
+    return {"service": service, "state": state, "reason": reason,
+            "source": source, "observed_at": observed_at, "retry_at": retry_at}
+
+
+_DEFAULT_AUTHOR = {"login": "gillella", "__typename": "User"}
+
+
+def capacity_comment(selection, *, created_at=None, author=_DEFAULT_AUTHOR,
+                     last_edited=None, body=None):
+    if created_at is None:
+        moment = datetime.fromisoformat(selection["as_of"].replace("Z", "+00:00"))
+        created_at = (moment + timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    if body is None:
+        body = (
+            f"## Review-capacity assignment evidence\n\n{merge_pr.CAPACITY_EVIDENCE_START}\n"
+            "```json\n"
+            + json.dumps(selection, indent=2, sort_keys=True)
+            + f"\n```\n{merge_pr.CAPACITY_EVIDENCE_END}\n"
+        )
+    return {
+        "body": body,
+        "createdAt": created_at,
+        "lastEditedAt": last_edited,
+        "author": author,
+    }
+
+
+def capacity_evidence(*comments):
+    return {"capacity_selection_comments": list(comments)}
+
+
+class CapacityAwareAssignmentGateTests(unittest.TestCase):
+    """#403: validate the immutable assignment create_pr.py actually made.
+
+    The gate used to recompute review_service_for_issue() for every linked
+    issue and reject anything else, so a PR legitimately rerouted around an
+    excluded service carried a correct label and could never merge. It now
+    replays the recorded selection from its own bounded snapshot -- and
+    refuses everything it cannot replay.
+
+    The worked example throughout: issue #9 rotates to codeant over the full
+    pool, but with codeant excluded the pool is (coderabbit, sourcery) and #9
+    lands on coderabbit. Every "valid" fixture below is that assignment, so a
+    test asserting rejection is rejecting for the reason it names rather than
+    for an incidentally malformed record.
+    """
+
+    REROUTED = "coderabbit"
+
+    def pr(self, service, body="Closes #9"):
+        return {"labels": [{"name": f"review:{service}"}], "body": body}
+
+    def valid(self, **overrides):
+        """The rerouted assignment for issue #9, correctly sealed."""
+        params = {"excluded": [exclusion("codeant")], "issues": (9,)}
+        params.update(overrides)
+        return capacity_selection(params.pop("selected", self.REROUTED), **params)
+
+    def gate(self, selection, service="coderabbit", body="Closes #9", **comment):
+        return merge_pr.assigned_review_service(
+            self.pr(service, body), capacity_evidence(capacity_comment(selection, **comment)),
+        )
+
+    # --- the selection the legacy formula cannot reach ---------------------
+
+    def test_rerouted_assignment_is_accepted_against_its_evidence(self):
+        self.assertEqual(merge_pr.review_service_for_issue(9), "codeant")
+        selection = self.valid()
+        self.assertEqual(selection["eligible"], ["coderabbit", "sourcery"])
+        self.assertEqual(self.gate(selection), "coderabbit")
+
+    def test_label_disagreeing_with_the_evidence_is_rejected(self):
+        """The evidence proves coderabbit; a codeant label on the same PR is a
+        relabel after assignment, not a second opinion -- even though codeant
+        is exactly what the legacy formula would have picked."""
+        self.assertIsNone(self.gate(self.valid(), service="codeant"))
+
+    def test_a_selection_its_own_snapshot_does_not_produce_is_rejected(self):
+        """The recorded service must be what replaying the exclusions yields;
+        asserting it is not enough. Over (coderabbit, sourcery), #9 is
+        coderabbit, so a sealed record naming sourcery proves nothing."""
+        selection = self.valid(selected="sourcery")
+        self.assertIsNone(self.gate(selection, service="sourcery"))
+
+    def test_eligible_pool_must_match_the_recorded_exclusions(self):
+        """A forged wider pool changes the rotation's modulus, which is how a
+        chosen service could be justified after the fact: over the full pool
+        #9 is codeant, and this record claims exactly that."""
+        selection = self.valid(selected="codeant", eligible=list(merge_pr.REVIEW_SERVICES))
+        selection["snapshot"]["digest"] = merge_pr.capacity_selection_digest(selection)
+        self.assertIsNone(self.gate(selection, service="codeant"))
+
+    def test_forged_exclusion_records_cannot_shrink_the_pool(self):
+        """An exclusion whose retry_at precedes its observed_at never excluded
+        anything; the ledger validator rejects it, so the two-wide pool it
+        claims to justify never forms and coderabbit is not #9's service."""
+        selection = self.valid(excluded=[exclusion("codeant", retry_at="2026-08-24T10:00:00Z")])
+        self.assertIsNone(self.gate(selection))
+
+    def test_exclusion_stale_at_assignment_time_is_rejected(self):
+        """Observed 12 hours before the assignment, well beyond the snapshot's
+        own max_age_seconds: it could not have been fresh evidence then."""
+        selection = self.valid(excluded=[exclusion("codeant", observed_at="2026-08-24T00:00:00Z")])
+        self.assertIsNone(self.gate(selection))
+
+    def test_duplicated_exclusion_for_one_service_is_rejected(self):
+        selection = self.valid(
+            excluded=[exclusion("codeant"), exclusion("codeant")],
+            eligible=["coderabbit", "sourcery"],
+        )
+        selection["snapshot"]["excluded_count"] = 2
+        selection["snapshot"]["digest"] = merge_pr.capacity_selection_digest(selection)
+        self.assertIsNone(self.gate(selection))
+
+    def test_every_service_excluded_leaves_nothing_to_prove(self):
+        selection = capacity_selection(
+            None, excluded=[exclusion(s) for s in merge_pr.REVIEW_SERVICES],
+        )
+        for service in merge_pr.REVIEW_SERVICES:
+            with self.subTest(service=service):
+                self.assertIsNone(self.gate(selection, service=service))
+
+    # --- immutability -----------------------------------------------------
+
+    def test_edited_evidence_comment_is_rejected(self):
+        self.assertIsNone(self.gate(self.valid(), last_edited="2026-08-24T14:00:00Z"))
+
+    def test_duplicated_evidence_comments_are_rejected(self):
+        """Two records means no single immutable assignment, even when both
+        say the same thing: the gate must not choose between them."""
+        selection = self.valid()
+        evidence = capacity_evidence(
+            capacity_comment(selection), capacity_comment(selection),
+        )
+        self.assertIsNone(merge_pr.assigned_review_service(self.pr("coderabbit"), evidence))
+
+    def test_evidence_posted_before_the_capacity_it_reports_is_rejected(self):
+        self.assertIsNone(self.gate(self.valid(), created_at="2026-08-24T11:00:00Z"))
+
+    def test_late_replayed_evidence_is_rejected(self):
+        """Posted a day after the snapshot it describes: whatever this is, it
+        is not the assignment the PR was opened with."""
+        self.assertIsNone(self.gate(self.valid(), created_at="2026-08-25T12:00:00Z"))
+
+    def test_evidence_from_a_non_user_account_is_rejected(self):
+        for author in (
+            {"login": "bot", "__typename": "Bot"},
+            {"login": "", "__typename": "User"},
+            None, "gillella",
+        ):
+            with self.subTest(author=author):
+                self.assertIsNone(self.gate(self.valid(), author=author))
+
+    def test_undated_evidence_is_rejected(self):
+        self.assertIsNone(self.gate(self.valid(), created_at="not-a-time"))
+
+    def test_a_timezoneless_timestamp_fails_closed_rather_than_raising(self):
+        """A naive timestamp cannot be compared against the assignment's aware
+        as_of. It must be a verdict, not a TypeError out of the merge gate."""
+        self.assertIsNone(self.gate(self.valid(), created_at="2026-08-24T12:01:00"))
+
+    def test_one_comment_carrying_two_records_is_rejected(self):
+        """As ambiguous as two comments carrying one each: a human auditor and
+        this parser could be reading different payloads off one artifact."""
+        selection = self.valid()
+        honest = capacity_comment(selection)
+        forged = self.valid(selected="sourcery")
+        doubled = honest["body"] + capacity_comment(forged)["body"]
+        self.assertIsNone(self.gate(selection, body=doubled))
+
+    # --- malformed and missing provenance ---------------------------------
+
+    def test_malformed_evidence_json_fails_closed_without_legacy_fallback(self):
+        """A comment claiming to be an assignment record but unreadable must
+        block, not quietly hand the decision back to the legacy formula --
+        that fallback is exactly what an attacker would want triggered. The
+        label here is codeant, which the legacy formula would have accepted."""
+        for payload in ("not json", "[]", '{"schema": }', '{"a": 1, "a": 2}'):
+            with self.subTest(payload=payload):
+                body = (
+                    f"{merge_pr.CAPACITY_EVIDENCE_START}\n```json\n{payload}\n```\n"
+                    f"{merge_pr.CAPACITY_EVIDENCE_END}\n"
+                )
+                self.assertIsNone(
+                    self.gate(self.valid(), service="codeant", body=body),
+                )
+
+    def test_evidence_marker_without_a_readable_payload_fails_closed(self):
+        self.assertIsNone(self.gate(
+            self.valid(), service="codeant",
+            body=f"{merge_pr.CAPACITY_EVIDENCE_START}\nno fence here\n",
+        ))
+
+    def test_missing_snapshot_provenance_fails_closed(self):
+        selection = self.valid()
+        del selection["snapshot"]
+        self.assertIsNone(self.gate(selection))
+
+    def test_incomplete_or_foreign_snapshot_provenance_fails_closed(self):
+        base = self.valid()
+        cases = {
+            "wrong source": {**base["snapshot"], "source": "some.other.ledger.v1"},
+            "detached observation": {**base["snapshot"], "observed_at": "2026-08-24T09:00:00Z"},
+            "unbounded window": {**base["snapshot"], "max_age_seconds": 0},
+            "non-integer window": {**base["snapshot"], "max_age_seconds": "3600"},
+            "boolean window": {**base["snapshot"], "max_age_seconds": True},
+            "miscounted": {**base["snapshot"], "excluded_count": 2},
+            "extra key": {**base["snapshot"], "note": "hi"},
+        }
+        for name, snapshot in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNone(self.gate({**base, "snapshot": snapshot}))
+
+    def test_tampered_field_breaks_the_digest_and_fails_closed(self):
+        """The realistic tamper: edit one field of a real record and leave the
+        rest. Every sealed field must break the seal."""
+        base = self.valid()
+        for field, value in (
+            ("selected", "sourcery"), ("issues", [1]), ("eligible", ["coderabbit"]),
+            ("as_of", "2026-08-24T12:00:01Z"), ("excluded", []),
+            ("candidates", ["coderabbit", "sourcery"]),
+        ):
+            with self.subTest(field=field):
+                self.assertIsNone(self.gate({**base, field: value}))
+
+    def test_unknown_schema_fails_closed(self):
+        selection = self.valid()
+        selection["schema"] = "aru.review-capacity-selection.v99"
+        self.assertIsNone(self.gate(selection))
+
+    def test_unexpected_or_missing_top_level_keys_fail_closed(self):
+        base = self.valid()
+        for name, selection in (
+            ("extra", {**base, "note": "hi"}),
+            ("missing", {k: v for k, v in base.items() if k != "rationale"}),
+        ):
+            with self.subTest(case=name):
+                self.assertIsNone(self.gate(selection))
+
+    def test_selected_must_be_a_configured_service(self):
+        for selected in (None, "someone-else", 3, True):
+            with self.subTest(selected=selected):
+                self.assertIsNone(self.gate(self.valid(selected=selected)))
+
+    # --- issue binding ----------------------------------------------------
+
+    def test_evidence_bound_to_a_different_issue_is_rejected(self):
+        """Evidence lifted from another PR proves nothing about this one, even
+        though it is internally consistent and correctly sealed: over the same
+        pool #12 really does select sourcery."""
+        selection = self.valid(issues=(12,), selected="sourcery")
+        self.assertIsNone(self.gate(selection, service="sourcery"))
+
+    def test_boolean_issue_numbers_do_not_pass_as_integers(self):
+        """`True == 1` in Python, so a forged [true] would otherwise satisfy a
+        PR closing #1 without ever naming it."""
+        selection = capacity_selection("coderabbit", issues=(1,))
+        selection["issues"] = [True]
+        selection["snapshot"]["digest"] = merge_pr.capacity_selection_digest(selection)
+        self.assertIsNone(self.gate(selection, body="Closes #1"))
+
+    def test_a_pr_with_no_linked_issue_is_rejected_with_evidence_too(self):
+        self.assertIsNone(self.gate(self.valid(), body="No issue link here."))
+
+    # --- multi-issue ------------------------------------------------------
+
+    def test_multi_issue_selection_valid_for_every_issue_resolves(self):
+        """Over (coderabbit, sourcery) both #9 and #11 land on coderabbit, so
+        one selection genuinely serves both."""
+        selection = self.valid(issues=(9, 11))
+        self.assertEqual(self.gate(selection, body="Closes #9\nCloses #11"), "coderabbit")
+
+    def test_multi_issue_selection_invalid_for_one_issue_fails_closed(self):
+        """#10 lands on sourcery over the same pool, so coderabbit is not one
+        auditable selection for the whole PR."""
+        selection = self.valid(issues=(9, 10))
+        self.assertIsNone(self.gate(selection, body="Closes #9\nCloses #10"))
+
+    def test_evidence_covering_only_some_linked_issues_fails_closed(self):
+        """The PR grew a second Closes after assignment, so the record no
+        longer describes the issue set the gate reads."""
+        self.assertIsNone(self.gate(self.valid(), body="Closes #9\nCloses #11"))
+
+    def test_issue_order_must_match_the_body(self):
+        selection = self.valid(issues=(11, 9))
+        self.assertIsNone(self.gate(selection, body="Closes #9\nCloses #11"))
+
+    # --- legacy compatibility ---------------------------------------------
+
+    def test_pr_without_any_evidence_uses_the_original_rotation(self):
+        self.assertEqual(
+            merge_pr.assigned_review_service(self.pr("codeant"), capacity_evidence()),
+            "codeant",
+        )
+        self.assertIsNone(
+            merge_pr.assigned_review_service(self.pr("coderabbit"), capacity_evidence()),
+        )
+
+    def test_v1_evidence_is_treated_as_legacy_not_authority(self):
+        """v1 could not express a reroute -- create_pr.py withheld every
+        divergent selection before posting one -- so a v1 comment adds nothing
+        the legacy check does not prove, and its contents are never trusted."""
+        legacy = {
+            "schema": "aru.review-capacity-selection.v1",
+            "as_of": "2026-08-24T12:00:00Z",
+            "candidates": list(merge_pr.REVIEW_SERVICES),
+            "eligible": list(merge_pr.REVIEW_SERVICES),
+            "excluded": [],
+            "selected": "coderabbit",
+            "rationale": "legacy record",
+        }
+        # Its "selected" is ignored: #9 rotates to codeant, so codeant stands
+        # and the coderabbit it names does not.
+        self.assertEqual(self.gate(legacy, service="codeant"), "codeant")
+        self.assertIsNone(self.gate(legacy))
+
+    def test_evidence_with_no_exclusions_agrees_with_the_legacy_rotation(self):
+        """The compatibility hinge: with nothing excluded the capacity
+        rotation and review_service_for_issue() are the same function, so a PR
+        that hit no capacity limit is unaffected by any of this."""
+        for issue in range(1, 8):
+            with self.subTest(issue=issue):
+                service = merge_pr.review_service_for_issue(issue)
+                selection = capacity_selection(service, issues=(issue,))
+                self.assertEqual(
+                    self.gate(selection, service=service, body=f"Closes #{issue}"),
+                    service,
+                )
+
+    def test_omitted_evidence_argument_keeps_the_legacy_contract(self):
+        self.assertEqual(merge_pr.assigned_review_service(self.pr("codeant")), "codeant")
+        self.assertIsNone(merge_pr.assigned_review_service(self.pr("coderabbit")))
+
+    # --- expiry after assignment ------------------------------------------
+
+    def test_expired_exclusion_does_not_switch_authority(self):
+        """The exclusion's retry_at is long past by the time the PR merges.
+        Re-judging it against 'now' would restore codeant to the pool, move #9
+        back to codeant, and invalidate a settled, once-valid assignment."""
+        selection = self.valid(
+            excluded=[exclusion("codeant", retry_at="2026-08-24T13:00:00Z")],
+        )
+        self.assertEqual(self.gate(selection), "coderabbit")
+
+    def test_validation_never_consults_the_wall_clock(self):
+        """Proves the stability above is structural rather than incidental:
+        the artifact resolves identically however stale its exclusion is, and
+        a much later comment is still rejected for being late."""
+        selection = self.valid(
+            excluded=[exclusion("codeant", retry_at="2026-08-24T13:00:00Z")],
+        )
+        evidence = capacity_evidence(capacity_comment(selection))
+        self.assertEqual(
+            merge_pr.capacity_selection_service(evidence, [9]), "coderabbit",
+        )
+        self.assertIsNone(merge_pr.capacity_selection_service(evidence, [10]))
+
+    # --- the gate itself ---------------------------------------------------
+
+    def test_check_reviews_reports_the_missing_authority_for_a_bad_record(self):
+        """The full gate, not just the resolver: an unusable record must
+        surface as a blocked review gate rather than some unrelated failure."""
+        evidence = dict(
+            coderabbit_evidence("gated-sha"),
+            **capacity_evidence(capacity_comment(
+                self.valid(), last_edited="2026-08-24T14:00:00Z",
+            )),
+        )
+        pr = dict(labelled("author:agent-1", "review:coderabbit"), body="Closes #9")
+        ok, message = merge_pr.check_reviews(pr, evidence)
+        self.assertFalse(ok)
+        self.assertIn("review:", message)
+
+    def test_review_gate_accepts_a_rerouted_pr_end_to_end(self):
+        """The failure #403 names. Issue #10 rotates to coderabbit over the
+        full pool; with codeant excluded it lands on sourcery. That PR, with
+        complete Sourcery evidence, must pass the review gate -- before this
+        change it was blocked no matter what Sourcery reported."""
+        self.assertEqual(merge_pr.review_service_for_issue(10), "coderabbit")
+        selection = capacity_selection(
+            "sourcery", issues=(10,), excluded=[exclusion("codeant")],
+        )
+        pr = dict(labelled("author:agent-1", "review:sourcery"), body="Closes #10")
+        pr["statusCheckRollup"] = [{
+            "__typename": "CheckRun",
+            "name": "Sourcery review",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "checkSuite": {"app": {"slug": "sourcery"}},
+        }]
+        evidence = {
+            "head_oid": "a" * 40,
+            "reviews": [],
+            "service_threads": {
+                "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
+            **capacity_evidence(capacity_comment(selection)),
+        }
+        self.assertEqual(merge_pr.assigned_review_service(pr, evidence), "sourcery")
+        ok, message = merge_pr.check_reviews(pr, evidence)
+        self.assertTrue(ok, message)
+        # Same PR, same Sourcery evidence, record removed: the legacy rotation
+        # takes over and blocks it. That is the bug, reproduced.
+        del evidence["capacity_selection_comments"]
+        self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
 
 if __name__ == "__main__":
     unittest.main()

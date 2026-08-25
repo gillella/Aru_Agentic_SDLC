@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 5176
+# line-ceiling: 5470
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -38,6 +38,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import acceptance_runner
+from audit_review_service_capacity import (
+    UNAVAILABILITY_SCHEMA,
+    parse_snapshot,
+    parse_timestamp,
+    validate_exclusion_record,
+)
 from common import (
     VERIFICATION_EVIDENCE_END,
     VERIFICATION_EVIDENCE_SCHEMA,
@@ -46,6 +52,11 @@ from common import (
     run_cmd,
 )
 from create_pr import (
+    CAPACITY_EVIDENCE_END,
+    CAPACITY_EVIDENCE_START,
+    CAPACITY_SELECTION_SCHEMA,
+    REVIEW_SERVICES,
+    capacity_selection_digest,
     render_verification_evidence,
     replace_verification_evidence,
     review_service_for_issue,
@@ -107,6 +118,29 @@ CODEANT_STATUS_MARKER_RE = re.compile(
 )
 CODEANT_STATUS_RECORD_KEYS = {"label", "commit", "started", "finished", "done"}
 REVIEW_SERVICE_LABELS = ("review:coderabbit", "review:sourcery", "review:codeant")
+
+# create_pr.py posts exactly one capacity-selection comment per PR, fenced by
+# these markers. Its v2 payload is the immutable record of why a service was
+# chosen; the keys below are the complete set, because an extra or missing one
+# makes the artifact's shape untrustworthy rather than merely novel.
+LEGACY_CAPACITY_SELECTION_SCHEMA = "aru.review-capacity-selection.v1"
+CAPACITY_SELECTION_KEYS = {
+    "schema", "as_of", "candidates", "eligible", "excluded",
+    "issues", "selected", "rationale", "snapshot",
+}
+CAPACITY_SNAPSHOT_KEYS = {
+    "source", "observed_at", "max_age_seconds", "excluded_count", "digest",
+}
+CAPACITY_SELECTION_JSON_RE = re.compile(
+    re.escape(CAPACITY_EVIDENCE_START) + r"\s*```json\s*(.*?)\s*```\s*"
+    + re.escape(CAPACITY_EVIDENCE_END),
+    re.DOTALL,
+)
+# How long after the capacity observation the assignment comment may land.
+# The two happen within seconds of each other in create_pr.py, so anything
+# outside this window is evidence replayed onto a PR long after the snapshot
+# it claims to describe -- not the assignment that PR was opened with.
+CAPACITY_EVIDENCE_MAX_LAG_SECONDS = 3600
 CODERABBIT_FULL_REVIEW_REQUEST = "@coderabbitai full review"
 CODERABBIT_FULL_REVIEW_FINISHED = "Full review finished."
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
@@ -591,6 +625,56 @@ def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
         cursor = next_cursor
 
 
+def _collect_coderabbit_full_review_comment(body, node, collector):
+    """Stash one CodeRabbit full-review marker comment, or report it unusable.
+
+    Returns False when the comment carries a full-review marker but its
+    timestamp or author cannot be established. Unlike the two collectors
+    above, that is not something the caller can defer: a marker whose
+    provenance is unknown must stop the whole query rather than be dropped,
+    because a missing "Full review finished." reads as "not finished yet"
+    while a missing request reads as "never requested".
+    """
+    comment_kind = _coderabbit_full_review_comment_kind(body)
+    if comment_kind is None:
+        return True
+    created_at = _parse_ts(node.get("createdAt"))
+    author = node.get("author")
+    if (
+        created_at is None
+        or not isinstance(author, dict)
+        or not isinstance(author.get("login"), str)
+        or not author["login"]
+        or author.get("__typename") not in KNOWN_REVIEW_ACTOR_TYPES
+    ):
+        return False
+    collector.append({
+        "kind": comment_kind,
+        "body": body,
+        "createdAt": node["createdAt"],
+        "author": {"login": author["login"], "__typename": author["__typename"]},
+    })
+    return True
+
+
+def _collect_capacity_selection_comment(body, node, collector):
+    """Stash one raw capacity-selection comment for later validation.
+
+    Unfiltered, like the CodeAnt collector above and for the same reason: an
+    edited, duplicated, or spoofed record has to be gathered so
+    capacity_selection_service() can see and reject it. Dropping it here would
+    make a tampered assignment look like a PR that simply has none, which is
+    the legacy path -- the exact fallback the tamper wants.
+    """
+    if CAPACITY_EVIDENCE_START in body:
+        collector.append({
+            "body": body,
+            "createdAt": node.get("createdAt"),
+            "lastEditedAt": node.get("lastEditedAt"),
+            "author": node.get("author"),
+        })
+
+
 def _collect_codeant_status_comment(body, author, collector):
     """Stash one raw PR comment for later CodeAnt status-marker parsing.
 
@@ -617,7 +701,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
         pullRequest(number:$pr) {
           headRefOid
           comments(first:100, after:$cursor) {
-            nodes { body createdAt author { login __typename } }
+            nodes { body createdAt lastEditedAt author { login __typename } }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -629,6 +713,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
     attestations = []
     coderabbit_full_review_comments = []
     codeant_status_comments = []
+    capacity_selection_comments = []
     while True:
         args = [
             "gh", "api", "graphql", "-f", f"query={query}",
@@ -657,28 +742,12 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
             if not isinstance(node, dict) or not isinstance(node.get("body"), str):
                 return None
             body = node["body"]
+            _collect_capacity_selection_comment(body, node, capacity_selection_comments)
             _collect_codeant_status_comment(body, node.get("author"), codeant_status_comments)
-            comment_kind = _coderabbit_full_review_comment_kind(body)
-            if comment_kind is not None:
-                created_at = _parse_ts(node.get("createdAt"))
-                author = node.get("author")
-                if (
-                    created_at is None
-                    or not isinstance(author, dict)
-                    or not isinstance(author.get("login"), str)
-                    or not author["login"]
-                    or author.get("__typename") not in KNOWN_REVIEW_ACTOR_TYPES
-                ):
-                    return None
-                coderabbit_full_review_comments.append({
-                    "kind": comment_kind,
-                    "body": body,
-                    "createdAt": node["createdAt"],
-                    "author": {
-                        "login": author["login"],
-                        "__typename": author["__typename"],
-                    },
-                })
+            if not _collect_coderabbit_full_review_comment(
+                body, node, coderabbit_full_review_comments,
+            ):
+                return None
             if not body.startswith(prefix):
                 continue
             marker, separator, _rest = body.partition(" -->")
@@ -713,6 +782,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
                 "attestations": attestations,
                 "coderabbit_full_review_comments": coderabbit_full_review_comments,
                 "codeant_status_comments": codeant_status_comments,
+                "capacity_selection_comments": capacity_selection_comments,
             }
         next_cursor = page_info.get("endCursor")
         if (
@@ -765,12 +835,16 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
         review_attestations = comment_evidence
         coderabbit_full_review_comments = []
         codeant_status_comments = []
+        capacity_selection_comments = []
     else:
         review_attestations = comment_evidence["attestations"]
         coderabbit_full_review_comments = comment_evidence[
             "coderabbit_full_review_comments"
         ]
         codeant_status_comments = comment_evidence.get("codeant_status_comments", [])
+        capacity_selection_comments = comment_evidence.get(
+            "capacity_selection_comments", []
+        )
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
@@ -932,6 +1006,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                     coderabbit_full_review_comments
                 ),
                 "codeant_status_comments": codeant_status_comments,
+                "capacity_selection_comments": capacity_selection_comments,
                 "unresolved": unresolved,
                 "unfixed": unfixed,
                 "outdated_unfixed": outdated_unfixed,
@@ -1205,18 +1280,231 @@ def label_values(pr, prefix):
     ]
 
 
-def assigned_review_service(pr):
+class _CapacitySelectionAbsent:
+    """The PR carries no capacity-selection evidence at all.
+
+    Distinct from ``None``, which means evidence exists and does not prove
+    anything. Collapsing the two would make a PR that never had capacity
+    evidence unmergeable, and -- worse in the other direction -- would let a
+    malformed or replayed artifact fall back to the legacy formula, which is
+    precisely the check an attacker would want skipped.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return "CAPACITY_SELECTION_ABSENT"
+
+
+CAPACITY_SELECTION_ABSENT = _CapacitySelectionAbsent()
+
+
+def _capacity_evidence_comments(evidence):
+    """Every PR comment claiming to be a capacity-selection record."""
+    comments = evidence.get("capacity_selection_comments") if isinstance(evidence, dict) else None
+    if not isinstance(comments, list):
+        return []
+    return [
+        comment for comment in comments
+        if isinstance(comment, dict)
+        and isinstance(comment.get("body"), str)
+        and CAPACITY_EVIDENCE_START in comment["body"]
+    ]
+
+
+def _issue_list(value):
+    """A JSON array of issue numbers, or None.
+
+    ``bool`` is rejected explicitly because it is a subclass of ``int`` in
+    Python: without this, a forged ``"issues": [true]`` compares equal to a
+    real ``[1]`` and binds an assignment to an issue it never mentioned.
+    """
+    if not isinstance(value, list) or not value:
+        return None
+    if any(not isinstance(num, int) or isinstance(num, bool) for num in value):
+        return None
+    return list(value)
+
+
+def _capacity_snapshot_window(payload, created_at):
+    """The bounded window this assignment was computed under, or None.
+
+    Establishes that the record names a snapshot at all, that the snapshot is
+    the ledger this framework routes from, that it is bounded, and that the
+    comment landed in the interval where it could plausibly be reporting it.
+    Everything downstream is replayed inside the window this returns, so a
+    record with no usable provenance never reaches the recomputation.
+    """
+    snapshot = payload["snapshot"]
+    if not isinstance(snapshot, dict) or set(snapshot) != CAPACITY_SNAPSHOT_KEYS:
+        return None
+    max_age = snapshot["max_age_seconds"]
+    if (
+        snapshot["source"] != UNAVAILABILITY_SCHEMA
+        or snapshot["observed_at"] != payload["as_of"]
+        or not isinstance(max_age, int) or isinstance(max_age, bool) or max_age <= 0
+        or not isinstance(snapshot["excluded_count"], int)
+        or isinstance(snapshot["excluded_count"], bool)
+    ):
+        return None
+    try:
+        as_of = parse_timestamp(payload["as_of"])
+    except ValueError:
+        return None
+    # The comment must have landed after the capacity it reports was observed,
+    # and close enough behind it to be that assignment rather than a replay.
+    lag = (created_at - as_of).total_seconds()
+    if lag < 0 or lag > CAPACITY_EVIDENCE_MAX_LAG_SECONDS:
+        return None
+    return as_of, max_age
+
+
+def _replayed_exclusions(payload, as_of, max_age):
+    """Services the recorded exclusions actually prove were unavailable.
+
+    Returns None if any record fails to replay, is duplicated, or is out of
+    canonical order -- never a partial pool, because a pool missing one
+    exclusion is a *wider* pool, and a wider pool changes the rotation's
+    modulus. Silently dropping a bad record is therefore not a safe
+    degradation here; it is the forgery.
+    """
+    excluded = payload["excluded"]
+    if not isinstance(excluded, list) or len(excluded) != payload["snapshot"]["excluded_count"]:
+        return None
+    services = []
+    for record in excluded:
+        # as_of, never now: an exclusion whose retry_at has since passed was
+        # still real when the assignment was made. Re-judging it against the
+        # present is what would switch a settled authority on expiry.
+        service, _reason = validate_exclusion_record(
+            record, as_of=as_of, max_age_seconds=max_age,
+        )
+        if service is None or service in services:
+            return None
+        services.append(service)
+    if services != [s for s in REVIEW_SERVICES if s in set(services)]:
+        return None
+    return services
+
+
+def _validated_capacity_selection(payload, issue_nums, created_at):
+    """Recompute one v2 assignment from its own bounded snapshot.
+
+    Every field is re-derived rather than read: the exclusions are replayed
+    through the ledger validator as of the assignment moment, the eligible
+    pool is recomputed from what survives, and the selected service is
+    recomputed from that pool for every linked issue. The recorded values
+    only ever have to *match* a recomputation, so a payload asserting an
+    eligible pool its own exclusion records do not produce is rejected.
+    """
+    window = _capacity_snapshot_window(payload, created_at)
+    if window is None:
+        return None
+    as_of, max_age = window
+    if (
+        _issue_list(payload["issues"]) != list(issue_nums)
+        or payload["candidates"] != list(REVIEW_SERVICES)
+    ):
+        return None
+    excluded_services = _replayed_exclusions(payload, as_of, max_age)
+    if excluded_services is None:
+        return None
+    eligible = [s for s in REVIEW_SERVICES if s not in set(excluded_services)]
+    selected = payload["selected"]
+    if not eligible or payload["eligible"] != eligible or selected not in REVIEW_SERVICES:
+        return None
+    if any(eligible[(num - 1) % len(eligible)] != selected for num in issue_nums):
+        return None
+    if payload["snapshot"]["digest"] != capacity_selection_digest(payload):
+        return None
+    return selected
+
+
+def capacity_selection_service(evidence, issue_nums):
+    """The service one immutable capacity assignment proves, if any.
+
+    Returns ``CAPACITY_SELECTION_ABSENT`` when the PR carries no such record
+    (the legacy full-pool rotation then decides), the proved service name, or
+    ``None`` when a record exists but cannot be trusted -- duplicated,
+    edited, posted by a non-user account, malformed, missing provenance,
+    bound to different issues, or internally inconsistent.
+
+    What this proves is that the assignment on the PR is the one that was
+    made, unmodified, from a bounded snapshot that genuinely produced it. It
+    is not a signature: an actor with repository write who rewrites the whole
+    comment can mint a consistent artifact. That actor can already move the
+    review:* label, which is the authority this validates against, so the
+    boundary being defended here is tampering with a real assignment, not
+    repository write itself.
+    """
+    comments = _capacity_evidence_comments(evidence)
+    if not comments:
+        return CAPACITY_SELECTION_ABSENT
+    if len(comments) > 1:
+        return None
+    comment = comments[0]
+    author = comment.get("author")
+    try:
+        # The strict parser, not _parse_ts(): a timestamp without a timezone
+        # would compare against the assignment's aware as_of and raise rather
+        # than fail closed, and "the gate crashed" is not a verdict.
+        created_at = parse_timestamp(comment.get("createdAt"))
+    except ValueError:
+        return None
+    if (
+        comment.get("lastEditedAt")
+        or not isinstance(author, dict)
+        or author.get("__typename") != "User"
+        or not isinstance(author.get("login"), str)
+        or not author["login"]
+        # One comment carrying two records is as ambiguous as two comments
+        # carrying one each: a human auditor and this parser could then be
+        # reading different payloads off the same artifact.
+        or comment["body"].count(CAPACITY_EVIDENCE_START) != 1
+        or comment["body"].count(CAPACITY_EVIDENCE_END) != 1
+    ):
+        return None
+    match = CAPACITY_SELECTION_JSON_RE.search(comment["body"])
+    if match is None:
+        return None
+    try:
+        payload = parse_snapshot(match.group(1))
+    except ValueError:
+        return None
+    if payload.get("schema") == LEGACY_CAPACITY_SELECTION_SCHEMA:
+        # v1 could not express a rerouted assignment: create_pr.py withheld
+        # every selection that disagreed with review_service_for_issue()
+        # before posting it. So a v1 comment adds nothing the legacy check
+        # does not already prove, and its contents are never trusted here.
+        return CAPACITY_SELECTION_ABSENT
+    if payload.get("schema") != CAPACITY_SELECTION_SCHEMA:
+        return None
+    if set(payload) != CAPACITY_SELECTION_KEYS:
+        return None
+    return _validated_capacity_selection(payload, issue_nums, created_at)
+
+
+def assigned_review_service(pr, evidence=None):
     """Exactly one review-pool authority label must be present.
 
-    The label alone is not trusted: create_pr.py assigns
-    review_service_for_issue(issue_id) once, deterministically, from the
-    linked issue number. At least one linked issue is required, and every
-    linked issue must recompute to the same service as the label - a PR with
-    no linked issue, or one whose issues resolve to different services (e.g.
-    a relabel after assignment, or a multi-issue PR spanning services), is
-    rejected rather than trusted. This closes the window where an edited
-    label, or a mixed-service issue set, could swap the review oracle after
-    the fact.
+    The label alone is not trusted. At least one linked issue is required,
+    and the label must equal what create_pr.py would have assigned for that
+    issue set - so a relabel after assignment, or a multi-issue PR no single
+    service can serve, is rejected rather than trusted.
+
+    Which recomputation applies depends on the evidence the PR carries:
+
+    * With an immutable capacity-selection record, the label must equal the
+      service that record proves. Capacity exclusion legitimately moves the
+      answer away from the full-pool rotation, so demanding that rotation
+      here would reject correctly-routed PRs (#403).
+    * With no such record, the legacy path applies unchanged: every linked
+      issue must recompute to review_service_for_issue().
+
+    ``evidence`` is optional so unit-level callers can exercise the label and
+    issue-set rules alone. Omitting it takes the legacy path, which accepts
+    only a full-pool-rotation label - a rerouted PR fails closed rather than
+    being waved through on an unread record.
     """
     labels = {
         lab.get("name", "")
@@ -1229,9 +1517,12 @@ def assigned_review_service(pr):
     issue_nums = linked_issues(pr.get("body") or "")
     if not issue_nums:
         return None
-    if any(review_service_for_issue(num) != service for num in issue_nums):
-        return None
-    return service
+    proved = capacity_selection_service(evidence, issue_nums)
+    if proved is CAPACITY_SELECTION_ABSENT:
+        if any(review_service_for_issue(num) != service for num in issue_nums):
+            return None
+        return service
+    return service if proved == service else None
 
 
 def _service_thread_counts(evidence, service):
@@ -2140,7 +2431,7 @@ def _codeant_status_evidence(evidence):
 
 
 def has_authoritative_assigned_review(pr, evidence):
-    service = assigned_review_service(pr) if isinstance(pr, dict) else None
+    service = assigned_review_service(pr, evidence) if isinstance(pr, dict) else None
     if service == "coderabbit":
         return has_authoritative_coderabbit_review(pr, evidence)
     if service == "sourcery":
@@ -2156,7 +2447,7 @@ def has_authoritative_assigned_review(pr, evidence):
 
 
 def check_reviews(pr, evidence):  # noqa: C901, PLR0912
-    service = assigned_review_service(pr) if isinstance(pr, dict) else None
+    service = assigned_review_service(pr, evidence) if isinstance(pr, dict) else None
     if service is None:
         return False, (
             "PR must carry exactly one authoritative review-pool label: "

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 680
+# line-ceiling: 700
 """Audit provider-neutral review-service capacity snapshots without mutation."""
 
 import argparse
@@ -69,7 +69,14 @@ def parse_snapshot(raw):
     return value
 
 
-def _parse_timestamp(value):
+def parse_timestamp(value):
+    """Strict ISO-8601-with-timezone parsing, normalized to UTC.
+
+    Public because merge_pr.py re-proves a recorded capacity assignment
+    against the moment it was made, and a second, laxer timestamp parser on
+    that side would let an evidence artifact this module rejects be accepted
+    there.
+    """
     if not isinstance(value, str) or not value.strip():
         raise ValueError("timestamp must be a non-empty string")
     text = value.strip()
@@ -95,7 +102,7 @@ def _as_of(value):
         if value.tzinfo is None:
             raise ValueError("as-of timestamp must include a timezone")
         return value.astimezone(timezone.utc)
-    return _parse_timestamp(value)
+    return parse_timestamp(value)
 
 
 def _mismatch(report, code, message, service=None):
@@ -164,7 +171,7 @@ def _classify_plan(raw, item, report, as_of):
         item["expiry_state"] = "not_applicable"
         return
     try:
-        expiry = _parse_timestamp(raw["expires_at"])
+        expiry = parse_timestamp(raw["expires_at"])
     except (KeyError, ValueError):
         _service_mismatch(
             report, item, "plan_invalid", "Trial expiry is missing or malformed.",
@@ -214,7 +221,7 @@ def _classify_quota(raw, item, report, as_of):
         _service_mismatch(report, item, "quota_invalid", "Quota counters are inconsistent.")
         return
     try:
-        reset = _parse_timestamp(raw["resets_at"])
+        reset = parse_timestamp(raw["resets_at"])
     except ValueError:
         _service_mismatch(report, item, "quota_invalid", "Quota reset is malformed.")
         return
@@ -321,7 +328,7 @@ def audit_capacity(payload, *, as_of=None, max_age_seconds=3600):
 
     observed = None
     try:
-        observed = _parse_timestamp(data.get("observed_at"))
+        observed = parse_timestamp(data.get("observed_at"))
     except ValueError:
         _mismatch(report, "observed_at_invalid", "Observation time is missing or malformed.")
     snapshot_current = observed is not None and max_age_valid
@@ -447,7 +454,7 @@ def record_unavailability(service, state, reason, retry_at, *, source,
     if not isinstance(source, str) or not source.strip():
         raise ValueError("source must be a non-empty string")
     observed = _as_of(observed_at)
-    retry = _parse_timestamp(retry_at)
+    retry = parse_timestamp(retry_at)
     if retry <= observed:
         raise ValueError("retry_at must be after observed_at")
 
@@ -506,7 +513,7 @@ def _validate_unavailability_entry(raw, as_of, max_age_seconds):
             "service": service,
         }
     try:
-        observed = _parse_timestamp(raw.get("observed_at"))
+        observed = parse_timestamp(raw.get("observed_at"))
     except ValueError:
         return None, {
             "code": "entry_observed_at_invalid",
@@ -514,7 +521,7 @@ def _validate_unavailability_entry(raw, as_of, max_age_seconds):
             "service": service,
         }
     try:
-        retry_at = _parse_timestamp(raw.get("retry_at"))
+        retry_at = parse_timestamp(raw.get("retry_at"))
     except ValueError:
         return None, {
             "code": "entry_retry_at_invalid",
@@ -541,6 +548,28 @@ def _validate_unavailability_entry(raw, as_of, max_age_seconds):
         "observed_at": _iso(observed),
         "retry_at": _iso(retry_at),
     }
+
+
+def validate_exclusion_record(record, *, as_of, max_age_seconds=DEFAULT_UNAVAILABILITY_MAX_AGE_SECONDS):
+    """Re-prove one recorded exclusion was genuine evidence at ``as_of``.
+
+    create_pr.py copies the ledger entries it actually excluded on into the
+    immutable assignment evidence it posts, so that evidence carries its own
+    bounded capacity snapshot rather than pointing at a machine-local file
+    that is gone -- or expired -- by the time the merge gate reads it.
+    merge_pr.py replays each copied record through this function to recompute
+    the eligible pool, which is why ``as_of`` is the assignment moment and
+    never "now": an exclusion whose ``retry_at`` has since passed was still a
+    valid exclusion when the assignment was made, and re-judging it against
+    the present would switch a settled authority.
+
+    Returns ``(service, info)`` for a record that genuinely excluded a
+    service, or ``(None, reason)`` for one that never could have -- the same
+    fail-open-per-entry classification audit_unavailability() applies, so a
+    forged or malformed exclusion cannot manufacture an eligible pool that
+    the ledger would not have produced.
+    """
+    return _validate_unavailability_entry(record, _as_of(as_of), max_age_seconds)
 
 
 def audit_unavailability(payload, *, as_of=None, max_age_seconds=DEFAULT_UNAVAILABILITY_MAX_AGE_SECONDS):

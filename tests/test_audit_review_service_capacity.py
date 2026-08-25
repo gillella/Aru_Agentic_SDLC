@@ -1,4 +1,4 @@
-# line-ceiling: 680
+# line-ceiling: 700
 import io
 import json
 import os
@@ -605,6 +605,87 @@ class UnavailabilityLedgerIoTests(unittest.TestCase):
             self.assertEqual(snapshot["entries"][0]["service"], "coderabbit")
             report = audit.audit_unavailability(snapshot, as_of=AS_OF)
             self.assertEqual(set(report["unavailable"]), {"coderabbit"})
+
+
+class ExclusionRecordReplayTests(unittest.TestCase):
+    """validate_exclusion_record() is the merge gate's replay of one exclusion.
+
+    merge_pr.py cannot reach the machine-local ledger a PR was routed from --
+    it is another machine's file, and expired by merge time -- so create_pr.py
+    copies the entries it excluded on into the assignment evidence and the
+    gate replays them here, as of the assignment moment. That makes this the
+    single definition of "this record genuinely excluded a service", shared by
+    the routing kernel and the gate rather than reimplemented on each side.
+    """
+
+    AS_OF = "2026-08-24T12:00:00Z"
+
+    def replay(self, record, **kwargs):
+        kwargs.setdefault("as_of", self.AS_OF)
+        return audit.validate_exclusion_record(record, **kwargs)
+
+    def test_a_genuine_entry_replays_to_its_service(self):
+        service, info = self.replay(unavailability_entry("sourcery"))
+        self.assertEqual(service, "sourcery")
+        self.assertEqual(info["state"], "cooldown")
+        self.assertEqual(info["retry_at"], "2026-08-24T13:00:00Z")
+
+    def test_expiry_after_the_assignment_does_not_invalidate_it(self):
+        """The property the merge gate depends on: this entry's retry_at is
+        long past by merge time, but it was real when the assignment was made,
+        and judging it as of that moment keeps a settled routing settled."""
+        record = unavailability_entry("sourcery", retry_at="2026-08-24T12:30:00Z")
+        self.assertEqual(self.replay(record)[0], "sourcery")
+        # The same record judged an hour later would no longer exclude.
+        self.assertIsNone(self.replay(record, as_of="2026-08-24T13:30:00Z")[0])
+
+    def test_records_that_never_excluded_anything_are_refused(self):
+        cases = {
+            "unknown service": unavailability_entry("someone-else"),
+            "unknown state": unavailability_entry(state="made-up"),
+            "inverted bounds": unavailability_entry(retry_at="2026-08-24T11:00:00Z"),
+            "stale at as_of": unavailability_entry(observed_at="2026-08-24T00:00:00Z"),
+            "dated ahead": unavailability_entry(observed_at="2026-08-24T13:00:00Z"),
+            "already retryable": unavailability_entry(retry_at="2026-08-24T11:45:00Z"),
+            "empty reason": unavailability_entry(reason="  "),
+            "empty source": unavailability_entry(source=""),
+            "malformed time": unavailability_entry(observed_at="not-a-time"),
+        }
+        for name, record in cases.items():
+            with self.subTest(case=name):
+                service, reason = self.replay(record)
+                self.assertIsNone(service)
+                self.assertIn("code", reason)
+
+    def test_extra_or_missing_fields_are_refused(self):
+        base = unavailability_entry()
+        for name, record in (
+            ("extra", {**base, "note": "hi"}),
+            ("missing", {k: v for k, v in base.items() if k != "source"}),
+            ("not an object", ["sourcery"]),
+        ):
+            with self.subTest(case=name):
+                self.assertIsNone(self.replay(record)[0])
+
+    def test_the_window_is_the_callers_to_state(self):
+        """The gate passes the window recorded in the evidence's own
+        provenance block, so a record judged fresh under one bound must be
+        judged stale under a tighter one."""
+        record = unavailability_entry(observed_at="2026-08-24T11:30:00Z")
+        self.assertEqual(self.replay(record, max_age_seconds=3600)[0], "coderabbit")
+        self.assertIsNone(self.replay(record, max_age_seconds=60)[0])
+
+    def test_it_agrees_with_the_ledger_audit_on_the_same_entry(self):
+        """Two callers, one definition: whatever audit_unavailability() counts
+        as an exclusion is exactly what replays here, and nothing else."""
+        for record in (unavailability_entry("sourcery"),
+                       unavailability_entry("sourcery", state="made-up"),
+                       unavailability_entry("sourcery", observed_at="2026-08-24T00:00:00Z")):
+            with self.subTest(record=record["state"]):
+                report = audit.audit_unavailability(ledger(record), as_of=self.AS_OF)
+                replayed = self.replay(record)[0]
+                self.assertEqual(replayed is not None, bool(report["unavailable"]))
+
 
 
 if __name__ == "__main__":

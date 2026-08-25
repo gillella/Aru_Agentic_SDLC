@@ -1,9 +1,10 @@
-# line-ceiling: 1060
+# line-ceiling: 1180
 import json
 import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,62 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import create_pr  # noqa: E402
 import common  # noqa: E402
 import merge_pr  # noqa: E402
+
+
+def patch_linked_issues():
+    """Stub the live PR-body read that binds an assignment to its issue set.
+
+    _acquire_review_assignment() reads the PR body so the evidence names the
+    exact issues merge_pr.py will recompute from. These fixtures name the PR
+    by URL and pass the matching issue number, so the stub derives the set
+    from the reference; the real read has its own tests in
+    LinkedIssueBindingTests.
+    """
+    return patch.object(
+        create_pr, "linked_issues_for_pr",
+        side_effect=lambda pr_ref: [int(str(pr_ref).rsplit("/", 1)[-1])],
+    )
+
+
+def capacity_evidence(selected, *, issues=(9,), eligible=None, excluded=(),
+                      as_of="2026-08-24T12:00:00Z"):
+    """A complete v2 selection record, sealed the way create_pr.py seals one."""
+    evidence = {
+        "schema": create_pr.CAPACITY_SELECTION_SCHEMA,
+        "as_of": as_of,
+        "candidates": list(create_pr.REVIEW_SERVICES),
+        "eligible": list(create_pr.REVIEW_SERVICES if eligible is None else eligible),
+        "excluded": [dict(item) for item in excluded],
+        "issues": list(issues),
+        "selected": selected,
+        "rationale": f"selected {selected!r} for test",
+    }
+    evidence["snapshot"] = {
+        "source": "aru.review-service-unavailability-ledger.v1",
+        "observed_at": as_of,
+        "max_age_seconds": create_pr.CAPACITY_MAX_AGE_SECONDS,
+        "excluded_count": len(evidence["excluded"]),
+        "digest": create_pr.capacity_selection_digest(evidence),
+    }
+    return evidence
+
+
+def comment_evidence(selection, *, created_at=None, author=None, last_edited=None):
+    """Wrap one selection the way merge_pr.py reads it off the live PR.
+
+    Rendered through create_pr.render_capacity_evidence() rather than
+    hand-written, so these tests break if the two sides ever stop agreeing on
+    the comment format itself.
+    """
+    if created_at is None:
+        moment = datetime.fromisoformat(selection["as_of"].replace("Z", "+00:00"))
+        created_at = (moment + timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    return {"capacity_selection_comments": [{
+        "body": create_pr.render_capacity_evidence(selection),
+        "createdAt": created_at,
+        "lastEditedAt": last_edited,
+        "author": author if author is not None else {"login": "gillella", "__typename": "User"},
+    }]}
 
 
 class AgentFlagTests(unittest.TestCase):
@@ -156,16 +213,13 @@ class IdentityStampTests(unittest.TestCase):
     # add-label write to detect a concurrent finalizer. The realistic sequence
     # for an unassigned PR that this call assigns is therefore
     # (None, None, <service>): unassigned, still unassigned, then ours.
+    def setUp(self):
+        patcher = patch_linked_issues()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def canned_evidence(self, service):
-        return {
-            "schema": "aru.review-capacity-selection.v1",
-            "as_of": "2026-08-24T12:00:00Z",
-            "candidates": list(create_pr.REVIEW_SERVICES),
-            "eligible": list(create_pr.REVIEW_SERVICES),
-            "excluded": [],
-            "selected": service,
-            "rationale": f"selected '{service}' for test",
-        }
+        return capacity_evidence(service)
 
     @patch.object(create_pr, "run_cmd")
     @patch.object(create_pr, "ensure_label", return_value=True)
@@ -360,7 +414,7 @@ class CapacitySelectionTests(unittest.TestCase):
         for issue_id in range(1, 8):
             with self.subTest(issue_id=issue_id):
                 evidence = create_pr.select_review_service(
-                    issue_id, as_of=self.AS_OF, snapshot=unavailable_ledger(),
+                    [issue_id], as_of=self.AS_OF, snapshot=unavailable_ledger(),
                 )
                 self.assertEqual(evidence["selected"], create_pr.review_service_for_issue(issue_id))
                 self.assertEqual(evidence["eligible"], list(create_pr.REVIEW_SERVICES))
@@ -369,7 +423,7 @@ class CapacitySelectionTests(unittest.TestCase):
     def test_excluded_service_is_never_selected_and_pool_rotates_evenly(self):
         snapshot = unavailable_ledger(unavailable_entry("sourcery", state="quota_exhausted"))
         picks = [
-            create_pr.select_review_service(issue_id, as_of=self.AS_OF, snapshot=snapshot)["selected"]
+            create_pr.select_review_service([issue_id], as_of=self.AS_OF, snapshot=snapshot)["selected"]
             for issue_id in range(1, 11)
         ]
         self.assertNotIn("sourcery", picks)
@@ -377,7 +431,7 @@ class CapacitySelectionTests(unittest.TestCase):
         # Deterministic: the same issue id always resolves to the same service.
         self.assertEqual(
             picks,
-            [create_pr.select_review_service(i, as_of=self.AS_OF, snapshot=snapshot)["selected"]
+            [create_pr.select_review_service([i], as_of=self.AS_OF, snapshot=snapshot)["selected"]
              for i in range(1, 11)],
         )
         # Approximately even across the eligible pair over 10 consecutive issues.
@@ -386,7 +440,7 @@ class CapacitySelectionTests(unittest.TestCase):
 
     def test_excluded_service_evidence_and_rationale_are_recorded(self):
         snapshot = unavailable_ledger(unavailable_entry("sourcery", state="outage", reason="5xx storm"))
-        evidence = create_pr.select_review_service(2, as_of=self.AS_OF, snapshot=snapshot)
+        evidence = create_pr.select_review_service([2], as_of=self.AS_OF, snapshot=snapshot)
         self.assertEqual(evidence["candidates"], list(create_pr.REVIEW_SERVICES))
         self.assertEqual(evidence["eligible"], ["coderabbit", "codeant"])
         self.assertEqual(len(evidence["excluded"]), 1)
@@ -400,7 +454,7 @@ class CapacitySelectionTests(unittest.TestCase):
         snapshot = unavailable_ledger(*[
             unavailable_entry(service, state="cooldown") for service in create_pr.REVIEW_SERVICES
         ])
-        evidence = create_pr.select_review_service(5, as_of=self.AS_OF, snapshot=snapshot)
+        evidence = create_pr.select_review_service([5], as_of=self.AS_OF, snapshot=snapshot)
         self.assertIsNone(evidence["selected"])
         self.assertEqual(evidence["eligible"], [])
         self.assertEqual({item["service"] for item in evidence["excluded"]}, set(create_pr.REVIEW_SERVICES))
@@ -412,7 +466,7 @@ class CapacitySelectionTests(unittest.TestCase):
         spoofed = {"service": "codeant", "state": "made-up-state", "reason": "x",
                    "observed_at": self.AS_OF, "retry_at": self.AS_OF, "source": "x"}
         evidence = create_pr.select_review_service(
-            1, as_of=self.AS_OF, snapshot=unavailable_ledger(stale, spoofed),
+            [1], as_of=self.AS_OF, snapshot=unavailable_ledger(stale, spoofed),
         )
         self.assertEqual(evidence["selected"], create_pr.review_service_for_issue(1))
         self.assertEqual(evidence["eligible"], list(create_pr.REVIEW_SERVICES))
@@ -423,14 +477,20 @@ class CapacitySelectionTests(unittest.TestCase):
         cross-repository ledger, not just unit-tested in isolation."""
         import audit_review_service_capacity as audit
 
+        # Relative to now, not a fixed date: this exclusion has to still be
+        # unexpired when the test runs, and a hardcoded retry_at silently
+        # stops excluding anything the moment the wall clock passes it -- at
+        # which point the assertions below fail for a reason that has nothing
+        # to do with the wiring they exist to prove.
+        retry_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         with tempfile.TemporaryDirectory() as directory:
             shared_path = Path(directory) / "shared-ledger.json"
             with patch.dict(os.environ, {audit.CAPACITY_LEDGER_ENV: str(shared_path)}):
                 audit.record_unavailability(
-                    "coderabbit", "outage", "provider 5xx", "2026-08-25T00:00:00Z",
+                    "coderabbit", "outage", "provider 5xx", retry_at,
                     source="status-page-poll",
                 )
-                evidence = create_pr.select_review_service(1)
+                evidence = create_pr.select_review_service([1])
         self.assertNotEqual(evidence["selected"], "coderabbit")
         self.assertIn("coderabbit", {item["service"] for item in evidence["excluded"]})
 
@@ -444,16 +504,13 @@ class FailClosedAssignmentTests(unittest.TestCase):
     duplicates an authority the routing contract promises is immutable.
     """
 
+    def setUp(self):
+        patcher = patch_linked_issues()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def canned_evidence(self, service):
-        return {
-            "schema": "aru.review-capacity-selection.v1",
-            "as_of": "2026-08-24T12:00:00Z",
-            "candidates": list(create_pr.REVIEW_SERVICES),
-            "eligible": list(create_pr.REVIEW_SERVICES),
-            "excluded": [],
-            "selected": service,
-            "rationale": f"selected '{service}' for test",
-        }
+        return capacity_evidence(service)
 
     def test_failed_label_lookup_is_not_read_as_unassigned(self):
         with patch.object(create_pr, "run_cmd", return_value=(1, "", "gh: not authenticated")):
@@ -572,72 +629,182 @@ class FailClosedAssignmentTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
 
 
-class MergeAuthoritySequencingTests(unittest.TestCase):
-    """A rerouted assignment is withheld until #403 teaches the merge gate.
+class CapacityRoutedAssignmentTests(unittest.TestCase):
+    """A capacity-rerouted assignment is now shipped, not withheld.
 
-    merge_pr.assigned_review_service() still recomputes review_service_for_issue()
-    and rejects any disagreeing label, so shipping a capacity-rerouted
-    assignment would produce a correctly-routed, permanently unmergeable PR.
-    Waiting in draft is recoverable; that is not.
+    Before #403 the merge gate recomputed review_service_for_issue() and
+    rejected any label that disagreed, so create_pr.py had to withhold every
+    selection a real exclusion moved -- correct routing was unmergeable.
+    merge_pr.py now validates the assignment against this evidence, so the
+    reroute is assigned and the evidence carries what proves it.
     """
 
-    def evidence(self, selected, eligible):
-        return {
-            "schema": "aru.review-capacity-selection.v1",
-            "as_of": "2026-08-24T12:00:00Z",
-            "candidates": list(create_pr.REVIEW_SERVICES),
-            "eligible": list(eligible),
-            "excluded": [],
-            "selected": selected,
-            "rationale": "test",
-        }
+    def setUp(self):
+        patcher = patch_linked_issues()
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def test_matching_selection_passes_through_untouched(self):
-        # Issue 9 -> codeant under both the formula and the full eligible pool.
-        original = self.evidence("codeant", create_pr.REVIEW_SERVICES)
-        self.assertEqual(create_pr.gate_divergent_selection(original, 9), original)
+    AS_OF = "2026-08-24T12:00:00Z"
 
-    def test_divergent_selection_is_withheld_with_auditable_reason(self):
-        gated = create_pr.gate_divergent_selection(
-            self.evidence("coderabbit", ["coderabbit", "sourcery"]), 9)
-        self.assertIsNone(gated["selected"])
-        self.assertEqual(gated["withheld_selection"], "coderabbit")
-        self.assertIn(str(create_pr.MERGE_AUTHORITY_FOLLOWUP), gated["withheld_reason"])
-        self.assertIn("codeant", gated["rationale"])
-        self.assertEqual(gated["eligible"], ["coderabbit", "sourcery"])
+    def rerouted(self, issue_id):
+        """Selection for an issue whose full-pool service is excluded."""
+        excluded = create_pr.review_service_for_issue(issue_id)
+        snapshot = unavailable_ledger(unavailable_entry(excluded, state="quota_exhausted"))
+        return excluded, create_pr.select_review_service(
+            [issue_id], as_of=self.AS_OF, snapshot=snapshot,
+        )
 
-    def test_empty_pool_stays_the_ordinary_waiting_state(self):
-        original = self.evidence(None, [])
-        self.assertEqual(create_pr.gate_divergent_selection(original, 9), original)
+    def test_divergent_selection_is_assigned_rather_than_withheld(self):
+        formula, evidence = self.rerouted(9)
+        self.assertEqual(formula, "codeant")
+        self.assertNotEqual(evidence["selected"], formula)
+        self.assertIn(evidence["selected"], evidence["eligible"])
+        self.assertNotIn("withheld_selection", evidence)
 
-    def test_withheld_selection_leaves_the_pr_draft_and_unlabelled(self):
+    def test_a_rerouted_assignment_is_accepted_by_the_live_merge_gate(self):
+        """The end the withholding gate existed to prevent: proves the label
+        create_pr.py now applies is one merge_pr.py actually accepts."""
+        _formula, evidence = self.rerouted(9)
+        service = evidence["selected"]
+        pr = {"labels": [{"name": f"review:{service}"}], "body": "Closes #9"}
+        # Without the evidence the legacy rotation still rules, and rejects it.
+        self.assertIsNone(merge_pr.assigned_review_service(pr))
+        self.assertEqual(
+            merge_pr.assigned_review_service(pr, comment_evidence(evidence)), service,
+        )
+
+    def test_evidence_records_the_issue_set_and_snapshot_provenance(self):
+        evidence = create_pr.select_review_service(
+            [9], as_of=self.AS_OF, snapshot=unavailable_ledger(),
+        )
+        self.assertEqual(evidence["schema"], "aru.review-capacity-selection.v2")
+        self.assertEqual(evidence["issues"], [9])
+        snapshot = evidence["snapshot"]
+        self.assertEqual(snapshot["source"], "aru.review-service-unavailability-ledger.v1")
+        self.assertEqual(snapshot["observed_at"], evidence["as_of"])
+        self.assertEqual(snapshot["max_age_seconds"], create_pr.CAPACITY_MAX_AGE_SECONDS)
+        self.assertEqual(snapshot["excluded_count"], 0)
+        self.assertEqual(snapshot["digest"], create_pr.capacity_selection_digest(evidence))
+
+    def test_digest_changes_when_any_sealed_field_changes(self):
+        evidence = create_pr.select_review_service(
+            [9], as_of=self.AS_OF, snapshot=unavailable_ledger(),
+        )
+        baseline = create_pr.capacity_selection_digest(evidence)
+        for field, value in (
+            ("selected", "sourcery"), ("issues", [10]), ("eligible", ["codeant"]),
+            ("as_of", "2026-08-24T13:00:00Z"), ("candidates", ["codeant"]),
+            ("excluded", [unavailable_entry("sourcery")]),
+        ):
+            with self.subTest(field=field):
+                tampered = {**evidence, field: value}
+                self.assertNotEqual(create_pr.capacity_selection_digest(tampered), baseline)
+
+    def test_rationale_is_not_sealed_so_prose_alone_cannot_break_a_digest(self):
+        evidence = create_pr.select_review_service(
+            [9], as_of=self.AS_OF, snapshot=unavailable_ledger(),
+        )
+        reworded = {**evidence, "rationale": "different prose entirely"}
+        self.assertEqual(
+            create_pr.capacity_selection_digest(reworded),
+            create_pr.capacity_selection_digest(evidence),
+        )
+
+    def test_multi_issue_selection_requires_one_service_for_every_issue(self):
+        agreeing = create_pr.select_review_service(
+            [1, 4], as_of=self.AS_OF, snapshot=unavailable_ledger(),
+        )
+        self.assertEqual(agreeing["selected"], "coderabbit")
+        self.assertEqual(agreeing["issues"], [1, 4])
+
+    def test_multi_issue_pr_spanning_services_selects_nothing(self):
+        """#1 rotates to coderabbit and #2 to sourcery over the full pool, so
+        no single service is authoritative for both and the PR stays draft."""
+        evidence = create_pr.select_review_service(
+            [1, 2], as_of=self.AS_OF, snapshot=unavailable_ledger(),
+        )
+        self.assertIsNone(evidence["selected"])
+        self.assertIn("different services", evidence["rationale"])
+
+    def test_exclusion_can_make_a_mixed_issue_set_agree(self):
+        """Not a special case bolted on: with sourcery excluded the pool is
+        two wide, and #1 and #2 land on different members -- but #1 and #3 now
+        agree where the full pool would have split them."""
+        snapshot = unavailable_ledger(unavailable_entry("sourcery"))
+        evidence = create_pr.select_review_service([1, 3], as_of=self.AS_OF, snapshot=snapshot)
+        self.assertEqual(evidence["eligible"], ["coderabbit", "codeant"])
+        self.assertEqual(evidence["selected"], "coderabbit")
+
+    def test_empty_issue_set_is_refused_rather_than_defaulted(self):
+        with self.assertRaises(ValueError):
+            create_pr.select_review_service([])
+
+    def test_selection_is_bound_to_the_live_pr_body_not_the_issue_flag(self):
+        """--issue names one issue; the body is what the merge gate reads. The
+        evidence must be bound to the body's full set or it proves nothing
+        about the PR the gate will validate."""
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "ensure_label") as label, \
-                patch.object(create_pr, "select_review_service",
-                              return_value=self.evidence("coderabbit", ["coderabbit", "sourcery"])):
-            run.side_effect = [(0, "", "")]
-            # Reported as success: waiting for capacity is the correct governed
-            # outcome, and --finalize-review retries it once #403 lands.
-            self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
-            label.assert_not_called()
-        commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(len(commands), 1)
-        self.assertEqual(commands[0][:3], ["gh", "pr", "comment"])
-        body = commands[0][commands[0].index("--body") + 1]
-        self.assertIn('"selected": null', body)
-        self.assertIn('"withheld_selection": "coderabbit"', body)
+                patch.object(create_pr, "linked_issues_for_pr", return_value=[1, 4]), \
+                patch.object(create_pr, "ensure_label", return_value=True), \
+                patch.object(create_pr, "existing_review_assignment",
+                              side_effect=[None, None, "coderabbit"]):
+            run.side_effect = [(0, "", ""), (0, "", ""), (0, "", "")]
+            self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 4))
+        body = run.call_args_list[0].args[0][-1]
+        self.assertIn('"issues": [\n    1,\n    4\n  ]', body)
 
-    def test_every_withheld_assignment_would_be_rejected_by_the_live_merge_gate(self):
-        """Proves the gate is load-bearing rather than defensive: the withheld
-        service is exactly what merge_pr.py refuses today."""
-        pr = {
-            "labels": [{"name": "review:coderabbit"}],
-            "body": "Closes #9",
-        }
-        self.assertIsNone(merge_pr.assigned_review_service(pr))
-        pr["labels"] = [{"name": "review:codeant"}]
-        self.assertEqual(merge_pr.assigned_review_service(pr), "codeant")
+    def test_assignment_refuses_an_issue_the_pr_does_not_close(self):
+        """A PR body that does not close --issue would bind evidence to an
+        issue set the merge gate never recomputes; nothing is written."""
+        with patch.object(create_pr, "run_cmd") as run, \
+                patch.object(create_pr, "existing_review_assignment", return_value=None), \
+                patch.object(create_pr, "linked_issues_for_pr", return_value=[4]), \
+                patch.object(create_pr, "ensure_label") as label:
+            self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+            label.assert_not_called()
+        run.assert_not_called()
+
+    def test_unreadable_pr_body_stops_before_any_write(self):
+        with patch.object(create_pr, "run_cmd") as run, \
+                patch.object(create_pr, "existing_review_assignment", return_value=None), \
+                patch.object(create_pr, "linked_issues_for_pr", return_value=None), \
+                patch.object(create_pr, "ensure_label") as label:
+            self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+            label.assert_not_called()
+        run.assert_not_called()
+
+
+class LinkedIssueBindingTests(unittest.TestCase):
+    """linked_issues_for_pr() must read exactly what merge_pr.linked_issues()
+    reads, or evidence gets bound to one issue set and validated against
+    another."""
+
+    def read(self, body):
+        payload = json.dumps({"body": body})
+        with patch.object(create_pr, "run_cmd", return_value=(0, payload, "")):
+            return create_pr.linked_issues_for_pr("https://x/pull/9")
+
+    def test_matches_the_merge_gate_parser_on_the_same_bodies(self):
+        for body in (
+            "Closes #9", "closes #9\nCloses #4", "Closes #9\nCloses #9",
+            "See #9 for context.", "", "Closes #12 and closes #7",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(self.read(body), merge_pr.linked_issues(body))
+
+    def test_order_of_appearance_is_preserved_and_duplicates_collapse(self):
+        self.assertEqual(self.read("Closes #7\nCloses #3\nCloses #7"), [7, 3])
+
+    def test_unreadable_or_unparseable_responses_are_none_not_empty(self):
+        """None means "could not tell" and stops assignment; [] would mean
+        "this PR closes nothing", which is a different, quieter failure."""
+        cases = ((1, "", "gh: not authenticated"), (0, "not json", ""),
+                 (0, "[]", ""), (0, '{"body": null}', ""))
+        for code, out, err in cases:
+            with self.subTest(out=out):
+                with patch.object(create_pr, "run_cmd", return_value=(code, out, err)):
+                    self.assertIsNone(create_pr.linked_issues_for_pr("https://x/pull/9"))
 
 
 class FinalizeReviewCliTests(unittest.TestCase):

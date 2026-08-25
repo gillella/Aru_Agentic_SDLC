@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 740
+# line-ceiling: 800
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -16,7 +16,9 @@ running Sonnet, so "a different tool" is not necessarily a different reviewer.
 """
 
 import argparse
+import hashlib
 import json
+import re
 import shlex
 import sys
 from datetime import datetime, timezone
@@ -43,26 +45,40 @@ REVIEW_LABEL_PREFIX = "review:"
 MODEL_FAMILIES = ("anthropic", "openai", "google", "meta", "mistral", "xai", "human")
 
 
-# merge_pr.assigned_review_service() still requires the live review:* label to
-# equal review_service_for_issue(), so an assignment that reroutes around an
-# excluded service would open a PR that can never pass the merge gate. #403 is
-# the governed follow-up that teaches that gate to validate capacity-selection
-# evidence; until it lands, a divergent selection is withheld rather than
-# shipped. This is a bounded sequencing dependency, not a policy change.
-MERGE_AUTHORITY_FOLLOWUP = 403
-
 CAPACITY_MAX_AGE_SECONDS = 3600
 CAPACITY_EVIDENCE_START = "<!-- ARU:REVIEW-CAPACITY-EVIDENCE:START -->"
 CAPACITY_EVIDENCE_END = "<!-- ARU:REVIEW-CAPACITY-EVIDENCE:END -->"
+
+# v2 carries what a merge-time auditor needs and v1 did not: the issue set the
+# selection is bound to, and a provenance block naming the bounded capacity
+# snapshot the eligible pool was computed from. Without those, merge_pr.py can
+# only recompute the legacy full-pool rotation, which rejects every legitimate
+# capacity-rerouted assignment -- the failure #403 exists to close. The version
+# is bumped rather than reused because a v1 comment is a materially weaker
+# artifact, and a gate that read it as v2 would be trusting fields that are
+# simply absent.
+CAPACITY_SELECTION_SCHEMA = "aru.review-capacity-selection.v2"
+
+# The digest binds the parts of one selection together: candidates, the
+# bounded exclusion records, the eligible pool they produce, the issue set,
+# and the service chosen. It is a consistency seal, not a signature -- there
+# is no key here, so it does not stop an actor who rewrites the whole comment.
+# What it does stop is the realistic tamper: editing one field of a real
+# assignment (swap the selected service, drop an exclusion, add an issue) and
+# leaving the rest intact.
+CAPACITY_DIGEST_FIELDS = ("as_of", "candidates", "eligible", "excluded", "issues", "selected")
 
 
 def review_service_for_issue(issue_id: int) -> str:
     """Stable approximately-even authority assignment for one issue number.
 
-    Capacity-unaware by design: merge_pr.py and audit_review_assignment.py
-    recompute this from every linked issue to prove a PR's label was not
-    edited after the fact, so it must stay a pure function of issue_id alone.
-    select_review_service() below is where capacity evidence is applied.
+    Capacity-unaware by design: it is the full-pool rotation, and stays a
+    pure function of issue_id alone. merge_pr.py recomputes it from every
+    linked issue for PRs that carry no capacity-selection evidence -- the
+    legacy path -- and audit_review_assignment.py reports against it.
+    select_review_service() below is where capacity evidence is applied, and
+    a PR whose assignment came from there is proved against that evidence
+    instead, since a real exclusion can legitimately move the answer.
     """
     return REVIEW_SERVICES[(issue_id - 1) % len(REVIEW_SERVICES)]
 
@@ -71,7 +87,24 @@ def review_label_for_service(service: str) -> str:
     return f"{REVIEW_LABEL_PREFIX}{service}"
 
 
-def select_review_service(issue_id: int, *, as_of=None, snapshot: Optional[Dict] = None) -> Dict:
+def capacity_selection_digest(evidence: Dict) -> str:
+    """Seal the fields one selection was actually computed from.
+
+    Imported by merge_pr.py so the value is produced and re-derived by the
+    same code. A second implementation of "canonicalize and hash" on the gate
+    side would eventually disagree with this one over key order or separators,
+    and a digest check that can disagree with itself is worse than none: it
+    fails honest assignments while a tampered one that happens to hit the
+    other convention passes.
+    """
+    payload = json.dumps(
+        {field: evidence.get(field) for field in CAPACITY_DIGEST_FIELDS},
+        sort_keys=True, separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def select_review_service(issue_ids, *, as_of=None, snapshot: Optional[Dict] = None) -> Dict:
     """Deterministic, approximately-even selection over the eligible pool.
 
     Loads fresh known-unavailable evidence from the shared cross-repository
@@ -83,25 +116,48 @@ def select_review_service(issue_id: int, *, as_of=None, snapshot: Optional[Dict]
     `eligible[(issue_id - 1) % len(eligible)]` is exactly
     review_service_for_issue(issue_id): the original rotation is unchanged
     until real evidence exists.
-    """
-    from audit_review_service_capacity import audit_unavailability, load_unavailability_snapshot
 
+    ``issue_ids`` is every issue the PR closes, not just the one named on the
+    command line, because the merge gate revalidates the selection against
+    all of them. A set whose members rotate to different services has no
+    single auditable answer, so nothing is selected and the PR stays draft --
+    the same fail-closed outcome the gate would reach, reached earlier and
+    with a rationale attached.
+    """
+    from audit_review_service_capacity import (
+        UNAVAILABILITY_SCHEMA,
+        audit_unavailability,
+        load_unavailability_snapshot,
+    )
+
+    issues = [int(num) for num in issue_ids]
+    if not issues:
+        raise ValueError("select_review_service requires at least one issue id")
     if snapshot is None:
         snapshot = load_unavailability_snapshot()
     report = audit_unavailability(snapshot, as_of=as_of, max_age_seconds=CAPACITY_MAX_AGE_SECONDS)
     excluded_map = report["unavailable"]
     eligible = [service for service in REVIEW_SERVICES if service not in excluded_map]
-    if eligible:
-        selected = eligible[(issue_id - 1) % len(eligible)]
+    picks = {eligible[(num - 1) % len(eligible)] for num in issues} if eligible else set()
+    if len(picks) == 1:
+        selected = picks.pop()
         rationale = (
             f"selected '{selected}' from {len(eligible)} eligible service(s) via "
-            f"(issue_id - 1) mod {len(eligible)} rotation over the eligible pool"
+            f"(issue_id - 1) mod {len(eligible)} rotation over the eligible pool, "
+            f"agreeing across issue(s) {', '.join('#' + str(num) for num in issues)}"
+        )
+    elif picks:
+        selected = None
+        rationale = (
+            "linked issues rotate to different services over the eligible pool "
+            f"({', '.join(sorted(picks))}); no single service can be authoritative "
+            "for all of them, so the PR stays draft"
         )
     else:
         selected = None
         rationale = "no configured review service is currently eligible; PR stays draft"
-    return {
-        "schema": "aru.review-capacity-selection.v1",
+    evidence = {
+        "schema": CAPACITY_SELECTION_SCHEMA,
         "as_of": report["as_of"],
         "candidates": list(REVIEW_SERVICES),
         "eligible": eligible,
@@ -109,39 +165,21 @@ def select_review_service(issue_id: int, *, as_of=None, snapshot: Optional[Dict]
             {"service": service, **excluded_map[service]}
             for service in REVIEW_SERVICES if service in excluded_map
         ],
+        "issues": issues,
         "selected": selected,
         "rationale": rationale,
     }
-
-
-def gate_divergent_selection(evidence: Dict, issue_id: int) -> Dict:
-    """Withhold a selection the merge authority would reject.
-
-    Capacity exclusion is allowed to change eligibility before assignment,
-    but merge_pr.py still recomputes review_service_for_issue() and rejects
-    any PR whose label disagrees. Assigning the rerouted service would
-    therefore produce a correctly-routed PR that is permanently unmergeable,
-    which is strictly worse than waiting. Until #403 lands, a divergent
-    selection is downgraded to the same bounded waiting-for-capacity state as
-    an empty eligible pool: the PR stays draft, the withheld candidate stays
-    in the auditable evidence, and --finalize-review retries later.
-    """
-    selected = evidence["selected"]
-    formula = review_service_for_issue(issue_id)
-    if selected is None or selected == formula:
-        return evidence
-    return {
-        **evidence,
-        "selected": None,
-        "withheld_selection": selected,
-        "withheld_reason": f"merge authority requires '{formula}' until #{MERGE_AUTHORITY_FOLLOWUP}",
-        "rationale": (
-            f"'{selected}' is eligible and would be selected, but the merge gate still "
-            f"requires '{formula}' for issue #{issue_id}; assignment withheld until "
-            f"#{MERGE_AUTHORITY_FOLLOWUP} lands, so the PR stays draft rather than "
-            "becoming unmergeable"
-        ),
+    # The provenance block names the bounded snapshot the pool came from and
+    # how it was bounded, so the gate can replay the exclusions under the same
+    # window instead of trusting the eligible list it was handed.
+    evidence["snapshot"] = {
+        "source": UNAVAILABILITY_SCHEMA,
+        "observed_at": report["as_of"],
+        "max_age_seconds": CAPACITY_MAX_AGE_SECONDS,
+        "excluded_count": len(evidence["excluded"]),
+        "digest": capacity_selection_digest(evidence),
     }
+    return evidence
 
 
 def render_capacity_evidence(evidence: Dict) -> str:
@@ -155,6 +193,47 @@ def render_capacity_evidence(evidence: Dict) -> str:
         "```\n"
         f"{CAPACITY_EVIDENCE_END}\n"
     )
+
+
+# Deliberately identical to merge_pr.linked_issues(): the assignment is bound
+# to the issue set the merge gate will recompute from, and two regexes that
+# disagree about what "Closes #12" means would bind evidence to one set and
+# validate it against another.
+CLOSES_ISSUE_RE = re.compile(r"\bcloses\s+#(\d+)\b", re.IGNORECASE)
+
+
+def linked_issues_for_pr(pr_ref: str) -> Optional[List[int]]:
+    """Every issue the live PR body closes, in order, or None if unreadable.
+
+    Read from the PR rather than assumed from --issue because a body may
+    legitimately close several issues, and the merge gate validates the
+    selection against all of them. Binding the evidence to a narrower set
+    than the gate will read produces a PR that is correctly routed and
+    permanently unmergeable, which is exactly the failure #403 removes.
+    """
+    code, out, err = run_cmd(["gh", "pr", "view", pr_ref, "--json", "body"], check=False)
+    if code != 0:
+        print(f"[ERROR] Could not read the body of PR {pr_ref}: "
+              f"{err.strip() or f'gh exited {code}'}", file=sys.stderr)
+        return None
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError:
+        print(f"[ERROR] Could not parse the body of PR {pr_ref}: response was not JSON",
+              file=sys.stderr)
+        return None
+    body = payload.get("body") if isinstance(payload, dict) else None
+    if not isinstance(body, str):
+        print(f"[ERROR] Could not parse the body of PR {pr_ref}: no body in response",
+              file=sys.stderr)
+        return None
+    seen, issues = set(), []
+    for match in CLOSES_ISSUE_RE.finditer(body):
+        num = int(match.group(1))
+        if num not in seen:
+            seen.add(num)
+            issues.append(num)
+    return issues
 
 
 class ReviewAssignmentLookupError(RuntimeError):
@@ -426,7 +505,16 @@ def _acquire_review_assignment(pr_ref: str, issue_id: int):
     because "no service" and "could not tell" must not share a return value;
     conflating them is what let a failed lookup look like an unassigned PR.
     """
-    evidence = gate_divergent_selection(select_review_service(issue_id), issue_id)
+    issues = linked_issues_for_pr(pr_ref)
+    if issues is None:
+        return False, None
+    if issue_id not in issues:
+        print(f"[ERROR] PR {pr_ref} does not close issue #{issue_id} "
+              f"(body links {issues or 'no issues'}); refusing to bind a review "
+              "assignment to an issue set the merge gate will not recompute.",
+              file=sys.stderr)
+        return False, None
+    evidence = select_review_service(issues)
     # The evidence comment is the only durable record of why a PR was assigned
     # or left waiting, so a PR must never reach either state without it.
     # Failing to post it is a failed finalization, not a warning.
