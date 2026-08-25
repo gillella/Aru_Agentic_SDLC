@@ -129,7 +129,9 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             normalized.append(node)
         return {"data": {"repository": {"pullRequest": {
             "headRefOid": head,
-            "commits": {"nodes": []},
+            "commits": {"nodes": [{"commit": {
+                "committedDate": "2026-08-24T00:00:00Z",
+            }}]},
             "reviewThreads": {
                 "nodes": normalized,
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -203,6 +205,85 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 ]
                 self.assertIsNone(merge_pr.review_evidence(162))
 
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_commit_history_requires_complete_aware_entries(
+        self, gh_json, _slug,
+    ):
+        malformed = (
+            "missing", None, {}, {"nodes": None}, {"nodes": []},
+            {"nodes": [None]}, {"nodes": [{}]},
+            {"nodes": [{"commit": None}]},
+            {"nodes": [{"commit": {}}]},
+            {"nodes": [{"commit": {"committedDate": "not-a-time"}}]},
+            {"nodes": [{"commit": {
+                "committedDate": "2026-08-24T00:00:00",
+            }}]},
+        )
+        for commits in malformed:
+            with self.subTest(commits=commits):
+                page = self.thread_page()
+                pull = page["data"]["repository"]["pullRequest"]
+                if commits == "missing":
+                    pull.pop("commits")
+                else:
+                    pull["commits"] = commits
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.side_effect = [
+                    self.review_page(), self.attestation_page(), page,
+                ]
+                self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_thread_timestamp_must_be_timezone_aware(self, gh_json, _slug):
+        page = self.thread_page(nodes=[{
+            "isResolved": False,
+            "isOutdated": False,
+            "comments": _complete_comments([{
+                "createdAt": "2026-08-24T01:00:00",
+                "body": "finding",
+                "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            }]),
+        }])
+        gh_json.side_effect = [
+            self.review_page(), self.attestation_page(), page,
+        ]
+        self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_only_coderabbit_can_withdraw_its_finding(self, gh_json, _slug):
+        actors = (
+            ({"login": "gillella", "__typename": "User"}, 0, 1),
+            ({"login": "other-bot", "__typename": "Bot"}, 0, 1),
+            ({"login": "coderabbitai[bot]", "__typename": "Bot"}, 1, 0),
+        )
+        root = {
+            "createdAt": "2026-08-24T01:00:00Z",
+            "body": "finding",
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+        }
+        for actor, withdrawn, unfixed in actors:
+            with self.subTest(actor=actor):
+                reply = {
+                    "createdAt": "2026-08-24T02:00:00Z",
+                    "body": "Withdrawn: rationale",
+                    "author": actor,
+                }
+                page = self.thread_page(nodes=[{
+                    "isResolved": True,
+                    "isOutdated": False,
+                    "comments": _complete_comments([root, reply]),
+                }])
+                gh_json.reset_mock(side_effect=True, return_value=True)
+                gh_json.side_effect = [
+                    self.review_page(), self.attestation_page(), page,
+                ]
+                evidence = merge_pr.review_evidence(162)
+                self.assertEqual(evidence["withdrawn"], withdrawn)
+                self.assertEqual(evidence["unfixed"], unfixed)
+
     @staticmethod
     def attestation_page(head="head123", nodes=None, has_next=False, cursor=None):
         return {"data": {"repository": {"pullRequest": {
@@ -212,6 +293,21 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
             },
         }}}}
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_full_review_comment_timestamp_requires_timezone(
+        self, gh_json, _slug,
+    ):
+        gh_json.side_effect = [
+            self.review_page(),
+            self.attestation_page(nodes=[{
+                "body": "Full review finished.",
+                "createdAt": "2026-08-24T01:00:00",
+                "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            }]),
+        ]
+        self.assertIsNone(merge_pr.review_evidence(162))
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -1252,6 +1348,19 @@ class ReviewGateTests(unittest.TestCase):
                 request_time="2026-08-23T22:58:00Z",
             ),
         )[0])
+
+    def test_no_findings_chronology_rejects_timezone_naive_values(self):
+        cases = (
+            {"request_time": "2026-08-23T22:58:00"},
+            {"completion_time": "2026-08-23T23:00:10"},
+            {"head_commit_time": "2026-08-23T22:57:00"},
+        )
+        for override in cases:
+            with self.subTest(override=override):
+                self.assertFalse(merge_pr.check_reviews(
+                    self.coderabbit_pr("author:agent-1"),
+                    self.no_findings_full_review_evidence(**override),
+                )[0])
 
     def test_tied_full_review_request_events_are_ambiguous(self):
         evidence = self.no_findings_full_review_evidence(extra_comments=[{
@@ -5143,7 +5252,9 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
     def thread_page(comments):
         return {"data": {"repository": {"pullRequest": {
             "headRefOid": ReviewBodyEditIntegrationTests.HEAD,
-            "commits": {"nodes": []},
+            "commits": {"nodes": [{"commit": {
+                "committedDate": "2026-08-17T00:00:00Z",
+            }}]},
             "reviewThreads": {
                 "nodes": [
                     {

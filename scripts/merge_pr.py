@@ -186,7 +186,7 @@ def linked_issue(body):
 # withdrawn. Only the first leaves evidence in the diff, so the second has to
 # say so out loud. A reply whose first top-level marker is "Withdrawn:"
 # records that the
-# reviewer or author retracted the finding rather than addressing it, and the
+# CodeRabbit retracted its finding rather than the author bypassing it, and the
 # merge audit line reports it. Without this, requiring a commit per finding
 # would force agents to manufacture no-op commits to clear a thread they had
 # legitimately argued down - an audit trail that actively lies is worse than
@@ -224,7 +224,7 @@ def _parse_ts(value):
 
 
 def _parse_review_ts(value):
-    """A submitted GitHub review timestamp, including its timezone."""
+    """A GitHub ordering timestamp, including its timezone."""
     parsed = _parse_ts(value)
     if parsed is None or parsed.tzinfo is None:
         return None
@@ -612,7 +612,7 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
             body = node["body"]
             comment_kind = _coderabbit_full_review_comment_kind(body)
             if comment_kind is not None:
-                created_at = _parse_ts(node.get("createdAt"))
+                created_at = _parse_review_ts(node.get("createdAt"))
                 author = node.get("author")
                 if (
                     created_at is None
@@ -756,16 +756,30 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
         if pull.get("headRefOid") != expected_head:
             return None
 
-        if commit_times is None:
-            try:
-                commit_times = sorted(
-                    ts for ts in (
-                        _parse_ts(((c or {}).get("commit") or {}).get("committedDate"))
-                        for c in (pull.get("commits") or {}).get("nodes") or []
-                    ) if ts is not None
-                )
-            except (AttributeError, TypeError):
+        try:
+            commit_nodes = pull["commits"]["nodes"]
+        except (KeyError, TypeError):
+            return None
+        if not isinstance(commit_nodes, list) or not commit_nodes:
+            return None
+        page_commit_times = []
+        for item in commit_nodes:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("commit"), dict)
+            ):
                 return None
+            committed_at = _parse_review_ts(
+                item["commit"].get("committedDate")
+            )
+            if committed_at is None:
+                return None
+            page_commit_times.append(committed_at)
+        page_commit_times.sort()
+        if commit_times is None:
+            commit_times = page_commit_times
+        elif commit_times != page_commit_times:
+            return None
 
         for node in nodes:
             if not isinstance(node, dict):
@@ -794,7 +808,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
             if any(
                 not isinstance(comment, dict)
                 or not isinstance(comment.get("body"), str)
-                or _parse_ts(comment.get("createdAt")) is None
+                or _parse_review_ts(comment.get("createdAt")) is None
                 or not isinstance(comment.get("author"), dict)
                 or not isinstance(comment["author"].get("login"), str)
                 or not comment["author"]["login"]
@@ -826,11 +840,16 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                     outdated_unfixed += 1
                 continue
 
-            if any(WITHDRAWN_MARKER.search(c.get("body") or "") for c in comments):
+            if thread_service == "coderabbit" and any(
+                WITHDRAWN_MARKER.search(comment["body"])
+                and comment["author"]["__typename"] in CODERABBIT_ACTOR_TYPES
+                and comment["author"]["login"].lower() in CODERABBIT_LOGINS
+                for comment in comments
+            ):
                 withdrawn += 1
                 continue
 
-            raised = _parse_ts(comments[0].get("createdAt"))
+            raised = _parse_review_ts(comments[0].get("createdAt"))
             has_commit_after = (raised is not None) and any(ts > raised for ts in commit_times)
 
             if not resolved and outdated:
@@ -1134,9 +1153,10 @@ def _thread_gate_message(counts):
         return False, (
             f"{unfixed} resolved thread(s) have no evidence that the finding was addressed: "
             "no commit after the finding was raised, no relevant size-waiver or verification-evidence "
-            "body edit after it was raised, and no reply starting with 'Withdrawn:'. "
+            "body edit after it was raised, and no authorized CodeRabbit reply "
+            "starting with 'Withdrawn:'. "
             "Push the fix, apply the documented body-only gate remedy when it matches the finding, "
-            "or withdraw the finding with a reason."
+            "or obtain a CodeRabbit withdrawal with a reason."
         )
     return True, ""
 
@@ -1466,7 +1486,7 @@ def _parse_coderabbit_full_review_comment(comment):
     )
     if kind is None:
         return None
-    created_at = _parse_ts(comment.get("createdAt"))
+    created_at = _parse_review_ts(comment.get("createdAt"))
     author = comment.get("author")
     if (
         created_at is None
@@ -1530,7 +1550,9 @@ def _coderabbit_no_findings_full_review(review, evidence):
     if not isinstance(body, str) or body.strip():
         return False
     review_time = _parse_review_ts(review.get("submittedAt"))
-    head_commit_time = _parse_ts(evidence.get("head_commit_committed_at"))
+    head_commit_time = _parse_review_ts(
+        evidence.get("head_commit_committed_at")
+    )
     comments = evidence.get("coderabbit_full_review_comments")
     if review_time is None or head_commit_time is None or comments is None:
         return False
