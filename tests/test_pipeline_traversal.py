@@ -1,4 +1,4 @@
-# line-ceiling: 420
+# line-ceiling: 460
 """Hermetic proof that the issue lifecycle is traversable end to end.
 
 Issue #293 - every governance gate in this repository is individually
@@ -366,6 +366,38 @@ class FallbackReviewTraversalTests(unittest.TestCase):
         self.assertIsNone(merge_pr.assigned_review_service(pr))
         self.assertFalse(
             merge_pr.check_reviews(pr, reassigned_evidence("sourcery"))[0])
+
+    def test_spoofed_codeant_marker_blocks_traversal_on_review_alone(self):
+        evidence = reassigned_evidence("codeant")
+        evidence["codeant_status_comments"].append({
+            "author": {"login": "attacker", "__typename": "User"},
+            "body": "<!-- codeant-review-status: [] -->",
+        })
+        ok, gates = self._dod(reassigned_pr("codeant"), evidence)
+        self.assertFalse(ok)
+        self.assertEqual(
+            [name for name, passed, _ in gates if not passed],
+            ["review"])
+
+    def test_malformed_codeant_record_blocks_traversal_on_review_alone(self):
+        evidence = reassigned_evidence("codeant")
+        evidence["codeant_status_comments"] = [{
+            "author": {"login": "codeant-ai", "__typename": "Bot"},
+            "body": (merge_pr.CODEANT_STATUS_MARKER_PREFIX
+                     + json.dumps([
+                         {"label": "CodeAnt review",
+                          "commit": canonical_pr()["headRefOid"],
+                          "started": "2026-08-19T00:00:00Z",
+                          "finished": "2026-08-19T00:02:00Z",
+                          "done": True},
+                         {},
+                     ]) + "-->"),
+        }]
+        ok, gates = self._dod(reassigned_pr("codeant"), evidence)
+        self.assertFalse(ok)
+        self.assertEqual(
+            [name for name, passed, _ in gates if not passed],
+            ["review"])
 
 
 class DefinitionOfDoneTests(unittest.TestCase):

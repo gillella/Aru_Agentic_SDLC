@@ -1209,6 +1209,30 @@ class CodeAntEvidenceTests(unittest.TestCase):
                 self.assertFalse(
                     merge_pr.has_authoritative_codeant_review(self.pr(), ev))
 
+    def test_spoofed_marker_alongside_valid_comment_fails_closed(self):
+        """A spoofed marker comment on the PR must fail closed rather than being
+        filtered out before ambiguity checks."""
+        valid = self.status_comment([self.record()])
+        for login, typename in (("gillella", "User"), ("codeant", "Bot"),
+                                ("codeant-ai", "User"),
+                                ("codeant-ai", "Organization"),
+                                ("spoof-bot", "Bot")):
+            with self.subTest(login=login, typename=typename):
+                spoofed = self.status_comment([self.record()], login=login, typename=typename)
+                ev = self.evidence(comments=[valid, spoofed])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+                ev_rev = self.evidence(comments=[spoofed, valid])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev_rev))
+        for malformed in (None, "not a comment", {"body": "<!-- codeant-review-status: [] -->"},
+                          {"body": "<!-- codeant-review-status: [] -->", "author": None},
+                          {"body": "<!-- codeant-review-status: [] -->", "author": "str"}):
+            with self.subTest(malformed=malformed):
+                ev = self.evidence(comments=[valid, malformed])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
     def test_unfinished_or_failed_record_at_head_blocks(self):
         for over in ({"done": False}, {"done": "true"}, {"finished": None},
                      {"started": "whenever"}, {"label": "   "}, {"label": 7}):
@@ -1228,6 +1252,51 @@ class CodeAntEvidenceTests(unittest.TestCase):
                 ev = self.evidence(comments=[self.status_comment([record])])
                 self.assertFalse(
                     merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+    def test_malformed_record_alongside_valid_record_blocks(self):
+        """Malformed or structurally incomplete records must block before
+        historical-head classification, while genuinely well-formed old-head
+        records remain history."""
+        valid_head = self.record()
+        valid_prior = self.record(commit=self.PRIOR, done=True)
+        valid_prior_unfinished = self.record(commit=self.PRIOR, done=False)
+
+        # Well-formed old-head records do not block
+        ev = self.evidence(comments=[self.status_comment([valid_head, valid_prior])])
+        self.assertTrue(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+        ev = self.evidence(comments=[self.status_comment([valid_head, valid_prior_unfinished])])
+        self.assertTrue(merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+
+        # Any malformed / structurally incomplete record must block
+        extra = self.record(commit=self.PRIOR)
+        extra["bogus"] = 1
+        missing = {k: v for k, v in self.record(commit=self.PRIOR).items() if k != "started"}
+
+        malformed_records = (
+            {},
+            "not a dict",
+            123,
+            [],
+            {"commit": "short"},
+            {"commit": self.PRIOR},
+            extra,
+            missing,
+            self.record(commit="not-40-hex-characters-long-commit-sha!"),
+            self.record(commit=self.PRIOR, started="invalid-ts"),
+            self.record(commit=self.PRIOR, finished="invalid-ts"),
+            self.record(commit=self.PRIOR, label=""),
+            self.record(commit=self.PRIOR, label=123),
+            self.record(commit=self.PRIOR, done="true"),
+            self.record(commit=self.PRIOR, done=None),
+        )
+        for bad in malformed_records:
+            with self.subTest(bad=bad):
+                ev = self.evidence(comments=[self.status_comment([valid_head, bad])])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev))
+                ev_rev = self.evidence(comments=[self.status_comment([bad, valid_head])])
+                self.assertFalse(
+                    merge_pr.has_authoritative_codeant_review(self.pr(), ev_rev))
 
     def test_records_that_name_no_live_head_are_missing_evidence(self):
         for over in ({"commit": self.PRIOR}, {"commit": "abc123"},

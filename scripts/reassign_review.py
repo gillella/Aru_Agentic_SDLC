@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 260
+# line-ceiling: 300
 """reassign_review.py - move one stalled pull request to a fallback reviewer.
 
 CodeRabbit is the default and the only authority `create_pr.py` ever assigns.
@@ -104,42 +104,129 @@ def _validated_snapshot(pr_id: int):
     return pr, None
 
 
-def reassign(pr_id: int, service: str, reason: str) -> int:  # noqa: C901, PLR0911
-    target = FALLBACK_LABELS.get(service)
-    if not target:
-        print(f"[ERROR] Unknown fallback service {service!r}; supported: "
-              f"{', '.join(sorted(FALLBACK_LABELS))}.", file=sys.stderr)
-        return EXIT_ERROR
+def _verify_live_pre_add(pr_id: int, target: str, initial_head: str, existing: str) -> tuple[bool, int]:
+    """Verify live state immediately before adding target label."""
+    live_pr, problem = _validated_snapshot(pr_id)
+    if problem:
+        print(f"[ERROR] Live check before adding {target} to PR #{pr_id} failed: "
+              f"{problem}.", file=sys.stderr)
+        return False, EXIT_ERROR
+    if live_pr.get("state") != "OPEN":
+        print(f"[CONFLICT] PR #{pr_id} changed state to {live_pr.get('state')} "
+              f"before adding {target}.", file=sys.stderr)
+        return False, EXIT_CONFLICT
+    if live_pr.get("headRefOid") != initial_head:
+        print(f"[CONFLICT] PR #{pr_id} head changed from {initial_head[:12]} to "
+              f"{str(live_pr.get('headRefOid'))[:12]} before adding {target}; "
+              "refusing to reassign against modified state.", file=sys.stderr)
+        return False, EXIT_CONFLICT
+    live_existing, problem = current_authority(live_pr.get("labels"))
+    if problem or live_existing != existing:
+        desc = problem if problem else f"expected {existing!r} but found {live_existing!r}"
+        print(f"[CONFLICT] PR #{pr_id} review authority changed before adding "
+              f"{target}: {desc}.", file=sys.stderr)
+        return False, EXIT_CONFLICT
+    return True, EXIT_OK
+
+
+def _verify_live_pre_remove(pr_id: int, target: str, initial_head: str, existing: str) -> tuple[bool, int]:
+    """Verify live state immediately before removing existing label."""
+    live_pr, problem = _validated_snapshot(pr_id)
+    if problem:
+        print(f"[ERROR] Added {target} to PR #{pr_id}, but live check before removing "
+              f"{existing} failed: {problem}. The pull request now carries two authority "
+              f"labels and the merge gate will refuse it; remove {existing} manually "
+              f"or remove {target} to undo.", file=sys.stderr)
+        return False, EXIT_ERROR
+    if live_pr.get("state") != "OPEN":
+        print(f"[CONFLICT] Added {target} to PR #{pr_id}, but state changed to "
+              f"{live_pr.get('state')} before removing {existing}. The pull request "
+              f"now carries two authority labels; resolve manually.", file=sys.stderr)
+        return False, EXIT_CONFLICT
+    if live_pr.get("headRefOid") != initial_head:
+        print(f"[CONFLICT] Added {target} to PR #{pr_id}, but head changed from "
+              f"{initial_head[:12]} to {str(live_pr.get('headRefOid'))[:12]} before "
+              f"removing {existing}. The pull request now carries two authority labels; "
+              f"resolve manually.", file=sys.stderr)
+        return False, EXIT_CONFLICT
+    labels = live_pr.get("labels")
+    if not isinstance(labels, list):
+        print(f"[ERROR] Added {target} to PR #{pr_id}, but could not read labels "
+              f"before removing {existing}.", file=sys.stderr)
+        return False, EXIT_ERROR
+    review_labels = [
+        item["name"] for item in labels
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+        and item["name"].startswith("review:")
+    ]
+    if set(review_labels) != {existing, target}:
+        print(f"[CONFLICT] Added {target} to PR #{pr_id}, but review labels before "
+              f"removing {existing} were {sorted(review_labels)} instead of "
+              f"{sorted([existing, target])}. Resolve manually.", file=sys.stderr)
+        return False, EXIT_CONFLICT
+    return True, EXIT_OK
+
+
+def _validate_initial_reassign(
+    pr_id: int, service: str, reason: str, target: str,
+) -> tuple[dict | None, str | None, int]:
+    """Validate arguments, snapshot, state, and initial authority.
+
+    Returns (pr, existing_authority, exit_code). On success, pr and
+    existing_authority are non-None and exit_code is EXIT_OK. On failure,
+    exit_code is EXIT_ERROR or EXIT_CONFLICT.
+    """
     if not reason or not reason.strip():
         print("[ERROR] A reason is required; reassignment must stay auditable.",
               file=sys.stderr)
-        return EXIT_ERROR
+        return None, None, EXIT_ERROR
 
     pr, problem = _validated_snapshot(pr_id)
     if problem:
         print(f"[ERROR] {problem[0].upper()}{problem[1:]}.", file=sys.stderr)
-        return EXIT_ERROR
+        return None, None, EXIT_ERROR
     if pr.get("state") != "OPEN":
         print(f"[CONFLICT] PR #{pr_id} is {pr.get('state')}; only an open pull "
               "request can be reassigned.", file=sys.stderr)
-        return EXIT_CONFLICT
+        return None, None, EXIT_CONFLICT
 
     existing, problem = current_authority(pr.get("labels"))
     if problem:
         print(f"[CONFLICT] Refusing to reassign PR #{pr_id}: {problem}.", file=sys.stderr)
-        return EXIT_CONFLICT
+        return None, None, EXIT_CONFLICT
     if existing == target:
         print(f"[CONFLICT] PR #{pr_id} is already assigned to {service}; "
               "reassignment is not a retry mechanism.", file=sys.stderr)
-        return EXIT_CONFLICT
+        return None, None, EXIT_CONFLICT
     if existing != CODERABBIT_LABEL:
         print(f"[CONFLICT] PR #{pr_id} carries {existing!r}, not the default "
               f"{CODERABBIT_LABEL!r}; only the default assignment may be moved to a "
               "fallback, so an already-switched pull request is never switched again.",
               file=sys.stderr)
-        return EXIT_CONFLICT
+        return None, None, EXIT_CONFLICT
+
+    return pr, existing, EXIT_OK
+
+
+def reassign(pr_id: int, service: str, reason: str) -> int:
+    target = FALLBACK_LABELS.get(service)
+    if not target:
+        print(f"[ERROR] Unknown fallback service {service!r}; supported: "
+              f"{', '.join(sorted(FALLBACK_LABELS))}.", file=sys.stderr)
+        return EXIT_ERROR
+
+    pr, existing, code = _validate_initial_reassign(pr_id, service, reason, target)
+    if code != EXIT_OK or pr is None or existing is None:
+        return code
+
+    initial_head = pr["headRefOid"]
 
     ensure_label(target, "5319e7", f"Fallback review authority: {service}")
+
+    ok, code = _verify_live_pre_add(pr_id, target, initial_head, existing)
+    if not ok:
+        return code
+
     # Add before remove: two labels is a state the merge gate refuses loudly,
     # while none is a pull request with no reviewer and nothing watching it.
     code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--add-label", target],
@@ -148,6 +235,11 @@ def reassign(pr_id: int, service: str, reason: str) -> int:  # noqa: C901, PLR09
         print(f"[ERROR] Could not add {target} to PR #{pr_id}: {err.strip()}. "
               "The original assignment is untouched.", file=sys.stderr)
         return EXIT_ERROR
+
+    ok, code = _verify_live_pre_remove(pr_id, target, initial_head, existing)
+    if not ok:
+        return code
+
     code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--remove-label", existing],
                            check=False)
     if code != 0:
@@ -158,7 +250,7 @@ def reassign(pr_id: int, service: str, reason: str) -> int:  # noqa: C901, PLR09
         return EXIT_ERROR
 
     ok, err = _comment(pr_id, audit_body(existing, target, service,
-                                         reason, pr["headRefOid"]))
+                                         reason, initial_head))
     if not ok:
         print(f"[ERROR] PR #{pr_id} now carries {target}, but the reason could not "
               f"be recorded: {err}. An unaudited reassignment is not acceptable; "
@@ -175,7 +267,7 @@ def reassign(pr_id: int, service: str, reason: str) -> int:  # noqa: C901, PLR09
               "refuse it.", file=sys.stderr)
         return EXIT_ERROR
 
-    print(f"✅ PR #{pr_id} reassigned to {service} at head {pr['headRefOid'][:12]} "
+    print(f"✅ PR #{pr_id} reassigned to {service} at head {initial_head[:12]} "
           f"and triggered with `{trigger}`.")
     return EXIT_OK
 

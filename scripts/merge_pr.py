@@ -1892,19 +1892,18 @@ def _codeant_status_record_at_head(record, expected_head):
     """Validate one status record against the exact current head.
 
     Returns ``True`` for a well-formed, completed record bound to the exact
-    head; ``False`` when a record bound to the exact head is malformed,
-    unfinished, or failed (``done`` is not ``True``); ``None`` when the record
-    cannot be tied to the exact head at all, so it is irrelevant history rather
-    than something that should block the merge.
+    head; ``False`` when a record is malformed or structurally incomplete, or
+    when a record bound to the exact head is unfinished or failed (``done`` is
+    not ``True``); ``None`` when a genuinely well-formed record is bound to a
+    different (historical) commit oid, so it is irrelevant history rather than
+    something that should block the merge.
     """
-    commit = record.get("commit") if isinstance(record, dict) else None
-    if (
-        not isinstance(commit, str)
-        or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None
-        or commit.lower() != str(expected_head or "").lower()
-    ):
-        return None
+    if not isinstance(record, dict):
+        return False
     if set(record) != CODEANT_STATUS_RECORD_KEYS:
+        return False
+    commit = record.get("commit")
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
         return False
     label = record.get("label")
     done = record.get("done")
@@ -1915,7 +1914,17 @@ def _codeant_status_record_at_head(record, expected_head):
         or not isinstance(done, bool)
     ):
         return False
+    if commit.lower() != str(expected_head or "").lower():
+        return None
     return done
+
+
+def _codeant_is_trusted_bot(author):
+    """True iff author is a dict representing the trusted CodeAnt Bot identity."""
+    if not isinstance(author, dict):
+        return False
+    login = str(author.get("login") or "").lower()
+    return login in CODEANT_LOGINS and author.get("__typename") == "Bot"
 
 
 def _codeant_trusted_status_payload(comment):
@@ -1928,11 +1937,7 @@ def _codeant_trusted_status_payload(comment):
     """
     if not isinstance(comment, dict):
         return None
-    author = comment.get("author")
-    if not isinstance(author, dict):
-        return None
-    login = str(author.get("login") or "").lower()
-    if login not in CODEANT_LOGINS or author.get("__typename") != "Bot":
+    if not _codeant_is_trusted_bot(comment.get("author")):
         return None
     return _codeant_status_records(comment.get("body"))
 
@@ -1959,19 +1964,24 @@ def _codeant_status_evidence(evidence):
     if not isinstance(expected_head, str) or not expected_head:
         return False
     comments = evidence.get("codeant_status_comments")
-    if not isinstance(comments, list):
+    if not isinstance(comments, list) or not comments:
         return False
-    trusted_payloads = [
-        payload for payload in map(_codeant_trusted_status_payload, comments)
-        if payload is not None
-    ]
+    # Every comment carrying a CodeAnt status marker must be authored by the
+    # exact CodeAnt Bot identity. A spoofed or non-CodeAnt author comment must
+    # fail closed rather than being filtered out before ambiguity checks.
+    for comment in comments:
+        if not isinstance(comment, dict) or not _codeant_is_trusted_bot(comment.get("author")):
+            return False
     # Exactly one trusted comment must supply the marker: zero is missing
     # evidence, two or more is an ambiguous/duplicated signal this gate cannot
     # arbitrate between.
-    if len(trusted_payloads) != 1:
+    if len(comments) != 1:
+        return False
+    records = _codeant_status_records(comments[0].get("body"))
+    if not isinstance(records, list):
         return False
     has_clean_completion = False
-    for record in trusted_payloads[0]:
+    for record in records:
         at_head = _codeant_status_record_at_head(record, expected_head)
         if at_head is None:
             continue
