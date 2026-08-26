@@ -131,13 +131,12 @@ error strands the agent while the board still has work.
 ### loop
 
 Read `prompts/fleet-worker.md`, then run its loop **inside the current desktop
-task**. Pace dynamically: after progress, ask the picker again immediately; for
-unchanged, idle, Complete, review/CI/dependency wait, rate limit, exhausted
-credits, helper failure, or GitHub/network error, use app-native wait or
-background primitives with a long fallback heartbeat, not a fixed interval.
-Emit that file's **Status Card** before sleeping on any wait or heartbeat, and
-do not emit a final response for a recoverable state.
-
+task**. Each tick starts with **exactly one authoritative picker call**, the `fetch_next_work.py --claim --json` command under **next**; its result is the tick snapshot and the only routine GitHub-bearing entrypoint.
+Do not preflight or enrich it with `fleet_status.py`, `triage_backlog.py`, direct `gh issue` / `gh pr` views, `check_ci.py`, or `merge_pr.py --dry-run`.
+Pace dynamically: after a successful mutation invalidates the prior snapshot, ask the picker exactly once again immediately.
+For unchanged, `idle`, a returned `error` work item, Complete, review/CI/dependency wait, rate limit, exhausted credits, or any usable picker result carrying a transient helper/degraded warning, make zero follow-up GitHub reads.
+Build the **Status Card** only from the picker result, mark unavailable fields honestly, and use app-native wait or background primitives with a long fallback heartbeat, not a fixed interval.
+A returned `error` work item is a usable snapshot and transient loop state, not a concrete failure: report its reason, wait, and read nothing further. A picker/helper failure that yields no usable snapshot also ends the routine tick with zero further reads by default. Full diagnostics are a separately declared attempt—replacing, not enriching, a routine tick—for an explicit operator `status` / `doctor` request or that concrete failure. Do not emit a final response for a recoverable state.
 Loop mode ends intentionally only when the operator explicitly stops it or a
 decision needs human intervention. If `$HOME/.aru/factory-loop.stop` applies
 here, stop immediately and do not arm native wakes. Ambiguous board identity,
@@ -228,6 +227,7 @@ helper with the picker-supplied `head_sha` pinned as `--expected-head`:
 python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>
 ```
 
+The picker already claimed and evaluated the merge: do not add a claim-confirmation read or separate `merge_pr.py --dry-run`; invoke the helper once, then make one fresh picker call only after a successful mutation. On exit `3` (blocked or head mismatch), release the merger claim with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release`, then return to the picker.
 Direct pushes and `gh pr merge` have no merge authority. A finding closes by a
 commit or an explicit `Withdrawn:` reply — resolving a thread proves nothing.
 

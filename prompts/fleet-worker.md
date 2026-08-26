@@ -118,6 +118,16 @@ unavailable.
 python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
 ```
 
+This is the tick's **exactly one authoritative picker call** and its only
+routine GitHub-bearing entrypoint. Treat the returned JSON as the complete
+snapshot for this tick. Do not preflight or enrich it with `fleet_status.py`,
+`triage_backlog.py`, direct gh issue / gh pr views, `check_ci.py`, or
+`merge_pr.py --dry-run`. A transient helper warning inside a usable result
+remains zero-read recovery. If no usable result exists, end the routine tick;
+full diagnostics are a separately declared attempt that replaces the next
+picker tick, only for an explicit operator `status` / `doctor` request or the
+concrete failure.
+
 It returns one work item of type `feedback`, `merge`, `issue`, `error`, or
 `idle`. `feedback`, `error`, and `idle` are returned without claims. `merge`
 and non-resume issue paths perform claim mutations; resume results report
@@ -191,27 +201,27 @@ otherwise support the conclusion with code and test evidence.
 
 #### B. `merge` — Definition of Done already passes
 
-The picker only offers `merge` when `merge_pr.py --dry-run` would pass every
-gate. Your claim is `merger:<AGENT_ID>` (already applied when `--claim` ran).
+The picker already evaluated every gate and applied the
+`merger:<AGENT_ID>` claim when `--claim` ran. Do not confirm that claim with a
+second read and do not run a separate dry-run.
 
-1. Confirm the claim:
-   `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge`
-2. Execute the gated merge **only** through the helper, pinning the head SHA
+1. Execute the gated merge **once** through the helper, pinning the head SHA
    the picker reported as `head_sha` / `work.head_sha`:
    `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>`
    Never run `gh pr merge`, never push to `main`, never bypass the helper, and
    never omit `--expected-head` when the picker supplied a SHA. If the live head
    differs, the helper exits blocked without merging — re-ask the board.
-3. On success (exit 0): the helper closes linked issues, moves them to Done,
+2. On success (exit 0): the helper closes linked issues, moves them to Done,
    clears claims, cleans worktrees, and runs one promote-only picker pass. If
    Ready is empty, that pass immediately promotes one qualified Backlog issue
-   without assigning it to the merger. Immediately ask the board again and
-   claim through the ordinary picker; never leave newly exposed work stranded.
-4. On exit 3 (DoD blocked / head mismatch): release the merge claim and loop —
+   without assigning it to the merger. The successful mutation invalidates the
+   old snapshot: immediately make exactly one fresh picker call; never leave
+   newly exposed work stranded.
+3. On exit 3 (DoD blocked / head mismatch): release the merge claim and loop —
    do not invent a merge attempt. The PR returns to review/feedback/waiting
    naturally.
    `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release`
-5. On exit 1 before GitHub accepts the merge, treat the helper or network error
+4. On exit 1 before GitHub accepts the merge, treat the helper or network error
    as recoverable and return to the loop. After GitHub accepts the merge, the
    helper itself retries idempotent close-out after 5s, 15s, and 45s. If those
    retries are exhausted, it leaves the `merger:` claim in place and posts
@@ -361,8 +371,13 @@ Do **not** write a final response for a recoverable state. When the picker is
 idle, the board is Complete, work is waiting on review/CI/dependencies, another
 agent wins a conflict, credits or rate limits are unavailable, or a helper,
 GitHub, or the network fails transiently, record the state, wait with bounded
-dynamic backoff, and ask again. Use a supported app-native wait/background
-primitive when available. A fixed-interval busy loop wastes credits.
+dynamic backoff, and ask again. An unchanged, `idle`, or degraded/error picker
+result—including one with transient helper warnings—causes zero follow-up
+GitHub reads for that tick. A failure with no usable result also stops the tick
+without more reads by default; only the separate diagnostic attempt defined
+above may replace a later routine tick. Use a supported app-native
+wait/background primitive when available. A fixed-interval busy loop wastes
+credits.
 
 ### Standard Waiting / Heartbeat Status Card
 
@@ -391,7 +406,7 @@ Waiting Reason: <CONCISE_EXPLANATION_OF_WAIT_STATE>
 
 - **Degrade Honestly**: When board stats cannot be queried (e.g. during rate limits or offline), report `BOARD STATS: Unavailable (rate-limited / offline)` rather than printing stale or invented figures.
 - **Waiting States Only**: Emit on wait or heartbeat boundaries, not on every active loop iteration or progress step.
-- **Zero Extra Dependencies**: Assemble from existing data (`fetch_next_work.py --json`, `triage_backlog.py --capacity`).
+- **Zero Extra Dependencies**: Assemble only from the current picker result. If a field is absent, mark it unavailable; never make a second GitHub call merely to enrich the card.
 
 **Slack control-room alerts (GitHub first).** When work is blocked, waiting on
 another agent, or needs HITL, post the same facts to the linked GitHub issue or
