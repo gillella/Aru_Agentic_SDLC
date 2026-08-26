@@ -28,11 +28,19 @@ the Definition-of-Done gate.
   non-authoritative in Aru-governed repositories.
 - Brainstorming workflows such as Superpowers supply input to Aru's plan gate;
   they do not run a parallel implementation process.
-- Memory tools provide context only. `review:coderabbit` is the only review
-  assignment `create_pr.py` creates. An operator may explicitly move a stalled
-  PR to Sourcery or CodeAnt after concrete observed unavailability; that switch
-  is one-way and is never a load balancer, a rotation, or a retry.
-  Only when all external reviewers are unavailable, busy, or waiting too long
+- Memory tools provide context only. `create_pr.py` assigns exactly one of
+  `review:coderabbit`, `review:sourcery`, or `review:codeant` using a
+  deterministic least-loaded algorithm over the complete paginated open-PR
+  inventory. Ties rotate by issue number in that fixed service order. The
+  label is a reservation: finalizers serialize capacity selection with one
+  atomic server-side ref lock, then settle across consecutive fresh inventory
+  reads; the higher-numbered pull request releases and re-selects if a legacy
+  or direct writer creates a collision. The existing assignment is immutable;
+  after concrete observed
+  unavailability an operator may make one audited external reassignment, never
+  an automatic retry or repeated rotation.
+  Coding agents never perform ordinary review. Only when all external reviewers
+  are unavailable, busy, or waiting too long
   may the operator assign one independent coding agent with `review:agent`.
   That emergency path is per-PR and never creates a review queue, rotation,
   fleet, scheduler, or permission for an author to review their own work.
@@ -62,8 +70,15 @@ with a direct push or an ad-hoc merge.
 An emergency agent review requires exactly one different `author:` and
 `reviewer:` identity, a valid reviewer model family, a substantive GitHub
 review of the exact current head, and one matching completed
-`aru-agent-review:v1` record. Missing, stale, duplicate, self-authored, or
-malformed evidence fails closed.
+`aru-agent-review:v1` record. Authorization comes from the
+`aru-agent-review-assignment:v1` record, which counts only when its author
+holds repository write access - resolved from the collaborator roster, not the
+comment's reported author association - and which names the single GitHub
+account permitted to perform that review; both the review and the completion
+record must come from that account. Missing, stale, duplicate, self-authored,
+unauthorized, or malformed evidence from those accounts fails closed. A
+marker-shaped comment from anyone else is ignored, so a drive-by comment
+cannot block every later emergency merge.
 Direct pushes to `main` are also blocked server-side by branch protection;
 an ad-hoc merge (`gh pr merge` or the GitHub UI, run outside `merge_pr.py`)
 is not - branch protection requires only a green CI status check, not
@@ -137,7 +152,7 @@ Helper inventory:
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID>` — one picker for all three work types; prefer over `fetch_next_issue.py`
 * `python3 "$ARU_SDLC_HOME/scripts/fetch_next_issue.py" --agent <AGENT_ID>` — issues only
 * `python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" [--capacity]`
-* `python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> --to <sourcery|codeant|agent> --reason <WHY> [...]`
+* `python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> --to <coderabbit|sourcery|codeant|agent> --reason <WHY> [...]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree] [--agent <id>]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --adopt --agent <id> --model-family <family>` — take over an abandoned PR

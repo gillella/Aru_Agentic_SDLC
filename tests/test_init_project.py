@@ -47,15 +47,18 @@ class ProjectBootstrapTests(unittest.TestCase):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
         self.assertIn("introduces a new helper function, module, or script", rules)
 
-    def test_generated_governance_uses_guarded_fallback_and_mechanical_merge(self):
+    def test_generated_governance_uses_balanced_external_pool_and_mechanical_merge(self):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
         normalized = " ".join(rules.split())
-        self.assertIn("`create_pr.py` assigns CodeRabbit by default", normalized)
-        self.assertIn("new PRs never rotate", rules)
-        self.assertIn("Sourcery or CodeAnt", normalized)
+        self.assertIn(
+            "`create_pr.py` assigns exactly one of `review:coderabbit`, "
+            "`review:sourcery`, or `review:codeant`", normalized)
+        self.assertIn("deterministic least-loaded", normalized)
+        self.assertIn("existing assignment is immutable", normalized)
         self.assertIn("review:agent", normalized)
         self.assertIn("unavailable, busy, or waiting too long", normalized)
         self.assertIn("never creates a review queue, rotation, fleet, scheduler", normalized)
+        self.assertIn("Coding agents never perform ordinary review", normalized)
         self.assertIn("After authoritative exact-head evidence from the assigned reviewer is present", normalized)
         self.assertIn("including the implementation author", rules)
         self.assertIn("merge_pr.py", rules)

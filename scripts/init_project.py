@@ -119,10 +119,10 @@ branch, or merge around the Definition-of-Done gate.
   non-authoritative here.
 - Brainstorming frameworks supply input to Aru's plan gate rather than running
   a parallel lifecycle.
-- Memory tools provide context only. `create_pr.py` assigns CodeRabbit by default; new PRs never rotate. An operator may explicitly move a stalled PR to Sourcery or CodeAnt. Only after every external reviewer is unavailable, busy, or waiting too long may the operator assign one independent coding agent to that exact PR with `review:agent`. This never creates a review queue, rotation, fleet, scheduler, or permission for an author to review.
+- Memory tools provide context only. `create_pr.py` assigns exactly one of `review:coderabbit`, `review:sourcery`, or `review:codeant` using a deterministic least-loaded choice over the complete open-PR inventory, with issue-number tie-breaking in that fixed order. The existing assignment is immutable; an operator may make one audited external reassignment after concrete unavailability. Coding agents never perform ordinary review. Only after every external reviewer is unavailable, busy, or waiting too long may the operator assign one independent coding agent to that exact PR with `review:agent`. This never creates a review queue, rotation, fleet, scheduler, or permission for an author to review.
 
 After authoritative exact-head evidence from the assigned reviewer is present—
-CodeRabbit, explicitly reassigned Sourcery/CodeAnt, or one explicitly selected
+CodeRabbit, Sourcery, CodeAnt, or one explicitly selected
 emergency independent agent—along with complete review-thread evidence with no
 unresolved or unfixed finding and every other enforced gate, any factory agent, including the implementation author,
 may execute the mechanical merge only through
