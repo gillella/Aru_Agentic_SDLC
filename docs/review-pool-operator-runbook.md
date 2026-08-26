@@ -2,8 +2,8 @@
 
 ## Purpose & Scope
 
-Operational procedure for CodeRabbit-first review with explicit Sourcery,
-CodeAnt, and last-resort independent-agent fallback
+Operational procedure for deterministic balanced review across CodeRabbit,
+Sourcery, and CodeAnt, with last-resort independent-agent fallback
 (`scripts/create_pr.py`, `scripts/merge_pr.py`). It covers what a factory
 agent or human operator does around PR assignment, review triggering, exact-head
 evidence, remediation, governed dry-runs, and billing/trial boundaries.
@@ -29,20 +29,23 @@ remediation edits in §4 as well as initial assignment.
 
 ## 1. Assignment
 
-`review:coderabbit` is the only review assignment `create_pr.py` ever
-creates. There is no rotation, capacity accounting, or scheduler behind it:
-reassignment is an explicit operator action taken after concrete observed
-unavailability, never a load balancer and never a retry. The label is
-applied to the PR **while it is still draft**, before the PR is marked ready.
+`create_pr.py` assigns exactly one of `review:coderabbit`, `review:sourcery`,
+or `review:codeant`. Its deterministic least-loaded algorithm reads the
+complete paginated open-PR inventory and counts each sole canonical authority
+label. It chooses the minimum count; ties use `(issue_id - 1) mod tie_count`
+over the tied services in fixed CodeRabbit, Sourcery, CodeAnt order. Unreadable,
+malformed, unknown, or conflicting inventory fails closed. Existing open PRs
+retain their current authority and are counted without being migrated. The
+selected label is applied while the PR is **still draft**, before ready state.
 Only one review-authority label may ever be present; `merge_pr.py` refuses to
 resolve a service when zero or more than one is set
 (`check_reviews` in `scripts/merge_pr.py`). Never add or swap a
-review-authority label by hand. If CodeRabbit is unavailable, use the governed
-helper for one explicit reassignment:
+review-authority label by hand. If the assigned service is unavailable, use
+the governed helper for one audited external reassignment:
 
 ```shell
 python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> \
-  --to <sourcery|codeant> --reason "<observed unavailability>"
+  --to <coderabbit|sourcery|codeant> --reason "<observed unavailability>"
 ```
 
 If CodeRabbit, Sourcery, and CodeAnt are all unavailable or busy, or the
@@ -56,16 +59,16 @@ python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> --to agent \
 ```
 
 The helper replaces one known authority, refuses self-review and ambiguous
-authors, and records the exact head, reviewer, family, and reason. It does not
-discover reviewers, track capacity, rotate agents, or create a second queue.
+authors, and records the exact head, reviewer, family, and reason. Coding
+agents never perform ordinary review. The helper does not discover reviewers,
+rotate repeatedly, or create a second queue.
 
 ### When the selected service also fails
 
-The external switch is one-way by design. `reassign_review.py` refuses a
-second external hop: once a PR carries `review:sourcery` or `review:codeant`,
-an attempt to move it to the other external service exits `2` (conflict) with
-`only the default assignment may be moved to a fallback`. Re-running the same
-`--to` is refused for the same reason — reassignment is not a retry mechanism.
+Authority permits one audited external reassignment. `reassign_review.py`
+reads complete marker history and refuses a second external hop from any
+initial or reassigned service. Re-running the same `--to` is also refused —
+reassignment is not a retry mechanism.
 So an operator whose chosen external fallback also stalls has exactly two
 governed options:
 
@@ -155,17 +158,12 @@ after a review invalidates it — re-review the new head before merging
   regardless of author precisely so a spoofed one is seen and rejected rather
   than silently skipped.
 - **Emergency agent** — exactly one author and one different assigned reviewer,
-  one reviewer model family, a substantive current-head GitHub review from the
-  same login, and exactly one matching completed `aru-agent-review:v1` record.
-  The assigned agent records completion with:
-
-  ```shell
-  python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> \
-    --complete-review --agent <AGENT_ID> --model-family <FAMILY> \
-    --review-disposition <no-findings|findings-resolved>
-  ```
-
-  A push invalidates this evidence. Missing, stale, duplicate, malformed, or
+  one reviewer model family in the audited `aru-agent-review-assignment:v1`
+  record, a substantive current-head GitHub review from the same login, and
+  exactly one matching completed `aru-agent-review:v1` comment. Its JSON names
+  the assigned agent, family, exact head, completion timestamp, `completed`
+  status, and `no-findings` or `findings-resolved` disposition. A push
+  invalidates this evidence. Missing, stale, duplicate, malformed, or
   self-review evidence blocks merge.
 
 Every review path additionally requires every blocker enforced by `check_reviews`

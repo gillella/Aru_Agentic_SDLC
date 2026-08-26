@@ -1,4 +1,5 @@
-# line-ceiling: 7145
+# +42 for #472 emergency-agent exact-head authority adversarial coverage.
+# line-ceiling: 7187
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
@@ -373,19 +374,23 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
-    def test_retired_agent_review_markers_are_not_parsed(self, gh_json, _slug):
-        """#414: an agent-written completion marker is inert comment text.
-
-        Parsing it would keep a merge path alive that nothing can legitimately
-        produce any more, so a forged copy would be the only way to reach it.
-        """
+    def test_emergency_agent_assignment_and_completion_markers_are_parsed(
+        self, gh_json, _slug,
+    ):
         head = "a" * 40
         payload = json.dumps({
             "agent": "agent-2", "completed_at": "2026-08-25T10:03:00Z",
             "disposition": "no-findings", "family": "openai", "head": head,
             "status": "completed",
         }, sort_keys=True, separators=(",", ":"))
+        assignment = json.dumps({
+            "family": "openai", "from": "review:codeant", "head": head,
+            "reason": "all external services unavailable", "reviewer": "agent-2",
+        }, sort_keys=True, separators=(",", ":"))
         nodes = [
+            {"body": f"<!-- aru-agent-review-assignment:v1 {assignment} -->",
+             "createdAt": "2026-08-25T10:01:00Z",
+             "author": {"login": "gillella", "__typename": "User"}},
             {"body": f"<!-- aru-agent-review:v1 {payload} -->",
              "createdAt": "2026-08-25T10:03:00Z",
              "author": {"login": "gillella", "__typename": "User"}},
@@ -394,16 +399,23 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
              "createdAt": "2026-08-25T10:03:00Z",
              "author": {"login": "gillella", "__typename": "User"}},
         ]
+        peer = {
+            "id": "agent-review", "state": "COMMENTED",
+            "submittedAt": "2026-08-25T10:02:00Z",
+            "body": "No findings after exact-head review.",
+            "author": {"login": "gillella", "__typename": "User"},
+            "commit": {"oid": head},
+        }
         gh_json.side_effect = [
-            self.review_page(head=head),
+            self.review_page(head=head, nodes=[peer]),
             self.attestation_page(head=head, nodes=nodes),
             self.thread_page(head=head),
         ]
         evidence = merge_pr.review_evidence(162)
-        for key in ("agent_review_attestations", "agent_review_marker_errors",
-                    "agent_review_assignments", "agent_review_assignment_errors",
-                    "review_attestations"):
-            self.assertNotIn(key, evidence)
+        self.assertEqual(len(evidence["agent_review_attestations"]), 1)
+        self.assertEqual(evidence["agent_review_marker_errors"], 0)
+        self.assertEqual(len(evidence["agent_review_assignments"]), 1)
+        self.assertEqual(evidence["agent_review_assignment_errors"], 0)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -2628,23 +2640,23 @@ class ReviewGateTests(unittest.TestCase):
             self.assertIsNone(merge_pr._with_coderabbit_status(383, evidence))
 
 
-class RetiredAgentReviewAuthorityTests(unittest.TestCase):
-    """#414: `review:agent` is no longer an authority a PR can be merged on.
-
-    The emergency path needed an operator assignment comment, a reviewer
-    identity stamped as (id, family), a substantive exact-head GitHub review,
-    and a matching `aru-agent-review:v1` completion marker. Nothing writes any
-    of that now, so the only way to reach the old verdict would be forged
-    evidence. The gate therefore refuses the label outright.
-    """
-
+class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
     HEAD = "a" * 40
+
+    def pr(self, *extra):
+        return labelled(
+            "author:agent-1", "family:anthropic", "review:agent",
+            "reviewer:agent-2", *extra,
+        )
 
     def evidence(self, **overrides):
         evidence = {
             "head_oid": self.HEAD,
             "head_commit_committed_at": "2026-08-25T10:00:00Z",
             "unresolved": 0, "unfixed": 0, "outdated_unfixed": 0,
+            "service_threads": {
+                "agent": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+            },
             "reviews": [{
                 "id": "agent-review", "state": "COMMENTED",
                 "submittedAt": "2026-08-25T10:02:00Z",
@@ -2656,27 +2668,41 @@ class RetiredAgentReviewAuthorityTests(unittest.TestCase):
                 "agent": "agent-2", "completed_at": "2026-08-25T10:03:00Z",
                 "disposition": "no-findings", "family": "openai",
                 "head": self.HEAD, "status": "completed",
-                "github_login": "gillella",
+                "github_login": "gillella", "recorded_at": "2026-08-25T10:03:00Z",
             }],
             "agent_review_marker_errors": 0,
+            "agent_review_assignments": [{
+                "family": "openai", "from": "review:codeant", "head": self.HEAD,
+                "reason": "External reviewers unavailable", "reviewer": "agent-2",
+                "assigned_at": "2026-08-25T10:01:00Z",
+                "github_login": "gillella",
+            }],
+            "agent_review_assignment_errors": 0,
         }
         evidence.update(overrides)
         return evidence
 
-    def test_review_agent_is_recognised_only_to_be_refused(self):
-        """The gate reads the label so it can name the way out, not accept it."""
-        pr = labelled("author:agent-1", "family:anthropic", "review:agent",
-                      "reviewed-by:agent-2", "reviewer-family:agent-2:openai")
-        self.assertEqual(merge_pr.assigned_review_service(pr), "agent")
-        ok, message = merge_pr.check_reviews(pr, self.evidence())
-        self.assertFalse(ok)
-        self.assertIn("retired", message)
-        self.assertIn("review:coderabbit", message)
-        self.assertFalse(
-            merge_pr.has_authoritative_assigned_review(pr, self.evidence()))
+    def test_complete_exact_head_independent_review_passes(self):
+        ok, message = merge_pr.check_reviews(self.pr(), self.evidence())
+        self.assertTrue(ok, message)
+        self.assertIn("agent-2", message)
+        self.assertTrue(merge_pr.has_authoritative_assigned_review(
+            self.pr(), self.evidence()))
 
-    def test_a_retired_assignment_costs_no_evidence_round_trip(self):
-        pr = labelled("author:agent-1", "review:agent")
+    def test_unknown_family_or_impossible_completion_chronology_fails(self):
+        unknown_family = self.evidence()
+        unknown_family["agent_review_assignments"][0]["family"] = "unknown"
+        unknown_family["agent_review_attestations"][0]["family"] = "unknown"
+
+        impossible_time = self.evidence()
+        impossible_time["agent_review_attestations"][0]["recorded_at"] = (
+            "2026-08-25T10:02:30Z")
+        for evidence in (unknown_family, impossible_time):
+            with self.subTest(evidence=evidence):
+                self.assertFalse(merge_pr.check_reviews(self.pr(), evidence)[0])
+
+    def test_agent_assignment_costs_no_provider_evidence_round_trip(self):
+        pr = self.pr()
         evidence = self.evidence()
         with patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
              patch.object(merge_pr, "_with_sourcery_runs") as sourcery:
@@ -2686,12 +2712,28 @@ class RetiredAgentReviewAuthorityTests(unittest.TestCase):
         sourcery.assert_not_called()
 
     def test_forged_completion_evidence_cannot_merge_a_coderabbit_pr(self):
-        """The retired marker must not become a second, weaker oracle."""
+        """Emergency evidence must not become a second, weaker ordinary oracle."""
         pr = labelled("author:agent-1", "family:anthropic",
                       "reviewed-by:agent-2", "reviewer-family:agent-2:openai")
         ok, message = merge_pr.check_reviews(pr, self.evidence())
         self.assertFalse(ok)
         self.assertIn("CodeRabbit", message)
+
+    def test_self_review_stale_duplicate_or_missing_evidence_fails_closed(self):
+        self_review = labelled(
+            "author:agent-1", "review:agent", "reviewer:agent-1")
+        cases = (
+            (self_review, self.evidence()),
+            (self.pr(), self.evidence(head_oid="b" * 40)),
+            (self.pr(), self.evidence(agent_review_marker_errors=1)),
+            (self.pr(), self.evidence(agent_review_assignment_errors=1)),
+            (self.pr(), self.evidence(agent_review_attestations=[])),
+            (self.pr(), self.evidence(agent_review_assignments=[])),
+            (self.pr(), self.evidence(reviews=[])),
+        )
+        for pr, evidence in cases:
+            with self.subTest(labels=pr["labels"], evidence=evidence):
+                self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
 
     def test_no_agent_thread_bucket_masquerades_as_a_service(self):
         payload = {"unresolved": 3,

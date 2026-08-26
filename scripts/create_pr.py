@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # +12 for the #344 terminal merge lease guard.
-# line-ceiling: 577
+# +85 for #472 complete-inventory review-pool selection and CodeAnt triggering.
+# line-ceiling: 662
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -20,7 +21,6 @@ import argparse
 import json
 import shlex
 import sys
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from common import (
@@ -34,18 +34,23 @@ from common import (
     get_current_branch,
     get_current_commit,
     get_issue,
+    get_repo_slug,
     run_cmd,
 )
 from github_pr_transport import open_pull_request_with_fallback
+from github_inventory import open_pull_requests
 
-NEEDS_REVIEW_LABEL = "needs-review"
 REVIEW_LABEL_PREFIX = "review:"
-CODERABBIT_REVIEW_LABEL = "review:coderabbit"
+REVIEW_SERVICES = ("coderabbit", "sourcery", "codeant")
+EMERGENCY_AGENT_LABEL = "review:agent"
+CODEANT_TRIGGER = "@codeant-ai: review"
 
 # Kept explicit rather than free-form: a typo like "anthropc" would silently
 # make every PR look cross-family to the picker, which is the one failure mode
 # this label exists to prevent.
-MODEL_FAMILIES = ("anthropic", "openai", "google", "meta", "mistral", "xai", "human")
+MODEL_FAMILIES = (
+    "anthropic", "openai", "codex", "google", "meta", "mistral", "xai", "human",
+)
 
 
 class ReviewAssignmentLookupError(RuntimeError):
@@ -59,11 +64,65 @@ class ReviewAssignmentLookupError(RuntimeError):
     """
 
 
+def review_label_for_service(service: str) -> str:
+    """Canonical authority label for one configured external service."""
+    return f"{REVIEW_LABEL_PREFIX}{service}"
+
+
+def select_review_service(issue_id: int) -> str:
+    """Choose the least-loaded external authority with a stable tie-break.
+
+    Capacity is the number of open PRs carrying each sole canonical authority
+    label. The inventory is complete and paginated; unreadable, malformed,
+    unknown, or conflicting authority state fails closed instead of being
+    mistaken for spare capacity. Ties rotate by issue number over the stable
+    ``REVIEW_SERVICES`` order, keeping simultaneous selections deterministic
+    and approximately even without mutating any existing assignment.
+    """
+    if type(issue_id) is not int or issue_id <= 0:
+        raise ReviewAssignmentLookupError("issue id must be a positive integer")
+    slug = get_repo_slug()
+    if not slug:
+        raise ReviewAssignmentLookupError("could not resolve the repository for capacity")
+    inventory = open_pull_requests(run_cmd, slug)
+    if inventory is None:
+        raise ReviewAssignmentLookupError("could not read the complete open-PR inventory")
+
+    counts = {service: 0 for service in REVIEW_SERVICES}
+    canonical = {review_label_for_service(service): service for service in REVIEW_SERVICES}
+    for pr in inventory:
+        labels = pr.get("labels") if isinstance(pr, dict) else None
+        if not isinstance(labels, list):
+            raise ReviewAssignmentLookupError("open-PR inventory has malformed labels")
+        names = []
+        for label in labels:
+            if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+                raise ReviewAssignmentLookupError("open-PR inventory has a malformed label")
+            if label["name"].lower().startswith(REVIEW_LABEL_PREFIX):
+                names.append(label["name"])
+        if not names:
+            continue
+        if names == [EMERGENCY_AGENT_LABEL]:
+            # A terminal emergency agent is not part of the ordinary external
+            # pool and therefore neither consumes nor creates provider capacity.
+            continue
+        if len(names) != 1 or names[0] not in canonical:
+            number = pr.get("number", "unknown")
+            raise ReviewAssignmentLookupError(
+                f"open PR #{number} has ambiguous or unsupported review authority: "
+                f"{', '.join(names)}")
+        counts[canonical[names[0]]] += 1
+
+    minimum = min(counts.values())
+    eligible = [service for service in REVIEW_SERVICES if counts[service] == minimum]
+    return eligible[(issue_id - 1) % len(eligible)]
+
+
 def existing_review_assignment(pr_ref: str) -> Optional[str]:
-    """Return the sole canonical CodeRabbit assignment, if safely readable.
+    """Return the sole canonical external assignment, if safely readable.
 
     ``None`` means the complete label array was read and contains no review
-    label. Legacy, unknown, case-variant, duplicated, multiple, or malformed
+    label. Unknown, case-variant, duplicated, multiple, or malformed
     label state raises instead of being mistaken for an unassigned PR.
     """
     code, out, err = run_cmd(["gh", "pr", "view", pr_ref, "--json", "labels"], check=False)
@@ -91,14 +150,15 @@ def existing_review_assignment(pr_ref: str) -> Optional[str]:
     if len(review_labels) != 1:
         raise ReviewAssignmentLookupError(
             f"PR {pr_ref} carries {len(review_labels)} review labels "
-            f"({', '.join(review_labels)}); exactly one canonical "
-            f"{CODERABBIT_REVIEW_LABEL} label is required.")
-    if review_labels[0] != CODERABBIT_REVIEW_LABEL:
+            f"({', '.join(review_labels)}); exactly one canonical external "
+            "review label is required.")
+    canonical = {review_label_for_service(service): service for service in REVIEW_SERVICES}
+    if review_labels[0] not in canonical:
         raise ReviewAssignmentLookupError(
             f"PR {pr_ref} carries unsupported review label {review_labels[0]!r}; "
-            f"only {CODERABBIT_REVIEW_LABEL!r} is authoritative and legacy "
-            "assignments are never migrated implicitly.")
-    return "coderabbit"
+            f"expected one of {', '.join(canonical)} and assignments are never "
+            "migrated implicitly.")
+    return canonical[review_labels[0]]
 
 
 def collect_verification_evidence(
@@ -274,66 +334,31 @@ def apply_identity(pr_ref: str, agent: str = "", family: str = "") -> bool:
     return True
 
 
-def enqueue_review(pr_ref: str) -> bool:
-    """Mark a newly opened PR as claimable review work immediately.
-
-    This is invocation, not a second review path: no bot posts a review.
-    The picker still requires a distinct agent. Failures here are warnings
-    because the PR already exists and identity is already stamped.
-    """
-    queued_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    ensure_label(
-        NEEDS_REVIEW_LABEL,
-        "5319e7",
-        "Opened; claimable as review work (not a bot review)",
-    )
-    code, _, err = run_cmd(
-        ["gh", "pr", "edit", pr_ref, "--add-label", NEEDS_REVIEW_LABEL],
-        check=False,
-    )
-    if code != 0:
-        print(f"[WARN] Could not apply {NEEDS_REVIEW_LABEL}: {err.strip()}",
-              file=sys.stderr)
-    body = (
-        "## Review queue\n"
-        f"review-queued-at: {queued_at}\n"
-        "\n"
-        "This PR is claimable review work for a distinct agent. "
-        "No automated account should post a review.\n"
-    )
-    code, _, err = run_cmd(
-        ["gh", "pr", "comment", pr_ref, "--body", body],
-        check=False,
-    )
-    if code != 0:
-        print(f"[WARN] Could not record review-queued-at: {err.strip()}",
-              file=sys.stderr)
-        return False
-    print(f"🔍 Enqueued as review work (review-queued-at: {queued_at})")
-    return True
-
-
 def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C901, PLR0912
-    """Assign only CodeRabbit, read it back, and make the PR reviewable.
+    """Assign one balanced external authority and make the PR reviewable.
 
-    The issue id remains in the public call shape for create/revert/CLI
-    compatibility, but it no longer selects authority. Retries are idempotent:
-    the sole canonical label is retained, an identical concurrent assignment
-    is accepted after readback, and a PR already made ready is recognized from
-    live state. Every legacy, unknown, duplicate, malformed, or unreadable
-    review-label state blocks without being migrated.
+    Retries are idempotent: a sole canonical label is retained without
+    recomputing capacity, an identical concurrent assignment is accepted after
+    readback, and a PR already made ready is recognized from live state.
+    Unknown, duplicate, malformed, or unreadable authority blocks without
+    implicit migration.
     """
-    del issue_id
     try:
         service = existing_review_assignment(pr_ref)
     except ReviewAssignmentLookupError as exc:
         print(f"[ERROR] Refusing to finalize PR {pr_ref}: {exc}", file=sys.stderr)
         return False
     if service is None:
+        try:
+            selected = select_review_service(issue_id)
+        except ReviewAssignmentLookupError as exc:
+            print(f"[ERROR] Refusing to assign PR {pr_ref}: {exc}", file=sys.stderr)
+            return False
+        label = review_label_for_service(selected)
         ensure_label(
-            CODERABBIT_REVIEW_LABEL,
+            label,
             "0e8a16",
-            "Authoritative review service: coderabbit",
+            f"Authoritative review service: {selected}",
         )
         try:
             service = existing_review_assignment(pr_ref)
@@ -342,31 +367,41 @@ def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C90
             return False
         if service is None:
             code, _, err = run_cmd(
-                ["gh", "pr", "edit", pr_ref, "--add-label", CODERABBIT_REVIEW_LABEL],
+                ["gh", "pr", "edit", pr_ref, "--add-label", label],
                 check=False,
             )
             if code != 0:
                 print(
-                    f"[ERROR] Could not apply {CODERABBIT_REVIEW_LABEL}: {err.strip()}",
+                    f"[ERROR] Could not apply {label}: {err.strip()}",
                     file=sys.stderr,
                 )
                 return False
         else:
+            if service != selected:
+                print(
+                    f"[ERROR] PR {pr_ref} was assigned concurrently to "
+                    f"{review_label_for_service(service)}, not selected {label}; "
+                    "refusing to arbitrate the race.",
+                    file=sys.stderr,
+                )
+                return False
             print(
-                f"🔒 {CODERABBIT_REVIEW_LABEL} was assigned concurrently; "
+                f"🔒 {label} was assigned concurrently; "
                 "resuming finalization."
             )
     else:
-        print(f"🔒 {CODERABBIT_REVIEW_LABEL} already assigned; resuming finalization.")
+        selected = service
+        label = review_label_for_service(service)
+        print(f"🔒 {label} already assigned; resuming finalization.")
 
     try:
         confirmed = existing_review_assignment(pr_ref)
     except ReviewAssignmentLookupError as exc:
         print(f"[ERROR] PR {pr_ref} has ambiguous authority before ready: {exc}", file=sys.stderr)
         return False
-    if confirmed != "coderabbit":
+    if confirmed != selected:
         print(
-            f"[ERROR] PR {pr_ref} did not retain {CODERABBIT_REVIEW_LABEL}; not marking ready.",
+            f"[ERROR] PR {pr_ref} did not retain {label}; not marking ready.",
             file=sys.stderr,
         )
         return False
@@ -385,22 +420,33 @@ def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C90
             detail = state_err.strip() if state_code != 0 else err.strip()
             print(
                 f"[ERROR] Could not mark PR ready after assigning "
-                f"{CODERABBIT_REVIEW_LABEL}: {detail or 'ready state remained unconfirmed'}",
+                f"{label}: {detail or 'ready state remained unconfirmed'}",
                 file=sys.stderr,
             )
             return False
         try:
-            if existing_review_assignment(pr_ref) != "coderabbit":
-                print(f"[ERROR] PR {pr_ref} is ready but no longer carries {CODERABBIT_REVIEW_LABEL}.", file=sys.stderr)
+            if existing_review_assignment(pr_ref) != selected:
+                print(f"[ERROR] PR {pr_ref} is ready but no longer carries {label}.", file=sys.stderr)
                 return False
         except ReviewAssignmentLookupError as exc:
             print(f"[ERROR] PR {pr_ref} has ambiguous authority after ready recovery: {exc}",
                   file=sys.stderr)
             return False
-        print(f"🔍 PR {pr_ref} was already ready with {CODERABBIT_REVIEW_LABEL}")
-        return True
+        print(f"🔍 PR {pr_ref} was already ready with {label}")
 
-    print(f"🔍 Assigned {CODERABBIT_REVIEW_LABEL} and marked PR ready")
+    if selected == "codeant":
+        code, _, err = run_cmd(
+            ["gh", "pr", "comment", pr_ref, "--body", CODEANT_TRIGGER], check=False)
+        if code != 0:
+            rollback, _, rollback_err = run_cmd(
+                ["gh", "pr", "ready", pr_ref, "--undo"], check=False)
+            detail = "draft state restored" if rollback == 0 else (
+                f"draft rollback also failed: {rollback_err.strip()}")
+            print(f"[ERROR] Could not trigger CodeAnt review: {err.strip()}; {detail}.",
+                  file=sys.stderr)
+            return False
+
+    print(f"🔍 Assigned {label} and marked PR ready")
     return True
 
 
@@ -484,9 +530,9 @@ def main():
         default=0,
         metavar="PR",
         help=(
-            "Retry CodeRabbit assignment on an existing PR or recover from a "
+            "Retry balanced external review assignment on an existing PR or recover from a "
             "prior label/readback/ready failure. Requires --issue for the linked "
-            "issue number; legacy or unknown review labels are never migrated."
+            "issue number; existing authority is immutable and unknown labels are never migrated."
         ),
     )
     parser.add_argument(

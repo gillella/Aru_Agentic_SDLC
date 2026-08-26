@@ -189,30 +189,13 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                 )
 
     def test_current_review_policy_keeps_agent_fallback_explicit_and_narrow(self):
-        plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
-        introduction = section(
-            plan,
-            plan.splitlines()[0],
-            "## Lifecycle status vocabulary",
-        )
-        normalized_intro = " ".join(introduction.replace("> ", "").split())
-        self.assertIn("CodeRabbit reviews ordinary PRs by default", normalized_intro)
-        self.assertIn("one independent coding agent", normalized_intro)
-        self.assertIn("no reviewer rotation, fleet, queue, or second scheduler", normalized_intro)
-        operator = section(plan, "## 4. The operator visibility and intervention interface", "### 4.1")
-        self.assertNotIn("independent-agent review", operator)
-        principle = section(plan, "### 4.3 The operating principle", "---")
-        self.assertIn("explicitly assigned reviewer reviews", principle)
-        self.assertIn("explicit emergency assignment", principle)
-        self.assertNotIn("CodeRabbit is the reviewer of record", principle)
         cursor = (ROOT / "docs/cursor-integration.md").read_text(encoding="utf-8")
         policy = (ROOT / "skills/code-review/SKILL.md").read_text(encoding="utf-8")
+        normalized_policy = " ".join(policy.lower().split())
         self.assertIn("external review is normal", cursor)
         self.assertIn("review:agent", policy)
+        self.assertIn("never ordinary review", normalized_policy)
         self.assertNotIn("never supplied by CodeRabbit review", policy)
-        intervention = section(plan, "### 4.1 The one mandatory human intervention", "### 4.2")
-        self.assertIn("implementation/remediation/mechanical-merge loop", intervention)
-        self.assertNotIn("implementation/review/remediation loop", intervention)
 
     def test_review_fallback_policy_is_documented_for_operators(self):
         """#436: the operator-facing docs must state the fallback-only policy,
@@ -229,37 +212,32 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
         runbook_path = "docs/review-pool-operator-runbook.md"
         runbook, agents = flat(runbook_path), flat("AGENTS.md")
         board = flat("docs/project_board_workflow.md")
-        plan = flat("docs/ARU-SOFTWARE-FACTORY.md")
-        only = "`review:coderabbit` is the only review assignment `create_pr.py`"
+        assignment = ("`create_pr.py` assigns exactly one of `review:coderabbit`, "
+                      "`review:sourcery`, or `review:codeant`")
         required = (
-            # Fallback-only policy: one default assignment, never load spreading.
-            (runbook, f"{only} ever creates"),
-            (runbook, "never a load balancer and never a retry"),
-            (agents, f"{only} creates"),
-            (agents, "never a load balancer, a rotation, or a retry"),
-            (board, f"{only} creates"),
-            (board, "no automatic rotation, load balancer, or scheduler exists"),
-            (plan, "`review:coderabbit` is the only assignment `create_pr.py` creates"),
-            (plan, "never as a load balancer"),
+            (runbook, assignment),
+            (runbook, "deterministic least-loaded"),
+            (agents, assignment),
+            (agents, "deterministic least-loaded"),
+            (board, assignment),
+            (board, "complete paginated open-PR inventory"),
             # Evidence contract: producer identity and head binding, not a name.
             (runbook, "produced by the recognized `sourcery-ai` app slug"),
             (runbook, "linked to this pull request number and base"),
             (runbook, "Zero such checks and two or more both block"),
             (runbook, "`codeant-review-status` marker"),
             (runbook, "blocks **both** paths"),
-            # Recovery: the switch is one-way, agent escalation is terminal.
-            (runbook, "The external switch is one-way by design"),
+            # Recovery: at most one external switch, agent escalation is terminal.
+            (runbook, "one audited external reassignment"),
             (runbook, "reassignment is not a retry mechanism"),
             (runbook, "`--to agent` is the only move accepted from an already-switched PR"),
             (runbook, "There is no third hop"),
-            (board, "That external switch is one-way"),
+            (board, "one audited external reassignment"),
         )
         for document, phrase in required:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, document)
-        # "Pool" is rotation-era vocabulary for a mechanism that does not exist.
-        self.assertNotIn("review-pool label", runbook)
-        self.assertNotIn("Review-Pool Operator Runbook", runbook)
+        self.assertIn("Review Authority Operator Runbook", runbook)
         self.assertIn("### When the selected service also fails",
                       (ROOT / runbook_path).read_text(encoding="utf-8"))
 

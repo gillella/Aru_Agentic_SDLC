@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # #414 removed retired review/queue machinery and ratcheted this file down.
-# line-ceiling: 4198
+# +190 for #472 terminal emergency-agent exact-head evidence restoration.
+# line-ceiling: 4388
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -59,6 +60,16 @@ CHECKPOINT_PREFIX = "ckpt/"
 AUTHOR_LABEL = "author:"
 # The authoring agent's model family, also stamped by create_pr.py.
 FAMILY_LABEL = "family:"
+# Emergency review is never ordinary assignment. These records exist only
+# after reassign_review.py documents external exhaustion for one PR.
+REVIEWER_LABEL = "reviewer:"
+AGENT_REVIEW_ATTESTATION_VERSION = "aru-agent-review:v1"
+AGENT_REVIEW_ASSIGNMENT_VERSION = "aru-agent-review-assignment:v1"
+AGENT_REVIEW_DISPOSITIONS = {"no-findings", "findings-resolved"}
+AGENT_REVIEW_MODEL_FAMILIES = {
+    "anthropic", "openai", "codex", "google", "meta", "mistral", "xai", "human",
+}
+AGENT_REVIEW_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 # Transient merge-execution claim from claim_merge. Cleared on close-out; never
 # treated as review evidence.
 MERGER_CLAIM_LABEL = "merger:"
@@ -75,20 +86,11 @@ ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
 CODERABBIT_LOGINS = {"coderabbitai", "coderabbitai[bot]"}
 CODERABBIT_APP_SLUGS = {"coderabbitai"}
 CODERABBIT_ACTOR_TYPES = {"Bot"}
-# CodeRabbit is the default positive oracle; Sourcery and CodeAnt are the
-# bounded external fallbacks an operator may switch to after observed
-# unavailability.
-#
-# `review:agent` stays in this tuple even though #414 removed every way to
-# produce coding-agent review evidence. reassign_review.py can still apply
-# the label, and a label the gate cannot even parse would fail with a
-# generic "unknown review label" that names no way out. Recognising it lets
-# check_reviews refuse it for the real reason and say which service to
-# reassign to. It is a recognised authority that can never be satisfied,
-# not a fourth oracle.
-RETIRED_AGENT_REVIEW_LABEL = "review:agent"
+# The balanced pool contains only the first three services. `review:agent` is
+# a terminal per-PR emergency exception and can never be selected ordinarily.
+AGENT_REVIEW_LABEL = "review:agent"
 REVIEW_SERVICE_LABELS = ("review:coderabbit", "review:sourcery", "review:codeant",
-                         RETIRED_AGENT_REVIEW_LABEL)
+                         AGENT_REVIEW_LABEL)
 # Sourcery publishes a commit-scoped REST check run. The app slug is the
 # producer identity: a check merely *named* "Sourcery review" proves nothing,
 # because any app may choose that name.
@@ -529,13 +531,78 @@ def _collect_codeant_status_comment(body, author, collector):
         collector.append({"body": body, "author": author})
 
 
+def _agent_marker(body, version):
+    """Parse exactly one JSON marker of ``version`` from a comment body.
+
+    Returns ``(present, payload)``. A present marker with ``None`` payload is
+    malformed evidence and must fail closed rather than disappear.
+    """
+    prefix = f"<!-- {version} "
+    if prefix not in body:
+        return False, None
+    matches = re.findall(re.escape(prefix) + r"(\{[^\n]*\}) -->", body)
+    if len(matches) != 1:
+        return True, None
+    try:
+        payload = json.loads(matches[0])
+    except json.JSONDecodeError:
+        return True, None
+    return True, payload
+
+
+def _collect_agent_marker(node, assignments, attestations):
+    """Collect trusted emergency assignment/completion records from one comment."""
+    body = node["body"]
+    author = node.get("author")
+    created = _parse_review_ts(node.get("createdAt"))
+    trusted = (created is not None and isinstance(author, dict)
+               and author.get("__typename") == "User"
+               and isinstance(author.get("login"), str) and bool(author["login"]))
+    errors = {"assignment": 0, "attestation": 0}
+
+    present, payload = _agent_marker(body, AGENT_REVIEW_ASSIGNMENT_VERSION)
+    required = {"family", "from", "head", "reason", "reviewer"}
+    if present:
+        if (not trusted or not isinstance(payload, dict) or set(payload) != required
+                or payload.get("from") not in REVIEW_SERVICE_LABELS[:3]
+                or not isinstance(payload.get("reviewer"), str)
+                or AGENT_REVIEW_ID_RE.fullmatch(payload["reviewer"]) is None
+                or payload.get("family") not in AGENT_REVIEW_MODEL_FAMILIES
+                or not isinstance(payload.get("reason"), str) or not payload["reason"].strip()
+                or not isinstance(payload.get("head"), str)
+                or re.fullmatch(r"[0-9a-fA-F]{40}", payload["head"]) is None):
+            errors["assignment"] += 1
+        else:
+            assignments.append({**payload, "head": payload["head"].lower(),
+                                "assigned_at": node["createdAt"],
+                                "github_login": author["login"]})
+
+    present, payload = _agent_marker(body, AGENT_REVIEW_ATTESTATION_VERSION)
+    required = {"agent", "completed_at", "disposition", "family", "head", "status"}
+    if present:
+        if (not trusted or not isinstance(payload, dict) or set(payload) != required
+                or not isinstance(payload.get("agent"), str)
+                or AGENT_REVIEW_ID_RE.fullmatch(payload["agent"]) is None
+                or payload.get("family") not in AGENT_REVIEW_MODEL_FAMILIES
+                or payload.get("status") != "completed"
+                or payload.get("disposition") not in AGENT_REVIEW_DISPOSITIONS
+                or not isinstance(payload.get("head"), str)
+                or re.fullmatch(r"[0-9a-fA-F]{40}", payload["head"]) is None
+                or _parse_review_ts(payload.get("completed_at")) is None):
+            errors["attestation"] += 1
+        else:
+            attestations.append({**payload, "head": payload["head"].lower(),
+                                 "github_login": author["login"],
+                                 "recorded_at": node["createdAt"]})
+    return errors
+
+
 def _review_comment_evidence(owner, name, pr_id, version):  # noqa: C901, PLR0912
     """Read paginated PR comments for provider-owned review markers.
 
-    Only the assigned external services leave evidence worth parsing here:
-    CodeRabbit's exact full-review command/finished comments and CodeAnt's
-    rolling status marker. Coding-agent head attestations were retired with
-    coding-agent review itself (#414), so no agent-written marker is read.
+    External provider markers and the narrow emergency-agent assignment and
+    completion records are collected from the same complete, version-stable
+    comment snapshot.
     """
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
@@ -550,6 +617,10 @@ def _review_comment_evidence(owner, name, pr_id, version):  # noqa: C901, PLR091
     }"""
     coderabbit_full_review_comments = []
     codeant_status_comments = []
+    agent_assignments = []
+    agent_attestations = []
+    agent_assignment_errors = 0
+    agent_marker_errors = 0
     try:
         for pull, nodes in _pull_pages(query, owner, name, pr_id, "comments"):
             if _evidence_version(pull) != version:
@@ -559,6 +630,9 @@ def _review_comment_evidence(owner, name, pr_id, version):  # noqa: C901, PLR091
                     return None
                 body = node["body"]
                 _collect_codeant_status_comment(body, node.get("author"), codeant_status_comments)
+                errors = _collect_agent_marker(node, agent_assignments, agent_attestations)
+                agent_assignment_errors += errors["assignment"]
+                agent_marker_errors += errors["attestation"]
                 comment_kind = _coderabbit_full_review_comment_kind(body)
                 if comment_kind is None:
                     continue
@@ -575,7 +649,11 @@ def _review_comment_evidence(owner, name, pr_id, version):  # noqa: C901, PLR091
     except _PageError:
         return None
     return {"coderabbit_full_review_comments": coderabbit_full_review_comments,
-            "codeant_status_comments": codeant_status_comments}
+            "codeant_status_comments": codeant_status_comments,
+            "agent_review_assignments": agent_assignments,
+            "agent_review_assignment_errors": agent_assignment_errors,
+            "agent_review_attestations": agent_attestations,
+            "agent_review_marker_errors": agent_marker_errors}
 
 
 def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
@@ -626,7 +704,8 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     commit_times = None
     service_threads = {"coderabbit": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
                        "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-                       "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}}
+                       "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+                       "agent": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}}
 
     pages = _pull_pages(query, owner, name, pr_id, "reviewThreads")
     while True:
@@ -771,6 +850,14 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
         "reviews": reviews,
         "coderabbit_full_review_comments": coderabbit_full_review_comments,
         "codeant_status_comments": codeant_status_comments,
+        # External-provider evidence predates the narrow emergency-agent
+        # fields. Missing agent fields mean no agent authority, never proof of
+        # one, and keep external evidence consumers backward-compatible.
+        "agent_review_assignments": comment_evidence.get("agent_review_assignments", []),
+        "agent_review_assignment_errors": comment_evidence.get(
+            "agent_review_assignment_errors", 0),
+        "agent_review_attestations": comment_evidence.get("agent_review_attestations", []),
+        "agent_review_marker_errors": comment_evidence.get("agent_review_marker_errors", 0),
         "unresolved": unresolved,
         "unfixed": unfixed,
         "outdated_unfixed": outdated_unfixed,
@@ -1746,6 +1833,77 @@ def has_authoritative_codeant_review(pr, evidence):
     return _codeant_status_evidence(evidence) is True
 
 
+def _identity_values(pr, prefix):
+    """Non-empty, trimmed identities from one label namespace."""
+    return [value for value in (raw.strip() for raw in label_values(pr, prefix)) if value]
+
+
+def _agent_review_verdict(pr, evidence):  # noqa: C901, PLR0911, PLR0912
+    """Validate the terminal operator-assigned independent-agent exception."""
+    if not isinstance(pr, dict) or not isinstance(evidence, dict):
+        return False, "Emergency agent review evidence is unavailable."
+    authors = _identity_values(pr, AUTHOR_LABEL)
+    reviewers = _identity_values(pr, REVIEWER_LABEL)
+    if len(authors) != 1 or len(reviewers) != 1:
+        return False, "Agent review requires exactly one author and one assigned reviewer."
+    reviewer = reviewers[0]
+    if reviewer == authors[0]:
+        return False, f"The assigned reviewer '{reviewer}' authored or remediated this head."
+    if (evidence.get("agent_review_marker_errors")
+            or evidence.get("agent_review_assignment_errors")):
+        return False, "Malformed emergency agent assignment or completion evidence exists."
+
+    head = evidence.get("head_oid")
+    committed_at = _parse_review_ts(evidence.get("head_commit_committed_at"))
+    if not isinstance(head, str) or not head or committed_at is None:
+        return False, "Emergency review is not bound to a trustworthy current head."
+    assignments = evidence.get("agent_review_assignments")
+    current_assignments = [item for item in assignments or []
+                           if isinstance(item, dict) and item.get("head") == head.lower()]
+    if len(current_assignments) != 1:
+        return False, "Explicit exact-head emergency assignment is missing or ambiguous."
+    assignment = current_assignments[0]
+    assigned_at = _parse_review_ts(assignment.get("assigned_at"))
+    family = assignment.get("family")
+    if (assignment.get("reviewer") != reviewer
+            or family not in AGENT_REVIEW_MODEL_FAMILIES
+            or assigned_at is None or assigned_at <= committed_at):
+        return False, "Emergency assignment identity, family, head, or timing is invalid."
+
+    attestations = evidence.get("agent_review_attestations")
+    current = [record for record in attestations or []
+               if isinstance(record, dict) and record.get("head") == head.lower()]
+    if len(current) != 1:
+        return False, "Agent completion evidence is missing, duplicated, stale, or ambiguous."
+    record = current[0]
+    completed_at = _parse_review_ts(record.get("completed_at"))
+    recorded_at = _parse_review_ts(record.get("recorded_at"))
+    if (record.get("agent") != reviewer or record.get("family") != family
+            or completed_at is None or completed_at <= assigned_at
+            or recorded_at is None or completed_at > recorded_at):
+        return False, "Agent completion identity, family, head, or timing is invalid."
+
+    matches = []
+    for review in evidence.get("reviews") or []:
+        if not isinstance(review, dict):
+            return False, "Could not establish trustworthy emergency review history."
+        state = str(review.get("state") or "").upper()
+        author = review.get("author") or {}
+        submitted = _parse_review_ts(review.get("submittedAt"))
+        body = review.get("body")
+        if ((review.get("commit") or {}).get("oid") == head
+                and author.get("__typename") == "User"
+                and author.get("login") == record.get("github_login")
+                and state not in {"PENDING", "DISMISSED", "CHANGES_REQUESTED"}
+                and (state != "COMMENTED" or isinstance(body, str) and body.strip())
+                and submitted is not None and assigned_at <= submitted <= completed_at):
+            matches.append(review)
+    if not matches:
+        return False, "No substantive independent GitHub review precedes agent completion."
+    return True, (f"Emergency independent review by {reviewer} ({family}) is complete on "
+                  f"current head {head[:12]} with disposition {record['disposition']}.")
+
+
 def with_service_evidence(pr, pr_id, evidence):
     """Enrich evidence with whichever provider this PR's authority label names.
 
@@ -1794,7 +1952,7 @@ def has_authoritative_assigned_review(pr, evidence):
     if service == "codeant":
         return has_authoritative_codeant_review(pr, evidence)
     if service == "agent":
-        return False
+        return _agent_review_verdict(pr, evidence)[0]
     return has_authoritative_coderabbit_review(pr, evidence)
 
 
@@ -1807,13 +1965,6 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
             + ". Missing, legacy, unknown, mixed, or duplicate "
             "review labels block merge."
         )
-    if service == "agent":
-        # Refused before any evidence is read. Coding-agent review claims and
-        # completion attestations were removed in #414, so nothing can produce
-        # evidence for this label and any that appears is forged.
-        return False, (f"{RETIRED_AGENT_REVIEW_LABEL} is retired: coding agents no longer "
-                       "supply review evidence. Reassign this PR to review:coderabbit, "
-                       "review:sourcery, or review:codeant before merging.")
     counts = _service_thread_counts(evidence, service)
     if not isinstance(counts, dict):
         return False, f"Could not determine {service.title()} review-thread state; refusing rather than guessing."
@@ -1860,6 +2011,8 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # first would make a genuinely completed clean review unmergeable. The
     # human-blocking and thread gates above already ran for every service, and
     # each branch below still demands producer-validated exact-head proof.
+    if service == "agent":
+        return _agent_review_verdict(pr, evidence)
     if service == "sourcery":
         if not has_authoritative_sourcery_review(pr, evidence):
             return False, (

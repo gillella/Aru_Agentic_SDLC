@@ -1,5 +1,6 @@
 # +16 for the #344 terminal merge lease tests.
-# line-ceiling: 717
+# +85 for #472 deterministic external review-pool assignment coverage.
+# line-ceiling: 802
 import json
 import sys
 import unittest
@@ -137,27 +138,46 @@ class IdentityStampTests(unittest.TestCase):
         self.assertEqual(create_cmd[:3], ["gh", "pr", "create"])
         self.assertIn("--draft", create_cmd)
 
+    @patch.object(create_pr, "select_review_service", return_value="sourcery")
     @patch.object(create_pr, "run_cmd")
     @patch.object(create_pr, "ensure_label", return_value=True)
     @patch.object(create_pr, "existing_review_assignment",
-                  side_effect=[None, None, "coderabbit"])
-    def test_new_assignment_adds_only_coderabbit_and_marks_ready(self, _existing, label, run):
+                  side_effect=[None, None, "sourcery"])
+    def test_new_assignment_adds_selected_service_and_marks_ready(
+        self, _existing, label, run, _select,
+    ):
         run.side_effect = [(0, "", ""), (0, "", "")]
         self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         label.assert_called_once_with(
-            "review:coderabbit", "0e8a16", "Authoritative review service: coderabbit",
+            "review:sourcery", "0e8a16", "Authoritative review service: sourcery",
         )
         label_cmd = run.call_args_list[0].args[0]
         self.assertEqual(label_cmd[:4], ["gh", "pr", "edit", "https://x/pull/9"])
-        self.assertEqual(label_cmd[-2:], ["--add-label", "review:coderabbit"])
+        self.assertEqual(label_cmd[-2:], ["--add-label", "review:sourcery"])
         ready_cmd = run.call_args_list[1].args[0]
         self.assertEqual(ready_cmd[:4], ["gh", "pr", "ready", "https://x/pull/9"])
 
+    @patch.object(create_pr, "select_review_service", return_value="codeant")
     @patch.object(create_pr, "run_cmd")
     @patch.object(create_pr, "ensure_label", return_value=True)
     @patch.object(create_pr, "existing_review_assignment",
+                  side_effect=[None, None, "codeant"])
+    def test_codeant_assignment_triggers_only_after_ready(
+        self, _existing, _label, run, _select,
+    ):
+        run.return_value = (0, "", "")
+        self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands[1][:3], ["gh", "pr", "ready"])
+        self.assertEqual(commands[2][:3], ["gh", "pr", "comment"])
+        self.assertEqual(commands[2][-1], "@codeant-ai: review")
+
+    @patch.object(create_pr, "run_cmd")
+    @patch.object(create_pr, "ensure_label", return_value=True)
+    @patch.object(create_pr, "select_review_service", return_value="coderabbit")
+    @patch.object(create_pr, "existing_review_assignment",
                   side_effect=[None, None])
-    def test_failed_label_write_stops_before_ready(self, _existing, _label, run):
+    def test_failed_label_write_stops_before_ready(self, _existing, _select, _label, run):
         run.return_value = (1, "", "label failed")
         self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         self.assertEqual(run.call_count, 1)
@@ -165,9 +185,12 @@ class IdentityStampTests(unittest.TestCase):
 
     @patch.object(create_pr, "run_cmd")
     @patch.object(create_pr, "ensure_label", return_value=True)
+    @patch.object(create_pr, "select_review_service", return_value="coderabbit")
     @patch.object(create_pr, "existing_review_assignment",
                   side_effect=[None, None, "coderabbit"])
-    def test_failed_ready_state_is_not_reported_as_finalized(self, _existing, _label, run):
+    def test_failed_ready_state_is_not_reported_as_finalized(
+        self, _existing, _select, _label, run,
+    ):
         run.side_effect = [
             (0, "", ""),
             (1, "", "ready failed"),
@@ -179,8 +202,8 @@ class IdentityStampTests(unittest.TestCase):
     @patch.object(create_pr, "run_cmd")
     @patch.object(create_pr, "ensure_label")
     @patch.object(create_pr, "existing_review_assignment",
-                  side_effect=["coderabbit", "coderabbit", "coderabbit"])
-    def test_retry_accepts_an_already_ready_coderabbit_pr(self, _existing, label, run):
+                  side_effect=["sourcery", "sourcery", "sourcery"])
+    def test_retry_preserves_an_already_ready_assignment(self, _existing, label, run):
         run.side_effect = [
             (1, "", "already ready"),
             (0, '{"isDraft": false}', ""),
@@ -194,27 +217,13 @@ class IdentityStampTests(unittest.TestCase):
     @patch.object(create_pr, "run_cmd")
     @patch.object(create_pr, "ensure_label")
     @patch.object(create_pr, "existing_review_assignment",
-                  side_effect=["coderabbit", "coderabbit", None])
+                  side_effect=["codeant", "codeant", None])
     def test_already_ready_retry_reports_lost_assignment(self, _existing, label, run, output):
         run.side_effect = [(1, "", "already ready"), (0, '{"isDraft": false}', "")]
         self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         label.assert_not_called()
-        self.assertTrue(any("no longer carries review:coderabbit" in str(call)
+        self.assertTrue(any("no longer carries review:codeant" in str(call)
                             for call in output.call_args_list))
-
-    @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
-    @patch.object(create_pr, "ensure_label", return_value=True)
-    def test_enqueue_review_comments_queued_at_and_needs_review(self, _label, run):
-        self.assertTrue(create_pr.enqueue_review("https://x/pull/7"))
-        edited = run.call_args_list[0].args[0]
-        self.assertEqual(edited[:4], ["gh", "pr", "edit", "https://x/pull/7"])
-        self.assertIn("needs-review", edited)
-        commented = run.call_args_list[1].args[0]
-        self.assertEqual(commented[:3], ["gh", "pr", "comment"])
-        body = commented[commented.index("--body") + 1]
-        self.assertIn("review-queued-at:", body)
-        self.assertIn("No automated account should post a review", body)
-
 
 class FailClosedAssignmentTests(unittest.TestCase):
     """Every ambiguous or unreadable authority state must stop finalization.
@@ -242,9 +251,9 @@ class FailClosedAssignmentTests(unittest.TestCase):
                     with self.assertRaises(create_pr.ReviewAssignmentLookupError):
                         create_pr.existing_review_assignment("https://x/pull/9")
 
-    def test_legacy_unknown_and_case_variant_review_labels_are_rejected(self):
+    def test_unknown_agent_and_case_variant_review_labels_are_rejected(self):
         for review_label in (
-            "review:sourcery", "review:codeant", "review:unknown",
+            "review:agent", "review:unknown",
             "Review:coderabbit", "review:coderabbit ",
         ):
             with self.subTest(review_label=review_label):
@@ -265,12 +274,15 @@ class FailClosedAssignmentTests(unittest.TestCase):
                     with self.assertRaises(create_pr.ReviewAssignmentLookupError):
                         create_pr.existing_review_assignment("https://x/pull/9")
 
-    def test_exact_coderabbit_label_resolves(self):
-        payload = json.dumps({
-            "labels": [{"name": "needs-review"}, {"name": "review:coderabbit"}],
-        })
-        with patch.object(create_pr, "run_cmd", return_value=(0, payload, "")):
-            self.assertEqual(create_pr.existing_review_assignment("https://x/pull/9"), "coderabbit")
+    def test_each_exact_external_label_resolves(self):
+        for service in create_pr.REVIEW_SERVICES:
+            with self.subTest(service=service):
+                payload = json.dumps({"labels": [
+                    {"name": "needs-review"}, {"name": f"review:{service}"},
+                ]})
+                with patch.object(create_pr, "run_cmd", return_value=(0, payload, "")):
+                    self.assertEqual(
+                        create_pr.existing_review_assignment("https://x/pull/9"), service)
 
     def test_no_review_label_is_the_only_unassigned_answer(self):
         payload = json.dumps({"labels": [{"name": "needs-review"}]})
@@ -287,10 +299,11 @@ class FailClosedAssignmentTests(unittest.TestCase):
         label.assert_not_called()
 
     @patch.object(create_pr, "ensure_label", return_value=True)
-    def test_concurrent_coderabbit_assignment_is_idempotent(self, _label):
+    def test_concurrent_identical_assignment_is_idempotent(self, _label):
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "existing_review_assignment",
-                              side_effect=[None, "coderabbit", "coderabbit"]):
+                              side_effect=[None, "sourcery", "sourcery"]), \
+                patch.object(create_pr, "select_review_service", return_value="sourcery"):
             run.return_value = (0, "", "")
             self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         commands = [call.args[0] for call in run.call_args_list]
@@ -302,7 +315,8 @@ class FailClosedAssignmentTests(unittest.TestCase):
         conflict = create_pr.ReviewAssignmentLookupError("unsupported review label")
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "existing_review_assignment",
-                              side_effect=[None, conflict]):
+                              side_effect=[None, conflict]), \
+                patch.object(create_pr, "select_review_service", return_value="sourcery"):
             self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         run.assert_not_called()
 
@@ -314,7 +328,8 @@ class FailClosedAssignmentTests(unittest.TestCase):
         conflict = create_pr.ReviewAssignmentLookupError("conflicting review labels")
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "existing_review_assignment",
-                              side_effect=[None, None, conflict]):
+                              side_effect=[None, None, conflict]), \
+                patch.object(create_pr, "select_review_service", return_value="sourcery"):
             run.return_value = (0, "", "")
             self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         commands = [call.args[0] for call in run.call_args_list]
@@ -326,13 +341,71 @@ class FailClosedAssignmentTests(unittest.TestCase):
     def test_assignment_that_does_not_stick_is_not_marked_ready(self, _label):
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "existing_review_assignment",
-                              side_effect=[None, None, None]):
+                              side_effect=[None, None, None]), \
+                patch.object(create_pr, "select_review_service", return_value="codeant"):
             run.return_value = (0, "", "")
             self.assertFalse(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         self.assertEqual(run.call_count, 1)
 
 
+class BalancedReviewSelectionTests(unittest.TestCase):
+    @staticmethod
+    def open_pr(number, *labels):
+        return {"number": number, "labels": [{"name": label} for label in labels]}
+
+    def test_empty_pool_uses_stable_even_issue_rotation(self):
+        expected = ["coderabbit", "sourcery", "codeant"] * 2
+        with patch.object(create_pr, "get_repo_slug", return_value="owner/repo"), \
+                patch.object(create_pr, "open_pull_requests", return_value=[]):
+            actual = [create_pr.select_review_service(issue) for issue in range(1, 7)]
+        self.assertEqual(actual, expected)
+
+    def test_least_loaded_service_is_selected(self):
+        inventory = [
+            self.open_pr(1, "review:coderabbit"),
+            self.open_pr(2, "review:coderabbit"),
+            self.open_pr(3, "review:codeant"),
+        ]
+        with patch.object(create_pr, "get_repo_slug", return_value="owner/repo"), \
+                patch.object(create_pr, "open_pull_requests", return_value=inventory):
+            self.assertEqual(create_pr.select_review_service(472), "sourcery")
+
+    def test_tied_minimum_load_uses_issue_number_deterministically(self):
+        inventory = [self.open_pr(1, "review:coderabbit")]
+        with patch.object(create_pr, "get_repo_slug", return_value="owner/repo"), \
+                patch.object(create_pr, "open_pull_requests", return_value=inventory):
+            first = create_pr.select_review_service(1)
+            second = create_pr.select_review_service(2)
+            repeat = create_pr.select_review_service(2)
+        self.assertEqual((first, second, repeat), ("sourcery", "codeant", "codeant"))
+
+    def test_terminal_agent_fallback_does_not_consume_external_capacity(self):
+        inventory = [
+            self.open_pr(1, "review:agent", "reviewer:agent-2"),
+            self.open_pr(2, "review:coderabbit"),
+        ]
+        with patch.object(create_pr, "get_repo_slug", return_value="owner/repo"), \
+                patch.object(create_pr, "open_pull_requests", return_value=inventory):
+            self.assertEqual(create_pr.select_review_service(472), "codeant")
+
+    def test_unreadable_or_ambiguous_inventory_fails_closed(self):
+        bad_inventories = [
+            None,
+            [self.open_pr(1, "review:coderabbit", "review:sourcery")],
+            [self.open_pr(1, "review:unknown")],
+        ]
+        for inventory in bad_inventories:
+            with self.subTest(inventory=inventory), \
+                    patch.object(create_pr, "get_repo_slug", return_value="owner/repo"), \
+                    patch.object(create_pr, "open_pull_requests", return_value=inventory):
+                with self.assertRaises(create_pr.ReviewAssignmentLookupError):
+                    create_pr.select_review_service(472)
+
+
 class FinalizeReviewCliTests(unittest.TestCase):
+    def test_codex_is_a_supported_author_model_family(self):
+        self.assertIn("codex", create_pr.MODEL_FAMILIES)
+
     def test_finalize_review_flag_retries_assignment_on_an_existing_pr(self):
         argv = ["create_pr.py", "--issue", "9", "--finalize-review", "42",
                 "--agent", "agent-1", "--model-family", "anthropic"]

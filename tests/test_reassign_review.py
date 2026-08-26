@@ -44,13 +44,36 @@ class CurrentAuthorityTests(unittest.TestCase):
                 self.assertTrue(problem)
 
 
+class ReassignmentHistoryTests(unittest.TestCase):
+    def test_complete_valid_audit_marker_is_returned(self):
+        body = rr.audit_body(
+            "review:coderabbit", "review:sourcery", "sourcery", "provider stalled", HEAD)
+        with patch.object(rr, "get_repo_slug", return_value="owner/repo"), \
+                patch.object(rr, "fetch_paginated_gh_api", return_value=[{"body": body}]):
+            history = rr.reassignment_history(433)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["from"], "review:coderabbit")
+        self.assertEqual(history[0]["to"], "review:sourcery")
+
+    def test_malformed_audit_marker_fails_closed(self):
+        body = "<!-- aru-review-reassignment:v1 not-json -->"
+        with patch.object(rr, "get_repo_slug", return_value="owner/repo"), \
+                patch.object(rr, "fetch_paginated_gh_api", return_value=[{"body": body}]):
+            self.assertIsNone(rr.reassignment_history(433))
+
+    def test_incomplete_comment_inventory_fails_closed(self):
+        with patch.object(rr, "get_repo_slug", return_value="owner/repo"), \
+                patch.object(rr, "fetch_paginated_gh_api", return_value=None):
+            self.assertIsNone(rr.reassignment_history(433))
+
+
 class ReassignTests(unittest.TestCase):
     REASON = "CodeRabbit reported Review rate limited at abc1234"
 
     def _run(self, snapshot, service="sourcery",
              edit_results=((0, "", ""), (0, "", "")),
              comment_results=((0, "", ""), (0, "", "")),
-             reviewer="agent-2", family="openai"):
+             reviewer="agent-2", family="openai", history=()):
         calls = []
 
         def fake_run_cmd(cmd, **kwargs):
@@ -61,6 +84,7 @@ class ReassignTests(unittest.TestCase):
             return results[min(index, len(results) - 1)]
 
         with patch.object(rr, "run_gh_json", return_value=snapshot), \
+             patch.object(rr, "reassignment_history", return_value=list(history)), \
              patch.object(rr, "ensure_label", return_value=True), \
              patch.object(rr, "run_cmd", side_effect=fake_run_cmd):
             code = rr.reassign(433, service, self.REASON, reviewer, family)
@@ -85,11 +109,13 @@ class ReassignTests(unittest.TestCase):
         self.assertIn(self.REASON, audit)
         self.assertIn(HEAD, audit)
         self.assertIn("review:sourcery", audit)
+        self.assertIn("aru-review-reassignment:v1", audit)
 
     def test_each_service_is_triggered_with_its_own_command(self):
         for service in sorted(rr.EXTERNAL_FALLBACK_LABELS):
             with self.subTest(service=service):
-                code, calls = self._run(pr("review:coderabbit"), service=service)
+                existing = "review:codeant" if service == "coderabbit" else "review:coderabbit"
+                code, calls = self._run(pr(existing), service=service)
                 self.assertEqual(code, rr.EXIT_OK)
                 self.assertEqual(self._comments(calls)[1],
                                  rr.SERVICE_TRIGGERS[service])
@@ -106,10 +132,21 @@ class ReassignTests(unittest.TestCase):
                 self.assertEqual(code, rr.EXIT_CONFLICT)
                 self.assertEqual([c for c in calls if "edit" in c], [])
 
-    def test_switching_between_fallbacks_is_refused(self):
-        """Only the default assignment may move; a second hop is not authorized."""
-        code, _ = self._run(pr("review:codeant"), service="sourcery")
+    def test_any_initial_external_authority_can_move_once(self):
+        for existing, target in (("review:sourcery", "codeant"),
+                                 ("review:codeant", "coderabbit")):
+            with self.subTest(existing=existing, target=target):
+                code, calls = self._run(pr(existing), service=target)
+                self.assertEqual(code, rr.EXIT_OK)
+                self.assertIn(f"review:{target}", [
+                    c[-1] for c in calls if "--add-label" in c])
+
+    def test_prior_external_reassignment_blocks_a_second_external_hop(self):
+        prior = {"from": "review:coderabbit", "to": "review:codeant", "head": HEAD}
+        code, calls = self._run(
+            pr("review:codeant"), service="sourcery", history=[prior])
         self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([c for c in calls if "edit" in c], [])
 
     def test_agent_fallback_can_follow_any_external_authority(self):
         for existing in ("review:coderabbit", "review:sourcery", "review:codeant"):
@@ -120,6 +157,22 @@ class ReassignTests(unittest.TestCase):
                 self.assertIn("review:agent", edits[0])
                 self.assertIn("reviewer:agent-2", edits[0])
                 self.assertEqual(len(self._comments(calls)), 1)
+
+    def test_agent_fallback_refuses_impossible_repeated_external_history(self):
+        prior = {"from": "review:coderabbit", "to": "review:sourcery", "head": HEAD}
+        second = {"from": "review:sourcery", "to": "review:codeant", "head": HEAD}
+        code, calls = self._run(
+            pr("review:codeant", "author:agent-1"), service="agent",
+            history=[prior, second])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "edit" in call], [])
+
+    def test_agent_fallback_refuses_history_that_does_not_end_at_live_authority(self):
+        prior = {"from": "review:coderabbit", "to": "review:sourcery", "head": HEAD}
+        code, calls = self._run(
+            pr("review:codeant", "author:agent-1"), service="agent", history=[prior])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "edit" in call], [])
 
     def test_agent_fallback_records_identity_family_head_and_reason(self):
         code, calls = self._run(pr("review:codeant", "author:agent-1"), service="agent")
@@ -186,6 +239,7 @@ class ReassignTests(unittest.TestCase):
                                 comment_results=((1, "", "denied"), (0, "", "")))
         self.assertEqual(code, rr.EXIT_ERROR)
         self.assertEqual(len(self._comments(calls)), 1)
+        self.assertEqual([call for call in calls if "--remove-label" in call], [])
 
     def test_failed_trigger_fails_closed(self):
         code, _ = self._run(pr("review:coderabbit"),
@@ -212,9 +266,9 @@ class ArgumentTests(unittest.TestCase):
                     rr.reassign(1, "agent", "external reviewers exhausted",
                                 reviewer, family), rr.EXIT_ERROR)
 
-    def test_coderabbit_is_not_a_fallback_target(self):
-        """The default is what we fall back *from*; it is never a target."""
-        self.assertNotIn("coderabbit", rr.FALLBACK_LABELS)
+    def test_every_external_service_is_a_reassignment_target(self):
+        self.assertEqual(
+            set(rr.EXTERNAL_FALLBACK_LABELS), {"coderabbit", "sourcery", "codeant"})
 
     def test_every_target_is_an_authority_the_merge_gate_recognises(self):
         """A label this helper can apply but the gate cannot read strands the PR."""

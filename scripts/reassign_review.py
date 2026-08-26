@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# line-ceiling: 260
+# +70 for #472 balanced-pool one-way reassignment history validation.
+# line-ceiling: 330
 """reassign_review.py - move one stalled pull request to a fallback reviewer.
 
-CodeRabbit is the default and the only authority `create_pr.py` ever assigns.
-When it is demonstrably unavailable for a specific pull request, this command
-moves that PR to Sourcery or CodeAnt. Only after all external paths are
-unavailable, busy, or waiting too long may an operator select one independent
-coding agent. Every reassignment records why.
+`create_pr.py` assigns one balanced external authority. When that service is
+demonstrably unavailable for a specific pull request, this command makes one
+audited external move. It never rotates through the pool. Only after external
+paths are unavailable, busy, or waiting too long may an operator select one
+independent coding agent. Every reassignment records why.
 
 Deliberately not a scheduler. There is no rotation, no capacity ledger, and no
 automatic failover: authority moves only when an operator names a pull request
@@ -29,12 +30,13 @@ import json
 import re
 import sys
 
-from common import ensure_label, run_cmd, run_gh_json
+from common import ensure_label, fetch_paginated_gh_api, get_repo_slug, run_cmd, run_gh_json
 from create_pr import MODEL_FAMILIES
 
-CODERABBIT_LABEL = "review:coderabbit"
 EXTERNAL_FALLBACK_LABELS = {
-    "sourcery": "review:sourcery", "codeant": "review:codeant",
+    "coderabbit": "review:coderabbit",
+    "sourcery": "review:sourcery",
+    "codeant": "review:codeant",
 }
 AGENT_SERVICE = "agent"
 AGENT_LABEL = "review:agent"
@@ -44,9 +46,13 @@ FALLBACK_LABELS = {**EXTERNAL_FALLBACK_LABELS, AGENT_SERVICE: AGENT_LABEL}
 # queue; the incoming service has to be asked. These are the providers' own
 # documented request commands.
 SERVICE_TRIGGERS = {
+    "coderabbit": "@coderabbitai full review",
     "sourcery": "@sourcery-ai review",
     "codeant": "@codeant-ai: review",
 }
+REASSIGNMENT_MARKER_PREFIX = "<!-- aru-review-reassignment:v1 "
+REASSIGNMENT_MARKER_RE = re.compile(
+    re.escape(REASSIGNMENT_MARKER_PREFIX) + r"(\{[^\n]*\}) -->")
 _HEAD_RE = re.compile(r"[0-9a-fA-F]{40}")
 _AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 EXIT_OK = 0
@@ -84,6 +90,45 @@ def _comment(pr_id: int, body: str):
     return code == 0, (err or "").strip()
 
 
+def reassignment_history(pr_id: int):
+    """Return complete, well-formed audited moves, or ``None`` if unknown.
+
+    A partial comment read must never look like no previous reassignment; that
+    would permit a second external hop. The common paginated REST reader keeps
+    transport failure distinct from an empty history.
+    """
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    comments = fetch_paginated_gh_api(f"repos/{slug}/issues/{pr_id}/comments")
+    if comments is None:
+        return None
+    history = []
+    allowed = {*EXTERNAL_FALLBACK_LABELS.values(), AGENT_LABEL}
+    expected = {"from", "head", "reason", "to"}
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, dict) else None
+        if not isinstance(body, str):
+            return None
+        raw_markers = REASSIGNMENT_MARKER_RE.findall(body)
+        if body.count(REASSIGNMENT_MARKER_PREFIX) != len(raw_markers):
+            return None
+        for raw in raw_markers:
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+            if (not isinstance(record, dict) or set(record) != expected
+                    or record.get("from") not in allowed or record.get("to") not in allowed
+                    or record["from"] == record["to"]
+                    or not isinstance(record.get("reason"), str) or not record["reason"].strip()
+                    or not isinstance(record.get("head"), str)
+                    or _HEAD_RE.fullmatch(record["head"]) is None):
+                return None
+            history.append(record)
+    return history
+
+
 def audit_body(existing: str, target: str, service: str, reason: str, head: str,
                reviewer: str = "", family: str = "") -> str:
     """The auditable record of why authority moved, naming the head it moved at.
@@ -92,20 +137,23 @@ def audit_body(existing: str, target: str, service: str, reason: str, head: str,
     comparing this record against later evidence needs to know which commit was
     live when the reassignment happened.
     """
+    move = json.dumps({"from": existing, "head": head, "reason": reason.strip(),
+                       "to": target}, sort_keys=True, separators=(",", ":"))
+    move_record = f"{REASSIGNMENT_MARKER_PREFIX}{move} -->\n"
     agent_record = ""
     if service == AGENT_SERVICE:
         payload = json.dumps({"family": family, "from": existing, "head": head,
                               "reason": reason.strip(), "reviewer": reviewer},
                              sort_keys=True, separators=(",", ":"))
         agent_record = f"<!-- aru-agent-review-assignment:v1 {payload} -->\n"
-    return (agent_record
+    return (move_record + agent_record
             + f"Review authority reassigned from `{existing}` to `{target}`.\n\n"
             f"Reason: {reason.strip()}\n\n"
             f"Head at reassignment: `{head}`\n\n"
             + (f"Emergency reviewer: `{reviewer}` (`{family}`).\n\n"
                if service == AGENT_SERVICE else "")
-            + "CodeRabbit remains the default for new pull requests; this is a "
-            "per-pull-request fallback, not a rotation. The merge gate now "
+            + "This is a one-way per-pull-request fallback, not a rotation. "
+            "The merge gate now "
             f"requires {service}'s producer-validated evidence bound to this "
             "pull request's exact current head.")
 
@@ -158,17 +206,37 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
         print(f"[CONFLICT] PR #{pr_id} is already assigned to {service}; "
               "reassignment is not a retry mechanism.", file=sys.stderr)
         return EXIT_CONFLICT
-    if service != AGENT_SERVICE and existing != CODERABBIT_LABEL:
-        print(f"[CONFLICT] PR #{pr_id} carries {existing!r}, not the default "
-              f"{CODERABBIT_LABEL!r}; only the default assignment may be moved to a "
-              "fallback, so an already-switched pull request is never switched again.",
-              file=sys.stderr)
-        return EXIT_CONFLICT
+    history = reassignment_history(pr_id)
+    if history is None:
+        print(f"[ERROR] Could not establish complete reassignment history for PR #{pr_id}; "
+              "refusing rather than permitting a repeated move.", file=sys.stderr)
+        return EXIT_ERROR
+    if service != AGENT_SERVICE:
+        if existing not in EXTERNAL_FALLBACK_LABELS.values():
+            print(f"[CONFLICT] {existing!r} is not a configured external authority.",
+                  file=sys.stderr)
+            return EXIT_CONFLICT
+        if history:
+            print(f"[CONFLICT] PR #{pr_id} already has an audited reassignment; "
+                  "a second external hop would rotate immutable authority.", file=sys.stderr)
+            return EXIT_CONFLICT
     if service == AGENT_SERVICE:
-        allowed = {CODERABBIT_LABEL, *EXTERNAL_FALLBACK_LABELS.values()}
-        if existing not in allowed:
+        if existing not in EXTERNAL_FALLBACK_LABELS.values():
             print(f"[CONFLICT] {existing!r} is not a configured external "
                   "review authority; agent fallback cannot replace it.", file=sys.stderr)
+            return EXIT_CONFLICT
+        if len(history) > 1:
+            print(f"[CONFLICT] PR #{pr_id} has repeated audited reassignments; "
+                  "terminal fallback cannot legitimize a rotation.", file=sys.stderr)
+            return EXIT_CONFLICT
+        if history and history[0].get("to") != existing:
+            print(f"[CONFLICT] PR #{pr_id} live authority {existing} does not match "
+                  "its audited reassignment history; resolve the label drift first.",
+                  file=sys.stderr)
+            return EXIT_CONFLICT
+        if any(record.get("to") == AGENT_LABEL for record in history):
+            print(f"[CONFLICT] PR #{pr_id} already used its terminal agent fallback.",
+                  file=sys.stderr)
             return EXIT_CONFLICT
         authors = [name[len("author:"):] for name in
                    (item["name"] for item in pr["labels"])
@@ -198,6 +266,19 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
         print(f"[ERROR] Could not add {target} to PR #{pr_id}: {err.strip()}. "
               "The original assignment is untouched.", file=sys.stderr)
         return EXIT_ERROR
+
+    # Persist the one-way audit while both labels are present. If this write
+    # fails, the merge gate sees the intentionally ambiguous state and no
+    # caller can mistake the missing history for permission to rotate again.
+    ok, err = _comment(pr_id, audit_body(existing, target, service,
+                                         reason, pr["headRefOid"], reviewer, family))
+    if not ok:
+        print(f"[ERROR] Added {target} to PR #{pr_id}, but the reason could not "
+              f"be recorded: {err}. Both authority labels remain so the merge "
+              f"gate blocks; restore {existing} by removing {target}, or record "
+              "the audit before completing the swap.", file=sys.stderr)
+        return EXIT_ERROR
+
     code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--remove-label", existing],
                            check=False)
     if code != 0:
@@ -205,15 +286,6 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
               f"#{pr_id}: {err.strip()}. The pull request now carries two authority "
               f"labels and the merge gate will refuse it; remove {existing} manually "
               "or remove the new label to undo the reassignment.", file=sys.stderr)
-        return EXIT_ERROR
-
-    ok, err = _comment(pr_id, audit_body(existing, target, service,
-                                         reason, pr["headRefOid"], reviewer, family))
-    if not ok:
-        print(f"[ERROR] PR #{pr_id} now carries {target}, but the reason could not "
-              f"be recorded: {err}. An unaudited reassignment is not acceptable; "
-              "post the reason manually or restore "
-              f"{existing}.", file=sys.stderr)
         return EXIT_ERROR
 
     if service == AGENT_SERVICE:
@@ -237,11 +309,11 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Move one stalled PR from CodeRabbit to a fallback reviewer.")
+        description="Move one stalled PR through the audited one-way fallback path.")
     parser.add_argument("--pr", type=int, required=True)
     parser.add_argument("--to", required=True, choices=sorted(FALLBACK_LABELS))
     parser.add_argument("--reason", required=True,
-                        help="Concrete unavailability, e.g. 'CodeRabbit rate limited at <sha>'")
+                        help="Concrete unavailability, e.g. 'assigned service rate limited at <sha>'")
     parser.add_argument("--reviewer", default="",
                         help="Independent agent id; required only with --to agent")
     parser.add_argument("--model-family", "--family", dest="family", default="",
