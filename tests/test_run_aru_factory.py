@@ -603,10 +603,12 @@ class WiringTests(unittest.TestCase):
     def test_loop_pacing_is_dynamic_and_nonblocking(self):
         raw = skill_text()
         text = flat(raw)
-        exact = ("pace dynamically", "fixed interval", "snapshot → reconcile → decide → dispatch → report", "never waits synchronously for coding-worker, ci, or external-review completion", "same-job single-flight", "no repository-local daemon, private task queue, or competing scheduler", "each tick starts with **exactly one authoritative picker call**", "do not preflight or enrich it with", "make zero follow-up github reads", "durable worker-state persistence belongs to #479", "worker prompt protocol belongs to #480", "exactly one fresh picker call occurs only at the start of the next tick", "aru's focused-predicate exception remains local to `aru_agentic_sdlc`")
+        exact = ("pace dynamically", "fixed interval", "snapshot → reconcile → decide → dispatch → report", "never waits synchronously for coding-worker, ci, or external-review completion", "same-job single-flight", "no repository-local daemon, private task queue, or competing scheduler", "each hermes tick starts with **exactly one authoritative picker call**", "do not preflight or enrich it with", "make zero follow-up github reads", "durable worker-state persistence belongs to #479", "worker prompt protocol belongs to #480", "exactly one fresh picker call occurs only at the start of the next tick", "aru's focused-predicate exception remains local to `aru_agentic_sdlc`", "hermes does not execute that worker loop inline", "worker-local ci waits and post-mutation picker transitions remain inside the dispatched worker task", "neither extend the hermes tick nor count as picker calls by that tick", "this slice defines that boundary only")
         for phrase in exact:
             self.assertIn(phrase, text)
         self.assertIn("consumer repositories follow their own `AGENTS.md` testing policy", raw)
+        worker = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
+        self.assertTrue(all(phrase in worker for phrase in ("immediately make exactly one fresh picker call", "check_ci.py --pr <pr> --wait")))
 
     def test_the_fleet_prompt_points_at_the_entrypoint(self):
         text = FLEET_PROMPT.read_text(encoding="utf-8")
