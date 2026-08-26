@@ -9,6 +9,8 @@ removed the superseded label, so issues accumulated every status they had ever
 held.
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 

@@ -80,6 +80,57 @@ def forensics(result, script, home):
 
 
 class InstallerParityTest(unittest.TestCase):
+    def test_default_all_and_explicit_single_agent_contracts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            all_home = root / "all"
+            explicit_all_home = root / "explicit-all"
+            cursor_home = root / "cursor"
+            clean_env = dict(os.environ, PATH="/usr/bin:/bin")
+
+            all_result = subprocess.run(
+                ["bash", str(installer_path()), "--target-home", str(all_home)],
+                env=dict(clean_env, HOME=str(all_home)), capture_output=True, text=True,
+            )
+            self.assertEqual(all_result.returncode, 0, all_result.stderr)
+            for path in (
+                ".codex/skills", ".claude/skills", ".cursor/skills",
+                ".gemini/antigravity/skills",
+            ):
+                self.assertTrue((all_home / path / "run-aru-factory").is_symlink(), path)
+            self.assertNotIn("not requested/detected", all_result.stdout)
+
+            explicit_all_result = subprocess.run(
+                ["bash", str(installer_path()), "--agent", "all",
+                 "--target-home", str(explicit_all_home)],
+                env=dict(clean_env, HOME=str(explicit_all_home)),
+                capture_output=True, text=True,
+            )
+            self.assertEqual(
+                explicit_all_result.returncode, 0, explicit_all_result.stderr,
+            )
+            for path in (
+                ".codex/skills", ".claude/skills", ".cursor/skills",
+                ".gemini/antigravity/skills",
+            ):
+                self.assertTrue(
+                    (explicit_all_home / path / "run-aru-factory").is_symlink(),
+                    path,
+                )
+            self.assertNotIn(
+                "not requested/detected", explicit_all_result.stdout,
+            )
+
+            cursor_result = subprocess.run(
+                ["bash", str(installer_path()), "--agent", "cursor",
+                 "--target-home", str(cursor_home)],
+                env=dict(clean_env, HOME=str(cursor_home)), capture_output=True, text=True,
+            )
+            self.assertEqual(cursor_result.returncode, 0, cursor_result.stderr)
+            self.assertTrue((cursor_home / ".cursor/skills/run-aru-factory").is_symlink())
+            for path in (".codex/skills", ".claude/skills", ".gemini/antigravity/skills"):
+                self.assertFalse((cursor_home / path).exists(), path)
+
     def test_every_skill_on_disk_is_installed(self):
         """The regression that shipped: a skill exists but is unreachable."""
         expected = skills_on_disk()

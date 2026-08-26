@@ -480,7 +480,7 @@ def _has_active_review_feedback(pr: Dict[str, Any]) -> bool:
     return str(pr.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED"
 
 
-def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
+def _assigned_service_review_state(pr: Dict[str, Any]) -> Optional[str]:
     evidence = _review_evidence(pr)
     if not evidence:
         return None
@@ -488,12 +488,16 @@ def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
         import merge_pr as mp
     except ImportError:
         return None
-    if not mp.has_authoritative_coderabbit_review(pr, evidence):
+    if not mp.has_authoritative_assigned_review(pr, evidence):
+        return None
+    service = mp.assigned_review_service(pr)
+    counts = mp._service_thread_counts(evidence, service)
+    if not isinstance(counts, dict):
         return None
     if (
-        int(evidence.get("unresolved") or 0) > 0
-        or int(evidence.get("unfixed") or 0) > 0
-        or int(evidence.get("outdated_unfixed") or 0) > 0
+        int(counts.get("unresolved") or 0) > 0
+        or int(counts.get("unfixed") or 0) > 0
+        or int(counts.get("outdated_unfixed") or 0) > 0
     ):
         return "feedback"
     return "reviewed"
@@ -502,11 +506,18 @@ def _coderabbit_review_state(pr: Dict[str, Any]) -> Optional[str]:
 def _review_state(pr: Dict[str, Any]) -> str:
     if pr.get("isDraft"):
         return "none"
+    assigned_state = _assigned_service_review_state(pr)
+    if assigned_state:
+        return assigned_state
+    try:
+        import merge_pr as mp
+
+        if mp.assigned_review_service(pr) in {"coderabbit", "sourcery", "codeant", "agent"}:
+            return "pending"
+    except ImportError:
+        pass
     if _has_active_review_feedback(pr):
         return "feedback"
-    coderabbit_state = _coderabbit_review_state(pr)
-    if coderabbit_state:
-        return coderabbit_state
     return "pending"
 
 

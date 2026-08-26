@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1260
+# line-ceiling: 1270
 """Return the highest-priority work one governed factory agent can perform.
 Finishing beats starting: author feedback, merge-ready work, resumable issues,
 then Ready issues. External review services stay outside the coding-agent queue;
@@ -507,21 +507,25 @@ def _dod_gate_details(pr_number: int) -> dict[str, str] | None:
 
 def _author_can_repair_review(pr: dict[str, Any]) -> bool:
     """True when DoD `review` fails only because resolved threads lack evidence."""
-    if merge_pr.assigned_review_service(pr) != "coderabbit":
+    service = merge_pr.assigned_review_service(pr)
+    if service not in {"coderabbit", "sourcery", "codeant", "agent"}:
         return False
     evidence = review_evidence(pr["number"])
     if not evidence:
         return False
-    evidence = merge_pr._with_coderabbit_status(pr["number"], evidence)
+    evidence = merge_pr.with_service_evidence(pr, pr["number"], evidence)
     if not evidence:
         return False
-    if not merge_pr.has_authoritative_coderabbit_review(pr, evidence):
+    if not merge_pr.has_authoritative_assigned_review(pr, evidence):
         return False
-    if int(evidence.get("unresolved") or 0) > 0:
+    counts = merge_pr._service_thread_counts(evidence, service)
+    if not isinstance(counts, dict):
         return False
-    if int(evidence.get("outdated_unfixed") or 0) > 0:
+    if int(counts.get("unresolved") or 0) > 0:
         return False
-    return int(evidence.get("unfixed") or 0) > 0
+    if int(counts.get("outdated_unfixed") or 0) > 0:
+        return False
+    return int(counts.get("unfixed") or 0) > 0
 
 
 def _author_fixable_from_unmet(

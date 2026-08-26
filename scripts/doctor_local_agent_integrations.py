@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-# line-ceiling: 957
+# line-ceiling: 914
 """Read-only diagnosis for local coding-agent integrations.
 
 Reports desktop continuity adapters plus install-link checks (canonical home,
 skill links, invocation surfaces, governance blocks, git/gh prerequisites,
-and target-repo governance). It never prints credential values and never
-mutates configuration, GitHub state, or agent files.
+worktree isolation, the local stop file, and target-repo governance). It never
+prints credential values and never mutates configuration, GitHub state, or
+agent files.
+
+It reads no presence registry and no factory-metrics state: GitHub remains the
+authority on who holds what, and the doctor only reports what is installed and
+readable on this machine.
 """
 
 from __future__ import annotations
@@ -840,31 +845,6 @@ def report(aru_home: Path, target_home: Path, project: str | None,
         "repository": repo,
         "checks": checks,
     }
-    try:
-        from agent_presence import PresenceStore, doctor_presence_summary
-
-        presence_path = target_home / ".aru" / "agent-presence.json"
-        projects_path = target_home / ".aru" / "projects.json"
-        payload["presence"] = doctor_presence_summary(
-            project=project,
-            agents=agents,
-            store=PresenceStore(presence_path),
-            catalog_non_guarantees=catalog["non_guarantees"],
-            projects_path=projects_path,
-        )
-    except Exception as exc:
-        payload["presence"] = {
-            "schema": "aru.agent-presence/v1",
-            "project": project,
-            "project_id": None,
-            "error": type(exc).__name__,
-            "tasks": [],
-            "by_product": {name: [] for name in agents},
-            "wake_limitations": list(catalog.get("non_guarantees") or []),
-            "ownership": (
-                "GitHub claims remain authoritative; presence never releases or steals claims."
-            ),
-        }
     payload["status"] = overall_status(checks, payload)
     return payload
 
@@ -885,35 +865,12 @@ def render_human(payload: dict) -> str:
             f" enabled={agent['native_wake_enabled']}"
             f" evidence={agent['native_wake_evidence']}"
         )
-        heartbeat = (
-            f" heartbeat={agent['last_heartbeat']}"
-            if agent.get("last_heartbeat")
-            else ""
-        )
         lines.append(
             f"  {name}: {mark} version={agent['version']}{app} "
-            f"same_task_wake={agent['same_task_native_wake']}{gap}{wake}{heartbeat}"
+            f"same_task_wake={agent['same_task_native_wake']}{gap}{wake}"
         )
-    presence = payload.get("presence") or {}
-    tasks = presence.get("tasks") or []
-    lines.append(f"presence_tasks: {len(tasks)}")
-    for task in tasks[:8]:
-        cooldown = ""
-        if task.get("cooldown_reason"):
-            cooldown += f" cooldown_reason={task['cooldown_reason']}"
-        if task.get("cooldown_until"):
-            cooldown += f" cooldown_until={task['cooldown_until']}"
-        lines.append(
-            f"  presence {task.get('agent_id')}: "
-            f"availability={task.get('availability')} "
-            f"project={task.get('project_id')} "
-            f"heartbeat={task.get('last_heartbeat') or 'unknown'}{cooldown}"
-        )
-    for note in presence.get("wake_limitations") or []:
+    for note in payload.get("non_guarantees") or []:
         lines.append(f"wake_limitation: {note}")
-    ownership = presence.get("ownership")
-    if ownership:
-        lines.append(f"presence_ownership: {ownership}")
     failed = [item for item in payload.get("checks") or [] if not item["ok"]]
     if failed:
         lines.append("failed checks:")

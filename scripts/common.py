@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # +60 for the #344 terminal merge lease shared by all four helpers.
-# line-ceiling: 1576
+# +42 for the #410 GitHub pagination/date helpers claims no longer take from metrics.
+# +33 for the #362 fail-closed board reads.
+# +15 for the #457 GraphQL quota reduction.
+# line-ceiling: 1680
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -15,6 +18,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -312,6 +316,59 @@ def run_gh_json(cmd: List[str]) -> Optional[Any]:
     except json.JSONDecodeError:
         print(f"[WARN] Failed to parse JSON from gh CLI: {stdout}", file=sys.stderr)
         return None
+
+
+def parse_iso(ts_str: str) -> Optional[datetime]:
+    """Parse a GitHub ISO 8601 timestamp, or None when it is unusable.
+
+    Recovery decisions are made from authoritative GitHub timestamps, so a
+    value that cannot be parsed must stay unusable rather than degrade to a
+    guess: callers treat None as "unprovable" and fail closed.
+    """
+    if not ts_str:
+        return None
+    try:
+        if ts_str.endswith("Z"):
+            ts_str = ts_str[:-1] + "+00:00"
+        return datetime.fromisoformat(ts_str)
+    except Exception:
+        return None
+
+
+def fetch_paginated_gh_api(endpoint: str) -> Optional[List[Dict[str, Any]]]:
+    """Fetch every page of a REST endpoint, or None when the read failed.
+
+    ``None`` is reserved for an unreadable answer (transport failure or
+    undecodable payload) and is never conflated with an empty result, so a
+    caller reading claim history can refuse to act on a partial timeline.
+    """
+    code, stdout, stderr = run_cmd(["gh", "api", "--paginate", endpoint], check=False)
+    if code != 0 or not stdout.strip():
+        if code != 0:
+            print(f"[ERROR] GitHub API request failed: {stderr}", file=sys.stderr)
+        return None
+
+    raw = stdout.strip()
+    # gh api --paginate concatenates one JSON array per page: `[...][...]`.
+    items: List[Dict[str, Any]] = []
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(raw):
+        while pos < len(raw) and raw[pos].isspace():
+            pos += 1
+        if pos >= len(raw):
+            break
+        try:
+            chunk, idx = decoder.raw_decode(raw[pos:])
+        except json.JSONDecodeError as exc:
+            print(f"[ERROR] Failed to decode API response JSON: {exc}", file=sys.stderr)
+            return None
+        if isinstance(chunk, list):
+            items.extend(chunk)
+        elif isinstance(chunk, dict):
+            items.append(chunk)
+        pos += idx
+    return items
 
 
 def get_current_branch() -> str:
@@ -954,19 +1011,19 @@ def get_repo_slug() -> Optional[str]:
 def query_issue_project_items(
     issue_number: int,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Returns project items while preserving GraphQL failures as ``None``."""
+    """Returns every project item while preserving any page failure as ``None``."""
     slug = get_repo_slug()
     if not slug or "/" not in slug:
         return None
     owner, repo = slug.split("/", 1)
 
     query = """
-    query($owner:String!, $repo:String!, $number:Int!) {
+    query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
       repository(owner:$owner, name:$repo) {
         issue(number:$number) {
           id
           url
-          projectItems(first:10) {
+          projectItems(first:100, after:$cursor) {
             nodes {
               id
               status: fieldValueByName(name:"Status") {
@@ -990,26 +1047,70 @@ def query_issue_project_items(
                 }
               }
             }
+            pageInfo { hasNextPage endCursor }
           }
         }
       }
     }
     """
-    cmd = [
-        "gh", "api", "graphql",
-        "-f", f"query={query}",
-        "-F", f"owner={owner}",
-        "-F", f"repo={repo}",
-        "-F", f"number={issue_number}",
-    ]
-    res = run_gh_json(cmd)
-    if not isinstance(res, dict) or res.get("errors"):
-        return None
-    try:
-        return res["data"]["repository"]["issue"]["projectItems"]["nodes"]
-    except (KeyError, TypeError):
-        return None
+    items: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+    seen_cursors = set()
+    while True:
+        cmd = [
+            "gh", "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}",
+            "-F", f"repo={repo}",
+            "-F", f"number={issue_number}",
+        ]
+        if cursor is not None:
+            cmd += ["-F", f"cursor={cursor}"]
+        res = run_gh_json(cmd)
+        if not isinstance(res, dict) or res.get("errors"):
+            return None
+        try:
+            connection = res["data"]["repository"]["issue"]["projectItems"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            if not isinstance(nodes, list) or not isinstance(page_info, dict):
+                return None
+            items.extend(nodes)
+            has_next = page_info["hasNextPage"]
+            if not isinstance(has_next, bool):
+                return None
+            if not has_next:
+                return items
+            next_cursor = page_info["endCursor"]
+        except (KeyError, TypeError):
+            return None
+        if not isinstance(next_cursor, str) or not next_cursor \
+                or next_cursor in seen_cursors:
+            return None
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
 
+
+def governed_project_items(
+    issue_number: int,
+    repo_slug: str,
+) -> Optional[List[Dict[str, Any]]]:
+    """Returns governed board items, or ``None`` when the board read failed.
+
+    Board mutation helpers must be able to tell "the issue is on no board" from
+    "the board is unreadable". Collapsing an incomplete pagination run to an
+    empty list made a denied later page look like a missing item, so a writer
+    would attach a duplicate item or move the wrong one instead of aborting.
+    """
+    items = query_issue_project_items(issue_number)
+    if items is None:
+        print(
+            f"[WARN] Project board items for issue #{issue_number} are "
+            "unreadable; refusing to write board state.",
+            file=sys.stderr,
+        )
+        return None
+    return select_governed_project_items(items, repo_slug)
 
 def get_repo_projects(repo_slug: str) -> Optional[List[Dict[str, Any]]]:
     """Returns Project v2 boards linked to ``owner/repo``.
@@ -1152,7 +1253,11 @@ def attach_issue_to_governed_project(
         if existing_items is _PROJECT_ITEMS_UNSET else existing_items
     )
     if existing is None:
-        print(f"[WARN] Could not query Project items for issue #{issue_number}.", file=sys.stderr)
+        print(
+            f"[WARN] Project board items for issue #{issue_number} are "
+            "unreadable; refusing to attach a possibly duplicate item.",
+            file=sys.stderr,
+        )
         return False
     if project_id and any(
         (item.get("project") or {}).get("id") == project_id
@@ -1190,11 +1295,9 @@ def set_board_status(  # noqa: C901, PLR0912
     slug = get_repo_slug()
     if not slug:
         return False
-    raw_items = query_issue_project_items(issue_number)
-    if raw_items is None:
-        print(f"[WARN] Could not query Project items for issue #{issue_number}.", file=sys.stderr)
+    items = governed_project_items(issue_number, slug)
+    if items is None:
         return False
-    items = select_governed_project_items(raw_items, slug)
     if not items:
         if expected_status is not None:
             print(
@@ -1203,10 +1306,9 @@ def set_board_status(  # noqa: C901, PLR0912
                 file=sys.stderr,
             )
             return False
-        if not attach_issue_to_governed_project(issue_number, existing_items=raw_items):
+        if not attach_issue_to_governed_project(issue_number, existing_items=[]):
             return False
-        refreshed = query_issue_project_items(issue_number)
-        items = select_governed_project_items(refreshed or [], slug) if refreshed is not None else []
+        items = governed_project_items(issue_number, slug)
     if not items:
         print(
             f"[WARN] Could not identify one governed project board for '{slug}'.",
@@ -1337,15 +1439,13 @@ def set_issue_priority_field(issue_number: int, value: str) -> bool:
     slug = get_repo_slug()
     if not slug or "/" not in slug or "P" not in value:
         return False
-    raw_items = query_issue_project_items(issue_number)
-    if raw_items is None:
+    items = governed_project_items(issue_number, slug)
+    if items is None:
         return False
-    items = select_governed_project_items(raw_items, slug)
     if not items:
-        if not attach_issue_to_governed_project(issue_number, existing_items=raw_items):
+        if not attach_issue_to_governed_project(issue_number, existing_items=[]):
             return False
-        refreshed = query_issue_project_items(issue_number)
-        items = select_governed_project_items(refreshed or [], slug) if refreshed is not None else []
+        items = governed_project_items(issue_number, slug)
     if not items:
         return False
 

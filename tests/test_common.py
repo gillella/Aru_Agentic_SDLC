@@ -1,3 +1,4 @@
+# line-ceiling: 456
 import sys
 import unittest
 from pathlib import Path
@@ -74,6 +75,38 @@ class GovernedProjectSelectionTests(unittest.TestCase):
         selected = select_governed_projects(projects, "octocat/widgets")
 
         self.assertEqual([project["title"] for project in selected], ["widgets Board"])
+
+
+class ProjectItemPaginationTests(unittest.TestCase):
+    @staticmethod
+    def page(nodes, has_next, cursor):
+        return {
+            "data": {"repository": {"issue": {"projectItems": {
+                "nodes": nodes,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            }}}},
+        }
+
+    @patch.object(common, "run_gh_json")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_reads_every_project_item_page(self, _slug, run):
+        run.side_effect = [
+            self.page([{"id": "FIRST"}], True, "CURSOR_1"),
+            self.page([{"id": "GOVERNED"}], False, None),
+        ]
+        items = common.query_issue_project_items(42)
+        self.assertEqual([item["id"] for item in items], ["FIRST", "GOVERNED"])
+        self.assertNotIn("cursor=", " ".join(run.call_args_list[0].args[0]))
+        self.assertIn("cursor=CURSOR_1", run.call_args_list[1].args[0])
+
+    @patch.object(common, "run_gh_json")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_later_page_failure_discards_partial_authority(self, _slug, run):
+        run.side_effect = [
+            self.page([{"id": "FIRST"}], True, "CURSOR_1"),
+            {"errors": [{"message": "scope denied"}]},
+        ]
+        self.assertIsNone(common.query_issue_project_items(42))
 
 
 class GovernedProjectAttachmentTests(unittest.TestCase):
@@ -166,6 +199,35 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
             common.set_board_status(42, "Ready", expected_status="Backlog")
         )
         attach.assert_not_called()
+
+    @patch.object(common, "run_cmd")
+    @patch.object(common, "attach_issue_to_governed_project")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    @patch.object(common, "query_issue_project_items", return_value=None)
+    def test_incomplete_board_read_blocks_every_board_write(
+        self, _items, _slug, attach, run
+    ):
+        """An unreadable page is not an unboarded issue: writers must abort."""
+        with patch("sys.stderr"):
+            self.assertFalse(common.set_board_status(42, "Ready"))
+            self.assertFalse(common.set_issue_priority_field(42, "P2"))
+
+        attach.assert_not_called()
+        run.assert_not_called()
+
+    @patch.object(common, "add_issue_to_project")
+    @patch.object(common, "get_repo_projects")
+    @patch.object(common, "query_issue_project_items", return_value=None)
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_incomplete_board_read_does_not_attach_a_duplicate_item(
+        self, _slug, _items, projects, add
+    ):
+        projects.return_value = [self.project()]
+
+        with patch("sys.stderr"):
+            self.assertFalse(attach_issue_to_governed_project(42))
+
+        add.assert_not_called()
 
 
 if __name__ == "__main__":

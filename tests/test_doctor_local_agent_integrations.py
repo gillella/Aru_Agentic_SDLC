@@ -1,4 +1,4 @@
-# line-ceiling: 608
+# line-ceiling: 568
 import hashlib
 import json
 import os
@@ -395,116 +395,76 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertTrue(missing)
         self.assertEqual(payload["status"], "degraded")
 
-    def test_presence_and_wake_limitations_are_reported_read_only(self):
-        import sys
+    def test_report_carries_no_presence_or_metrics_state(self):
+        """#410: the doctor describes this machine, not agent liveness.
 
-        sys.path.insert(0, str(ROOT / "scripts"))
-        import agent_presence as ap
-
+        Presence and factory metrics were local caches of intent that could
+        disagree with GitHub, so a doctor that surfaced them invited operators
+        to reason about ownership from unauthoritative state.
+        """
         project = self.target_home / "repo-a"
         project.mkdir()
+        subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True)
+        payload = json.loads(
+            self.run_doctor("--json", "--project", str(project.resolve())).stdout
+        )
+        self.assertNotIn("presence", payload)
+        # Keys, not a whole-payload substring scan: the checkout path itself
+        # can legitimately contain the word.
+        for key in payload:
+            for banned in ("presence", "heartbeat", "metrics"):
+                self.assertNotIn(banned, key)
+        for name, agent in payload["agents"].items():
+            self.assertNotIn("last_heartbeat", agent, name)
+            for banned in ("presence", "heartbeat", "metrics"):
+                self.assertFalse([k for k in agent if banned in k], name)
+        human = self.run_doctor("--project", str(project.resolve())).stdout
+        # `opt_in_thread_heartbeat` is a catalog capability name, so the human
+        # report is checked for the emitted fields rather than the words.
+        for banned in ("presence_tasks:", "presence_ownership:", " heartbeat="):
+            self.assertNotIn(banned, human)
+
+    def test_doctor_source_reads_no_presence_or_metrics_runtime(self):
+        source = DOCTOR.read_text(encoding="utf-8")
+        self.assertNotIn("agent_presence", source)
+        self.assertNotIn("PresenceStore", source)
+        self.assertNotIn("factory_metrics", source)
+
+    def test_report_still_covers_install_repo_auth_worktree_and_stop(self):
+        """The retained surface the doctor is responsible for after #410."""
+        repo = self.target_home / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/acme/demo.git"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        (repo / "AGENTS.md").write_text("# Issue-First Law\n")
+        (repo / ".worktrees").mkdir()
         aru = self.target_home / ".aru"
         aru.mkdir()
-        store = ap.PresenceStore(aru / "agent-presence.json")
-        store.register(
-            agent_id="cursor-cloud-1",
-            family="cursor",
-            project_id=ap.path_derived_project_id(project),
-            checkout_path=str(project.resolve()),
-            availability="cooling-down",
-            cooldown_reason="rate-limited",
-            cooldown_until="2026-08-17T22:00:00Z",
-            wake_evidence_supported=["github-recovery"],
+        (aru / "factory-loop.stop").write_text(
+            json.dumps({"reason": "operator", "projects": [str(repo.resolve())]})
         )
-        other = self.target_home / "repo-b"
-        other.mkdir()
-        store.register(
-            agent_id="cursor-cloud-2",
-            family="cursor",
-            project_id=ap.path_derived_project_id(other),
-            checkout_path=str(other.resolve()),
-            availability="available",
-        )
-        presence_file = aru / "agent-presence.json"
-        before = presence_file.read_text(encoding="utf-8")
+
         payload = json.loads(
-            self.run_doctor("--json", "--project", str(project.resolve())).stdout
+            self.run_doctor("--json", "--project", str(repo.resolve())).stdout
         )
-        self.assertIn("presence", payload)
-        tasks = payload["presence"]["tasks"]
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0]["agent_id"], "cursor-cloud-1")
-        self.assertEqual(tasks[0]["cooldown_reason"], "rate-limited")
-        self.assertEqual(tasks[0]["cooldown_until"], "2026-08-17T22:00:00Z")
-        self.assertEqual(payload["agents"]["cursor"].get("last_heartbeat"), tasks[0]["last_heartbeat"])
-        self.assertTrue(payload["presence"]["wake_limitations"])
-        self.assertIn("GitHub claims remain authoritative", payload["presence"]["ownership"])
-        # Doctor must not invent paid wake enablement from presence alone.
-        self.assertFalse(payload["agents"]["cursor"]["native_wake_enabled"])
-        joined = " ".join(payload["presence"]["wake_limitations"])
-        self.assertIn("Presence never launches agents", joined)
-        self.assertIn("by_product", payload["presence"])
-        human = self.run_doctor("--project", str(project.resolve())).stdout
-        self.assertIn("cooldown_reason=rate-limited", human)
-        self.assertIn("cooldown_until=2026-08-17T22:00:00Z", human)
-        # Read-only: presence file unchanged after the first doctor run.
-        after = presence_file.read_text(encoding="utf-8")
-        self.assertEqual(before, after)
+        self.assertEqual(payload["install_diagnosis"], "complete")
+        self.assertIn("prerequisites", payload["install"])
+        self.assertIn("gh_logged_in", payload["install"]["prerequisites"])
+        self.assertTrue(payload["repository"]["worktrees"]["present"])
+        self.assertTrue(payload["loop_stopped"])
+        self.assertIn(payload["status"], {"degraded", "invalid"})
+        check_ids = {item["id"] for item in payload["checks"]}
+        self.assertLessEqual(
+            {"canonical_home", "gh_auth", "git_remote", "worktrees"}, check_ids
+        )
+        self.assertTrue(payload["non_guarantees"])
 
-    def test_presence_project_id_uses_target_home_registry(self):
-        import sys
-
-        sys.path.insert(0, str(ROOT / "scripts"))
-        import agent_presence as ap
-
-        project = self.target_home / "repo-reg"
-        project.mkdir()
-        aru = self.target_home / ".aru"
-        aru.mkdir(mode=0o700, exist_ok=True)
-        projects_path = aru / "projects.json"
-        record = {
-            "project_id": "proj_from_target_home",
-            "github_repo_id": "R_kgDOreg",
-            "github_repo_database_id": 1,
-            "project_v2_id": "PVT_kwDOreg",
-            "repo_slug": "acme/reg",
-            "local_path": str(project.resolve()),
-            "slack_team_id": "T123",
-            "slack_channel_id": "C123",
-            "lifecycle": "active",
-            "created_at": "2026-08-16T00:00:00Z",
-            "updated_at": "2026-08-16T00:00:00Z",
-            "updated_by": "test",
-            "closed_at": None,
-        }
-        projects_path.write_text(
-            json.dumps({"schema_version": 1, "projects": {
-                "proj_from_target_home": record,
-            }, "migrations": {}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(projects_path, 0o600)
-        store = ap.PresenceStore(aru / "agent-presence.json")
-        store.register(
-            agent_id="cursor-cloud-1",
-            family="cursor",
-            project_id="proj_from_target_home",
-            checkout_path=str(project.resolve()),
-        )
-        payload = json.loads(
-            self.run_doctor("--json", "--project", str(project.resolve())).stdout
-        )
-        self.assertEqual(payload["presence"]["project_id"], "proj_from_target_home")
-        self.assertEqual(len(payload["presence"]["tasks"]), 1)
-        # Prove the target-home registry supplied the project_id (not a path hash).
-        self.assertNotEqual(
-            payload["presence"]["project_id"],
-            ap.path_derived_project_id(project),
-        )
-        self.assertEqual(
-            ap.resolve_project_id(project, projects_path=projects_path),
-            "proj_from_target_home",
-        )
+        human = self.run_doctor("--project", str(repo.resolve())).stdout
+        self.assertIn("loop_stopped: True", human)
+        self.assertIn("wake_limitation:", human)
 
     def test_auth_probe_uses_target_home_not_operator_credentials(self):
         env_file = self.target_home / "gh-auth-env.txt"

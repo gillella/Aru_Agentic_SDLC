@@ -54,8 +54,8 @@ class RestFallbackTests(unittest.TestCase):
         board.assert_called_once_with("owner/repo", {7}, projects=None)
         project_lookup.assert_not_called()
 
-    def test_non_coderabbit_gate_fix_skips_review_evidence_query(self):
-        pr = {"number": 9, "labels": [{"name": "review:agent"}]}
+    def test_unassigned_gate_fix_skips_review_evidence_query(self):
+        pr = {"number": 9, "labels": [{"name": "review:unknown"}]}
         with patch.object(fnw, "review_evidence") as evidence:
             self.assertFalse(fnw._author_can_repair_review(pr))
         evidence.assert_not_called()
