@@ -140,7 +140,9 @@ def _resolve_repo_details(target_dir: str) -> Tuple[Optional[Dict[str, Any]], Op
     }, None
 
 
-def _resolve_board_inventory(slug: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[int, str]], Optional[str]]:
+def _resolve_board_inventory(  # noqa: C901, PLR0912
+    slug: str,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[int, str]], Optional[str]]:
     """Resolve the canonical Project v2 board and status counts."""
     available = get_repo_projects(slug)
     if available is None:
@@ -494,7 +496,10 @@ def _collect_claimable_work(
     agent: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[str], bool, bool]:
     """Evaluate Ready candidates and capture bounded diagnostics and integrity failures."""
-    owner = repo_owner or repository_owner_login(slug)
+    try:
+        owner = repo_owner or repository_owner_login(slug)
+    except Exception:
+        owner = None
     try:
         trusted_logins = repository_trusted_logins(slug)
     except Exception:

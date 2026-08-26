@@ -1015,7 +1015,33 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
         self.assertEqual(snapshot["claimable_work"], [])
         self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in snapshot["errors"]))
 
+    def test_collaborator_lookup_failure_with_in_flight_work_blocks_rather_than_ordinary_waiting(self):
+        issue1 = make_issue(10, status="Ready", touches="scripts/a.py")
+        issue2 = make_issue(20, status="In Progress", agent="agent-1", touches="scripts/b.py")
+        repo = FakeRepo(issues=[issue1, issue2], fail={"collaborators"})
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertEqual(snapshot["claimable_work"], [])
+        self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in snapshot["errors"]))
+
+    def test_repo_owner_resolution_failure_propagates_degraded_blocked_candidate_evaluation(self):
+        issue1 = make_issue(10, status="Ready")
+        with patch("factory_loop_snapshot.repository_owner_login", return_value=None):
+            claimable, diags, errors, is_degraded, is_blocked = fls._collect_claimable_work(
+                [issue1], slug="gillella/Aru_Agentic_SDLC", repo_owner=None
+            )
+
+        self.assertTrue(is_degraded)
+        self.assertTrue(is_blocked)
+        self.assertEqual(claimable, [])
+        self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in errors))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
