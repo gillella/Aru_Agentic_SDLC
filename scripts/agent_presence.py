@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1232
+# line-ceiling: 1280
 """Project-scoped agent presence and availability registry.
 
 GitHub claims remain authoritative ownership. This registry only records which
@@ -12,16 +12,21 @@ Persistence mirrors the #187 secure JSON discipline (0600, flock, atomic).
 from __future__ import annotations
 
 import argparse
+import copy
+import fcntl
 import hashlib
 import json
 import os
 import re
 import socket
+import stat
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 from agent_identity import (
     AGENT_ID_ENV_VAR as AGENT_ID_ENV_VAR,
@@ -34,17 +39,11 @@ from agent_identity import (
     worker_fingerprint as worker_fingerprint,
 )
 
-from slack_projects import (
-    PROJECT_ID_RE,
-    RegistryError,
-    mutate_secure_json,
-    read_secure_json,
-)
-
 SCHEMA_VERSION = 1
 SCHEMA_NAME = "aru.agent-presence/v1"
 DEFAULT_PRESENCE_PATH = Path.home() / ".aru" / "agent-presence.json"
 DEFAULT_HEARTBEAT_TTL_SECONDS = 300
+PROJECT_ID_RE = re.compile(r"^proj_[A-Za-z0-9_-]{3,64}$")
 FAMILY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 AVAILABILITY_STATES = frozenset({
@@ -76,7 +75,7 @@ PHASE_TO_AVAILABILITY = {
 }
 
 
-class PresenceError(RegistryError):
+class PresenceError(RuntimeError):
     """Presence registry is unavailable, invalid, or rejects the mutation."""
 
 
@@ -102,6 +101,148 @@ def _parse_iso(value: str) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
+    if path.is_symlink():
+        raise PresenceError(f"unsafe directory: {path}")
+    if path.exists():
+        if not path.is_dir():
+            raise PresenceError(f"unsafe directory: {path}")
+        info = path.stat()
+        if info.st_uid != os.getuid():
+            raise PresenceError(f"directory is not owned by the current user: {path}")
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o022:
+            raise PresenceError(f"directory is writable by another user: {path}")
+        if mode != 0o700:
+            descriptor = -1
+            try:
+                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(path, flags)
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or opened.st_uid != os.getuid()
+                    or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                ):
+                    raise PresenceError(f"directory changed while securing it: {path}")
+                if stat.S_IMODE(opened.st_mode) & 0o022:
+                    raise PresenceError(f"directory is writable by another user: {path}")
+                os.fchmod(descriptor, 0o700)
+            except OSError as exc:
+                raise PresenceError(f"cannot secure directory {path}: {exc}") from exc
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        return
+    path.mkdir(parents=True, mode=0o700)
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode) or opened.st_uid != os.getuid():
+            raise PresenceError(f"unsafe directory after creation: {path}")
+        os.fchmod(descriptor, 0o700)
+    except OSError as exc:
+        raise PresenceError(f"cannot secure directory {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _private_file(path: Path) -> None:
+    if path.is_symlink():
+        raise PresenceError(f"refusing symlink: {path}")
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise PresenceError(f"not a regular file: {path}")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise PresenceError(f"file must be private (0600): {path}")
+
+
+@contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    _private_directory(path.parent)
+    lock_path = path.with_name(f"{path.name}.lock")
+    if lock_path.exists():
+        _private_file(lock_path)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise PresenceError(f"cannot open lock file {lock_path}: {exc}") from exc
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _read_unlocked(path: Path, default: Any = None) -> Any:
+    if path.is_symlink():
+        raise PresenceError(f"refusing symlink: {path}")
+    if not path.exists():
+        if default is not None:
+            return copy.deepcopy(default)
+        raise PresenceError(f"file does not exist: {path}")
+    _private_file(path)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PresenceError(f"cannot read {path}: {exc}") from exc
+
+
+def _write_unlocked(path: Path, value: Any) -> None:
+    if path.is_symlink():
+        raise PresenceError(f"refusing symlink: {path}")
+    if path.exists():
+        _private_file(path)
+    temp_name: Optional[str] = None
+    try:
+        encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
+        descriptor, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        temp_name = None
+        os.chmod(path, 0o600)
+        parent_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except (OSError, TypeError, ValueError) as exc:
+        raise PresenceError(f"cannot write {path}: {exc}") from exc
+    finally:
+        if temp_name:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+
+
+def read_secure_json(path: Path, default: Any = None) -> Any:
+    with _file_lock(path):
+        return _read_unlocked(path, default)
+
+
+def mutate_secure_json(path: Path, default: Any, updater: Callable[[Any], Any]) -> Any:
+    """Lock, validate, update, and atomically replace one private JSON file."""
+    with _file_lock(path):
+        current = _read_unlocked(path, default)
+        updated = updater(copy.deepcopy(current))
+        _write_unlocked(path, updated)
+        return updated
 
 
 def _is_live_session(session_id: str) -> bool:
@@ -141,7 +282,7 @@ def identity_derived_project_id(github_repo_id: str, project_v2_id: str) -> str:
     return f"proj_repo_{digest}"
 
 
-def resolve_project_id(  # noqa: C901, PLR0912
+def resolve_project_id(
     checkout: Path,
     *,
     projects_path: Optional[Path] = None,
@@ -150,50 +291,15 @@ def resolve_project_id(  # noqa: C901, PLR0912
     """Resolve a shared project identity for presence.
 
     Preference order:
-    1. Active #187 registry row whose ``local_path`` matches this checkout.
-    2. Active registry row matching durable GitHub repo + ProjectV2 ids.
-    3. Deterministic ``proj_repo_<hash>`` from those durable ids (clone-independent).
-    4. Path hash only when GitHub identity cannot be discovered (offline/hermetic).
+    1. Deterministic ``proj_repo_<hash>`` from durable GitHub repo + ProjectV2 ids (clone-independent).
+    2. Path hash only when GitHub identity cannot be discovered (offline/hermetic).
     """
     resolved = checkout.expanduser().resolve()
     identity: Optional[Dict[str, Any]] = None
-    provider = identity_provider
-    try:
-        from slack_projects import ProjectRegistry, discover_checkout_identity
-
-        if provider is None:
-            provider = discover_checkout_identity
-        registry = ProjectRegistry(projects_path) if projects_path else ProjectRegistry()
-        records = registry.list(include_closed=False)
-        for record in records:
-            try:
-                if Path(record.local_path).expanduser().resolve() == resolved:
-                    return record.project_id
-            except OSError:
-                continue
+    if identity_provider is not None:
         try:
-            identity = provider(resolved)
-        except (RegistryError, OSError, ValueError, TypeError):
-            identity = None
-        if identity:
-            repo_id = str(identity.get("github_repo_id") or "")
-            board_id = str(identity.get("project_v2_id") or "")
-            for record in records:
-                if (
-                    record.github_repo_id == repo_id
-                    and record.project_v2_id == board_id
-                ):
-                    return record.project_id
-            if repo_id and board_id:
-                return identity_derived_project_id(repo_id, board_id)
-    except RegistryError:
-        pass
-    except OSError:
-        pass
-    if identity is None and provider is not None:
-        try:
-            identity = provider(resolved)
-        except (RegistryError, OSError, ValueError, TypeError, PresenceError):
+            identity = identity_provider(resolved)
+        except (PresenceError, OSError, ValueError, TypeError):
             identity = None
     if identity:
         repo_id = str(identity.get("github_repo_id") or "")

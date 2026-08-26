@@ -47,8 +47,8 @@ REMOVED_PATHS = (
 
 REMOVED_MODULES = (
     "run_fleet", "fleet_cycle", "spawn_ephemeral_worker", "factory_metrics",
-    "fixtures", "slack_control_room", "slack_notify", "slack", "slack_sdk",
-    "slack_bolt",
+    "fixtures", "slack_control_room", "slack_notify", "slack_projects", "slack",
+    "slack_sdk", "slack_bolt",
 )
 
 # `scripts/agent_presence.py` outlives this slice. Its three live dependents
@@ -61,14 +61,6 @@ PRESENCE_DEPENDENTS_ALLOWED = {
     "tests/test_agent_fingerprint.py",
     "tests/test_claim_review.py",
     "tests/test_agent_presence.py",
-}
-
-# `scripts/slack_projects.py` is removed in #415. The two retained paths below
-# are reserved by `#414` and `#407`; asserting a subset ceiling ensures coupling
-# cannot grow to any other module while those slices complete.
-SLACK_PROJECTS_DEPENDENTS_ALLOWED = {
-    "scripts/agent_presence.py",
-    "scripts/delivery_increments.py",
 }
 
 STATUS_LINE_BUDGET = 250
@@ -168,19 +160,6 @@ class RemovedSurfaceTests(unittest.TestCase):
         }
         unexpected = dependents - PRESENCE_DEPENDENTS_ALLOWED
         self.assertEqual(unexpected, set(), f"new presence coupling: {unexpected}")
-
-    def test_slack_projects_coupling_never_grows_past_the_paths_415_cannot_edit(self):
-        """Scripts outliving this slice may not acquire new slack_projects imports.
-
-        `scripts/agent_presence.py` is removed in #414 and `scripts/delivery_increments.py`
-        is removed in #407. No other retained module may import slack_projects.
-        """
-        dependents = {
-            rel for rel, text in source_files()
-            if "slack_projects" in imported_modules(text)
-        }
-        unexpected = dependents - SLACK_PROJECTS_DEPENDENTS_ALLOWED
-        self.assertEqual(unexpected, set(), f"new slack_projects coupling: {unexpected}")
 
 
 class RetainedRuntimeBoundaryTests(unittest.TestCase):
