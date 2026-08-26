@@ -52,6 +52,25 @@ class WorktreeAdmissionTests(unittest.TestCase):
         issue.assert_called_once_with(999)
         worktree.assert_not_called()
 
+    @patch("create_branch.terminal_merge_lease", return_value=None)
+    @patch("create_branch.create_worktree", return_value=".worktrees/env")
+    @patch("create_branch.query_issue_project_items")
+    @patch("create_branch.get_repo_slug", return_value="octocat/widgets")
+    @patch("create_branch.get_issue")
+    @patch("create_branch.get_agent_id", return_value="agent-1")
+    def test_cli_admits_the_exported_agent_identity_without_the_flag(
+        self, _identity, issue, _slug, items, worktree, _lease
+    ):
+        """A runner that exports its identity needs no --agent to be admitted."""
+        issue.return_value = self.issue("agent:agent-1", "status:in-progress")
+        items.return_value = [self.project_item()]
+        with patch("sys.argv", ["create_branch.py", "--issue", "999",
+                                "--type", "fix", "--worktree"]):
+            cb.main()
+        worktree.assert_called_once_with(
+            "fix/issue-999-safe-branch", agent="agent-1"
+        )
+
     def test_missing_ambiguous_or_divergent_authority_fails_closed(self):
         valid_issue = self.issue("agent:agent-1", "status:in-progress")
         cases = [
