@@ -311,25 +311,29 @@ class GovernanceTests(unittest.TestCase):
         self.assertNotIn("SKILL.md", review)
         self.assertNotIn("skills/address-pr-feedback", review)
 
-    def test_review_skill_states_the_default_and_the_explicit_fallback(self):
-        """CodeRabbit at creation; Sourcery/CodeAnt only on an operator move."""
+    def test_review_skill_states_balanced_authority_and_terminal_fallback(self):
+        """Exactly one balanced external authority; `review:agent` is terminal."""
         review = flat(REVIEW_SKILL.read_text(encoding="utf-8"))
         for clause in (
-            "review:coderabbit",
-            "only an operator may reassign",
-            "sourcery or codeant",
+            "`create_pr.py` labels every new pr with exactly one deterministically balanced external authority",
+            "coding-agent review is never ordinary review",
             "reassignment is never automatic",
             "reassign_review.py",
             "external exhaustion or an operator-declared excessive wait",
             "not a review queue, rotation, scheduler",
         ):
             self.assertIn(clause, review, f"review contract missing: {clause}")
+        # Creation names no service now (#476): a per-service authority label
+        # back in the emergency skill is balanced routing leaking out of
+        # create_pr.py, or the retired CodeRabbit-only default coming back.
+        for label in ("review:coderabbit", "review:sourcery", "review:codeant"):
+            self.assertNotIn(label, review, f"creation-time routing leaked: {label}")
         # Presence anywhere is also satisfied by a document that says elsewhere
         # that the router hands off by itself (#454), so the two load-bearing
         # clauses are read in their sentence and contradictions are rejected.
-        reassignment = sentence_with(review, "may reassign")
-        self.assertIn("only an operator", reassignment)
-        self.assertIn("sourcery or codeant", reassignment)
+        reassignment = sentence_with(review, "audited external reassignment")
+        self.assertIn("an operator may make one", reassignment)
+        self.assertIn("recording the concrete unavailability or excessive wait", reassignment)
         emergency = sentence_with(review, "may review only when")
         for clause in (
             "reassign_review.py",

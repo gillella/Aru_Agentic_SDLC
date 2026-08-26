@@ -2,8 +2,8 @@
 
 ## Purpose & Scope
 
-Operational procedure for CodeRabbit-first review with explicit Sourcery,
-CodeAnt, and last-resort independent-agent fallback
+Operational procedure for deterministic balanced review across CodeRabbit,
+Sourcery, and CodeAnt, with last-resort independent-agent fallback
 (`scripts/create_pr.py`, `scripts/merge_pr.py`). It covers what a factory
 agent or human operator does around PR assignment, review triggering, exact-head
 evidence, remediation, governed dry-runs, and billing/trial boundaries.
@@ -29,20 +29,23 @@ remediation edits in §4 as well as initial assignment.
 
 ## 1. Assignment
 
-`review:coderabbit` is the only review assignment `create_pr.py` ever
-creates. There is no rotation, capacity accounting, or scheduler behind it:
-reassignment is an explicit operator action taken after concrete observed
-unavailability, never a load balancer and never a retry. The label is
-applied to the PR **while it is still draft**, before the PR is marked ready.
+`create_pr.py` assigns exactly one of `review:coderabbit`, `review:sourcery`,
+or `review:codeant`. Its deterministic least-loaded algorithm reads the
+complete paginated open-PR inventory and counts each sole canonical authority
+label. It chooses the minimum count; ties use `(issue_id - 1) mod tie_count`
+over the tied services in fixed CodeRabbit, Sourcery, CodeAnt order. Unreadable,
+malformed, unknown, or conflicting inventory fails closed. Existing open PRs
+retain their current authority and are counted without being migrated. The
+selected label is applied while the PR is **still draft**, before ready state.
 Only one review-authority label may ever be present; `merge_pr.py` refuses to
 resolve a service when zero or more than one is set
 (`check_reviews` in `scripts/merge_pr.py`). Never add or swap a
-review-authority label by hand. If CodeRabbit is unavailable, use the governed
-helper for one explicit reassignment:
+review-authority label by hand. If the assigned service is unavailable, use
+the governed helper for one audited external reassignment:
 
 ```shell
 python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> \
-  --to <sourcery|codeant> --reason "<observed unavailability>"
+  --to <coderabbit|sourcery|codeant> --reason "<observed unavailability>"
 ```
 
 If CodeRabbit, Sourcery, and CodeAnt are all unavailable or busy, or the
@@ -52,20 +55,37 @@ independent agent:
 ```shell
 python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> --to agent \
   --reviewer <AGENT_ID> --model-family <FAMILY> \
+  [--reviewer-login <GITHUB_LOGIN>] \
   --reason "<external attempts and excessive-wait decision>"
 ```
 
 The helper replaces one known authority, refuses self-review and ambiguous
-authors, and records the exact head, reviewer, family, and reason. It does not
-discover reviewers, track capacity, rotate agents, or create a second queue.
+authors, and records the exact head, reviewer, family, reason, and the one
+GitHub account authorized to perform the review. `--reviewer-login` defaults
+to the `gh` authenticated login; pass it explicitly when the reviewing agent
+authenticates as a different account. The merge gate accepts the emergency
+review only from that account, so an assignment recorded against the wrong
+login has to be corrected before the review is submitted. Coding agents never
+perform ordinary review. The helper does not discover reviewers, rotate
+repeatedly, or create a second queue.
+
+The helper serializes each PR's complete reassignment transaction with an
+atomic server-side ref lock. It then re-reads the authority, head, and audit
+history immediately before it writes as defense in depth against direct or
+legacy writers. After recording the audit, it requires the complete history to
+equal the prior history plus its exact record; a missing, rival, or additional
+record leaves authority fail-closed for operator reconciliation. Only marker
+authors present in GitHub's collaborator roster filtered to push access count
+as audit history. `MEMBER` and `COLLABORATOR` comment associations are not
+authorization because they can include read-only actors; trusting them would
+let such an actor block every later reassignment.
 
 ### When the selected service also fails
 
-The external switch is one-way by design. `reassign_review.py` refuses a
-second external hop: once a PR carries `review:sourcery` or `review:codeant`,
-an attempt to move it to the other external service exits `2` (conflict) with
-`only the default assignment may be moved to a fallback`. Re-running the same
-`--to` is refused for the same reason — reassignment is not a retry mechanism.
+Authority permits one audited external reassignment. `reassign_review.py`
+reads complete marker history and refuses a second external hop from any
+initial or reassigned service. Re-running the same `--to` is also refused —
+reassignment is not a retry mechanism.
 So an operator whose chosen external fallback also stalls has exactly two
 governed options:
 
@@ -112,8 +132,13 @@ not type these `gh` commands directly:
 2. The assigned `review:<service>` label is added.
 3. The PR is marked ready (`gh pr ready`).
 4. For `review:codeant` only, a `@codeant-ai: review` comment fires the
-   manual trigger; on failure, the function attempts to restore draft state so
-   the operator can retry. If that rollback also fails, the PR can remain ready.
+   manual trigger, and only if the comment history does not already carry one:
+   finalization is resumable, and a second trigger enqueues a second review of
+   the same head with competing evidence records. An unreadable comment history
+   stops rather than guessing either way. On trigger failure the function
+   restores draft state only when this run left draft itself; a retry that
+   found the PR already ready leaves it as it was. If that rollback also
+   fails, the PR can remain ready.
 
 CodeRabbit's auto-review is centrally scoped to non-draft PRs carrying
 `review:coderabbit` (`.coderabbit.yaml` `reviews.auto_review`), so step 3
@@ -155,18 +180,24 @@ after a review invalidates it — re-review the new head before merging
   regardless of author precisely so a spoofed one is seen and rejected rather
   than silently skipped.
 - **Emergency agent** — exactly one author and one different assigned reviewer,
-  one reviewer model family, a substantive current-head GitHub review from the
-  same login, and exactly one matching completed `aru-agent-review:v1` record.
-  The assigned agent records completion with:
-
-  ```shell
-  python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> \
-    --complete-review --agent <AGENT_ID> --model-family <FAMILY> \
-    --review-disposition <no-findings|findings-resolved>
-  ```
-
-  A push invalidates this evidence. Missing, stale, duplicate, malformed, or
-  self-review evidence blocks merge.
+  and an audited `aru-agent-review-assignment:v1` record whose author holds
+  repository write access. Write access is resolved from the repository's
+  collaborator roster, because the per-comment author association does not
+  prove it: `MEMBER` covers a read-only organization member and `COLLABORATOR`
+  a read-only collaborator, either of whom could otherwise authorize
+  themselves. That record is the authorization: it names the
+  reviewer model family and `reviewer_login`, the single GitHub account allowed
+  to perform this review. Both the substantive current-head GitHub review and
+  the one matching completed `aru-agent-review:v1` comment must come from that
+  authorized account. Binding them to each other instead would only prove they
+  share an author, which any collaborator can arrange for themselves. The
+  completion JSON names the assigned agent, family, exact head, completion
+  timestamp, `completed` status, and `no-findings` or `findings-resolved`
+  disposition. A push invalidates this evidence. Missing, stale, duplicate,
+  malformed, unauthorized, or self-review evidence blocks merge — but only from
+  the write-access assignor and the account it authorized. A marker-shaped
+  comment from anyone else is ignored rather than fatal, so one drive-by
+  comment cannot permanently block the emergency path.
 
 Every review path additionally requires every blocker enforced by `check_reviews`
 (`scripts/merge_pr.py`) to be clear:

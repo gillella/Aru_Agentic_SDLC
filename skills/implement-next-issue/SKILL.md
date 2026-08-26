@@ -39,7 +39,7 @@ flowchart TD
     J --> K[9. Poll CI Run Status]
     K --> L{CI Passing?}
     L -- No --> M[10. Execute remediate-ci-failure] --> I
-    L -- Yes --> N[11. Await CodeRabbit & Remediate Findings]
+    L -- Yes --> N[11. Await Assigned Authority & Remediate Findings]
 ```
 
 ---
@@ -231,8 +231,11 @@ or other irreversible work from the plan gate.
 ### Step 11: Review and Handoff
 1. Transition the issue/PR Project Board status to `In Review`:
    `python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" --issue <ISSUE_ID> --status "In Review"`.
-2. Await CodeRabbit by default. If it is unavailable, the operator may use
-   `reassign_review.py` for Sourcery or CodeAnt. Only after every external path
+2. `create_pr.py` has assigned exactly one of `review:coderabbit`,
+   `review:sourcery`, or `review:codeant` using the deterministic least-loaded
+   open-PR inventory rule. Await that immutable assigned authority. If it is
+   unavailable, the operator may use `reassign_review.py` for one audited
+   external reassignment. Only after every external path
    is exhausted or its wait is declared excessive may that helper select one
    independent coding agent. Authors never select or review their own PR.
 3. Route every actionable reviewer finding to the author or adopted
@@ -248,7 +251,7 @@ or other irreversible work from the plan gate.
 ### Step 12: Merge Authority and Completion
 
 1. Wait for completed exact-head evidence from the assigned authority:
-   CodeRabbit, explicitly reassigned Sourcery/CodeAnt, or the one emergency
+   CodeRabbit, Sourcery, CodeAnt, or the one emergency
    independent `review:agent` selected after external exhaustion. Labels or ordinary
    comments alone never satisfy review, and every author push invalidates the
    prior evidence. Before invoking `merge_pr.py`, every actionable finding must
