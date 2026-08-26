@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# line-ceiling: 1565
+# +51 for the #344 terminal merge lease guard.
+# line-ceiling: 1656
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -26,6 +27,9 @@ from typing import Any, Optional
 import merge_pr
 from common import (
     AGENT_LABEL_PREFIX,
+    terminal_lease_refusal,
+    terminal_lease_sha,
+    terminal_merge_lease,
     agent_labels,
     claimed_by,
     ensure_label,
@@ -397,12 +401,69 @@ def _start_fresh_issue_claim(
     )
 
 
+def _terminally_merged(issue_id: int, issue=None):
+    """Refusal text when this issue was already closed by a governed merge.
+
+    Re-claiming merged work is how a stale worker resumed a finished issue and
+    pushed an orphan commit onto its deleted branch (#344). None means the
+    issue is claimable as far as merge state is concerned.
+
+    Short-circuits on the already-fetched issue: an open issue cannot have been
+    terminally merged, so the overwhelmingly common path costs no extra API
+    call at all.
+    """
+    if isinstance(issue, dict) and issue.get("state") != "CLOSED":
+        return None
+    data = run_gh_json([
+        "gh", "issue", "view", str(issue_id),
+        "--json", "state,closedByPullRequestsReferences",
+    ])
+    # An unreadable lookup is not "not merged". A closed issue still carrying
+    # status:ready would otherwise sail through on a failed API call, so an
+    # unknown answer blocks on this governance path (CodeRabbit, #344).
+    if not isinstance(data, dict):
+        return (f"Could not read merge state for issue #{issue_id}; refusing to claim "
+                "rather than risk continuing terminally merged work.")
+    if data.get("state") != "CLOSED":
+        return None
+    refs = data.get("closedByPullRequestsReferences") or []
+    # A malformed reference list is another shape of "cannot read merge state".
+    # Skipping the entries we cannot parse would let a closed-by-merge issue be
+    # re-claimed on garbage data, which is the same fail-open the readable-lookup
+    # guard above closes (CodeRabbit, #344).
+    if not isinstance(refs, list):
+        return (f"Closing-PR references for issue #{issue_id} were malformed; refusing "
+                "to claim while merge state is unknown.")
+    for ref in refs:
+        number = ref.get("number") if isinstance(ref, dict) else None
+        if not number:
+            return (f"Issue #{issue_id} lists a closing pull request that could not be "
+                    "identified; refusing to claim while merge state is unknown.")
+        pr = run_gh_json(["gh", "pr", "view", str(number), "--json", "state,headRefName"])
+        if not isinstance(pr, dict):
+            return (f"Could not read the state of PR #{number}, which closed issue "
+                    f"#{issue_id}; refusing to claim while merge state is unknown.")
+        if pr.get("state") != "MERGED":
+            continue
+        lease = terminal_merge_lease(pr.get("headRefName") or "")
+        if lease:
+            return terminal_lease_refusal(lease, f"re-claim issue #{issue_id}")
+        return (f"Issue #{issue_id} was closed by merged PR #{number}; merged work "
+                "cannot be re-claimed. File a new issue for follow-up work.")
+    return None
+
+
 def _claim_issue_locked(issue_id: int, agent: str, status: str,
                         assignee: str) -> int:
     issue = get_issue(issue_id)
     if not issue:
         print(f"[ERROR] Issue #{issue_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+
+    refusal = _terminally_merged(issue_id, issue)
+    if refusal:
+        print(f"[BLOCKED] {refusal}", file=sys.stderr)
+        return EXIT_CONFLICT
 
     my_label = _label_for(agent)
     owner = repository_owner_login()
@@ -1078,6 +1139,34 @@ def _remove_merger_label(pr_id: int, agent: str) -> bool:
     return code == 0
 
 
+def _terminal_lease_conflict(pr_id: int, labels):
+    """Exit code when a terminal lease blocks a merge claim, else None.
+
+    The terminal-lease label is only a cache. Labels are writable by anyone
+    with triage rights, so honouring one on its own would let an outsider
+    freeze any PR (CWE-345); the merged-PR record is the authority and the
+    label merely says when it is worth asking. claim_review and
+    complete_review need no equivalent guard, because #412 retired
+    coding-agent review and both are already unconditional refusals.
+    """
+    lease_sha = terminal_lease_sha(labels)
+    if not lease_sha:
+        return None
+    state = run_gh_json(["gh", "pr", "view", str(pr_id), "--json", "state"])
+    if not isinstance(state, dict):
+        print(f"[ERROR] PR #{pr_id} carries a terminal-lease label but its merge "
+              "state could not be read; refusing rather than guessing.", file=sys.stderr)
+        return EXIT_ERROR
+    if state.get("state") == "MERGED":
+        print(f"[CONFLICT] PR #{pr_id} was merged by a governed run (lease "
+              f"{lease_sha}); it cannot be claimed for merge again. File a new "
+              "governed issue and branch for follow-up work.", file=sys.stderr)
+        return EXIT_CONFLICT
+    print(f"[WARN] PR #{pr_id} carries terminal-lease:{lease_sha} but GitHub reports "
+          "it unmerged; ignoring the label and continuing.", file=sys.stderr)
+    return None
+
+
 def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     """Claims a pull request for mechanical merge. Same exit codes as claim_issue.
 
@@ -1089,6 +1178,10 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+
+    blocked = _terminal_lease_conflict(pr_id, labels)
+    if blocked is not None:
+        return blocked
 
     holder = merge_claimant(labels)
     if holder and holder != agent:
@@ -1327,7 +1420,12 @@ def _effective_reap_threshold(
     return base, "live agent"
 
 
-def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:  # noqa: C901
+def reap_stale_merges(  # noqa: C901, PLR0912
+    hours: int = 4,
+    presence_store: Any = None,
+    now: Optional[datetime] = None,
+    prs_snapshot: Optional[list] = None,
+) -> list:
     """Releases merge claims that went quiet without finishing close-out.
 
     Open and merged PRs are both scanned. A crash right after server-side merge
@@ -1338,24 +1436,27 @@ def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[
     if hours <= 0:
         return []
 
-    prs = []
-    for state in ("open", "merged"):
-        code, out, _ = run_cmd(
-            ["gh", "pr", "list", "--state", state, "--limit", "200",
-             "--json", "number,labels,state,mergedAt"],
-            check=False,
-        )
-        if code != 0:
-            print(f"[WARN] Could not list {state} PRs; merge reaping incomplete.",
-                  file=sys.stderr)
-            return []
-        try:
-            batch = json.loads(out) if out else []
-        except json.JSONDecodeError:
-            print(f"[WARN] Could not parse {state} PR list; merge reaping aborted.",
-                  file=sys.stderr)
-            return []
-        prs.extend(batch)
+    if prs_snapshot is None:
+        prs = []
+        for state in ("open", "merged"):
+            code, out, _ = run_cmd(
+                ["gh", "pr", "list", "--state", state, "--limit", "200",
+                 "--json", "number,labels,state,mergedAt"],
+                check=False,
+            )
+            if code != 0:
+                print(f"[WARN] Could not list {state} PRs; merge reaping incomplete.",
+                      file=sys.stderr)
+                return []
+            try:
+                batch = json.loads(out) if out else []
+            except json.JSONDecodeError:
+                print(f"[WARN] Could not parse {state} PR list; merge reaping aborted.",
+                      file=sys.stderr)
+                return []
+            prs.extend(batch)
+    else:
+        prs = list(prs_snapshot)
 
     claims = _claims_with_timestamps(prs, MERGER_LABEL_PREFIX, merge_claimant)
     if claims is None:

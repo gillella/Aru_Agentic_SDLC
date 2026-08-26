@@ -44,6 +44,7 @@ from common import (
     touches_conflict,
 )
 from delivery_increments import DeliveryIncrementStore
+from github_inventory import hydrate_renamed_files
 from update_issue_status import update_status
 
 # Canonical Priority ranking: `priority:p0` is the highest. The governance
@@ -358,10 +359,9 @@ def load_open_pr_file_records() -> Optional[List[Dict[str, Any]]]:
         if not cursor or cursor in seen:
             return None
         seen.add(cursor)
-    for record in records:
-        files = _rest_pr_files(owner, repo, record["number"])
-        record["files"] = [] if files is None else files
-    return records
+    return hydrate_renamed_files(
+        records, owner, repo, RENAME_CHANGE_TYPES, _rest_pr_files
+    )
 
 
 def attach_open_pr_file_snapshots(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -564,7 +564,7 @@ def abandoned_work_note(num: int, holders: List[str], hours: int,
     return "\n".join(lines)
 
 
-def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  # noqa: C901, PLR0912, PLR0915
+def reap_stale_claims(issues: List[Dict[str, Any]], hours: int, open_prs_snapshot: Optional[List[Dict[str, Any]]] = None) -> List[int]:  # noqa: C901, PLR0912, PLR0915
     """Releases claims that have gone quiet.
 
     An agent that crashes mid-issue leaves it In Progress forever, and once
@@ -577,20 +577,20 @@ def reap_stale_claims(issues: List[Dict[str, Any]], hours: int) -> List[int]:  #
         return []
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    pr_code, prs, pr_err = run_cmd(
-        ["gh", "pr", "list", "--state", "open", "--limit", "200",
-         "--json", "number,body,headRefName,updatedAt"],
-        check=False,
-    )
-    if pr_code != 0:
-        print(f"[WARN] Could not verify open PRs; no claims were reaped: {pr_err}", file=sys.stderr)
-        return []
-    try:
-        open_prs = json.loads(prs) if prs else []
-    except json.JSONDecodeError:
-        print("[WARN] Could not parse open PRs; no claims were reaped.", file=sys.stderr)
-        return []
-
+    if open_prs_snapshot is None:
+        pr_code, prs, pr_err = run_cmd([
+            "gh", "pr", "list", "--state", "open", "--limit", "200", "--json",
+            "number,body,headRefName,updatedAt"], check=False)
+        if pr_code != 0:
+            print(f"[WARN] Could not verify open PRs; no claims were reaped: {pr_err}", file=sys.stderr)
+            return []
+        try:
+            open_prs = json.loads(prs) if prs else []
+        except json.JSONDecodeError:
+            print("[WARN] Could not parse open PRs; no claims were reaped.", file=sys.stderr)
+            return []
+    else:
+        open_prs = list(open_prs_snapshot)
     branch_code, remote_branches, branch_err = run_cmd(
         ["git", "ls-remote", "--heads", "origin"],
         check=False,

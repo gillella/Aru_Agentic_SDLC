@@ -51,6 +51,7 @@ class ProjectBootstrapTests(unittest.TestCase):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
         normalized = " ".join(rules.split())
         self.assertIn("`create_pr.py` assigns CodeRabbit by default", normalized)
+        self.assertIn("new PRs never rotate", rules)
         self.assertIn("Sourcery or CodeAnt", normalized)
         self.assertIn("review:agent", normalized)
         self.assertIn("unavailable, busy, or waiting too long", normalized)

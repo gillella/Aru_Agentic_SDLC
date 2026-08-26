@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# line-ceiling: 1482
+# +60 for the #344 terminal merge lease shared by all four helpers.
+# line-ceiling: 1576
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -17,6 +18,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from github_inventory import (
+    board_agent_identities as rest_board_agent_identities,
+    local_repo_slug,
+    open_issues as rest_open_issues,
+)
 
 
 VERIFICATION_EVIDENCE_SCHEMA = "aru.verification.v1"
@@ -443,9 +450,6 @@ def create_worktree(branch_name: str, path: str = None, attempts: int = 5,
     return None
 
 
-BOARD_IDENTITY_LABEL_PREFIXES = ("agent:", "reviewer:", "merger:", "author:")
-
-
 def board_agent_identities() -> Tuple[Optional[Dict[str, List[str]]], str]:
     """Agent ids GitHub currently shows in use, mapped to where they are held.
 
@@ -456,44 +460,31 @@ def board_agent_identities() -> Tuple[Optional[Dict[str, List[str]]], str]:
     PR, so its id was handed to a second session and every downstream identity
     guarantee degraded (#304).
 
-    Two endpoints because gh exposes issues and pull requests separately; this
-    runs once at identity resolution, not per tick.
+    Two REST endpoints are used because GitHub exposes issues and pull requests
+    separately.  Keeping this lightweight read off GraphQL prevents identity
+    resolution from consuming the Projects/review query budget.
 
     Returns (holders, error). ``holders`` is None when the board could not be
     read, so callers fail closed rather than assign a possibly-held id.
     """
-    holders: Dict[str, List[str]] = {}
-    queries = (
-        (["gh", "issue", "list", "--state", "open", "--limit", "500",
-          "--json", "number,labels"], "issue"),
-        (["gh", "pr", "list", "--state", "open", "--limit", "500",
-          "--json", "number,labels"], "PR"),
-    )
-    for cmd, kind in queries:
-        items = run_gh_json(cmd)
-        if not isinstance(items, list):
-            return None, f"could not read open {kind}s from GitHub"
-        for item in items:
-            for label in item.get("labels") or []:
-                name = str(label.get("name") or "")
-                for prefix in BOARD_IDENTITY_LABEL_PREFIXES:
-                    if name.startswith(prefix) and name[len(prefix):]:
-                        agent_id = name[len(prefix):]
-                        holders.setdefault(agent_id, []).append(
-                            f"{kind} #{item.get('number')} ({name})")
-    return holders, ""
+    slug = get_repo_slug()
+    if not slug:
+        return None, "could not resolve the repository from the local origin"
+    return rest_board_agent_identities(run_cmd, slug)
 
 
 def query_open_issues() -> Optional[List[Dict[str, Any]]]:
-    """Fetches open issues, preserving a query failure as ``None``.
+    """Fetch open issues through paginated REST, preserving failure as ``None``.
 
-    --limit is explicit: gh defaults to 30, which silently truncates any board
-    with more issues than that and makes the dependency graph wrong.
+    ``gh issue list`` uses GraphQL and historically spent quota on a payload the
+    REST Issues endpoint already provides.  Filtering pull requests in jq and
+    paginating explicitly keeps this inventory complete without consuming the
+    GraphQL budget needed for Projects and review threads.
     """
-    cmd = ["gh", "issue", "list", "--state", "open", "--limit", "500",
-           "--json", "number,title,labels,assignees,body,state,updatedAt,author"]
-    res = run_gh_json(cmd)
-    return res if isinstance(res, list) else None
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    return rest_open_issues(run_cmd, slug)
 
 
 def list_open_issues() -> List[Dict[str, Any]]:
@@ -978,10 +969,8 @@ def fetch_issue_comments(issue_id: int) -> List[Dict[str, Any]]:
 
 
 def get_repo_slug() -> Optional[str]:
-    """Returns 'owner/repo' for the current working directory's repo."""
-    cmd = ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]
-    code, stdout, _ = run_cmd(cmd, check=False)
-    return stdout or None
+    """Return ``owner/repo`` from the local origin without spending API quota."""
+    return local_repo_slug(run_cmd)
 
 
 def query_issue_project_items(
@@ -1472,6 +1461,99 @@ def check_version_compatibility(
             file=sys.stderr,
         )
     return True
+
+
+TERMINAL_LEASE_LABEL_PREFIX = "terminal-lease:"
+
+
+def terminal_lease_label(gated_sha: str) -> str:
+    """Label recording that a governed merge accepted this PR at ``gated_sha``.
+
+    Written once, immediately after GitHub accepts the merge, and never removed
+    by any claim-clearing or reap path -- so its presence is both the "recorded"
+    and the "still queryable" half of the lease. Truncated to 12 hex characters
+    to stay inside GitHub's 50-character label limit while remaining collision-
+    proof in practice.
+    """
+    return f"{TERMINAL_LEASE_LABEL_PREFIX}{(gated_sha or '').strip().lower()[:12]}"
+
+
+def terminal_lease_sha(labels) -> Optional[str]:
+    """The gated-SHA prefix recorded by a terminal-lease label, or None.
+
+    Presence means a governed merge already accepted this PR, so every claim
+    path must treat it as terminal rather than trusting claim labels that
+    still look open.
+    """
+    for name in labels or []:
+        if isinstance(name, str) and name.startswith(TERMINAL_LEASE_LABEL_PREFIX):
+            value = name[len(TERMINAL_LEASE_LABEL_PREFIX):].strip().lower()
+            if value:
+                return value
+    return None
+
+
+def terminal_merge_lease(branch: str) -> Optional[Dict[str, Any]]:
+    """Resolve a head branch to its terminal merged lease, or None.
+
+    After a governed merge accepts an exact head, that branch name is spent:
+    any later push to it is a stale worker producing an ungoverned orphan
+    commit, not new work (#344, observed on hermes PR #89). The lease is the
+    predicate that lets every helper tell those apart.
+
+    Derived from merged-PR state rather than a separate store, so it cannot
+    disagree with GitHub about whether a merge happened, and so it applies to
+    PRs merged before this landed with no backfill. Returns None when the
+    branch was never merged. Fails closed -- returning a lease -- when the
+    lookup is unreadable or matches several merged PRs, because "cannot tell"
+    must block continuation rather than permit it.
+    """
+    if not branch or not isinstance(branch, str):
+        return None
+    limit = 20
+    rows = run_gh_json([
+        "gh", "pr", "list", "--state", "merged", "--head", branch,
+        "--limit", str(limit),
+        "--json", "number,headRefName,headRefOid,mergeCommit,mergedAt,author",
+    ])
+    unreadable = {"branch": branch, "unreadable": True, "pr": None,
+                  "gated_sha": None, "merged_sha": None, "holder": None}
+    # A non-list payload is malformed, not "no matches", and a full page may be
+    # hiding a further match. Either way the answer is unknown, and on a
+    # governance path unknown must block rather than permit (CodeRabbit, #344).
+    if not isinstance(rows, list) or len(rows) >= limit:
+        return unreadable
+    exact = [r for r in rows if isinstance(r, dict) and r.get("headRefName") == branch]
+    if not exact:
+        return None
+    if len(exact) > 1:
+        return {"branch": branch, "ambiguous": sorted(r.get("number") for r in exact),
+                "pr": None, "gated_sha": None, "merged_sha": None, "holder": None}
+    row = exact[0]
+    return {
+        "branch": branch,
+        "pr": row.get("number"),
+        "gated_sha": row.get("headRefOid"),
+        "merged_sha": (row.get("mergeCommit") or {}).get("oid"),
+        "holder": (row.get("author") or {}).get("login"),
+        "merged_at": row.get("mergedAt"),
+    }
+
+
+def terminal_lease_refusal(lease: Dict[str, Any], attempted: str) -> str:
+    """One refusal message shared by every door a stale writer can knock on."""
+    if lease.get("unreadable"):
+        return (f"Cannot determine whether branch {lease['branch']!r} was already merged; "
+                f"refusing to {attempted} rather than risk continuing merged work.")
+    if lease.get("ambiguous"):
+        return (f"Branch {lease['branch']!r} matches several merged PRs "
+                f"({lease['ambiguous']}); refusing to {attempted}.")
+    return (
+        f"Branch {lease['branch']!r} was terminally merged by PR #{lease['pr']} "
+        f"at gated head {lease['gated_sha']} (merge {lease['merged_sha']}). "
+        f"Refusing to {attempted}: merged work cannot be continued. "
+        "File a new issue and create a new branch for follow-up work."
+    )
 
 
 if os.environ.get("ARU_SDLC_REF"):

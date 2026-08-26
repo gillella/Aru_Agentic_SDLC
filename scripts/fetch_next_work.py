@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1260
+# line-ceiling: 1270
 """Return the highest-priority work one governed factory agent can perform.
 Finishing beats starting: author feedback, merge-ready work, resumable issues,
 then Ready issues. External review services stay outside the coding-agent queue;
@@ -54,7 +54,7 @@ from picker_board_inventory import governed_board_inventory as _governed_open_is
 
 
 class AutoTriageError(RuntimeError):
-    """An attempted automatic promotion left unverifiable lifecycle state."""
+    """Automatic promotion could not prove or preserve lifecycle state."""
 
 
 def _reserve_derived_identity(agent_id: str) -> int | None:
@@ -105,10 +105,13 @@ DEFAULT_ROUND_CAP = 3
 # that a single-family fleet is never stuck.
 DEFAULT_CROSS_FAMILY_WAIT_MIN = 30
 DEFAULT_REAP_AFTER_HOURS = 4
+_UNSET = object()
 
-PR_FIELDS = ("number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,"
-             "createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt,"
-             "files,changedFiles")
+PR_FIELDS = "number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt,files,changedFiles"
+
+
+class DegradedPrSnapshot(list):
+    pass
 
 
 def _label_value(labels: list[str], prefix: str) -> str | None:
@@ -124,16 +127,88 @@ def list_open_prs() -> list[dict[str, Any]] | None:
         check=False,
     )
     if code != 0:
-        print(f"[WARN] Could not list PRs: {err.strip()}", file=sys.stderr)
-        return None
+        print(
+            f"[WARN] Rich PR query failed; using a bounded REST inventory: {err.strip()}",
+            file=sys.stderr,
+        )
+        return _rest_open_prs()
     try:
         prs = json.loads(out) if out else []
     except json.JSONDecodeError:
-        print("[WARN] Could not parse the PR list.", file=sys.stderr)
-        return None
+        print(
+            "[WARN] Rich PR query was malformed; using a bounded REST inventory.",
+            file=sys.stderr,
+        )
+        return _rest_open_prs()
     if not isinstance(prs, list):
-        return None
+        return _rest_open_prs()
     return attach_open_pr_file_snapshots(prs)
+
+
+def _rest_open_prs() -> list[dict[str, Any]] | None:
+    """Return a complete but deliberately non-authoritative REST PR snapshot.
+
+    REST can preserve queue visibility during a GraphQL outage, but it cannot
+    batch the exact review-thread, check-rollup, and changed-file evidence that
+    governs routing and merge.  Records are marked degraded so selection stops
+    after this bounded inventory instead of issuing an N+1 set of REST calls or
+    making a lifecycle decision from partial evidence.
+    """
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    code, out, err = run_cmd(
+        [
+            "gh", "api", "--paginate",
+            f"repos/{slug}/pulls?state=open&per_page=100",
+            "--jq", ".[]",
+        ],
+        check=False,
+    )
+    if code != 0:
+        print(f"[WARN] Could not list open PRs through REST: {err.strip()}", file=sys.stderr)
+        return None
+    prs: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for raw in (out or "").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        number = item.get("number") if isinstance(item, dict) else None
+        labels = item.get("labels") if isinstance(item, dict) else None
+        head = item.get("head") if isinstance(item, dict) else None
+        if (
+            not isinstance(number, int)
+            or number in seen
+            or not isinstance(labels, list)
+            or any(not isinstance(label, dict) or not isinstance(label.get("name"), str)
+                   for label in labels)
+            or not isinstance(head, dict)
+        ):
+            return None
+        seen.add(number)
+        prs.append({
+            "number": number,
+            "title": item.get("title") or "",
+            "isDraft": bool(item.get("draft")),
+            "labels": labels,
+            "reviews": [],
+            "statusCheckRollup": [],
+            "updatedAt": item.get("updated_at"),
+            "createdAt": item.get("created_at"),
+            "headRefName": head.get("ref") or "",
+            "headRefOid": head.get("sha") or "",
+            "body": item.get("body") or "",
+            "reviewDecision": "",
+            "state": "OPEN",
+            "mergedAt": None,
+            "_degraded_rest_snapshot": True,
+        })
+    return DegradedPrSnapshot(prs)
 
 
 def _issue_closeout_snapshot(slug: str) -> dict[int, dict[str, Any]] | None:
@@ -287,6 +362,8 @@ def list_work_prs() -> list[dict[str, Any]] | None:
     open_prs = list_open_prs()
     if open_prs is None:
         return None
+    if isinstance(open_prs, DegradedPrSnapshot):
+        return open_prs
     recovery = list_merged_needing_closeout()
     if recovery is None:
         return None
@@ -464,18 +541,22 @@ def _author_can_repair_review(pr: dict[str, Any]) -> bool:
     evidence = review_evidence(pr["number"])
     if not evidence:
         return False
-    if merge_pr.assigned_review_service(pr) != "coderabbit":
+    service = merge_pr.assigned_review_service(pr)
+    if service not in {"coderabbit", "sourcery", "codeant", "agent"}:
         return False
-    evidence = merge_pr._with_coderabbit_status(pr["number"], evidence)
+    evidence = merge_pr.with_service_evidence(pr, pr["number"], evidence)
     if not evidence:
         return False
-    if not merge_pr.has_authoritative_coderabbit_review(pr, evidence):
+    if not merge_pr.has_authoritative_assigned_review(pr, evidence):
         return False
-    if int(evidence.get("unresolved") or 0) > 0:
+    counts = merge_pr._service_thread_counts(evidence, service)
+    if not isinstance(counts, dict):
         return False
-    if int(evidence.get("outdated_unfixed") or 0) > 0:
+    if int(counts.get("unresolved") or 0) > 0:
         return False
-    return int(evidence.get("unfixed") or 0) > 0
+    if int(counts.get("outdated_unfixed") or 0) > 0:
+        return False
+    return int(counts.get("unfixed") or 0) > 0
 
 
 def _author_fixable_from_unmet(
@@ -597,18 +678,22 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa
             return no(reason)
         return {"eligible": True, "reason": reason}
 
+    if pr.get("_degraded_rest_snapshot"):
+        return no("GraphQL review, CI, and file evidence is unavailable")
+
+    # CI is present in the initial batched PR snapshot.  Reject obvious
+    # non-candidates before paying for a per-PR GraphQL review-thread query.
+    state = ci_state(pr)
+    if state != "green":
+        if state in {"red", "none"}:
+            return no("unmet: ci")
+        return no(f"CI is {state}")
+
     threads = review_thread_count(pr)
     if threads is None:
         return no("review thread state is unavailable")
     if threads:
         return no(f"{threads} active review feedback item(s); waiting on author")
-
-    state = ci_state(pr)
-    if state != "green":
-        if state == "red":
-            return no("unmet: ci")
-        if state != "none":
-            return no(f"CI is {state}")
 
     ok, reason = dod_status(pr["number"])
     if not ok:
@@ -652,10 +737,17 @@ def record_review_claim(pr_number: int, agent: str, created_at: str | None) -> N
               f"{err.strip()}", file=sys.stderr)
 
 
-def select(agent: str, family: str | None, round_cap: int, cross_family_wait: int  # noqa: C901, PLR0912, PLR0915
-           ) -> dict[str, Any]:
+def select(  # noqa: C901, PLR0912, PLR0915
+    agent: str,
+    family: str | None,
+    round_cap: int,
+    cross_family_wait: int,
+    *,
+    prs_snapshot: Any = _UNSET,
+    issues_snapshot: Any = _UNSET,
+) -> dict[str, Any]:
     """Builds the full picture, then picks by priority."""
-    prs = list_work_prs()
+    prs = list_work_prs() if prs_snapshot is _UNSET else prs_snapshot
     if prs is None:
         # Fail closed. Treating an unreadable queue as empty makes the selector
         # claim new implementation work as though no feedback or remediation were
@@ -663,6 +755,19 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
         return {"agent": agent, "family": family,
                 "work": {"type": "error", "skill": None,
                          "reason": "the pull request queue could not be read"},
+                "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
+                "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
+                "escalated_prs": [], "claimable_issues": [],
+                "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
+                "missing_touches": [], "operator_only_issues": []}
+
+    degraded = [pr["number"] for pr in prs if pr.get("_degraded_rest_snapshot")]
+    if isinstance(prs, DegradedPrSnapshot) or degraded:
+        return {"agent": agent, "family": family,
+                "work": {"type": "error", "skill": None,
+                         "reason": ("GraphQL is unavailable; REST preserved the open-PR "
+                                    "inventory but cannot prove review, CI, or file state")},
+                "degraded_rest_prs": degraded,
                 "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
                 "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
                 "escalated_prs": [], "claimable_issues": [],
@@ -710,7 +815,16 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     skipped = []
 
     # 4. Otherwise start something new - unchanged issue selection.
-    issues = list_open_issues()
+    issues = list_open_issues() if issues_snapshot is _UNSET else issues_snapshot
+    if issues is None:
+        return {"agent": agent, "family": family,
+                "work": {"type": "error", "skill": None,
+                         "reason": "the open issue queue could not be read"},
+                "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
+                "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
+                "escalated_prs": [], "claimable_issues": [],
+                "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
+                "missing_touches": [], "operator_only_issues": []}
     parts = build_candidates(
         issues, agent, pr_files_by_issue=pr_files_by_issue_from_prs(prs),
         increment_scope=active_increment_scope(),
@@ -777,7 +891,7 @@ def select(agent: str, family: str | None, round_cap: int, cross_family_wait: in
     }
 
 
-def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None) -> tuple[dict[str, Any] | None, str | None]:  # noqa: C901
+def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None) -> tuple[dict[str, Any] | None, str | None]:  # noqa: C901, PLR0912
     """Return the one issue triage and the ordinary picker would admit."""
     from triage_backlog import partition, ready_gaps, split_reasons
 
@@ -793,8 +907,8 @@ def _idle_backlog_candidate(agent: str, expected_ready_issue: int | None = None)
     open_numbers = {issue["number"] for issue in issues}
     inventory = _governed_open_issue_statuses(repo_slug or "", open_numbers)
     if inventory is None:
-        print("[WARN] Governed board inventory is incomplete; refusing auto-triage.",
-              file=sys.stderr)
+        if expected_ready_issue is None:
+            raise AutoTriageError("Project inventory unavailable; cannot prove Ready is empty")
         return None, repo_slug
     _board_statuses, ready_count = inventory
     expected_ready_count = int(expected_ready_issue is not None)
@@ -959,12 +1073,12 @@ def _promote_one_idle_backlog_issue_locked(
             or post_candidate is None or post_candidate.get("number") != number
             or post_work.get("type") != "issue" or post_work.get("issue") != number
             or board_status() != "ready"):
-        update_status(
+        rolled_back = update_status(
             number, "Backlog", require_board=True,
             expected_status="Ready", require_unclaimed=True,
         )
         raise AutoTriageError(
-            f"issue #{number} changed during promotion or failed authoritative readback"
+            f"issue #{number} failed authoritative readback; rollback {'succeeded' if rolled_back else 'FAILED'}"
         )
     print(f"[INFO] Picker promoted qualified Backlog issue #{number} to Ready.",
           file=sys.stderr)
@@ -1011,15 +1125,37 @@ def main():  # noqa: C901, PLR0912, PLR0915
     if rc is not None:
         return rc
 
+    prs_snapshot: list[dict[str, Any]] | None | object = _UNSET
+    issues_snapshot: list[dict[str, Any]] | object = _UNSET
     if args.reap_after > 0:
+        prs_snapshot = list_work_prs()
+        if prs_snapshot is not None and not isinstance(prs_snapshot, DegradedPrSnapshot):
+            issues_snapshot = list_open_issues()
         try:
-            reap_stale_merges(args.reap_after)
-            reap_stale_claims(list_open_issues(), args.reap_after)
+            if prs_snapshot is None:
+                print("[WARN] PR snapshot unavailable; stale-claim reaping skipped.", file=sys.stderr)
+            elif isinstance(prs_snapshot, DegradedPrSnapshot):
+                print("[WARN] PR snapshot is REST-degraded; stale-claim reaping skipped.", file=sys.stderr)
+            else:
+                released_merges = reap_stale_merges(
+                    args.reap_after, prs_snapshot=prs_snapshot
+                )
+                open_prs = [pr for pr in prs_snapshot if not is_merged(pr)]
+                released_issues = reap_stale_claims(
+                    issues_snapshot, args.reap_after,
+                    open_prs_snapshot=open_prs,
+                )
+                if released_merges or released_issues:
+                    # Reaping is a mutation, so only that uncommon path pays
+                    # for a fresh authoritative snapshot before selection.
+                    prs_snapshot = list_work_prs()
+                    issues_snapshot = list_open_issues()
         except Exception as err:
             print(f"[WARN] Autonomous claim reap encountered error: {err}", file=sys.stderr)
 
     res = select(args.agent, (args.family or "").lower() or None,
-                 args.round_cap, args.cross_family_wait)
+                 args.round_cap, args.cross_family_wait,
+                 prs_snapshot=prs_snapshot, issues_snapshot=issues_snapshot)
     work = res["work"]
 
     # A read-only picker call remains read-only. A loop asking to claim work may

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-# line-ceiling: 5261
+# +64 for the #344 terminal lease and stale-writer escalation.
+# +26 for the #427 CodeRabbit completed-description allowlist.
+# line-ceiling: 5331
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -39,6 +41,8 @@ from pathlib import Path
 
 import acceptance_runner
 from common import (
+    ensure_label,
+    terminal_lease_label,
     VERIFICATION_EVIDENCE_END,
     VERIFICATION_EVIDENCE_SCHEMA,
     VERIFICATION_EVIDENCE_START,
@@ -4336,6 +4340,76 @@ def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
     )
 
 
+def record_terminal_lease(pr_id, gated_sha):
+    """Stamp the merged PR with its terminal lease.
+
+    Written after GitHub accepts the merge and never cleared by any claim or
+    reap path, so the label alone answers "was this already merged?" without a
+    lookup. The derived branch predicate in common.terminal_merge_lease covers
+    PRs merged before this existed; this makes the record explicit going
+    forward (#344).
+    """
+    if not pr_id or not gated_sha:
+        return True, "No lease to record."
+    label = terminal_lease_label(gated_sha)
+    ensure_label(label, "b60205", "Terminally merged; further writes are stale")
+    code, _, err = run_cmd(
+        ["gh", "pr", "edit", str(pr_id), "--add-label", label], check=False,
+    )
+    if code != 0:
+        # Non-fatal by design. The merge already succeeded, and
+        # common.terminal_merge_lease derives the same fact from merged-PR
+        # state, so a missing marker degrades convenience, not protection.
+        # Failing close-out here would strand a completed merge over a label.
+        return True, (
+            f"[WARN] Could not record terminal lease {label}: {err.strip()}. "
+            "The derived merged-PR lease still blocks stale continuation."
+        )
+    return True, f"Recorded terminal lease {label}."
+
+
+def detect_stale_writer(repo_root, pr, branch, gated_sha, head_repo_slug):
+    """P0 escalation when a merged branch reappears at a SHA we never gated.
+
+    delete_remote_branch already refuses to delete a changed ref, which is
+    correct and stays fail-closed. But a generic "left untouched" warning reads
+    like cleanup lag, and on hermes PR #89 that let a stale worker's orphan
+    commit sit unnoticed while it opened a spurious follow-up issue. The branch
+    reappearing after a governed merge is a different event from cleanup lag,
+    so it gets a different, louder message naming everything an operator needs.
+    """
+    if not branch or not gated_sha or not head_repo_slug:
+        return True, "No branch to check for stale writes."
+    base = get_repo_slug()
+    remote = "origin" if head_repo_slug == base else f"https://github.com/{head_repo_slug}.git"
+    code, out, _ = run_cmd(
+        ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+        check=False, cwd=repo_root,
+    )
+    if code != 0:
+        # Fail closed. A stale worker can recreate the branch between the
+        # delete and this re-read, so an unreadable remote is exactly when a
+        # stale write is most likely -- reporting success here would let
+        # close-out clear the merger claim with no escalation and no retry.
+        return False, (
+            "Could not re-inspect the remote branch after deletion; cannot rule out "
+            "a stale write. Close-out stays incomplete so recovery re-runs it."
+        )
+    if not out.strip():
+        return True, "No recreated branch."
+    actual = out.split()[0]
+    if heads_match(actual, gated_sha):
+        return True, "Remote branch still at the gated head."
+    return False, (
+        f"[P0] STALE WRITER: branch {head_repo_slug}:{branch} was recreated at {actual} "
+        f"after PR #{pr.get('number')} merged gated head {gated_sha}. "
+        f"Holder: {pr.get('author', {}).get('login') or 'unknown'}. "
+        "The branch was NOT deleted, so the orphan commit is preserved for inspection. "
+        "This work is outside governance: it did not pass a Definition-of-Done gate. "
+        "Do not adopt it into a new issue; file a new governed issue and branch instead."
+    )
+
+
 def ensure_issue_closed(issue_num):
     issue = _gh_json(["gh", "issue", "view", str(issue_num), "--json", "state"])
     if issue is None:
@@ -4492,10 +4566,14 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):  # noqa: C901, PLR09
     expected_sha = pr.get("headRefOid") or ""
     head_repo_slug = head_repository_slug(pr)
     steps = [
+        ("terminal lease", lambda: record_terminal_lease(pr.get("number"), expected_sha)),
         ("worktree", lambda: prune_worktree(repo_root, branch, expected_sha)),
         ("local branch", lambda: cleanup_local_branch(repo_root, branch, expected_sha)),
         ("remote branch", lambda: delete_remote_branch(
             repo_root, branch, expected_sha, head_repo_slug
+        )),
+        ("stale writer", lambda: detect_stale_writer(
+            repo_root, pr, branch, expected_sha, head_repo_slug
         )),
     ]
     for num in issue_nums:
