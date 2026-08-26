@@ -1,7 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -22,8 +22,8 @@ class CheckCiRestTests(unittest.TestCase):
 
         self.assertTrue(check_ci.check_ci_status(17))
 
-        self.assertTrue(all(call.args[0][1] == "api" for call in api.call_args_list))
-        self.assertTrue(all("graphql" not in call.args[0] for call in api.call_args_list))
+        self.assertTrue(all(c.args[0][1] == "api" for c in api.call_args_list))
+        self.assertTrue(all("graphql" not in c.args[0] for c in api.call_args_list))
 
     @patch.object(check_ci, "get_repo_slug", return_value="owner/repo")
     @patch.object(check_ci, "run_gh_json")
@@ -64,7 +64,7 @@ class CheckCiRestTests(unittest.TestCase):
             check_ci.check_ci_status(17, wait=True, poll_interval=15, timeout=45)
         )
 
-        self.assertEqual([call.args[0] for call in clock.sleep.call_args_list], [15, 30])
+        self.assertEqual(clock.sleep.call_args_list, [call(15), call(30)])
 
     @patch.object(check_ci, "_pull_head", return_value="abc")
     @patch.object(check_ci, "_ci_contexts", return_value=[
