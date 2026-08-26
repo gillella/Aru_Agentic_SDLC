@@ -47,18 +47,16 @@ def stage_expected_ready_for_triage(
     return staged_issues
 
 
-def governed_board_inventory(
-    repo_slug: str, open_numbers: set[int],
-) -> tuple[dict[int, str], int] | None:
-    """Return complete open-issue statuses and the board's literal Ready count."""
-    governed = select_governed_projects(get_repo_projects(repo_slug) or [], repo_slug)
-    if len(governed) != 1:
-        return None
-    project = governed[0]
-    owner = (project.get("owner") or {}).get("login")
-    number = project.get("number")
-    if not owner or not isinstance(number, int):
-        return None
+_OMITTED = object()
+
+
+def _board_items(owner: str, number: int) -> list | None:
+    """Read one complete board page, or ``None`` when it cannot be trusted.
+
+    A saturated page is indistinguishable from a truncated one, and a
+    ``totalCount`` that disagrees with the rows is a partial answer, so both
+    refuse rather than report a short board as the whole board.
+    """
     code, stdout, _stderr = run_cmd([
         "gh", "project", "item-list", str(number), "--owner", owner,
         "--limit", "1000", "--format", "json",
@@ -71,6 +69,37 @@ def governed_board_inventory(
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     if not isinstance(items, list) or total != len(items) or len(items) >= 1000:
+        return None
+    return items
+
+
+def governed_board_inventory(
+    repo_slug: str,
+    open_numbers: set[int],
+    *,
+    projects: list[dict] | None | object = _OMITTED,
+    require_complete: bool = True,
+) -> tuple[dict[int, str], int] | None:
+    """Return open-issue statuses and the board's literal Ready count.
+
+    Callers that already loaded repository project metadata can pass it so a
+    cycle does not repeat the same Projects query.  ``require_complete=False``
+    is for status diagnostics: missing open issues are then reported as board
+    orphans instead of making the single inventory unreadable.
+    """
+    available = get_repo_projects(repo_slug) if projects is _OMITTED else projects
+    if available is None:
+        return None
+    governed = select_governed_projects(available, repo_slug)
+    if len(governed) != 1:
+        return None
+    project = governed[0]
+    owner = (project.get("owner") or {}).get("login")
+    number = project.get("number")
+    if not owner or not isinstance(number, int):
+        return None
+    items = _board_items(owner, number)
+    if items is None:
         return None
     statuses: dict[int, str] = {}
     ready_count = 0
@@ -97,4 +126,6 @@ def governed_board_inventory(
         if issue_number in statuses or not isinstance(status, str) or not status:
             return None
         statuses[issue_number] = status
-    return (statuses, ready_count) if set(statuses) == open_numbers else None
+    if require_complete and set(statuses) != open_numbers:
+        return None
+    return statuses, ready_count

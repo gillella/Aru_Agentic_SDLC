@@ -20,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 # standalone metrics product. Each is a runtime the kernel no longer has.
 REMOVED_PATHS = (
     "scripts/run_fleet.py",
+    # The runner's prompt/fingerprint helpers, which arrived on `main` while
+    # this slice was open and have no consumer once the runner is gone.
+    "scripts/fleet_cycle.py",
     "scripts/spawn_ephemeral_worker.py",
     "scripts/launch_fleet.sh",
     "scripts/factory_metrics.py",
@@ -35,7 +38,8 @@ REMOVED_PATHS = (
 )
 
 REMOVED_MODULES = (
-    "run_fleet", "spawn_ephemeral_worker", "factory_metrics", "fixtures",
+    "run_fleet", "fleet_cycle", "spawn_ephemeral_worker", "factory_metrics",
+    "fixtures",
 )
 
 # `scripts/agent_presence.py` outlives this slice. Its three live dependents

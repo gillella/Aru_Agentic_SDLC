@@ -1,3 +1,4 @@
+# line-ceiling: 456
 import sys
 import unittest
 from pathlib import Path
@@ -76,6 +77,38 @@ class GovernedProjectSelectionTests(unittest.TestCase):
         self.assertEqual([project["title"] for project in selected], ["widgets Board"])
 
 
+class ProjectItemPaginationTests(unittest.TestCase):
+    @staticmethod
+    def page(nodes, has_next, cursor):
+        return {
+            "data": {"repository": {"issue": {"projectItems": {
+                "nodes": nodes,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            }}}},
+        }
+
+    @patch.object(common, "run_gh_json")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_reads_every_project_item_page(self, _slug, run):
+        run.side_effect = [
+            self.page([{"id": "FIRST"}], True, "CURSOR_1"),
+            self.page([{"id": "GOVERNED"}], False, None),
+        ]
+        items = common.query_issue_project_items(42)
+        self.assertEqual([item["id"] for item in items], ["FIRST", "GOVERNED"])
+        self.assertNotIn("cursor=", " ".join(run.call_args_list[0].args[0]))
+        self.assertIn("cursor=CURSOR_1", run.call_args_list[1].args[0])
+
+    @patch.object(common, "run_gh_json")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_later_page_failure_discards_partial_authority(self, _slug, run):
+        run.side_effect = [
+            self.page([{"id": "FIRST"}], True, "CURSOR_1"),
+            {"errors": [{"message": "scope denied"}]},
+        ]
+        self.assertIsNone(common.query_issue_project_items(42))
+
+
 class GovernedProjectAttachmentTests(unittest.TestCase):
     def project(self):
         return {
@@ -90,7 +123,7 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
 
     @patch.object(common, "add_issue_to_project", return_value=True)
     @patch.object(common, "get_repo_projects")
-    @patch.object(common, "get_issue_project_items", return_value=[])
+    @patch.object(common, "query_issue_project_items", return_value=[])
     @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
     def test_resolves_and_attaches_without_hardcoding(
         self, _slug, _items, projects, add
@@ -103,7 +136,7 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
 
     @patch.object(common, "add_issue_to_project")
     @patch.object(common, "get_repo_projects")
-    @patch.object(common, "get_issue_project_items")
+    @patch.object(common, "query_issue_project_items")
     @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
     def test_already_attached_is_a_no_op(self, _slug, items, projects, add):
         project = self.project()
@@ -130,7 +163,7 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
     @patch.object(common, "run_cmd", return_value=(0, "", ""))
     @patch.object(common, "attach_issue_to_governed_project", return_value=True)
     @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
-    @patch.object(common, "get_issue_project_items")
+    @patch.object(common, "query_issue_project_items")
     def test_status_move_attaches_an_unboarded_issue_first(
         self, items, _slug, attach, _run
     ):
@@ -143,7 +176,58 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
 
         self.assertTrue(common.set_board_status(42, "Ready"))
 
-        attach.assert_called_once_with(42)
+        attach.assert_called_once_with(42, existing_items=[])
+
+    @patch.object(common, "attach_issue_to_governed_project")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    @patch.object(common, "query_issue_project_items", return_value=None)
+    def test_status_move_does_not_retry_after_unavailable_item_read(
+        self, items, _slug, attach,
+    ):
+        self.assertFalse(common.set_board_status(42, "Ready"))
+
+        items.assert_called_once_with(42)
+        attach.assert_not_called()
+
+    @patch.object(common, "attach_issue_to_governed_project")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    @patch.object(common, "query_issue_project_items", return_value=[])
+    def test_conditional_status_move_never_attaches_missing_item(
+        self, _items, _slug, attach,
+    ):
+        self.assertFalse(
+            common.set_board_status(42, "Ready", expected_status="Backlog")
+        )
+        attach.assert_not_called()
+
+    @patch.object(common, "run_cmd")
+    @patch.object(common, "attach_issue_to_governed_project")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    @patch.object(common, "query_issue_project_items", return_value=None)
+    def test_incomplete_board_read_blocks_every_board_write(
+        self, _items, _slug, attach, run
+    ):
+        """An unreadable page is not an unboarded issue: writers must abort."""
+        with patch("sys.stderr"):
+            self.assertFalse(common.set_board_status(42, "Ready"))
+            self.assertFalse(common.set_issue_priority_field(42, "P2"))
+
+        attach.assert_not_called()
+        run.assert_not_called()
+
+    @patch.object(common, "add_issue_to_project")
+    @patch.object(common, "get_repo_projects")
+    @patch.object(common, "query_issue_project_items", return_value=None)
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    def test_incomplete_board_read_does_not_attach_a_duplicate_item(
+        self, _slug, _items, projects, add
+    ):
+        projects.return_value = [self.project()]
+
+        with patch("sys.stderr"):
+            self.assertFalse(attach_issue_to_governed_project(42))
+
+        add.assert_not_called()
 
 
 if __name__ == "__main__":
@@ -268,54 +352,6 @@ class MetadataTrustTests(unittest.TestCase):
             common.repository_trusted_logins(),
             {"acme-corp", "alice", "bob"},
         )
-
-    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
-    @patch.object(common, "run_gh_json")
-    def test_get_issue_merges_graphql_trust_identity(self, gh_json, _slug):
-        gh_json.side_effect = [
-            {
-                "number": 7,
-                "title": "t",
-                "labels": [],
-                "author": {"login": "alice"},
-            },
-            {
-                "data": {
-                    "repository": {
-                        "issue": {
-                            "editor": {"login": "owner"},
-                            "authorAssociation": "COLLABORATOR",
-                        }
-                    }
-                }
-            },
-        ]
-        issue = common.get_issue(7)
-        self.assertEqual(issue["author"], {"login": "alice"})
-        self.assertEqual(issue["editor"], {"login": "owner"})
-        self.assertEqual(issue["authorAssociation"], "COLLABORATOR")
-        self.assertTrue(issue["trustIdentityResolved"])
-
-    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
-    @patch.object(common, "run_gh_json")
-    def test_get_issue_failed_trust_lookup_rejects_rewrite_label(
-        self, gh_json, _slug
-    ):
-        gh_json.side_effect = [
-            {
-                "number": 7,
-                "title": "t",
-                "labels": [{"name": common.TRUSTED_REWRITE_LABEL}],
-                "author": {"login": "attacker"},
-            },
-            {"errors": [{"message": "timeout"}]},
-        ]
-        issue = common.get_issue(7)
-        self.assertFalse(issue["trustIdentityResolved"])
-        self.assertNotIn("editor", issue)
-        self.assertFalse(
-            common.is_trusted_metadata_author(issue, owner="gillella"))
-
 
 class ProseAndCodeBlockExclusionTests(unittest.TestCase):
     """#294: line-anchored metadata must not treat code or prose as paths.

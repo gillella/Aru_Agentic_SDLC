@@ -29,20 +29,15 @@ from common import (
     label_names,
     query_open_issues,
     run_cmd,
-    run_gh_json,
     worktree_agent_of,
 )
+from github_inventory import open_pull_requests as rest_open_pull_requests
 from picker_board_inventory import governed_board_inventory
 
 EXIT_COMPLETE = 0
 EXIT_ERROR = 1
 EXIT_WAITING = 2
 EXIT_BLOCKED = 3
-
-# A saturated page is indistinguishable from a truncated one, so the reader
-# refuses the answer rather than reporting a short list as complete.
-PR_LIMIT = 200
-PR_FIELDS = "number,title,isDraft,labels,headRefName,headRefOid,updatedAt,url"
 
 _ISSUE_BRANCH_RE = re.compile(r"issue-(\d+)", re.IGNORECASE)
 
@@ -78,13 +73,13 @@ def _readable_pr(row: Any) -> bool:
     )
 
 
-def list_open_prs() -> Optional[List[Dict[str, Any]]]:
-    """Read every open PR once, or None when the page is truncated or malformed."""
-    result = run_gh_json([
-        "gh", "pr", "list", "--state", "open",
-        "--limit", str(PR_LIMIT), "--json", PR_FIELDS,
-    ])
-    if not isinstance(result, list) or len(result) >= PR_LIMIT:
+# The paginated REST reader keeps this inventory off the shared GraphQL
+# budget, and it returns the complete list or nothing at all, so there is no
+# truncated page here to mistake for a short one.
+def list_open_prs(slug: str) -> Optional[List[Dict[str, Any]]]:
+    """Read every open PR once, or None when the inventory is unreadable."""
+    result = rest_open_pull_requests(run_cmd, slug)
+    if not isinstance(result, list):
         return None
     return result if all(_readable_pr(row) for row in result) else None
 
@@ -132,14 +127,17 @@ def _issue_rows(issues: List[Dict[str, Any]],
     return sorted(rows, key=lambda row: row["number"])
 
 
-def _pr_rows(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _pr_rows(prs: List[Dict[str, Any]], slug: str) -> List[Dict[str, Any]]:
     """Report PR identity and authorship. Review verdicts belong to merge_pr."""
     rows = [{
         "number": pr["number"], "title": pr.get("title", ""),
         "branch": pr.get("headRefName", ""), "head": pr.get("headRefOid", ""),
         "draft": bool(pr.get("isDraft")),
         "author": _identity(label_names(pr), "author:"),
-        "updated_at": pr.get("updatedAt", ""), "url": pr.get("url", ""),
+        "updated_at": pr.get("updatedAt") or "",
+        # The list endpoint the reader normalizes does not carry a browse URL,
+        # and the operator view would lose a link it has always printed.
+        "url": f"https://github.com/{slug}/pull/{pr['number']}",
     } for pr in prs]
     return sorted(rows, key=lambda row: row["number"])
 
@@ -203,7 +201,7 @@ def _collect(slug: str) -> Dict[str, Any]:
             state="blocked", code=EXIT_BLOCKED,
         )
     board, ready_count = inventory
-    prs = list_open_prs()
+    prs = list_open_prs(slug)
     if prs is None:
         return _fail("Failed to list open pull requests from GitHub.",
                      "ERROR: Could not read open pull requests.")
@@ -213,7 +211,7 @@ def _collect(slug: str) -> Dict[str, Any]:
         return _fail("Failed to read local Git worktree state.",
                      "ERROR: Could not read local worktrees.")
 
-    issue_rows, pr_rows = _issue_rows(issues, board), _pr_rows(prs)
+    issue_rows, pr_rows = _issue_rows(issues, board), _pr_rows(prs, slug)
     worktree_rows = _worktree_rows(worktrees, open_numbers)
     claims = (
         [{"type": "issue", "number": r["number"], "agent": r["agent"]}

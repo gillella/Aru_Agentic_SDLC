@@ -37,14 +37,12 @@ def issue(number, body="", labels=(), author="owner"):
 
 class TrustedOwnerTests(unittest.TestCase):
     def setUp(self):
-        owner = patch.object(
-            fetch_next_issue, "repository_owner_login", return_value="owner")
-        trusted = patch.object(
-            fetch_next_issue, "repository_trusted_logins", return_value={"owner"})
-        self.addCleanup(owner.stop)
-        self.addCleanup(trusted.stop)
-        owner.start()
-        trusted.start()
+        self.enterContext(patch.object(
+            fetch_next_issue, "repository_owner_login", return_value="owner"))
+        self.enterContext(patch.object(
+            fetch_next_issue, "repository_trusted_logins", return_value={"owner"}))
+        self.enterContext(patch.object(
+            fetch_next_issue, "active_increment_scope", return_value=None))
 
 
 class IssueSelectionTests(TrustedOwnerTests):

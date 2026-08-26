@@ -1,7 +1,7 @@
-# +66 for the #406 Sourcery fail-closed regression tests: unreadable worktree
+# +62 for the #406 Sourcery fail-closed regression tests: unreadable worktree
 # reads, malformed pull-request rows, malformed board items, and the open-review
 # reason its Slack caller filters for.
-# line-ceiling: 457
+# line-ceiling: 453
 """Compact read-only status (#406).
 
 The fleet supervisor these tests used to cover is gone. What is left has to
@@ -46,12 +46,12 @@ def issue(number, *, status="Ready", agent=None, title="t"):
 
 
 def pull(number, *, branch="chore/issue-1-x", author=None, draft=False):
+    """One row as the paginated REST pull-request endpoint returns it."""
     labels = [{"name": f"author:{author}"}] if author else []
     return {
-        "number": number, "title": f"PR {number}", "isDraft": draft,
-        "labels": labels, "headRefName": branch, "headRefOid": "deadbeef",
-        "updatedAt": "2026-08-26T00:00:00Z",
-        "url": f"https://github.com/{SLUG}/pull/{number}",
+        "number": number, "title": f"PR {number}", "draft": draft,
+        "labels": labels, "head": {"ref": branch, "sha": "deadbeef"},
+        "updated_at": "2026-08-26T00:00:00Z",
     }
 
 
@@ -115,10 +115,10 @@ class FakeRepo:
             if "board" in self.fail:
                 return (1, "", "api down")
             return (0, self._item_list(), "")
-        if cmd[:3] == ["gh", "pr", "list"]:
+        if "pulls?state=open" in joined:
             if "prs" in self.fail:
                 return (1, "", "api down")
-            return (0, json.dumps(self.prs), "")
+            return (0, "\n".join(json.dumps(row) for row in self.prs), "")
         raise AssertionError(f"unexpected command: {cmd}")
 
 
@@ -295,13 +295,6 @@ class FailClosedTests(unittest.TestCase):
             status = fs.evaluate_fleet_status(".")
         self.assert_failed(status, "blocked", fs.EXIT_BLOCKED)
 
-    def test_saturated_pull_request_page_fails_closed(self):
-        """A full page may be a truncated page; a short answer would be wrong."""
-        repo = FakeRepo(prs=[pull(n) for n in range(fs.PR_LIMIT)])
-        with wired(repo):
-            status = fs.evaluate_fleet_status(".")
-        self.assert_failed(status, "error", fs.EXIT_ERROR)
-
     def test_unreadable_worktree_list_fails_closed(self):
         """An unreadable checkout is not an empty one, and must not read ok.
 
@@ -320,10 +313,13 @@ class FailClosedTests(unittest.TestCase):
 
     def test_malformed_pull_request_row_fails_closed(self):
         """Every row the report indexes is validated before it is indexed."""
-        for row in ("not-a-dict", {"title": "no number"}, {"number": "458"},
-                    {"number": 458, "labels": None},
-                    {"number": 458, "labels": ["author:claude-1"]},
-                    {"number": 458, "labels": [{"name": 7}]}):
+        head = {"ref": "chore/issue-1-x", "sha": "deadbeef"}
+        for row in ("not-a-dict", {"title": "no number", "head": head},
+                    {"number": "458", "head": head},
+                    {"number": 458, "labels": None, "head": head},
+                    {"number": 458, "labels": ["author:claude-1"], "head": head},
+                    {"number": 458, "labels": [{"name": 7}], "head": head},
+                    {"number": 458, "labels": [], "head": "not-an-object"}):
             with self.subTest(row=row):
                 repo = FakeRepo(prs=[row])
                 with wired(repo):

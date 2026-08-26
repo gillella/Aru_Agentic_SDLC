@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # +64 for the #344 terminal lease and stale-writer escalation.
 # +26 for the #427 CodeRabbit completed-description allowlist.
-# line-ceiling: 5331
+# +80 for the #429 acceptance-interpreter and post-merge persistence fix; #414 ratchets this file to 4,500.
+# line-ceiling: 5416
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -1495,71 +1496,69 @@ def _evidence_note(evidence):
 
 
 def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
-    """Read every typed status page while proving one stable PR head."""
+    """Read typed status contexts through REST for one immutable head SHA."""
     if not isinstance(expected_head, str) or not expected_head:
         return None
-    query = """
-    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
-      repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
-          commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100, after:$cursor) {
-            totalCount
-            pageInfo { hasNextPage endCursor }
-            nodes {
-              __typename
-              ... on CheckRun { name status conclusion checkSuite { app { slug } } }
-              ... on StatusContext { context state description creator { login __typename } }
-            }
-          } } } } }
-        }
-      }
-    }"""
-    cursor = None
-    seen_cursors = set()
+    slug = f"{owner}/{name}"
+    checks = _gh_json([
+        "gh", "api", f"repos/{slug}/commits/{expected_head}/check-runs?per_page=100",
+    ])
+    statuses = _gh_json([
+        "gh", "api", f"repos/{slug}/commits/{expected_head}/status?per_page=100",
+    ])
+    if not isinstance(checks, dict) or not isinstance(statuses, dict):
+        return None
+    check_runs = checks.get("check_runs")
+    status_rows = statuses.get("statuses")
+    check_total = checks.get("total_count")
+    status_total = statuses.get("total_count")
+    if (
+        not isinstance(check_runs, list)
+        or not isinstance(status_rows, list)
+        or type(check_total) is not int
+        or type(status_total) is not int
+        or check_total != len(check_runs)
+        or status_total != len(status_rows)
+    ):
+        return None
     contexts = []
-    expected_total = None
-    while True:
-        args = [
-            "gh", "api", "graphql", "-f", f"query={query}",
-            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data = _gh_json(args)
-        if not data or (isinstance(data, dict) and data.get("errors")):
-            return None
-        try:
-            pull = data["data"]["repository"]["pullRequest"]
-            commits = pull["commits"]["nodes"]
-            connection = commits[0]["commit"]["statusCheckRollup"]["contexts"]
-            page_nodes = connection["nodes"]
-            total_count = connection["totalCount"]
-            page_info = connection["pageInfo"]
-            has_next = page_info["hasNextPage"]
-        except (KeyError, IndexError, TypeError):
-            return None
+    for check in check_runs:
+        app = check.get("app") if isinstance(check, dict) else None
         if (
-            pull.get("headRefOid") != expected_head
-            or not isinstance(page_nodes, list)
-            or type(total_count) is not int
-            or not isinstance(has_next, bool)
-            or expected_total not in {None, total_count}
+            not isinstance(check, dict)
+            or not isinstance(check.get("name"), str)
+            or not isinstance(check.get("status"), str)
+            or not isinstance(app, dict)
         ):
             return None
-        expected_total = total_count
-        contexts.extend(page_nodes)
-        if not has_next:
-            return contexts if expected_total == len(contexts) else None
-        next_cursor = page_info.get("endCursor")
+        contexts.append({
+            "__typename": "CheckRun",
+            "name": check["name"],
+            "status": check["status"].upper(),
+            "conclusion": str(check.get("conclusion") or "").upper(),
+            "checkSuite": {"app": {"slug": app.get("slug")}},
+        })
+    for status in status_rows:
+        creator = status.get("creator") if isinstance(status, dict) else None
         if (
-            not isinstance(next_cursor, str)
-            or not next_cursor
-            or next_cursor in seen_cursors
+            not isinstance(status, dict)
+            or not isinstance(status.get("context"), str)
+            or not isinstance(status.get("state"), str)
+            or not isinstance(creator, dict)
         ):
             return None
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
+        contexts.append({
+            "__typename": "StatusContext",
+            "context": status["context"],
+            "state": status["state"].upper(),
+            "creator": {
+                "login": creator.get("login"),
+                "__typename": creator.get("type"),
+            },
+        })
+    fresh = _gh_json(["gh", "api", f"repos/{slug}/pulls/{pr_id}"])
+    head = (fresh or {}).get("head") if isinstance(fresh, dict) else None
+    return contexts if isinstance(head, dict) and head.get("sha") == expected_head else None
 
 
 def _with_coderabbit_status(pr_id, evidence):
@@ -3234,6 +3233,58 @@ def release_pr_head_checkout(path, repo_root=None):
     repo_root = repo_root or repository_root() or os.getcwd()
     run_cmd(["git", "worktree", "remove", "--force", path], check=False, cwd=repo_root)
     shutil.rmtree(path, ignore_errors=True)
+
+
+PROJECT_VENV_DIRS = (".venv", "venv")
+
+
+def resolve_project_runner(runner, repo_root=None):
+    """Map an allowlisted bare runner name onto this project's own executable.
+
+    Resolving argv[0] from the ambient PATH runs whatever interpreter the shell
+    exposes -- often a shim lacking this project's dependencies -- so the gate
+    blames the code for an environment mismatch (#429). Prefers the repository
+    virtualenv, then VIRTUAL_ENV, then PATH. An error is an environment fault,
+    never a verification failure.
+    """
+    if not isinstance(runner, str) or not runner:
+        return None, "acceptance runner name is missing or malformed"
+    roots = [os.path.join(repo_root, n) for n in PROJECT_VENV_DIRS] if repo_root else []
+    if os.environ.get("VIRTUAL_ENV"):
+        roots.append(os.environ["VIRTUAL_ENV"])
+    for root in roots:
+        candidate = os.path.join(root, "bin", runner)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate, None
+    found = shutil.which(runner)
+    if found:
+        return found, None
+    return None, (
+        f"cannot resolve the project interpreter for {runner!r}: no project "
+        "virtualenv, no VIRTUAL_ENV, and nothing on PATH provides it. This is "
+        "an environment fault, not a verification failure; nothing was recorded."
+    )
+
+
+def resolve_acceptance_runners(criteria, repo_root=None):
+    """Resolve every runner up front, so a bad environment refuses before running."""
+    resolved = {}
+    for item in criteria:
+        if not item.argv or item.argv[0] in resolved:
+            continue
+        resolved[item.argv[0]], error = resolve_project_runner(item.argv[0], repo_root)
+        if error:
+            return None, error
+    return resolved, None
+
+
+def acceptance_run_cmd(resolved):
+    """Wrap the acceptance runner so argv[0] becomes the resolved executable."""
+    def _runner(argv, check=False, cwd=None, evidence=None):
+        if isinstance(argv, list) and argv:
+            argv = [resolved.get(argv[0], argv[0]), *argv[1:]]
+        return acceptance_runner._run_verify(argv, cwd=cwd, evidence=evidence, check=check)
+    return _runner
 
 
 def persist_acceptance_evidence(pr_id, pr, records):
@@ -5061,6 +5112,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
     # Stays None on the resume path, where no gate is evaluated. The checkpoint
     # records that gap rather than inventing a verdict set.
     gates = None
+    acceptance_records = []
     if args.expected_head and not is_merged(pr):
         if not heads_match(gated_head, args.expected_head):
             print(
@@ -5144,20 +5196,33 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 print(f"\n🚫 Not merged. Unmet: accept. {checkout_err}")
                 return EXIT_BLOCKED
             try:
+                # Resolve runners first: an unresolvable interpreter must
+                # refuse before anything runs, so nothing partial is recorded.
+                all_criteria = [
+                    item
+                    for body in issue_bodies.values()
+                    for item in acceptance_runner.parse_criteria(body)
+                ]
+                resolved, resolve_err = resolve_acceptance_runners(
+                    all_criteria, repository_root(),
+                )
+                if resolve_err:
+                    print(f"\n🚫 Not merged. Unmet: accept. {resolve_err}")
+                    return EXIT_BLOCKED
+                run_cmd_fn = acceptance_run_cmd(resolved)
                 records = []
                 for num in issue_nums:
                     passed, message = check_acceptance(
                         num, issue_bodies.get(num, ""), cwd=checkout, execute=True,
-                        records_out=records,
+                        records_out=records, run_cmd_fn=run_cmd_fn,
                     )
                     print(f"  {'✅' if passed else '❌'} accept #{num:<4} {message}")
                     if not passed:
-                        persist_acceptance_evidence(args.pr, pr, records)
+                        # Deliberately does NOT persist: writing these records
+                        # flips the evidence block to failed and blocks the next
+                        # attempt on a gate the author never failed (#429).
                         return EXIT_BLOCKED
-                persisted, persist_msg = persist_acceptance_evidence(args.pr, pr, records)
-                print(f"  {'✅' if persisted else '❌'} evidence    {persist_msg}")
-                if not persisted:
-                    return EXIT_BLOCKED
+                acceptance_records = records
             finally:
                 release_pr_head_checkout(checkout)
 
@@ -5278,6 +5343,25 @@ def main():  # noqa: C901, PLR0912, PLR0915
             file=sys.stderr,
         )
         return EXIT_ERROR
+
+    if acceptance_records:
+        persisted, persist_msg = persist_acceptance_evidence(
+            args.pr, final_pr, acceptance_records
+        )
+        print(f"  {'✅' if persisted else '❌'} evidence          {persist_msg}")
+        if not persisted:
+            failure = f"acceptance evidence persistence: {persist_msg}"
+            evidence_ok = post_human_intervention(
+                final_pr, issue_nums, root, gated_head, merged_sha, [], command,
+                blocked_before_closeout=failure,
+            )
+            print(
+                "[ERROR] Merge succeeded but acceptance evidence could not be persisted; "
+                f"intervention evidence {'was recorded' if evidence_ok else 'could not be fully recorded'}.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+
     # Park the verdicts the moment we hold them, and read them back on a
     # resumed close-out. Re-deriving them post-merge is not an option:
     # check_open fails on a closed PR, so a re-evaluated block would record
