@@ -2,7 +2,7 @@
 # #414 removed coding-agent review, review-round gating, and split planning and
 # ratcheted this file down from 5,438 lines. Every earlier +N allowance note
 # (#344, #427, #429, #460) described a ceiling that no longer exists.
-# line-ceiling: 4172
+# line-ceiling: 4195
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -24,6 +24,7 @@ Exit codes:
 """
 
 import argparse
+from collections import namedtuple
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -322,7 +323,36 @@ def _pull_pages(query, owner, name, pr_id, connection):
         seen_cursors.add(cursor)
 
 
-def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912, PLR0915
+# Every paginated review read selects this block, so each page reports which
+# state it was served from. Reviews, comments and threads are three separate
+# paginated calls: `headRefOid` alone only proves nobody pushed, so a review
+# or thread created between two of the calls would land in neither page set
+# while the head stayed put (#463 review).
+_EVIDENCE_VERSION_FIELDS = """
+          headRefOid
+          reviewTotal: reviews { totalCount }
+          commentTotal: comments { totalCount }
+          threadTotal: reviewThreads { totalCount }"""
+
+
+_EvidenceVersion = namedtuple("_EvidenceVersion", "head reviews comments threads")
+
+
+def _evidence_version(pull):
+    """The state one page was served from: head plus every connection size."""
+    head = pull.get("headRefOid")
+    if not isinstance(head, str) or not head:
+        return None
+    totals = []
+    for key in ("reviewTotal", "commentTotal", "threadTotal"):
+        node = pull.get(key)
+        if not isinstance(node, dict) or type(node.get("totalCount")) is not int:
+            return None
+        totals.append(node["totalCount"])
+    return _EvidenceVersion(head, *totals)
+
+
+def _body_edit_events(owner, name, pr_id, version):  # noqa: C901, PLR0912, PLR0915
     """Verified author body-region changes, sourced from GitHub edit history.
 
     A bare pull-request ``updatedAt`` cannot distinguish body edits from reviews,
@@ -333,8 +363,7 @@ def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
+        pullRequest(number:$pr) {""" + _EVIDENCE_VERSION_FIELDS + """
           body
           author { login __typename }
           userContentEdits(first:100, after:$cursor) {
@@ -356,7 +385,7 @@ def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
 
     try:
         for pull, nodes in _pull_pages(query, owner, name, pr_id, "userContentEdits"):
-            if pull.get("headRefOid") != expected_head:
+            if _evidence_version(pull) != version:
                 return None
             body = pull.get("body")
             author = pull.get("author") or {}
@@ -424,7 +453,7 @@ def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
                 next_verification
                 and next_verification != prior_verification
                 and evidence is not None
-                and evidence.get("head_sha") == expected_head
+                and evidence.get("head_sha") == version.head
             ):
                 events["verification"].append(edit["at"])
         previous = snapshot
@@ -434,7 +463,7 @@ def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
     if _size_waiver_region(current_body) is None:
         events["size-waiver"] = []
     current_evidence, _ = parse_verification_evidence(current_body)
-    if current_evidence is None or current_evidence.get("head_sha") != expected_head:
+    if current_evidence is None or current_evidence.get("head_sha") != version.head:
         events["verification"] = []
     return events
 
@@ -444,8 +473,7 @@ def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
+        pullRequest(number:$pr) {""" + _EVIDENCE_VERSION_FIELDS + """
           reviews(first:100, after:$cursor) {
             nodes {
               id
@@ -460,20 +488,17 @@ def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
         }
       }
     }"""
-    expected_head = None
+    expected = None
     reviewed_head = False
     reviews = []
     seen_review_ids = set()
 
     try:
         for pull, nodes in _pull_pages(query, owner, name, pr_id, "reviews"):
-            head = pull.get("headRefOid")
-            if not isinstance(head, str) or not head:
+            version = _evidence_version(pull)
+            if version is None or expected not in (None, version):
                 return None
-            if expected_head is None:
-                expected_head = head
-            elif head != expected_head:
-                return None
+            expected = version
 
             for review in nodes:
                 if not isinstance(review, dict):
@@ -506,11 +531,11 @@ def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
                         or is_advisory_review_account(login)
                         or state == "COMMENTED" and not body.strip()):
                     continue
-                if oid == expected_head:
+                if oid == expected.head:
                     reviewed_head = True
     except _PageError:
         return None
-    return expected_head, reviewed_head, reviews
+    return expected, reviewed_head, reviews
 
 
 def _collect_codeant_status_comment(body, author, collector):
@@ -524,7 +549,7 @@ def _collect_codeant_status_comment(body, author, collector):
         collector.append({"body": body, "author": author})
 
 
-def _review_comment_evidence(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
+def _review_comment_evidence(owner, name, pr_id, version):  # noqa: C901, PLR0912
     """Read paginated PR comments for provider-owned review markers.
 
     Only the assigned external services leave evidence worth parsing here:
@@ -535,8 +560,7 @@ def _review_comment_evidence(owner, name, pr_id, expected_head):  # noqa: C901, 
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
+        pullRequest(number:$pr) {""" + _EVIDENCE_VERSION_FIELDS + """
           comments(first:100, after:$cursor) {
             nodes { body createdAt author { login __typename } }
             pageInfo { hasNextPage endCursor }
@@ -548,7 +572,7 @@ def _review_comment_evidence(owner, name, pr_id, expected_head):  # noqa: C901, 
     codeant_status_comments = []
     try:
         for pull, nodes in _pull_pages(query, owner, name, pr_id, "comments"):
-            if pull.get("headRefOid") != expected_head:
+            if _evidence_version(pull) != version:
                 return None
             for node in nodes:
                 if not isinstance(node, dict) or not isinstance(node.get("body"), str):
@@ -583,8 +607,8 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     review_result = _reviewed_current_head(owner, name, pr_id)
     if review_result is None:
         return None
-    expected_head, reviewed_head, reviews = review_result
-    comment_evidence = _review_comment_evidence(owner, name, pr_id, expected_head)
+    version, reviewed_head, reviews = review_result
+    comment_evidence = _review_comment_evidence(owner, name, pr_id, version)
     if comment_evidence is None:
         return None
     coderabbit_full_review_comments = comment_evidence["coderabbit_full_review_comments"]
@@ -592,8 +616,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
+        pullRequest(number:$pr) {""" + _EVIDENCE_VERSION_FIELDS + """
           commits(last:100) {
             nodes { commit { committedDate } }
           }
@@ -633,7 +656,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
             return None
         except StopIteration:
             break
-        if pull.get("headRefOid") != expected_head:
+        if _evidence_version(pull) != version:
             return None
 
         try:
@@ -747,7 +770,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                 has_body_edit_after = False
                 if region is not None and raised is not None:
                     if body_edit_events is None:
-                        body_edit_events = _body_edit_events(owner, name, pr_id, expected_head)
+                        body_edit_events = _body_edit_events(owner, name, pr_id, version)
                         if body_edit_events is None:
                             return None
                     has_body_edit_after = any(
@@ -762,7 +785,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                         service_threads[thread_service]["unfixed"] += 1
 
     return {
-        "head_oid": expected_head,
+        "head_oid": version.head,
         "head_commit_committed_at": commit_times[-1].isoformat() if commit_times else None,
         "github_review_evidence": True,
         "reviews": reviews,

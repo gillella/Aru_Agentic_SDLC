@@ -1,4 +1,4 @@
-# line-ceiling: 6980
+# line-ceiling: 7019
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
@@ -18,6 +18,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import common
 import merge_pr
 import cleanup_worktrees
+
+
+def _pull_version(head="head123", reviews=0, comments=0, threads=0):
+    """The evidence-version fields merge_pr requires on every review page."""
+    return {"headRefOid": head, "reviewTotal": {"totalCount": reviews},
+            "commentTotal": {"totalCount": comments},
+            "threadTotal": {"totalCount": threads}}
+
+
+# The tuple merge_pr derives from those fields, for callers that pass a
+# version straight into a paginated reader.
+_VERSION = merge_pr._evidence_version(_pull_version("a" * 40))
 
 
 def _complete_comments(nodes):
@@ -110,7 +122,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 node["author"].setdefault("__typename", "User")
             normalized.append(node)
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": head,
+            **_pull_version(head),
             "reviews": {
                 "nodes": normalized,
                 "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
@@ -131,7 +143,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             node["comments"] = comments
             normalized.append(node)
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": head,
+            **_pull_version(head),
             "commits": {"nodes": [{"commit": {
                 "committedDate": "2026-08-24T00:00:00Z",
             }}]},
@@ -312,10 +324,37 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 self.assertEqual(evidence["withdrawn"], withdrawn)
                 self.assertEqual(evidence["unfixed"], unfixed)
 
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_evidence_read_from_two_states_fails_closed(self, gh_json, _slug):
+        """A review or thread created mid-read is never merged around.
+
+        Reviews, comments and threads are three separate paginated calls, so
+        an unchanged head proves only that nobody pushed. Every page reports
+        the size of all three connections, and any disagreement between two
+        pages fails the whole read closed instead of merging on a torn view.
+        """
+        empty_page = {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}
+        for moved in ("reviews", "comments", "threads"):
+            for connection in ("comments", "reviewThreads"):
+                with self.subTest(moved=moved, read=connection):
+                    gh_json.reset_mock(side_effect=True, return_value=True)
+                    later = {"data": {"repository": {"pullRequest": {
+                        **_pull_version(**{moved: 1}),
+                        "commits": {"nodes": [{"commit": {
+                            "committedDate": "2026-08-24T00:00:00Z"}}]},
+                        connection: empty_page,
+                    }}}}
+                    pages = [self.review_page(), later]
+                    if connection == "reviewThreads":
+                        pages.insert(1, self.attestation_page())
+                    gh_json.side_effect = pages
+                    self.assertIsNone(merge_pr.review_evidence(162))
+
     @staticmethod
     def attestation_page(head="head123", nodes=None, has_next=False, cursor=None):
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": head,
+            **_pull_version(head),
             "comments": {
                 "nodes": [] if nodes is None else nodes,
                 "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
@@ -6021,7 +6060,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
     @classmethod
     def page(cls, nodes, body, *, has_next=False, cursor=None):
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": cls.HEAD,
+            **_pull_version(cls.HEAD),
             "body": body,
             "author": {"login": "author", "__typename": "User"},
             "userContentEdits": {
@@ -6040,7 +6079,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         ], after)
 
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
 
         self.assertEqual(len(events["size-waiver"]), 1)
@@ -6056,7 +6095,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         ], current)
 
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
 
         self.assertEqual(len(events["verification"]), 1)
@@ -6076,7 +6115,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         ], before)
 
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
 
         self.assertEqual(events, {"size-waiver": [], "verification": []})
@@ -6126,7 +6165,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         ], after)
 
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
 
         self.assertEqual(events, {"size-waiver": [], "verification": []})
@@ -6148,7 +6187,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
             ),
         ]
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
         self.assertEqual(len(events["size-waiver"]), 1)
         self.assertIn("cursor=older", gh_json.call_args_list[1].args[0])
@@ -6158,7 +6197,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         gh_json.side_effect = None
         gh_json.return_value = changed
         self.assertIsNone(
-            merge_pr._body_edit_events("owner", "repo", 248, self.HEAD)
+            merge_pr._body_edit_events("owner", "repo", 248, _VERSION)
         )
 
 
@@ -6176,7 +6215,7 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
     @staticmethod
     def thread_page(comments):
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": ReviewBodyEditIntegrationTests.HEAD,
+            **_pull_version(ReviewBodyEditIntegrationTests.HEAD),
             "commits": {"nodes": [{"commit": {
                 "committedDate": "2026-08-17T00:00:00Z",
             }}]},
@@ -6213,7 +6252,7 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
             patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"),
             patch.object(
                 merge_pr, "_reviewed_current_head",
-                return_value=(self.HEAD, True, [self.REVIEW]),
+                return_value=(_VERSION, True, [self.REVIEW]),
             ),
             patch.object(
                 merge_pr, "_review_comment_evidence",
@@ -6414,7 +6453,7 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
             "data": {
                 "repository": {
                     "pullRequest": {
-                        "headRefOid": "head123",
+                        **_pull_version(),
                         "reviews": {
                             "nodes": [{
                                 "id": "review-1", "state": "COMMENTED",
@@ -6453,7 +6492,7 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
             "data": {
                 "repository": {
                     "pullRequest": {
-                        "headRefOid": "head123",
+                        **_pull_version(),
                         "reviews": {
                             "nodes": [{
                                 "id": "review-1", "state": "COMMENTED",

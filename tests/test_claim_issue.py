@@ -1,6 +1,6 @@
 # +59 for the #344 terminal merge lease tests.
 # +7 for the #410 fixed-quiet-threshold recovery tests.
-# line-ceiling: 1145
+# line-ceiling: 1203
 import io
 import json
 import sys
@@ -266,6 +266,33 @@ class ClaimProtocolTests(unittest.TestCase):
         self.assertEqual(
             run_cmd.call_args_list[-2].args[0],
             ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
+        )
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_settle_rollback_unassigns_the_caller_supplied_assignee(
+        self, get_issue, _ensure, run_cmd, _update_status, _sleep
+    ):
+        """A custom --assignee must be undone by the same name it was made with.
+
+        Rolling back with "@me" leaves the operator-only issue assigned to
+        whoever the claim named, so board ownership and GitHub assignment
+        disagree on an issue no agent may hold.
+        """
+        get_issue.side_effect = [
+            issue_with_labels("status:ready"),
+            issue_with_labels("status:ready", "agent:agent-a", "needs-human"),
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a", assignee="octocat")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        self.assertEqual(
+            run_cmd.call_args_list[-1].args[0],
+            ["gh", "issue", "edit", "7", "--remove-assignee", "octocat"],
         )
 
     @patch.object(claim_issue.time, "sleep")
@@ -868,6 +895,37 @@ class ClaimAgeReaperTests(unittest.TestCase):
             self._pr(19, "merger:renewed"),
         ])
         fetch_timeline.side_effect = [
+            self._timeline("merger:renewed", self.OLD),
+            [
+                *self._timeline("merger:renewed", self.OLD),
+                *self._timeline("merger:renewed", recent),
+            ],
+        ]
+
+        with patch("sys.stderr") as stderr:
+            result = claim_issue.reap_stale_merges(4)
+
+        self.assertEqual(result, [])
+        self.assertEqual(run_cmd.call_count, 2)
+        self.assertTrue(stderr.write.called)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_claim_reacquired_after_revalidation_is_not_removed(
+        self, run_cmd, fetch_timeline
+    ):
+        """The sweep re-proves each claim in the instant before removing it.
+
+        Revalidation covers the whole set at preflight time; the removal
+        happens later, so a claim released and re-acquired in between would
+        otherwise be reaped on the strength of the older observation.
+        """
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.side_effect = self._merged_list_pair([
+            self._pr(21, "merger:renewed"),
+        ])
+        fetch_timeline.side_effect = [
+            self._timeline("merger:renewed", self.OLD),
             self._timeline("merger:renewed", self.OLD),
             [
                 *self._timeline("merger:renewed", self.OLD),

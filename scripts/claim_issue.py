@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # #414 removed coding-agent review claiming and ratcheted this file down from
 # 1,581 lines, superseding the #344 terminal-merge-lease allowance.
-# line-ceiling: 1001
+# line-ceiling: 1019
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -157,7 +157,7 @@ def _rollback_claim(issue_id: int, agent: str, assignee: str, target_status: str
     run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee], check=False)
 
 
-def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
+def _settle_as_winner(issue_id: int, agent: str, my_label: str, assignee: str) -> int:
     """Sleep/read until SETTLE_ROUNDS consecutive readbacks name us the winner.
 
     Returns EXIT_OK when settled as winner, EXIT_CONFLICT when another agent
@@ -175,7 +175,7 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
         holders = agent_labels(issue)
         if _needs_human(issue):
             if my_label in holders:
-                _rollback_claim(issue_id, agent, "@me", target_status="Backlog")
+                _rollback_claim(issue_id, agent, assignee, target_status="Backlog")
             print(f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
                   "while the claim was settling.", file=sys.stderr)
             return EXIT_CONFLICT
@@ -306,7 +306,7 @@ def _start_fresh_issue_claim(issue_id: int, agent: str, status: str, assignee: s
     if code != 0:
         print(f"[ERROR] Could not apply claim label: {err}", file=sys.stderr)
         return EXIT_ERROR
-    settled = _settle_as_winner(issue_id, agent, my_label)
+    settled = _settle_as_winner(issue_id, agent, my_label, assignee)
     if settled != EXIT_OK:
         return settled
     return _finalize_claim(issue_id, agent, status, assignee, my_label, owner=owner,
@@ -869,6 +869,24 @@ def _revalidate_claims(prs: list, prefix: str, claimant, expected: list):
     return refreshed
 
 
+def _claim_is_unchanged(pr_number: int, holder: str, claimed_at) -> bool:
+    """Re-prove one merge claim in the instant before its label is removed.
+
+    `_revalidate_claims` proves the whole set was unchanged when the sweep
+    began, but each removal happens later still, after every other claimed
+    PR's timeline was read. A holder that released and re-acquired inside
+    that window would otherwise have a fresh claim reaped on the strength of
+    a stale observation. GitHub offers no atomic compare-and-remove for a
+    label, so the closest available is to re-read this one timeline and act
+    only while the claim event is still the exact one that was gated on.
+    """
+    if _claim_labeled_at(pr_number, f"{MERGER_LABEL_PREFIX}{holder}") == claimed_at:
+        return True
+    print(f"[WARN] Merge claim on PR #{pr_number} changed during the sweep; "
+          "leaving it to its current holder.", file=sys.stderr)
+    return False
+
+
 def _quiet_threshold_label(hours: int | float) -> str:
     """Render the configured quiet threshold for the audit line."""
     value = float(hours)
@@ -928,7 +946,7 @@ def reap_stale_merges(  # noqa: C901, PLR0912
         number = pr["number"]
         if claimed_at >= cutoff:
             continue
-        if _remove_merger_label(number, holder):
+        if _claim_is_unchanged(number, holder, claimed_at) and _remove_merger_label(number, holder):
             released.append(number)
             print(f"♻️  Released stale merge claim on PR #{number} "
                   f"(held by '{holder}', claim age > {quiet} quiet threshold).", file=sys.stderr)

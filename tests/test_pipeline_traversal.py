@@ -1,4 +1,4 @@
-# line-ceiling: 447
+# line-ceiling: 458
 """Hermetic proof that the issue lifecycle is traversable end to end.
 
 Issue #293 - every governance gate in this repository is individually
@@ -401,7 +401,18 @@ class RetiredAgentReviewTraversalTests(unittest.TestCase):
                          ["review"])
 
     def test_no_external_fallback_service_is_named_agent(self):
-        self.assertNotIn("agent", FALLBACK_SERVICES)
+        """Read the production mapping, not the tuple this module declares.
+
+        `reassign_review` can still label a PR `review:agent`, so the claim
+        worth proving is the one the merge gate depends on: the coding agent
+        is not one of the external review authorities, and an assignment to
+        it yields no positive review authority at any head.
+        """
+        self.assertNotIn("agent", reassign_review.EXTERNAL_FALLBACK_LABELS)
+        self.assertEqual(set(reassign_review.EXTERNAL_FALLBACK_LABELS),
+                         set(FALLBACK_SERVICES))
+        self.assertFalse(merge_pr.has_authoritative_assigned_review(
+            reassigned_pr("agent"), canonical_evidence()))
 
 
 class DefinitionOfDoneTests(unittest.TestCase):
