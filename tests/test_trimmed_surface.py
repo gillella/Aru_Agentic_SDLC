@@ -38,10 +38,12 @@ REMOVED_MODULES = (
     "run_fleet", "spawn_ephemeral_worker", "factory_metrics", "fixtures",
 )
 
-# `#406` may not edit these; `#414` reserves all three in its own `touches:`
-# and removes the last presence dependency there. Pinning the set means the
-# coupling can only shrink, never grow, while that removal is outstanding.
-PRESENCE_DEPENDENTS_PENDING_414 = {
+# `scripts/agent_presence.py` outlives this slice. Its three live dependents
+# are `#414`'s reserved paths, not `#406`'s, so deleting the module here would
+# turn CI red on files this issue may not edit. The set below is a ceiling
+# rather than an equality: the coupling may shrink as those paths are cleaned,
+# but a new dependent must not appear while the module is on its way out.
+PRESENCE_DEPENDENTS_ALLOWED = {
     "scripts/fetch_next_work.py",
     "tests/test_agent_fingerprint.py",
     "tests/test_claim_review.py",
@@ -129,20 +131,22 @@ class RemovedSurfaceTests(unittest.TestCase):
             with self.subTest(path=rel):
                 self.assertNotIn("factory_metrics", imported_modules(text))
 
-    def test_presence_coupling_is_pinned_to_the_paths_414_owns(self):
+    def test_presence_coupling_never_grows_past_the_paths_406_cannot_edit(self):
         """Blocked, not forgotten: see the #406 amended plan for the blocker.
 
         `scripts/agent_presence.py` cannot be deleted here because
         `scripts/fetch_next_work.py` still calls `PresenceStore` and two test
-        modules import it -- all three are `#414`'s reserved paths. This guard
-        fails if a fourth dependent appears, and fails again once `#414` lands
-        so the removal is finished rather than silently left half-done.
+        modules import it -- all three are `#414`'s reserved paths, not this
+        issue's. Asserting a subset rather than equality keeps the guard honest
+        in both directions: a fourth dependent fails it, while a later slice
+        that drops one of these imports does not fail a file it cannot edit.
         """
         dependents = {
             rel for rel, text in source_files()
             if "agent_presence" in imported_modules(text)
         }
-        self.assertEqual(dependents, PRESENCE_DEPENDENTS_PENDING_414)
+        unexpected = dependents - PRESENCE_DEPENDENTS_ALLOWED
+        self.assertEqual(unexpected, set(), f"new presence coupling: {unexpected}")
 
 
 class CompactStatusTests(unittest.TestCase):
