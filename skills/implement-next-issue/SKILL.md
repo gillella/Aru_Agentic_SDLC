@@ -228,13 +228,14 @@ or other irreversible work from the plan gate.
    c. Apply fix edits in the worktree directory.
    d. Push updates and re-verify CI.
 
-### Step 11: CodeRabbit Review and Handoff
+### Step 11: Review and Handoff
 1. Transition the issue/PR Project Board status to `In Review`:
    `python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" --issue <ISSUE_ID> --status "In Review"`.
-2. Await CodeRabbit's review. Coding agents never review. Never claim review
-   work, invoke `code-review`, or ask Claude, Codex, Cursor, or Antigravity to
-   review a PR.
-3. Route every actionable CodeRabbit finding to the author or adopted
+2. Await CodeRabbit by default. If it is unavailable, the operator may use
+   `reassign_review.py` for Sourcery or CodeAnt. Only after every external path
+   is exhausted or its wait is declared excessive may that helper select one
+   independent coding agent. Authors never select or review their own PR.
+3. Route every actionable reviewer finding to the author or adopted
    implementation/remediation agent. Before resolving a review thread, ensure
    the finding is addressed by a later commit on the PR branch or by a reply
    that begins `Withdrawn:` and explains why it no longer applies. Use
@@ -246,12 +247,14 @@ or other irreversible work from the plan gate.
 
 ### Step 12: Merge Authority and Completion
 
-1. Coding agents never review. Coding-agent reviews and legacy `reviewed-by:` attestations never satisfy
-   review. Wait for a completed substantive CodeRabbit review on the exact
-   current head. Before invoking `merge_pr.py`, every actionable CodeRabbit
-   finding must have later-commit evidence or an explicit `Withdrawn:` reply;
-   thread resolution alone is never sufficient.
-2. After the CodeRabbit oracle passes, any factory agent,
+1. Wait for completed exact-head evidence from the assigned authority:
+   CodeRabbit, explicitly reassigned Sourcery/CodeAnt, or the one emergency
+   independent `review:agent` selected after external exhaustion. Labels or ordinary
+   comments alone never satisfy review, and every author push invalidates the
+   prior evidence. Before invoking `merge_pr.py`, every actionable finding must
+   have later-commit evidence or an authorized withdrawal; thread resolution
+   alone is never sufficient.
+2. After the assigned review authority passes, any factory agent,
    including the implementation author, may perform the mechanical merge with
    `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <PR_ID> --expected-head <HEAD_SHA>`
    when the picker supplied `head_sha`. This is the sole

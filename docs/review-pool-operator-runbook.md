@@ -1,17 +1,17 @@
-# Review-Pool Operator Runbook
+# Review Authority Operator Runbook
 
 ## Purpose & Scope
 
-Operational procedure for the deterministic three-service review pool
-(CodeRabbit, Sourcery, CodeAnt) introduced by the review-pool cutover
+Operational procedure for CodeRabbit-first review with explicit Sourcery,
+CodeAnt, and last-resort independent-agent fallback
 (`scripts/create_pr.py`, `scripts/merge_pr.py`). It covers what a factory
 agent or human operator does around PR assignment, review triggering, exact-head
 evidence, remediation, governed dry-runs, and billing/trial boundaries.
 
-This runbook does not grant review, merge, or account authority. Assigned
-review-pool services are the sole PR code-review authority
-(`AGENTS.md` §Process Ownership and Merge Authority); coding agents implement
-and remediate only. Real-money execution, production cutover, destructive
+This runbook does not grant merge or account authority. A coding agent may
+review only after an operator explicitly assigns that independent agent to one
+PR because every external reviewer is unavailable, busy, or waiting too long.
+Real-money execution, production cutover, destructive
 migration, credential use, and external-account mutation stay separate,
 mandatory human gates that no review evidence satisfies.
 
@@ -29,20 +29,58 @@ remediation edits in §4 as well as initial assignment.
 
 ## 1. Assignment
 
-`create_pr.py` assigns exactly one review service per issue, deterministically:
+`review:coderabbit` is the only review assignment `create_pr.py` ever
+creates. There is no rotation, capacity accounting, or scheduler behind it:
+reassignment is an explicit operator action taken after concrete observed
+unavailability, never a load balancer and never a retry. The label is
+applied to the PR **while it is still draft**, before the PR is marked ready.
+Only one review-authority label may ever be present; `merge_pr.py` refuses to
+resolve a service when zero or more than one is set
+(`check_reviews` in `scripts/merge_pr.py`). Never add or swap a
+review-authority label by hand. If CodeRabbit is unavailable, use the governed
+helper for one explicit reassignment:
 
-```text
-REVIEW_SERVICES[(issue_id - 1) % 3]  ->  coderabbit | sourcery | codeant
+```shell
+python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> \
+  --to <sourcery|codeant> --reason "<observed unavailability>"
 ```
 
-The label (`review:coderabbit`, `review:sourcery`, or `review:codeant`) is
-applied to the PR **while it is still draft**, before the PR is marked ready.
-Only one review-pool label may ever be present; `merge_pr.py` refuses to
-resolve a service when zero or more than one is set
-(`check_reviews` in `scripts/merge_pr.py`). Never add or swap a review-pool
-label by hand. `merge_pr.py` recomputes the assigned service from every
-linked issue and rejects a mismatched label, making the PR unmergeable
-instead of changing accepted review authority.
+If CodeRabbit, Sourcery, and CodeAnt are all unavailable or busy, or the
+operator declares the wait excessive, the same helper may select one
+independent agent:
+
+```shell
+python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> --to agent \
+  --reviewer <AGENT_ID> --model-family <FAMILY> \
+  --reason "<external attempts and excessive-wait decision>"
+```
+
+The helper replaces one known authority, refuses self-review and ambiguous
+authors, and records the exact head, reviewer, family, and reason. It does not
+discover reviewers, track capacity, rotate agents, or create a second queue.
+
+### When the selected service also fails
+
+The external switch is one-way by design. `reassign_review.py` refuses a
+second external hop: once a PR carries `review:sourcery` or `review:codeant`,
+an attempt to move it to the other external service exits `2` (conflict) with
+`only the default assignment may be moved to a fallback`. Re-running the same
+`--to` is refused for the same reason — reassignment is not a retry mechanism.
+So an operator whose chosen external fallback also stalls has exactly two
+governed options:
+
+1. **Wait at the current authority.** Nothing is lost; the PR keeps its
+   exact-head evidence contract and merges as soon as the service reports.
+2. **Escalate to the terminal option.** `--to agent` is the only move accepted
+   from an already-switched PR: it admits `review:coderabbit` *or* either
+   external label as the outgoing authority. It additionally requires
+   `--reviewer` with a safe agent id, `--model-family`, and exactly one
+   `author:<id>` different from that reviewer, so a PR with ambiguous or
+   self-authored identity cannot be escalated at all.
+
+There is no third hop. Independent-agent review is the end of the fallback
+chain, not another entry in a pool; if it cannot be assigned, the PR waits for
+a human decision recorded on the PR itself.
 
 ## 2. Trigger
 
@@ -98,12 +136,39 @@ after a review invalidates it — re-review the new head before merging
   come from the recognized CodeRabbit app/login and be `COMPLETED`/`SUCCESS`;
   missing, pending, failed, rate-limited, stale, ambiguous, or spoofed
   evidence blocks merge.
-- **Sourcery** — one successful, head-bound `Sourcery review` check
-  (`_sourcery_check`).
-- **CodeAnt** — one authoritative exact-head `codeant-ai` review object, not
-  `CHANGES_REQUESTED` (`_codeant_latest_review`).
+- **Sourcery** — exactly one check named `Sourcery review`, `COMPLETED` with
+  conclusion `SUCCESS` (`_sourcery_check`). The name alone proves nothing: the
+  run must be produced by the recognized `sourcery-ai` app slug, carry this
+  PR's exact head SHA, and be linked to this pull request number and base, so a
+  run from another PR that happens to share a head cannot satisfy the gate
+  (`_sourcery_match_binds_this_head`). Zero such checks and two or more both
+  block — ambiguity is never arbitrated in the PR's favour.
+- **CodeAnt** — either of two provider-owned shapes bound to the exact current
+  head (`has_authoritative_codeant_review`): an authoritative exact-head
+  `codeant-ai` review object that is not `CHANGES_REQUESTED`
+  (`_codeant_latest_review`); or, when a clean run left no review object to
+  find, CodeAnt's own completed clean-review status record parsed from the
+  `codeant-review-status` marker on its rolling status comment
+  (`_codeant_status_evidence`). A current-head review object that exists but is
+  untrustworthy blocks **both** paths — the status marker is a fallback for
+  absent evidence, never a way around rejected evidence. Markers are collected
+  regardless of author precisely so a spoofed one is seen and rejected rather
+  than silently skipped.
+- **Emergency agent** — exactly one author and one different assigned reviewer,
+  one reviewer model family, a substantive current-head GitHub review from the
+  same login, and exactly one matching completed `aru-agent-review:v1` record.
+  The assigned agent records completion with:
 
-All three additionally require every blocker enforced by `check_reviews`
+  ```shell
+  python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> \
+    --complete-review --agent <AGENT_ID> --model-family <FAMILY> \
+    --review-disposition <no-findings|findings-resolved>
+  ```
+
+  A push invalidates this evidence. Missing, stale, duplicate, malformed, or
+  self-review evidence blocks merge.
+
+Every review path additionally requires every blocker enforced by `check_reviews`
 (`scripts/merge_pr.py`) to be clear:
 
 - The assigned-service thread gate: zero unresolved and zero outdated-unfixed
@@ -223,8 +288,8 @@ dry-run is evidence the PR is mergeable, not a merge —
       obtained before editing.
 - [ ] Local suite is green before any remediation commit or push (§4 step 2,
       `AGENTS.md` "Local Test Verification First").
-- [ ] Exactly one `review:<service>` label, applied before `gh pr ready`.
-- [ ] Assigned service's exact-head evidence present per §3.
+- [ ] Exactly one `review:<authority>` label; ordinary PRs receive it before `gh pr ready`.
+- [ ] Assigned reviewer's exact-head evidence present per §3.
 - [ ] The assigned-service thread gate passes and aggregate unresolved,
       outdated-unfixed, and unfixed counts are zero; every resolved finding
       is fixed, explicitly withdrawn, or supported by the required

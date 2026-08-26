@@ -1,9 +1,11 @@
-# line-ceiling: 1162
+# +59 for the #344 terminal merge lease tests.
+# line-ceiling: 1255
 import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import call, patch
@@ -47,12 +49,11 @@ def issue_with_labels(*names, author="owner", number=7):
 class ClaimProtocolTests(unittest.TestCase):
     def setUp(self):
         self.required_board_preflight = claim_issue._required_board_preflight
-        owner = patch.object(
-            claim_issue, "repository_owner_login", return_value="owner")
-        trusted = patch.object(
-            claim_issue, "repository_trusted_logins", return_value={"owner"})
-        board = patch.object(
-            claim_issue, "_required_board_preflight", return_value=True)
+        owner = patch.object(claim_issue, "repository_owner_login", return_value="owner")
+        trusted = patch.object(claim_issue, "repository_trusted_logins", return_value={"owner"})
+        board = patch.object(claim_issue, "_required_board_preflight", return_value=True)
+        self.enterContext(patch.object(claim_issue.merge_pr, "repository_merge_lock",
+            return_value=nullcontext((True, "locked"))))
         self.addCleanup(owner.stop)
         self.addCleanup(trusted.stop)
         self.addCleanup(board.stop)
@@ -1088,11 +1089,14 @@ class DummyRecord:
 
 
 class ClaimIssueTests(unittest.TestCase):
-    def test_review_claim_conflict_message_references_review_pool(self):
-        with patch("sys.stderr") as stderr:
+    def test_normal_review_claim_conflict_names_emergency_assignment(self):
+        with patch.object(claim_issue, "_pr_labels",
+                          return_value=["review:coderabbit", "author:agent-1"]), \
+                patch("sys.stderr") as stderr:
             code = claim_issue.claim_review(17, "codex-review-pool")
         self.assertEqual(code, claim_issue.EXIT_CONFLICT)
-        self.assertIn("review-pool", "".join(call.args[0] for call in stderr.write.call_args_list).lower())
+        self.assertIn("emergency", "".join(
+            call.args[0] for call in stderr.write.call_args_list).lower())
 
     def test_absent_agent_reduced_reap_threshold(self):
         store = DummyPresenceStore(records={})
@@ -1160,3 +1164,87 @@ class ClaimIssueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TerminalLeaseClaimTests(unittest.TestCase):
+    """#344: an issue closed by a governed merge cannot be re-claimed."""
+
+    @staticmethod
+    def _gh(issue_state, pr_state):
+        def fake(cmd):
+            if "issue" in cmd:
+                return {"state": issue_state,
+                        "closedByPullRequestsReferences": [{"number": 89}]}
+            return {"state": pr_state, "headRefName": "fix/issue-87-x"}
+        return fake
+
+    def test_issue_closed_by_a_merged_pr_is_refused(self):
+        with patch.object(claim_issue, "run_gh_json", side_effect=self._gh("CLOSED", "MERGED")), \
+             patch.object(claim_issue, "terminal_merge_lease", return_value=None):
+            self.assertIsNotNone(claim_issue._terminally_merged(87))
+
+    def test_open_issue_is_not_terminally_merged(self):
+        with patch.object(claim_issue, "run_gh_json", side_effect=self._gh("OPEN", "MERGED")):
+            self.assertIsNone(claim_issue._terminally_merged(87))
+
+    def test_closed_without_a_merged_pr_is_not_terminal(self):
+        with patch.object(claim_issue, "run_gh_json", side_effect=self._gh("CLOSED", "CLOSED")):
+            self.assertIsNone(claim_issue._terminally_merged(87))
+
+    LEASED = ["author:agent-a", "terminal-lease:abcdef123456"]
+
+    def test_merge_claim_is_refused_when_the_pr_really_is_merged(self):
+        """Criterion 4: the lease blocks continuation of a merged claim."""
+        with patch.object(claim_issue, "run_gh_json", return_value={"state": "MERGED"}):
+            self.assertEqual(
+                claim_issue._terminal_lease_conflict(89, self.LEASED),
+                claim_issue.EXIT_CONFLICT,
+            )
+
+    def test_a_forged_lease_label_cannot_freeze_an_unmerged_pr(self):
+        """CWE-345: the label is a cache; the merged-PR record is the authority."""
+        with patch.object(claim_issue, "run_gh_json", return_value={"state": "OPEN"}):
+            self.assertIsNone(claim_issue._terminal_lease_conflict(89, self.LEASED))
+
+    def test_unreadable_merge_state_refuses_rather_than_guessing(self):
+        with patch.object(claim_issue, "run_gh_json", return_value=None):
+            self.assertEqual(
+                claim_issue._terminal_lease_conflict(89, self.LEASED),
+                claim_issue.EXIT_ERROR,
+            )
+
+    def test_no_lease_label_costs_no_lookup(self):
+        with patch.object(claim_issue, "run_gh_json") as gh:
+            self.assertIsNone(claim_issue._terminal_lease_conflict(89, ["author:agent-a"]))
+        gh.assert_not_called()
+
+    def test_unreadable_issue_lookup_blocks_the_claim(self):
+        """A failed governance lookup must surface, not read as 'not merged'."""
+        with patch.object(claim_issue, "run_gh_json", return_value=None):
+            self.assertIsNotNone(claim_issue._terminally_merged(87))
+
+    def test_malformed_closing_pr_reference_list_blocks_the_claim(self):
+        """A non-list references payload is unknown, not "nothing merged"."""
+        for payload in ({"nope": 1}, "refs", 7):
+            with self.subTest(payload=payload):
+                with patch.object(claim_issue, "run_gh_json", return_value={
+                    "state": "CLOSED", "closedByPullRequestsReferences": payload,
+                }):
+                    self.assertIsNotNone(claim_issue._terminally_merged(87))
+
+    def test_unidentifiable_closing_pr_reference_blocks_the_claim(self):
+        """A reference with no resolvable number cannot clear the merge check."""
+        for ref in ({"number": None}, {}, "89", None):
+            with self.subTest(ref=ref):
+                with patch.object(claim_issue, "run_gh_json", return_value={
+                    "state": "CLOSED", "closedByPullRequestsReferences": [ref],
+                }) as gh:
+                    self.assertIsNotNone(claim_issue._terminally_merged(87))
+                self.assertEqual(gh.call_count, 1, "must not look past a bad reference")
+
+    def test_unreadable_closing_pr_blocks_the_claim(self):
+        def gh(cmd):
+            return ({"state": "CLOSED", "closedByPullRequestsReferences": [{"number": 89}]}
+                    if "issue" in cmd else None)
+        with patch.object(claim_issue, "run_gh_json", side_effect=gh):
+            self.assertIsNotNone(claim_issue._terminally_merged(87))
