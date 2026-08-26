@@ -1,4 +1,4 @@
-# line-ceiling: 2498
+# line-ceiling: 2792
 import io
 import json
 import os
@@ -2492,6 +2492,300 @@ class UnifiedWorkDispatchAndIndependenceTests(unittest.TestCase):
         for method in lifecycle_mutation_methods:
             with self.subTest(method=method):
                 self.assertFalse(hasattr(et, method))
+
+
+class ShellScopeAndExpansionTests(unittest.TestCase):
+    """`_redirect_writes` must model the shell it is reading, not a token bag.
+
+    Four ways the walk disagreed with bash, each of which pointed the write at
+    a directory the command never used:
+
+      * `cd ~` was joined to the base as a literal directory named `~`, so a
+        following relative redirect was judged inside `<base>/~/`;
+      * a `cd` in a pipeline stage, a backgrounded command, or a `( ... )`
+        subshell was carried back into the parent shell, whose cwd the shell
+        never actually moved;
+      * `/usr/bin/sed -i` was not recognised as sed at all, so the file it
+        rewrites was left out of the walk entirely;
+      * `$OUT` after `OUT=...` in the same command was answered from the hook
+        process's own environment rather than from the assignment the shell
+        had just made.
+    """
+
+    AGENTS_MD = "# AGENTS\n\n## Core Governance Directive: The Issue-First Law\n\nBody.\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+
+        def git(*args, cwd):
+            subprocess.run(
+                ["git", *args], cwd=str(cwd), check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+        cls.main_root = base / "repo"
+        cls.main_root.mkdir()
+        git("init", "-b", "main", cwd=cls.main_root)
+        git("config", "user.email", "t@example.com", cwd=cls.main_root)
+        git("config", "user.name", "t", cwd=cls.main_root)
+        (cls.main_root / "AGENTS.md").write_text(cls.AGENTS_MD, encoding="utf-8")
+        (cls.main_root / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (cls.main_root / "MEMORY.md").write_text("- repo copy\n", encoding="utf-8")
+        git("add", "-A", cwd=cls.main_root)
+        git("commit", "-m", "init", cwd=cls.main_root)
+
+        cls.wt = cls.main_root / ".worktrees" / "fix-issue-11"
+        git("worktree", "add", "-b", "fix/issue-11-a", str(cls.wt), cwd=cls.main_root)
+
+        # Stands in for `~`: outside every repository, with a basename that
+        # deliberately collides with a governed file.
+        cls.fake_home = base / "userhome"
+        cls.outside = cls.fake_home / "memory"
+        cls.outside.mkdir(parents=True)
+        (cls.outside / "MEMORY.md").write_text("- user copy\n", encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def bash(self, cwd, command, touches=("app.py", "MEMORY.md"), env=None):
+        payload = {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": str(cwd),
+        }
+        # Only the GitHub lookup is stubbed; all git and path resolution is real.
+        with patch.dict(os.environ, env or {}), \
+             patch.object(et.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             patch.object(et, "touches_for", return_value=list(touches)):
+            return et.main()
+
+    # --- tilde expansion ---------------------------------------------------
+
+    def test_cd_tilde_resolves_to_the_home_directory(self):
+        """`cd ~` moved the base to `<repo>/~`, a directory bash never enters."""
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                "cd ~/memory && echo x >> MEMORY.md",
+                env={"HOME": str(self.fake_home)},
+            ),
+            et.EXIT_ALLOW,
+        )
+
+    def test_bare_cd_tilde_resolves_to_the_home_directory(self):
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                "cd ~ && echo x >> MEMORY.md",
+                env={"HOME": str(self.outside)},
+            ),
+            et.EXIT_ALLOW,
+        )
+
+    def test_pushd_tilde_resolves_to_the_home_directory(self):
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                "pushd ~ && echo x >> MEMORY.md",
+                env={"HOME": str(self.outside)},
+            ),
+            et.EXIT_ALLOW,
+        )
+
+    def test_tilde_home_inside_a_worktree_still_reaches_the_protected_checkout(self):
+        """Expansion is not an escape: the expanded path is governed normally."""
+        self.assertEqual(
+            self.bash(
+                self.wt,
+                "cd ~ && echo x >> app.py",
+                env={"HOME": str(self.main_root)},
+            ),
+            et.EXIT_BLOCK,
+        )
+
+    def test_quoted_tilde_is_not_expanded(self):
+        """Quoting suppresses the expansion, so this really is `<repo>/~`."""
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                "cd '~' && echo x >> MEMORY.md",
+                env={"HOME": str(self.outside)},
+            ),
+            et.EXIT_BLOCK,
+        )
+
+    # --- pipeline, background and subshell scoping -------------------------
+
+    def test_backgrounded_cd_does_not_move_the_parent_shell(self):
+        """`cd /outside & echo x >> MEMORY.md` still appends inside the repo."""
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.outside} & echo x >> MEMORY.md"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_piped_cd_does_not_move_the_parent_shell(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.outside} | cat; echo x >> MEMORY.md"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_subshell_cd_does_not_survive_the_closing_paren(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"(cd {self.outside}); echo x >> MEMORY.md"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_cd_inside_a_subshell_applies_to_that_subshell(self):
+        """Scoping cuts both ways - inside the parens the move is real."""
+        self.assertEqual(
+            self.bash(self.main_root, f"(cd {self.outside} && echo x >> MEMORY.md)"),
+            et.EXIT_ALLOW,
+        )
+
+    def test_backgrounded_cd_does_not_move_a_git_write_off_the_protected_branch(self):
+        """The fail-closed half of the module shares the scoping rule."""
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.outside} & git commit -m x"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_subshell_cd_does_not_move_a_later_git_write(self):
+        self.assertEqual(
+            self.bash(self.main_root, f"(cd {self.outside}) && git commit -m x"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_sequential_cd_outside_still_releases_the_write(self):
+        """The unscoped path is unchanged: a plain `cd` really does move."""
+        self.assertEqual(
+            self.bash(self.main_root, f"cd {self.outside} && echo x >> MEMORY.md"),
+            et.EXIT_ALLOW,
+        )
+
+    # --- sed -i identified by basename -------------------------------------
+
+    def test_qualified_sed_in_place_is_governed(self):
+        """`/usr/bin/sed -i` rewrites the file exactly as a bare `sed` does."""
+        self.assertEqual(
+            self.bash(self.main_root, "/usr/bin/sed -i.bak s/a/b/ MEMORY.md"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_bare_sed_in_place_is_still_governed(self):
+        self.assertEqual(
+            self.bash(self.main_root, "sed -i.bak s/a/b/ MEMORY.md"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_wrapped_sed_in_place_is_governed(self):
+        self.assertEqual(
+            self.bash(self.main_root, "env sed -i.bak s/a/b/ MEMORY.md"),
+            et.EXIT_BLOCK,
+        )
+
+    def test_the_word_sed_in_another_command_is_not_an_in_place_edit(self):
+        """Matching any word named `sed` reported writes no command performed."""
+        self.assertEqual(
+            self.bash(self.main_root, "echo sed -i.bak MEMORY.md"), et.EXIT_ALLOW
+        )
+
+    def test_sed_without_the_in_place_flag_is_not_a_write(self):
+        self.assertEqual(
+            self.bash(self.main_root, "/usr/bin/sed s/a/b/ MEMORY.md"), et.EXIT_ALLOW
+        )
+
+    # --- variables assigned inside the command -----------------------------
+
+    def test_in_command_assignment_beats_the_hook_process_environment(self):
+        """`OUT=<outside>; cd $OUT` used the shell's value, not this process's."""
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                f"OUT={self.outside}; cd $OUT && echo x >> MEMORY.md",
+                env={"OUT": str(self.main_root)},
+            ),
+            et.EXIT_ALLOW,
+        )
+
+    def test_in_command_assignment_can_also_reach_the_protected_checkout(self):
+        """The dangerous direction: a stale process value must not excuse it."""
+        self.assertEqual(
+            self.bash(
+                self.wt,
+                f"OUT={self.main_root}; cd $OUT && echo x >> app.py",
+                env={"OUT": str(self.outside)},
+            ),
+            et.EXIT_BLOCK,
+        )
+
+    def test_exported_in_command_assignment_is_tracked(self):
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                f"export OUT={self.outside}; cd $OUT && echo x >> MEMORY.md",
+                env={"OUT": str(self.main_root)},
+            ),
+            et.EXIT_ALLOW,
+        )
+
+    def test_an_unresolvable_assignment_makes_the_base_unknowable(self):
+        """A value this scanner cannot resolve is not the process's value."""
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                "OUT=$(cat somewhere); cd $OUT && echo x >> MEMORY.md",
+                env={"OUT": str(self.main_root)},
+            ),
+            et.EXIT_ALLOW,
+        )
+
+    def test_a_command_prefix_assignment_does_not_persist(self):
+        """`OUT=x cmd` sets OUT for `cmd` alone, so `$OUT` later is inherited."""
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                f"OUT={self.outside} true; cd $OUT && echo x >> MEMORY.md",
+                env={"OUT": str(self.main_root)},
+            ),
+            et.EXIT_BLOCK,
+        )
+
+    def test_a_subshell_assignment_does_not_leak_into_the_parent(self):
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                f"(OUT={self.outside}); cd $OUT && echo x >> MEMORY.md",
+                env={"OUT": str(self.main_root)},
+            ),
+            et.EXIT_BLOCK,
+        )
+
+    def test_unset_makes_a_later_use_unknowable_rather_than_inherited(self):
+        self.assertEqual(
+            self.bash(
+                self.main_root,
+                "unset OUT; cd $OUT && echo x >> MEMORY.md",
+                env={"OUT": str(self.main_root)},
+            ),
+            et.EXIT_ALLOW,
+        )
+
+    # --- the scanner reports subshell boundaries ---------------------------
+
+    def test_scanner_reports_parentheses_as_control_tokens(self):
+        kinds = et._shell_tokens("(cd /tmp)")
+        self.assertIn(("control", "("), kinds)
+        self.assertIn(("control", ")"), kinds)
+
+    def test_process_substitution_opens_a_balanced_subshell(self):
+        """`>(` consumes its paren, so the scope stack must not go negative."""
+        self.assertEqual(
+            et._redirect_writes("echo >(cat > inside.txt); echo x > after.txt", "/repo"),
+            [("inside.txt", "/repo"), ("after.txt", "/repo")],
+        )
 
 
 if __name__ == "__main__":
