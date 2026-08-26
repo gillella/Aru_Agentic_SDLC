@@ -251,18 +251,32 @@ def most_recent_merge_history(repo_slug: Optional[str] = None) -> Tuple[Optional
     slug = repo_slug or get_repo_slug()
     if not slug:
         return None, False
+    query = f"repo:{slug} {_merged_pr_search()}"
     res = run_gh_json([
-        "gh", "api", "--method", "GET", f"repos/{slug}/pulls",
-        "-f", "state=closed", "-f", "sort=updated", "-f", "direction=desc",
+        "gh", "api", "--paginate", "--slurp", "--method", "GET", "search/issues",
+        "-f", f"q={query}", "-f", "sort=updated", "-f", "order=desc",
         "-f", f"per_page={STALL_MERGE_WINDOW}",
     ])
-    if not isinstance(res, list):
+    if not isinstance(res, list) or not res:
+        return None, False
+    rows = []
+    total_count = None
+    for page in res:
+        if (
+            not isinstance(page, dict) or not isinstance(page.get("items"), list)
+            or page.get("incomplete_results")
+        ):
+            return None, False
+        total_count = page.get("total_count") if total_count is None else total_count
+        rows.extend(page["items"])
+    if not isinstance(total_count, int) or total_count > len(rows):
         return None, False
     stamps = []
-    for row in res:
+    for row in rows:
         if not isinstance(row, dict):
             continue
-        parsed = _parse_ts(row.get("merged_at") or row.get("mergedAt"))
+        pull = row.get("pull_request") or {}
+        parsed = _parse_ts(pull.get("merged_at") or pull.get("mergedAt"))
         if parsed is not None:
             stamps.append(parsed)
     return (max(stamps) if stamps else None), True

@@ -284,16 +284,16 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(status["exit_code"], EXIT_ERROR)
         self.assertIn("Could not query open issues.", status["summary"])
 
-    @patch("fleet_status.governed_board_inventory", return_value=None)
+    @patch("fleet_status.get_repo_projects", return_value=None)
     @patch("fleet_status.get_repo_slug", return_value="octocat/widgets")
-    def test_error_state_on_real_board_query_failure(self, _slug, _run_gh):
+    def test_error_state_on_real_board_query_failure(self, *_mocks):
         status = evaluate_fleet_status(".")
 
         self.assertEqual(status["state"], "error")
         self.assertEqual(status["exit_code"], EXIT_ERROR)
         self.assertIn("Could not query project boards.", status["summary"])
 
-    @patch("common.run_gh_json", return_value=None)
+    @patch("fleet_status.governed_board_inventory", return_value=None)
     @patch("fleet_status.list_worktree_branches", return_value=[])
     @patch("fleet_status.list_open_prs_details", return_value=[])
     @patch(
@@ -1364,29 +1364,34 @@ class StallQuestionTests(unittest.TestCase):
 class MostRecentMergeTests(unittest.TestCase):
     def test_returns_newest_merged_at_not_first_row(self):
         # gh returns newest-created first, which is not newest-merged.
-        rows = [
-            {"mergedAt": "2026-08-17T01:00:00Z"},
-            {"mergedAt": "2026-08-17T09:00:00Z"},
-            {"mergedAt": "2026-08-17T03:00:00Z"},
-        ]
-        with patch.object(fleet_status, "run_gh_json", return_value=rows):
+        payload = {"total_count": 3, "incomplete_results": False, "items": [
+            {"pull_request": {"merged_at": "2026-08-17T01:00:00Z"}},
+            {"pull_request": {"merged_at": "2026-08-17T09:00:00Z"}},
+            {"pull_request": {"merged_at": "2026-08-17T03:00:00Z"}},
+        ]}
+        with patch.object(fleet_status, "run_gh_json", return_value=[payload]):
             newest = most_recent_merge_time()
         self.assertEqual(newest, datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc))
 
-    def test_lookup_uses_rest_closed_pull_inventory(self):
+    def test_lookup_uses_merge_date_bounded_rest_search(self):
         captured = []
 
         def fake_gh(argv, **kwargs):
             captured.append(argv)
-            return []
+            return [{"total_count": 0, "incomplete_results": False, "items": []}]
 
         with patch.object(fleet_status, "run_gh_json", side_effect=fake_gh):
             most_recent_merge_history()
         self.assertEqual(len(captured), 1)
         argv = captured[0]
-        self.assertEqual(argv[:4], ["gh", "api", "--method", "GET"])
-        self.assertIn("state=closed", argv)
-        self.assertIn("sort=updated", argv)
+        self.assertEqual(argv[:2], ["gh", "api"])
+        self.assertIn("--paginate", argv)
+        self.assertIn("--slurp", argv)
+        self.assertIn("search/issues", argv)
+        query = next(value[2:] for value in argv if value.startswith("q="))
+        self.assertIn("repo:", query)
+        self.assertIn("is:merged", query)
+        self.assertIn("merged:>=", query)
 
     def test_lookup_failure_returns_unavailable(self):
         with patch.object(fleet_status, "run_gh_json", return_value=None):
@@ -1397,14 +1402,18 @@ class MostRecentMergeTests(unittest.TestCase):
             self.assertIsNone(most_recent_merge_time())
 
     def test_empty_successful_history_is_available(self):
-        with patch.object(fleet_status, "run_gh_json", return_value=[]):
+        payload = {"total_count": 0, "incomplete_results": False, "items": []}
+        with patch.object(fleet_status, "run_gh_json", return_value=[payload]):
             newest, ok = most_recent_merge_history()
         self.assertIsNone(newest)
         self.assertTrue(ok)
 
     def test_malformed_rows_are_skipped(self):
-        rows = ["nonsense", {"mergedAt": None}, {"mergedAt": "2026-08-17T05:00:00Z"}]
-        with patch.object(fleet_status, "run_gh_json", return_value=rows):
+        payload = {"total_count": 3, "incomplete_results": False, "items": [
+            "nonsense", {"pull_request": {"merged_at": None}},
+            {"pull_request": {"merged_at": "2026-08-17T05:00:00Z"}},
+        ]}
+        with patch.object(fleet_status, "run_gh_json", return_value=[payload]):
             newest = most_recent_merge_time()
         self.assertEqual(newest, datetime(2026, 8, 17, 5, 0, tzinfo=timezone.utc))
 

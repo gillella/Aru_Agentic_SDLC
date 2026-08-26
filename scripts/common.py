@@ -1176,7 +1176,7 @@ def attach_issue_to_governed_project(
     return add_issue_to_project(issue_number, int(project_number), owner)
 
 
-def set_board_status(
+def set_board_status(  # noqa: C901, PLR0912
     issue_number: int,
     status: str,
     *,
@@ -1196,6 +1196,13 @@ def set_board_status(
         return False
     items = select_governed_project_items(raw_items, slug)
     if not items:
+        if expected_status is not None:
+            print(
+                f"[CONFLICT] Issue #{issue_number} is missing from the governed "
+                f"board; cannot verify expected status '{expected_status}'.",
+                file=sys.stderr,
+            )
+            return False
         if not attach_issue_to_governed_project(issue_number, existing_items=raw_items):
             return False
         refreshed = query_issue_project_items(issue_number)

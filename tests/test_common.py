@@ -156,6 +156,17 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
         items.assert_called_once_with(42)
         attach.assert_not_called()
 
+    @patch.object(common, "attach_issue_to_governed_project")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    @patch.object(common, "query_issue_project_items", return_value=[])
+    def test_conditional_status_move_never_attaches_missing_item(
+        self, _items, _slug, attach,
+    ):
+        self.assertFalse(
+            common.set_board_status(42, "Ready", expected_status="Backlog")
+        )
+        attach.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
