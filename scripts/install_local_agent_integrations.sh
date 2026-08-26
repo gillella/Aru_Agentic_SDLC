@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# line-ceiling: 769
+# line-ceiling: 779
 # install_local_agent_integrations.sh — wire Aru_Agentic_SDLC skills and native adapters for local coding agents
 set -euo pipefail
 
@@ -126,6 +126,14 @@ EOF
         ;;
     esac
   done
+  if [[ "${STOP_LOOP}" == true && "${RESUME_LOOP}" == true ]]; then
+    echo "error: cannot specify both --stop-loop and --resume-loop" >&2
+    exit 1
+  fi
+  if [[ "${ENABLE_NATIVE_WAKE}" == true && "${DISABLE_NATIVE_WAKE}" == true ]]; then
+    echo "error: cannot specify both --enable-native-wake and --disable-native-wake" >&2
+    exit 1
+  fi
 }
 
 parse_args "$@"

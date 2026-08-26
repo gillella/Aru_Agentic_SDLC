@@ -446,6 +446,19 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertEqual(res_repeat.returncode, 0)
         self.assertIn("No stop requested; continuing", res_repeat.stdout)
 
+    def test_simultaneous_stop_and_resume_rejected(self):
+        res = self.run_installer("--stop-loop", "--resume-loop")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("cannot specify both --stop-loop and --resume-loop", res.stderr)
+
+        res_proj = self.run_installer("--stop-loop", "--resume-loop", "--project", "/tmp/aru-proj-a")
+        self.assertNotEqual(res_proj.returncode, 0)
+        self.assertIn("cannot specify both --stop-loop and --resume-loop", res_proj.stderr)
+
+        res_wake = self.run_installer("--enable-native-wake", "--disable-native-wake")
+        self.assertNotEqual(res_wake.returncode, 0)
+        self.assertIn("cannot specify both --enable-native-wake and --disable-native-wake", res_wake.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

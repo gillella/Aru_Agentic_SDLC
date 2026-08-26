@@ -33,6 +33,15 @@ class LoopControlTests(unittest.TestCase):
         ] + list(args)
         return subprocess.run(cmd, capture_output=True, text=True)
 
+    def run_doctor(self, *args):
+        cmd = [
+            sys.executable,
+            str(ROOT / "scripts" / "doctor_local_agent_integrations.py"),
+            "--aru-home", str(ROOT),
+            "--target-home", str(self.target_home),
+        ] + list(args)
+        return subprocess.run(cmd, capture_output=True, text=True)
+
     def create_adapter(self, payload: dict | str, exit_code: int = 0) -> str:
         bin_path = self.target_home / "fake_adapter.sh"
         body = payload if isinstance(payload, str) else json.dumps(payload)
@@ -175,6 +184,63 @@ class LoopControlTests(unittest.TestCase):
         lower = text.lower()
         for term in forbidden:
             self.assertNotIn(term, lower, f"Hard-coded identifier {term} found in loop_control.py")
+
+    def test_global_status_without_project_only_matches_global_star_marker(self):
+        loop_control.execute_stop(self.target_home, project=self.project_a, reason="maintenance")
+        status_global = loop_control.get_status(self.target_home, project=None)
+        self.assertTrue(status_global["desktop_stop_marker"]["present"])
+        self.assertFalse(status_global["desktop_stop_marker"]["applies"])
+        self.assertEqual(status_global["desktop_stop_marker"]["scope"], "project")
+        self.assertEqual(status_global["status"], "ok")
+
+        res_cli = self.run_cli("status", "--json")
+        self.assertEqual(res_cli.returncode, 0)
+        cli_data = json.loads(res_cli.stdout)
+        self.assertEqual(cli_data["status"], "ok")
+        self.assertFalse(cli_data["desktop_stop_marker"]["applies"])
+
+        loop_control.execute_stop(self.target_home, project=None, reason="operator-requested")
+        status_star = loop_control.get_status(self.target_home, project=None)
+        self.assertTrue(status_star["desktop_stop_marker"]["present"])
+        self.assertTrue(status_star["desktop_stop_marker"]["applies"])
+        self.assertEqual(status_star["desktop_stop_marker"]["scope"], "global")
+        self.assertEqual(status_star["status"], "stopped")
+
+        res_star_cli = self.run_cli("status", "--json")
+        self.assertEqual(res_star_cli.returncode, 0)
+        star_cli_data = json.loads(res_star_cli.stdout)
+        self.assertEqual(star_cli_data["status"], "stopped")
+        self.assertTrue(star_cli_data["desktop_stop_marker"]["applies"])
+
+    def test_doctor_and_loop_control_malformed_stop_marker_yields_invalid_json_without_traceback(self):
+        malformed_cases = [
+            "{CORRUPTED JSON",
+            json.dumps(["not", "a", "dict"]),
+            json.dumps({"projects": "not-a-list"}),
+            json.dumps({"projects": 12345}),
+        ]
+        stop_file = self.aru_dir / "factory-loop.stop"
+        for payload in malformed_cases:
+            stop_file.write_text(payload, encoding="utf-8")
+            status = loop_control.get_status(self.target_home, project=self.project_a)
+            self.assertEqual(status["status"], "invalid")
+            self.assertIn("error", status)
+
+            res_doc = self.run_doctor("--json", "--project", self.project_a)
+            self.assertEqual(res_doc.returncode, 1)
+            self.assertNotIn("Traceback", res_doc.stderr)
+            doc_data = json.loads(res_doc.stdout)
+            self.assertEqual(doc_data["status"], "invalid")
+            stop_checks = [c for c in doc_data["checks"] if c["id"] == "stop_marker"]
+            self.assertTrue(len(stop_checks) >= 1)
+            self.assertFalse(stop_checks[0]["ok"])
+            self.assertEqual(stop_checks[0]["severity"], "invalid")
+
+            res_doc_global = self.run_doctor("--json")
+            self.assertEqual(res_doc_global.returncode, 1)
+            self.assertNotIn("Traceback", res_doc_global.stderr)
+            doc_global_data = json.loads(res_doc_global.stdout)
+            self.assertEqual(doc_global_data["status"], "invalid")
 
 
 if __name__ == "__main__":

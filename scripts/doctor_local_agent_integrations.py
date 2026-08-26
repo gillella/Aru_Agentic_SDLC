@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 914
+# line-ceiling: 935
 """Read-only diagnosis for local coding-agent integrations.
 
 Reports desktop continuity adapters plus install-link checks (canonical home,
@@ -210,8 +210,12 @@ def find_macos_app(spec: dict, roots: list[Path]) -> dict | None:
 def load_json(path: Path) -> dict | None:
     if not path.is_file():
         return None
-    with path.open(encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def project_automation_id(project: str) -> str:
@@ -806,11 +810,29 @@ def report(aru_home: Path, target_home: Path, project: str | None,
             "capability_gap": gap,
             **wake,
         }
-    marker_info = resolve_desktop_stop_marker(target_home, project)
+    try:
+        marker_info = resolve_desktop_stop_marker(target_home, project)
+        marker_error = None
+    except ValueError as exc:
+        marker_info = {
+            "present": False,
+            "applies": False,
+            "scope": "none",
+            "projects": [],
+            "reason": None,
+            "path": str(target_home / ".aru" / "factory-loop.stop"),
+        }
+        marker_error = str(exc)
     stopped = marker_info["applies"]
     install = diagnose_install(aru_home, target_home, agents, home=home)
     repo = None
     checks = list(install["checks"])
+    if marker_error:
+        checks.append(check(
+            "stop_marker", False, "invalid",
+            f"Malformed stop marker: {marker_error}",
+            path=str(target_home / ".aru" / "factory-loop.stop"),
+        ))
     if project and _is_git_repo(project, home=home):
         repo = diagnose_repo(project, install["prerequisites"]["gh_logged_in"], home=home)
         checks.extend(repo["checks"])

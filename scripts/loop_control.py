@@ -35,9 +35,11 @@ def stop_applies(stop_doc: dict | None, project: str | None) -> bool:
     if not isinstance(stop_doc, dict):
         return False
     projects = stop_doc.get("projects") or []
-    if "*" in projects or (project and project in projects):
+    if "*" in projects:
         return True
-    return bool(projects) and project is None
+    if project and project in projects:
+        return True
+    return False
 
 
 def resolve_desktop_stop_marker(target_home: Path, project: str | None = None) -> dict:
