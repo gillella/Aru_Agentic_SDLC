@@ -8,6 +8,7 @@ read-only execution guarantee, and hermetic two-repository isolation.
 
 import contextlib
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -102,6 +103,7 @@ class FakeRepo:
         board_items: list = None,
         projects: list = None,
         tags: list = None,
+        framework_version: str = "v0.1.0",
         fail: tuple = (),
     ):
         self.slug = slug
@@ -110,6 +112,7 @@ class FakeRepo:
         self.worktrees = MAIN_WORKTREE if worktrees is None else worktrees
         self.fail = set(fail)
         self.tags = ["v0.1.0"] if tags is None else list(tags)
+        self.framework_version = framework_version
 
         owner, _, repo_name = slug.partition("/")
         self.owner = owner
@@ -158,6 +161,8 @@ class FakeRepo:
         if cmd[:2] == ["git", "tag"]:
             return 0, "\n".join(self.tags) + "\n", ""
         if cmd[:2] == ["git", "describe"]:
+            if cwd and os.path.abspath(str(cwd)) == os.path.abspath(common.get_framework_root()):
+                return 0, f"{self.framework_version}\n", ""
             if self.tags:
                 return 0, f"{self.tags[-1]}\n", ""
             return 1, "", "No names found"
@@ -432,6 +437,61 @@ class TestFailClosedAndDegraded(unittest.TestCase):
         self.assertEqual(snapshot["state"], "error")
         self.assertEqual(snapshot["exit_code"], fls.EXIT_ERROR)
 
+    def test_open_issue_missing_from_board_fails_closed(self):
+        repo = FakeRepo(
+            issues=[make_issue(101), make_issue(102)],
+            board_items=[{"status": "Ready", "content": {"number": 101, "repository": "gillella/Aru_Agentic_SDLC"}}],
+        )
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertTrue(any("missing from canonical Project v2 board" in e for e in snapshot["errors"]))
+
+    def test_duplicate_board_item_for_issue_fails_closed(self):
+        repo = FakeRepo(
+            issues=[make_issue(101)],
+            board_items=[
+                {"status": "Ready", "content": {"number": 101, "repository": "gillella/Aru_Agentic_SDLC"}},
+                {"status": "In Progress", "content": {"number": 101, "repository": "gillella/Aru_Agentic_SDLC"}},
+            ],
+        )
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertTrue(any("Duplicate board item" in e for e in snapshot["errors"]))
+
+    def test_empty_status_board_item_fails_closed(self):
+        repo = FakeRepo(
+            issues=[make_issue(101)],
+            board_items=[{"status": "", "content": {"number": 101, "repository": "gillella/Aru_Agentic_SDLC"}}],
+        )
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertTrue(any("empty or missing status" in e for e in snapshot["errors"]))
+
+    def test_whitespace_status_board_item_fails_closed(self):
+        repo = FakeRepo(
+            issues=[make_issue(101)],
+            board_items=[{"status": "   ", "content": {"number": 101, "repository": "gillella/Aru_Agentic_SDLC"}}],
+        )
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertTrue(any("empty or missing status" in e for e in snapshot["errors"]))
+
 
 class TestReadOnlyGuarantee(unittest.TestCase):
     def test_executes_no_mutating_commands(self):
@@ -453,25 +513,19 @@ class TestTwoRepositoryHermeticIsolation(unittest.TestCase):
         repo_a = FakeRepo(
             slug="org-alpha/project-alpha",
             issues=[make_issue(1, title="Alpha 1")],
-            projects=[{
-                "id": "PVT_A",
-                "number": 10,
-                "title": "project-alpha Board",
-                "owner": {"login": "org-alpha"},
-                "repositories": {"nodes": [{"nameWithOwner": "org-alpha/project-alpha"}]},
-            }],
+            tags=["v-alpha-1.0.0"],
+            projects=[{"id": "PVT_A", "number": 10, "title": "project-alpha Board",
+                       "owner": {"login": "org-alpha"},
+                       "repositories": {"nodes": [{"nameWithOwner": "org-alpha/project-alpha"}]}}],
         )
 
         repo_b = FakeRepo(
             slug="org-beta/project-beta",
             issues=[make_issue(2, title="Beta 2")],
-            projects=[{
-                "id": "PVT_B",
-                "number": 20,
-                "title": "project-beta Board",
-                "owner": {"login": "org-beta"},
-                "repositories": {"nodes": [{"nameWithOwner": "org-beta/project-beta"}]},
-            }],
+            tags=["v-beta-2.0.0"],
+            projects=[{"id": "PVT_B", "number": 20, "title": "project-beta Board",
+                       "owner": {"login": "org-beta"},
+                       "repositories": {"nodes": [{"nameWithOwner": "org-beta/project-beta"}]}}],
         )
 
         with wired_repo(repo_a):
@@ -485,12 +539,16 @@ class TestTwoRepositoryHermeticIsolation(unittest.TestCase):
         self.assertEqual(snap_a["board"]["number"], 10)
         self.assertEqual(snap_a["board"]["title"], "project-alpha Board")
         self.assertEqual(snap_a["open_issues"][0]["title"], "Alpha 1")
+        self.assertEqual(snap_a["tags_releases"]["latest_tag"], "v-alpha-1.0.0")
+        self.assertEqual(snap_a["tags_releases"]["framework_version"], "v0.1.0")
 
         # Verify Repo B
         self.assertEqual(snap_b["repository"]["slug"], "org-beta/project-beta")
         self.assertEqual(snap_b["board"]["number"], 20)
         self.assertEqual(snap_b["board"]["title"], "project-beta Board")
         self.assertEqual(snap_b["open_issues"][0]["title"], "Beta 2")
+        self.assertEqual(snap_b["tags_releases"]["latest_tag"], "v-beta-2.0.0")
+        self.assertEqual(snap_b["tags_releases"]["framework_version"], "v0.1.0")
 
         # Verify zero cross-talk
         self.assertNotEqual(snap_a["repository"]["slug"], snap_b["repository"]["slug"])
@@ -510,6 +568,17 @@ class TestCLIAndFormatting(unittest.TestCase):
         self.assertIn("Repository: gillella/Aru_Agentic_SDLC", text)
         self.assertIn("Board: #7", text)
         self.assertIn("#10 [P0] Implement Feature", text)
+
+    def test_text_formatting_with_consumer_repository(self):
+        issue1 = make_issue(10, title="Consumer Feature", status="Ready", priority="p0")
+        repo = FakeRepo(slug="org-beta/project-beta", issues=[issue1])
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot("/path/to/beta")
+            text = fls.format_snapshot_text(snapshot)
+
+        self.assertIn("=== project-beta: Factory Loop Snapshot ===", text)
+        self.assertNotIn("=== Aru_Agentic_SDLC: Factory Loop Snapshot ===", text)
+        self.assertIn("Repository: org-beta/project-beta", text)
 
     def test_cli_json_flag(self):
         repo = FakeRepo(issues=[make_issue(1)])

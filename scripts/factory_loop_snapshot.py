@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from common import (
     claimed_by,
     get_current_framework_version,
+    get_framework_root,
     get_repo_projects,
     parse_touches,
     run_cmd,
@@ -170,11 +171,17 @@ def _resolve_board_inventory(slug: str) -> Tuple[Optional[Dict[str, Any]], Optio
 
         item_repo = content.get("repository") or item.get("repository")
         if item_repo == slug:
-            if isinstance(raw_status, str) and raw_status:
-                status_counts[raw_status] = status_counts.get(raw_status, 0) + 1
+            if not isinstance(raw_status, str) or not raw_status.strip():
+                issue_num = content.get("number")
+                issue_ref = f"issue #{issue_num}" if isinstance(issue_num, int) else "item"
+                return None, None, f"Board item for {issue_ref} has empty or missing status on board #{number}."
+            status_clean = raw_status.strip()
             issue_num = content.get("number")
-            if isinstance(issue_num, int) and isinstance(raw_status, str) and raw_status:
-                issue_board_statuses[issue_num] = raw_status
+            if isinstance(issue_num, int):
+                if issue_num in issue_board_statuses:
+                    return None, None, f"Duplicate board item for issue #{issue_num} on board #{number}."
+                issue_board_statuses[issue_num] = status_clean
+            status_counts[status_clean] = status_counts.get(status_clean, 0) + 1
 
     # Sort status count keys deterministically
     sorted_status_counts = {k: status_counts[k] for k in sorted(status_counts.keys())}
@@ -321,7 +328,7 @@ def _normalize_pull_requests(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(rows, key=lambda row: row["number"])
 
 
-def _collect_tags_and_releases(target_dir: str) -> Dict[str, Any]:
+def _collect_tags_and_releases(target_dir: str = "") -> Dict[str, Any]:
     """Collect git tags and framework version."""
     code_tags, out_tags, _ = run_cmd(["git", "tag", "--list"], check=False)
     tags = sorted([t.strip() for t in out_tags.splitlines() if t.strip()]) if code_tags == 0 else []
@@ -332,7 +339,7 @@ def _collect_tags_and_releases(target_dir: str) -> Dict[str, Any]:
     )
     latest_tag = out_desc.strip() if code_desc == 0 and out_desc.strip() else (tags[-1] if tags else None)
 
-    framework_ver = get_current_framework_version(target_dir)
+    framework_ver = get_current_framework_version(get_framework_root())
 
     return {
         "latest_tag": latest_tag,
@@ -512,6 +519,21 @@ def evaluate_factory_loop_snapshot(
                 board=board_info,
             )
 
+        missing_board_issues = [
+            issue["number"] for issue in raw_issues if issue["number"] not in board_statuses
+        ]
+        if missing_board_issues:
+            missing_str = ", ".join(f"#{n}" for n in sorted(missing_board_issues))
+            return _fail_closed(
+                f"Open issue(s) {missing_str} missing from canonical Project v2 board #{board_info['number']}.",
+                "BLOCKED: Governed project board state is unusable.",
+                state="blocked",
+                code=EXIT_BLOCKED,
+                slug=slug,
+                root_dir=target,
+                board=board_info,
+            )
+
         raw_prs = rest_open_pull_requests(run_cmd, slug)
         if raw_prs is None:
             return _fail_closed(
@@ -593,14 +615,15 @@ def evaluate_factory_loop_snapshot(
 
 def format_snapshot_text(snapshot: Dict[str, Any]) -> str:
     """Format snapshot as human-readable plain text summary."""
+    repo = snapshot.get("repository") or {}
+    repo_name = repo.get("name") or repo.get("slug") or "Factory"
     lines = [
-        "=== Aru_Agentic_SDLC: Factory Loop Snapshot ===",
+        f"=== {repo_name}: Factory Loop Snapshot ===",
         f"Schema: {snapshot.get('schema_version', 'unknown')}",
         f"State: {snapshot.get('state', 'UNKNOWN').upper()}",
         f"Summary: {snapshot.get('summary', '')}",
     ]
-    repo = snapshot.get("repository")
-    if repo:
+    if repo.get("slug"):
         lines.append(f"Repository: {repo.get('slug')} ({repo.get('current_branch')})")
 
     board = snapshot.get("board")
