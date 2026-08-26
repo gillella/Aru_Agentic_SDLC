@@ -3,7 +3,6 @@
 import io
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import fetch_next_issue  # noqa: E402
 import fetch_next_work as fnw  # noqa: E402
-import run_fleet  # noqa: E402
 
 
 def rest_pr(number):
@@ -258,72 +256,6 @@ class CycleSnapshotTests(unittest.TestCase):
             fnw.main()
 
         select.assert_called_once()
-
-
-class DurableRunnerBudgetTests(unittest.TestCase):
-    def runner(self, root, command_runner=lambda *_: None):
-        config = run_fleet.RunnerConfig(
-            repo=Path(root), aru_home=Path(root), agent="agent-1", family="openai",
-            state_dir=Path(root) / "state",
-        )
-        return run_fleet.FleetRunner(
-            config, command_runner=command_runner, agent_runner=lambda *_: 0,
-        )
-
-    def test_picker_promotes_idle_without_preclaiming_child_work(self):
-        seen = []
-        def command(argv, _cwd):
-            seen.append(argv)
-            return run_fleet.CommandResult(0, json.dumps({"work": {"type": "idle"}}))
-        with tempfile.TemporaryDirectory() as root:
-            self.runner(root, command)._run_picker()
-        self.assertIn("--promote-idle", seen[0])
-        self.assertNotIn("--claim", seen[0])
-
-    def test_active_followup_skips_duplicate_full_fleet_inventory(self):
-        with tempfile.TemporaryDirectory() as root:
-            runner = self.runner(root)
-            with patch.object(
-                runner, "_run_fleet_status", return_value={"state": "waiting"},
-            ) as fleet, patch.object(
-                runner, "_run_picker", side_effect=[
-                    {"work": {"type": "issue", "issue": 45}},
-                    {"work": {"type": "issue", "issue": 46}},
-                ],
-            ):
-                runner.run_iteration()
-                runner.run_iteration()
-        self.assertEqual(fleet.call_count, 1)
-
-    def test_cached_blocked_fleet_state_is_preserved_on_subsequent_idle_cycle(self):
-        with tempfile.TemporaryDirectory() as root:
-            runner = self.runner(root)
-            with patch.object(
-                runner, "_run_fleet_status", return_value={"state": "blocked"},
-            ) as fleet, patch.object(
-                runner, "_run_picker", return_value={"work": {"type": "idle"}},
-            ) as picker:
-                res1 = runner.run_iteration()
-                res2 = runner.run_iteration()
-        self.assertEqual(res1.phase, "blocked_wait")
-        self.assertEqual(res2.phase, "blocked_wait")
-        self.assertEqual(picker.call_count, 2)
-        self.assertEqual(fleet.call_count, 1)
-
-    def test_startup_diagnostic_does_not_park_when_picker_has_actionable_work(self):
-        with tempfile.TemporaryDirectory() as root:
-            runner = self.runner(root)
-            with patch.object(
-                runner, "_run_fleet_status", return_value={"state": "complete"},
-            ) as fleet, patch.object(
-                runner, "_run_picker", return_value={"work": {"type": "pr", "pr": 9}},
-            ) as picker:
-                res = runner.run_iteration()
-        self.assertEqual(res.phase, "active")
-        self.assertEqual(res.work_type, "pr")
-        self.assertEqual(res.work_number, 9)
-        self.assertEqual(fleet.call_count, 1)
-        self.assertEqual(picker.call_count, 1)
 
 
 if __name__ == "__main__":

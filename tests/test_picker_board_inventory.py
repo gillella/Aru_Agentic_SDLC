@@ -58,6 +58,16 @@ class GovernedBoardInventoryTests(unittest.TestCase):
                     "number": 1, "repository": "owner/repo",
                 }},
             ]},
+            # Malformed rows are refused, not indexed: reading fields off a
+            # non-object raised past every guard and gave callers a traceback
+            # where they had been promised a fail-closed None.
+            {"totalCount": 1, "items": ["not-an-object"]},
+            {"totalCount": 1, "items": [
+                {"status": "Ready", "content": "not-an-object"},
+            ]},
+            {"totalCount": 1, "items": [
+                {"status": "Ready", "content": {"number": {"unhashable": 1}}},
+            ]},
         ]
         for payload in bad_payloads:
             with self.subTest(payload=payload):

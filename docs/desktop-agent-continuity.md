@@ -32,7 +32,8 @@ App quit, logout, machine sleep, power-off, exhausted credits, and
 vendor-enforced termination are **not** software guarantees.
 
 Never use AppleScript, accessibility clicks, keystroke injection, or screen
-coordinates. Never replace the desktop task with `scripts/run_fleet.py`.
+coordinates. Never replace the desktop task with a background runner,
+daemon, or scheduler.
 
 ## Per application
 
@@ -104,8 +105,7 @@ Presence is not ownership:
 - Explicit `unregister` (or a distinct agent id) is required before the same
   agent id may bind to another project.
 - Desktop tasks register and heartbeat via `scripts/agent_presence.py`
-  (`register` / `heartbeat` / `set-availability`); `run_fleet.py` is optional
-  headless only.
+  (`register` / `heartbeat` / `set-availability`).
 - Never post presence heartbeats to Slack.
 
 ## Credit cooldown, takeover, and return

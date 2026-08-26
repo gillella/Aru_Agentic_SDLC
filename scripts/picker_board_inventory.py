@@ -50,6 +50,29 @@ def stage_expected_ready_for_triage(
 _OMITTED = object()
 
 
+def _board_items(owner: str, number: int) -> list | None:
+    """Read one complete board page, or ``None`` when it cannot be trusted.
+
+    A saturated page is indistinguishable from a truncated one, and a
+    ``totalCount`` that disagrees with the rows is a partial answer, so both
+    refuse rather than report a short board as the whole board.
+    """
+    code, stdout, _stderr = run_cmd([
+        "gh", "project", "item-list", str(number), "--owner", owner,
+        "--limit", "1000", "--format", "json",
+    ], check=False)
+    if code != 0:
+        return None
+    try:
+        payload = json.loads(stdout)
+        items, total = payload["items"], payload["totalCount"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(items, list) or total != len(items) or len(items) >= 1000:
+        return None
+    return items
+
+
 def governed_board_inventory(
     repo_slug: str,
     open_numbers: set[int],
@@ -75,29 +98,30 @@ def governed_board_inventory(
     number = project.get("number")
     if not owner or not isinstance(number, int):
         return None
-    code, stdout, _stderr = run_cmd([
-        "gh", "project", "item-list", str(number), "--owner", owner,
-        "--limit", "1000", "--format", "json",
-    ], check=False)
-    if code != 0:
-        return None
-    try:
-        payload = json.loads(stdout)
-        items, total = payload["items"], payload["totalCount"]
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(items, list) or total != len(items) or len(items) >= 1000:
+    items = _board_items(owner, number)
+    if items is None:
         return None
     statuses: dict[int, str] = {}
     ready_count = 0
     for item in items:
+        # A malformed row is unusable evidence, not an absent one: callers
+        # promise a fail-closed None here, and reading fields off a non-object
+        # would raise past every guard below instead.
+        if not isinstance(item, dict):
+            return None
         status = item.get("status")
         if isinstance(status, str) and status.lower() == "ready":
             ready_count += 1
         content = item.get("content") or {}
+        if not isinstance(content, dict):
+            return None
         issue_number = content.get("number")
         repository = content.get("repository") or item.get("repository")
-        if issue_number not in open_numbers or repository != repo_slug:
+        # A non-integer number is skipped rather than indexed: draft items
+        # legitimately carry none, and the completeness check below still
+        # refuses the snapshot if a real open issue went missing this way.
+        if (not isinstance(issue_number, int) or issue_number not in open_numbers
+                or repository != repo_slug):
             continue
         if issue_number in statuses or not isinstance(status, str) or not status:
             return None

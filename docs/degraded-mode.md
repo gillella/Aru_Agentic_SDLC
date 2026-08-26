@@ -37,18 +37,15 @@ files, so the picker never immediately re-queries the same file connection.
 For a green PR owned by another agent, the exact merge gate reads review
 threads once; the picker does not issue a second feedback query first.
 
-`fleet_status.py` uses paginated REST for ordinary issue, pull-request, and
-merge-history inventories. It reads the governed Project once for the complete
-open-issue status map instead of querying Project items once per issue, and it
-does not run exact-head review evidence for every open PR just to render a
-monitoring summary. Exact review evidence remains a merge-time authority.
+`fleet_status.py` uses paginated REST for its open issue and pull-request
+inventories. It reads the governed Project once for the complete open-issue
+status map instead of querying Project items once per issue, and it does not
+run exact-head review evidence for every open PR just to render a monitoring
+summary. Exact review evidence remains a merge-time authority.
 
-The durable runner performs one full fleet diagnostic at startup. Later
-cycles use the claiming picker first and refresh the broader diagnostic view
-only periodically while idle. CI polling uses REST check/status endpoints,
-exponential backoff, and a hard fail-closed timeout. A cycle may refresh
-snapshots after a successful mutation, but unchanged polling must not re-read
-the full queue.
+CI polling uses REST check/status endpoints, exponential backoff, and a hard
+fail-closed timeout. A cycle may refresh snapshots after a successful
+mutation, but unchanged polling must not re-read the full queue.
 
 ---
 
