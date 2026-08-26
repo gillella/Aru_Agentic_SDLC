@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-# #414 removed coding-agent review, review-round gating, and split planning and
-# ratcheted this file down from 5,438 lines. Every earlier +N allowance note
-# (#344, #427, #429, #460) described a ceiling that no longer exists.
+# #414 removed retired review/queue machinery and ratcheted this file down.
 # line-ceiling: 4198
 """merge_pr.py - the Definition-of-Done gate.
 
@@ -46,6 +44,7 @@ from common import (ensure_label, terminal_lease_label, VERIFICATION_EVIDENCE_EN
                     VERIFICATION_EVIDENCE_SCHEMA, VERIFICATION_EVIDENCE_START, get_repo_slug,
                     run_cmd)
 from create_pr import render_verification_evidence, replace_verification_evidence
+from picker_continuation import ensure_ready_after_closeout
 from update_issue_status import update_status
 
 EXIT_OK = 0
@@ -4161,10 +4160,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
             )
             return EXIT_ERROR
 
-    # Park the verdicts the moment we hold them, and read them back on a
-    # resumed close-out. Re-deriving them post-merge is not an option:
-    # check_open fails on a closed PR, so a re-evaluated block would record
-    # failures that never happened.
+    # Preserve pre-merge verdicts because closed PRs cannot reproduce them.
     if gates is not None:
         save_gate_verdicts(root, args.pr, gates)
     else:
@@ -4179,9 +4175,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
               f"{'was recorded' if evidence_ok else 'could not be fully recorded'}.")
         return EXIT_ERROR
 
-    # Only here: after close-out succeeded, so no checkpoint can ever claim a
-    # success that did not happen. A failed write is a warning, not a failure —
-    # the merge is already complete and must not be reported as broken.
+    # Only successful close-out can publish a checkpoint.
     tag_ok, tag_message = write_checkpoint_tag(root, final_pr, issue_nums, gates, gated_head,
                                                merged_sha)
     # A push failure still returns ok, so mark the line by what it reports.
@@ -4190,6 +4184,8 @@ def main():  # noqa: C901, PLR0912, PLR0915
     if tag_ok:
         discard_gate_verdicts(root, args.pr)
 
+    ready_ok, ready_message = ensure_ready_after_closeout(root, run_cmd_fn=run_cmd)
+    print(f"  {'✅' if ready_ok else '⚠️ '} {'ready handoff':<18} {ready_message}")
     print("\n✅ Merge and every close-out step completed.")
     return EXIT_OK
 

@@ -203,7 +203,10 @@ gate. Your claim is `merger:<AGENT_ID>` (already applied when `--claim` ran).
    never omit `--expected-head` when the picker supplied a SHA. If the live head
    differs, the helper exits blocked without merging — re-ask the board.
 3. On success (exit 0): the helper closes linked issues, moves them to Done,
-   clears claims, and cleans worktrees. Immediately ask the board again.
+   clears claims, cleans worktrees, and runs one promote-only picker pass. If
+   Ready is empty, that pass immediately promotes one qualified Backlog issue
+   without assigning it to the merger. Immediately ask the board again and
+   claim through the ordinary picker; never leave newly exposed work stranded.
 4. On exit 3 (DoD blocked / head mismatch): release the merge claim and loop —
    do not invent a merge attempt. The PR returns to review/feedback/waiting
    naturally.
