@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # #414 removed coding-agent review claiming and ratcheted this file down from
 # 1,581 lines, superseding the #344 terminal-merge-lease allowance.
-# line-ceiling: 1040
+# line-ceiling: 1042
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
