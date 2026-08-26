@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # #414 removed the review work type and ratcheted this file down from 1,264 lines.
-# line-ceiling: 898
+# line-ceiling: 900
 """Return the highest-priority work one governed factory agent can perform.
 Finishing beats starting: author feedback, merge-ready work, resumable issues, then
 Ready issues. Review is not coding-agent work at all -- the assigned external
@@ -70,6 +70,7 @@ def skill_for_issue(issue: dict[str, Any]) -> str:
 
 DEFAULT_REAP_AFTER_HOURS = 4
 _UNSET = object()
+OPEN_PR_QUERY_LIMIT = 200
 
 PR_FIELDS = "number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt,files,changedFiles"
 
@@ -83,8 +84,8 @@ def _label_value(labels: list[str], prefix: str) -> str | None:
 
 
 def list_open_prs() -> list[dict[str, Any]] | None:
-    code, out, err = run_cmd(["gh", "pr", "list", "--state", "open", "--limit", "200", "--json",
-                              PR_FIELDS], check=False)
+    code, out, err = run_cmd(["gh", "pr", "list", "--state", "open", "--json", PR_FIELDS,
+                              "--limit", str(OPEN_PR_QUERY_LIMIT)], check=False)
     prs: Any = None
     if code != 0:
         print(f"[WARN] Rich PR query failed; using a bounded REST inventory: {err.strip()}",
@@ -95,9 +96,10 @@ def list_open_prs() -> list[dict[str, Any]] | None:
         except json.JSONDecodeError:
             print("[WARN] Rich PR query was malformed; using a bounded REST inventory.",
                   file=sys.stderr)
-    # ``PR_FIELDS`` already carries files and changedFiles; the old overlay
-    # re-queried the same connection, doubling GraphQL reads every cycle for a
-    # snapshot downstream validation refuses to trust when it is truncated.
+    # PR_FIELDS carries files; a capped ``gh pr list`` is truncated, not short.
+    if isinstance(prs, list) and len(prs) >= OPEN_PR_QUERY_LIMIT:
+        print("[WARN] Open PR inventory hit its cap; the queue is truncated.", file=sys.stderr)
+        return None
     return prs if isinstance(prs, list) else _rest_open_prs()
 
 
@@ -490,7 +492,7 @@ def select(agent: str, family: str | None, *, prs_snapshot: Any = _UNSET,  # noq
     if prs is None:
         return _error_selection(agent, family, "the pull request queue could not be read")
 
-    if len(prs) >= 200:
+    if sum(1 for pr in prs if not is_merged(pr)) >= OPEN_PR_QUERY_LIMIT:
         return _error_selection(agent, family,
                                 "open pull request inventory may be truncated; refusing selection")
 
@@ -641,7 +643,7 @@ def _idle_backlog_candidate(  # noqa: C901, PLR0912
     if prs is None:
         print("[WARN] Cannot triage while the pull request queue is unreadable.", file=sys.stderr)
         return None, repo_slug
-    if len(prs) >= 200:
+    if sum(1 for pr in prs if not is_merged(pr)) >= OPEN_PR_QUERY_LIMIT:
         print("[WARN] Open pull request inventory may be truncated; refusing auto-triage.",
               file=sys.stderr)
         return None, repo_slug

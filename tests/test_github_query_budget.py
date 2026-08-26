@@ -199,6 +199,75 @@ class PullRequestFileBudgetTests(unittest.TestCase):
         self.assertEqual(records[1]["files"], renamed)
 
 
+class OpenPrQueryCapTests(unittest.TestCase):
+    """``gh pr list`` cannot page, so a result at the cap proves nothing (#463)."""
+
+    @staticmethod
+    def capped():
+        return [{
+            "number": number, "title": f"PR {number}", "isDraft": False, "labels": [],
+            "reviews": [], "statusCheckRollup": [], "updatedAt": "now", "createdAt": "now",
+            "headRefName": f"fix/{number}", "headRefOid": f"sha-{number}", "body": "",
+            "reviewDecision": "", "state": "OPEN", "mergedAt": None,
+            "files": [], "changedFiles": 0,
+        } for number in range(1, fnw.OPEN_PR_QUERY_LIMIT + 1)]
+
+    def test_result_at_the_cap_is_unreadable_rather_than_a_complete_inventory(self):
+        with patch.object(fnw, "run_cmd", return_value=(0, json.dumps(self.capped()), "")) as run, \
+             patch.object(fnw, "_rest_open_prs") as rest, \
+             patch("sys.stderr", io.StringIO()) as err:
+            self.assertIsNone(fnw.list_open_prs())
+
+        run.assert_called_once()
+        rest.assert_not_called()
+        self.assertIn("truncated", err.getvalue())
+
+    def test_one_pr_below_the_cap_is_still_a_usable_inventory(self):
+        usable = self.capped()[:-1]
+        with patch.object(fnw, "run_cmd", return_value=(0, json.dumps(usable), "")):
+            self.assertEqual(fnw.list_open_prs(), usable)
+
+    def test_capped_inventory_never_reaches_close_out_recovery_or_selection(self):
+        with patch.object(fnw, "run_cmd", return_value=(0, json.dumps(self.capped()), "")), \
+             patch.object(fnw, "list_merged_needing_closeout") as recovery, \
+             patch("sys.stderr", io.StringIO()):
+            self.assertIsNone(fnw.list_work_prs())
+
+        recovery.assert_not_called()
+        result = fnw.select("agent-1", "openai", prs_snapshot=None)
+        self.assertEqual(result["work"]["type"], "error")
+        self.assertIn("could not be read", result["work"]["reason"])
+
+    def test_capped_inventory_stops_the_cycle_before_any_claim_is_reaped(self):
+        with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--json"]), \
+             patch("sys.stdout", io.StringIO()) as out, patch("sys.stderr", io.StringIO()), \
+             patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "run_cmd", return_value=(0, json.dumps(self.capped()), "")), \
+             patch.object(fnw, "list_open_issues") as issues, \
+             patch.object(fnw, "reap_stale_merges") as merges, \
+             patch.object(fnw, "reap_stale_claims") as claims:
+            self.assertEqual(fnw.main(), 1)
+
+        merges.assert_not_called()
+        claims.assert_not_called()
+        issues.assert_not_called()
+        self.assertEqual(json.loads(out.getvalue())["work"]["type"], "error")
+
+    def test_close_out_recovery_prs_do_not_fake_a_truncated_open_queue(self):
+        merged = [{"number": 900 + n, "title": "done", "labels": [], "state": "MERGED",
+                   "mergedAt": "now", "body": ""} for n in range(20)]
+        snapshot = self.capped()[:-1] + merged
+        with patch.object(fnw, "needs_my_attention", return_value=False), \
+             patch.object(fnw, "merge_eligibility",
+                          return_value={"eligible": False, "reason": "unmet: ci"}), \
+             patch.object(fnw, "author_gate_fix", return_value=None):
+            result = fnw.select("agent-1", "openai", prs_snapshot=snapshot,
+                                issues_snapshot=None)
+
+        self.assertEqual(result["work"]["type"], "error")
+        self.assertIn("open issue queue could not be read", result["work"]["reason"])
+
+
 class CycleSnapshotTests(unittest.TestCase):
     @staticmethod
     def idle():
