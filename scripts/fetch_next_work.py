@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # #414 removed the review work type and ratcheted this file down from 1,264 lines.
-# line-ceiling: 894
+# line-ceiling: 898
 """Return the highest-priority work one governed factory agent can perform.
 Finishing beats starting: author feedback, merge-ready work, resumable issues, then
 Ready issues. Review is not coding-agent work at all -- the assigned external
@@ -489,6 +489,10 @@ def select(agent: str, family: str | None, *, prs_snapshot: Any = _UNSET,  # noq
     prs = list_work_prs() if prs_snapshot is _UNSET else prs_snapshot
     if prs is None:
         return _error_selection(agent, family, "the pull request queue could not be read")
+
+    if len(prs) >= 200:
+        return _error_selection(agent, family,
+                                "open pull request inventory may be truncated; refusing selection")
 
     degraded = [pr["number"] for pr in prs if pr.get("_degraded_rest_snapshot")]
     if isinstance(prs, DegradedPrSnapshot) or degraded:

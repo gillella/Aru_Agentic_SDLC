@@ -1,6 +1,6 @@
 # +59 for the #344 terminal merge lease tests.
 # +7 for the #410 fixed-quiet-threshold recovery tests.
-# line-ceiling: 1203
+# line-ceiling: 1268
 import io
 import json
 import sys
@@ -441,14 +441,9 @@ class ClaimProtocolTests(unittest.TestCase):
         result = claim_issue.claim_issue(7, "agent-b")
 
         self.assertEqual(result, claim_issue.EXIT_CONFLICT)
-        self.assertEqual(
-            update_status.call_args_list[0],
-            call(7, "In Progress", require_board=True),
-        )
-        self.assertEqual(
-            update_status.call_args_list[1],
-            call(7, "Ready", require_board=True),
-        )
+        update_status.assert_called_once_with(7, "In Progress", require_board=True)
+        self.assertTrue(any(c.args[0][:4] == ["gh", "issue", "edit", "7"] and "--remove-label" in c.args[0]
+                            for c in run_cmd.call_args_list))
 
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "update_status", return_value=True)
@@ -594,6 +589,71 @@ class ClaimProtocolTests(unittest.TestCase):
 
         self.assertIsNone(result)
         update_status.assert_called_once_with(7, "Backlog", require_board=True)
+
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "_remove_agent_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_release_removes_custom_assignee_from_issue_record(
+        self, get_issue, _remove_label, run_cmd, _update_status
+    ):
+        issue = issue_with_labels("status:in-progress", "agent:agent-a")
+        issue["assignees"] = [{"login": "custom-user"}]
+        get_issue.return_value = issue
+
+        claim_issue.release_issue(7, "agent-a")
+
+        run_cmd.assert_called_once_with(
+            ["gh", "issue", "edit", "7", "--remove-assignee", "custom-user"],
+            check=False,
+        )
+
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "_remove_agent_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_release_with_explicit_assignee_arg(
+        self, get_issue, _remove_label, run_cmd, _update_status
+    ):
+        issue = issue_with_labels("status:in-progress", "agent:agent-a")
+        get_issue.return_value = issue
+
+        claim_issue.release_issue(7, "agent-a", assignee="custom-user")
+
+        run_cmd.assert_called_once_with(
+            ["gh", "issue", "edit", "7", "--remove-assignee", "custom-user"],
+            check=False,
+        )
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "_remove_agent_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_rollback_claim_does_not_revert_status_or_assignee_when_another_agent_wins(
+        self, get_issue, remove_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:in-progress", "agent:agent-a", "agent:agent-b"
+        )
+        claim_issue._rollback_claim(7, "agent-b", "octocat", target_status="Ready")
+        update_status.assert_not_called()
+        run_cmd.assert_not_called()
+        remove_label.assert_called_once_with(7, "agent-b")
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "_remove_agent_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_rollback_claim_does_nothing_when_caller_label_is_missing(
+        self, get_issue, remove_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:in-progress", "agent:agent-a"
+        )
+        claim_issue._rollback_claim(7, "agent-b", "octocat", target_status="Ready")
+        update_status.assert_not_called()
+        run_cmd.assert_not_called()
+        remove_label.assert_not_called()
 
     @patch.object(claim_issue, "update_status")
     @patch.object(claim_issue, "run_cmd")

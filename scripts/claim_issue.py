@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # #414 removed coding-agent review claiming and ratcheted this file down from
 # 1,581 lines, superseding the #344 terminal-merge-lease allowance.
-# line-ceiling: 1019
+# line-ceiling: 1040
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -150,8 +150,20 @@ def _needs_human(issue: dict) -> bool:
     return "needs-human" in {name.lower() for name in label_names(issue)}
 
 
-def _rollback_claim(issue_id: int, agent: str, assignee: str, target_status: str = "Ready") -> None:
+def _rollback_claim(issue_id: int, agent: str, assignee: str, target_status: str = "Ready", issue: dict | None = None) -> None:
     """Best-effort undo after a late contender wins during/after status update."""
+    if issue is None:
+        issue = get_issue(issue_id)
+    if not issue:
+        _remove_agent_label(issue_id, agent)
+        return
+    my_label = _label_for(agent)
+    holders = agent_labels(issue)
+    if my_label not in holders:
+        return
+    if holders[0] != my_label:
+        _remove_agent_label(issue_id, agent)
+        return
     update_status(issue_id, target_status, require_board=True)
     _remove_agent_label(issue_id, agent)
     run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee], check=False)
@@ -175,7 +187,7 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str, assignee: str) -
         holders = agent_labels(issue)
         if _needs_human(issue):
             if my_label in holders:
-                _rollback_claim(issue_id, agent, assignee, target_status="Backlog")
+                _rollback_claim(issue_id, agent, assignee, target_status="Backlog", issue=issue)
             print(f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
                   "while the claim was settling.", file=sys.stderr)
             return EXIT_CONFLICT
@@ -222,12 +234,12 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
     if not _metadata_is_trusted(issue, owner, trusted_logins):
         holders = agent_labels(issue)
         if my_label in holders:
-            _rollback_claim(issue_id, agent, assignee)
+            _rollback_claim(issue_id, agent, assignee, issue=issue)
         return _refuse_untrusted_metadata(issue_id)
     holders = agent_labels(issue)
     if _needs_human(issue):
         if my_label in holders:
-            _rollback_claim(issue_id, agent, assignee, target_status="Backlog")
+            _rollback_claim(issue_id, agent, assignee, target_status="Backlog", issue=issue)
         print(f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
               "before claim finalization.", file=sys.stderr)
         return EXIT_CONFLICT
@@ -273,20 +285,20 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
         _rollback_claim(issue_id, agent, assignee)
         return EXIT_ERROR
     if not _metadata_is_trusted(issue, owner, trusted_logins):
-        _rollback_claim(issue_id, agent, assignee)
+        _rollback_claim(issue_id, agent, assignee, issue=issue)
         return _refuse_untrusted_metadata(issue_id)
 
     holders = agent_labels(issue)
     if _needs_human(issue):
         print(f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
               "during claim finalization; returning it to Backlog.", file=sys.stderr)
-        _rollback_claim(issue_id, agent, assignee, target_status="Backlog")
+        _rollback_claim(issue_id, agent, assignee, target_status="Backlog", issue=issue)
         return EXIT_CONFLICT
     if my_label not in holders or holders[0] != my_label:
         contenders = ", ".join(h[len(AGENT_LABEL_PREFIX):] for h in holders) or "(none)"
         print(f"[CONFLICT] Late contender on #{issue_id} after status update "
               f"[{contenders}]; releasing.", file=sys.stderr)
-        _rollback_claim(issue_id, agent, assignee)
+        _rollback_claim(issue_id, agent, assignee, issue=issue)
         return EXIT_CONFLICT
 
     print(f"✅ Issue #{issue_id} claimed by '{agent}'.")
@@ -434,7 +446,7 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress", assignee
         return _claim_issue_locked(issue_id, agent, status, assignee)
 
 
-def release_issue(issue_id: int, agent: str) -> int:
+def release_issue(issue_id: int, agent: str, assignee: str | None = None) -> int:
     """Voluntarily gives up a claim so another agent can take the work.
 
     Without this, an agent that decides an issue is out of scope or blocked has
@@ -456,10 +468,20 @@ def release_issue(issue_id: int, agent: str) -> int:
     if not _remove_agent_label(issue_id, agent):
         update_status(issue_id, "In Progress", require_board=True)
         return EXIT_ERROR
-    code, _, err = run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", "@me"],
-                           check=False)
-    if code != 0:
-        print(f"[WARN] Unable to remove assignee: {err}", file=sys.stderr)
+    to_remove = set()
+    if assignee and assignee != "@me":
+        to_remove.add(assignee)
+    for a in (issue.get("assignees") or []):
+        login = a.get("login") if isinstance(a, dict) else (str(a) if a else None)
+        if login:
+            to_remove.add(login)
+    if not to_remove:
+        to_remove.add(assignee or "@me")
+    for target in sorted(to_remove):
+        code, _, err = run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", target],
+                               check=False)
+        if code != 0:
+            print(f"[WARN] Unable to remove assignee '{target}': {err}", file=sys.stderr)
     print(f"♻️  Issue #{issue_id} released by '{agent}' and returned to {target_status}.")
 
 
@@ -1011,7 +1033,7 @@ def main():
         sys.exit(EXIT_ERROR)
 
     if args.release:
-        sys.exit(release_issue(args.issue, args.agent))
+        sys.exit(release_issue(args.issue, args.agent, args.assignee))
     sys.exit(claim_issue(args.issue, args.agent, args.status, args.assignee))
 
 

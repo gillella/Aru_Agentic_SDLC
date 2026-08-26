@@ -2,7 +2,7 @@
 # #414 removed coding-agent review, review-round gating, and split planning and
 # ratcheted this file down from 5,438 lines. Every earlier +N allowance note
 # (#344, #427, #429, #460) described a ceiling that no longer exists.
-# line-ceiling: 4195
+# line-ceiling: 4228
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -2731,12 +2731,22 @@ def ensure_pr_head_checkout(pr, repo_root=None):
     # Never pass --depth=1 here: every worktree shares this clone's Git
     # metadata, and a shallow fetch writes `.git/shallow`, which breaks
     # merge-base / rebase / diff for the rest of the factory.
-    fetch_code, _, fetch_err = run_cmd(["git", "fetch", "--no-tags", "origin", sha], check=False,
+    head_slug = head_repository_slug(pr) if isinstance(pr, dict) else ""
+    fetch_source = "origin"
+    if pr and (pr.get("isCrossRepository") or (head_slug and head_slug != get_repo_slug())):
+        head_url = (pr.get("headRepository") or {}).get("url") if isinstance(pr.get("headRepository"), dict) else None
+        fetch_source = head_url or (f"https://github.com/{head_slug}.git" if head_slug else "origin")
+
+    fetch_code, _, fetch_err = run_cmd(["git", "fetch", "--no-tags", fetch_source, sha], check=False,
                                        cwd=repo_root)
     if fetch_code != 0:
         ref = (pr or {}).get("headRefName")
         if ref:
-            fetch_code, _, fetch_err = run_cmd(["git", "fetch", "--no-tags", "origin", ref],
+            fetch_code, _, fetch_err = run_cmd(["git", "fetch", "--no-tags", fetch_source, ref],
+                                               check=False, cwd=repo_root)
+        if fetch_code != 0 and (pr or {}).get("number"):
+            fetch_code, _, fetch_err = run_cmd(["git", "fetch", "--no-tags", "origin",
+                                                f"pull/{pr['number']}/head"],
                                                check=False, cwd=repo_root)
     add_code, _, add_err = run_cmd(["git", "worktree", "add", "--detach", dest, sha], check=False,
                                    cwd=repo_root)
@@ -2814,33 +2824,56 @@ def acceptance_run_cmd(resolved):
     return _runner
 
 
-def persist_acceptance_evidence(pr_id, pr, records):
+def persist_acceptance_evidence(pr_id, pr, records, max_retries=3):  # noqa: C901, PLR0912
     """Writes live verify: records into the PR's durable evidence block."""
     if not records:
         return True, "no acceptance records to persist"
     sha = pr.get("headRefOid")
-    fresh = _gh_json(["gh", "pr", "view", str(pr_id), "--json", "body,headRefOid"])
-    if not fresh:
-        return False, "could not re-read the PR body to persist acceptance evidence"
-    if fresh.get("headRefOid") != sha:
-        return False, "PR head changed while acceptance commands ran"
-    body = fresh.get("body") or ""
-    existing, error = parse_verification_evidence(body)
-    merged = acceptance_runner.merge_into_evidence(None if error == "missing" else existing,
-                                                   records)
-    merged["head_sha"] = sha
-    if error == "missing":
-        updated = body + render_verification_evidence(merged)
-    else:
-        if error:
-            return False, f"verification evidence is malformed: {error}"
-        updated = replace_verification_evidence(body, merged)
-        if updated is None:
-            return False, "could not replace the verification evidence block"
-    code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--body", updated], check=False)
-    if code != 0:
-        return False, f"could not persist acceptance evidence: {err.strip()}"
-    return True, f"persisted {len(records)} acceptance record(s)"
+    for attempt in range(max_retries):
+        fresh = _gh_json(["gh", "pr", "view", str(pr_id), "--json", "body,headRefOid"])
+        if not fresh:
+            if attempt < max_retries - 1:
+                continue
+            return False, "could not re-read the PR body to persist acceptance evidence"
+        if fresh.get("headRefOid") != sha:
+            return False, "PR head changed while acceptance commands ran"
+        body = fresh.get("body") or ""
+        existing, error = parse_verification_evidence(body)
+        merged = acceptance_runner.merge_into_evidence(None if error == "missing" else existing,
+                                                       records)
+        merged["head_sha"] = sha
+        if error == "missing":
+            updated = body + render_verification_evidence(merged)
+        else:
+            if error:
+                return False, f"verification evidence is malformed: {error}"
+            updated = replace_verification_evidence(body, merged)
+            if updated is None:
+                return False, "could not replace the verification evidence block"
+        if updated == body:
+            return True, f"persisted {len(records)} acceptance record(s)"
+        code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--body", updated], check=False)
+        if code != 0:
+            if attempt < max_retries - 1:
+                continue
+            return False, f"could not persist acceptance evidence: {err.strip()}"
+        verify_fresh = _gh_json(["gh", "pr", "view", str(pr_id), "--json", "body,headRefOid"])
+        if not verify_fresh:
+            if attempt < max_retries - 1:
+                continue
+            return False, "could not verify PR body after persisting acceptance evidence"
+        if verify_fresh.get("headRefOid") != sha:
+            return False, "PR head changed after persisting acceptance evidence"
+        verify_body = verify_fresh.get("body") or ""
+        verify_existing, verify_error = parse_verification_evidence(verify_body)
+        if not verify_error and verify_existing and verify_existing.get("head_sha") == sha:
+            commands = verify_existing.get("commands") or []
+            if all(any(r.get("command") == c.get("command") and r.get("exit_code") == c.get("exit_code")
+                       for c in commands) for r in records):
+                return True, f"persisted {len(records)} acceptance record(s)"
+        if attempt < max_retries - 1:
+            continue
+    return False, "could not verify persisted acceptance evidence after retries"
 
 
 def check_acceptance(issue_num, issue_body, cwd=None, execute=False, run_cmd_fn=None, records_out=None):

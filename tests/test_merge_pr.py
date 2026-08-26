@@ -1,4 +1,4 @@
-# line-ceiling: 7019
+# line-ceiling: 7120
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
@@ -7013,6 +7013,107 @@ class DryRunJsonTests(unittest.TestCase):
         payload = __import__("json").loads(printed[0])
         self.assertTrue(payload["already_merged"])
         self.assertTrue(payload["ok"])
+
+    def test_ensure_pr_head_checkout_fetches_from_fork_remote_for_cross_repository_pr(self):
+        pr = {
+            "number": 12,
+            "headRefOid": "abc1234567890",
+            "headRefName": "fix/bug",
+            "isCrossRepository": True,
+            "headRepository": {
+                "nameWithOwner": "contributor/repo",
+                "url": "https://github.com/contributor/repo",
+            },
+        }
+        with patch.object(merge_pr, "get_repo_slug", return_value="base/repo"), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(tempfile, "mkdtemp", return_value="/tmp/checkout"), \
+             patch.object(merge_pr, "run_cmd") as run_cmd:
+            def fake_run(argv, check=False, cwd=None):
+                if argv[:4] == ["git", "fetch", "--no-tags", "https://github.com/contributor/repo"]:
+                    return (0, "", "")
+                if argv[:4] == ["git", "worktree", "add", "--detach"]:
+                    return (0, "", "")
+                if argv == ["git", "rev-parse", "HEAD"]:
+                    return (0, "abc1234567890\n", "")
+                if argv == ["git", "status", "--porcelain"]:
+                    return (0, "", "")
+                return (0, "", "")
+            run_cmd.side_effect = fake_run
+            dest, err = merge_pr.ensure_pr_head_checkout(pr)
+        self.assertEqual(dest, "/tmp/checkout")
+        self.assertIsNone(err)
+        fetch_call = next(c for c in run_cmd.call_args_list if c.args[0][:2] == ["git", "fetch"])
+        self.assertEqual(fetch_call.args[0][3], "https://github.com/contributor/repo")
+
+    def test_ensure_pr_head_checkout_falls_back_to_pull_head_ref(self):
+        pr = {
+            "number": 12,
+            "headRefOid": "abc1234567890",
+            "headRefName": "fix/bug",
+            "isCrossRepository": False,
+        }
+        with patch.object(merge_pr, "get_repo_slug", return_value="base/repo"), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(tempfile, "mkdtemp", return_value="/tmp/checkout"), \
+             patch.object(merge_pr, "run_cmd") as run_cmd:
+            def fake_run(argv, check=False, cwd=None):
+                if argv == ["git", "fetch", "--no-tags", "origin", "abc1234567890"]:
+                    return (1, "", "fetch sha failed")
+                if argv == ["git", "fetch", "--no-tags", "origin", "fix/bug"]:
+                    return (1, "", "fetch ref failed")
+                if argv == ["git", "fetch", "--no-tags", "origin", "pull/12/head"]:
+                    return (0, "", "")
+                if argv[:4] == ["git", "worktree", "add", "--detach"]:
+                    return (0, "", "")
+                if argv == ["git", "rev-parse", "HEAD"]:
+                    return (0, "abc1234567890\n", "")
+                if argv == ["git", "status", "--porcelain"]:
+                    return (0, "", "")
+                return (0, "", "")
+            run_cmd.side_effect = fake_run
+            dest, err = merge_pr.ensure_pr_head_checkout(pr)
+        self.assertEqual(dest, "/tmp/checkout")
+        self.assertIsNone(err)
+
+    def test_persist_acceptance_evidence_verifies_post_write(self):
+        pr = {"number": 9, "headRefOid": "head123"}
+        records = [{"command": ["python3", "-m", "unittest"], "status": "passed", "exit_code": 0, "duration_seconds": 0.1}]
+        rendered = merge_pr.render_verification_evidence({"schema": "aru.verification.v1", "head_sha": "head123", "commands": records})
+        with patch.object(merge_pr, "_gh_json") as gh_json, \
+             patch.object(merge_pr, "run_cmd", return_value=(0, "", "")):
+            gh_json.side_effect = [
+                {"body": "Closes #1\n", "headRefOid": "head123"},
+                {"body": f"Closes #1\n{rendered}\n", "headRefOid": "head123"},
+            ]
+            ok, msg = merge_pr.persist_acceptance_evidence(9, pr, records)
+        self.assertTrue(ok)
+        self.assertIn("persisted 1 acceptance record", msg)
+
+    def test_persist_acceptance_evidence_retries_on_concurrent_modification(self):
+        pr = {"number": 9, "headRefOid": "head123"}
+        records = [{"command": ["python3", "-m", "unittest"], "status": "passed", "exit_code": 0, "duration_seconds": 0.1}]
+        rendered = merge_pr.render_verification_evidence({"schema": "aru.verification.v1", "head_sha": "head123", "commands": records})
+        with patch.object(merge_pr, "_gh_json") as gh_json, \
+             patch.object(merge_pr, "run_cmd", return_value=(0, "", "")):
+            gh_json.side_effect = [
+                {"body": "Closes #1\n", "headRefOid": "head123"},
+                {"body": "Closes #1 - author concurrent edit\n", "headRefOid": "head123"},
+                {"body": "Closes #1 - author concurrent edit\n", "headRefOid": "head123"},
+                {"body": f"Closes #1 - author concurrent edit\n{rendered}\n", "headRefOid": "head123"},
+            ]
+            ok, msg = merge_pr.persist_acceptance_evidence(9, pr, records)
+        self.assertTrue(ok)
+        self.assertIn("persisted 1 acceptance record", msg)
+
+    def test_persist_acceptance_evidence_fails_closed_when_verification_fails(self):
+        pr = {"number": 9, "headRefOid": "head123"}
+        records = [{"command": ["python3", "-m", "unittest"], "status": "passed", "exit_code": 0, "duration_seconds": 0.1}]
+        with patch.object(merge_pr, "_gh_json", return_value={"body": "Closes #1\n", "headRefOid": "head123"}), \
+             patch.object(merge_pr, "run_cmd", return_value=(0, "", "")):
+            ok, msg = merge_pr.persist_acceptance_evidence(9, pr, records, max_retries=2)
+        self.assertFalse(ok)
+        self.assertIn("could not verify persisted acceptance evidence", msg)
 
 
 if __name__ == "__main__":

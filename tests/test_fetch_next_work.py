@@ -1,4 +1,4 @@
-# line-ceiling: 1496
+# line-ceiling: 1502
 import io
 import json
 import sys
@@ -475,6 +475,12 @@ class UnreadableQueueTests(unittest.TestCase):
             res = fnw.select("agent-2", "openai")
         self.assertEqual(res["work"]["type"], "idle")
         self.assertEqual(res["claimable_issues"], [])
+
+    def test_selector_fails_closed_when_pr_inventory_reaches_limit(self):
+        prs = [pr(i, "author:agent-1", "family:openai") for i in range(1, 201)]
+        res = fnw.select("agent-2", "openai", prs_snapshot=prs)
+        self.assertEqual(res["work"]["type"], "error")
+        self.assertIn("truncated", res["work"]["reason"])
 
 
 class ResearchRoutingTests(unittest.TestCase):
