@@ -1,4 +1,4 @@
-# Review-Pool Operator Runbook
+# Review Authority Operator Runbook
 
 ## Purpose & Scope
 
@@ -29,13 +29,16 @@ remediation edits in §4 as well as initial assignment.
 
 ## 1. Assignment
 
-`create_pr.py` assigns `review:coderabbit` by default. The label is
+`review:coderabbit` is the only review assignment `create_pr.py` ever
+creates. There is no rotation, capacity accounting, or scheduler behind it:
+reassignment is an explicit operator action taken after concrete observed
+unavailability, never a load balancer and never a retry. The label is
 applied to the PR **while it is still draft**, before the PR is marked ready.
-Only one review-pool label may ever be present; `merge_pr.py` refuses to
+Only one review-authority label may ever be present; `merge_pr.py` refuses to
 resolve a service when zero or more than one is set
-(`check_reviews` in `scripts/merge_pr.py`). Never add or swap a review-pool
-label by hand. If CodeRabbit is unavailable, use the governed helper for one
-explicit reassignment:
+(`check_reviews` in `scripts/merge_pr.py`). Never add or swap a
+review-authority label by hand. If CodeRabbit is unavailable, use the governed
+helper for one explicit reassignment:
 
 ```shell
 python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> \
@@ -55,6 +58,29 @@ python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> --to agent \
 The helper replaces one known authority, refuses self-review and ambiguous
 authors, and records the exact head, reviewer, family, and reason. It does not
 discover reviewers, track capacity, rotate agents, or create a second queue.
+
+### When the selected service also fails
+
+The external switch is one-way by design. `reassign_review.py` refuses a
+second external hop: once a PR carries `review:sourcery` or `review:codeant`,
+an attempt to move it to the other external service exits `2` (conflict) with
+`only the default assignment may be moved to a fallback`. Re-running the same
+`--to` is refused for the same reason — reassignment is not a retry mechanism.
+So an operator whose chosen external fallback also stalls has exactly two
+governed options:
+
+1. **Wait at the current authority.** Nothing is lost; the PR keeps its
+   exact-head evidence contract and merges as soon as the service reports.
+2. **Escalate to the terminal option.** `--to agent` is the only move accepted
+   from an already-switched PR: it admits `review:coderabbit` *or* either
+   external label as the outgoing authority. It additionally requires
+   `--reviewer` with a safe agent id, `--model-family`, and exactly one
+   `author:<id>` different from that reviewer, so a PR with ambiguous or
+   self-authored identity cannot be escalated at all.
+
+There is no third hop. Independent-agent review is the end of the fallback
+chain, not another entry in a pool; if it cannot be assigned, the PR waits for
+a human decision recorded on the PR itself.
 
 ## 2. Trigger
 
@@ -110,10 +136,24 @@ after a review invalidates it — re-review the new head before merging
   come from the recognized CodeRabbit app/login and be `COMPLETED`/`SUCCESS`;
   missing, pending, failed, rate-limited, stale, ambiguous, or spoofed
   evidence blocks merge.
-- **Sourcery** — one successful, head-bound `Sourcery review` check
-  (`_sourcery_check`).
-- **CodeAnt** — one authoritative exact-head `codeant-ai` review object, not
-  `CHANGES_REQUESTED` (`_codeant_latest_review`).
+- **Sourcery** — exactly one check named `Sourcery review`, `COMPLETED` with
+  conclusion `SUCCESS` (`_sourcery_check`). The name alone proves nothing: the
+  run must be produced by the recognized `sourcery-ai` app slug, carry this
+  PR's exact head SHA, and be linked to this pull request number and base, so a
+  run from another PR that happens to share a head cannot satisfy the gate
+  (`_sourcery_match_binds_this_head`). Zero such checks and two or more both
+  block — ambiguity is never arbitrated in the PR's favour.
+- **CodeAnt** — either of two provider-owned shapes bound to the exact current
+  head (`has_authoritative_codeant_review`): an authoritative exact-head
+  `codeant-ai` review object that is not `CHANGES_REQUESTED`
+  (`_codeant_latest_review`); or, when a clean run left no review object to
+  find, CodeAnt's own completed clean-review status record parsed from the
+  `codeant-review-status` marker on its rolling status comment
+  (`_codeant_status_evidence`). A current-head review object that exists but is
+  untrustworthy blocks **both** paths — the status marker is a fallback for
+  absent evidence, never a way around rejected evidence. Markers are collected
+  regardless of author precisely so a spoofed one is seen and rejected rather
+  than silently skipped.
 - **Emergency agent** — exactly one author and one different assigned reviewer,
   one reviewer model family, a substantive current-head GitHub review from the
   same login, and exactly one matching completed `aru-agent-review:v1` record.

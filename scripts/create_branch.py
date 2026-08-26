@@ -9,7 +9,14 @@ import re
 import sys
 from typing import Any, Optional
 
-from common import create_worktree, fetch_issue_comments, get_issue, run_cmd
+from common import (
+    create_worktree,
+    fetch_issue_comments,
+    get_issue,
+    run_cmd,
+    terminal_lease_refusal,
+    terminal_merge_lease,
+)
 
 HIGH_RISK_TERMS = {
     "money",
@@ -239,6 +246,14 @@ def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool =
         title_slug = sanitize_slug(clean_title)
 
     branch_name = f"{branch_type}/issue-{issue_id}-{title_slug}"
+
+    # A branch name that already carried a governed merge is spent. Silently
+    # checking it out again is how a stale worker rebuilt merged work into an
+    # ungoverned orphan commit (#344); refuse instead of reusing.
+    lease = terminal_merge_lease(branch_name)
+    if lease:
+        print(f"[BLOCKED] {terminal_lease_refusal(lease, 'reuse this branch')}", file=sys.stderr)
+        sys.exit(1)
 
     if use_worktree:
         path = create_worktree(branch_name, agent=agent)
