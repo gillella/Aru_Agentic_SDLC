@@ -173,24 +173,33 @@ def _resolve_board_inventory(slug: str) -> Tuple[Optional[Dict[str, Any]], Optio
     for item in items:
         if not isinstance(item, dict):
             return None, None, f"Malformed item on board #{number}."
-        raw_status = item.get("status")
         content = item.get("content") or {}
         if not isinstance(content, dict):
             return None, None, f"Malformed item content on board #{number}."
 
         item_repo = content.get("repository") or item.get("repository")
-        if item_repo == slug:
-            if not isinstance(raw_status, str) or not raw_status.strip():
-                issue_num = content.get("number")
-                issue_ref = f"issue #{issue_num}" if isinstance(issue_num, int) else "item"
-                return None, None, f"Board item for {issue_ref} has empty or missing status on board #{number}."
-            status_clean = raw_status.strip()
-            issue_num = content.get("number")
-            if isinstance(issue_num, int):
-                if issue_num in issue_board_statuses:
-                    return None, None, f"Duplicate board item for issue #{issue_num} on board #{number}."
-                issue_board_statuses[issue_num] = status_clean
-            status_counts[status_clean] = status_counts.get(status_clean, 0) + 1
+        if item_repo != slug:
+            continue
+
+        raw_type = content.get("type") or item.get("type")
+        if raw_type is not None:
+            if not isinstance(raw_type, str) or raw_type.strip().lower() != "issue":
+                continue
+
+        issue_num = content.get("number")
+        if not isinstance(issue_num, int) or isinstance(issue_num, bool) or issue_num <= 0:
+            continue
+
+        raw_status = item.get("status")
+        if not isinstance(raw_status, str) or not raw_status.strip():
+            return None, None, f"Board item for issue #{issue_num} has empty or missing status on board #{number}."
+
+        status_clean = raw_status.strip()
+        if issue_num in issue_board_statuses:
+            return None, None, f"Duplicate board item for issue #{issue_num} on board #{number}."
+
+        issue_board_statuses[issue_num] = status_clean
+        status_counts[status_clean] = status_counts.get(status_clean, 0) + 1
 
     # Sort status count keys deterministically
     sorted_status_counts = {k: status_counts[k] for k in sorted(status_counts.keys())}
@@ -486,8 +495,11 @@ def _collect_claimable_work(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[str], bool, bool]:
     """Evaluate Ready candidates and capture bounded diagnostics and integrity failures."""
     owner = repo_owner or repository_owner_login(slug)
-    trusted_logins = repository_trusted_logins(slug)
-    if trusted_logins is None:
+    try:
+        trusted_logins = repository_trusted_logins(slug)
+    except Exception:
+        trusted_logins = None
+    if not owner or trusted_logins is None:
         return (
             [],
             {

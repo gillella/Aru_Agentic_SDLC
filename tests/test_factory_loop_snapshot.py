@@ -977,6 +977,45 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
         self.assertEqual(claimable, [10])
         self.assertIn(20, snapshot["candidate_diagnostics"]["missing_touches"])
 
+    def test_board_inventory_restricts_counts_and_indexing_to_issue_content_with_integer_numbers(self):
+        issue101 = make_issue(101, status="Ready", touches="scripts/a.py")
+        issue102 = make_issue(102, status="Backlog", touches="scripts/b.py")
+        repo = FakeRepo(
+            issues=[issue101, issue102],
+            board_items=[
+                {"status": "Ready", "content": {"type": "Issue", "number": 101, "repository": "gillella/Aru_Agentic_SDLC"}},
+                {"status": "In Review", "content": {"type": "PullRequest", "number": 101, "repository": "gillella/Aru_Agentic_SDLC"}},
+                {"status": "In Progress", "content": {"type": "PullRequest", "number": 201, "repository": "gillella/Aru_Agentic_SDLC"}},
+                {"status": "Ready", "content": {"type": "DraftIssue", "title": "Draft Idea", "repository": "gillella/Aru_Agentic_SDLC"}},
+                {"status": "Ready", "content": {"number": "not-an-int", "repository": "gillella/Aru_Agentic_SDLC"}},
+                {"status": "Backlog", "content": {"type": "Discussion", "number": 301, "repository": "gillella/Aru_Agentic_SDLC"}},
+                {"status": "Ready", "content": {"type": "Issue", "number": 50, "repository": "other/repo"}},
+                {"status": "Backlog", "content": {"number": 102, "repository": "gillella/Aru_Agentic_SDLC"}},
+            ],
+        )
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertFalse(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "waiting")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_WAITING)
+        self.assertEqual(snapshot["board"]["status_counts"], {"Backlog": 1, "Ready": 1})
+        self.assertEqual(snapshot["open_issues"][0]["board_status"], "Ready")
+        self.assertEqual(snapshot["open_issues"][1]["board_status"], "Backlog")
+
+    def test_collaborator_lookup_exception_propagates_degraded_blocked_candidate_evaluation(self):
+        issue1 = make_issue(10, status="Ready")
+        repo = FakeRepo(issues=[issue1])
+        with wired_repo(repo), patch("factory_loop_snapshot.repository_trusted_logins", side_effect=RuntimeError("gh api network timeout")):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertEqual(snapshot["claimable_work"], [])
+        self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in snapshot["errors"]))
+
 
 if __name__ == "__main__":
     unittest.main()
+
