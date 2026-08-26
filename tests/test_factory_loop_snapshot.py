@@ -1,4 +1,4 @@
-# line-ceiling: 750
+# line-ceiling: 950
 """Unit tests for factory_loop_snapshot.py (#466).
 
 Validates deterministic, project-agnostic read-only factory loop snapshot
@@ -733,6 +733,137 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
         self.assertEqual(prs[2]["review_authority"]["assigned"], "codeant")
         self.assertEqual(prs[3]["review_authority"]["assigned"], "agent")
         self.assertIsNone(prs[4]["review_authority"]["assigned"])
+
+    def test_pr_multiple_review_labels_is_ambiguous_and_blocks_merge(self):
+        pr_multi1 = make_pull(1, review_service="review:coderabbit")
+        pr_multi1["labels"].append({"name": "review:agent"})
+
+        pr_multi2 = make_pull(2, review_service="review:sourcery")
+        pr_multi2["labels"].append({"name": "review:codeant"})
+
+        repo = FakeRepo(prs=[pr_multi1, pr_multi2])
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        prs = {p["number"]: p for p in snapshot["open_pull_requests"]}
+        self.assertIsNone(prs[1]["review_authority"]["assigned"])
+        self.assertEqual(prs[1]["review_authority"]["state"], "AMBIGUOUS")
+        self.assertIn("review:agent", prs[1]["review_authority"]["evidence"])
+        self.assertIn("review:coderabbit", prs[1]["review_authority"]["evidence"])
+        self.assertFalse(prs[1]["merge_gate"]["ready"])
+        self.assertTrue(any("Ambiguous review authority" in b for b in prs[1]["merge_gate"]["blockers"]))
+
+        self.assertIsNone(prs[2]["review_authority"]["assigned"])
+        self.assertEqual(prs[2]["review_authority"]["state"], "AMBIGUOUS")
+        self.assertFalse(prs[2]["merge_gate"]["ready"])
+
+    def test_candidate_diagnostics_preserves_blocked_conflicted_and_missing_touches(self):
+        issue_ready = make_issue(10, status="Ready", touches="scripts/a.py")
+        issue_blocked = make_issue(11, status="Ready", touches="scripts/b.py", depends_on="#10")
+        issue_inflight = make_issue(12, status="In Progress", agent="agent-x", touches="scripts/c.py")
+        issue_conflicted = make_issue(13, status="Ready", touches="scripts/c.py")
+        issue_missing = make_issue(14, status="Ready", touches="")
+
+        repo = FakeRepo(issues=[issue_ready, issue_blocked, issue_inflight, issue_conflicted, issue_missing])
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertFalse(snapshot["degraded"])
+        self.assertEqual([c["issue"] for c in snapshot["claimable_work"]], [10])
+
+        diag = snapshot["candidate_diagnostics"]
+        self.assertEqual(diag["integrity_issues"], [])
+        self.assertEqual(diag["blocked"], [{"number": 11, "blocked_by": [10]}])
+        self.assertEqual(diag["conflicted"], [{"number": 13, "conflict": ["scripts/c.py"]}])
+        self.assertIn(14, diag["missing_touches"])
+
+    def test_candidate_integrity_failure_duplicate_priority_fails_closed(self):
+        issue_dup = make_issue(20, status="Ready")
+        issue_dup["labels"] = [
+            {"name": "status:ready"},
+            {"name": "priority:p1"},
+            {"name": "priority:p1"},
+            {"name": "type:feat"},
+        ]
+
+        repo = FakeRepo(issues=[issue_dup])
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertEqual(snapshot["claimable_work"], [])
+        self.assertEqual(len(snapshot["candidate_diagnostics"]["integrity_issues"]), 1)
+        self.assertEqual(snapshot["candidate_diagnostics"]["integrity_issues"][0]["number"], 20)
+        self.assertTrue(any("Candidate evaluation integrity failure on issue #20" in e for e in snapshot["errors"]))
+
+    def test_candidate_integrity_failure_contradictory_priority_fails_closed(self):
+        issue_contra = make_issue(21, status="Ready")
+        issue_contra["labels"] = [
+            {"name": "status:ready"},
+            {"name": "priority:p0"},
+            {"name": "priority:p2"},
+            {"name": "type:feat"},
+        ]
+
+        repo = FakeRepo(issues=[issue_contra])
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertEqual(snapshot["claimable_work"], [])
+        self.assertEqual(len(snapshot["candidate_diagnostics"]["integrity_issues"]), 1)
+        self.assertEqual(snapshot["candidate_diagnostics"]["integrity_issues"][0]["number"], 21)
+
+    def test_candidate_evaluation_exception_fails_closed(self):
+        repo = FakeRepo(issues=[make_issue(1, status="Ready")])
+        with wired_repo(repo), patch("factory_loop_snapshot.build_candidates", side_effect=RuntimeError("eval boom")):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertTrue(any("Candidate evaluation failed: eval boom" in e for e in snapshot["errors"]))
+
+    def test_candidate_evaluation_malformed_result_fails_closed(self):
+        repo = FakeRepo(issues=[make_issue(1, status="Ready")])
+        with wired_repo(repo), patch("factory_loop_snapshot.build_candidates", return_value="not-a-dict"):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertTrue(any("Candidate evaluation returned malformed result" in e for e in snapshot["errors"]))
+
+    def test_format_snapshot_text_displays_candidate_diagnostics(self):
+        mock_snapshot = {
+            "schema_version": fls.SCHEMA_VERSION,
+            "state": "blocked",
+            "summary": "BLOCKED test",
+            "repository": {"name": "test-repo", "slug": "org/test-repo", "current_branch": "main"},
+            "board": {"number": 1, "title": "Board", "status_counts": {"Ready": 2}},
+            "claimable_work": [{"issue": 10, "priority": "P0", "title": "Good issue", "skill": "implement-next-issue"}],
+            "candidate_diagnostics": {
+                "integrity_issues": [{"number": 20, "reason": "duplicate priority"}],
+                "blocked": [{"number": 11, "blocked_by": [10]}],
+                "conflicted": [{"number": 12, "conflict": ["scripts/foo.py"]}],
+                "missing_touches": [13],
+            },
+            "worktrees": [],
+            "errors": ["Candidate evaluation integrity failure on issue #20: duplicate priority."],
+        }
+        text = fls.format_snapshot_text(mock_snapshot)
+        self.assertIn("Candidate Integrity Issues (1):", text)
+        self.assertIn("#20: duplicate priority", text)
+        self.assertIn("Blocked Candidates (1):", text)
+        self.assertIn("#11 (blocked by #10)", text)
+        self.assertIn("Conflicted Candidates (1):", text)
+        self.assertIn("#12 (conflict: scripts/foo.py)", text)
+        self.assertIn("Missing Touches / Untrusted (1):", text)
+        self.assertIn("#13", text)
 
 
 if __name__ == "__main__":

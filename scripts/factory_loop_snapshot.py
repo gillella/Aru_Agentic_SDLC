@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 700
+# line-ceiling: 850
 """factory_loop_snapshot.py - deterministic read-only factory loop snapshot.
 
 Emits a bounded, normalized read-only snapshot of live coordination state for
@@ -104,6 +104,12 @@ def _fail_closed(
             "tags": [],
         },
         "claimable_work": [],
+        "candidate_diagnostics": {
+            "integrity_issues": [],
+            "blocked": [],
+            "conflicted": [],
+            "missing_touches": [],
+        },
     }
 
 
@@ -257,20 +263,22 @@ def _extract_ci_summary(pr: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_review_authority(pr_labels: List[str]) -> Dict[str, Any]:
-    """Identify assigned review authority from labels."""
-    assigned = None
-    for lbl in pr_labels:
-        if lbl in REVIEW_SERVICE_LABELS:
-            assigned = REVIEW_SERVICE_LABELS[lbl]
-            break
-
-    if not assigned:
+    """Identify assigned review authority from labels matching exact-one contract."""
+    recognized = sorted([lbl for lbl in pr_labels if lbl in REVIEW_SERVICE_LABELS])
+    if len(recognized) == 0:
         return {
             "assigned": None,
             "state": "UNASSIGNED",
             "evidence": "No review:* label assigned.",
         }
+    if len(recognized) > 1:
+        return {
+            "assigned": None,
+            "state": "AMBIGUOUS",
+            "evidence": f"Multiple review labels assigned: {', '.join(recognized)}.",
+        }
 
+    assigned = REVIEW_SERVICE_LABELS[recognized[0]]
     return {
         "assigned": assigned,
         "state": "ASSIGNED",
@@ -301,7 +309,9 @@ def _normalize_pull_requests(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             blockers.append("Missing author:<id> label.")
         if ci_info["state"] != "PASSED":
             blockers.append(f"CI is {ci_info['state']}.")
-        if review_auth["assigned"] is None:
+        if review_auth["state"] == "AMBIGUOUS":
+            blockers.append(f"Ambiguous review authority ({review_auth['evidence']})")
+        elif review_auth["assigned"] is None:
             blockers.append("No review authority assigned.")
 
         rows.append({
@@ -448,33 +458,108 @@ def _collect_worker_assignments(
 def _collect_claimable_work(
     raw_issues: List[Dict[str, Any]],
     agent: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """Evaluate Ready candidates eligible for pickup without mutating claims."""
-    build_res = build_candidates(raw_issues, agent=agent)
-    candidates = build_res.get("candidates") or []
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[str], bool, bool]:
+    """Evaluate Ready candidates and capture bounded diagnostics and integrity failures."""
+    try:
+        build_res = build_candidates(raw_issues, agent=agent)
+    except Exception as exc:
+        return (
+            [],
+            {
+                "integrity_issues": [],
+                "blocked": [],
+                "conflicted": [],
+                "missing_touches": [],
+            },
+            [f"Candidate evaluation failed: {exc}"],
+            True,
+            True,
+        )
 
+    if not isinstance(build_res, dict):
+        return (
+            [],
+            {
+                "integrity_issues": [],
+                "blocked": [],
+                "conflicted": [],
+                "missing_touches": [],
+            },
+            ["Candidate evaluation returned malformed result."],
+            True,
+            True,
+        )
+
+    candidates = build_res.get("candidates") or []
     claimable = []
     for cand in candidates:
-        num = cand["number"]
-        labels = cand.get("labels") or []
-        body = cand.get("body") or ""
-        p_rank = canonical_priority_display(labels) or "P3"
-        claimable.append({
-            "issue": num,
-            "priority": p_rank,
-            "title": cand.get("title") or "",
-            "touches": sorted(parse_touches(body)),
-            "skill": skill_for_issue(cand),
-        })
+        if isinstance(cand, dict):
+            num = cand.get("number")
+            labels = cand.get("labels") or []
+            body = cand.get("body") or ""
+            p_rank = canonical_priority_display(labels) or "P3"
+            claimable.append({
+                "issue": num,
+                "priority": p_rank,
+                "title": cand.get("title") or "",
+                "touches": sorted(parse_touches(body)),
+                "skill": skill_for_issue(cand),
+            })
 
     def sort_key(item: Dict[str, Any]) -> Tuple[int, int]:
         r, _ = priority_rank([{"name": f"priority:{item['priority'].lower()}"}])
         return (r if r is not None else 99, item["issue"])
 
-    return sorted(claimable, key=sort_key)
+    sorted_claimable = sorted(claimable, key=sort_key)
+
+    raw_integrity = build_res.get("integrity_issues") or []
+    integrity_diag = [
+        {"number": item["number"], "reason": item.get("reason", "unknown")}
+        for item in raw_integrity
+        if isinstance(item, dict) and isinstance(item.get("number"), int)
+    ]
+    integrity_diag.sort(key=lambda x: x["number"])
+
+    raw_blocked = build_res.get("blocked") or []
+    blocked_diag = [
+        {"number": item["number"], "blocked_by": sorted(set(item.get("blocked_by") or []))}
+        for item in raw_blocked
+        if isinstance(item, dict) and isinstance(item.get("number"), int)
+    ]
+    blocked_diag.sort(key=lambda x: x["number"])
+
+    raw_conflicted = build_res.get("conflicted") or []
+    conflicted_diag = [
+        {"number": item["number"], "conflict": sorted(set(item.get("conflict") or []))}
+        for item in raw_conflicted
+        if isinstance(item, dict) and isinstance(item.get("number"), int)
+    ]
+    conflicted_diag.sort(key=lambda x: x["number"])
+
+    raw_missing = build_res.get("missing_touches") or []
+    missing_diag = sorted(set(n for n in raw_missing if isinstance(n, int)))
+
+    diagnostics = {
+        "integrity_issues": integrity_diag,
+        "blocked": blocked_diag,
+        "conflicted": conflicted_diag,
+        "missing_touches": missing_diag,
+    }
+
+    errors: List[str] = []
+    is_degraded = False
+    is_blocked = False
+
+    if integrity_diag:
+        is_degraded = True
+        is_blocked = True
+        for item in integrity_diag:
+            errors.append(f"Candidate evaluation integrity failure on issue #{item['number']}: {item['reason']}.")
+
+    return sorted_claimable, diagnostics, errors, is_degraded, is_blocked
 
 
-def evaluate_factory_loop_snapshot(
+def evaluate_factory_loop_snapshot(  # noqa: C901, PLR0912, PLR0915
     repo_dir: str = ".",
     *,
     agent: Optional[str] = None,
@@ -576,24 +661,45 @@ def evaluate_factory_loop_snapshot(
         touches_reservations = _collect_touches_reservations(issue_rows)
         worker_assignments = _collect_worker_assignments(claims, sanitized_worktrees)
         tags_releases = _collect_tags_and_releases(target)
-        claimable_work = _collect_claimable_work(raw_issues, agent=agent)
+        (
+            claimable_work,
+            candidate_diagnostics,
+            eval_errors,
+            eval_degraded,
+            eval_blocked,
+        ) = _collect_claimable_work(raw_issues, agent=agent)
 
         open_work = bool(issue_rows or pr_rows or any(wt["issue"] is not None for wt in sanitized_worktrees))
-        state = "waiting" if open_work else "complete"
-        exit_code = EXIT_WAITING if open_work else EXIT_COMPLETE
-        summary = (
-            f"WAITING: {len(issue_rows)} open issue(s), {len(pr_rows)} open PR(s), {len(claims)} claim(s)."
-            if open_work
-            else "COMPLETE: no open issues, no open PRs, no claims, no issue worktrees."
-        )
+
+        errors: List[str] = []
+        if eval_errors:
+            errors.extend(eval_errors)
+
+        degraded = eval_degraded
+        if eval_blocked:
+            state = "blocked"
+            exit_code = EXIT_BLOCKED
+            summary = (
+                f"BLOCKED: Candidate evaluation encountered {len(eval_errors)} integrity/evaluation error(s)."
+            )
+        elif open_work:
+            state = "waiting"
+            exit_code = EXIT_WAITING
+            summary = (
+                f"WAITING: {len(issue_rows)} open issue(s), {len(pr_rows)} open PR(s), {len(claims)} claim(s)."
+            )
+        else:
+            state = "complete"
+            exit_code = EXIT_COMPLETE
+            summary = "COMPLETE: no open issues, no open PRs, no claims, no issue worktrees."
 
         return {
             "schema_version": SCHEMA_VERSION,
             "state": state,
             "exit_code": exit_code,
             "summary": summary,
-            "degraded": False,
-            "errors": [],
+            "degraded": degraded,
+            "errors": errors,
             "repository": repo_details,
             "board": board_info,
             "open_issues": issue_rows,
@@ -605,6 +711,7 @@ def evaluate_factory_loop_snapshot(
             "worker_assignments": worker_assignments,
             "tags_releases": tags_releases,
             "claimable_work": claimable_work,
+            "candidate_diagnostics": candidate_diagnostics,
         }
 
     except Exception as exc:
@@ -613,7 +720,7 @@ def evaluate_factory_loop_snapshot(
         os.chdir(previous)
 
 
-def format_snapshot_text(snapshot: Dict[str, Any]) -> str:
+def format_snapshot_text(snapshot: Dict[str, Any]) -> str:  # noqa: C901, PLR0912
     """Format snapshot as human-readable plain text summary."""
     repo = snapshot.get("repository") or {}
     repo_name = repo.get("name") or repo.get("slug") or "Factory"
@@ -638,6 +745,26 @@ def format_snapshot_text(snapshot: Dict[str, Any]) -> str:
         lines.append(f"Claimable Work ({len(claimable)}):")
         for item in claimable:
             lines.append(f"  • #{item['issue']} [{item['priority']}] {item['title']} ({item['skill']})")
+
+    diag = snapshot.get("candidate_diagnostics") or {}
+    if diag.get("integrity_issues"):
+        lines.append(f"Candidate Integrity Issues ({len(diag['integrity_issues'])}):")
+        for item in diag["integrity_issues"]:
+            lines.append(f"  • #{item['number']}: {item['reason']}")
+    if diag.get("blocked"):
+        lines.append(f"Blocked Candidates ({len(diag['blocked'])}):")
+        for item in diag["blocked"]:
+            deps_str = ", ".join(f"#{d}" for d in item["blocked_by"])
+            lines.append(f"  • #{item['number']} (blocked by {deps_str})")
+    if diag.get("conflicted"):
+        lines.append(f"Conflicted Candidates ({len(diag['conflicted'])}):")
+        for item in diag["conflicted"]:
+            conf_str = ", ".join(item["conflict"])
+            lines.append(f"  • #{item['number']} (conflict: {conf_str})")
+    if diag.get("missing_touches"):
+        lines.append(f"Missing Touches / Untrusted ({len(diag['missing_touches'])}):")
+        for num in diag["missing_touches"]:
+            lines.append(f"  • #{num}")
 
     worktrees = snapshot.get("worktrees") or []
     if worktrees:
