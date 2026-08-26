@@ -1040,8 +1040,17 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
         self.assertEqual(claimable, [])
         self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in errors))
 
+    def test_collaborator_lookup_empty_set_propagates_degraded_blocked_candidate_evaluation(self):
+        issue1 = make_issue(10, status="Ready", touches="scripts/a.py")
+        repo = FakeRepo(issues=[issue1])
+        with wired_repo(repo), patch("factory_loop_snapshot.repository_trusted_logins", return_value=set()):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertEqual(snapshot["claimable_work"], [])
+        self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in snapshot["errors"]))
 
 if __name__ == "__main__":
     unittest.main()
-
-

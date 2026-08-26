@@ -504,7 +504,7 @@ def _collect_claimable_work(
         trusted_logins = repository_trusted_logins(slug)
     except Exception:
         trusted_logins = None
-    if not owner or trusted_logins is None:
+    if not owner or trusted_logins is None or not trusted_logins:
         return (
             [],
             {
