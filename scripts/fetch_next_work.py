@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # #414 removed the review work type and ratcheted this file down from 1,264 lines.
-# line-ceiling: 900
+# line-ceiling: 899
 """Return the highest-priority work one governed factory agent can perform.
 Finishing beats starting: author feedback, merge-ready work, resumable issues, then
 Ready issues. Review is not coding-agent work at all -- the assigned external
@@ -71,6 +71,7 @@ def skill_for_issue(issue: dict[str, Any]) -> str:
 DEFAULT_REAP_AFTER_HOURS = 4
 _UNSET = object()
 OPEN_PR_QUERY_LIMIT = 200
+DOD_CANDIDATE_LIMIT = 3
 
 PR_FIELDS = "number,title,isDraft,labels,reviews,statusCheckRollup,updatedAt,createdAt,headRefName,headRefOid,body,reviewDecision,state,mergedAt,files,changedFiles"
 
@@ -420,13 +421,9 @@ def author_gate_fix(pr: dict[str, Any], agent: str, dod_reason: str | None) -> d
     return work
 
 
-def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa: C901, PLR0912
-    """Decides whether `agent` may claim mechanical merge of this PR.
-
-    Cheap label/CI/thread filters run first so only survivors pay for the
-    shared ``merge_pr.dod_status`` evaluator. Already-merged PRs are eligible
-    only when close-out is still incomplete.
-    """
+def merge_eligibility(pr: dict[str, Any], agent: str,  # noqa: C901, PLR0912
+                      dod_budget: list[int] | None = None) -> dict[str, Any]:
+    """Decide merge eligibility, spending optional budget only on full DoD checks."""
     labels = label_names(pr)
     holder = merge_claimant(labels)
 
@@ -449,10 +446,7 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa
         state = ci_state(pr)
         if state != "green":
             return no("unmet: ci" if state in {"red", "none"} else f"CI is {state}")
-        # The author-routing pass already cached feedback for this agent's PRs.
-        # For somebody else's green PR the authoritative DoD call below includes
-        # the same thread gate, so querying first only duplicated a GraphQL
-        # request for every near-ready candidate.
+        # Reuse author feedback; DoD already checks threads for other green PRs.
         if "_active_review_feedback" in pr or _label_value(labels, "author:") == agent:
             threads = review_thread_count(pr)
             if threads is None:
@@ -460,6 +454,10 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa
             if threads:
                 return no(f"{threads} active review feedback item(s); waiting on author")
 
+    if dod_budget is not None:
+        if dod_budget[0] <= 0:
+            return no("Definition-of-Done evaluation deferred by per-cycle query budget")
+        dod_budget[0] -= 1
     ok, reason = dod_status(pr["number"])
     return {"eligible": True, "reason": reason} if ok else no(reason)
 
@@ -511,8 +509,9 @@ def select(agent: str, family: str | None, *, prs_snapshot: Any = _UNSET,  # noq
     # paying for a second evaluation.
     mergeable, merge_skipped = [], []
     dod_reasons: dict[int, str] = {}
+    dod_budget = [DOD_CANDIDATE_LIMIT]
     for pr in sorted(prs, key=lambda p: p["number"]):
-        verdict = merge_eligibility(pr, agent)
+        verdict = merge_eligibility(pr, agent, dod_budget)
         dod_reasons[pr["number"]] = verdict["reason"]
         if verdict["eligible"]:
             mergeable.append(pr)

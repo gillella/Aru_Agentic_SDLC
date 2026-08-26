@@ -129,6 +129,7 @@ class PerCandidateBudgetTests(unittest.TestCase):
     @staticmethod
     def pr(checks):
         rollups = {
+            "green": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
             "red": [{"status": "COMPLETED", "conclusion": "FAILURE"}],
             "pending": [{"status": "IN_PROGRESS"}],
             "none": [],
@@ -150,6 +151,14 @@ class PerCandidateBudgetTests(unittest.TestCase):
             self.assertFalse(verdict["eligible"])
             threads.assert_not_called()
             dod.assert_not_called()
+
+    def test_picker_bounds_full_dod_evaluations_per_cycle(self):
+        candidates = [dict(self.pr("green"), number=n) for n in range(1, 11)]
+        with patch.object(fnw, "dod_status", return_value=(False, "unmet: review")) as dod:
+            result = fnw.select("agent-1", "openai", prs_snapshot=candidates,
+                                issues_snapshot=[])
+        self.assertEqual(result["work"]["type"], "idle")
+        self.assertEqual(dod.call_count, fnw.DOD_CANDIDATE_LIMIT)
 
 
 class PullRequestFileBudgetTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-# line-ceiling: 7120
+# line-ceiling: 7145
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
@@ -20,9 +20,11 @@ import merge_pr
 import cleanup_worktrees
 
 
-def _pull_version(head="head123", reviews=0, comments=0, threads=0):
+def _pull_version(head="head123", reviews=0, comments=0, threads=0,
+                  updated="2026-08-25T00:00:00Z"):
     """The evidence-version fields merge_pr requires on every review page."""
-    return {"headRefOid": head, "reviewTotal": {"totalCount": reviews},
+    return {"headRefOid": head, "updatedAt": updated,
+            "reviewTotal": {"totalCount": reviews},
             "commentTotal": {"totalCount": comments},
             "threadTotal": {"totalCount": threads}}
 
@@ -350,6 +352,14 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                         pages.insert(1, self.attestation_page())
                     gh_json.side_effect = pages
                     self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_same_counts_from_different_pr_versions_fail_closed(self, gh_json, _slug):
+        later = self.attestation_page()
+        later["data"]["repository"]["pullRequest"]["updatedAt"] = "2026-08-25T00:00:01Z"
+        gh_json.side_effect = [self.review_page(), later]
+        self.assertIsNone(merge_pr.review_evidence(162))
 
     @staticmethod
     def attestation_page(head="head123", nodes=None, has_next=False, cursor=None):
@@ -5147,7 +5157,8 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         run.side_effect = [
             (0, "gated-sha\n", ""),  # rev-parse --verify
             (0, "worktree /repo\nbranch refs/heads/main\n", ""),  # worktree list
-            (0, "", ""),  # git update-ref -d
+            (0, "gated-sha\n", ""),  # leased revalidation
+            (0, "", ""),  # git branch -D
         ]
         ok, message = merge_pr.cleanup_local_branch(
             "/repo", "fix/issue-7-x", "gated-sha"
@@ -5155,8 +5166,8 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("Deleted local branch", message)
         self.assertEqual(
-            run.call_args_list[2].args[0],
-            ["git", "update-ref", "-d", "refs/heads/fix/issue-7-x", "gated-sha"],
+            run.call_args_list[3].args[0],
+            ["git", "branch", "-D", "--", "fix/issue-7-x"],
         )
 
     @patch.object(merge_pr, "run_cmd")
@@ -5164,7 +5175,8 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         run.side_effect = [
             (0, "gated-sha\n", ""),  # rev-parse --verify
             (0, "worktree /repo\nbranch refs/heads/main\n", ""),  # worktree list
-            (1, "", "unable to lock ref"),  # git update-ref -d
+            (0, "gated-sha\n", ""),  # leased revalidation
+            (1, "", "unable to lock ref"),  # git branch -D
             (0, "gated-sha\n", ""),  # post-failure rev-parse check
         ]
         ok, message = merge_pr.cleanup_local_branch(
@@ -5173,6 +5185,19 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Orphan local branch", message)
         self.assertIn("unable to lock ref", message)
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_git_branch_guard_rejects_attachment_after_listing(self, run):
+        run.side_effect = [
+            (0, "gated-sha\n", ""),
+            (0, "worktree /repo\nbranch refs/heads/main\n", ""),
+            (0, "gated-sha\n", ""),
+            (1, "", "cannot delete branch checked out at /repo/late"),
+            (0, "gated-sha\n", ""),
+        ]
+        ok, message = merge_pr.cleanup_local_branch("/repo", "fix/issue-7-x", "gated-sha")
+        self.assertFalse(ok)
+        self.assertIn("worktree guard", message)
 
     @patch.object(merge_pr, "run_cmd")
     def test_local_branch_cleanup_fails_closed_when_worktree_enumeration_fails(self, run):
@@ -5680,7 +5705,7 @@ class OrphanLocalBranchRegressionTests(unittest.TestCase):
 
             def fail_first_branch_delete(command, **kwargs):
                 nonlocal first_delete_seen
-                if command[:3] == ["git", "update-ref", "-d"] and not first_delete_seen:
+                if command[:3] == ["git", "branch", "-D"] and not first_delete_seen:
                     first_delete_seen = True
                     return 1, "", "simulated transient lock"
                 return real_run_cmd(command, **kwargs)

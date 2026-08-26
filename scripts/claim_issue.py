@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # #414 removed coding-agent review claiming and ratcheted this file down from
 # 1,581 lines, superseding the #344 terminal-merge-lease allowance.
-# line-ceiling: 1042
+# line-ceiling: 1050
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -164,9 +164,17 @@ def _rollback_claim(issue_id: int, agent: str, assignee: str, target_status: str
     if holders[0] != my_label:
         _remove_agent_label(issue_id, agent)
         return
-    update_status(issue_id, target_status, require_board=True)
-    _remove_agent_label(issue_id, agent)
-    run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee], check=False)
+    current_status = _status_name(issue).replace("-", " ")
+    if not update_status(issue_id, target_status, require_board=True,
+                         expected_status=current_status,
+                         expected_updated_at=issue.get("updatedAt")):
+        return
+    fresh = get_issue(issue_id)
+    if not fresh or agent_labels(fresh) != [my_label] or not _remove_agent_label(issue_id, agent):
+        return
+    fresh = get_issue(issue_id)
+    if fresh and not agent_labels(fresh) and _status_name(fresh) == target_status.lower().replace(" ", "-"):
+        run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee], check=False)
 
 
 def _settle_as_winner(issue_id: int, agent: str, my_label: str, assignee: str) -> int:
@@ -447,11 +455,7 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress", assignee
 
 
 def release_issue(issue_id: int, agent: str, assignee: str | None = None) -> int:
-    """Voluntarily gives up a claim so another agent can take the work.
-
-    Without this, an agent that decides an issue is out of scope or blocked has
-    no way to hand it back short of waiting for the reaper.
-    """
+    """Give up a claim so another agent can take the work."""
     issue = get_issue(issue_id)
     if not issue:
         print(f"[ERROR] Issue #{issue_id} not found.", file=sys.stderr)
@@ -481,8 +485,11 @@ def release_issue(issue_id: int, agent: str, assignee: str | None = None) -> int
         code, _, err = run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", target],
                                check=False)
         if code != 0:
-            print(f"[WARN] Unable to remove assignee '{target}': {err}", file=sys.stderr)
+            print(f"[ERROR] Issue #{issue_id} was released but assignee '{target}' "
+                  f"could not be removed: {err}", file=sys.stderr)
+            return EXIT_ERROR
     print(f"♻️  Issue #{issue_id} released by '{agent}' and returned to {target_status}.")
+    return EXIT_OK
 
 
 # --- Authoring and adopting a pull request ---------------------------------
@@ -817,7 +824,9 @@ def release_merge(pr_id: int, agent: str) -> int:
 
 def _claim_labeled_at(pr_number: int, label_name: str):
     """Return the latest exact-label claim event, or None when unprovable."""
-    events = fetch_paginated_gh_api(f"repos/{{owner}}/{{repo}}/issues/{pr_number}/timeline")
+    slug = get_repo_slug()
+    events = (fetch_paginated_gh_api(f"repos/{slug}/issues/{pr_number}/timeline")
+              if slug else None)
     if events is None:
         print(f"[WARN] Could not read claim timeline for PR #{pr_number}; no claims were reaped.",
               file=sys.stderr)

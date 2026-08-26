@@ -2,7 +2,7 @@
 # #414 removed coding-agent review, review-round gating, and split planning and
 # ratcheted this file down from 5,438 lines. Every earlier +N allowance note
 # (#344, #427, #429, #460) described a ceiling that no longer exists.
-# line-ceiling: 4228
+# line-ceiling: 4198
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -288,14 +288,7 @@ class _PageError(Exception):
 
 
 def _pull_pages(query, owner, name, pr_id, connection):
-    """Yield ``(pullRequest, nodes)`` for every page of one PR connection.
-
-    Each reader below needs the identical three protections -- a cursor threaded
-    through the request, a hard stop when GitHub repeats a cursor, and a
-    fail-closed exit on any malformed page -- and previously carried its own
-    copy. ``_PageError`` rather than ``None`` keeps the "what does an unusable
-    page mean here" decision in each caller, which is where it belongs.
-    """
+    """Yield complete PR connection pages; malformed/repeated cursors fail closed."""
     cursor, seen_cursors = None, set()
     while True:
         args = ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}", "-F",
@@ -323,43 +316,31 @@ def _pull_pages(query, owner, name, pr_id, connection):
         seen_cursors.add(cursor)
 
 
-# Every paginated review read selects this block, so each page reports which
-# state it was served from. Reviews, comments and threads are three separate
-# paginated calls: `headRefOid` alone only proves nobody pushed, so a review
-# or thread created between two of the calls would land in neither page set
-# while the head stayed put (#463 review).
+# Every page carries the same PR mutation version and connection sizes, so
+# separately paginated review inputs cannot be combined across states.
 _EVIDENCE_VERSION_FIELDS = """
           headRefOid
+          updatedAt
           reviewTotal: reviews { totalCount }
           commentTotal: comments { totalCount }
           threadTotal: reviewThreads { totalCount }"""
-
-
-_EvidenceVersion = namedtuple("_EvidenceVersion", "head reviews comments threads")
+_EvidenceVersion = namedtuple("_EvidenceVersion", "head updated reviews comments threads")
 
 
 def _evidence_version(pull):
-    """The state one page was served from: head plus every connection size."""
-    head = pull.get("headRefOid")
-    if not isinstance(head, str) or not head:
+    """The PR version one page was served from, plus every connection size."""
+    head, updated = pull.get("headRefOid"), _parse_ts(pull.get("updatedAt"))
+    if not isinstance(head, str) or not head or updated is None or updated.tzinfo is None:
         return None
-    totals = []
-    for key in ("reviewTotal", "commentTotal", "threadTotal"):
-        node = pull.get(key)
-        if not isinstance(node, dict) or type(node.get("totalCount")) is not int:
-            return None
-        totals.append(node["totalCount"])
-    return _EvidenceVersion(head, *totals)
+    nodes = [pull.get(key) for key in ("reviewTotal", "commentTotal", "threadTotal")]
+    if any(not isinstance(node, dict) or type(node.get("totalCount")) is not int for node in nodes):
+        return None
+    totals = [node["totalCount"] for node in nodes]
+    return _EvidenceVersion(head, updated, *totals)
 
 
 def _body_edit_events(owner, name, pr_id, version):  # noqa: C901, PLR0912, PLR0915
-    """Verified author body-region changes, sourced from GitHub edit history.
-
-    A bare pull-request ``updatedAt`` cannot distinguish body edits from reviews,
-    labels, or comments. ``userContentEdits`` supplies immutable edit timestamps,
-    editor identity, and the body snapshot after each edit. Unknown, truncated,
-    or internally inconsistent history fails closed with ``None``.
-    """
+    """Return complete, internally consistent author body-edit history."""
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
@@ -3300,52 +3281,41 @@ def is_valid_branch_name(branch: str) -> bool:
 
 
 def cleanup_local_branch(repo_root, branch, expected_sha):
-    """Deletes the local branch using an atomic compare-and-delete leased to expected_sha.
-
-    A compare-and-delete protects the ref OID against reuse races, but it cannot
-    atomically stop another process from attaching a new worktree to that ref. Any
-    worktree attachment observed here leaves the branch untouched and returns a
-    failure so close-out remains incomplete and the merger claim remains discoverable.
-    When unattached, deletion uses ``git update-ref -d refs/heads/<branch> <expected_sha>``
-    to guarantee the ref is only deleted if it still equals the exact gated head SHA.
-    If the lease fails because the ref moved or was recreated, the ref is preserved
-    and a close-out failure is returned.
-    """
+    """Delete the exact gated branch using Git's checked-out-worktree guard."""
     if not branch or not expected_sha:
         return False, "Branch and gated head SHA are required; local branch state is unknown."
     if not is_valid_branch_name(branch):
         return False, f"Invalid local branch ref name: {branch!r}."
     ref = f"refs/heads/{branch}"
-    code, actual_sha, _ = run_cmd(["git", "rev-parse", "--verify", "--quiet", ref], check=False,
-                                  cwd=repo_root)
+    code, actual_sha, _ = run_cmd(["git", "rev-parse", "--verify", "--quiet", ref], check=False, cwd=repo_root)
     if code != 0:
         return True, "Local branch already absent."
     if actual_sha.strip() != expected_sha:
-        return False, (f"Local branch {branch} was reused at {actual_sha.strip() or 'unknown'}; "
-                       "lease mismatch -- unrelated ref retained.")
-    list_code, porcelain, list_err = run_cmd(["git", "worktree", "list", "--porcelain"], check=False,
-                                             cwd=repo_root)
+        return False, (f"Local branch {branch} reused at {actual_sha.strip() or 'unknown'}; "
+                       "lease mismatch; unrelated ref retained.")
+    list_code, porcelain, list_err = run_cmd(["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root)
     if list_code != 0:
-        return False, (f"Could not enumerate worktrees to prove {branch} is unattached: "
-                       f"{list_err.strip()}")
+        return False, f"Could not enumerate worktrees to prove {branch} is unattached: {list_err.strip()}"
     if find_branch_worktree(porcelain, branch)[0]:
         return False, (f"Retained local branch {branch}; branch is attached to a worktree.")
-    code, _, err = run_cmd(["git", "update-ref", "-d", ref, expected_sha], check=False, cwd=repo_root)
+    lease_code, lease_sha, _ = run_cmd(["git", "rev-parse", "--verify", "--quiet", ref], check=False, cwd=repo_root)
+    if lease_code != 0:
+        return True, "Local branch already absent."
+    if lease_sha.strip() != expected_sha:
+        return False, f"Local branch {branch} lease failed (now {lease_sha.strip() or 'unknown'}); ref retained."
+    code, _, err = run_cmd(["git", "branch", "-D", "--", branch], check=False, cwd=repo_root)
     if code == 0:
         return True, f"Deleted local branch {branch}; worktree registration was already gone."
-    # If update-ref failed, check if another process deleted it concurrently
-    # or if the ref moved / was recreated with a different SHA.
-    check_code, current_sha, _ = run_cmd(
-        ["git", "rev-parse", "--verify", "--quiet", ref],
-        check=False, cwd=repo_root,
-    )
+    # Distinguish concurrent deletion from a moved/recreated ref.
+    check_code, current_sha, _ = run_cmd(["git", "rev-parse", "--verify", "--quiet", ref],
+                                         check=False, cwd=repo_root)
     if check_code != 0:
         return True, "Local branch already absent."
     if current_sha.strip() != expected_sha:
-        return False, (f"Local branch {branch} lease failed on {expected_sha} "
-                       f"(now at {current_sha.strip() or 'unknown'}): {err.strip()}; ref retained.")
-    return False, (f"Orphan local branch {branch} deletion failed after unattached validation: "
-                   f"{err.strip()}")
+        return False, (f"Local branch {branch} lease failed (now {current_sha.strip() or 'unknown'}): "
+                       f"{err.strip()}; ref retained.")
+    return False, (f"Orphan local branch {branch} deletion failed after unattached validation "
+                   f"and Git's worktree guard: {err.strip()}")
 
 
 def is_harmless_orphan_branch_failure(failure: str) -> bool:

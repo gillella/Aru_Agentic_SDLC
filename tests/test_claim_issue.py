@@ -1,6 +1,6 @@
 # +59 for the #344 terminal merge lease tests.
 # +7 for the #410 fixed-quiet-threshold recovery tests.
-# line-ceiling: 1268
+# line-ceiling: 1296
 import io
 import json
 import sys
@@ -257,12 +257,17 @@ class ClaimProtocolTests(unittest.TestCase):
         get_issue.side_effect = [
             issue_with_labels("status:ready"),
             issue_with_labels("status:ready", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "needs-human"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
 
         self.assertEqual(result, claim_issue.EXIT_CONFLICT)
-        update_status.assert_called_once_with(7, "Backlog", require_board=True)
+        update_status.assert_called_once_with(
+            7, "Backlog", require_board=True, expected_status="ready",
+            expected_updated_at=None,
+        )
         self.assertEqual(
             run_cmd.call_args_list[-2].args[0],
             ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
@@ -285,6 +290,8 @@ class ClaimProtocolTests(unittest.TestCase):
         get_issue.side_effect = [
             issue_with_labels("status:ready"),
             issue_with_labels("status:ready", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "needs-human"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a", assignee="octocat")
@@ -308,12 +315,17 @@ class ClaimProtocolTests(unittest.TestCase):
             issue_with_labels("status:ready", "agent:agent-a"),
             issue_with_labels("status:ready", "agent:agent-a"),
             issue_with_labels("status:ready", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "needs-human"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
 
         self.assertEqual(result, claim_issue.EXIT_CONFLICT)
-        update_status.assert_called_once_with(7, "Backlog", require_board=True)
+        update_status.assert_called_once_with(
+            7, "Backlog", require_board=True, expected_status="ready",
+            expected_updated_at=None,
+        )
 
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "update_status", return_value=True)
@@ -329,6 +341,8 @@ class ClaimProtocolTests(unittest.TestCase):
             issue_with_labels("status:ready", "agent:agent-a"),
             issue_with_labels("status:ready", "agent:agent-a"),
             issue_with_labels("status:in-progress", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "needs-human"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
@@ -338,7 +352,8 @@ class ClaimProtocolTests(unittest.TestCase):
             update_status.call_args_list,
             [
                 call(7, "In Progress", require_board=True),
-                call(7, "Backlog", require_board=True),
+                call(7, "Backlog", require_board=True, expected_status="in progress",
+                     expected_updated_at=None),
             ],
         )
 
@@ -587,7 +602,7 @@ class ClaimProtocolTests(unittest.TestCase):
 
         result = claim_issue.release_issue(7, "agent-a")
 
-        self.assertIsNone(result)
+        self.assertEqual(result, claim_issue.EXIT_OK)
         update_status.assert_called_once_with(7, "Backlog", require_board=True)
 
     @patch.object(claim_issue, "update_status", return_value=True)
@@ -624,6 +639,16 @@ class ClaimProtocolTests(unittest.TestCase):
             ["gh", "issue", "edit", "7", "--remove-assignee", "custom-user"],
             check=False,
         )
+
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(1, "", "denied"))
+    @patch.object(claim_issue, "_remove_agent_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_release_reports_assignee_cleanup_failure(
+        self, get_issue, _remove_label, _run_cmd, _update_status
+    ):
+        get_issue.return_value = issue_with_labels("status:in-progress", "agent:agent-a")
+        self.assertEqual(claim_issue.release_issue(7, "agent-a"), claim_issue.EXIT_ERROR)
 
     @patch.object(claim_issue, "update_status")
     @patch.object(claim_issue, "run_cmd")
@@ -766,12 +791,17 @@ class ClaimProtocolTests(unittest.TestCase):
             "status:ready", "agent:agent-a", author="attacker")
         get_issue.side_effect = [
             ready, labeled, labeled, untrusted,
+            issue_with_labels("status:ready", "agent:agent-a", author="attacker"),
+            issue_with_labels("status:ready", author="attacker"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
 
         self.assertEqual(result, claim_issue.EXIT_CONFLICT)
-        update_status.assert_called_once_with(7, "Ready", require_board=True)
+        update_status.assert_called_once_with(
+            7, "Ready", require_board=True, expected_status="ready",
+            expected_updated_at=None,
+        )
         self.assertEqual(
             run_cmd.call_args_list[-2].args[0],
             ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
@@ -791,6 +821,8 @@ class ClaimProtocolTests(unittest.TestCase):
             "status:in-progress", "agent:agent-a", author="attacker")
         get_issue.side_effect = [
             ready, labeled, labeled, labeled, untrusted,
+            issue_with_labels("status:ready", "agent:agent-a", author="attacker"),
+            issue_with_labels("status:ready", author="attacker"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
@@ -800,7 +832,8 @@ class ClaimProtocolTests(unittest.TestCase):
             update_status.call_args_list,
             [
                 call(7, "In Progress", require_board=True),
-                call(7, "Ready", require_board=True),
+                call(7, "Ready", require_board=True, expected_status="in progress",
+                     expected_updated_at=None),
             ],
         )
 
