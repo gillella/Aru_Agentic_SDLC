@@ -188,6 +188,7 @@ def open_pull_requests(run: Runner, slug: str) -> Optional[List[Dict[str, Any]]]
         ):
             return None
         seen.add(number)
+        merge_state = str(row.get("mergeStateStatus") or row.get("mergeable_state") or "").upper()
         prs.append({
             "number": number,
             "title": row.get("title") or "",
@@ -202,7 +203,7 @@ def open_pull_requests(run: Runner, slug: str) -> Optional[List[Dict[str, Any]]]
             "body": row.get("body") or "",
             "comments": [],
             "reviewDecision": "",
-            "mergeStateStatus": "",
+            "mergeStateStatus": merge_state,
             "state": "OPEN",
         })
     return prs

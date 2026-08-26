@@ -109,18 +109,40 @@ class RestIssueInventoryTests(unittest.TestCase):
 
 
 class RestPullInventoryTests(unittest.TestCase):
-    def test_open_pull_snapshot_is_paginated_rest_and_never_graphql(self):
-        pull = {
-            "number": 9, "title": "quota safe", "draft": False,
+    @staticmethod
+    def pull(number=9):
+        return {
+            "number": number, "title": "quota safe", "draft": False,
             "labels": [{"name": "review:coderabbit"}],
             "head": {"ref": "fix/quota", "sha": "abc"},
             "body": "body", "state": "open",
+            "mergeable_state": "dirty",
             "created_at": "2026-08-25T12:00:00Z",
             "updated_at": "2026-08-25T12:01:00Z",
         }
+
+    def test_failure_malformed_or_duplicate_snapshot_fails_closed(self):
+        duplicate = "\n".join(json.dumps(self.pull()) for _ in range(2))
+        no_head = json.dumps({k: v for k, v in self.pull().items() if k != "head"})
+        bad_label = json.dumps({**self.pull(), "labels": [{"colour": "red"}]})
+        for result in (
+            (1, "", "rate limited"),
+            (0, "not-json", ""),
+            (0, duplicate, ""),
+            (0, no_head, ""),
+            (0, bad_label, ""),
+        ):
+            with self.subTest(result=result), \
+                 patch.object(common, "run_cmd", return_value=result):
+                self.assertIsNone(
+                    github_inventory.open_pull_requests(
+                        common.run_cmd, "acme/widgets",
+                    )
+                )
+
+    def test_open_pull_snapshot_is_paginated_rest_and_never_graphql(self):
+        pull = self.pull()
         with patch.object(
-            github_inventory, "json_lines", wraps=github_inventory.json_lines,
-        ), patch.object(
             common, "run_cmd", return_value=(0, json.dumps(pull), ""),
         ) as run:
             prs = github_inventory.open_pull_requests(
@@ -128,6 +150,7 @@ class RestPullInventoryTests(unittest.TestCase):
             )
 
         self.assertEqual(prs[0]["headRefOid"], "abc")
+        self.assertEqual(prs[0]["mergeStateStatus"], "DIRTY")
         command = run.call_args.args[0]
         self.assertEqual(command[:3], ["gh", "api", "--paginate"])
         self.assertNotIn("graphql", command)

@@ -307,8 +307,23 @@ class DurableRunnerBudgetTests(unittest.TestCase):
                 res2 = runner.run_iteration()
         self.assertEqual(res1.phase, "blocked_wait")
         self.assertEqual(res2.phase, "blocked_wait")
-        self.assertEqual(picker.call_count, 1)
+        self.assertEqual(picker.call_count, 2)
         self.assertEqual(fleet.call_count, 1)
+
+    def test_startup_diagnostic_does_not_park_when_picker_has_actionable_work(self):
+        with tempfile.TemporaryDirectory() as root:
+            runner = self.runner(root)
+            with patch.object(
+                runner, "_run_fleet_status", return_value={"state": "complete"},
+            ) as fleet, patch.object(
+                runner, "_run_picker", return_value={"work": {"type": "pr", "pr": 9}},
+            ) as picker:
+                res = runner.run_iteration()
+        self.assertEqual(res.phase, "active")
+        self.assertEqual(res.work_type, "pr")
+        self.assertEqual(res.work_number, 9)
+        self.assertEqual(fleet.call_count, 1)
+        self.assertEqual(picker.call_count, 1)
 
 
 if __name__ == "__main__":

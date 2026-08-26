@@ -80,6 +80,25 @@ class CheckCiRestTests(unittest.TestCase):
     def test_unknown_or_incomplete_terminal_state_fails_closed(self, _contexts, _head):
         self.assertFalse(check_ci.check_ci_status(17))
 
+    @patch.object(check_ci, "get_repo_slug", return_value="owner/repo")
+    @patch.object(check_ci, "run_gh_json")
+    def test_pull_head_resolves_fork_namespaced_target(self, gh_json, _slug):
+        gh_json.return_value = [{"head": {"sha": "forksha123"}}]
+        sha = check_ci._pull_head("forkuser:feature")
+        self.assertEqual(sha, "forksha123")
+        self.assertIn("head=forkuser:feature", gh_json.call_args.args[0])
+
+    @patch.object(check_ci, "get_repo_slug", return_value="owner/repo")
+    @patch.object(check_ci, "run_gh_json")
+    def test_pull_head_resolves_fork_branch_when_base_owner_lookup_empty(self, gh_json, _slug):
+        gh_json.side_effect = [
+            [],  # base owner lookup returns empty
+            [{"head": {"ref": "fork-feature", "sha": "forksha456"}}],  # all open PRs list
+        ]
+        sha = check_ci._pull_head("fork-feature")
+        self.assertEqual(sha, "forksha456")
+        self.assertEqual(gh_json.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

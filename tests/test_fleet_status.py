@@ -1,4 +1,4 @@
-# line-ceiling: 1600
+# line-ceiling: 1620
 import os
 import stat
 import sys
@@ -1439,6 +1439,20 @@ class MostRecentMergeTests(unittest.TestCase):
         self.assertIn("repo:", query)
         self.assertIn("is:merged", query)
         self.assertIn("merged:>=", query)
+
+    def test_incomplete_or_truncated_search_fails_closed(self):
+        row = {"pull_request": {"merged_at": "2026-08-17T05:00:00Z"}}
+        for pages in (
+            [{"total_count": 1, "incomplete_results": True, "items": [row]}],
+            [{"total_count": 2, "incomplete_results": False, "items": [row]}],
+            [{"total_count": 1, "incomplete_results": False, "items": ["nonsense"]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [{"pull_request": {}}]}],
+        ):
+            with self.subTest(pages=pages), \
+                 patch.object(fleet_status, "run_gh_json", return_value=pages):
+                newest, ok = most_recent_merge_history()
+            self.assertIsNone(newest)
+            self.assertFalse(ok)
 
     def test_lookup_failure_returns_unavailable(self):
         with patch.object(fleet_status, "run_gh_json", return_value=None):

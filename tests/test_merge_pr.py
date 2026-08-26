@@ -2775,6 +2775,17 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
         self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
 
     @patch.object(merge_pr, "_gh_json")
+    def test_truncated_rest_statuses_are_rejected(self, gh_json):
+        gh_json.side_effect = [
+            {"total_count": 0, "check_runs": []},
+            {"total_count": 2, "statuses": [{
+                "context": "CI", "state": "success",
+                "creator": {"login": "github-actions[bot]", "type": "Bot"},
+            }]},
+        ]
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+
+    @patch.object(merge_pr, "_gh_json")
     def test_rest_statuses_are_mapped_to_typed_merge_evidence(self, gh_json):
         coderabbit = {
             "__typename": "CheckRun",

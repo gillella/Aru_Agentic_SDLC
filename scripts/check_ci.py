@@ -26,10 +26,24 @@ def _pull_head(target: str) -> str | None:
         payload = run_gh_json(["gh", "api", f"repos/{slug}/pulls/{target}"])
     else:
         owner = slug.split("/", 1)[0]
+        head_filter = target if ":" in target else f"{owner}:{target}"
         rows = run_gh_json([
             "gh", "api", "--method", "GET", f"repos/{slug}/pulls",
-            "-f", "state=open", "-f", f"head={owner}:{target}", "-f", "per_page=100",
+            "-f", "state=open", "-f", f"head={head_filter}", "-f", "per_page=100",
         ])
+        if not rows and ":" not in target:
+            all_open = run_gh_json([
+                "gh", "api", "--method", "GET", f"repos/{slug}/pulls",
+                "-f", "state=open", "-f", "per_page=100",
+            ])
+            if isinstance(all_open, list):
+                matching = [
+                    p for p in all_open
+                    if isinstance(p, dict)
+                    and isinstance(p.get("head"), dict)
+                    and p["head"].get("ref") == target
+                ]
+                rows = matching
         payload = rows[0] if isinstance(rows, list) and len(rows) == 1 else None
     head = (payload or {}).get("head") if isinstance(payload, dict) else None
     sha = (head or {}).get("sha") if isinstance(head, dict) else None

@@ -276,9 +276,11 @@ def most_recent_merge_history(repo_slug: Optional[str] = None) -> Tuple[Optional
         if not isinstance(row, dict):
             continue
         pull = row.get("pull_request") or {}
-        parsed = _parse_ts(pull.get("merged_at") or pull.get("mergedAt"))
+        parsed = _parse_ts(pull.get("merged_at") or pull.get("mergedAt") or row.get("closed_at"))
         if parsed is not None:
             stamps.append(parsed)
+    if total_count > 0 and not stamps:
+        return None, False
     return (max(stamps) if stamps else None), True
 
 
@@ -1089,6 +1091,8 @@ def evaluate_queue_row(
         slug = get_repo_slug()
 
         def issue_body_fn(num):
+            if not slug:
+                raise RuntimeError("could not resolve the repository slug")
             return (
                 mp._gh_json(["gh", "api", f"repos/{slug}/issues/{num}"]) or {}
             ).get("body") or ""

@@ -47,11 +47,14 @@ def stage_expected_ready_for_triage(
     return staged_issues
 
 
+_OMITTED = object()
+
+
 def governed_board_inventory(
     repo_slug: str,
     open_numbers: set[int],
     *,
-    projects: list[dict] | None = None,
+    projects: list[dict] | None | object = _OMITTED,
     require_complete: bool = True,
 ) -> tuple[dict[int, str], int] | None:
     """Return open-issue statuses and the board's literal Ready count.
@@ -61,7 +64,7 @@ def governed_board_inventory(
     is for status diagnostics: missing open issues are then reported as board
     orphans instead of making the single inventory unreadable.
     """
-    available = projects if projects is not None else get_repo_projects(repo_slug)
+    available = get_repo_projects(repo_slug) if projects is _OMITTED else projects
     if available is None:
         return None
     governed = select_governed_projects(available, repo_slug)
