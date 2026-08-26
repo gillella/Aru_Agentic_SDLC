@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 710
+# line-ceiling: 730
 """Operator-authorized Delivery Increment records and transition rules."""
 
 from __future__ import annotations
@@ -87,9 +87,14 @@ def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
 def _private_file(path: Path) -> None:
     if path.is_symlink():
         raise IncrementError(f"refusing symlink: {path}")
-    info = path.stat()
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise IncrementError(f"cannot stat file {path}: {exc}") from exc
     if not stat.S_ISREG(info.st_mode):
         raise IncrementError(f"not a regular file: {path}")
+    if info.st_uid != os.getuid():
+        raise IncrementError(f"file is not owned by the current user: {path}")
     if stat.S_IMODE(info.st_mode) & 0o077:
         raise IncrementError(f"file must be private (0600): {path}")
 
@@ -173,15 +178,35 @@ def _strict_json_loads(value: str) -> Any:
 
 
 def _read_increment_unlocked(path: Path, default: Any) -> Any:
-    if path.is_symlink():
-        raise IncrementError(f"refusing symlink: {path}")
-    if not path.exists():
-        return deepcopy(default)
-    _private_file(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
     try:
-        return _strict_json_loads(path.read_text(encoding="utf-8"))
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
+        if default is not None:
+            return deepcopy(default)
+        raise IncrementError(f"file does not exist: {path}") from exc
+    except OSError as exc:
+        raise IncrementError(f"cannot open {path}: {exc}") from exc
+
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise IncrementError(f"not a regular file: {path}")
+        if info.st_uid != os.getuid():
+            raise IncrementError(f"file is not owned by the current user: {path}")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise IncrementError(f"file must be private (0600): {path}")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            return _strict_json_loads(handle.read())
+    except IncrementError:
+        raise
     except (OSError, UnicodeError) as exc:
         raise IncrementError(f"cannot read {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _read_increment_json(path: Path, default: Any) -> Any:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1370
+# line-ceiling: 1450
 """Project-scoped agent presence and availability registry.
 
 GitHub claims remain authoritative ownership. This registry only records which
@@ -153,9 +153,14 @@ def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
 def _private_file(path: Path) -> None:
     if path.is_symlink():
         raise PresenceError(f"refusing symlink: {path}")
-    info = path.stat()
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise PresenceError(f"cannot stat file {path}: {exc}") from exc
     if not stat.S_ISREG(info.st_mode):
         raise PresenceError(f"not a regular file: {path}")
+    if info.st_uid != os.getuid():
+        raise PresenceError(f"file is not owned by the current user: {path}")
     if stat.S_IMODE(info.st_mode) & 0o077:
         raise PresenceError(f"file must be private (0600): {path}")
 
@@ -183,18 +188,35 @@ def _file_lock(path: Path) -> Iterator[None]:
 
 
 def _read_unlocked(path: Path, default: Any = None) -> Any:
-    if path.is_symlink():
-        raise PresenceError(f"refusing symlink: {path}")
-    if not path.exists():
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
         if default is not None:
             return copy.deepcopy(default)
-        raise PresenceError(f"file does not exist: {path}")
-    _private_file(path)
+        raise PresenceError(f"file does not exist: {path}") from exc
+    except OSError as exc:
+        raise PresenceError(f"cannot open {path}: {exc}") from exc
+
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise PresenceError(f"not a regular file: {path}")
+        if info.st_uid != os.getuid():
+            raise PresenceError(f"file is not owned by the current user: {path}")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise PresenceError(f"file must be private (0600): {path}")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
             return json.load(handle)
+    except PresenceError:
+        raise
     except (OSError, json.JSONDecodeError) as exc:
         raise PresenceError(f"cannot read {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _write_unlocked(path: Path, value: Any) -> None:
@@ -264,17 +286,79 @@ def _is_live_session(session_id: str) -> bool:
 
 
 IDENTITY_TIMEOUT_SECONDS = 15
+REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+GITHUB_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+PROJECTS_V2_QUERY = """
+query($owner:String!, $repo:String!) {
+  repository(owner:$owner, name:$repo) {
+    projectsV2(first:100) {
+      nodes {
+        id number title
+        owner {
+          ... on User { login }
+          ... on Organization { login }
+        }
+        repositories(first:100) { nodes { nameWithOwner } }
+      }
+    }
+  }
+}
+""".strip()
 
 
-def _bounded_json(command: List[str], cwd: Optional[str] = None) -> Any:
+def _validate_gh_identity_command(command: Sequence[str]) -> None:
+    if not command or not isinstance(command, (list, tuple)):
+        raise PresenceError("invalid command structure")
+    if command[0] != "gh":
+        raise PresenceError(f"unauthorized executable: {command[0]}")
+
+    if list(command) == ["gh", "repo", "view", "--json", "id,nameWithOwner"]:
+        return
+
+    if (
+        len(command) == 3
+        and command[1] == "api"
+        and command[2].startswith("repos/")
+    ):
+        slug = command[2][len("repos/"):]
+        if REPO_SLUG_RE.fullmatch(slug):
+            return
+        raise PresenceError(f"invalid repository slug in command: {slug}")
+
+    if (
+        len(command) == 9
+        and command[1] == "api"
+        and command[2] == "graphql"
+        and command[3] == "-f"
+        and command[4] == f"query={PROJECTS_V2_QUERY}"
+        and command[5] == "-F"
+        and command[6].startswith("owner=")
+        and command[7] == "-F"
+        and command[8].startswith("repo=")
+    ):
+        owner = command[6][len("owner="):]
+        repo_name = command[8][len("repo="):]
+        if GITHUB_NAME_RE.fullmatch(owner) and GITHUB_NAME_RE.fullmatch(repo_name):
+            return
+        raise PresenceError(
+            f"invalid repository owner/name in command: {owner}/{repo_name}"
+        )
+
+    raise PresenceError(f"unauthorized command invocation: {command}")
+
+
+def _run_gh_json(command: Sequence[str], cwd: Optional[str] = None) -> Any:
+    _validate_gh_identity_command(command)
     try:
         result = subprocess.run(
-            command,
+            list(command),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
             timeout=IDENTITY_TIMEOUT_SECONDS,
+            shell=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise PresenceError(
@@ -291,25 +375,13 @@ def _bounded_json(command: List[str], cwd: Optional[str] = None) -> Any:
 
 
 def _discover_governed_project(repo_slug: str) -> Dict[str, Any]:
+    if not REPO_SLUG_RE.fullmatch(repo_slug or ""):
+        raise PresenceError(f"invalid repository slug: {repo_slug}")
     owner, repo_name = repo_slug.split("/", 1)
-    query = """
-    query($owner:String!, $repo:String!) {
-      repository(owner:$owner, name:$repo) {
-        projectsV2(first:100) {
-          nodes {
-            id number title
-            owner {
-              ... on User { login }
-              ... on Organization { login }
-            }
-            repositories(first:100) { nodes { nameWithOwner } }
-          }
-        }
-      }
-    }
-    """
-    response = _bounded_json([
-        "gh", "api", "graphql", "-f", f"query={query}",
+    if not GITHUB_NAME_RE.fullmatch(owner) or not GITHUB_NAME_RE.fullmatch(repo_name):
+        raise PresenceError(f"invalid repository owner/name: {repo_slug}")
+    response = _run_gh_json([
+        "gh", "api", "graphql", "-f", f"query={PROJECTS_V2_QUERY}",
         "-F", f"owner={owner}", "-F", f"repo={repo_name}",
     ])
     try:
@@ -326,22 +398,22 @@ def discover_checkout_identity(local_path: Path) -> Dict[str, Any]:
     if not local_path.is_dir():
         raise PresenceError(f"checkout is unavailable: {local_path}")
     try:
-        repo = _bounded_json(
+        repo = _run_gh_json(
             ["gh", "repo", "view", "--json", "id,nameWithOwner"],
             cwd=str(local_path),
         )
         repo_node_id = repo["id"]
         repo_slug = repo["nameWithOwner"]
         if (not isinstance(repo_node_id, str) or not repo_node_id.strip()
-                or not isinstance(repo_slug, str) or not repo_slug.strip()):
+                or not isinstance(repo_slug, str) or not REPO_SLUG_RE.fullmatch(repo_slug)):
             raise PresenceError("repository identity is missing or invalid")
-        rest_repo = _bounded_json(
+        rest_repo = _run_gh_json(
             ["gh", "api", f"repos/{repo_slug}"], cwd=str(local_path),
         )
         rest_node_id = rest_repo["node_id"]
         rest_slug = rest_repo["full_name"]
         if (not isinstance(rest_node_id, str) or not rest_node_id.strip()
-                or not isinstance(rest_slug, str) or not rest_slug.strip()):
+                or not isinstance(rest_slug, str) or not REPO_SLUG_RE.fullmatch(rest_slug)):
             raise PresenceError("repository identity is missing or invalid")
         if rest_node_id != repo_node_id or rest_slug != repo_slug:
             raise PresenceError("repository identity APIs returned mismatched data")
@@ -381,7 +453,6 @@ def identity_derived_project_id(github_repo_id: str, project_v2_id: str) -> str:
 def resolve_project_id(
     checkout: Path,
     *,
-    projects_path: Optional[Path] = None,
     identity_provider: Optional[Callable[[Path], Dict[str, Any]]] = None,
 ) -> str:
     """Resolve a shared project identity for presence.
@@ -1041,7 +1112,6 @@ def doctor_presence_summary(
     agents: Dict[str, Dict[str, Any]],
     store: Optional[PresenceStore] = None,
     catalog_non_guarantees: Optional[Sequence[str]] = None,
-    projects_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Read-only presence + wake-limitation summary for the doctor payload."""
     store = store or PresenceStore()
@@ -1050,7 +1120,7 @@ def doctor_presence_summary(
     error = None
     if project:
         try:
-            project_id = resolve_project_id(Path(project), projects_path=projects_path)
+            project_id = resolve_project_id(Path(project))
             # Never expire/mutate on doctor: diagnosis must stay read-only.
             records = store.query_project(
                 checkout_path=project,
@@ -1223,7 +1293,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the clone-independent project_id for a checkout",
     )
     resolve.add_argument("--checkout", type=Path, required=True)
-    resolve.add_argument("--projects-path", type=Path)
 
     return parser
 
@@ -1314,10 +1383,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:  # noqa: C901, PLR0912, P
 
         if command == "resolve-project-id":
             checkout = args.checkout.expanduser().resolve()
-            project_id = resolve_project_id(
-                checkout,
-                projects_path=args.projects_path,
-            )
+            project_id = resolve_project_id(checkout)
             if args.json:
                 print(json.dumps({
                     "checkout": str(checkout),

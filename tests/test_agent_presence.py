@@ -153,22 +153,12 @@ class AgentPresenceTests(unittest.TestCase):
         clone_b = self.root / "clones" / "agent-b"
         clone_a.mkdir(parents=True)
         clone_b.mkdir(parents=True)
-        aru = self.root / "aru-home"
-        aru.mkdir(mode=0o700)
-        projects_path = aru / "projects.json"
-        projects_path.write_text(
-            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(projects_path, 0o600)
         first = ap.resolve_project_id(
             clone_a,
-            projects_path=projects_path,
             identity_provider=lambda _path: identity,
         )
         second = ap.resolve_project_id(
             clone_b,
-            projects_path=projects_path,
             identity_provider=lambda _path: identity,
         )
         self.assertEqual(first, second)
@@ -248,14 +238,6 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertEqual(store.get("cursor-1").cooldown_reason, "credit-exhausted")
 
     def test_doctor_summary_is_read_only(self):
-        aru = self.root / "aru-isolated"
-        aru.mkdir(mode=0o700)
-        projects_path = aru / "projects.json"
-        projects_path.write_text(
-            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(projects_path, 0o600)
         self.store.register(
             agent_id="cursor-cloud-1",
             family="cursor",
@@ -271,7 +253,6 @@ class AgentPresenceTests(unittest.TestCase):
             agents=agents,
             store=self.store,
             catalog_non_guarantees=["app quit"],
-            projects_path=projects_path,
         )
         after = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(before, after)
@@ -280,14 +261,6 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertIn("app quit", " ".join(summary["wake_limitations"]))
 
     def test_doctor_picks_newest_heartbeat_by_timestamp(self):
-        aru = self.root / "aru-hb"
-        aru.mkdir(mode=0o700)
-        projects_path = aru / "projects.json"
-        projects_path.write_text(
-            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(projects_path, 0o600)
         project_id = ap.path_derived_project_id(self.project_a)
         self.store.register(
             agent_id="cursor-old",
@@ -312,21 +285,12 @@ class AgentPresenceTests(unittest.TestCase):
             project=str(self.project_a),
             agents=agents,
             store=ap.PresenceStore(self.path),
-            projects_path=projects_path,
         )
         self.assertEqual(len(summary["tasks"]), 2)
         # 15:00Z == 20:30 +05:30, so Z form is newer than +05:30 form above.
         self.assertEqual(agents["cursor"]["last_heartbeat"], "2026-08-16T15:00:00Z")
 
     def test_doctor_summary_is_project_scoped(self):
-        aru = self.root / "aru-scoped"
-        aru.mkdir(mode=0o700)
-        projects_path = aru / "projects.json"
-        projects_path.write_text(
-            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(projects_path, 0o600)
         self.store.register(
             agent_id="cursor-cloud-1",
             family="cursor",
@@ -352,7 +316,6 @@ class AgentPresenceTests(unittest.TestCase):
             agents=agents,
             store=self.store,
             catalog_non_guarantees=["app quit"],
-            projects_path=projects_path,
         )
         self.assertEqual(len(summary["tasks"]), 1)
         self.assertEqual(summary["tasks"][0]["agent_id"], "cursor-cloud-1")
@@ -721,7 +684,7 @@ class DurableIdentityAndDirectoryConcurrencyTests(unittest.TestCase):
                 }
             raise RuntimeError(f"unexpected command: {cmd}")
 
-        with patch.object(ap, "_bounded_json", side_effect=mock_bounded):
+        with patch.object(ap, "_run_gh_json", side_effect=mock_bounded):
             identity = ap.discover_checkout_identity(clone)
             project_id = ap.resolve_project_id(clone)
 
@@ -739,6 +702,77 @@ class DurableIdentityAndDirectoryConcurrencyTests(unittest.TestCase):
             project_id = ap.resolve_project_id(non_git_dir)
 
         self.assertEqual(project_id, ap.path_derived_project_id(non_git_dir))
+
+    def test_read_unlocked_rejects_symlink_and_insecure_file(self):
+        real_file = self.root / "real_store.json"
+        real_file.write_text(json.dumps({"schema": "test"}), encoding="utf-8")
+        os.chmod(real_file, 0o600)
+
+        symlink_file = self.root / "symlink_store.json"
+        symlink_file.symlink_to(real_file)
+
+        with self.assertRaises(ap.PresenceError):
+            ap._read_unlocked(symlink_file)
+
+        insecure_file = self.root / "insecure_store.json"
+        insecure_file.write_text(json.dumps({"schema": "test"}), encoding="utf-8")
+        os.chmod(insecure_file, 0o644)
+
+        with self.assertRaises(ap.PresenceError):
+            ap._read_unlocked(insecure_file)
+
+    def test_read_unlocked_rejects_foreign_owner(self):
+        real_file = self.root / "foreign_owner.json"
+        real_file.write_text(json.dumps({"schema": "test"}), encoding="utf-8")
+        os.chmod(real_file, 0o600)
+
+        real_fstat = os.fstat
+        def mock_fstat(fd):
+            st = real_fstat(fd)
+            # Replace st_uid with foreign UID
+            return os.stat_result((
+                st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                os.getuid() + 1000, st.st_gid, st.st_size,
+                st.st_atime, st.st_mtime, st.st_ctime
+            ))
+
+        with patch("os.fstat", side_effect=mock_fstat):
+            with self.assertRaises(ap.PresenceError):
+                ap._read_unlocked(real_file)
+
+    def test_validate_gh_identity_command_enforces_allowlist(self):
+        # Disallow non-gh executable
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["bash", "-c", "echo pwned"])
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["sh", "-c", "whoami"])
+
+        # Disallow unauthorized gh commands
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["gh", "auth", "token"])
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["gh", "repo", "delete", "owner/repo"])
+
+        # Disallow malicious injection in repository slug
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["gh", "api", "repos/owner/repo;rm -rf /"])
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["gh", "api", "repos/--help"])
+
+        # Disallow malicious injection in graphql owner / repo
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command([
+                "gh", "api", "graphql", "-f", f"query={ap.PROJECTS_V2_QUERY}",
+                "-F", "owner=bad;whoami", "-F", "repo=repo",
+            ])
+
+        # Allow valid shapes
+        ap._validate_gh_identity_command(["gh", "repo", "view", "--json", "id,nameWithOwner"])
+        ap._validate_gh_identity_command(["gh", "api", "repos/owner/repo"])
+        ap._validate_gh_identity_command([
+            "gh", "api", "graphql", "-f", f"query={ap.PROJECTS_V2_QUERY}",
+            "-F", "owner=owner", "-F", "repo=repo",
+        ])
 
     def test_private_directory_concurrent_creation_race(self):
         target = self.root / "concurrent_store_dir"
