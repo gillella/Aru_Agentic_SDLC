@@ -1,9 +1,9 @@
 # +59 for the #344 terminal merge lease tests.
-# line-ceiling: 1255
+# +7 for the #410 fixed-quiet-threshold recovery tests.
+# line-ceiling: 1263
 import io
 import json
 import sys
-import tempfile
 import unittest
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -13,27 +13,6 @@ from unittest.mock import call, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import claim_issue  # noqa: E402
-import agent_presence as ap  # noqa: E402
-
-
-_PRESENCE_TEMPORARY = None
-_PRESENCE_PATCHER = None
-
-
-def setUpModule():
-    global _PRESENCE_TEMPORARY, _PRESENCE_PATCHER
-    _PRESENCE_TEMPORARY = tempfile.TemporaryDirectory()
-    _PRESENCE_PATCHER = patch.object(
-        ap,
-        "DEFAULT_PRESENCE_PATH",
-        Path(_PRESENCE_TEMPORARY.name) / "agent-presence.json",
-    )
-    _PRESENCE_PATCHER.start()
-
-
-def tearDownModule():
-    _PRESENCE_PATCHER.stop()
-    _PRESENCE_TEMPORARY.cleanup()
 
 
 def issue_with_labels(*names, author="owner", number=7):
@@ -1069,25 +1048,6 @@ class ClaimAgeReaperTests(unittest.TestCase):
         fetch_timeline.assert_not_called()
 
 
-class DummyPresenceStore:
-    def __init__(self, records=None, error=None, ttl_seconds=300):
-        self.records = records or {}
-        self.error = error
-        self.heartbeat_ttl_seconds = ttl_seconds
-
-    def get(self, agent_id):
-        if self.error:
-            raise self.error
-        return self.records.get(agent_id)
-
-
-class DummyRecord:
-    def __init__(self, agent_id, availability="available", last_heartbeat=""):
-        self.agent_id = agent_id
-        self.availability = availability
-        self.last_heartbeat = last_heartbeat
-
-
 class ClaimIssueTests(unittest.TestCase):
     def test_normal_review_claim_conflict_names_emergency_assignment(self):
         with patch.object(claim_issue, "_pr_labels",
@@ -1098,68 +1058,121 @@ class ClaimIssueTests(unittest.TestCase):
         self.assertIn("emergency", "".join(
             call.args[0] for call in stderr.write.call_args_list).lower())
 
-    def test_absent_agent_reduced_reap_threshold(self):
-        store = DummyPresenceStore(records={})
-        hours, reason = claim_issue._effective_reap_threshold("absent-agent", 4, store=store)
-        self.assertEqual(hours, 2.0)
-        self.assertIn("absent from presence registry", reason)
 
-    def test_live_agent_full_reap_threshold(self):
-        now = datetime.now(timezone.utc)
-        fresh_hb = now.isoformat().replace("+00:00", "Z")
-        store = DummyPresenceStore(records={
-            "live-agent": DummyRecord("live-agent", availability="available", last_heartbeat=fresh_hb)
-        })
-        hours, reason = claim_issue._effective_reap_threshold("live-agent", 4, store=store, now=now)
-        self.assertEqual(hours, 4.0)
-        self.assertEqual(reason, "live agent")
+class QuietThresholdReapTests(unittest.TestCase):
+    """#410: recovery reads GitHub timestamps against one fixed threshold.
 
-    def test_recent_claim_never_reaped(self):
-        store = DummyPresenceStore(records={})
-        hours, _ = claim_issue._effective_reap_threshold("absent-agent", 4, store=store)
-        # 0.5h claim is younger than the 2.0h reduced threshold
-        self.assertLess(0.5, hours)
+    The reaper used to shorten its own window for an agent the local presence
+    registry could not vouch for, which made the release deadline depend on
+    unauthoritative local state that no longer exists.
+    """
 
-    def test_missing_presence_fallback(self):
-        store = DummyPresenceStore(error=RuntimeError("disk unreadable"))
-        import io
-        fake_stderr = io.StringIO()
-        with patch("sys.stderr", fake_stderr):
-            hours, reason = claim_issue._effective_reap_threshold("any-agent", 4, store=store)
-        self.assertEqual(hours, 4.0)
-        self.assertIn("fallback", reason)
-        self.assertIn("[WARN]", fake_stderr.getvalue())
+    OLD = "2020-01-01T00:00:00Z"
 
-    def test_reduced_threshold_floor_1h(self):
-        store = DummyPresenceStore(records={})
-        # Base 1.5h -> half is 0.75h -> floored at 1.0h
-        hours, _ = claim_issue._effective_reap_threshold("absent-agent", 1.5, store=store)
-        self.assertEqual(hours, 1.0)
-        # Base 1.0h -> half is 0.5h -> floored at 1.0h
-        hours_one, _ = claim_issue._effective_reap_threshold("absent-agent", 1.0, store=store)
-        self.assertEqual(hours_one, 1.0)
+    @staticmethod
+    def _pr(number, label, reviews=None):
+        return {
+            "number": number,
+            "labels": [{"name": label}],
+            "reviews": reviews or [],
+        }
 
-    def test_reap_output_explains_threshold(self):
-        import io
-        fake_stderr = io.StringIO()
-        store = DummyPresenceStore(records={})
+    @staticmethod
+    def _timeline(label, created_at):
+        return [{
+            "event": "labeled",
+            "label": {"name": label},
+            "created_at": created_at,
+        }]
+
+    def test_threshold_label_renders_whole_and_fractional_hours(self):
+        self.assertEqual(claim_issue._quiet_threshold_label(4), "4h")
+        self.assertEqual(claim_issue._quiet_threshold_label(1.5), "1.5h")
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_claim_younger_than_the_full_threshold_survives(
+        self, run_cmd, fetch_timeline
+    ):
         now = datetime.now(timezone.utc)
         claimed_at = (now - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+        run_cmd.return_value = (
+            0, json.dumps([self._pr(42, "reviewer:unknown-agent")]), "",
+        )
+        fetch_timeline.return_value = self._timeline(
+            "reviewer:unknown-agent", claimed_at
+        )
 
-        with patch("sys.stderr", fake_stderr), \
-             patch.object(claim_issue, "run_cmd") as mock_cmd, \
-             patch.object(claim_issue, "fetch_paginated_gh_api") as mock_timeline:
-            mock_cmd.side_effect = [
-                (0, json.dumps([{"number": 42, "labels": [{"name": "reviewer:absent-agent"}], "reviews": []}]), ""),
-                (0, "", ""),
-            ]
-            mock_timeline.return_value = [{"event": "labeled", "label": {"name": "reviewer:absent-agent"}, "created_at": claimed_at}]
-            released = claim_issue.reap_stale_reviews(4, presence_store=store, now=now)
-            self.assertEqual(released, [42])
-            output = fake_stderr.getvalue()
-            self.assertIn("Released stale review claim on PR #42", output)
-            self.assertIn("absent from presence registry", output)
-            self.assertIn("claim age > 2h", output)
+        # A 3h-old claim is stale only under the halved presence threshold.
+        self.assertEqual(claim_issue.reap_stale_reviews(4, now=now), [])
+        self.assertEqual(run_cmd.call_count, 1)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_reap_output_names_the_configured_threshold(
+        self, run_cmd, fetch_timeline
+    ):
+        now = datetime.now(timezone.utc)
+        claimed_at = (now - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        run_cmd.side_effect = [
+            (0, json.dumps([self._pr(42, "reviewer:gone")]), ""),
+            (0, "", ""),
+        ]
+        fetch_timeline.return_value = self._timeline("reviewer:gone", claimed_at)
+
+        fake_stderr = io.StringIO()
+        with patch("sys.stderr", fake_stderr):
+            released = claim_issue.reap_stale_reviews(4, now=now)
+
+        self.assertEqual(released, [42])
+        output = fake_stderr.getvalue()
+        self.assertIn("Released stale review claim on PR #42", output)
+        self.assertIn("claim age > 4h quiet threshold", output)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_merge_reaper_names_the_configured_threshold(
+        self, run_cmd, fetch_timeline
+    ):
+        now = datetime.now(timezone.utc)
+        claimed_at = (now - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        run_cmd.side_effect = [
+            (0, json.dumps([self._pr(43, "merger:gone")]), ""),
+            (0, "[]", ""),
+            (0, "", ""),
+        ]
+        fetch_timeline.return_value = self._timeline("merger:gone", claimed_at)
+
+        fake_stderr = io.StringIO()
+        with patch("sys.stderr", fake_stderr):
+            released = claim_issue.reap_stale_merges(4, now=now)
+
+        self.assertEqual(released, [43])
+        self.assertIn("claim age > 4h quiet threshold", fake_stderr.getvalue())
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api", return_value=None)
+    @patch.object(claim_issue, "run_cmd")
+    def test_unreadable_claim_history_reaps_nothing(self, run_cmd, _timeline):
+        run_cmd.return_value = (
+            0, json.dumps([self._pr(44, "reviewer:gone")]), "",
+        )
+        with patch("sys.stderr", io.StringIO()):
+            self.assertEqual(claim_issue.reap_stale_reviews(4), [])
+        self.assertEqual(run_cmd.call_count, 1)
+
+    def test_claim_recovery_imports_no_presence_or_metrics_runtime(self):
+        source = (
+            Path(claim_issue.__file__).read_text(encoding="utf-8").lower()
+        )
+        for banned in ("agent_presence", "factory_metrics", "heartbeat", "presence"):
+            self.assertNotIn(banned, source)
+
+    def test_generic_github_helpers_come_from_retained_common_code(self):
+        import common
+
+        self.assertIs(claim_issue.fetch_paginated_gh_api,
+                      common.fetch_paginated_gh_api)
+        self.assertIs(claim_issue.parse_iso, common.parse_iso)
 
 
 if __name__ == "__main__":
