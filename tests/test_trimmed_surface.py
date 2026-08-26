@@ -199,6 +199,7 @@ class RetainedRuntimeBoundaryTests(unittest.TestCase):
         "scripts/common.py",
         "scripts/agent_identity.py",
         "scripts/doctor_local_agent_integrations.py",
+        "scripts/fetch_next_issue.py",
     )
 
     FORBIDDEN_STORAGE_PATTERNS = (

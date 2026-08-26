@@ -43,7 +43,6 @@ from common import (
     run_gh_json,
     touches_conflict,
 )
-from delivery_increments import DeliveryIncrementStore
 from github_inventory import hydrate_renamed_files
 from update_issue_status import update_status
 
@@ -81,24 +80,8 @@ def priority_rank(labels: List[Dict[str, Any]]) -> "tuple[Optional[int], Optiona
 
 
 def active_increment_scope(project_id: Optional[str] = None, *, fail_on_error: bool = False) -> Optional[set]:
-    """Resolve increment scope; optionally distinguish no scope from lookup failure."""
-    try:
-        store = DeliveryIncrementStore()
-        if project_id is None:
-            project_id = repo_project_id()
-        if not project_id:
-            if fail_on_error:
-                raise RuntimeError("repository identity is unavailable")
-            return None
-        increment = store.active(project_id)
-    except Exception:
-        if fail_on_error:
-            raise
-        return None
-    if not increment:
-        return None
-    scope = increment.get("issue_scope") or []
-    return {int(num) for num in scope}
+    """Resolve increment scope; Delivery Increment state is retired in the kernel."""
+    return None
 
 
 def repo_project_id() -> Optional[str]:
