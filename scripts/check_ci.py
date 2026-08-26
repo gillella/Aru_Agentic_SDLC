@@ -9,8 +9,12 @@ import time
 from common import get_current_branch, get_repo_slug, run_gh_json
 
 
-FAILED_STATES = {"FAILURE", "FAILED", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"}
+FAILED_STATES = {
+    "FAILURE", "FAILED", "ERROR", "CANCELLED", "TIMED_OUT",
+    "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE",
+}
 PENDING_STATES = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
+PASSING_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
 
 def _pull_head(target: str) -> str | None:
@@ -91,11 +95,21 @@ def check_ci_status(pr_id: int = None, wait: bool = False, poll_interval: int = 
 
         failing = [c for c in checks if c.get("state") in FAILED_STATES]
         pending = [c for c in checks if c.get("state") in PENDING_STATES]
+        unknown = [
+            c for c in checks
+            if c.get("state") not in FAILED_STATES | PENDING_STATES | PASSING_STATES
+        ]
 
         if failing:
             print(f"❌ CI Check Failures Detected ({len(failing)} failed):", file=sys.stderr)
             for f in failing:
                 print(f"  - {f.get('name')}: {f.get('state')}", file=sys.stderr)
+            return False
+
+        if unknown:
+            print("[ERROR] CI returned an unknown or incomplete state:", file=sys.stderr)
+            for item in unknown:
+                print(f"  - {item.get('name')}: {item.get('state') or '<missing>'}", file=sys.stderr)
             return False
 
         if checks and not pending:

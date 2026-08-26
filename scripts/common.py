@@ -38,6 +38,7 @@ _SENSITIVE_ARGUMENT_NAMES = {
 }
 
 _OPAQUE_VALUE_OPTIONS = {"-c", "--command", "-Command", "-e", "--eval"}
+_PROJECT_ITEMS_UNSET = object()
 
 
 def _looks_sensitive(name: str) -> bool:
@@ -1010,11 +1011,6 @@ def query_issue_project_items(
         return None
 
 
-def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
-    """Compatibility wrapper for board mutation helpers expecting a list."""
-    return query_issue_project_items(issue_number) or []
-
-
 def get_repo_projects(repo_slug: str) -> Optional[List[Dict[str, Any]]]:
     """Returns Project v2 boards linked to ``owner/repo``.
 
@@ -1124,7 +1120,9 @@ def resolve_governed_project(repo_slug: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def attach_issue_to_governed_project(issue_number: int) -> bool:
+def attach_issue_to_governed_project(
+    issue_number: int, existing_items: Any = _PROJECT_ITEMS_UNSET,
+) -> bool:
     """Idempotently attaches an issue to its repository's governed board."""
     slug = get_repo_slug()
     if not slug:
@@ -1149,7 +1147,13 @@ def attach_issue_to_governed_project(issue_number: int) -> bool:
         return False
 
     project_id = project.get("id")
-    existing = get_issue_project_items(issue_number)
+    existing = (
+        query_issue_project_items(issue_number)
+        if existing_items is _PROJECT_ITEMS_UNSET else existing_items
+    )
+    if existing is None:
+        print(f"[WARN] Could not query Project items for issue #{issue_number}.", file=sys.stderr)
+        return False
     if project_id and any(
         (item.get("project") or {}).get("id") == project_id
         for item in existing
@@ -1186,14 +1190,16 @@ def set_board_status(
     slug = get_repo_slug()
     if not slug:
         return False
-    items = get_issue_project_items(issue_number)
-    items = select_governed_project_items(items, slug)
+    raw_items = query_issue_project_items(issue_number)
+    if raw_items is None:
+        print(f"[WARN] Could not query Project items for issue #{issue_number}.", file=sys.stderr)
+        return False
+    items = select_governed_project_items(raw_items, slug)
     if not items:
-        if not attach_issue_to_governed_project(issue_number):
+        if not attach_issue_to_governed_project(issue_number, existing_items=raw_items):
             return False
-        items = select_governed_project_items(
-            get_issue_project_items(issue_number), slug
-        )
+        refreshed = query_issue_project_items(issue_number)
+        items = select_governed_project_items(refreshed or [], slug) if refreshed is not None else []
     if not items:
         print(
             f"[WARN] Could not identify one governed project board for '{slug}'.",
@@ -1324,14 +1330,15 @@ def set_issue_priority_field(issue_number: int, value: str) -> bool:
     slug = get_repo_slug()
     if not slug or "/" not in slug or "P" not in value:
         return False
-    items = get_issue_project_items(issue_number)
-    items = select_governed_project_items(items, slug)
+    raw_items = query_issue_project_items(issue_number)
+    if raw_items is None:
+        return False
+    items = select_governed_project_items(raw_items, slug)
     if not items:
-        if not attach_issue_to_governed_project(issue_number):
+        if not attach_issue_to_governed_project(issue_number, existing_items=raw_items):
             return False
-        items = select_governed_project_items(
-            get_issue_project_items(issue_number), slug
-        )
+        refreshed = query_issue_project_items(issue_number)
+        items = select_governed_project_items(refreshed or [], slug) if refreshed is not None else []
     if not items:
         return False
 

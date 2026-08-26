@@ -49,6 +49,13 @@ class CheckCiRestTests(unittest.TestCase):
     def test_failure_is_reported(self, _contexts, _head):
         self.assertFalse(check_ci.check_ci_status(17))
 
+    @patch.object(check_ci, "_pull_head", return_value="abc")
+    @patch.object(check_ci, "_ci_contexts", return_value=[
+        {"name": "CI", "state": "COMPLETED"},
+    ])
+    def test_unknown_or_incomplete_terminal_state_fails_closed(self, _contexts, _head):
+        self.assertFalse(check_ci.check_ci_status(17))
+
 
 if __name__ == "__main__":
     unittest.main()

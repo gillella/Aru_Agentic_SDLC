@@ -43,14 +43,14 @@ class PickerTransitionGuardTests(unittest.TestCase):
         self.post_ready_issue = 10
         self.post_selected_issue = 10
 
-        def inventory(_slug, numbers):
+        def inventory(_slug, numbers, **_kwargs):
             self.inventory_reads += 1
             return ({number: ("Ready" if self.inventory_reads >= 3
                               and number == self.post_ready_issue
                               else "Backlog") for number in numbers},
                     int(self.inventory_reads >= 3))
 
-        def select(*_args):
+        def select(*_args, **_kwargs):
             self.select_reads += 1
             return {"work": ({"type": "issue", "issue": self.post_selected_issue}
                              if self.select_reads >= 3 else {"type": "idle"})}
@@ -123,6 +123,38 @@ class PickerTransitionGuardTests(unittest.TestCase):
             ):
                 fnw.promote_one_idle_backlog_issue("agent-1")
         update.assert_not_called()
+
+    def test_unavailable_open_issue_inventory_is_an_error_not_idle(self):
+        with patch.object(fnw, "list_open_issues", return_value=None), \
+             patch.object(fnw, "update_status") as update:
+            with self.assertRaisesRegex(
+                fnw.AutoTriageError,
+                "Open issue inventory unavailable",
+            ):
+                fnw.promote_one_idle_backlog_issue("agent-1")
+        update.assert_not_called()
+
+    def test_post_promotion_selection_uses_fresh_ready_snapshot(self):
+        issue = qualified_issue()
+        post = qualified_issue(status="ready")
+        contexts = self.qualification_context()
+        snapshot = {}
+        with patch.object(fnw, "list_open_issues", side_effect=[[issue], [post]]), \
+             contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
+             contexts[5], patch.object(
+                 fnw, "get_repo_projects", return_value=[{"id": "project"}],
+             ), patch.object(
+                 fnw, "_governed_open_issue_statuses",
+                 side_effect=[({10: "Backlog"}, 0), ({10: "Ready"}, 1)],
+             ), patch.object(fnw, "update_status", return_value=True):
+            promoted = fnw.promote_one_idle_backlog_issue(
+                "agent-1", post_snapshot_out=snapshot,
+            )
+
+        self.assertEqual(promoted, 10)
+        self.assertEqual(snapshot["issues"], [post])
+        self.assertEqual(snapshot["prs"], [])
+        self.assertEqual(snapshot["_selection"]["work"], {"type": "issue", "issue": 10})
 
     def test_lost_board_readback_reports_rollback_result(self):
         for rolled_back, expected in (

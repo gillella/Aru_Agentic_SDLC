@@ -26,7 +26,7 @@ from claim_issue import (
 from common import (
     get_repo_projects,
     get_repo_slug,
-    list_open_issues,
+    query_open_issues as list_open_issues,
     run_cmd,
     label_names as issue_label_names,
 )
@@ -832,13 +832,16 @@ def _idle_backlog_candidate(  # noqa: C901, PLR0912
     issues_snapshot: Any = _UNSET,
     prs_snapshot: Any = _UNSET,
     repo_slug_snapshot: str | None = None,
-    projects_snapshot: list[dict[str, Any]] | None = None,
+    projects_snapshot: Any = _UNSET,
     snapshot_out: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Return the one issue triage and the ordinary picker would admit."""
     from triage_backlog import partition, ready_gaps, split_reasons
-
     issues = list_open_issues() if issues_snapshot is _UNSET else issues_snapshot
+    if issues is None:
+        raise AutoTriageError(
+            "Open issue inventory unavailable; cannot prove the picker is idle"
+        )
     if not issues:
         return None, None
     if len(issues) >= 500:
@@ -852,7 +855,7 @@ def _idle_backlog_candidate(  # noqa: C901, PLR0912
         _governed_open_issue_statuses(
             repo_slug or "", open_numbers, projects=projects_snapshot,
         )
-        if projects_snapshot is not None
+        if projects_snapshot is not _UNSET
         else _governed_open_issue_statuses(repo_slug or "", open_numbers)
     )
     if inventory is None:
@@ -967,10 +970,9 @@ def _promote_one_idle_backlog_issue_locked(
     if current["work"]["type"] != "idle":
         return None
     repo_slug_snapshot = get_repo_slug()
-    projects_snapshot = (
-        get_repo_projects(repo_slug_snapshot)
-        if repo_slug_snapshot and post_snapshot_out is not None else None
-    )
+    projects_snapshot: Any = _UNSET
+    if repo_slug_snapshot and post_snapshot_out is not None:
+        projects_snapshot = get_repo_projects(repo_slug_snapshot)
     fresh, repo_slug = _idle_backlog_candidate(
         agent,
         issues_snapshot=issues_snapshot,
@@ -1004,6 +1006,7 @@ def _promote_one_idle_backlog_issue_locked(
         expected_ready_issue=number,
         repo_slug_snapshot=repo_slug_snapshot,
         projects_snapshot=projects_snapshot,
+        snapshot_out=post_snapshot_out,
     )
     post = post_candidate
     post_statuses = {
@@ -1107,7 +1110,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
         return rc
 
     prs_snapshot: list[dict[str, Any]] | None | object = _UNSET
-    issues_snapshot: list[dict[str, Any]] | object = _UNSET
+    issues_snapshot: list[dict[str, Any]] | None | object = _UNSET
     if args.reap_after > 0:
         prs_snapshot = list_work_prs()
         if prs_snapshot is not None and not isinstance(prs_snapshot, DegradedPrSnapshot):
@@ -1117,6 +1120,9 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 print("[WARN] PR snapshot unavailable; stale-claim reaping skipped.", file=sys.stderr)
             elif isinstance(prs_snapshot, DegradedPrSnapshot):
                 print("[WARN] PR snapshot is REST-degraded; stale-claim reaping skipped.", file=sys.stderr)
+            elif issues_snapshot is None:
+                print("[WARN] Open issue snapshot unavailable; stale-claim reaping skipped.",
+                      file=sys.stderr)
             else:
                 released_merges = reap_stale_merges(
                     args.reap_after, prs_snapshot=prs_snapshot

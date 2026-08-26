@@ -29,6 +29,31 @@ def rest_pr(number):
 
 
 class RestFallbackTests(unittest.TestCase):
+    def test_unavailable_open_issue_inventory_is_not_treated_as_empty(self):
+        result = fnw.select(
+            "agent-1", "openai", 3, 30,
+            prs_snapshot=[], issues_snapshot=None,
+        )
+
+        self.assertEqual(result["work"]["type"], "error")
+        self.assertIn("open issue queue could not be read", result["work"]["reason"])
+
+    def test_failed_project_metadata_snapshot_is_reused_without_retry(self):
+        inventory = patch.object(fnw, "_governed_open_issue_statuses", return_value=None)
+        projects = patch.object(fnw, "get_repo_projects")
+        with inventory as board, projects as project_lookup:
+            with self.assertRaises(fnw.AutoTriageError):
+                fnw._idle_backlog_candidate(
+                    "agent-1",
+                    issues_snapshot=[{"number": 7}],
+                    prs_snapshot=[],
+                    repo_slug_snapshot="owner/repo",
+                    projects_snapshot=None,
+                )
+
+        board.assert_called_once_with("owner/repo", {7}, projects=None)
+        project_lookup.assert_not_called()
+
     def test_non_coderabbit_gate_fix_skips_review_evidence_query(self):
         pr = {"number": 9, "labels": [{"name": "review:agent"}]}
         with patch.object(fnw, "review_evidence") as evidence:

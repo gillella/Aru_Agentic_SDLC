@@ -90,7 +90,7 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
 
     @patch.object(common, "add_issue_to_project", return_value=True)
     @patch.object(common, "get_repo_projects")
-    @patch.object(common, "get_issue_project_items", return_value=[])
+    @patch.object(common, "query_issue_project_items", return_value=[])
     @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
     def test_resolves_and_attaches_without_hardcoding(
         self, _slug, _items, projects, add
@@ -103,7 +103,7 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
 
     @patch.object(common, "add_issue_to_project")
     @patch.object(common, "get_repo_projects")
-    @patch.object(common, "get_issue_project_items")
+    @patch.object(common, "query_issue_project_items")
     @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
     def test_already_attached_is_a_no_op(self, _slug, items, projects, add):
         project = self.project()
@@ -130,7 +130,7 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
     @patch.object(common, "run_cmd", return_value=(0, "", ""))
     @patch.object(common, "attach_issue_to_governed_project", return_value=True)
     @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
-    @patch.object(common, "get_issue_project_items")
+    @patch.object(common, "query_issue_project_items")
     def test_status_move_attaches_an_unboarded_issue_first(
         self, items, _slug, attach, _run
     ):
@@ -143,7 +143,18 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
 
         self.assertTrue(common.set_board_status(42, "Ready"))
 
-        attach.assert_called_once_with(42)
+        attach.assert_called_once_with(42, existing_items=[])
+
+    @patch.object(common, "attach_issue_to_governed_project")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    @patch.object(common, "query_issue_project_items", return_value=None)
+    def test_status_move_does_not_retry_after_unavailable_item_read(
+        self, items, _slug, attach,
+    ):
+        self.assertFalse(common.set_board_status(42, "Ready"))
+
+        items.assert_called_once_with(42)
+        attach.assert_not_called()
 
 
 if __name__ == "__main__":
