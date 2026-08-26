@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # +64 for the #344 terminal lease and stale-writer escalation.
-# +70 for the #429 acceptance-interpreter fix; #414 ratchets this file to 4,500.
-# line-ceiling: 5375
+# +80 for the #429 acceptance-interpreter and post-merge persistence fix; #414 ratchets this file to 4,500.
+# line-ceiling: 5390
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -5087,6 +5087,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
     # Stays None on the resume path, where no gate is evaluated. The checkpoint
     # records that gap rather than inventing a verdict set.
     gates = None
+    acceptance_records = []
     if args.expected_head and not is_merged(pr):
         if not heads_match(gated_head, args.expected_head):
             print(
@@ -5196,10 +5197,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
                         # flips the evidence block to failed and blocks the next
                         # attempt on a gate the author never failed (#429).
                         return EXIT_BLOCKED
-                persisted, persist_msg = persist_acceptance_evidence(args.pr, pr, records)
-                print(f"  {'✅' if persisted else '❌'} evidence    {persist_msg}")
-                if not persisted:
-                    return EXIT_BLOCKED
+                acceptance_records = records
             finally:
                 release_pr_head_checkout(checkout)
 
@@ -5320,6 +5318,25 @@ def main():  # noqa: C901, PLR0912, PLR0915
             file=sys.stderr,
         )
         return EXIT_ERROR
+
+    if acceptance_records:
+        persisted, persist_msg = persist_acceptance_evidence(
+            args.pr, final_pr, acceptance_records
+        )
+        print(f"  {'✅' if persisted else '❌'} evidence          {persist_msg}")
+        if not persisted:
+            failure = f"acceptance evidence persistence: {persist_msg}"
+            evidence_ok = post_human_intervention(
+                final_pr, issue_nums, root, gated_head, merged_sha, [], command,
+                blocked_before_closeout=failure,
+            )
+            print(
+                "[ERROR] Merge succeeded but acceptance evidence could not be persisted; "
+                f"intervention evidence {'was recorded' if evidence_ok else 'could not be fully recorded'}.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+
     # Park the verdicts the moment we hold them, and read them back on a
     # resumed close-out. Re-deriving them post-merge is not an option:
     # check_open fails on a closed PR, so a re-evaluated block would record

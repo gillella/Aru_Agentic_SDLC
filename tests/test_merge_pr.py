@@ -1,4 +1,4 @@
-# line-ceiling: 7125
+# line-ceiling: 7185
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
@@ -970,18 +970,6 @@ class AcceptanceEnvironmentTests(unittest.TestCase):
             runner(["ruff", "check", "scripts/merge_pr.py"])
         self.assertEqual(seen["argv"], ["ruff", "check", "scripts/merge_pr.py"])
 
-    def test_failing_acceptance_never_persists_evidence(self):
-        """The corruption itself: a refusal must not write to the PR body."""
-        source = inspect.getsource(merge_pr.main)
-        marker = "if not passed:"
-        self.assertIn(marker, source)
-        tail = source.split(marker, 1)[1].split("persisted, persist_msg", 1)[0]
-        self.assertNotIn(
-            "persist_acceptance_evidence", tail,
-            "a refused acceptance run must not persist records into the PR body",
-        )
-
-
 class RefusedMergeIsNonDestructiveTests(unittest.TestCase):
     """#429: the refusal path end to end, driven through ``main()``.
 
@@ -1025,27 +1013,56 @@ class RefusedMergeIsNonDestructiveTests(unittest.TestCase):
             "mergeable": "MERGEABLE", "labels": [],
         }
 
-    def _drive(self, pr, *, ambient=None):
-        """Run main() from the DoD pass down to the acceptance gate.
+    def _drive(
+        self,
+        pr,
+        *,
+        ambient=None,
+        check_rebased_return=(True, "current"),
+        execute_merge_return=None,
+        persist_error=False,
+    ):
+        """Run main() from the DoD pass down through merge execution.
 
         Every GitHub touch is recorded rather than issued, so the assertions
         below can speak about mutations that were *attempted*, not merely about
         ones that happened to succeed against a live API.
         """
         commands = []
+        captured_state = {"body": pr.get("body", "")}
 
         def record_json(argv, *_args, **_kwargs):
             commands.append(list(argv))
+            if len(argv) >= 3 and argv[0:2] == ["gh", "issue"] and argv[2] == "view":
+                return {"body": self.BODY}
+            if len(argv) >= 3 and argv[0:2] == ["gh", "pr"] and argv[2] == "view":
+                return {"body": captured_state["body"], "headRefOid": pr.get("headRefOid")}
             return {"body": self.BODY}
 
         def record_run(argv, *_args, **_kwargs):
             commands.append(list(argv))
+            if len(argv) >= 4 and argv[0:3] == ["gh", "pr", "edit"]:
+                if persist_error:
+                    return 1, "", "simulated persistence failure"
+                if "--body" in argv:
+                    captured_state["body"] = argv[argv.index("--body") + 1]
             return 0, "", ""
+
+        def fetch_snapshot(pr_id):
+            snap = dict(pr)
+            snap["body"] = captured_state["body"]
+            return snap
+
+        exec_return = (
+            execute_merge_return
+            if execute_merge_return is not None
+            else (merged_pr(), "merged")
+        )
 
         which = patch.object(merge_pr.shutil, "which", return_value=ambient) \
             if ambient else nullcontext()
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
-             patch.object(merge_pr, "fetch_pr", return_value=pr), \
+             patch.object(merge_pr, "fetch_pr", side_effect=fetch_snapshot), \
              patch.object(merge_pr, "_gh_json", side_effect=record_json), \
              patch.object(merge_pr, "run_cmd", side_effect=record_run), \
              patch.object(merge_pr, "review_evidence",
@@ -1059,16 +1076,18 @@ class RefusedMergeIsNonDestructiveTests(unittest.TestCase):
              patch.object(merge_pr, "release_pr_head_checkout"), \
              patch.object(merge_pr, "repository_merge_lock",
                           return_value=nullcontext((True, "serialized"))), \
-             patch.object(merge_pr, "check_rebased", return_value=(True, "current")), \
+             patch.object(merge_pr, "check_rebased", return_value=check_rebased_return), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
-             patch.object(merge_pr, "execute_merge",
-                          return_value=(merged_pr(), "merged")) as execute, \
-             patch.object(merge_pr, "persist_acceptance_evidence",
-                          return_value=(True, "recorded")) as persist, \
+             patch.object(merge_pr, "execute_merge", return_value=exec_return) as execute, \
+             patch.object(merge_pr, "write_checkpoint_tag",
+                          return_value=(True, "checkpoint written")), \
              which:
             code = merge_pr.main()
         return SimpleNamespace(
-            code=code, commands=commands, persist=persist, execute=execute,
+            code=code,
+            commands=commands,
+            captured_body=captured_state["body"],
+            execute=execute,
         )
 
     def _assert_no_mutation(self, commands):
@@ -1078,43 +1097,91 @@ class RefusedMergeIsNonDestructiveTests(unittest.TestCase):
                 f"a refused merge issued a mutating command: {argv}",
             )
 
-    def test_a_failing_verify_command_refuses_without_touching_the_pr(self):
-        """The reported corruption: the refusal wrote its own failure to the PR."""
+    def test_failed_acceptance_twice_refuses_without_touching_pr(self):
+        """Failed acceptance twice must assert no PR edit and byte-identical PR body."""
         self._runner(1)
         pr = self._pr()
-        before = json.dumps(pr, sort_keys=True)
-        result = self._drive(pr)
-
-        self.assertEqual(result.code, merge_pr.EXIT_BLOCKED)
-        result.persist.assert_not_called()
-        result.execute.assert_not_called()
-        self._assert_no_mutation(result.commands)
-        self.assertEqual(json.dumps(pr, sort_keys=True), before)
-
-    def test_repeated_refusals_are_idempotent(self):
-        """Retrying after a refusal must find the PR exactly as it was left."""
-        self._runner(1)
-        pr = self._pr()
-        before = json.dumps(pr, sort_keys=True)
+        initial_body = pr["body"]
 
         first = self._drive(pr)
-        second = self._drive(pr)
-
         self.assertEqual(first.code, merge_pr.EXIT_BLOCKED)
+        first.execute.assert_not_called()
+        self._assert_no_mutation(first.commands)
+        self.assertEqual(first.captured_body, initial_body)
+
+        second = self._drive(pr)
         self.assertEqual(second.code, merge_pr.EXIT_BLOCKED)
-        self.assertEqual(first.commands, second.commands,
-                         "the second attempt did not repeat the first exactly")
+        second.execute.assert_not_called()
         self._assert_no_mutation(second.commands)
-        self.assertEqual(json.dumps(pr, sort_keys=True), before)
+        self.assertEqual(second.captured_body, initial_body)
+        self.assertEqual(
+            first.commands, second.commands,
+            "the second attempt did not repeat the first exactly",
+        )
+
+    def test_final_gate_refusal_after_successful_acceptance_twice_preserves_pr(self):
+        """Final-gate refusal after successful acceptance twice must not edit PR and keep PR body identical."""
+        self._runner(0)
+        pr = self._pr()
+        initial_body = pr["body"]
+
+        first = self._drive(pr, check_rebased_return=(False, "Branch is behind base"))
+        self.assertEqual(first.code, merge_pr.EXIT_BLOCKED)
+        first.execute.assert_not_called()
+        self._assert_no_mutation(first.commands)
+        self.assertEqual(first.captured_body, initial_body)
+
+        second = self._drive(pr, check_rebased_return=(False, "Branch is behind base"))
+        self.assertEqual(second.code, merge_pr.EXIT_BLOCKED)
+        second.execute.assert_not_called()
+        self._assert_no_mutation(second.commands)
+        self.assertEqual(second.captured_body, initial_body)
+        self.assertEqual(
+            first.commands, second.commands,
+            "the second attempt did not repeat the first exactly",
+        )
+
+    def test_successful_acceptance_persists_evidence_post_merge(self):
+        """Acceptance evidence is persisted only after execute_merge succeeds."""
+        self._runner(0)
+        pr = self._pr()
+        initial_body = pr["body"]
+
+        result = self._drive(pr)
+        self.assertEqual(result.code, merge_pr.EXIT_OK)
+        result.execute.assert_called_once()
+        self.assertNotEqual(result.captured_body, initial_body)
+        self.assertIn("aru.verification.v1", result.captured_body)
+        self.assertIn("tests.test_example", result.captured_body)
+        edit_cmds = [
+            cmd for cmd in result.commands
+            if len(cmd) >= 3 and cmd[0:3] == ["gh", "pr", "edit"]
+        ]
+        self.assertEqual(len(edit_cmds), 1)
+
+    def test_post_merge_persistence_failure_triggers_intervention_recovery(self):
+        """A persistence failure post-merge enters human intervention recovery, not pre-merge EXIT_BLOCKED."""
+        self._runner(0)
+        pr = self._pr()
+
+        result = self._drive(pr, persist_error=True)
+        self.assertEqual(result.code, merge_pr.EXIT_ERROR)
+        result.execute.assert_called_once()
+        intervention_comments = [
+            cmd for cmd in result.commands
+            if len(cmd) >= 3 and cmd[0:2] in (["gh", "issue"], ["gh", "pr"]) and cmd[2] == "comment"
+        ]
+        self.assertTrue(
+            intervention_comments,
+            "human intervention comment must be recorded on failure",
+        )
 
     def test_an_unresolvable_interpreter_refuses_before_running_anything(self):
         """No project runner exists, so nothing runs and nothing is recorded."""
-        result = self._drive(self._pr(), ambient=None)
         with patch.object(merge_pr.shutil, "which", return_value=None):
             result = self._drive(self._pr())
 
         self.assertEqual(result.code, merge_pr.EXIT_BLOCKED)
-        result.persist.assert_not_called()
         result.execute.assert_not_called()
         self._assert_no_mutation(result.commands)
 
@@ -1130,15 +1197,14 @@ class RefusedMergeIsNonDestructiveTests(unittest.TestCase):
 
         self.assertEqual(result.code, merge_pr.EXIT_OK)
         result.execute.assert_called_once()
-        result.persist.assert_called_once()
-        records = result.persist.call_args[0][2]
-        self.assertTrue(records, "a passing gate must still record author evidence")
-        self.assertTrue(
-            all(record["status"] == "passed" for record in records), records,
-        )
+        evidence, error = merge_pr.parse_verification_evidence(result.captured_body)
+        self.assertIsNone(error)
         self.assertEqual(
-            [record["command"][0] for record in records],
+            [record["command"][0] for record in evidence.get("commands", [])],
             [common.sanitize_command([project])[0]],
+        )
+        self.assertTrue(
+            all(record["status"] == "passed" for record in evidence.get("commands", [])),
         )
 
 
