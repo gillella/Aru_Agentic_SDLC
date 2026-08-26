@@ -139,7 +139,7 @@ def check_ci_status(pr_id: int = None, wait: bool = False, poll_interval: int = 
         if not wait:
             label = "not started" if not checks else f"still pending ({len(pending)} in progress)"
             print(f"⏳ CI checks {label}.")
-            return True
+            return False
         if elapsed >= timeout:
             print("❌ Timed out before CI produced a complete passing result.", file=sys.stderr)
             return False
