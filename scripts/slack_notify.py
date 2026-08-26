@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1045
+# line-ceiling: 1080
 """Post stamped Slack events for the Aru factory control room.
 
 GitHub remains the work queue. Slack downtime must not halt factory work.
@@ -248,7 +248,41 @@ def read_alert_payload_file(path: Path) -> str:
             raise ValueError("alert payload file is not owned by the current operator")
         if metadata.st_mode & 0o077:
             raise ValueError("alert payload file permissions must be 0600 or stricter")
-        return handle.read().rstrip("\r\n")
+
+        chunk_size = 64 * 1024
+        total_chars = 0
+        total_newlines = 0
+        trailing_newlines = 0
+        collected_chunks: list[str] = []
+        collected_chars = 0
+
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            total_chars += len(chunk)
+            total_newlines += chunk.count("\n")
+            stripped = chunk.rstrip("\r\n")
+            if not stripped:
+                trailing_newlines += len(chunk)
+            else:
+                trailing_newlines = len(chunk) - len(stripped)
+            if collected_chars <= MAX_ALERT_TEXT_CHARS:
+                needed = (MAX_ALERT_TEXT_CHARS + 1) - collected_chars
+                collected_chunks.append(chunk[:needed])
+                collected_chars += len(collected_chunks[-1])
+
+        char_count = total_chars - trailing_newlines
+        non_trailing_newlines = total_newlines - trailing_newlines
+        line_count = 0 if char_count == 0 else non_trailing_newlines + 1
+
+        if char_count > MAX_ALERT_TEXT_CHARS or line_count > MAX_ALERT_TEXT_LINES:
+            raise ValueError(
+                f"alert summary exceeds size limit ({char_count}/{MAX_ALERT_TEXT_CHARS} characters, "
+                f"{line_count}/{MAX_ALERT_TEXT_LINES} lines); nothing delivered to Slack or GitHub"
+            )
+
+        return "".join(collected_chunks).rstrip("\r\n")
 
 
 def config_for_project(config: SlackConfig, project: Any) -> SlackConfig:
@@ -958,10 +992,14 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901, PLR0912, PLR09
         try:
             text = read_alert_payload_file(Path(payload_file))
         except (OSError, UnicodeError, ValueError) as exc:
-            print(
-                f"[WARN] Slack notify skipped: cannot read alert payload file: {exc}",
-                file=sys.stderr,
-            )
+            msg = str(exc)
+            if "alert summary exceeds size limit" in msg:
+                print(f"[WARN] Slack notify skipped: {msg}", file=sys.stderr)
+            else:
+                print(
+                    f"[WARN] Slack notify skipped: cannot read alert payload file: {exc}",
+                    file=sys.stderr,
+                )
             return 2
     event: Dict[str, Any] = {
         "type": args.type,

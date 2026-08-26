@@ -1,7 +1,8 @@
-# line-ceiling: 1860
+# line-ceiling: 1960
 import io
 import sys
 import tempfile
+import tracemalloc
 import unittest
 import os
 import time
@@ -1843,6 +1844,112 @@ class SlackNotifyTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(github_calls), 1)
         self.assertIn("Slack notify failed: slack_unavailable", mock_stderr.getvalue())
+
+    def test_unusually_large_decision_file_preserves_full_diagnostics_without_unbounded_allocation(self):
+        checkout, record, env_file, registry_path = self._setup_cli_environment()
+        decision_file = self.default_root / "large_decision.txt"
+        line = "x" * 99 + "\n"
+        num_lines = 50000
+        with open(decision_file, "w", encoding="utf-8") as f:
+            for _ in range(num_lines):
+                f.write(line)
+        decision_file.chmod(0o600)
+        expected_chars = 50000 * 100 - 1  # trailing \n stripped
+        slack_calls = []
+        github_calls = []
+
+        def mock_transport(*a, **k):
+            slack_calls.append(a)
+            return {"ok": True}
+
+        def mock_comment(*a, **k):
+            github_calls.append(a)
+            return True
+
+        tracemalloc.start()
+        try:
+            with (
+                patch.dict(
+                    sn.notify_alert.__kwdefaults__,
+                    {"transport": mock_transport, "comment": mock_comment},
+                ),
+                patch("sys.stderr", new_callable=io.StringIO) as mock_stderr,
+            ):
+                code = main([
+                    "--agent", "cursor-1", "--family", "openai", "--event", "hitl",
+                    "--project-id", record.project_id, "--issue", "435", "--pr", "439",
+                    "--decision-file", str(decision_file),
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(code, 2)
+        stderr_output = mock_stderr.getvalue()
+        self.assertIn("nothing delivered to Slack or GitHub", stderr_output)
+        self.assertIn(f"{expected_chars}/1000 characters", stderr_output)
+        self.assertIn("50000/12 lines", stderr_output)
+        self.assertEqual(slack_calls, [])
+        self.assertEqual(github_calls, [])
+        self.assertLess(peak, 1024 * 1024)
+
+    def test_unusually_large_text_file_preserves_full_diagnostics_without_unbounded_allocation(self):
+        checkout, record, env_file, registry_path = self._setup_cli_environment()
+        text_file = self.default_root / "large_text.txt"
+        line = "y" * 79 + "\n"
+        num_lines = 40000
+        with open(text_file, "w", encoding="utf-8") as f:
+            for _ in range(num_lines):
+                f.write(line)
+        text_file.chmod(0o600)
+        expected_chars = 40000 * 80 - 1
+        slack_calls = []
+        github_calls = []
+
+        def mock_transport(*a, **k):
+            slack_calls.append(a)
+            return {"ok": True}
+
+        def mock_comment(*a, **k):
+            github_calls.append(a)
+            return True
+
+        tracemalloc.start()
+        try:
+            with (
+                patch.dict(
+                    sn.notify_alert.__kwdefaults__,
+                    {"transport": mock_transport, "comment": mock_comment},
+                ),
+                patch("sys.stderr", new_callable=io.StringIO) as mock_stderr,
+            ):
+                code = main([
+                    "--agent", "cursor-1", "--family", "openai", "--event", "blocked",
+                    "--project-id", record.project_id, "--issue", "1",
+                    "--text-file", str(text_file),
+                    "--registry-file", str(registry_path), "--env-file", str(env_file),
+                ])
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(code, 2)
+        stderr_output = mock_stderr.getvalue()
+        self.assertIn("nothing delivered to Slack or GitHub", stderr_output)
+        self.assertIn(f"{expected_chars}/1000 characters", stderr_output)
+        self.assertIn("40000/12 lines", stderr_output)
+        self.assertEqual(slack_calls, [])
+        self.assertEqual(github_calls, [])
+        self.assertLess(peak, 1024 * 1024)
+
+    def test_read_alert_payload_file_preserves_valid_content_within_limits(self):
+        payload_file = self.default_root / "valid_payload.txt"
+        valid_text = "valid single line alert payload"
+        payload_file.write_text(valid_text + "\n", encoding="utf-8")
+        payload_file.chmod(0o600)
+        read_text = read_alert_payload_file(payload_file)
+        self.assertEqual(read_text, valid_text)
 
 
 if __name__ == "__main__":
