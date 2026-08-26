@@ -199,6 +199,41 @@ class AdoptPullRequestTests(unittest.TestCase):
         self.assertEqual(rc, claim_issue.EXIT_CONFLICT)
         self.assertFalse([c for c in calls if c[:3] == ["gh", "pr", "edit"]])
 
+    def test_operator_can_transfer_a_recent_pr_with_a_reason(self):
+        rc, calls = self._adopt(self.snapshot(idle_hours=0), family="anthropic",
+                                operator_authorized=True, reason="Original author is busy")
+        self.assertEqual(rc, claim_issue.EXIT_OK)
+        comment = next(c for c in calls if c[:3] == ["gh", "pr", "comment"])
+        self.assertIn("operator-authorized transfer", comment[-1])
+        self.assertIn("Original author is busy", comment[-1])
+
+    def test_operator_transfer_requires_flag_and_reason_before_reads(self):
+        for authorized, reason in ((True, "  "), (False, "author unavailable")):
+            with self.subTest(authorized=authorized), \
+                 patch.object(claim_issue, "run_gh_json") as read, \
+                 patch.object(claim_issue, "run_cmd") as mutate:
+                rc = claim_issue.adopt_pr(42, "claude-a3f19c", "anthropic", 4,
+                                          authorized, reason)
+            self.assertEqual(rc, claim_issue.EXIT_ERROR)
+            read.assert_not_called()
+            mutate.assert_not_called()
+
+    def test_adopt_after_zero_is_not_an_implicit_operator_bypass(self):
+        rc, calls = self._adopt(self.snapshot(idle_hours=0), family="anthropic",
+                                after_hours=0)
+        self.assertEqual(rc, claim_issue.EXIT_ERROR)
+        self.assertFalse([c for c in calls if c[:3] == ["gh", "pr", "edit"]])
+
+    def test_assigned_coding_reviewer_cannot_become_author(self):
+        snapshot = self.snapshot(labels=[{"name": "author:codex-9f21"},
+                                         {"name": "family:openai"},
+                                         {"name": "review:agent"},
+                                         {"name": "reviewer:claude-a3f19c"}])
+        rc, calls = self._adopt(snapshot, family="anthropic", operator_authorized=True,
+                                reason="Original author is unavailable")
+        self.assertEqual(rc, claim_issue.EXIT_CONFLICT)
+        self.assertFalse([c for c in calls if c[:3] == ["gh", "pr", "edit"]])
+
     def test_adopting_your_own_pr_is_refused(self):
         rc, _calls = self._adopt(self.snapshot(), agent="codex-9f21")
         self.assertEqual(rc, claim_issue.EXIT_CONFLICT)

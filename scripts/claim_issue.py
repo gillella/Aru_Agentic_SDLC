@@ -553,12 +553,15 @@ def _pr_idle_hours(updated_at) -> Optional[float]:
     return (datetime.now(timezone.utc) - parsed).total_seconds() / 3600.0
 
 
-def _adoption_target(pr_id: int, agent: str, after_hours: int):
+def _adoption_target(pr_id: int, agent: str, after_hours: int, operator_authorized=False, reason=""):
     """Validate that PR `pr_id` may be adopted by `agent`.
 
     Returns (snapshot, previous_author, idle_hours, refusal). `refusal` is None
     when adoption may proceed, otherwise the exit code to return.
     """
+    if operator_authorized != bool(reason):
+        print("[ERROR] Immediate transfer requires both --operator-authorized and a non-empty --reason.", file=sys.stderr)
+        return None, None, None, EXIT_ERROR
     snapshot = _pr_snapshot(pr_id)
     if snapshot is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
@@ -577,8 +580,16 @@ def _adoption_target(pr_id: int, agent: str, after_hours: int):
         print(f"[CONFLICT] PR #{pr_id} is already authored by '{agent}'.", file=sys.stderr)
         return None, None, None, EXIT_CONFLICT
 
-    # Abandonment has to be demonstrated, not assumed. A PR touched recently
-    # belongs to an agent that is still working, and taking it would be theft.
+    if operator_authorized:
+        reviewers = [name[len("reviewer:"):] for name in snapshot["labels"] if name.startswith("reviewer:")]
+        if agent in reviewers:
+            print(f"[CONFLICT] '{agent}' is the assigned coding reviewer for PR #{pr_id}; "
+                  "reassign review before transferring authorship.", file=sys.stderr)
+            return None, None, None, EXIT_CONFLICT
+        return snapshot, previous, None, None
+    if after_hours <= 0:
+        print("[ERROR] --adopt-after must be positive; use explicit operator authorization for an immediate transfer.", file=sys.stderr)
+        return None, None, None, EXIT_ERROR
     idle_hours = _pr_idle_hours(snapshot.get("updatedAt"))
     if idle_hours is None:
         print(f"[CONFLICT] PR #{pr_id} has no readable update time, so it cannot "
@@ -592,27 +603,17 @@ def _adoption_target(pr_id: int, agent: str, after_hours: int):
     return snapshot, previous, idle_hours, None
 
 
-def adopt_pr(pr_id: int, agent: str, family: str = "",
-             after_hours: int = DEFAULT_ADOPT_AFTER_HOURS) -> int:
-    """Transfers authorship of an abandoned PR to a successor agent.
-
-    An agent that stops mid-task leaves an issue, a branch, and a PR that
-    nothing can reach: the reaper can release the issue claim, but `author:` on
-    the PR was never reassigned by anything, so no agent could push the fix that
-    would let it merge (#311).
-
-    Adoption is in place. Commits, CI history, and review threads are preserved;
-    only ownership moves. The successor becomes the author, so the (id, family)
-    peer gate still refuses to let it review its own PR -- which is the correct
-    outcome, not a regression.
-    """
+def adopt_pr(pr_id: int, agent: str, family: str = "", after_hours: int = DEFAULT_ADOPT_AFTER_HOURS,
+             operator_authorized: bool = False, reason: str = "") -> int:
+    """Transfer PR authorship after abandonment or explicit operator authorization."""
     agent = (agent or "").strip()
     if not agent:
         print("[ERROR] --agent is empty. Adoption moves author:<id>; an empty id "
               "would stamp invalid ownership on the PR. If you passed a shell "
               "variable, it is unset.", file=sys.stderr)
         return EXIT_ERROR
-    snapshot, previous, idle_hours, refusal = _adoption_target(pr_id, agent, after_hours)
+    reason = (reason or "").strip()
+    snapshot, previous, idle_hours, refusal = _adoption_target(pr_id, agent, after_hours, operator_authorized, reason)
     if refusal is not None:
         return refusal
     labels = snapshot["labels"]
@@ -643,18 +644,12 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
         print(f"[ERROR] Could not transfer authorship of PR #{pr_id}: {err}", file=sys.stderr)
         return EXIT_ERROR
 
-    # Read back before reporting success. Two successors can both clear
-    # _adoption_target and both run `gh pr edit`; without this the loser prints
-    # success and exits EXIT_OK, leaving two agents believing they own one PR.
+    # Re-read to prove exactly one successor won any concurrent transfer race.
     settled = _pr_snapshot(pr_id)
     if settled is None:
         print(f"[ERROR] Could not re-read PR #{pr_id} to confirm adoption. "
               "Verify ownership before pushing to this branch.", file=sys.stderr)
         return EXIT_ERROR
-    # Exactly one, not merely "the first one is us". pr_author returns the first
-    # match, so two concurrent edits leaving two author: labels would report
-    # success to whichever agent that happened to name, while the PR carries
-    # ambiguous ownership that merge_pr would then resolve just as arbitrarily.
     holders = [name[len(AUTHOR_LABEL_PREFIX):] for name in settled["labels"]
                if name.startswith(AUTHOR_LABEL_PREFIX)]
     if holders != [agent]:
@@ -665,14 +660,14 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
               "pushing to this branch.", file=sys.stderr)
         return EXIT_CONFLICT
 
-    run_cmd(["gh", "pr", "comment", str(pr_id), "--body",
-             f"🤝 Adopted by `{agent}`"
+    basis = f"operator-authorized transfer. Reason: {reason}" if operator_authorized else f"idle {idle_hours:.1f}h"
+    run_cmd(["gh", "pr", "comment", str(pr_id), "--body", f"🤝 Adopted by `{agent}`"
              + (f" (family `{family}`)" if family else "")
-             + f" from `{previous}`, idle {idle_hours:.1f}h.\n\n"
+             + f" from `{previous}`, {basis}.\n\n"
              "Commits, CI history, and review threads are preserved. The "
              "adopting agent is now the author and cannot review this PR."],
             check=False)
-    print(f"🤝 PR #{pr_id} adopted by '{agent}' from '{previous}' (idle {idle_hours:.1f}h).")
+    print(f"🤝 PR #{pr_id} adopted by '{agent}' from '{previous}' ({basis}).")
     return EXIT_OK
 
 
@@ -1009,6 +1004,8 @@ def main():
     parser.add_argument("--adopt-after", type=int, default=DEFAULT_ADOPT_AFTER_HOURS, metavar="HOURS",
                         help="Hours a PR must be idle before it may be adopted "
                         f"(default: {DEFAULT_ADOPT_AFTER_HOURS})")
+    parser.add_argument("--operator-authorized", action="store_true", help="Immediate transfer; requires --reason")
+    parser.add_argument("--reason", default="", help="Audited reason for operator transfer")
     parser.add_argument("--merge", action="store_true",
                         help="With --pr: claim or release mechanical merge (merger:<id>).")
     parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
@@ -1020,7 +1017,7 @@ def main():
 
     if args.pr is not None:
         if args.adopt:
-            sys.exit(adopt_pr(args.pr, args.agent, args.family, args.adopt_after))
+            sys.exit(adopt_pr(args.pr, args.agent, args.family, args.adopt_after, args.operator_authorized, args.reason))
         if args.merge:
             rc = (release_merge(args.pr, args.agent) if args.release
                   else claim_merge(args.pr, args.agent))
@@ -1039,6 +1036,9 @@ def main():
 
     if args.adopt:
         print("[ERROR] --adopt applies to a PR; use --pr <n> --adopt.", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
+    if args.operator_authorized or args.reason:
+        print("[ERROR] --operator-authorized and --reason require --pr <n> --adopt.", file=sys.stderr)
         sys.exit(EXIT_ERROR)
 
     if args.release:
