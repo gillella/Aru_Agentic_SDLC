@@ -15,6 +15,17 @@ import fetch_next_issue  # noqa: E402
 import merge_pr
 
 
+_increment_scope_patch = patch.object(fnw, "active_increment_scope", return_value=None)
+
+
+def setUpModule():
+    _increment_scope_patch.start()
+
+
+def tearDownModule():
+    _increment_scope_patch.stop()
+
+
 def ts(minutes_ago):
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat().replace("+00:00", "Z")
 
@@ -341,6 +352,17 @@ class MergeWorkTests(unittest.TestCase):
         own = pr(9, "author:agent-2", "family:openai", decision="APPROVED", reviews=1)
         with patch.object(fnw, "dod_status", return_value=(True, "all gates passed")):
             verdict = fnw.merge_eligibility(own, "agent-2")
+        self.assertTrue(verdict["eligible"])
+
+    def test_other_authors_green_pr_uses_dod_without_duplicate_feedback_query(self):
+        ready = pr(9, "author:agent-1", "family:anthropic")
+        ready.pop("_active_review_feedback", None)
+        with patch.object(
+            fnw, "fetch_active_review_feedback",
+            side_effect=AssertionError("duplicate feedback query"),
+        ), patch.object(fnw, "dod_status", return_value=(True, "all gates passed")):
+            verdict = fnw.merge_eligibility(ready, "agent-2")
+
         self.assertTrue(verdict["eligible"])
 
     def test_blocked_gates_do_not_offer_merge(self):
@@ -1300,8 +1322,8 @@ class IdleBacklogPromotionTests(unittest.TestCase):
     def setUp(self):
         self.inventory_reads = 0
         self.select_reads = 0
-        def inventory(_slug, numbers):
-            self.inventory_reads += 1; return ({number: ("Ready" if self.inventory_reads >= 3 and number == 10 else "Backlog") for number in numbers}, int(self.inventory_reads >= 3))  # noqa: E702
+        def inventory(_slug, numbers, **_kwargs):
+            self.inventory_reads += 1; return ({number: ("Ready" if self.inventory_reads >= 2 and number == 10 else "Backlog") for number in numbers}, int(self.inventory_reads >= 2))  # noqa: E702
         def select(*_args):
             self.select_reads += 1; return {"work": ({"type": "issue", "issue": 10} if self.select_reads >= 3 else {"type": "idle"})}  # noqa: E702
         self.enterContext(patch.object(merge_pr, "repository_merge_lock",
@@ -1310,6 +1332,8 @@ class IdleBacklogPromotionTests(unittest.TestCase):
             fnw, "select", side_effect=select))
         self.enterContext(patch.object(
             fnw, "_governed_open_issue_statuses", side_effect=inventory))
+        self.enterContext(patch.object(
+            fnw, "get_repo_projects", return_value=[{"id": "project"}]))
     @staticmethod
     def _issue(number, priority="p1", *, status="backlog", body=None, labels=()):
         return {
@@ -1332,7 +1356,7 @@ class IdleBacklogPromotionTests(unittest.TestCase):
         issues = [self._issue(20, "p2"), self._issue(30, "p0"), self._issue(10, "p0")]
         post = self._issue(10, "p0", status="ready")
         with patch.object(fnw, "list_open_issues",
-                          side_effect=[issues, issues, [post], [post]]), \
+                          side_effect=[issues, [post]]), \
              patch.object(fnw, "list_work_prs", return_value=[]), \
              patch.object(fnw, "active_increment_scope", return_value=None), \
              patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
@@ -1342,11 +1366,6 @@ class IdleBacklogPromotionTests(unittest.TestCase):
                           return_value="owner"), \
              patch.object(fetch_next_issue, "is_trusted_metadata_author",
                           return_value=True), \
-             patch.object(fnw, "query_issue_project_items",
-                          side_effect=[[{"status": {"name": "Backlog"}}],
-                                       [{"status": {"name": "Ready"}}]]), \
-             patch.object(fnw, "select_governed_project_items",
-                          side_effect=lambda items, _slug: items), \
              patch.object(fnw, "update_status", return_value=True) as update:
             promoted = fnw.promote_one_idle_backlog_issue("agent-1")
         self.assertEqual(promoted, 10)
@@ -1372,9 +1391,7 @@ class IdleBacklogPromotionTests(unittest.TestCase):
 
     def test_refuses_candidate_that_changes_during_live_revalidation(self):
         original = self._issue(1)
-        changed = {**original, "body": original["body"] + "\nchanged\n"}
-        with patch.object(fnw, "list_open_issues",
-                          side_effect=[[original], [changed]]), \
+        with patch.object(fnw, "list_open_issues", return_value=[original]), \
              patch.object(fnw, "list_work_prs", return_value=[]), \
              patch.object(fnw, "active_increment_scope", return_value=None), \
              patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
@@ -1384,9 +1401,13 @@ class IdleBacklogPromotionTests(unittest.TestCase):
                           return_value="owner"), \
              patch.object(fetch_next_issue, "is_trusted_metadata_author",
                           return_value=True), \
-             patch.object(fnw, "update_status") as update:
-            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
-        update.assert_not_called()
+             patch.object(fnw, "update_status", return_value=False) as update:
+            with self.assertRaises(fnw.AutoTriageError):
+                fnw.promote_one_idle_backlog_issue("agent-1")
+        update.assert_called_once_with(
+            1, "Ready", require_board=True, expected_status="Backlog",
+            require_unclaimed=True, expected_updated_at="2026-08-25T18:00:00Z",
+        )
 
     def test_refuses_when_governed_board_is_not_backlog(self):
         issue = self._issue(1)
@@ -1400,10 +1421,8 @@ class IdleBacklogPromotionTests(unittest.TestCase):
                           return_value="owner"), \
              patch.object(fetch_next_issue, "is_trusted_metadata_author",
                           return_value=True), \
-             patch.object(fnw, "query_issue_project_items",
-                          return_value=[{"status": {"name": "Done"}}]), \
-             patch.object(fnw, "select_governed_project_items",
-                          side_effect=lambda items, _slug: items), \
+             patch.object(fnw, "_governed_open_issue_statuses",
+                          return_value=({1: "Done"}, 0)), \
              patch.object(fnw, "update_status") as update:
             self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
         update.assert_not_called()

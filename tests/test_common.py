@@ -176,7 +176,29 @@ class GovernedProjectAttachmentTests(unittest.TestCase):
 
         self.assertTrue(common.set_board_status(42, "Ready"))
 
-        attach.assert_called_once_with(42)
+        attach.assert_called_once_with(42, existing_items=[])
+
+    @patch.object(common, "attach_issue_to_governed_project")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    @patch.object(common, "query_issue_project_items", return_value=None)
+    def test_status_move_does_not_retry_after_unavailable_item_read(
+        self, items, _slug, attach,
+    ):
+        self.assertFalse(common.set_board_status(42, "Ready"))
+
+        items.assert_called_once_with(42)
+        attach.assert_not_called()
+
+    @patch.object(common, "attach_issue_to_governed_project")
+    @patch.object(common, "get_repo_slug", return_value="octocat/widgets")
+    @patch.object(common, "query_issue_project_items", return_value=[])
+    def test_conditional_status_move_never_attaches_missing_item(
+        self, _items, _slug, attach,
+    ):
+        self.assertFalse(
+            common.set_board_status(42, "Ready", expected_status="Backlog")
+        )
+        attach.assert_not_called()
 
     @patch.object(common, "run_cmd")
     @patch.object(common, "attach_issue_to_governed_project")
@@ -330,54 +352,6 @@ class MetadataTrustTests(unittest.TestCase):
             common.repository_trusted_logins(),
             {"acme-corp", "alice", "bob"},
         )
-
-    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
-    @patch.object(common, "run_gh_json")
-    def test_get_issue_merges_graphql_trust_identity(self, gh_json, _slug):
-        gh_json.side_effect = [
-            {
-                "number": 7,
-                "title": "t",
-                "labels": [],
-                "author": {"login": "alice"},
-            },
-            {
-                "data": {
-                    "repository": {
-                        "issue": {
-                            "editor": {"login": "owner"},
-                            "authorAssociation": "COLLABORATOR",
-                        }
-                    }
-                }
-            },
-        ]
-        issue = common.get_issue(7)
-        self.assertEqual(issue["author"], {"login": "alice"})
-        self.assertEqual(issue["editor"], {"login": "owner"})
-        self.assertEqual(issue["authorAssociation"], "COLLABORATOR")
-        self.assertTrue(issue["trustIdentityResolved"])
-
-    @patch.object(common, "get_repo_slug", return_value="acme-corp/widgets")
-    @patch.object(common, "run_gh_json")
-    def test_get_issue_failed_trust_lookup_rejects_rewrite_label(
-        self, gh_json, _slug
-    ):
-        gh_json.side_effect = [
-            {
-                "number": 7,
-                "title": "t",
-                "labels": [{"name": common.TRUSTED_REWRITE_LABEL}],
-                "author": {"login": "attacker"},
-            },
-            {"errors": [{"message": "timeout"}]},
-        ]
-        issue = common.get_issue(7)
-        self.assertFalse(issue["trustIdentityResolved"])
-        self.assertNotIn("editor", issue)
-        self.assertFalse(
-            common.is_trusted_metadata_author(issue, owner="gillella"))
-
 
 class ProseAndCodeBlockExclusionTests(unittest.TestCase):
     """#294: line-anchored metadata must not treat code or prose as paths.

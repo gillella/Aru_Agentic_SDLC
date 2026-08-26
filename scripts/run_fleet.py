@@ -34,6 +34,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from fleet_cycle import build_prompt, state_fingerprint
+
 
 STATE_VERSION = 2
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -269,39 +271,6 @@ def work_identity(work: dict[str, Any]) -> tuple[str, int | None]:
     return work_type, raw_number if isinstance(raw_number, int) else None
 
 
-def state_fingerprint(fleet: dict[str, Any], work: dict[str, Any]) -> str:
-    work_type, work_number = work_identity(work)
-    stable = {
-        "fleet_state": fleet.get("state"),
-        "summary": fleet.get("summary"),
-        "open_issues": fleet.get("open_issues_count"),
-        "open_prs": fleet.get("open_prs_count"),
-        "active_claims": fleet.get("active_claims"),
-        "work_type": work_type,
-        "work_number": work_number,
-    }
-    encoded = json.dumps(stable, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
-
-
-def build_prompt(config: RunnerConfig, work: dict[str, Any]) -> str:
-    work_type, work_number = work_identity(work)
-    subject = work_type if work_number is None else f"{work_type} #{work_number}"
-    return (
-        f"You are {config.agent}, model family {config.family}, in the trusted "
-        f"repository {config.repo}. The durable Aru runner observed eligible "
-        f"work ({subject}). Read AGENTS.md and the run-aru-factory skill, then "
-        "execute exactly one governed Aru Code next unit. Re-run the canonical "
-        "picker with your stable agent id and family and claim through the "
-        "framework helpers; the observed item is advisory because another "
-        "worker may win the race. Complete or safely hand off that one unit, "
-        "then exit this child session. Do not start a second unit and do not "
-        "bypass Issue-First, worktrees, tests, CI, independent review, or the "
-        "merge helper. Recover existing work for this identity before claiming "
-        "anything new."
-    )
-
-
 def build_agent_argv(config: RunnerConfig, prompt: str) -> list[str]:
     repo = str(config.repo)
     if config.adapter_command_json:
@@ -440,6 +409,8 @@ class FleetRunner:
         self.last_child_fingerprint = ""
         self.active_cooldown_reason: str | None = None
         self.active_cooldown_id: str | None = None
+        self.last_fleet_snapshot: dict[str, Any] | None = None
+        self.last_fleet_cycle = 0
         if self.presence_store is not None:
             try:
                 existing = self.presence_store.get(config.agent)
@@ -604,7 +575,7 @@ class FleetRunner:
             str(self.config.aru_home / "scripts" / "fetch_next_work.py"),
             "--agent", self.config.agent,
             "--family", self.config.family,
-            "--json",
+            "--promote-idle", "--json",
         ]
         if self.command_runner is run_command:
             result = run_command(argv, self.config.repo, self.config.helper_timeout)
@@ -663,17 +634,19 @@ class FleetRunner:
         if self._stop_requested():
             return IterationResult("stopping", 0.0)
         self.cycle += 1
-        fleet = self._run_fleet_status()
-        fleet_state = str(fleet.get("state") or "error")
-        if self._stop_requested():
-            return IterationResult("stopping", 0.0)
-
-        if fleet_state == "complete":
-            return self._park("complete_watch", fleet, {"type": "idle"})
-        if fleet_state == "blocked":
-            return self._park("blocked_wait", fleet, {"type": "idle"})
-        if fleet_state == "error":
-            return self._park("error_wait", fleet, {"type": "error"})
+        # Establish one full diagnostic snapshot at startup. Later cycles ask
+        # the canonical claiming picker first: actionable work does not need a
+        # second, overlapping fleet-wide inventory merely to launch it.
+        if self.last_fleet_snapshot is None:
+            fleet = self._run_fleet_status()
+            fleet_state = str(fleet.get("state") or "error")
+            self.last_fleet_snapshot = fleet
+            self.last_fleet_cycle = self.cycle
+            if self._stop_requested():
+                return IterationResult("stopping", 0.0)
+        else:
+            fleet = self.last_fleet_snapshot
+            fleet_state = str(fleet.get("state") or "waiting")
 
         selection = self._run_picker()
         work = selection.get("work") if isinstance(selection.get("work"), dict) else {"type": "error"}
@@ -681,6 +654,19 @@ class FleetRunner:
         if self._stop_requested():
             return IterationResult("stopping", 0.0, work_type, work_number)
         if work_type == "idle":
+            # The picker is already a fresh eligibility snapshot. Refresh the
+            # broader diagnostic view periodically instead of every cycle.
+            if self.cycle - self.last_fleet_cycle >= 4:
+                fleet = self._run_fleet_status()
+                fleet_state = str(fleet.get("state") or "error")
+                self.last_fleet_snapshot = fleet
+                self.last_fleet_cycle = self.cycle
+            if fleet_state == "complete":
+                return self._park("complete_watch", fleet, work)
+            if fleet_state == "blocked":
+                return self._park("blocked_wait", fleet, work)
+            if fleet_state == "error":
+                return self._park("error_wait", fleet, {"type": "error"})
             return self._park("waiting", fleet, work)
         if work_type == "error":
             return self._park("error_wait", fleet, work)

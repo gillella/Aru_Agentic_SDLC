@@ -1496,71 +1496,69 @@ def _evidence_note(evidence):
 
 
 def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
-    """Read every typed status page while proving one stable PR head."""
+    """Read typed status contexts through REST for one immutable head SHA."""
     if not isinstance(expected_head, str) or not expected_head:
         return None
-    query = """
-    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
-      repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
-          commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100, after:$cursor) {
-            totalCount
-            pageInfo { hasNextPage endCursor }
-            nodes {
-              __typename
-              ... on CheckRun { name status conclusion checkSuite { app { slug } } }
-              ... on StatusContext { context state description creator { login __typename } }
-            }
-          } } } } }
-        }
-      }
-    }"""
-    cursor = None
-    seen_cursors = set()
+    slug = f"{owner}/{name}"
+    checks = _gh_json([
+        "gh", "api", f"repos/{slug}/commits/{expected_head}/check-runs?per_page=100",
+    ])
+    statuses = _gh_json([
+        "gh", "api", f"repos/{slug}/commits/{expected_head}/status?per_page=100",
+    ])
+    if not isinstance(checks, dict) or not isinstance(statuses, dict):
+        return None
+    check_runs = checks.get("check_runs")
+    status_rows = statuses.get("statuses")
+    check_total = checks.get("total_count")
+    status_total = statuses.get("total_count")
+    if (
+        not isinstance(check_runs, list)
+        or not isinstance(status_rows, list)
+        or type(check_total) is not int
+        or type(status_total) is not int
+        or check_total != len(check_runs)
+        or status_total != len(status_rows)
+    ):
+        return None
     contexts = []
-    expected_total = None
-    while True:
-        args = [
-            "gh", "api", "graphql", "-f", f"query={query}",
-            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data = _gh_json(args)
-        if not data or (isinstance(data, dict) and data.get("errors")):
-            return None
-        try:
-            pull = data["data"]["repository"]["pullRequest"]
-            commits = pull["commits"]["nodes"]
-            connection = commits[0]["commit"]["statusCheckRollup"]["contexts"]
-            page_nodes = connection["nodes"]
-            total_count = connection["totalCount"]
-            page_info = connection["pageInfo"]
-            has_next = page_info["hasNextPage"]
-        except (KeyError, IndexError, TypeError):
-            return None
+    for check in check_runs:
+        app = check.get("app") if isinstance(check, dict) else None
         if (
-            pull.get("headRefOid") != expected_head
-            or not isinstance(page_nodes, list)
-            or type(total_count) is not int
-            or not isinstance(has_next, bool)
-            or expected_total not in {None, total_count}
+            not isinstance(check, dict)
+            or not isinstance(check.get("name"), str)
+            or not isinstance(check.get("status"), str)
+            or not isinstance(app, dict)
         ):
             return None
-        expected_total = total_count
-        contexts.extend(page_nodes)
-        if not has_next:
-            return contexts if expected_total == len(contexts) else None
-        next_cursor = page_info.get("endCursor")
+        contexts.append({
+            "__typename": "CheckRun",
+            "name": check["name"],
+            "status": check["status"].upper(),
+            "conclusion": str(check.get("conclusion") or "").upper(),
+            "checkSuite": {"app": {"slug": app.get("slug")}},
+        })
+    for status in status_rows:
+        creator = status.get("creator") if isinstance(status, dict) else None
         if (
-            not isinstance(next_cursor, str)
-            or not next_cursor
-            or next_cursor in seen_cursors
+            not isinstance(status, dict)
+            or not isinstance(status.get("context"), str)
+            or not isinstance(status.get("state"), str)
+            or not isinstance(creator, dict)
         ):
             return None
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
+        contexts.append({
+            "__typename": "StatusContext",
+            "context": status["context"],
+            "state": status["state"].upper(),
+            "creator": {
+                "login": creator.get("login"),
+                "__typename": creator.get("type"),
+            },
+        })
+    fresh = _gh_json(["gh", "api", f"repos/{slug}/pulls/{pr_id}"])
+    head = (fresh or {}).get("head") if isinstance(fresh, dict) else None
+    return contexts if isinstance(head, dict) and head.get("sha") == expected_head else None
 
 
 def _with_coderabbit_status(pr_id, evidence):

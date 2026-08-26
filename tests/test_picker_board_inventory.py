@@ -74,6 +74,26 @@ class GovernedBoardInventoryTests(unittest.TestCase):
         self.assertEqual(staged[0]["labels"][1]["name"], "status:backlog")
         self.assertIsNone(inventory.stage_expected_ready_for_triage(issues, None))
 
+    @patch.object(inventory, "run_cmd")
+    @patch.object(inventory, "get_repo_projects")
+    def test_reuses_project_snapshot_and_can_report_partial_board_membership(
+        self, projects, run_cmd,
+    ):
+        projects.return_value = [self.project]
+        run_cmd.return_value = (0, json.dumps({
+            "totalCount": 1,
+            "items": [{"status": "Ready", "content": {
+                "number": 1, "repository": "owner/repo",
+            }}],
+        }), "")
+
+        result = inventory.governed_board_inventory(
+            "owner/repo", {1, 2}, projects=[self.project], require_complete=False,
+        )
+
+        self.assertEqual(result, ({1: "Ready"}, 1))
+        projects.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

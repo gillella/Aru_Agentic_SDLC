@@ -43,14 +43,14 @@ class PickerTransitionGuardTests(unittest.TestCase):
         self.post_ready_issue = 10
         self.post_selected_issue = 10
 
-        def inventory(_slug, numbers):
+        def inventory(_slug, numbers, **_kwargs):
             self.inventory_reads += 1
             return ({number: ("Ready" if self.inventory_reads >= 3
                               and number == self.post_ready_issue
                               else "Backlog") for number in numbers},
                     int(self.inventory_reads >= 3))
 
-        def select(*_args):
+        def select(*_args, **_kwargs):
             self.select_reads += 1
             return {"work": ({"type": "issue", "issue": self.post_selected_issue}
                              if self.select_reads >= 3 else {"type": "idle"})}
@@ -85,13 +85,7 @@ class PickerTransitionGuardTests(unittest.TestCase):
              self.qualification_context()[0], self.qualification_context()[1], \
              self.qualification_context()[2], self.qualification_context()[3], \
              self.qualification_context()[4], self.qualification_context()[5], \
-             patch.object(fnw, "query_issue_project_items", side_effect=[
-                 [{"status": {"name": "Backlog"}}],
-                 [{"status": {"name": "Ready"}}],
-             ]), patch.object(
-                 fnw, "select_governed_project_items",
-                 side_effect=lambda items, _slug: items,
-             ), patch.object(fnw, "update_status", return_value=True) as update:
+             patch.object(fnw, "update_status", return_value=True) as update:
             with self.assertRaises(fnw.AutoTriageError):
                 fnw.promote_one_idle_backlog_issue("agent-1")
 
@@ -130,6 +124,38 @@ class PickerTransitionGuardTests(unittest.TestCase):
                 fnw.promote_one_idle_backlog_issue("agent-1")
         update.assert_not_called()
 
+    def test_unavailable_open_issue_inventory_is_an_error_not_idle(self):
+        with patch.object(fnw, "list_open_issues", return_value=None), \
+             patch.object(fnw, "update_status") as update:
+            with self.assertRaisesRegex(
+                fnw.AutoTriageError,
+                "Open issue inventory unavailable",
+            ):
+                fnw.promote_one_idle_backlog_issue("agent-1")
+        update.assert_not_called()
+
+    def test_post_promotion_selection_uses_fresh_ready_snapshot(self):
+        issue = qualified_issue()
+        post = qualified_issue(status="ready")
+        contexts = self.qualification_context()
+        snapshot = {}
+        with patch.object(fnw, "list_open_issues", side_effect=[[issue], [post]]), \
+             contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
+             contexts[5], patch.object(
+                 fnw, "get_repo_projects", return_value=[{"id": "project"}],
+             ), patch.object(
+                 fnw, "_governed_open_issue_statuses",
+                 side_effect=[({10: "Backlog"}, 0), ({10: "Ready"}, 1)],
+             ), patch.object(fnw, "update_status", return_value=True):
+            promoted = fnw.promote_one_idle_backlog_issue(
+                "agent-1", post_snapshot_out=snapshot,
+            )
+
+        self.assertEqual(promoted, 10)
+        self.assertEqual(snapshot["issues"], [post])
+        self.assertEqual(snapshot["prs"], [])
+        self.assertEqual(snapshot["_selection"]["work"], {"type": "issue", "issue": 10})
+
     def test_lost_board_readback_reports_rollback_result(self):
         for rolled_back, expected in (
             (True, "rollback succeeded"),
@@ -148,12 +174,6 @@ class PickerTransitionGuardTests(unittest.TestCase):
                      contexts[4], contexts[5], patch.object(
                          fnw, "_governed_open_issue_statuses",
                          side_effect=[backlog, backlog, None],
-                     ), patch.object(
-                         fnw, "query_issue_project_items",
-                         return_value=[{"status": {"name": "Backlog"}}],
-                     ), patch.object(
-                         fnw, "select_governed_project_items",
-                         side_effect=lambda items, _slug: items,
                      ), patch.object(
                          fnw, "update_status",
                          side_effect=[True, rolled_back],
@@ -225,10 +245,7 @@ class PickerTransitionGuardTests(unittest.TestCase):
              contexts[5], patch.object(fnw, "select", side_effect=[
                  {"work": {"type": "idle"}}, {"work": {"type": "idle"}},
                  {"work": {"type": "issue", "issue": 99}},
-             ]), patch.object(fnw, "query_issue_project_items",
-                              return_value=[{"status": {"name": "Backlog"}}]), \
-             patch.object(fnw, "select_governed_project_items",
-                          side_effect=lambda items, _slug: items), \
+            ]), \
              patch.object(fnw, "update_status", return_value=True) as update:
             with self.assertRaises(fnw.AutoTriageError):
                 fnw.promote_one_idle_backlog_issue("agent-1")
@@ -249,10 +266,7 @@ class PickerTransitionGuardTests(unittest.TestCase):
         with patch.object(fnw, "list_open_issues", side_effect=[
                  [selected], [selected], [post, higher], [post, higher],
              ]), contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
-             contexts[5], patch.object(fnw, "query_issue_project_items",
-                                        return_value=[{"status": {"name": "Backlog"}}]), \
-             patch.object(fnw, "select_governed_project_items",
-                          side_effect=lambda items, _slug: items), \
+             contexts[5], \
              patch.object(fnw, "update_status", return_value=True) as update:
             with self.assertRaises(fnw.AutoTriageError):
                 fnw.promote_one_idle_backlog_issue("agent-1")

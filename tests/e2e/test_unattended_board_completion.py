@@ -108,26 +108,23 @@ class UnattendedBoardCompletionTests(unittest.TestCase):
             ("issue", 6),
         )
 
-        reviewed_followup = self.cycle("claude-1")
-        merged_followup = self.cycle("codex-1")
-        reviewed_overlap = self.cycle("claude-1")
-        merged_overlap = self.cycle("codex-1")
-        requested = self.cycle("claude-1")
-        fixed = self.cycle("codex-1")
-        review_retry_wait = self.cycle("claude-1")
-        reviewed = self.cycle("claude-1")
-        merged = self.cycle("codex-1")
-        self.assertEqual(reviewed_followup.work_type, "review")
-        self.assertEqual(reviewed_overlap.work_type, "review")
-        self.assertEqual(merged_followup.work_type, "merge")
-        self.assertEqual(merged_overlap.work_type, "merge")
+        for step in range(30):
+            merged_issues = {
+                event["issue"] for event in self.fleet.events
+                if event["event"] == "merged"
+            }
+            if {1, 4, 6}.issubset(merged_issues):
+                break
+            self.cycle("claude-1" if step % 2 == 0 else "codex-1")
+        else:
+            self.fail("explicitly assigned review and merge work did not drain")
         self.assertEqual(
             {
                 event["issue"]
                 for event in self.fleet.events
-                if event["event"] == "review_completed" and event["issue"] in {4, 6}
+                if event["event"] == "review_completed" and event["issue"] in {1, 4, 6}
             },
-            {4, 6},
+            {1, 4, 6},
         )
         self.assertEqual(
             {
@@ -137,12 +134,6 @@ class UnattendedBoardCompletionTests(unittest.TestCase):
             },
             {4, 6},
         )
-        self.assertEqual(requested.work_type, "review")
-        self.assertEqual(requested.work_number, 102)
-        self.assertEqual(fixed.work_type, "feedback")
-        self.assertEqual(review_retry_wait.phase, "waiting")
-        self.assertEqual(reviewed.work_type, "review")
-        self.assertEqual(merged.work_type, "merge")
         alpha_pr = next(pr for pr in self.fleet.pull_requests.values() if pr.issue == 1)
         self.assertEqual(alpha_pr.fixes, 1)
         self.assertEqual(alpha_pr.verifications, 2)
@@ -184,7 +175,10 @@ class UnattendedBoardCompletionTests(unittest.TestCase):
             [("issue", 5), ("review", 106), ("merge", 106)],
         )
 
-        complete = self.cycle("codex-1")
+        for _ in range(4):
+            complete = self.cycle("codex-1")
+            if complete.phase == "complete_watch":
+                break
         self.assertEqual(complete.phase, "complete_watch")
         self.assertEqual(
             self.fleet.final_audit(),

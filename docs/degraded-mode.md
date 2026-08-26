@@ -32,11 +32,23 @@ facts with one REST call per pull request or make a claim/merge decision from a
 partial snapshot.
 
 One normal picker cycle shares its issue and pull-request snapshots with the
-stale-claim reapers. Per-pull-request review reads occur only for candidates
-whose batched CI state is already green; ordinary file snapshots use REST only
-when a rename requires the previous path. A cycle may refresh the snapshots
-after a successful mutation, but unchanged polling must not re-read the full
-queue.
+stale-claim reapers. The rich pull-request snapshot already includes changed
+files, so the picker never immediately re-queries the same file connection.
+For a green PR owned by another agent, the exact merge gate reads review
+threads once; the picker does not issue a second feedback query first.
+
+`fleet_status.py` uses paginated REST for ordinary issue, pull-request, and
+merge-history inventories. It reads the governed Project once for the complete
+open-issue status map instead of querying Project items once per issue, and it
+does not run exact-head review evidence for every open PR just to render a
+monitoring summary. Exact review evidence remains a merge-time authority.
+
+The durable runner performs one full fleet diagnostic at startup. Later
+cycles use the claiming picker first and refresh the broader diagnostic view
+only periodically while idle. CI polling uses REST check/status endpoints,
+exponential backoff, and a hard fail-closed timeout. A cycle may refresh
+snapshots after a successful mutation, but unchanged polling must not re-read
+the full queue.
 
 ---
 

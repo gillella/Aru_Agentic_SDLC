@@ -2750,71 +2750,43 @@ class EmergencyAgentReviewGateTests(unittest.TestCase):
 
 
 class CodeRabbitStatusEvidenceTests(unittest.TestCase):
-    @staticmethod
-    def payload(*, head="head123", total=1, nodes=None, has_next=False, cursor=None):
-        return {"data": {"repository": {"pullRequest": {
-            "headRefOid": head,
-            "commits": {"nodes": [{"commit": {"statusCheckRollup": {
-                "contexts": {
-                    "totalCount": total,
-                    "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
-                    "nodes": [] if nodes is None else nodes,
-                },
-            }}}]},
-        }}}}
-
     @patch.object(merge_pr, "_gh_json")
-    def test_errors_field_rejects_partial_status_payload(self, gh_json):
-        gh_json.return_value = {
-            "errors": [{"message": "partial result"}],
-            "data": {"repository": {"pullRequest": {
-                "headRefOid": "head123",
-                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
-                    "contexts": {"totalCount": 1, "nodes": []},
-                }}}]},
-            }}},
-        }
+    def test_rest_read_failure_rejects_status_payload(self, gh_json):
+        gh_json.side_effect = [None, {"total_count": 0, "statuses": []}]
         self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
 
     @patch.object(merge_pr, "_gh_json")
     def test_missing_context_total_count_rejects_status_payload(self, gh_json):
-        gh_json.return_value = {
-            "data": {"repository": {"pullRequest": {
-                "headRefOid": "head123",
-                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
-                    "contexts": {
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        "nodes": [],
-                    },
-                }}}]},
-            }}},
-        }
+        gh_json.side_effect = [
+            {"check_runs": []},
+            {"total_count": 0, "statuses": []},
+        ]
         self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
 
     @patch.object(merge_pr, "_gh_json")
-    def test_truncated_context_page_rejects_status_payload(self, gh_json):
-        gh_json.return_value = {
-            "data": {"repository": {"pullRequest": {
-                "headRefOid": "head123",
-                "commits": {"nodes": [{"commit": {"statusCheckRollup": {
-                    "contexts": {
-                        "totalCount": 2,
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        "nodes": [{
-                            "__typename": "CheckRun",
-                            "name": "CodeRabbit",
-                            "status": "COMPLETED",
-                            "conclusion": "SUCCESS",
-                            "checkSuite": {"app": {"slug": "coderabbitai"}},
-                        }],
-                    },
-                }}}]},
-            }}},
-        }
+    def test_truncated_rest_contexts_are_rejected(self, gh_json):
+        gh_json.side_effect = [
+            {"total_count": 2, "check_runs": [{
+                "name": "CodeRabbit", "status": "completed",
+                "conclusion": "success", "app": {"slug": "coderabbitai"},
+            }]},
+            {"total_count": 0, "statuses": []},
+        ]
         self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
 
     @patch.object(merge_pr, "_gh_json")
-    def test_status_contexts_paginate_with_repeated_head_proof(self, gh_json):
+    def test_truncated_rest_statuses_are_rejected(self, gh_json):
+        gh_json.side_effect = [
+            {"total_count": 0, "check_runs": []},
+            {"total_count": 2, "statuses": [{
+                "context": "CI", "state": "success",
+                "creator": {"login": "github-actions[bot]", "type": "Bot"},
+            }]},
+        ]
+        self.assertIsNone(merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"))
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_rest_statuses_are_mapped_to_typed_merge_evidence(self, gh_json):
         coderabbit = {
             "__typename": "CheckRun",
             "name": "CodeRabbit",
@@ -2823,51 +2795,35 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
             "checkSuite": {"app": {"slug": "coderabbitai"}},
         }
         other = {
-            "__typename": "CheckRun",
-            "name": "CI",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-            "checkSuite": {"app": {"slug": "github-actions"}},
+            "__typename": "StatusContext",
+            "context": "CI",
+            "state": "SUCCESS",
+            "creator": {"login": "github-actions[bot]", "__typename": "Bot"},
         }
         gh_json.side_effect = [
-            self.payload(total=2, nodes=[coderabbit], has_next=True, cursor="page-2"),
-            self.payload(total=2, nodes=[other]),
+            {"total_count": 1, "check_runs": [{
+                "name": "CodeRabbit", "status": "completed",
+                "conclusion": "success", "app": {"slug": "coderabbitai"},
+            }]},
+            {"total_count": 1, "statuses": [{
+                "context": "CI", "state": "success",
+                "creator": {"login": "github-actions[bot]", "type": "Bot"},
+            }]},
+            {"head": {"sha": "head123"}},
         ]
 
         self.assertEqual(
             merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123"),
             [coderabbit, other],
         )
-        self.assertIn("cursor=page-2", gh_json.call_args_list[1].args[0])
+        self.assertTrue(all("graphql" not in call.args[0] for call in gh_json.call_args_list))
 
     @patch.object(merge_pr, "_gh_json")
-    def test_status_context_selection_carries_description_to_the_gate(self, gh_json):
-        """The loader must select the one field the gate reads on a status."""
-        coderabbit = {
-            "__typename": "StatusContext",
-            "context": "CodeRabbit",
-            "state": "SUCCESS",
-            "description": "Review completed",
-            "creator": {"login": "coderabbitai", "__typename": "Bot"},
-        }
-        gh_json.return_value = self.payload(total=1, nodes=[coderabbit])
-
-        statuses = merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123")
-
-        self.assertEqual(statuses, [coderabbit])
-        query = next(
-            arg for arg in gh_json.call_args.args[0] if arg.startswith("query=")
-        )
-        self.assertIn("description", query.split("on StatusContext {", 1)[1])
-        self.assertIs(
-            merge_pr._coderabbit_check({"coderabbit_status": statuses}), True
-        )
-
-    @patch.object(merge_pr, "_gh_json")
-    def test_status_pagination_rejects_concurrent_head_change(self, gh_json):
+    def test_status_snapshot_rejects_concurrent_head_change(self, gh_json):
         gh_json.side_effect = [
-            self.payload(total=1, has_next=True, cursor="page-2"),
-            self.payload(head="new-head", total=1, nodes=[{}]),
+            {"total_count": 0, "check_runs": []},
+            {"total_count": 0, "statuses": []},
+            {"head": {"sha": "new-head"}},
         ]
         self.assertIsNone(
             merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123")
@@ -6243,7 +6199,9 @@ class ExpectedHeadGateTests(unittest.TestCase):
         self, fetch_pr, _issue, _evidence, _evaluate, execute
     ):
         fetch_pr.side_effect = [self.open_pr("H1"), self.open_pr("H2")]
-        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))):
             rc = merge_pr.main()
 
         self.assertEqual(rc, merge_pr.EXIT_BLOCKED)

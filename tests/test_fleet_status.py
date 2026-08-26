@@ -1,4 +1,4 @@
-# line-ceiling: 1580
+# line-ceiling: 1640
 import os
 import stat
 import sys
@@ -148,6 +148,15 @@ class FleetStatusTests(unittest.TestCase):
         issues = [] if issues is None else issues
         prs = [] if prs is None else prs
         item_map = {} if items is None else items
+        def board_inventory(_slug, numbers, **_kwargs):
+            statuses = {}
+            for number in numbers:
+                issue_items = item_map.get(number, [mock_project_item()])
+                if issue_items:
+                    statuses[number] = issue_items[0]["status"]["name"]
+            return statuses, sum(
+                1 for status in statuses.values() if status.lower() == "ready"
+            )
         if merge_history is None:
             merge_history = (datetime.now(timezone.utc), True)
         with (
@@ -156,10 +165,7 @@ class FleetStatusTests(unittest.TestCase):
             patch("fleet_status.query_open_issues", return_value=issues),
             patch("fleet_status.list_open_prs_details", return_value=prs),
             patch("fleet_status.list_worktree_branches", return_value=[]),
-            patch(
-                "fleet_status.query_issue_project_items",
-                side_effect=lambda number: item_map.get(number, [mock_project_item()]),
-            ),
+            patch("fleet_status.governed_board_inventory", side_effect=board_inventory),
             patch("fleet_status.most_recent_merge_history", return_value=merge_history),
             patch("fleet_status.registered_agent_count", return_value=agent_count),
         ):
@@ -278,16 +284,16 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(status["exit_code"], EXIT_ERROR)
         self.assertIn("Could not query open issues.", status["summary"])
 
-    @patch("common.run_gh_json", return_value=None)
+    @patch("fleet_status.get_repo_projects", return_value=None)
     @patch("fleet_status.get_repo_slug", return_value="octocat/widgets")
-    def test_error_state_on_real_board_query_failure(self, _slug, _run_gh):
+    def test_error_state_on_real_board_query_failure(self, *_mocks):
         status = evaluate_fleet_status(".")
 
         self.assertEqual(status["state"], "error")
         self.assertEqual(status["exit_code"], EXIT_ERROR)
         self.assertIn("Could not query project boards.", status["summary"])
 
-    @patch("common.run_gh_json", return_value=None)
+    @patch("fleet_status.governed_board_inventory", return_value=None)
     @patch("fleet_status.list_worktree_branches", return_value=[])
     @patch("fleet_status.list_open_prs_details", return_value=[])
     @patch(
@@ -297,7 +303,7 @@ class FleetStatusTests(unittest.TestCase):
     @patch("fleet_status.get_repo_projects", return_value=[mock_project()])
     @patch("fleet_status.get_repo_slug", return_value="octocat/widgets")
     def test_error_state_on_real_project_item_query_failure(
-        self, _slug, _projects, _issues, _prs, _worktrees, _run_gh
+        self, _slug, _projects, _issues, _prs, _worktrees, _inventory
     ):
         status = evaluate_fleet_status(".")
 
@@ -305,17 +311,7 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(status["exit_code"], EXIT_ERROR)
         self.assertIn("Could not query issue project-board state.", status["summary"])
 
-    @patch(
-        "common.run_gh_json",
-        return_value={
-            "errors": [{"message": "partial result"}],
-            "data": {
-                "repository": {
-                    "issue": {"projectItems": {"nodes": []}},
-                }
-            },
-        },
-    )
+    @patch("fleet_status.governed_board_inventory", return_value=None)
     @patch("fleet_status.list_worktree_branches", return_value=[])
     @patch("fleet_status.list_open_prs_details", return_value=[])
     @patch(
@@ -325,7 +321,7 @@ class FleetStatusTests(unittest.TestCase):
     @patch("fleet_status.get_repo_projects", return_value=[mock_project()])
     @patch("fleet_status.get_repo_slug", return_value="octocat/widgets")
     def test_partial_project_item_graphql_errors_fail_closed(
-        self, _slug, _projects, _issues, _prs, _worktrees, _run_gh
+        self, _slug, _projects, _issues, _prs, _worktrees, _inventory
     ):
         status = evaluate_fleet_status(".")
 
@@ -907,18 +903,15 @@ class FleetStatusTests(unittest.TestCase):
         }
         self.assertFalse(_pending_review(pr_unresolved_feedback))
 
-        # Helper fallback when thread counts are missing from gh pr list payload
+        # Missing thread counts stay conservatively pending without an N+1 query.
         pr_missing_field = {
             "number": 15, "isDraft": False, "reviewDecision": "COMMENTED", "labels": [],
         }
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[{"id": "t1"}]):
-            self.assertFalse(_pending_review(pr_missing_field))
-
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]):
-            pr_clean_field = {
-                "number": 16, "isDraft": False, "reviewDecision": "COMMENTED", "labels": [],
-            }
-            self.assertTrue(_pending_review(pr_clean_field))
+        with patch(
+            "fetch_pr_feedback.fetch_active_review_feedback",
+            side_effect=AssertionError("fleet status must not query each PR"),
+        ):
+            self.assertTrue(_pending_review(pr_missing_field))
 
         pr_coderabbit_reviewed = {
             "number": 17,
@@ -996,15 +989,13 @@ class FleetStatusTests(unittest.TestCase):
         ):
             reviewed = mock_pr(18, f"review:{service}", decision="COMMENTED")
             evidence = {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}
+            reviewed["_active_review_feedback"] = []
+            reviewed["_review_evidence"] = evidence
             with self.subTest(service=service, authoritative=authoritative), \
-                 patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]), \
-                 patch("merge_pr.review_evidence", return_value=evidence), \
-                 patch("merge_pr.with_service_evidence", return_value=evidence) as enrich, \
                  patch("merge_pr.has_authoritative_assigned_review", return_value=authoritative):
                 status = self.evaluate_fixture(prs=[reviewed])
             reason = "PR #18 is reviewed and waiting for merge." if authoritative else "PR #18 is open and pending review."
             self.assertIn(reason, status["reasons"])
-            enrich.assert_called_once_with(reviewed, 18, evidence)
 
     def test_assigned_service_threads_isolate_feedback_state(self):
         evidence = {
@@ -1019,48 +1010,60 @@ class FleetStatusTests(unittest.TestCase):
         sourcery_pr = mock_pr(
             18, "review:sourcery", decision="COMMENTED", unresolvedReviewThreadsCount=1,
         )
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[{"id": 1}]), \
-             patch("merge_pr.review_evidence", return_value=evidence), \
-             patch("merge_pr.with_service_evidence", return_value=evidence), \
-             patch("merge_pr.has_authoritative_assigned_review", return_value=True):
+        sourcery_pr["_active_review_feedback"] = [{"id": 1}]
+        sourcery_pr["_review_evidence"] = evidence
+        with patch("merge_pr.has_authoritative_assigned_review", return_value=True):
             status = self.evaluate_fixture(prs=[sourcery_pr])
         self.assertIn("PR #18 is reviewed and waiting for merge.", status["reasons"])
 
         codeant_pr = mock_pr(18, "review:codeant", decision="COMMENTED")
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]), \
-             patch("merge_pr.review_evidence", return_value=evidence), \
-             patch("merge_pr.with_service_evidence", return_value=evidence), \
-             patch("merge_pr.has_authoritative_assigned_review", return_value=True):
+        codeant_pr["_active_review_feedback"] = []
+        codeant_pr["_review_evidence"] = evidence
+        with patch("merge_pr.has_authoritative_assigned_review", return_value=True):
             status = self.evaluate_fixture(prs=[codeant_pr])
         self.assertIn("PR #18 has active review feedback.", status["reasons"])
 
         pending_reassigned_pr = mock_pr(
             18, "review:codeant", decision="COMMENTED", unresolvedReviewThreadsCount=1,
         )
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[{"id": 1}]), \
-             patch("merge_pr.review_evidence", return_value=evidence), \
-             patch("merge_pr.with_service_evidence", return_value=evidence), \
-             patch("merge_pr.has_authoritative_assigned_review", return_value=False):
+        pending_reassigned_pr["_active_review_feedback"] = [{"id": 1}]
+        pending_reassigned_pr["_review_evidence"] = evidence
+        with patch("merge_pr.has_authoritative_assigned_review", return_value=False):
             status = self.evaluate_fixture(prs=[pending_reassigned_pr])
         self.assertIn("PR #18 is open and pending review.", status["reasons"])
 
-    def test_unknown_feedback_result_keeps_pr_in_feedback_state(self):
+    def test_current_head_coderabbit_review_is_not_reported_as_pending_review(self):
+        reviewed = mock_pr(
+            18,
+            "review:coderabbit",
+            decision="COMMENTED",
+            statusCheckRollup=[{
+                "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
+            }],
+        )
+        reviewed["_active_review_feedback"] = []
+        reviewed["_review_evidence"] = coderabbit_evidence("b")
+        status = self.evaluate_fixture(prs=[reviewed])
+        self.assertIn("PR #18 is reviewed and waiting for merge.", status["reasons"])
+        self.assertNotIn("PR #18 is open and pending review.", status["reasons"])
+
+    def test_missing_feedback_detail_stays_pending_without_live_lookup(self):
         pr = mock_pr(19, decision="COMMENTED", statusCheckRollup=[{
             "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
         }])
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=None), \
-             patch("merge_pr.review_evidence", side_effect=AssertionError("feedback state should short-circuit")):
+        with patch("fetch_pr_feedback.fetch_active_review_feedback",
+                   side_effect=AssertionError("fleet status must not query each PR")):
             status = self.evaluate_fixture(prs=[pr])
-        self.assertIn("PR #19 has active review feedback.", status["reasons"])
+        self.assertIn("PR #19 is open and pending review.", status["reasons"])
 
-    def test_feedback_lookup_exception_keeps_pr_in_feedback_state(self):
+    def test_feedback_lookup_is_not_attempted_by_fleet_status(self):
         pr = mock_pr(20, decision="COMMENTED", statusCheckRollup=[{
             "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
         }])
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", side_effect=RuntimeError("boom")), \
-             patch("merge_pr.review_evidence", side_effect=AssertionError("feedback state should short-circuit")):
+        with patch("fetch_pr_feedback.fetch_active_review_feedback",
+                   side_effect=AssertionError("fleet status must not query each PR")):
             status = self.evaluate_fixture(prs=[pr])
-        self.assertIn("PR #20 has active review feedback.", status["reasons"])
+        self.assertIn("PR #20 is open and pending review.", status["reasons"])
 
     def test_api_failure_still_never_reports_complete(self):
         status = evaluate_fleet_status("/definitely/not/a/repository")
@@ -1309,6 +1312,16 @@ class MergeQueueViewTests(unittest.TestCase):
         self.assertEqual(row["next_action"], "review")
         self.assertIn("evidence unavailable", row["verdict"])
 
+    def test_queue_row_unresolvable_slug_fails_closed(self):
+        pr = self._full_pr(10, "author:agent-a", "reviewed-by:agent-b")
+        with patch("fleet_status.get_repo_slug", return_value=None), \
+             patch("merge_pr.fetch_pr", return_value=pr), \
+             patch("merge_pr.linked_issues", return_value=[1]):
+            row = evaluate_queue_row(pr)
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["first_blocking"], "accept #1")
+        self.assertIn("could not resolve the repository slug", row["verdict"])
+
     def test_open_pr_list_failure_does_not_look_empty(self):
         payload = build_merge_queue(list_prs_fn=lambda: None)
         self.assertIsNone(payload["queue"])
@@ -1408,31 +1421,63 @@ class StallQuestionTests(unittest.TestCase):
 class MostRecentMergeTests(unittest.TestCase):
     def test_returns_newest_merged_at_not_first_row(self):
         # gh returns newest-created first, which is not newest-merged.
-        rows = [
-            {"mergedAt": "2026-08-17T01:00:00Z"},
-            {"mergedAt": "2026-08-17T09:00:00Z"},
-            {"mergedAt": "2026-08-17T03:00:00Z"},
-        ]
-        with patch.object(fleet_status, "run_gh_json", return_value=rows):
+        payload = {"total_count": 3, "incomplete_results": False, "items": [
+            {"pull_request": {"merged_at": "2026-08-17T01:00:00Z"}},
+            {"pull_request": {"merged_at": "2026-08-17T09:00:00Z"}},
+            {"pull_request": {"merged_at": "2026-08-17T03:00:00Z"}},
+        ]}
+        with patch.object(fleet_status, "run_gh_json", return_value=[payload]):
             newest = most_recent_merge_time()
         self.assertEqual(newest, datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc))
 
-    def test_lookup_uses_merge_date_search_not_creation_order(self):
+    def test_lookup_uses_merge_date_bounded_rest_search(self):
         captured = []
 
         def fake_gh(argv, **kwargs):
             captured.append(argv)
-            return []
+            return [{"total_count": 0, "incomplete_results": False, "items": []}]
 
         with patch.object(fleet_status, "run_gh_json", side_effect=fake_gh):
             most_recent_merge_history()
         self.assertEqual(len(captured), 1)
         argv = captured[0]
-        self.assertIn("--search", argv)
-        search = argv[argv.index("--search") + 1]
-        self.assertIn("is:merged", search)
-        self.assertIn("merged:>=", search)
-        self.assertNotIn("--state", argv)
+        self.assertEqual(argv[:2], ["gh", "api"])
+        self.assertIn("--paginate", argv)
+        self.assertIn("--slurp", argv)
+        self.assertIn("search/issues", argv)
+        query = next(value[2:] for value in argv if value.startswith("q="))
+        self.assertIn("repo:", query)
+        self.assertIn("is:merged", query)
+        self.assertIn("merged:>=", query)
+
+    def test_search_extracts_timestamp_from_closed_at_when_pull_request_has_only_url(self):
+        payload = {"total_count": 2, "incomplete_results": False, "items": [
+            {"closed_at": "2026-08-17T02:00:00Z", "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/1"}},
+            {"closed_at": "2026-08-17T08:00:00Z", "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/2"}},
+        ]}
+        with patch.object(fleet_status, "run_gh_json", return_value=[payload]):
+            newest, ok = most_recent_merge_history()
+        self.assertEqual(newest, datetime(2026, 8, 17, 8, 0, tzinfo=timezone.utc))
+        self.assertTrue(ok)
+
+    def test_incomplete_or_truncated_search_fails_closed(self):
+        row = {"closed_at": "2026-08-17T05:00:00Z", "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/1"}}
+        for pages in (
+            [{"total_count": 1, "incomplete_results": True, "items": [row]}],
+            [{"total_count": 2, "incomplete_results": False, "items": [row]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [row, row]}],
+            [{"total_count": 1, "incomplete_results": False, "items": ["nonsense"]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [{"closed_at": "2026-08-17T05:00:00Z"}]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [{"closed_at": "2026-08-17T05:00:00Z", "pull_request": None}]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [{"pull_request": {}}]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [{"closed_at": "invalid-ts", "pull_request": {}}]}],
+            [{"total_count": 2, "incomplete_results": False, "items": [row, {"pull_request": {}}]}],
+        ):
+            with self.subTest(pages=pages), \
+                 patch.object(fleet_status, "run_gh_json", return_value=pages):
+                newest, ok = most_recent_merge_history()
+            self.assertIsNone(newest)
+            self.assertFalse(ok)
 
     def test_lookup_failure_returns_unavailable(self):
         with patch.object(fleet_status, "run_gh_json", return_value=None):
@@ -1443,16 +1488,21 @@ class MostRecentMergeTests(unittest.TestCase):
             self.assertIsNone(most_recent_merge_time())
 
     def test_empty_successful_history_is_available(self):
-        with patch.object(fleet_status, "run_gh_json", return_value=[]):
+        payload = {"total_count": 0, "incomplete_results": False, "items": []}
+        with patch.object(fleet_status, "run_gh_json", return_value=[payload]):
             newest, ok = most_recent_merge_history()
         self.assertIsNone(newest)
         self.assertTrue(ok)
 
-    def test_malformed_rows_are_skipped(self):
-        rows = ["nonsense", {"mergedAt": None}, {"mergedAt": "2026-08-17T05:00:00Z"}]
-        with patch.object(fleet_status, "run_gh_json", return_value=rows):
-            newest = most_recent_merge_time()
-        self.assertEqual(newest, datetime(2026, 8, 17, 5, 0, tzinfo=timezone.utc))
+    def test_malformed_rows_fail_closed(self):
+        payload = {"total_count": 3, "incomplete_results": False, "items": [
+            "nonsense", {"pull_request": {"merged_at": None}},
+            {"pull_request": {"merged_at": "2026-08-17T05:00:00Z"}},
+        ]}
+        with patch.object(fleet_status, "run_gh_json", return_value=[payload]):
+            newest, ok = most_recent_merge_history()
+        self.assertIsNone(newest)
+        self.assertFalse(ok)
 
 
 class StallAlertTests(unittest.TestCase):

@@ -2,7 +2,8 @@
 # +60 for the #344 terminal merge lease shared by all four helpers.
 # +42 for the #410 GitHub pagination/date helpers claims no longer take from metrics.
 # +33 for the #362 fail-closed board reads.
-# line-ceiling: 1665
+# +15 for the #457 GraphQL quota reduction.
+# line-ceiling: 1680
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -24,9 +25,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from github_inventory import (
     board_agent_identities as rest_board_agent_identities,
+    issue_details as rest_issue_details,
     local_repo_slug,
     open_issues as rest_open_issues,
 )
+from github_issue_trust import query_issue_trust_identity
 
 
 VERIFICATION_EVIDENCE_SCHEMA = "aru.verification.v1"
@@ -39,6 +42,7 @@ _SENSITIVE_ARGUMENT_NAMES = {
 }
 
 _OPAQUE_VALUE_OPTIONS = {"-c", "--command", "-Command", "-e", "--eval"}
+_PROJECT_ITEMS_UNSET = object()
 
 
 def _looks_sensitive(name: str) -> bool:
@@ -924,14 +928,27 @@ def touches_conflict(a_paths: List[str], b_paths: List[str]) -> Optional[Tuple[s
 
 
 def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
-    """Fetches single issue details via gh CLI, plus GraphQL trust identity."""
-    cmd = [
-        "gh", "issue", "view", str(issue_id),
-        "--json", "number,title,labels,assignees,body,state,author,updatedAt",
-    ]
-    res = run_gh_json(cmd)
-    if not isinstance(res, dict):
+    """Fetch one issue through REST, using GraphQL only for outsider edits.
+
+    The claim path calls this repeatedly for optimistic concurrency checks.
+    ``gh issue view`` made every one of those reads a GraphQL request even
+    though REST already returns all ordinary issue fields and the author's
+    repository association.  The only missing trust datum is the last editor,
+    and that matters only when the original author is not already trusted.
+    """
+    slug = get_repo_slug()
+    if not slug:
         return None
+    res = rest_issue_details(run_gh_json, slug, issue_id)
+    if not res:
+        return None
+    association = res.get("authorAssociation")
+    if isinstance(association, str) and association.upper() in TRUSTED_AUTHOR_ASSOCIATIONS:
+        # REST supplied enough information to establish trust.  Do not spend a
+        # GraphQL request merely to learn an editor that cannot reduce trust.
+        res["trustIdentityResolved"] = True
+        return res
+
     trust = _issue_trust_identity(issue_id)
     res["trustIdentityResolved"] = trust is not None
     if trust:
@@ -942,47 +959,9 @@ def get_issue(issue_id: int) -> Optional[Dict[str, Any]]:
     return res
 
 
-_ISSUE_TRUST_QUERY = """
-query($owner:String!, $repo:String!, $number:Int!) {
-  repository(owner:$owner, name:$repo) {
-    issue(number:$number) {
-      editor { login }
-      authorAssociation
-    }
-  }
-}
-"""
-
-
 def _issue_trust_identity(issue_id: int) -> Optional[Dict[str, Any]]:
     """Editor and association fields that `gh issue view --json` cannot return."""
-    slug = get_repo_slug()
-    if not slug or "/" not in slug:
-        return None
-    owner, repo = slug.split("/", 1)
-    cmd = [
-        "gh", "api", "graphql",
-        "-f", f"query={_ISSUE_TRUST_QUERY}",
-        "-F", f"owner={owner}",
-        "-F", f"repo={repo}",
-        "-F", f"number={issue_id}",
-    ]
-    payload = run_gh_json(cmd)
-    if not isinstance(payload, dict) or payload.get("errors"):
-        return None
-    try:
-        node = payload["data"]["repository"]["issue"]
-    except (KeyError, TypeError):
-        return None
-    if not isinstance(node, dict):
-        return None
-    trust: Dict[str, Any] = {}
-    if "editor" in node:
-        trust["editor"] = node.get("editor")
-    association = node.get("authorAssociation")
-    if isinstance(association, str) and association:
-        trust["authorAssociation"] = association
-    return trust
+    return query_issue_trust_identity(issue_id, get_repo_slug, run_gh_json)
 
 
 def fetch_pr_comments(pr_id: int) -> List[Dict[str, Any]]:
@@ -1133,7 +1112,6 @@ def governed_project_items(
         return None
     return select_governed_project_items(items, repo_slug)
 
-
 def get_repo_projects(repo_slug: str) -> Optional[List[Dict[str, Any]]]:
     """Returns Project v2 boards linked to ``owner/repo``.
 
@@ -1243,7 +1221,9 @@ def resolve_governed_project(repo_slug: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def attach_issue_to_governed_project(issue_number: int) -> bool:
+def attach_issue_to_governed_project(
+    issue_number: int, existing_items: Any = _PROJECT_ITEMS_UNSET,
+) -> bool:
     """Idempotently attaches an issue to its repository's governed board."""
     slug = get_repo_slug()
     if not slug:
@@ -1268,7 +1248,10 @@ def attach_issue_to_governed_project(issue_number: int) -> bool:
         return False
 
     project_id = project.get("id")
-    existing = query_issue_project_items(issue_number)
+    existing = (
+        query_issue_project_items(issue_number)
+        if existing_items is _PROJECT_ITEMS_UNSET else existing_items
+    )
     if existing is None:
         print(
             f"[WARN] Project board items for issue #{issue_number} are "
@@ -1298,7 +1281,12 @@ def attach_issue_to_governed_project(issue_number: int) -> bool:
     return add_issue_to_project(issue_number, int(project_number), owner)
 
 
-def set_board_status(issue_number: int, status: str) -> bool:
+def set_board_status(  # noqa: C901, PLR0912
+    issue_number: int,
+    status: str,
+    *,
+    expected_status: Optional[str] = None,
+) -> bool:
     """Moves an issue's board item(s) to the named Status option.
 
     Returns True only if at least one board item actually moved, so callers can
@@ -1311,7 +1299,14 @@ def set_board_status(issue_number: int, status: str) -> bool:
     if items is None:
         return False
     if not items:
-        if not attach_issue_to_governed_project(issue_number):
+        if expected_status is not None:
+            print(
+                f"[CONFLICT] Issue #{issue_number} is missing from the governed "
+                f"board; cannot verify expected status '{expected_status}'.",
+                file=sys.stderr,
+            )
+            return False
+        if not attach_issue_to_governed_project(issue_number, existing_items=[]):
             return False
         items = governed_project_items(issue_number, slug)
     if not items:
@@ -1320,6 +1315,19 @@ def set_board_status(issue_number: int, status: str) -> bool:
             file=sys.stderr,
         )
         return False
+
+    if expected_status is not None:
+        current = {
+            str((item.get("status") or {}).get("name") or "").lower()
+            for item in items
+        }
+        if current != {expected_status.lower()}:
+            print(
+                f"[CONFLICT] Issue #{issue_number} board status is not exactly "
+                f"'{expected_status}'; refusing conditional move.",
+                file=sys.stderr,
+            )
+            return False
 
     moved = False
     for item in items:
@@ -1435,7 +1443,7 @@ def set_issue_priority_field(issue_number: int, value: str) -> bool:
     if items is None:
         return False
     if not items:
-        if not attach_issue_to_governed_project(issue_number):
+        if not attach_issue_to_governed_project(issue_number, existing_items=[]):
             return False
         items = governed_project_items(issue_number, slug)
     if not items:
