@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# line-ceiling: 565
+# +12 for the #344 terminal merge lease guard.
+# line-ceiling: 577
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -23,6 +24,9 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from common import (
+    terminal_lease_refusal,
+    terminal_merge_lease,
+
     VERIFICATION_EVIDENCE_END,
     VERIFICATION_EVIDENCE_SCHEMA,
     VERIFICATION_EVIDENCE_START,
@@ -404,6 +408,13 @@ def create_pr(issue_id: int, title: str = "", body: str = "",
               agent: str = "", family: str = "",
               verification_commands: Optional[List[str]] = None) -> bool:
     current_branch = get_current_branch()
+    # Opening a PR from a branch that already carried a governed merge means a
+    # stale worker is re-proposing merged work under a spent name (#344).
+    lease = terminal_merge_lease(current_branch)
+    if lease:
+        print(f"[BLOCKED] {terminal_lease_refusal(lease, 'open a PR from this branch')}",
+              file=sys.stderr)
+        return False
     issue = get_issue(issue_id)
 
     if not title:

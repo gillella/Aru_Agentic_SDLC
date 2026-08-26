@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# line-ceiling: 1482
+# +60 for the #344 terminal merge lease shared by all four helpers.
+# line-ceiling: 1576
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -1460,6 +1461,99 @@ def check_version_compatibility(
             file=sys.stderr,
         )
     return True
+
+
+TERMINAL_LEASE_LABEL_PREFIX = "terminal-lease:"
+
+
+def terminal_lease_label(gated_sha: str) -> str:
+    """Label recording that a governed merge accepted this PR at ``gated_sha``.
+
+    Written once, immediately after GitHub accepts the merge, and never removed
+    by any claim-clearing or reap path -- so its presence is both the "recorded"
+    and the "still queryable" half of the lease. Truncated to 12 hex characters
+    to stay inside GitHub's 50-character label limit while remaining collision-
+    proof in practice.
+    """
+    return f"{TERMINAL_LEASE_LABEL_PREFIX}{(gated_sha or '').strip().lower()[:12]}"
+
+
+def terminal_lease_sha(labels) -> Optional[str]:
+    """The gated-SHA prefix recorded by a terminal-lease label, or None.
+
+    Presence means a governed merge already accepted this PR, so every claim
+    path must treat it as terminal rather than trusting claim labels that
+    still look open.
+    """
+    for name in labels or []:
+        if isinstance(name, str) and name.startswith(TERMINAL_LEASE_LABEL_PREFIX):
+            value = name[len(TERMINAL_LEASE_LABEL_PREFIX):].strip().lower()
+            if value:
+                return value
+    return None
+
+
+def terminal_merge_lease(branch: str) -> Optional[Dict[str, Any]]:
+    """Resolve a head branch to its terminal merged lease, or None.
+
+    After a governed merge accepts an exact head, that branch name is spent:
+    any later push to it is a stale worker producing an ungoverned orphan
+    commit, not new work (#344, observed on hermes PR #89). The lease is the
+    predicate that lets every helper tell those apart.
+
+    Derived from merged-PR state rather than a separate store, so it cannot
+    disagree with GitHub about whether a merge happened, and so it applies to
+    PRs merged before this landed with no backfill. Returns None when the
+    branch was never merged. Fails closed -- returning a lease -- when the
+    lookup is unreadable or matches several merged PRs, because "cannot tell"
+    must block continuation rather than permit it.
+    """
+    if not branch or not isinstance(branch, str):
+        return None
+    limit = 20
+    rows = run_gh_json([
+        "gh", "pr", "list", "--state", "merged", "--head", branch,
+        "--limit", str(limit),
+        "--json", "number,headRefName,headRefOid,mergeCommit,mergedAt,author",
+    ])
+    unreadable = {"branch": branch, "unreadable": True, "pr": None,
+                  "gated_sha": None, "merged_sha": None, "holder": None}
+    # A non-list payload is malformed, not "no matches", and a full page may be
+    # hiding a further match. Either way the answer is unknown, and on a
+    # governance path unknown must block rather than permit (CodeRabbit, #344).
+    if not isinstance(rows, list) or len(rows) >= limit:
+        return unreadable
+    exact = [r for r in rows if isinstance(r, dict) and r.get("headRefName") == branch]
+    if not exact:
+        return None
+    if len(exact) > 1:
+        return {"branch": branch, "ambiguous": sorted(r.get("number") for r in exact),
+                "pr": None, "gated_sha": None, "merged_sha": None, "holder": None}
+    row = exact[0]
+    return {
+        "branch": branch,
+        "pr": row.get("number"),
+        "gated_sha": row.get("headRefOid"),
+        "merged_sha": (row.get("mergeCommit") or {}).get("oid"),
+        "holder": (row.get("author") or {}).get("login"),
+        "merged_at": row.get("mergedAt"),
+    }
+
+
+def terminal_lease_refusal(lease: Dict[str, Any], attempted: str) -> str:
+    """One refusal message shared by every door a stale writer can knock on."""
+    if lease.get("unreadable"):
+        return (f"Cannot determine whether branch {lease['branch']!r} was already merged; "
+                f"refusing to {attempted} rather than risk continuing merged work.")
+    if lease.get("ambiguous"):
+        return (f"Branch {lease['branch']!r} matches several merged PRs "
+                f"({lease['ambiguous']}); refusing to {attempted}.")
+    return (
+        f"Branch {lease['branch']!r} was terminally merged by PR #{lease['pr']} "
+        f"at gated head {lease['gated_sha']} (merge {lease['merged_sha']}). "
+        f"Refusing to {attempted}: merged work cannot be continued. "
+        "File a new issue and create a new branch for follow-up work."
+    )
 
 
 if os.environ.get("ARU_SDLC_REF"):
