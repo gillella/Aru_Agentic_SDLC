@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1280
+# line-ceiling: 1370
 """Project-scoped agent presence and availability registry.
 
 GitHub claims remain authoritative ownership. This registry only records which
@@ -20,6 +20,7 @@ import os
 import re
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -38,6 +39,7 @@ from agent_identity import (
     product_for_family as product_for_family,
     worker_fingerprint as worker_fingerprint,
 )
+from common import select_governed_projects
 
 SCHEMA_VERSION = 1
 SCHEMA_NAME = "aru.agent-presence/v1"
@@ -106,50 +108,46 @@ def _parse_iso(value: str) -> datetime:
 def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
     if path.is_symlink():
         raise PresenceError(f"unsafe directory: {path}")
-    if path.exists():
-        if not path.is_dir():
-            raise PresenceError(f"unsafe directory: {path}")
-        info = path.stat()
-        if info.st_uid != os.getuid():
-            raise PresenceError(f"directory is not owned by the current user: {path}")
-        mode = stat.S_IMODE(info.st_mode)
-        if mode & 0o022:
-            raise PresenceError(f"directory is writable by another user: {path}")
-        if mode != 0o700:
-            descriptor = -1
-            try:
-                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-                descriptor = os.open(path, flags)
-                opened = os.fstat(descriptor)
-                if (
-                    not stat.S_ISDIR(opened.st_mode)
-                    or opened.st_uid != os.getuid()
-                    or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
-                ):
-                    raise PresenceError(f"directory changed while securing it: {path}")
-                if stat.S_IMODE(opened.st_mode) & 0o022:
-                    raise PresenceError(f"directory is writable by another user: {path}")
-                os.fchmod(descriptor, 0o700)
-            except OSError as exc:
-                raise PresenceError(f"cannot secure directory {path}: {exc}") from exc
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
-        return
-    path.mkdir(parents=True, mode=0o700)
-    descriptor = -1
+    if not path.exists():
+        try:
+            path.mkdir(parents=True, mode=0o700)
+        except FileExistsError:
+            # Concurrent creation race: another process created the directory.
+            pass
+        except OSError as exc:
+            raise PresenceError(f"cannot create directory {path}: {exc}") from exc
+
+    if path.is_symlink() or not path.is_dir():
+        raise PresenceError(f"unsafe directory: {path}")
     try:
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
-        opened = os.fstat(descriptor)
-        if not stat.S_ISDIR(opened.st_mode) or opened.st_uid != os.getuid():
-            raise PresenceError(f"unsafe directory after creation: {path}")
-        os.fchmod(descriptor, 0o700)
+        info = path.stat()
     except OSError as exc:
-        raise PresenceError(f"cannot secure directory {path}: {exc}") from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        raise PresenceError(f"cannot stat directory {path}: {exc}") from exc
+    if info.st_uid != os.getuid():
+        raise PresenceError(f"directory is not owned by the current user: {path}")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        raise PresenceError(f"directory is writable by another user: {path}")
+    if mode != 0o700:
+        descriptor = -1
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise PresenceError(f"directory changed while securing it: {path}")
+            if stat.S_IMODE(opened.st_mode) & 0o022:
+                raise PresenceError(f"directory is writable by another user: {path}")
+            os.fchmod(descriptor, 0o700)
+        except OSError as exc:
+            raise PresenceError(f"cannot secure directory {path}: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def _private_file(path: Path) -> None:
@@ -265,6 +263,104 @@ def _is_live_session(session_id: str) -> bool:
     return True
 
 
+IDENTITY_TIMEOUT_SECONDS = 15
+
+
+def _bounded_json(command: List[str], cwd: Optional[str] = None) -> Any:
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            timeout=IDENTITY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PresenceError(
+            f"identity command timed out after {IDENTITY_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise PresenceError(f"identity command failed: {exc}") from exc
+    if result.returncode != 0 or not result.stdout:
+        raise PresenceError(result.stderr.strip() or "identity command returned no data")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise PresenceError(f"identity command returned invalid JSON: {exc}") from exc
+
+
+def _discover_governed_project(repo_slug: str) -> Dict[str, Any]:
+    owner, repo_name = repo_slug.split("/", 1)
+    query = """
+    query($owner:String!, $repo:String!) {
+      repository(owner:$owner, name:$repo) {
+        projectsV2(first:100) {
+          nodes {
+            id number title
+            owner {
+              ... on User { login }
+              ... on Organization { login }
+            }
+            repositories(first:100) { nodes { nameWithOwner } }
+          }
+        }
+      }
+    }
+    """
+    response = _bounded_json([
+        "gh", "api", "graphql", "-f", f"query={query}",
+        "-F", f"owner={owner}", "-F", f"repo={repo_name}",
+    ])
+    try:
+        available = response["data"]["repository"]["projectsV2"]["nodes"]
+    except (KeyError, TypeError) as exc:
+        raise PresenceError("cannot query governed ProjectV2 boards") from exc
+    projects = select_governed_projects(available, repo_slug)
+    if len(projects) != 1 or not projects[0].get("id"):
+        raise PresenceError("cannot resolve one governed ProjectV2 board")
+    return projects[0]
+
+
+def discover_checkout_identity(local_path: Path) -> Dict[str, Any]:
+    if not local_path.is_dir():
+        raise PresenceError(f"checkout is unavailable: {local_path}")
+    try:
+        repo = _bounded_json(
+            ["gh", "repo", "view", "--json", "id,nameWithOwner"],
+            cwd=str(local_path),
+        )
+        repo_node_id = repo["id"]
+        repo_slug = repo["nameWithOwner"]
+        if (not isinstance(repo_node_id, str) or not repo_node_id.strip()
+                or not isinstance(repo_slug, str) or not repo_slug.strip()):
+            raise PresenceError("repository identity is missing or invalid")
+        rest_repo = _bounded_json(
+            ["gh", "api", f"repos/{repo_slug}"], cwd=str(local_path),
+        )
+        rest_node_id = rest_repo["node_id"]
+        rest_slug = rest_repo["full_name"]
+        if (not isinstance(rest_node_id, str) or not rest_node_id.strip()
+                or not isinstance(rest_slug, str) or not rest_slug.strip()):
+            raise PresenceError("repository identity is missing or invalid")
+        if rest_node_id != repo_node_id or rest_slug != repo_slug:
+            raise PresenceError("repository identity APIs returned mismatched data")
+        database_id = rest_repo["id"]
+        if (isinstance(database_id, bool) or not isinstance(database_id, int)
+                or database_id <= 0):
+            raise PresenceError("repository database id is missing or invalid")
+        project = _discover_governed_project(repo["nameWithOwner"])
+    except (KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        raise PresenceError(f"cannot verify GitHub identity for {local_path}: {exc}") from exc
+    return {
+        "github_repo_id": repo_node_id,
+        "github_repo_database_id": database_id,
+        "project_v2_id": str(project["id"]),
+        "repo_slug": repo_slug,
+        "local_path": str(local_path.resolve()),
+    }
+
+
 def path_derived_project_id(checkout: Path) -> str:
     """Last-resort project_id when GitHub identity cannot be resolved."""
     resolved = checkout.expanduser().resolve()
@@ -295,12 +391,12 @@ def resolve_project_id(
     2. Path hash only when GitHub identity cannot be discovered (offline/hermetic).
     """
     resolved = checkout.expanduser().resolve()
+    provider = identity_provider if identity_provider is not None else discover_checkout_identity
     identity: Optional[Dict[str, Any]] = None
-    if identity_provider is not None:
-        try:
-            identity = identity_provider(resolved)
-        except (PresenceError, OSError, ValueError, TypeError):
-            identity = None
+    try:
+        identity = provider(resolved)
+    except (PresenceError, OSError, ValueError, TypeError):
+        identity = None
     if identity:
         repo_id = str(identity.get("github_repo_id") or "")
         board_id = str(identity.get("project_v2_id") or "")

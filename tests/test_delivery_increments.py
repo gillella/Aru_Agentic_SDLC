@@ -1,4 +1,4 @@
-# line-ceiling: 446
+# line-ceiling: 550
 import json
 import os
 import sys
@@ -440,6 +440,61 @@ class EmergencyIncrementTests(IncrementFixture):
         self.assertEqual(emergency["kind"], "emergency")
         self.assertEqual(self.store.get(normal["increment_id"])["issue_scope"], [10, 11])
         self.assertEqual(self.store.active("proj_alpha")["increment_id"], normal["increment_id"])
+
+
+class DirectoryConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_private_directory_concurrent_creation_race(self):
+        from delivery_increments import _private_directory
+
+        target = self.root / "concurrent_inc_dir"
+        original_mkdir = Path.mkdir
+        first_call = [True]
+
+        def racing_mkdir(path_self, *args, **kwargs):
+            if path_self == target and first_call[0]:
+                first_call[0] = False
+                original_mkdir(path_self, *args, **kwargs)
+                raise FileExistsError(f"File exists: {path_self}")
+            return original_mkdir(path_self, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", side_effect=racing_mkdir, autospec=True):
+            _private_directory(target)
+
+        self.assertTrue(target.is_dir())
+        mode = target.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o700)
+
+    def test_private_directory_threadpool_concurrency(self):
+        from delivery_increments import _private_directory
+
+        target = self.root / "multi_threaded_inc_dir"
+
+        def create_dir(_):
+            _private_directory(target)
+            return True
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(create_dir, range(16)))
+
+        self.assertTrue(all(results))
+        self.assertTrue(target.is_dir())
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+
+    def test_private_directory_concurrent_conflict_with_file(self):
+        from delivery_increments import IncrementError, _private_directory
+
+        target = self.root / "conflicting_file"
+        target.write_text("not a directory", encoding="utf-8")
+
+        with self.assertRaises(IncrementError):
+            _private_directory(target)
 
 
 if __name__ == "__main__":

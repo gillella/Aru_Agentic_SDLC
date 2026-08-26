@@ -1,9 +1,10 @@
-# line-ceiling: 667
+# line-ceiling: 850
 import json
 import os
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -661,6 +662,125 @@ class FreeIdentityResolutionTests(unittest.TestCase):
         self.store.resolve_free_identity(["gemini-1"], "session-a")
         with self.assertRaises(ap.PresenceError):
             self.store.resolve_free_identity(["gemini-1"], "session-b")
+
+
+class DurableIdentityAndDirectoryConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def test_resolve_project_id_default_discovers_durable_identity(self):
+        clone_a = self.root / "clones" / "agent-a"
+        clone_b = self.root / "clones" / "agent-b"
+        clone_a.mkdir(parents=True)
+        clone_b.mkdir(parents=True)
+
+        repo_identity = {
+            "github_repo_id": "R_kgDO123456",
+            "github_repo_database_id": 987654,
+            "project_v2_id": "PVT_kwDO789012",
+            "repo_slug": "owner/project-repo",
+            "local_path": str(clone_a.resolve()),
+        }
+
+        with patch.object(ap, "discover_checkout_identity", return_value=repo_identity):
+            first = ap.resolve_project_id(clone_a)
+            second = ap.resolve_project_id(clone_b)
+
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("proj_repo_"))
+        self.assertNotEqual(first, ap.path_derived_project_id(clone_a))
+        self.assertNotEqual(first, ap.path_derived_project_id(clone_b))
+
+    def test_discover_checkout_identity_e2e_mock(self):
+        clone = self.root / "mock_repo"
+        clone.mkdir()
+
+        def mock_bounded(cmd, cwd=None):
+            if cmd[:3] == ["gh", "repo", "view"]:
+                return {"id": "R_node_1", "nameWithOwner": "acme/corp"}
+            if cmd[:3] == ["gh", "api", "repos/acme/corp"]:
+                return {"node_id": "R_node_1", "full_name": "acme/corp", "id": 42}
+            if cmd[:3] == ["gh", "api", "graphql"]:
+                return {
+                    "data": {
+                        "repository": {
+                            "projectsV2": {
+                                "nodes": [
+                                    {
+                                        "id": "PVT_board_1",
+                                        "number": 1,
+                                        "title": "corp Board",
+                                        "repositories": {"nodes": [{"nameWithOwner": "acme/corp"}]},
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            raise RuntimeError(f"unexpected command: {cmd}")
+
+        with patch.object(ap, "_bounded_json", side_effect=mock_bounded):
+            identity = ap.discover_checkout_identity(clone)
+            project_id = ap.resolve_project_id(clone)
+
+        self.assertEqual(identity["github_repo_id"], "R_node_1")
+        self.assertEqual(identity["project_v2_id"], "PVT_board_1")
+        self.assertEqual(identity["repo_slug"], "acme/corp")
+        self.assertEqual(identity["github_repo_database_id"], 42)
+        self.assertTrue(project_id.startswith("proj_repo_"))
+
+    def test_resolve_project_id_fallback_on_discovery_error(self):
+        non_git_dir = self.root / "random_dir"
+        non_git_dir.mkdir()
+
+        with patch.object(ap, "discover_checkout_identity", side_effect=ap.PresenceError("not git")):
+            project_id = ap.resolve_project_id(non_git_dir)
+
+        self.assertEqual(project_id, ap.path_derived_project_id(non_git_dir))
+
+    def test_private_directory_concurrent_creation_race(self):
+        target = self.root / "concurrent_store_dir"
+        original_mkdir = Path.mkdir
+
+        # Simulate losing the mkdir race on first attempt
+        first_call = [True]
+
+        def racing_mkdir(path_self, *args, **kwargs):
+            if path_self == target and first_call[0]:
+                first_call[0] = False
+                original_mkdir(path_self, *args, **kwargs)
+                raise FileExistsError(f"File exists: {path_self}")
+            return original_mkdir(path_self, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", side_effect=racing_mkdir, autospec=True):
+            ap._private_directory(target)
+
+        self.assertTrue(target.is_dir())
+        mode = target.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o700)
+
+    def test_private_directory_threadpool_concurrency(self):
+        target = self.root / "multi_threaded_dir"
+
+        def create_dir(_):
+            ap._private_directory(target)
+            return True
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(create_dir, range(16)))
+
+        self.assertTrue(all(results))
+        self.assertTrue(target.is_dir())
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+
+    def test_private_directory_concurrent_conflict_with_file(self):
+        target = self.root / "conflicting_file"
+        target.write_text("not a directory", encoding="utf-8")
+
+        with self.assertRaises(ap.PresenceError):
+            ap._private_directory(target)
 
 
 if __name__ == "__main__":

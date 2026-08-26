@@ -42,50 +42,46 @@ class IncrementError(RuntimeError):
 def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
     if path.is_symlink():
         raise IncrementError(f"unsafe directory: {path}")
-    if path.exists():
-        if not path.is_dir():
-            raise IncrementError(f"unsafe directory: {path}")
-        info = path.stat()
-        if info.st_uid != os.getuid():
-            raise IncrementError(f"directory is not owned by the current user: {path}")
-        mode = stat.S_IMODE(info.st_mode)
-        if mode & 0o022:
-            raise IncrementError(f"directory is writable by another user: {path}")
-        if mode != 0o700:
-            descriptor = -1
-            try:
-                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-                descriptor = os.open(path, flags)
-                opened = os.fstat(descriptor)
-                if (
-                    not stat.S_ISDIR(opened.st_mode)
-                    or opened.st_uid != os.getuid()
-                    or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
-                ):
-                    raise IncrementError(f"directory changed while securing it: {path}")
-                if stat.S_IMODE(opened.st_mode) & 0o022:
-                    raise IncrementError(f"directory is writable by another user: {path}")
-                os.fchmod(descriptor, 0o700)
-            except OSError as exc:
-                raise IncrementError(f"cannot secure directory {path}: {exc}") from exc
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
-        return
-    path.mkdir(parents=True, mode=0o700)
-    descriptor = -1
+    if not path.exists():
+        try:
+            path.mkdir(parents=True, mode=0o700)
+        except FileExistsError:
+            # Concurrent creation race: another process created the directory.
+            pass
+        except OSError as exc:
+            raise IncrementError(f"cannot create directory {path}: {exc}") from exc
+
+    if path.is_symlink() or not path.is_dir():
+        raise IncrementError(f"unsafe directory: {path}")
     try:
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
-        opened = os.fstat(descriptor)
-        if not stat.S_ISDIR(opened.st_mode) or opened.st_uid != os.getuid():
-            raise IncrementError(f"unsafe directory after creation: {path}")
-        os.fchmod(descriptor, 0o700)
+        info = path.stat()
     except OSError as exc:
-        raise IncrementError(f"cannot secure directory {path}: {exc}") from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        raise IncrementError(f"cannot stat directory {path}: {exc}") from exc
+    if info.st_uid != os.getuid():
+        raise IncrementError(f"directory is not owned by the current user: {path}")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        raise IncrementError(f"directory is writable by another user: {path}")
+    if mode != 0o700:
+        descriptor = -1
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise IncrementError(f"directory changed while securing it: {path}")
+            if stat.S_IMODE(opened.st_mode) & 0o022:
+                raise IncrementError(f"directory is writable by another user: {path}")
+            os.fchmod(descriptor, 0o700)
+        except OSError as exc:
+            raise IncrementError(f"cannot secure directory {path}: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def _private_file(path: Path) -> None:
