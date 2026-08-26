@@ -1,8 +1,10 @@
 # Aru Software Factory — Build Plan
 
 > **Current review policy (2026-08-25):** CodeRabbit reviews ordinary PRs by
-> default. An operator may explicitly reassign a stalled PR to Sourcery or
-> CodeAnt. Only after every external reviewer is unavailable, busy, or waiting
+> default, and `review:coderabbit` is the only assignment `create_pr.py`
+> creates. An operator may explicitly reassign a stalled PR to Sourcery or
+> CodeAnt after concrete observed unavailability, never as a load balancer.
+> Only after every external reviewer is unavailable, busy, or waiting
 > too long may one independent coding agent be assigned to that exact PR.
 > Legacy coding-agent labels alone remain invalid; emergency review requires
 > exact-head GitHub evidence and merge-gate validation. There is no reviewer

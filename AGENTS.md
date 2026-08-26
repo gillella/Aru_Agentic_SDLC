@@ -28,8 +28,10 @@ the Definition-of-Done gate.
   non-authoritative in Aru-governed repositories.
 - Brainstorming workflows such as Superpowers supply input to Aru's plan gate;
   they do not run a parallel implementation process.
-- Memory tools provide context only. `create_pr.py` assigns CodeRabbit by
-  default. An operator may explicitly move a stalled PR to Sourcery or CodeAnt.
+- Memory tools provide context only. `review:coderabbit` is the only review
+  assignment `create_pr.py` creates. An operator may explicitly move a stalled
+  PR to Sourcery or CodeAnt after concrete observed unavailability; that switch
+  is one-way and is never a load balancer, a rotation, or a retry.
   Only when all external reviewers are unavailable, busy, or waiting too long
   may the operator assign one independent coding agent with `review:agent`.
   That emergency path is per-PR and never creates a review queue, rotation,

@@ -1,4 +1,4 @@
-# line-ceiling: 431
+# line-ceiling: 476
 """Mechanical truth contract for the canonical factory documentation."""
 
 import re
@@ -213,6 +213,55 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
         intervention = section(plan, "### 4.1 The one mandatory human intervention", "### 4.2")
         self.assertIn("implementation/remediation/mechanical-merge loop", intervention)
         self.assertNotIn("implementation/review/remediation loop", intervention)
+
+    def test_review_fallback_policy_is_documented_for_operators(self):
+        """#436: the operator-facing docs must state the fallback-only policy,
+        the per-service evidence the merge gate really enforces, and what an
+        operator does when the service they switched to also stalls.
+
+        Matching runs against whitespace-normalized text so a future rewrap
+        cannot silently drop a policy sentence while this test keeps passing.
+        """
+        def flat(relative_path):
+            raw = (ROOT / relative_path).read_text(encoding="utf-8")
+            return " ".join(raw.replace("> ", "").split())
+
+        runbook_path = "docs/review-pool-operator-runbook.md"
+        runbook, agents = flat(runbook_path), flat("AGENTS.md")
+        board = flat("docs/project_board_workflow.md")
+        plan = flat("docs/ARU-SOFTWARE-FACTORY.md")
+        only = "`review:coderabbit` is the only review assignment `create_pr.py`"
+        required = (
+            # Fallback-only policy: one default assignment, never load spreading.
+            (runbook, f"{only} ever creates"),
+            (runbook, "never a load balancer and never a retry"),
+            (agents, f"{only} creates"),
+            (agents, "never a load balancer, a rotation, or a retry"),
+            (board, f"{only} creates"),
+            (board, "no automatic rotation, load balancer, or scheduler exists"),
+            (plan, "`review:coderabbit` is the only assignment `create_pr.py` creates"),
+            (plan, "never as a load balancer"),
+            # Evidence contract: producer identity and head binding, not a name.
+            (runbook, "produced by the recognized `sourcery-ai` app slug"),
+            (runbook, "linked to this pull request number and base"),
+            (runbook, "Zero such checks and two or more both block"),
+            (runbook, "`codeant-review-status` marker"),
+            (runbook, "blocks **both** paths"),
+            # Recovery: the switch is one-way, agent escalation is terminal.
+            (runbook, "The external switch is one-way by design"),
+            (runbook, "reassignment is not a retry mechanism"),
+            (runbook, "`--to agent` is the only move accepted from an already-switched PR"),
+            (runbook, "There is no third hop"),
+            (board, "That external switch is one-way"),
+        )
+        for document, phrase in required:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, document)
+        # "Pool" is rotation-era vocabulary for a mechanism that does not exist.
+        self.assertNotIn("review-pool label", runbook)
+        self.assertNotIn("Review-Pool Operator Runbook", runbook)
+        self.assertIn("### When the selected service also fails",
+                      (ROOT / runbook_path).read_text(encoding="utf-8"))
 
     def test_historical_roadmap_cannot_look_current(self):
         plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
