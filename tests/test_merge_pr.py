@@ -2753,7 +2753,7 @@ class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
                 "agent": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
             },
             "reviews": [{
-                "id": "agent-review", "state": "COMMENTED",
+                "id": "agent-review", "state": "APPROVED",
                 "submittedAt": "2026-08-25T10:02:00Z",
                 "body": "No findings after exact-head review.",
                 "author": {"login": "gillella", "__typename": "User"},
@@ -2784,6 +2784,13 @@ class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
         self.assertIn("agent-2", message)
         self.assertTrue(merge_pr.has_authoritative_assigned_review(
             self.pr(), self.evidence()))
+
+    def test_comment_only_review_cannot_authorize_a_merge(self):
+        evidence = self.evidence()
+        evidence["reviews"][0]["state"] = "COMMENTED"
+        ok, message = merge_pr.check_reviews(self.pr(), evidence)
+        self.assertFalse(ok)
+        self.assertIn("No substantive independent GitHub review", message)
 
     def test_unknown_family_or_impossible_completion_chronology_fails(self):
         unknown_family = self.evidence()

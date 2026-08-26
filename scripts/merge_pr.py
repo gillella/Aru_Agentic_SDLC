@@ -1978,12 +1978,10 @@ def _agent_review_verdict(pr, evidence):  # noqa: C901, PLR0911, PLR0912
         state = str(review.get("state") or "").upper()
         author = review.get("author") or {}
         submitted = _parse_review_ts(review.get("submittedAt"))
-        body = review.get("body")
         if ((review.get("commit") or {}).get("oid") == head
                 and author.get("__typename") == "User"
                 and _login_matches(author.get("login"), authorized_login)
-                and state not in {"PENDING", "DISMISSED", "CHANGES_REQUESTED"}
-                and (state != "COMMENTED" or isinstance(body, str) and body.strip())
+                and state == "APPROVED"
                 and submitted is not None and assigned_at <= submitted <= completed_at):
             matches.append(review)
     if not matches:

@@ -31,6 +31,7 @@ from common import (
     terminal_lease_refusal,
     terminal_merge_lease,
 
+    TRUSTED_AUTHOR_ASSOCIATIONS,
     VERIFICATION_EVIDENCE_END,
     VERIFICATION_EVIDENCE_SCHEMA,
     VERIFICATION_EVIDENCE_START,
@@ -210,16 +211,10 @@ def review_assignment_lock(head: str):
                   f"{REVIEW_ASSIGNMENT_LOCK_REF} before assigning another PR.",
                   file=sys.stderr)
 
-
 def codeant_already_triggered(pr_ref: str) -> Optional[bool]:
-    """Whether this pull request already carries the CodeAnt trigger comment.
+    """Return trusted exact-trigger presence, or ``None`` for unreadable history.
 
-    ``None`` when the comment history cannot be read. Finalization is
-    resumable, so a retry that reposts the trigger enqueues a second CodeAnt
-    run and can produce competing evidence records for one head; a retry that
-    guesses "already sent" can leave the assignment with no review at all.
-    The match is the exact trigger body, because CodeAnt's own usage-guide
-    comments quote the same string.
+    Trust blocks suppression by arbitrary commenters; unknown blocks retry guesses.
     """
     code, out, _ = run_cmd(["gh", "pr", "view", str(pr_ref), "--json", "comments"],
                            check=False)
@@ -234,12 +229,17 @@ def codeant_already_triggered(pr_ref: str) -> Optional[bool]:
         return None
     for comment in comments:
         body = comment.get("body") if isinstance(comment, dict) else None
-        if not isinstance(body, str):
+        author = comment.get("author") if isinstance(comment, dict) else None
+        login = author.get("login") if isinstance(author, dict) else None
+        if not isinstance(body, str) or not isinstance(login, str):
             return None
         if body.strip() == CODEANT_TRIGGER:
-            return True
+            association = comment.get("authorAssociation")
+            if not isinstance(association, str):
+                return None
+            if association.upper() in TRUSTED_AUTHOR_ASSOCIATIONS:
+                return True
     return False
-
 
 def _confirm_reservation(number: int, issue_id: int, selected: str) -> str:
     """Compare-and-set the applied label against a fresh complete inventory.

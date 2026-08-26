@@ -367,17 +367,16 @@ class ConcurrentReassignmentTests(ReassignHarness, unittest.TestCase):
 
         def run(command, **_kwargs):
             calls.append(command)
-            if command[:4] == ["gh", "api", "--method", "POST"]:
-                return 1, "", "reference already exists"
             return 0, "", ""
 
         with patch.object(rr, "run_gh_json", return_value=pr("review:coderabbit")), \
                 patch.object(rr, "reassignment_history", return_value=[]), \
+                patch.object(rr, "remote_reassignment_lock",
+                             return_value=nullcontext(False)), \
                 patch.object(rr, "ensure_label", return_value=True), \
                 patch.object(rr, "run_cmd", side_effect=run):
             code = rr.reassign(433, "sourcery", self.REASON)
         self.assertEqual(code, rr.EXIT_CONFLICT)
-        self.assertEqual(calls[0][:4], ["gh", "api", "--method", "POST"])
         self.assertEqual([cmd for cmd in calls if cmd[:3] == ["gh", "pr", "edit"]], [])
 
     def test_history_landing_before_the_write_refuses_without_mutating(self):

@@ -31,6 +31,7 @@ from contextlib import contextmanager
 import json
 import re
 import sys
+import time
 
 from common import (
     ensure_label,
@@ -40,6 +41,7 @@ from common import (
     run_gh_json,
 )
 from create_pr import MODEL_FAMILIES
+from review_reassignment_lock import remote_reassignment_lock
 
 EXTERNAL_FALLBACK_LABELS = {
     "coderabbit": "review:coderabbit",
@@ -61,7 +63,7 @@ SERVICE_TRIGGERS = {
 REASSIGNMENT_MARKER_PREFIX = "<!-- aru-review-reassignment:v1 "
 REASSIGNMENT_MARKER_RE = re.compile(
     re.escape(REASSIGNMENT_MARKER_PREFIX) + r"(\{[^\n]*\}) -->")
-REASSIGNMENT_LOCK_REF_PREFIX = "refs/tags/aru-locks/review-reassignment-"
+HISTORY_SETTLE_DELAYS_S = (0.0, 0.5, 1.5)
 _HEAD_RE = re.compile(r"[0-9a-fA-F]{40}")
 _AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 # GitHub login grammar, plus the `[bot]` suffix an App identity carries.
@@ -302,40 +304,27 @@ def _recheck_before_commit(pr_id: int, existing: str, head: str, history):
 
 @contextmanager
 def reassignment_lock(pr_id: int):
-    """Atomically serialize one PR's reassignment through a transient ref.
-
-    Re-reading labels/history narrows a race but cannot close the interval
-    between the last read and the first write. Creating a GitHub ref is an
-    atomic server-side claim, so only one operator reaches that interval.
-    """
-    slug = get_repo_slug()
+    """Validate the live PR head, then enter its owner-bound remote lease."""
     snapshot, problem = _validated_snapshot(pr_id)
-    lock_ref = f"{REASSIGNMENT_LOCK_REF_PREFIX}{pr_id}"
-    if not slug or problem:
+    if problem:
         print(f"[CONFLICT] Cannot establish the atomic reassignment lock for PR "
-              f"#{pr_id}: {problem or 'repository is unreadable'}.", file=sys.stderr)
+              f"#{pr_id}: {problem}.", file=sys.stderr)
         yield False
         return
-    head = snapshot["headRefOid"]
-    code, _, err = run_cmd(
-        ["gh", "api", "--method", "POST", f"repos/{slug}/git/refs",
-         "-f", f"ref={lock_ref}", "-f", f"sha={head}"], check=False)
-    if code != 0:
-        print(f"[CONFLICT] Could not acquire the atomic reassignment lock for PR "
-              f"#{pr_id}; another operator may be active: {err.strip()}.", file=sys.stderr)
-        yield False
-        return
-    try:
-        yield True
-    finally:
-        path = lock_ref.removeprefix("refs/")
-        released, _, release_err = run_cmd(
-            ["gh", "api", "--method", "DELETE", f"repos/{slug}/git/refs/{path}"],
-            check=False)
-        if released != 0:
-            print(f"[ERROR] Reassignment finished but lock release failed: "
-                  f"{release_err.strip()}. Verify no operator is live, then remove "
-                  f"{lock_ref} before retrying PR #{pr_id}.", file=sys.stderr)
+    with remote_reassignment_lock(pr_id, snapshot["headRefOid"]) as acquired:
+        yield acquired
+
+
+def _settled_history(pr_id: int, prior, expected):
+    """Retry only missing/stale audit visibility inside a bounded window."""
+    committed = None
+    for delay in HISTORY_SETTLE_DELAYS_S:
+        if delay:
+            time.sleep(delay)
+        committed = reassignment_history(pr_id)
+        if committed == expected or (committed is not None and committed != prior):
+            break
+    return committed
 
 
 def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",
@@ -481,8 +470,8 @@ def _reassign_locked(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # exactly the prior prefix plus this command's record. Cardinality alone is
     # insufficient: an eventually-consistent read can still show no new record,
     # or a rival record can appear with the expected length.
-    committed = reassignment_history(pr_id)
     expected_history = [*history, own_record]
+    committed = _settled_history(pr_id, list(history), expected_history)
     if committed != expected_history:
         detail = ("the reassignment history could not be re-read" if committed is None
                   else "the visible audit history is not the exact record this command wrote")

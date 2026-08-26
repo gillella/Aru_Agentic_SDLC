@@ -380,13 +380,7 @@ class FailClosedAssignmentTests(unittest.TestCase):
 
 
 class CodeAntTriggerOwnershipTests(unittest.TestCase):
-    """Finalization owns only what it changed, and triggers exactly once.
-
-    A retry undoes only the draft transition it performed itself, and reposts
-    `@codeant-ai: review` only when it is absent: a second trigger enqueues a
-    second review of one head and leaves competing evidence behind, while
-    assuming one landed can leave the assignment unreviewed.
-    """
+    """Finalization owns only its transitions and trusted exact trigger."""
 
     NO_TRIGGER_YET = (0, '{"comments": []}', "")
 
@@ -408,8 +402,10 @@ class CodeAntTriggerOwnershipTests(unittest.TestCase):
         return ok, [call.args[0] for call in run.call_args_list]
 
     @staticmethod
-    def comments(*bodies):
-        return (0, json.dumps({"comments": [{"body": body} for body in bodies]}), "")
+    def comments(*bodies, association="OWNER", login="gillella"):
+        comments = [{"author": {"login": login}, "authorAssociation": association,
+                     "body": body} for body in bodies]
+        return (0, json.dumps({"comments": comments}), "")
 
     def test_trigger_failure_on_an_already_ready_pr_never_redrafts_it(self):
         """The reported defect: a transient comment failure on a PR this retry
@@ -434,9 +430,13 @@ class CodeAntTriggerOwnershipTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual([c for c in commands if c[:3] == ["gh", "pr", "comment"]], [])
 
+    def test_an_untrusted_exact_trigger_cannot_suppress_the_real_trigger(self):
+        ok, commands = self._finalize(history=self.comments(
+            "@codeant-ai: review", association="NONE", login="drive-by"))
+        self.assertTrue(ok)
+        self.assertEqual(commands[-1][-1], create_pr.CODEANT_TRIGGER)
+
     def test_a_quoted_trigger_in_a_provider_comment_is_not_a_trigger(self):
-        """CodeAnt's own usage guide quotes the trigger string, so only a
-        comment whose whole body is the trigger counts as one."""
         ok, commands = self._finalize(history=self.comments(
             "Retrigger review by typing:\n@codeant-ai: review\nin a comment."))
         self.assertTrue(ok)
