@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 440
+# line-ceiling: 520
 import json
 import stat
 import subprocess
@@ -426,6 +426,73 @@ class LoopControlTests(unittest.TestCase):
             self.assertFalse(marker["valid"], repr(raw))
             self.assertFalse(marker["applies"], repr(raw))
             self.assertFalse(loop_control.stop_applies({"projects": raw}, self.project_a))
+
+
+    def test_per_project_pause_reasons_are_independent(self):
+        """A second project's stop must not rewrite the first project's reason."""
+        self.assertEqual(self.run_cli("stop", "--project", self.project_a,
+                                      "--reason", "maintenance").returncode, 0)
+        self.assertEqual(self.run_cli("stop", "--project", self.project_b,
+                                      "--reason", "quota-exhausted").returncode, 0)
+        for project, expected in ((self.project_a, "maintenance"),
+                                  (self.project_b, "quota-exhausted")):
+            res = self.run_cli("status", "--project", project, "--json")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            marker = json.loads(res.stdout)["desktop_stop_marker"]
+            self.assertTrue(marker["applies"], project)
+            self.assertEqual(marker["reason"], expected, project)
+
+        # Resuming one project drops only its reason; the other survives intact.
+        self.assertEqual(self.run_cli("resume", "--project", self.project_a).returncode, 0)
+        doc = json.loads((self.aru_dir / "factory-loop.stop").read_text())
+        self.assertNotIn(self.project_a, doc["reasons"])
+        self.assertEqual(doc["reasons"][self.project_b], "quota-exhausted")
+        marker_b = json.loads(self.run_cli(
+            "status", "--project", self.project_b, "--json").stdout)["desktop_stop_marker"]
+        self.assertEqual(marker_b["reason"], "quota-exhausted")
+
+    def test_reason_falls_back_to_global_then_legacy_marker(self):
+        """A global token covers every project; a pre-map marker still reports."""
+        stop_file = self.aru_dir / "factory-loop.stop"
+        stop_file.write_text(json.dumps(
+            {"projects": ["*"], "reasons": {"*": "factory-complete"}}), encoding="utf-8")
+        marker = loop_control.resolve_desktop_stop_marker(self.target_home, self.project_a)
+        self.assertEqual(marker["reason"], "factory-complete")
+
+        # Markers written before `reasons` existed carry only a top-level reason.
+        stop_file.write_text(json.dumps(
+            {"projects": [self.project_a], "reason": "human-intervention"}), encoding="utf-8")
+        legacy = loop_control.resolve_desktop_stop_marker(self.target_home, self.project_a)
+        self.assertEqual(legacy["reason"], "human-intervention")
+
+        # A malformed reasons map is ignored rather than crashing status.
+        for bad in ("nope", ["a"], 7, {self.project_a: [1]}):
+            stop_file.write_text(json.dumps(
+                {"projects": [self.project_a], "reasons": bad, "reason": "maintenance"}),
+                encoding="utf-8")
+            res = self.run_cli("status", "--project", self.project_a, "--json")
+            self.assertEqual(res.returncode, 0, repr(bad))
+            self.assertNotIn("Traceback", res.stderr, repr(bad))
+            self.assertEqual(
+                json.loads(res.stdout)["desktop_stop_marker"]["reason"], "maintenance", repr(bad))
+
+    def test_concurrent_project_stops_never_lose_a_stop_request(self):
+        """Parallel stops share one marker; none may be dropped by a lost update."""
+        projects = [f"/tmp/aru-concurrent-{index}" for index in range(12)]
+        procs = [subprocess.Popen(
+            [sys.executable, str(ROOT / "scripts" / "loop_control.py"),
+             "--target-home", str(self.target_home), "stop",
+             "--project", project, "--reason", "maintenance"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for project in projects]
+        for proc in procs:
+            _, err = proc.communicate()
+            self.assertEqual(proc.returncode, 0, err)
+
+        doc = json.loads((self.aru_dir / "factory-loop.stop").read_text())
+        self.assertEqual(sorted(doc["projects"]), sorted(projects))
+        self.assertEqual(sorted(doc["reasons"]), sorted(projects))
+        # A shared fixed temp path would leave one writer's file orphaned.
+        self.assertEqual([p.name for p in self.aru_dir.iterdir() if p.name.endswith(".tmp")], [])
 
 
 if __name__ == "__main__":

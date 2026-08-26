@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 460
 """Unified loop control, status inspection, and adapter contract.
 
 Provides project-agnostic stop/resume operations, status inspection, and
@@ -13,11 +14,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX host
+    fcntl = None
 
 EXIT_OK, EXIT_INVALID, EXIT_DEGRADED = 0, 1, 2
 PAUSE_REASONS = (
@@ -41,6 +50,67 @@ def stop_applies(stop_doc: dict | None, project: str | None) -> bool:
     if project and project in projects:
         return True
     return False
+
+
+@contextmanager
+def marker_lock(aru_dir: Path):
+    """Serialise read-modify-write of the shared stop marker across processes.
+
+    Two concurrent project-scoped stops otherwise read the same project list and
+    write it back independently, so the second silently discards the first
+    operator's durable stop intent.
+    """
+    aru_dir.mkdir(parents=True, exist_ok=True)
+    if fcntl is None:  # pragma: no cover - non-POSIX host
+        yield
+        return
+    with open(aru_dir / "factory-loop.stop.lock", "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def write_stop_marker(stop_path: Path, doc: dict) -> None:
+    """Replace the marker atomically through a temp file unique to this call.
+
+    A fixed `.tmp` sibling is shared by every concurrent writer, so one process
+    can replace or unlink the half-written file another is still using.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(stop_path.parent), prefix=".factory-loop.stop.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        os.replace(tmp_name, stop_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def parse_stop_reasons(data: dict) -> dict[str, str]:
+    """Return the marker's per-project reason map, ignoring a malformed value."""
+    raw = data.get("reasons")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): value for key, value in raw.items() if isinstance(value, str)}
+
+
+def reason_for_project(data: dict, project: str | None) -> str:
+    """Resolve the pause reason recorded for `project`, not for the last stop.
+
+    The marker holds one entry per project token, because a single top-level
+    `reason` made a later stop of project B rewrite project A's reason while
+    both tokens stayed active. The top-level value is still honoured last so
+    markers written before the map existed keep reporting their reason.
+    """
+    reasons = parse_stop_reasons(data)
+    for token in ([project] if project else []) + ["*"]:
+        if token in reasons:
+            return reasons[token]
+    legacy = data.get("reason")
+    return legacy if isinstance(legacy, str) and legacy else DEFAULT_PAUSE_REASON
 
 
 def parse_stop_projects(data: dict, stop_path: Path) -> list[str]:
@@ -75,7 +145,7 @@ def resolve_desktop_stop_marker(target_home: Path, project: str | None = None) -
     scope = "global" if "*" in projects else ("project" if projects else "none")
     return {
         "present": True, "applies": stop_applies(data, project), "scope": scope,
-        "projects": projects, "reason": data.get("reason") or DEFAULT_PAUSE_REASON, "path": str(stop_path),
+        "projects": projects, "reason": reason_for_project(data, project), "path": str(stop_path),
         "valid": True, "error": None,
     }
 
@@ -200,24 +270,24 @@ def execute_stop(target_home: Path, project: str | None = None, reason: str = DE
     if project and not project.startswith("/"):
         raise ValueError("--project must be an absolute path")
     aru_dir = target_home / ".aru"
-    aru_dir.mkdir(parents=True, exist_ok=True)
     stop_path = aru_dir / "factory-loop.stop"
-    projects = []
-    if stop_path.is_file():
-        try:
-            data = json.loads(stop_path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("expected JSON object")
-        except Exception as exc:
-            raise ValueError(f"malformed stop marker at {stop_path}: {exc}") from exc
-        projects = parse_stop_projects(data, stop_path)
     token = project or "*"
-    if token not in projects:
-        projects.append(token)
-    doc = {"projects": projects, "stopped_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "source": source, "reason": reason}
-    tmp = stop_path.with_suffix(".stop.tmp")
-    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(stop_path)
+    with marker_lock(aru_dir):
+        projects, reasons = [], {}
+        if stop_path.is_file():
+            try:
+                data = json.loads(stop_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("expected JSON object")
+            except Exception as exc:
+                raise ValueError(f"malformed stop marker at {stop_path}: {exc}") from exc
+            projects = parse_stop_projects(data, stop_path)
+            reasons = parse_stop_reasons(data)
+        if token not in projects:
+            projects.append(token)
+        reasons[token] = reason
+        doc = {"projects": projects, "reasons": reasons, "stopped_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "source": source, "reason": reason}
+        write_stop_marker(stop_path, doc)
     return {"action": "stop", "changed": True, "token": token, "stop_path": str(stop_path), "reason": reason}
 
 
@@ -227,32 +297,39 @@ def execute_resume(target_home: Path, project: str | None = None, reason: str | 
         raise ValueError(f"invalid pause reason '{reason}'. Valid reasons: {', '.join(PAUSE_REASONS)}")
     if project and not project.startswith("/"):
         raise ValueError("--project must be an absolute path")
-    stop_path = target_home / ".aru" / "factory-loop.stop"
+    aru_dir = target_home / ".aru"
+    stop_path = aru_dir / "factory-loop.stop"
+    no_stop = (EXIT_OK, "No stop requested; continuing", {"action": "resume", "changed": False, "message": "No stop requested; continuing"})
     if not stop_path.is_file():
-        return EXIT_OK, "No stop requested; continuing", {"action": "resume", "changed": False, "message": "No stop requested; continuing"}
-    try:
-        data = json.loads(stop_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("expected JSON object")
-    except Exception as exc:
-        raise ValueError(f"malformed stop marker at {stop_path}: {exc}") from exc
-    projects = parse_stop_projects(data, stop_path)
-    if not project:
-        stop_path.unlink(missing_ok=True)
-        return EXIT_OK, f"removed stop marker {stop_path}", {"action": "resume", "changed": True, "message": f"removed stop marker {stop_path}"}
-    if "*" in projects:
-        return EXIT_INVALID, "error: global stop (*) is in effect; resume without --project to clear it", {"action": "resume", "error": "global stop in effect"}
-    if project not in projects:
-        return EXIT_OK, "No stop requested; continuing", {"action": "resume", "changed": False, "message": "No stop requested; continuing"}
-    remaining = [p for p in projects if p != project]
-    if remaining:
-        data["projects"] = remaining
-        tmp = stop_path.with_suffix(".stop.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        tmp.replace(stop_path)
+        return no_stop
+    # Locked for the same reason stop is: clearing one project rewrites the
+    # list every other project's stop intent also lives in.
+    with marker_lock(aru_dir):
+        if not stop_path.is_file():
+            return no_stop
+        try:
+            data = json.loads(stop_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("expected JSON object")
+        except Exception as exc:
+            raise ValueError(f"malformed stop marker at {stop_path}: {exc}") from exc
+        projects = parse_stop_projects(data, stop_path)
+        if not project:
+            stop_path.unlink(missing_ok=True)
+            return EXIT_OK, f"removed stop marker {stop_path}", {"action": "resume", "changed": True, "message": f"removed stop marker {stop_path}"}
+        if "*" in projects:
+            return EXIT_INVALID, "error: global stop (*) is in effect; resume without --project to clear it", {"action": "resume", "error": "global stop in effect"}
+        if project not in projects:
+            return no_stop
+        remaining = [p for p in projects if p != project]
+        if not remaining:
+            stop_path.unlink(missing_ok=True)
+            return EXIT_OK, f"removed stop marker {stop_path}", {"action": "resume", "changed": True, "message": f"removed stop marker {stop_path}"}
+        reasons = parse_stop_reasons(data)
+        reasons.pop(project, None)
+        data["projects"], data["reasons"] = remaining, reasons
+        write_stop_marker(stop_path, data)
         return EXIT_OK, f"cleared stop for {project} in {stop_path}", {"action": "resume", "changed": True, "message": f"cleared stop for {project} in {stop_path}"}
-    stop_path.unlink(missing_ok=True)
-    return EXIT_OK, f"removed stop marker {stop_path}", {"action": "resume", "changed": True, "message": f"removed stop marker {stop_path}"}
 
 
 def render_human_status(payload: dict) -> str:

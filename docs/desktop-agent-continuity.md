@@ -72,6 +72,18 @@ Stop and resume transitions accept an optional bounded `--reason <token>`:
 `quota-exhausted`, `maintenance`, or `error-threshold`. Unrecognized reasons fail
 closed.
 
+The reason is recorded per project token in the marker's `reasons` map, so
+stopping project B never rewrites the reason project A was stopped for, and
+`status --project <abs>` reports the reason that project was actually stopped
+for. A marker written before that map existed still reports its single
+top-level `reason`. Resuming one project drops only that project's entry.
+
+Because every project shares one marker file, `stop` and `resume` take an
+exclusive lock on `$HOME/.aru/factory-loop.stop.lock` around the
+read-modify-write and replace the marker through a temp file unique to each
+call. Concurrent project-scoped stops therefore cannot lose one another's
+durable stop intent or collide on a shared temp path.
+
 While a stop applies to a project, loop mode must not continue and must not
 arm native wakes. If a managed Codex heartbeat (`id = "aru-code-loop"` or
 `id = "aru-code-loop-<12 hex>"`) exists for that project, stop pauses
