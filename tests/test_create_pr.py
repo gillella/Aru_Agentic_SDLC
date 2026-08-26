@@ -1,4 +1,5 @@
-# line-ceiling: 700
+# +16 for the #344 terminal merge lease tests.
+# line-ceiling: 717
 import json
 import sys
 import unittest
@@ -126,7 +127,8 @@ class IdentityStampTests(unittest.TestCase):
     @patch.object(create_pr, "get_issue", return_value={"title": "t"})
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
     def test_successful_open_enqueues_review(self, _branch, _issue):
-        with patch.object(create_pr, "run_cmd", return_value=(0, "https://x/pull/7", "")) as run, \
+        with patch.object(create_pr, "terminal_merge_lease", return_value=None), \
+                patch.object(create_pr, "run_cmd", return_value=(0, "https://x/pull/7", "")) as run, \
                 patch.object(create_pr, "apply_identity", return_value=True), \
                 patch.object(create_pr, "finalize_review_assignment", return_value=True) as queued:
             self.assertTrue(create_pr.create_pr(7, "t", "b", "agent-1", "anthropic"))
@@ -649,7 +651,8 @@ class VerificationEvidenceTests(unittest.TestCase):
     @patch.object(create_pr, "get_issue", return_value={"title": "t"})
     @patch.object(create_pr, "get_current_branch", return_value="fix/issue-7-x")
     def test_create_pr_renders_not_run_evidence_into_body(self, _branch, _issue):
-        with patch.object(
+        with patch.object(create_pr, "terminal_merge_lease", return_value=None), \
+             patch.object(
             create_pr,
             "run_cmd",
             return_value=(0, "https://x/pull/7", ""),
@@ -688,3 +691,17 @@ class VerificationEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TerminalLeasePrCreationTests(unittest.TestCase):
+    """#344 criterion 2: merged work cannot be re-proposed under a spent branch."""
+
+    LEASE = {"branch": "fix/issue-87-x", "pr": 89, "gated_sha": "a" * 40,
+             "merged_sha": "b" * 40, "holder": "codex-1"}
+
+    def test_pr_creation_from_a_leased_branch_is_refused(self):
+        with patch.object(create_pr, "get_current_branch", return_value="fix/issue-87-x"), \
+             patch.object(create_pr, "terminal_merge_lease", return_value=self.LEASE), \
+             patch.object(create_pr, "run_cmd") as run:
+            self.assertFalse(create_pr.create_pr(87, "t", "b", "agent-1", "anthropic"))
+        run.assert_not_called()
