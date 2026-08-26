@@ -1,4 +1,4 @@
-# line-ceiling: 487
+# line-ceiling: 513
 """Contract tests for the run-aru-factory entrypoint skill.
 
 The skill is prose, so these assert the properties a reader depends on rather
@@ -48,16 +48,27 @@ RETIRED_REVIEW_MACHINERY = (
 # is what a denial is. What it may not do is describe the machinery as
 # something the factory has, so every match must sit inside a denial.
 DENIAL_MARKER = re.compile(r"\b(?:never|not|no|nor|neither|without|forbidden|refuses?)\b")
-DENIAL_WINDOW = 90
+
+# A denial only speaks for the sentence it stands in. Scanning a fixed number of
+# characters backwards let the "never" in one sentence vouch for a mention in
+# the next, so "reassignment is never automatic. the picker rotates reviewers"
+# read as denied. The lookback therefore stops at the preceding sentence break.
+SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\n")
+
+
+def sentence_start(text, position):
+    """Offset where the sentence containing `position` begins."""
+    breaks = [match.end() for match in SENTENCE_BREAK.finditer(text, 0, position)]
+    return breaks[-1] if breaks else 0
 
 
 def restored_machinery(text):
-    """Machinery mentions in `text` that no nearby denial rules out."""
+    """Machinery mentions in `text` that no denial in their sentence rules out."""
     return [
         match.group(0)
         for pattern in RETIRED_REVIEW_MACHINERY
         for match in re.finditer(pattern, text)
-        if not DENIAL_MARKER.search(text[max(0, match.start() - DENIAL_WINDOW):match.start()])
+        if not DENIAL_MARKER.search(text, sentence_start(text, match.start()), match.start())
     ]
 
 
@@ -291,6 +302,21 @@ class GovernanceTests(unittest.TestCase):
             "it does not track capacity, rotate agents, or create a second queue",
         ):
             self.assertEqual([], restored_machinery(denial), f"false positive: {denial}")
+
+    def test_a_denial_does_not_reach_past_its_own_sentence(self):
+        """#454: a fixed-width lookback let an earlier denial cover later prose.
+
+        Both halves below are things the skills genuinely say, and the denial
+        is real -- but it answers reassignment, not the sentence after it. A
+        detector that lets the "never" carry across the full stop goes quiet on
+        the one shape it exists to catch: machinery reintroduced next to a
+        denial of something else.
+        """
+        self.assertEqual(
+            ["rotate"],
+            restored_machinery("reassignment is never automatic. the picker rotates reviewers"),
+        )
+        self.assertEqual([], restored_machinery("the picker never rotates reviewers"))
 
     def test_cursor_code_review_command_is_an_emergency_router(self):
         text = CURSOR_CODE_REVIEW.read_text(encoding="utf-8")
