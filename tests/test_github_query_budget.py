@@ -1,3 +1,4 @@
+# line-ceiling: 440
 """Regression tests for bounded GitHub reads in one factory picker cycle."""
 
 import io
