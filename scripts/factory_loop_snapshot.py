@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 850
+# line-ceiling: 880
 """factory_loop_snapshot.py - deterministic read-only factory loop snapshot.
 
 Emits a bounded, normalized read-only snapshot of live coordination state for
@@ -22,6 +22,8 @@ from common import (
     get_framework_root,
     get_repo_projects,
     parse_touches,
+    repository_owner_login,
+    repository_trusted_logins,
     run_cmd,
     select_governed_projects,
     _redact_local_path,
@@ -42,6 +44,7 @@ from github_inventory import (
     local_repo_slug,
     open_issues as rest_open_issues,
     open_pull_requests as rest_open_pull_requests,
+    rich_open_pull_requests,
 )
 from picker_board_inventory import _board_items
 
@@ -242,9 +245,14 @@ def _normalize_issues(
 
 def _extract_ci_summary(pr: Dict[str, Any]) -> Dict[str, Any]:
     """Extract and normalize CI rollup status."""
-    rollup = pr.get("statusCheckRollup") or []
-    if not isinstance(rollup, list) or not rollup:
-        return {"state": "UNKNOWN", "summary": "No CI check status rollup available."}
+    if pr.get("statusCheckRollup") is None:
+        return {"state": "UNAVAILABLE", "summary": "CI status rollup unavailable in REST inventory."}
+
+    rollup = pr.get("statusCheckRollup")
+    if not isinstance(rollup, list):
+        return {"state": "UNAVAILABLE", "summary": "CI status rollup unavailable or invalid."}
+    if not rollup:
+        return {"state": "NONE", "summary": "No CI status checks reported on head commit."}
 
     states = []
     for check in rollup:
@@ -253,7 +261,7 @@ def _extract_ci_summary(pr: Dict[str, Any]) -> Dict[str, Any]:
             conclusion = (check.get("conclusion") or "").upper()
             states.append(conclusion or status or "UNKNOWN")
 
-    if any(s in {"FAILURE", "FAILED", "ERROR", "TIMED_OUT", "CANCELLED"} for s in states):
+    if any(s in {"FAILURE", "FAILED", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"} for s in states):
         return {"state": "FAILED", "summary": "One or more CI checks failed."}
     if any(s in {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED"} for s in states):
         return {"state": "PENDING", "summary": "CI checks are in progress or pending."}
@@ -296,7 +304,7 @@ def _normalize_pull_requests(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         author = _identity(names, "author:")
         merger = _identity(names, "merger:")
-        draft = bool(pr.get("isDraft"))
+        draft = bool(pr.get("isDraft") or pr.get("draft"))
         linked = sorted(linked_issue_numbers_from_pr(pr))
 
         ci_info = _extract_ci_summary(pr)
@@ -307,7 +315,11 @@ def _normalize_pull_requests(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             blockers.append("PR is a draft.")
         if not author:
             blockers.append("Missing author:<id> label.")
-        if ci_info["state"] != "PASSED":
+        if ci_info["state"] == "UNAVAILABLE":
+            blockers.append("CI check status is unavailable.")
+        elif ci_info["state"] == "NONE":
+            blockers.append("No CI checks reported on head commit.")
+        elif ci_info["state"] != "PASSED":
             blockers.append(f"CI is {ci_info['state']}.")
         if review_auth["state"] == "AMBIGUOUS":
             blockers.append(f"Ambiguous review authority ({review_auth['evidence']})")
@@ -317,8 +329,8 @@ def _normalize_pull_requests(prs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows.append({
             "number": num,
             "title": pr.get("title") or "",
-            "branch": pr.get("headRefName") or "",
-            "head_sha": pr.get("headRefOid") or "",
+            "branch": pr.get("headRefName") or (pr.get("head") or {}).get("ref") or "",
+            "head_sha": pr.get("headRefOid") or (pr.get("head") or {}).get("sha") or "",
             "draft": draft,
             "author": author,
             "merger": merger,
@@ -455,13 +467,47 @@ def _collect_worker_assignments(
     return {k: assignments[k] for k in sorted(assignments.keys())}
 
 
+def _fetch_open_pull_requests(slug: str) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Fetch open pull requests attempting rich query first, falling back to REST inventory."""
+    rich_prs = rich_open_pull_requests(run_cmd, slug)
+    if rich_prs is not None:
+        return rich_prs, None
+    rest_prs = rest_open_pull_requests(run_cmd, slug)
+    if rest_prs is not None:
+        return rest_prs, None
+    return None, f"Failed to list open pull requests from GitHub for '{slug}'."
+
+
 def _collect_claimable_work(
     raw_issues: List[Dict[str, Any]],
+    slug: str,
+    repo_owner: Optional[str] = None,
     agent: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[str], bool, bool]:
     """Evaluate Ready candidates and capture bounded diagnostics and integrity failures."""
+    owner = repo_owner or repository_owner_login(slug)
+    trusted_logins = repository_trusted_logins(slug)
+    if trusted_logins is None:
+        return (
+            [],
+            {
+                "integrity_issues": [],
+                "blocked": [],
+                "conflicted": [],
+                "missing_touches": [],
+            },
+            [f"Could not resolve trusted collaborator logins for repository '{slug}'. Candidate evaluation is degraded."],
+            True,
+            True,
+        )
+
     try:
-        build_res = build_candidates(raw_issues, agent=agent)
+        build_res = build_candidates(
+            raw_issues,
+            agent=agent,
+            repo_owner=owner,
+            trusted_logins=trusted_logins,
+        )
     except Exception as exc:
         return (
             [],
@@ -619,10 +665,10 @@ def evaluate_factory_loop_snapshot(  # noqa: C901, PLR0912, PLR0915
                 board=board_info,
             )
 
-        raw_prs = rest_open_pull_requests(run_cmd, slug)
-        if raw_prs is None:
+        raw_prs, err_prs = _fetch_open_pull_requests(slug)
+        if err_prs or raw_prs is None:
             return _fail_closed(
-                f"Failed to list open pull requests from GitHub for '{slug}'.",
+                err_prs or f"Failed to list open pull requests from GitHub for '{slug}'.",
                 "ERROR: Could not read open PRs.",
                 slug=slug,
                 root_dir=target,
@@ -667,7 +713,12 @@ def evaluate_factory_loop_snapshot(  # noqa: C901, PLR0912, PLR0915
             eval_errors,
             eval_degraded,
             eval_blocked,
-        ) = _collect_claimable_work(raw_issues, agent=agent)
+        ) = _collect_claimable_work(
+            raw_issues,
+            slug=slug,
+            repo_owner=repo_details.get("owner"),
+            agent=agent,
+        )
 
         open_work = bool(issue_rows or pr_rows or any(wt["issue"] is not None for wt in sanitized_worktrees))
 
