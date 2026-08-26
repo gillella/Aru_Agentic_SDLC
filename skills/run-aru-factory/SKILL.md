@@ -209,13 +209,13 @@ Restated only because skipping one is how each has been broken before.
    `--agent <id>`; `--model-family <family>` is optional.
 7. **Degraded GitHub halts coordination gracefully** — never a secondary local
    task queue or an ungated merge. See `docs/degraded-mode.md`.
-8. **Agent review is emergency-only.** New PRs default to CodeRabbit; an
-   operator may explicitly move one stalled PR to Sourcery or CodeAnt. Only
-   after external exhaustion or an operator-declared excessive wait may
-   `reassign_review.py` select one independent `review:agent`. The picker may
-   resume that exact preassignment but never creates a coding-agent review
-   queue. Self-review, stale heads, missing family, labels alone, and malformed
-   or duplicate completion evidence fail closed.
+8. **Agent review is emergency-only.** New PRs get exactly `review:coderabbit`;
+   reassignment is never automatic. Only an operator may move one stalled PR
+   from CodeRabbit to Sourcery or CodeAnt with `reassign_review.py`, recording
+   the concrete reason; only after external exhaustion or an operator-declared
+   excessive wait may that helper select one independent `review:agent`. The
+   picker resumes it but never creates a coding-agent review queue. Self-review,
+   stale heads, labels alone, and malformed or duplicate evidence fail closed.
 
 ### Merging
 
