@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import json
-import os
 import stat
 import subprocess
 import sys
@@ -225,12 +224,15 @@ class LoopControlTests(unittest.TestCase):
             status = loop_control.get_status(self.target_home, project=self.project_a)
             self.assertEqual(status["status"], "invalid")
             self.assertIn("error", status)
+            self.assertTrue(status["desktop_stop_marker"]["present"])
+            self.assertFalse(status["desktop_stop_marker"]["applies"])
 
             res_doc = self.run_doctor("--json", "--project", self.project_a)
             self.assertEqual(res_doc.returncode, 1)
             self.assertNotIn("Traceback", res_doc.stderr)
             doc_data = json.loads(res_doc.stdout)
             self.assertEqual(doc_data["status"], "invalid")
+            self.assertTrue(doc_data["desktop_stop_marker"]["present"])
             stop_checks = [c for c in doc_data["checks"] if c["id"] == "stop_marker"]
             self.assertTrue(len(stop_checks) >= 1)
             self.assertFalse(stop_checks[0]["ok"])
@@ -241,6 +243,52 @@ class LoopControlTests(unittest.TestCase):
             self.assertNotIn("Traceback", res_doc_global.stderr)
             doc_global_data = json.loads(res_doc_global.stdout)
             self.assertEqual(doc_global_data["status"], "invalid")
+            self.assertTrue(doc_global_data["desktop_stop_marker"]["present"])
+
+    def test_adapter_unhashable_and_non_string_state_handled_safely(self):
+        unusual_states = [
+            ["enabled", "active"],
+            {"nested": "state"},
+            12345,
+            12.34,
+            True,
+            None,
+            "unrecognized_custom_state",
+        ]
+        for bad_state in unusual_states:
+            adapter = self.create_adapter({"adapter": "test-orch", "state": bad_state, "detail": "custom"})
+            res = self.run_cli("status", "--project", self.project_a, "--orchestrator-adapter", adapter, "--json")
+            self.assertEqual(res.returncode, 0, f"Failed for state: {bad_state!r}")
+            data = json.loads(res.stdout)
+            self.assertEqual(data["orchestrator"]["state"], "unknown")
+            self.assertEqual(data["status"], "ok")
+            self.assertIsNone(data["orchestrator"]["error"])
+
+    def test_cli_argument_validation_and_errors(self):
+        res_stop_reason = self.run_cli("stop", "--reason", "invalid-reason")
+        self.assertEqual(res_stop_reason.returncode, 1)
+        self.assertIn("invalid pause reason", res_stop_reason.stderr)
+
+        res_resume_reason = self.run_cli("resume", "--reason", "invalid-reason")
+        self.assertEqual(res_resume_reason.returncode, 1)
+        self.assertIn("invalid pause reason", res_resume_reason.stderr)
+
+        res_stop_rel = self.run_cli("stop", "--project", "relative/path")
+        self.assertEqual(res_stop_rel.returncode, 1)
+        self.assertIn("absolute", res_stop_rel.stderr)
+
+        res_resume_rel = self.run_cli("resume", "--project", "relative/path")
+        self.assertEqual(res_resume_rel.returncode, 1)
+        self.assertIn("absolute", res_resume_rel.stderr)
+
+        stop_file = self.aru_dir / "factory-loop.stop"
+        stop_file.write_text("INVALID JSON", encoding="utf-8")
+        res_status_json = self.run_cli("status", "--json", "--project", self.project_a)
+        self.assertEqual(res_status_json.returncode, 1)
+        data = json.loads(res_status_json.stdout)
+        self.assertEqual(data["status"], "invalid")
+        self.assertTrue(data["desktop_stop_marker"]["present"])
+        self.assertIn("error", data)
 
 
 if __name__ == "__main__":

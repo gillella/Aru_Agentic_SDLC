@@ -450,6 +450,11 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         res = self.run_installer("--stop-loop", "--resume-loop")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("cannot specify both --stop-loop and --resume-loop", res.stderr)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+
+        res_rev = self.run_installer("--resume-loop", "--stop-loop")
+        self.assertNotEqual(res_rev.returncode, 0)
+        self.assertIn("cannot specify both --stop-loop and --resume-loop", res_rev.stderr)
 
         res_proj = self.run_installer("--stop-loop", "--resume-loop", "--project", "/tmp/aru-proj-a")
         self.assertNotEqual(res_proj.returncode, 0)
@@ -458,6 +463,14 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         res_wake = self.run_installer("--enable-native-wake", "--disable-native-wake")
         self.assertNotEqual(res_wake.returncode, 0)
         self.assertIn("cannot specify both --enable-native-wake and --disable-native-wake", res_wake.stderr)
+
+        res_wake_rev = self.run_installer("--disable-native-wake", "--enable-native-wake")
+        self.assertNotEqual(res_wake_rev.returncode, 0)
+        self.assertIn("cannot specify both --enable-native-wake and --disable-native-wake", res_wake_rev.stderr)
+
+        res_bad_reason = self.run_installer("--stop-loop", "--reason", "invalid-reason")
+        self.assertNotEqual(res_bad_reason.returncode, 0)
+        self.assertIn("invalid pause reason", res_bad_reason.stderr)
 
 
 if __name__ == "__main__":

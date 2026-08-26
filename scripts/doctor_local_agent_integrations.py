@@ -44,7 +44,7 @@ SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
-from loop_control import resolve_desktop_stop_marker, stop_applies
+from loop_control import resolve_desktop_stop_marker  # noqa: E402
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -814,13 +814,14 @@ def report(aru_home: Path, target_home: Path, project: str | None,
         marker_info = resolve_desktop_stop_marker(target_home, project)
         marker_error = None
     except ValueError as exc:
+        marker_path = target_home / ".aru" / "factory-loop.stop"
         marker_info = {
-            "present": False,
+            "present": marker_path.is_file(),
             "applies": False,
             "scope": "none",
             "projects": [],
             "reason": None,
-            "path": str(target_home / ".aru" / "factory-loop.stop"),
+            "path": str(marker_path),
         }
         marker_error = str(exc)
     stopped = marker_info["applies"]

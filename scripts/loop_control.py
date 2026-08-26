@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -104,7 +103,7 @@ def query_orchestrator(adapter_cmd: str | None, project: str | None) -> dict:
     except Exception as exc:
         return {"configured": True, "adapter": adapter_cmd, "state": "unknown", "reason": None, "detail": "adapter output is not valid JSON", "error": str(exc)}
     state = data.get("state", "unknown")
-    if state not in {"enabled", "paused", "unknown"}:
+    if not isinstance(state, str) or state not in {"enabled", "paused", "unknown"}:
         state = "unknown"
     return {"configured": True, "adapter": data.get("adapter") or adapter_cmd, "state": state, "reason": data.get("reason"), "detail": data.get("detail"), "error": None}
 
@@ -140,7 +139,8 @@ def get_status(target_home: Path, project: str | None = None, adapter_cmd: str |
     try:
         marker = resolve_desktop_stop_marker(target_home, project)
     except ValueError as exc:
-        marker = {"present": False, "applies": False, "scope": "none", "projects": [], "reason": None, "path": str(target_home / ".aru" / "factory-loop.stop")}
+        stop_path = target_home / ".aru" / "factory-loop.stop"
+        marker = {"present": stop_path.is_file(), "applies": False, "scope": "none", "projects": [], "reason": None, "path": str(stop_path)}
         err = str(exc)
     wake = resolve_native_wake(target_home, project)
     orch = query_orchestrator(adapter_cmd, project)
@@ -236,6 +236,53 @@ def render_human_status(payload: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _handle_stop(target_home: Path, project: str | None, reason: str, is_json: bool) -> int:
+    try:
+        res = execute_stop(target_home, project=project, reason=reason)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    if is_json:
+        json.dump(res, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        print(f"wrote stop marker {res['stop_path']} for {res['token']}")
+    return EXIT_OK
+
+
+def _handle_resume(target_home: Path, project: str | None, reason: str | None, is_json: bool) -> int:
+    try:
+        code, msg, res = execute_resume(target_home, project=project, reason=reason)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    if code != EXIT_OK:
+        print(msg, file=sys.stderr)
+        return code
+    if is_json:
+        json.dump(res, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        print(msg)
+    return EXIT_OK
+
+
+def _handle_status(target_home: Path, project: str | None, adapter_cmd: str | None, is_json: bool) -> int:
+    payload = get_status(target_home, project=project, adapter_cmd=adapter_cmd)
+    if is_json:
+        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(render_human_status(payload))
+
+    st = payload["status"]
+    if st == "invalid":
+        return EXIT_INVALID
+    if st in {"degraded", "contradictory"}:
+        return EXIT_DEGRADED
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     common_p = argparse.ArgumentParser(add_help=False)
     common_p.add_argument("--project", default=argparse.SUPPRESS, help="Absolute project path")
@@ -259,48 +306,12 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --project must be an absolute path", file=sys.stderr)
         return EXIT_INVALID
 
+    is_json = bool(getattr(args, "json", False))
     if action == "stop":
-        try:
-            res = execute_stop(target_home, project=project, reason=getattr(args, "reason", DEFAULT_PAUSE_REASON))
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return EXIT_INVALID
-        if getattr(args, "json", False):
-            json.dump(res, sys.stdout, indent=2, sort_keys=True)
-            sys.stdout.write("\n")
-        else:
-            print(f"wrote stop marker {res['stop_path']} for {res['token']}")
-        return EXIT_OK
-
+        return _handle_stop(target_home, project, getattr(args, "reason", DEFAULT_PAUSE_REASON), is_json)
     if action == "resume":
-        try:
-            code, msg, res = execute_resume(target_home, project=project, reason=getattr(args, "reason", None))
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return EXIT_INVALID
-        if code != EXIT_OK:
-            print(msg, file=sys.stderr)
-            return code
-        if getattr(args, "json", False):
-            json.dump(res, sys.stdout, indent=2, sort_keys=True)
-            sys.stdout.write("\n")
-        else:
-            print(msg)
-        return EXIT_OK
-
-    payload = get_status(target_home, project=project, adapter_cmd=getattr(args, "orchestrator_adapter", None))
-    if getattr(args, "json", False):
-        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
-        sys.stdout.write("\n")
-    else:
-        sys.stdout.write(render_human_status(payload))
-
-    st = payload["status"]
-    if st == "invalid":
-        return EXIT_INVALID
-    if st in {"degraded", "contradictory"}:
-        return EXIT_DEGRADED
-    return EXIT_OK
+        return _handle_resume(target_home, project, getattr(args, "reason", None), is_json)
+    return _handle_status(target_home, project, getattr(args, "orchestrator_adapter", None), is_json)
 
 
 if __name__ == "__main__":
