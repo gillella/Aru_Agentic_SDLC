@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# +51 for the #344 terminal merge lease guard.
-# line-ceiling: 1167
+# #414 removed coding-agent review claiming and ratcheted this file down from
+# 1,581 lines, superseding the #344 terminal-merge-lease allowance.
+# line-ceiling: 1001
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -24,27 +25,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import merge_pr
-from common import (
-    AGENT_LABEL_PREFIX,
-    terminal_lease_refusal,
-    terminal_lease_sha,
-    terminal_merge_lease,
-    agent_labels,
-    claimed_by,
-    ensure_label,
-    fetch_paginated_gh_api,
-    get_issue,
-    get_repo_slug,
-    is_trusted_metadata_author,
-    label_names,
-    parse_iso,
-    repository_owner_login,
-    repository_trusted_logins,
-    query_issue_project_items,
-    run_cmd,
-    run_gh_json,
-    select_governed_project_items,
-)
+from common import (AGENT_LABEL_PREFIX, terminal_lease_refusal, terminal_lease_sha,
+                    terminal_merge_lease, agent_labels, claimed_by, ensure_label,
+                    fetch_paginated_gh_api, get_issue, get_repo_slug, is_trusted_metadata_author,
+                    label_names, parse_iso, repository_owner_login, repository_trusted_logins,
+                    query_issue_project_items, run_cmd, run_gh_json,
+                    select_governed_project_items)
 from update_issue_status import update_status
 
 EXIT_OK = 0
@@ -92,9 +78,7 @@ def _remove_agent_label(issue_id: int, agent: str) -> bool:
 
 def _status_labels(issue: dict) -> list[str]:
     """Returns deterministic unique status labels for fail-closed decisions."""
-    return sorted({
-        name.lower() for name in label_names(issue) if name.lower().startswith("status:")
-    })
+    return sorted({name.lower() for name in label_names(issue) if name.lower().startswith("status:")})
 
 
 def _has_in_progress(issue: dict) -> bool:
@@ -119,37 +103,25 @@ def _required_board_preflight(issue_id: int, target_status: str) -> bool:
     """Verify readable governed-board authority before writing a claim label."""
     slug = get_repo_slug()
     if not slug or "/" not in slug:
-        print(
-            f"[ERROR] Cannot resolve repository identity for issue #{issue_id}; "
-            "claim cannot proceed.",
-            file=sys.stderr,
-        )
+        print(f"[ERROR] Cannot resolve repository identity for issue #{issue_id}; "
+              "claim cannot proceed.", file=sys.stderr)
         return False
     items = query_issue_project_items(issue_id)
     if items is None:
-        print(
-            f"[ERROR] Cannot read the governed Project Board for issue #{issue_id}; "
-            "claim cannot proceed. Verify `gh auth status` and grant "
-            "`read:project` to inspect the board and `project` to mutate it.",
-            file=sys.stderr,
-        )
+        print(f"[ERROR] Cannot read the governed Project Board for issue #{issue_id}; "
+              "claim cannot proceed. Verify `gh auth status` and grant "
+              "`read:project` to inspect the board and `project` to mutate it.", file=sys.stderr)
         return False
     governed = select_governed_project_items(items, slug)
     if len(governed) != 1:
-        print(
-            f"[ERROR] Cannot identify exactly one governed Project Board item "
-            f"for issue #{issue_id}; claim cannot proceed.",
-            file=sys.stderr,
-        )
+        print(f"[ERROR] Cannot identify exactly one governed Project Board item "
+              f"for issue #{issue_id}; claim cannot proceed.", file=sys.stderr)
         return False
     item = governed[0]
     current_status = str((item.get("status") or {}).get("name", "")).strip()
     if current_status.lower() != "ready":
-        print(
-            f"[ERROR] Governed Project Board state for issue #{issue_id} must be "
-            f"Ready before claim (found {current_status or 'none'}).",
-            file=sys.stderr,
-        )
+        print(f"[ERROR] Governed Project Board state for issue #{issue_id} must be "
+              f"Ready before claim (found {current_status or 'none'}).", file=sys.stderr)
         return False
     field = (item.get("project") or {}).get("field") or {}
     has_target = any(
@@ -157,28 +129,20 @@ def _required_board_preflight(issue_id: int, target_status: str) -> bool:
         for option in field.get("options", [])
     )
     if not field.get("id") or not has_target:
-        print(
-            f"[ERROR] Governed Project Board has no readable Status option "
-            f"'{target_status}' for issue #{issue_id}; claim cannot proceed.",
-            file=sys.stderr,
-        )
+        print(f"[ERROR] Governed Project Board has no readable Status option "
+              f"'{target_status}' for issue #{issue_id}; claim cannot proceed.", file=sys.stderr)
         return False
     return True
 
 
 def _metadata_is_trusted(issue: dict, owner=None, trusted_logins=None) -> bool:
     """Re-evaluates provenance with the same predicate the picker uses."""
-    return is_trusted_metadata_author(
-        issue, owner, trusted_logins=trusted_logins,
-    )
+    return is_trusted_metadata_author(issue, owner, trusted_logins=trusted_logins)
 
 
 def _refuse_untrusted_metadata(issue_id: int) -> int:
-    print(
-        f"[CONFLICT] Issue #{issue_id} metadata is untrusted; refusing to claim "
-        "until a trusted rewrite.",
-        file=sys.stderr,
-    )
+    print(f"[CONFLICT] Issue #{issue_id} metadata is untrusted; refusing to claim "
+          "until a trusted rewrite.", file=sys.stderr)
     return EXIT_CONFLICT
 
 
@@ -186,15 +150,11 @@ def _needs_human(issue: dict) -> bool:
     return "needs-human" in {name.lower() for name in label_names(issue)}
 
 
-def _rollback_claim(issue_id: int, agent: str, assignee: str,
-                    target_status: str = "Ready") -> None:
+def _rollback_claim(issue_id: int, agent: str, assignee: str, target_status: str = "Ready") -> None:
     """Best-effort undo after a late contender wins during/after status update."""
     update_status(issue_id, target_status, require_board=True)
     _remove_agent_label(issue_id, agent)
-    run_cmd(
-        ["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee],
-        check=False,
-    )
+    run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee], check=False)
 
 
 def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
@@ -207,11 +167,8 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
         time.sleep(READBACK_DELAY_S)
         issue = get_issue(issue_id)
         if not issue:
-            print(
-                f"[ERROR] Could not read back Issue #{issue_id} after claiming "
-                f"(settle {round_num}/{SETTLE_ROUNDS}).",
-                file=sys.stderr,
-            )
+            print(f"[ERROR] Could not read back Issue #{issue_id} after claiming "
+                  f"(settle {round_num}/{SETTLE_ROUNDS}).", file=sys.stderr)
             _remove_agent_label(issue_id, agent)
             return EXIT_ERROR
 
@@ -219,18 +176,12 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
         if _needs_human(issue):
             if my_label in holders:
                 _rollback_claim(issue_id, agent, "@me", target_status="Backlog")
-            print(
-                f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
-                "while the claim was settling.",
-                file=sys.stderr,
-            )
+            print(f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
+                  "while the claim was settling.", file=sys.stderr)
             return EXIT_CONFLICT
         if my_label not in holders:
-            print(
-                f"[ERROR] Claim label '{my_label}' was not present during read-back "
-                f"(settle {round_num}/{SETTLE_ROUNDS}).",
-                file=sys.stderr,
-            )
+            print(f"[ERROR] Claim label '{my_label}' was not present during read-back "
+                  f"(settle {round_num}/{SETTLE_ROUNDS}).", file=sys.stderr)
             return EXIT_ERROR
 
         if not _has_ready(issue):
@@ -243,29 +194,21 @@ def _settle_as_winner(issue_id: int, agent: str, my_label: str) -> int:
                 return EXIT_OK
             if len(holders) > 1:
                 _remove_agent_label(issue_id, agent)
-            print(
-                f"[CONFLICT] Issue #{issue_id} became {_status_name(issue)} while "
-                "the claim was settling; refusing to reopen it.",
-                file=sys.stderr,
-            )
+            print(f"[CONFLICT] Issue #{issue_id} became {_status_name(issue)} while "
+                  "the claim was settling; refusing to reopen it.", file=sys.stderr)
             return EXIT_CONFLICT
 
         if holders[0] != my_label:
             contenders = ", ".join(h[len(AGENT_LABEL_PREFIX):] for h in holders)
-            print(
-                f"[CONFLICT] Race on #{issue_id} between [{contenders}]; "
-                f"'{holders[0][len(AGENT_LABEL_PREFIX):]}' wins. Releasing.",
-                file=sys.stderr,
-            )
+            print(f"[CONFLICT] Race on #{issue_id} between [{contenders}]; "
+                  f"'{holders[0][len(AGENT_LABEL_PREFIX):]}' wins. Releasing.", file=sys.stderr)
             _remove_agent_label(issue_id, agent)
             return EXIT_CONFLICT
 
         if len(holders) > 1:
             contenders = ", ".join(h[len(AGENT_LABEL_PREFIX):] for h in holders)
-            print(
-                f"[INFO] Race on #{issue_id} between [{contenders}]; "
-                f"'{agent}' wins (settle {round_num}/{SETTLE_ROUNDS})."
-            )
+            print(f"[INFO] Race on #{issue_id} between [{contenders}]; "
+                  f"'{agent}' wins (settle {round_num}/{SETTLE_ROUNDS}).")
 
     return EXIT_OK
 
@@ -274,8 +217,7 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
     """Assign, move board status, and confirm no late lower-sorting contender."""
     issue = get_issue(issue_id)
     if not issue:
-        print(f"[ERROR] Could not revalidate Issue #{issue_id} before finalizing.",
-              file=sys.stderr)
+        print(f"[ERROR] Could not revalidate Issue #{issue_id} before finalizing.", file=sys.stderr)
         return EXIT_ERROR
     if not _metadata_is_trusted(issue, owner, trusted_logins):
         holders = agent_labels(issue)
@@ -286,11 +228,8 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
     if _needs_human(issue):
         if my_label in holders:
             _rollback_claim(issue_id, agent, assignee, target_status="Backlog")
-        print(
-            f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
-            "before claim finalization.",
-            file=sys.stderr,
-        )
+        print(f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
+              "before claim finalization.", file=sys.stderr)
         return EXIT_CONFLICT
     if _has_in_progress(issue) and holders == [my_label]:
         print(f"[INFO] Issue #{issue_id} is already yours; resuming.")
@@ -298,16 +237,12 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
     if not _has_ready(issue):
         if my_label in holders and len(holders) > 1:
             _remove_agent_label(issue_id, agent)
-        print(
-            f"[CONFLICT] Issue #{issue_id} became {_status_name(issue)} before "
-            "claim finalization; refusing to reopen it.",
-            file=sys.stderr,
-        )
+        print(f"[CONFLICT] Issue #{issue_id} became {_status_name(issue)} before "
+              "claim finalization; refusing to reopen it.", file=sys.stderr)
         return EXIT_CONFLICT
 
-    code, _, err = run_cmd(
-        ["gh", "issue", "edit", str(issue_id), "--add-assignee", assignee], check=False
-    )
+    code, _, err = run_cmd(["gh", "issue", "edit", str(issue_id), "--add-assignee", assignee],
+                           check=False)
     if code != 0:
         print(f"[WARN] Unable to assign issue: {err}. Continuing...", file=sys.stderr)
 
@@ -316,24 +251,17 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
     # which resolves against the target project's cwd rather than the
     # framework's, so it silently did nothing from a project repo root.
     if not update_status(issue_id, status, require_board=True):
-        print(
-            f"[ERROR] Required Project Board/status mutation failed for issue "
-            f"#{issue_id}; claim is incomplete. Verify `gh auth status`, "
-            "`read:project`/`project` authority, board membership, and the "
-            f"'{status}' Status option before retrying.",
-            file=sys.stderr,
-        )
+        print(f"[ERROR] Required Project Board/status mutation failed for issue "
+              f"#{issue_id}; claim is incomplete. Verify `gh auth status`, "
+              "`read:project`/`project` authority, board membership, and the "
+              f"'{status}' Status option before retrying.", file=sys.stderr)
         removed = _remove_agent_label(issue_id, agent)
-        cleanup_code, _, cleanup_err = run_cmd(
-            ["gh", "issue", "edit", str(issue_id), "--remove-assignee", assignee],
-            check=False,
-        )
+        cleanup_code, _, cleanup_err = run_cmd(["gh", "issue", "edit", str(issue_id),
+                                                "--remove-assignee", assignee], check=False)
         if not removed or cleanup_code != 0:
-            print(
-                f"[ERROR] Claim rollback incomplete for issue #{issue_id}; "
-                f"manual reconciliation required: {cleanup_err or 'claim label cleanup failed'}",
-                file=sys.stderr,
-            )
+            print(f"[ERROR] Claim rollback incomplete for issue #{issue_id}; "
+                  f"manual reconciliation required: {cleanup_err or 'claim label cleanup failed'}",
+                  file=sys.stderr)
         return EXIT_ERROR
 
     # Post-commit verify: a late lexicographically-smaller label write can land
@@ -350,20 +278,14 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
 
     holders = agent_labels(issue)
     if _needs_human(issue):
-        print(
-            f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
-            "during claim finalization; returning it to Backlog.",
-            file=sys.stderr,
-        )
+        print(f"[CONFLICT] Issue #{issue_id} became operator-only (needs-human) "
+              "during claim finalization; returning it to Backlog.", file=sys.stderr)
         _rollback_claim(issue_id, agent, assignee, target_status="Backlog")
         return EXIT_CONFLICT
     if my_label not in holders or holders[0] != my_label:
         contenders = ", ".join(h[len(AGENT_LABEL_PREFIX):] for h in holders) or "(none)"
-        print(
-            f"[CONFLICT] Late contender on #{issue_id} after status update "
-            f"[{contenders}]; releasing.",
-            file=sys.stderr,
-        )
+        print(f"[CONFLICT] Late contender on #{issue_id} after status update "
+              f"[{contenders}]; releasing.", file=sys.stderr)
         _rollback_claim(issue_id, agent, assignee)
         return EXIT_CONFLICT
 
@@ -371,34 +293,24 @@ def _finalize_claim(issue_id: int, agent: str, status: str, assignee: str, my_la
     return EXIT_OK
 
 
-def _start_fresh_issue_claim(
-    issue_id: int,
-    agent: str,
-    status: str,
-    assignee: str,
-    my_label: str,
-    owner: Optional[str],
-    trusted_logins: Optional[set[str]],
-) -> int:
+def _start_fresh_issue_claim(issue_id: int, agent: str, status: str, assignee: str, my_label: str,
+                             owner: Optional[str], trusted_logins: Optional[set[str]]) -> int:
     """Preflight, write, settle, and finalize one new Ready claim."""
     if not _required_board_preflight(issue_id, status):
         return EXIT_ERROR
     if not ensure_label(my_label, "1d76db", f"Claimed by agent '{agent}'"):
         print(f"[ERROR] Could not provision claim label '{my_label}'.", file=sys.stderr)
         return EXIT_ERROR
-    code, _, err = run_cmd(
-        ["gh", "issue", "edit", str(issue_id), "--add-label", my_label], check=False
-    )
+    code, _, err = run_cmd(["gh", "issue", "edit", str(issue_id), "--add-label", my_label],
+                           check=False)
     if code != 0:
         print(f"[ERROR] Could not apply claim label: {err}", file=sys.stderr)
         return EXIT_ERROR
     settled = _settle_as_winner(issue_id, agent, my_label)
     if settled != EXIT_OK:
         return settled
-    return _finalize_claim(
-        issue_id, agent, status, assignee, my_label,
-        owner=owner, trusted_logins=trusted_logins,
-    )
+    return _finalize_claim(issue_id, agent, status, assignee, my_label, owner=owner,
+                           trusted_logins=trusted_logins)
 
 
 def _terminally_merged(issue_id: int, issue=None):
@@ -414,10 +326,8 @@ def _terminally_merged(issue_id: int, issue=None):
     """
     if isinstance(issue, dict) and issue.get("state") != "CLOSED":
         return None
-    data = run_gh_json([
-        "gh", "issue", "view", str(issue_id),
-        "--json", "state,closedByPullRequestsReferences",
-    ])
+    data = run_gh_json(["gh", "issue", "view", str(issue_id), "--json",
+                        "state,closedByPullRequestsReferences"])
     # An unreadable lookup is not "not merged". A closed issue still carrying
     # status:ready would otherwise sail through on a failed API call, so an
     # unknown answer blocks on this governance path (CodeRabbit, #344).
@@ -453,8 +363,7 @@ def _terminally_merged(issue_id: int, issue=None):
     return None
 
 
-def _claim_issue_locked(issue_id: int, agent: str, status: str,
-                        assignee: str) -> int:
+def _claim_issue_locked(issue_id: int, agent: str, status: str, assignee: str) -> int:
     issue = get_issue(issue_id)
     if not issue:
         print(f"[ERROR] Issue #{issue_id} not found.", file=sys.stderr)
@@ -471,11 +380,8 @@ def _claim_issue_locked(issue_id: int, agent: str, status: str,
 
     # --- Step 1: pre-check -------------------------------------------------
     if _needs_human(issue):
-        print(
-            f"[CONFLICT] Issue #{issue_id} is operator-only (needs-human); "
-            "factory agents must not claim it.",
-            file=sys.stderr,
-        )
+        print(f"[CONFLICT] Issue #{issue_id} is operator-only (needs-human); "
+              "factory agents must not claim it.", file=sys.stderr)
         return EXIT_CONFLICT
 
     if _has_ready(issue) and not _metadata_is_trusted(issue, owner, trusted_logins):
@@ -494,24 +400,16 @@ def _claim_issue_locked(issue_id: int, agent: str, status: str,
         if _has_ready(issue):
             print(f"[INFO] Completing interrupted claim on #{issue_id}...")
             if not _required_board_preflight(issue_id, status):
-                print(
-                    f"[ERROR] Incomplete claim state retained for issue #{issue_id}: "
-                    f"`{my_label}` and any existing assignee were left unchanged "
-                    "because governed Board authority could not be proven. Retry "
-                    "with the same stable agent id after reconciliation, allow "
-                    "stale-claim reaping, or reconcile manually.",
-                    file=sys.stderr,
-                )
+                print(f"[ERROR] Incomplete claim state retained for issue #{issue_id}: "
+                      f"`{my_label}` and any existing assignee were left unchanged "
+                      "because governed Board authority could not be proven. Retry "
+                      "with the same stable agent id after reconciliation, allow "
+                      "stale-claim reaping, or reconcile manually.", file=sys.stderr)
                 return EXIT_ERROR
-            return _finalize_claim(
-                issue_id, agent, status, assignee, my_label,
-                owner=owner, trusted_logins=trusted_logins,
-            )
-        print(
-            f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready or "
-            "In Progress; refusing stale same-agent recovery.",
-            file=sys.stderr,
-        )
+            return _finalize_claim(issue_id, agent, status, assignee, my_label, owner=owner,
+                                   trusted_logins=trusted_logins)
+        print(f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready or "
+              "In Progress; refusing stale same-agent recovery.", file=sys.stderr)
         return EXIT_CONFLICT
 
     # A fresh claim may start only from Ready. In Review deliberately makes
@@ -519,21 +417,15 @@ def _claim_issue_locked(issue_id: int, agent: str, status: str,
     # not make the parked issue claimable again. The same-agent interrupted
     # In Progress/Ready paths above remain explicitly resumable.
     if not _has_ready(issue):
-        print(
-            f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready; "
-            "refusing a new claim.",
-            file=sys.stderr,
-        )
+        print(f"[CONFLICT] Issue #{issue_id} is {_status_name(issue)}, not Ready; "
+              "refusing a new claim.", file=sys.stderr)
         return EXIT_CONFLICT
 
-    return _start_fresh_issue_claim(
-        issue_id, agent, status, assignee, my_label,
-        owner, trusted_logins,
-    )
+    return _start_fresh_issue_claim(issue_id, agent, status, assignee, my_label, owner,
+                                    trusted_logins)
 
 
-def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
-                assignee: str = "@me") -> int:
+def claim_issue(issue_id: int, agent: str, status: str = "In Progress", assignee: str = "@me") -> int:
     """Serialize claims against auto-triage and merge lifecycle transitions."""
     with merge_pr.repository_merge_lock() as (locked, message):
         if not locked:
@@ -564,10 +456,8 @@ def release_issue(issue_id: int, agent: str) -> int:
     if not _remove_agent_label(issue_id, agent):
         update_status(issue_id, "In Progress", require_board=True)
         return EXIT_ERROR
-    code, _, err = run_cmd(
-        ["gh", "issue", "edit", str(issue_id), "--remove-assignee", "@me"],
-        check=False,
-    )
+    code, _, err = run_cmd(["gh", "issue", "edit", str(issue_id), "--remove-assignee", "@me"],
+                           check=False)
     if code != 0:
         print(f"[WARN] Unable to remove assignee: {err}", file=sys.stderr)
     print(f"♻️  Issue #{issue_id} released by '{agent}' and returned to {target_status}.")
@@ -583,11 +473,8 @@ AUTHOR_LABEL_PREFIX = "author:"
 
 def _pr_labels(pr_id: int):
     """Returns the PR's label names, or None when the PR cannot be read."""
-    code, out, _ = run_cmd(
-        ["gh", "pr", "view", str(pr_id), "--json", "labels", "-q",
-         "[.labels[].name] | join(\"\\n\")"],
-        check=False,
-    )
+    code, out, _ = run_cmd(["gh", "pr", "view", str(pr_id), "--json", "labels", "-q",
+                            "[.labels[].name] | join(\"\\n\")"], check=False)
     if code != 0:
         return None
     return [line.strip() for line in out.splitlines() if line.strip()]
@@ -608,16 +495,11 @@ DEFAULT_ADOPT_AFTER_HOURS = 4
 
 def _pr_snapshot(pr_id: int):
     """Labels plus the PR's last-update time, or None when it cannot be read."""
-    payload = run_gh_json(
-        ["gh", "pr", "view", str(pr_id), "--json", "labels,updatedAt,state"])
+    payload = run_gh_json(["gh", "pr", "view", str(pr_id), "--json", "labels,updatedAt,state"])
     if not isinstance(payload, dict):
         return None
-    return {
-        "labels": [str((lab or {}).get("name") or "")
-                   for lab in payload.get("labels") or []],
-        "updatedAt": payload.get("updatedAt"),
-        "state": payload.get("state"),
-    }
+    return {"labels": [str((lab or {}).get("name") or "") for lab in payload.get("labels") or []],
+            "updatedAt": payload.get("updatedAt"), "state": payload.get("state")}
 
 
 def _label_value(labels, prefix: str):
@@ -660,12 +542,10 @@ def _adoption_target(pr_id: int, agent: str, after_hours: int):
     previous = pr_author(snapshot["labels"])
     if previous is None:
         print(f"[CONFLICT] PR #{pr_id} has no {AUTHOR_LABEL_PREFIX}<id> label, so "
-              "there is no ownership to transfer. Stamp the author first.",
-              file=sys.stderr)
+              "there is no ownership to transfer. Stamp the author first.", file=sys.stderr)
         return None, None, None, EXIT_CONFLICT
     if previous == agent:
-        print(f"[CONFLICT] PR #{pr_id} is already authored by '{agent}'.",
-              file=sys.stderr)
+        print(f"[CONFLICT] PR #{pr_id} is already authored by '{agent}'.", file=sys.stderr)
         return None, None, None, EXIT_CONFLICT
 
     # Abandonment has to be demonstrated, not assumed. A PR touched recently
@@ -703,15 +583,13 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
               "would stamp invalid ownership on the PR. If you passed a shell "
               "variable, it is unset.", file=sys.stderr)
         return EXIT_ERROR
-    snapshot, previous, idle_hours, refusal = _adoption_target(
-        pr_id, agent, after_hours)
+    snapshot, previous, idle_hours, refusal = _adoption_target(pr_id, agent, after_hours)
     if refusal is not None:
         return refusal
     labels = snapshot["labels"]
 
     previous_family = _label_value(labels, FAMILY_LABEL_PREFIX)
-    add = [f"{AUTHOR_LABEL_PREFIX}{agent}",
-           f"{ADOPTED_FROM_LABEL_PREFIX}{previous}"]
+    add = [f"{AUTHOR_LABEL_PREFIX}{agent}", f"{ADOPTED_FROM_LABEL_PREFIX}{previous}"]
     remove = [f"{AUTHOR_LABEL_PREFIX}{previous}"]
     if family:
         add.append(f"{FAMILY_LABEL_PREFIX}{family}")
@@ -719,8 +597,7 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
             remove.append(f"{FAMILY_LABEL_PREFIX}{previous_family}")
     else:
         print("[WARN] No --model-family given. The merge gate compares identity "
-              "as (id, family); stamp it so review routing stays correct.",
-              file=sys.stderr)
+              "as (id, family); stamp it so review routing stays correct.", file=sys.stderr)
 
     for name in add:
         if not ensure_label(name, "5319e7", f"Adoption marker '{name}'"):
@@ -734,8 +611,7 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
         cmd += ["--remove-label", name]
     code, _, err = run_cmd(cmd, check=False)
     if code != 0:
-        print(f"[ERROR] Could not transfer authorship of PR #{pr_id}: {err}",
-              file=sys.stderr)
+        print(f"[ERROR] Could not transfer authorship of PR #{pr_id}: {err}", file=sys.stderr)
         return EXIT_ERROR
 
     # Read back before reporting success. Two successors can both clear
@@ -767,8 +643,7 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
              "Commits, CI history, and review threads are preserved. The "
              "adopting agent is now the author and cannot review this PR."],
             check=False)
-    print(f"🤝 PR #{pr_id} adopted by '{agent}' from '{previous}' "
-          f"(idle {idle_hours:.1f}h).")
+    print(f"🤝 PR #{pr_id} adopted by '{agent}' from '{previous}' (idle {idle_hours:.1f}h).")
     return EXIT_OK
 
 
@@ -851,8 +726,7 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
 
     holder = merge_claimant(labels)
     if holder and holder != agent:
-        print(f"[CONFLICT] PR #{pr_id} merge is already claimed by '{holder}'.",
-              file=sys.stderr)
+        print(f"[CONFLICT] PR #{pr_id} merge is already claimed by '{holder}'.", file=sys.stderr)
         return EXIT_CONFLICT
     if holder == agent:
         print(f"[INFO] PR #{pr_id} merge is already yours; resuming.")
@@ -863,9 +737,7 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
         print(f"[ERROR] Could not provision merge label '{my_label}'.", file=sys.stderr)
         return EXIT_ERROR
 
-    code, _, err = run_cmd(
-        ["gh", "pr", "edit", str(pr_id), "--add-label", my_label], check=False
-    )
+    code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--add-label", my_label], check=False)
     if code != 0:
         print(f"[ERROR] Could not apply merge claim: {err}", file=sys.stderr)
         return EXIT_ERROR
@@ -873,15 +745,13 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     time.sleep(READBACK_DELAY_S)
     labels = _pr_labels(pr_id)
     if labels is None:
-        print(f"[ERROR] Could not read back PR #{pr_id} after claiming merge.",
-              file=sys.stderr)
+        print(f"[ERROR] Could not read back PR #{pr_id} after claiming merge.", file=sys.stderr)
         _remove_merger_label(pr_id, agent)
         return EXIT_ERROR
 
     holders = merger_labels(labels)
     if my_label not in holders:
-        print(f"[ERROR] Merge label '{my_label}' was not present during read-back.",
-              file=sys.stderr)
+        print(f"[ERROR] Merge label '{my_label}' was not present during read-back.", file=sys.stderr)
         return EXIT_ERROR
 
     if len(holders) > 1:
@@ -889,8 +759,7 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
         contenders = ", ".join(h[len(MERGER_LABEL_PREFIX):] for h in holders)
         if winner != my_label:
             print(f"[CONFLICT] Race to merge #{pr_id} between [{contenders}]; "
-                  f"'{winner[len(MERGER_LABEL_PREFIX):]}' wins. Releasing.",
-                  file=sys.stderr)
+                  f"'{winner[len(MERGER_LABEL_PREFIX):]}' wins. Releasing.", file=sys.stderr)
             _remove_merger_label(pr_id, agent)
             return EXIT_CONFLICT
         print(f"[INFO] Race to merge #{pr_id} between [{contenders}]; '{agent}' wins.")
@@ -901,8 +770,7 @@ def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
         holders = merger_labels(confirm)
         if len(holders) > 1 and holders[0] != my_label:
             print(f"[CONFLICT] Late contender on merge of PR #{pr_id}; "
-                  f"'{holders[0][len(MERGER_LABEL_PREFIX):]}' wins. Releasing.",
-                  file=sys.stderr)
+                  f"'{holders[0][len(MERGER_LABEL_PREFIX):]}' wins. Releasing.", file=sys.stderr)
             _remove_merger_label(pr_id, agent)
             return EXIT_CONFLICT
 
@@ -917,8 +785,7 @@ def release_merge(pr_id: int, agent: str) -> int:
         return EXIT_ERROR
     holder = merge_claimant(labels)
     if holder != agent:
-        print(f"[CONFLICT] PR #{pr_id} merge is held by '{holder}', not '{agent}'.",
-              file=sys.stderr)
+        print(f"[CONFLICT] PR #{pr_id} merge is held by '{holder}', not '{agent}'.", file=sys.stderr)
         return EXIT_CONFLICT
     if not _remove_merger_label(pr_id, agent):
         return EXIT_ERROR
@@ -928,15 +795,10 @@ def release_merge(pr_id: int, agent: str) -> int:
 
 def _claim_labeled_at(pr_number: int, label_name: str):
     """Return the latest exact-label claim event, or None when unprovable."""
-    events = fetch_paginated_gh_api(
-        f"repos/{{owner}}/{{repo}}/issues/{pr_number}/timeline"
-    )
+    events = fetch_paginated_gh_api(f"repos/{{owner}}/{{repo}}/issues/{pr_number}/timeline")
     if events is None:
-        print(
-            f"[WARN] Could not read claim timeline for PR #{pr_number}; "
-            "no claims were reaped.",
-            file=sys.stderr,
-        )
+        print(f"[WARN] Could not read claim timeline for PR #{pr_number}; no claims were reaped.",
+              file=sys.stderr)
         return None
 
     matches = []
@@ -948,20 +810,14 @@ def _claim_labeled_at(pr_number: int, label_name: str):
             continue
         when = parse_iso(event.get("created_at") or "")
         if when is None or when.tzinfo is None:
-            print(
-                f"[WARN] Claim timeline for PR #{pr_number} has an invalid "
-                f"timestamp for {label_name}; no claims were reaped.",
-                file=sys.stderr,
-            )
+            print(f"[WARN] Claim timeline for PR #{pr_number} has an invalid "
+                  f"timestamp for {label_name}; no claims were reaped.", file=sys.stderr)
             return None
         matches.append(when)
 
     if not matches:
-        print(
-            f"[WARN] Claim timeline for PR #{pr_number} has no labeled event "
-            f"for {label_name}; no claims were reaped.",
-            file=sys.stderr,
-        )
+        print(f"[WARN] Claim timeline for PR #{pr_number} has no labeled event "
+              f"for {label_name}; no claims were reaped.", file=sys.stderr)
         return None
     return max(matches)
 
@@ -971,11 +827,7 @@ def _claims_with_timestamps(prs: list, prefix: str, claimant):
     claims = []
     seen = set()
     for pr in prs:
-        names = [
-            lab.get("name", "")
-            for lab in pr.get("labels", [])
-            if isinstance(lab, dict)
-        ]
+        names = [lab.get("name", "") for lab in pr.get("labels", []) if isinstance(lab, dict)]
         holder = claimant(names)
         if not holder:
             continue
@@ -1008,20 +860,11 @@ def _revalidate_claims(prs: list, prefix: str, claimant, expected: list):
     refreshed = _claims_with_timestamps(prs, prefix, claimant)
     if refreshed is None:
         return None
-    expected_state = {
-        (pr["number"], holder): claimed_at
-        for pr, holder, claimed_at in expected
-    }
-    refreshed_state = {
-        (pr["number"], holder): claimed_at
-        for pr, holder, claimed_at in refreshed
-    }
+    expected_state = {(pr["number"], holder): claimed_at for pr, holder, claimed_at in expected}
+    refreshed_state = {(pr["number"], holder): claimed_at for pr, holder, claimed_at in refreshed}
     if refreshed_state != expected_state:
-        print(
-            "[WARN] Claim state changed during reaper preflight; "
-            "no claims were reaped.",
-            file=sys.stderr,
-        )
+        print("[WARN] Claim state changed during reaper preflight; no claims were reaped.",
+              file=sys.stderr)
         return None
     return refreshed
 
@@ -1054,11 +897,8 @@ def reap_stale_merges(  # noqa: C901, PLR0912
     if prs_snapshot is None:
         prs = []
         for state in ("open", "merged"):
-            code, out, _ = run_cmd(
-                ["gh", "pr", "list", "--state", state, "--limit", "200",
-                 "--json", "number,labels,state,mergedAt"],
-                check=False,
-            )
+            code, out, _ = run_cmd(["gh", "pr", "list", "--state", state, "--limit", "200",
+                                    "--json", "number,labels,state,mergedAt"], check=False)
             if code != 0:
                 print(f"[WARN] Could not list {state} PRs; merge reaping incomplete.",
                       file=sys.stderr)
@@ -1076,9 +916,7 @@ def reap_stale_merges(  # noqa: C901, PLR0912
     claims = _claims_with_timestamps(prs, MERGER_LABEL_PREFIX, merge_claimant)
     if claims is None:
         return []
-    claims = _revalidate_claims(
-        prs, MERGER_LABEL_PREFIX, merge_claimant, claims
-    )
+    claims = _revalidate_claims(prs, MERGER_LABEL_PREFIX, merge_claimant, claims)
     if claims is None:
         return []
 
@@ -1093,8 +931,7 @@ def reap_stale_merges(  # noqa: C901, PLR0912
         if _remove_merger_label(number, holder):
             released.append(number)
             print(f"♻️  Released stale merge claim on PR #{number} "
-                  f"(held by '{holder}', claim age > {quiet} quiet threshold).",
-                  file=sys.stderr)
+                  f"(held by '{holder}', claim age > {quiet} quiet threshold).", file=sys.stderr)
     return released
 
 
@@ -1104,8 +941,7 @@ def main():
                     "claim the mechanical merge of a pull request, for one agent.")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--issue", type=int, help="GitHub Issue Number")
-    target.add_argument("--pr", type=int,
-                        help="Pull Request number to adopt or claim for merge")
+    target.add_argument("--pr", type=int, help="Pull Request number to adopt or claim for merge")
     parser.add_argument("--agent", type=str, required=True,
                         help="Agent id, e.g. 'agent-1'. Becomes the agent:<id> label.")
     parser.add_argument("--assignee", type=str, default="@me", help="GitHub assignee (default: @me)")
@@ -1121,10 +957,9 @@ def main():
                         help="With --pr: take over an abandoned PR, moving "
                              "author: and family: to this agent and recording "
                              "adopted-from:<previous>.")
-    parser.add_argument("--adopt-after", type=int, default=DEFAULT_ADOPT_AFTER_HOURS,
-                        metavar="HOURS",
+    parser.add_argument("--adopt-after", type=int, default=DEFAULT_ADOPT_AFTER_HOURS, metavar="HOURS",
                         help="Hours a PR must be idle before it may be adopted "
-                             f"(default: {DEFAULT_ADOPT_AFTER_HOURS})")
+                        f"(default: {DEFAULT_ADOPT_AFTER_HOURS})")
     parser.add_argument("--merge", action="store_true",
                         help="With --pr: claim or release mechanical merge (merger:<id>).")
     parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
@@ -1146,8 +981,7 @@ def main():
         # line report success while nothing was claimed.
         print("[ERROR] A pull request may only be adopted (--adopt) or claimed "
               "for mechanical merge (--merge). Coding agents do not claim "
-              "review; the assigned review service reviews the PR.",
-              file=sys.stderr)
+              "review; the assigned review service reviews the PR.", file=sys.stderr)
         sys.exit(EXIT_ERROR)
 
     if args.merge:
