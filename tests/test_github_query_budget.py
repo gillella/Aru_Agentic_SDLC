@@ -1,4 +1,4 @@
-# line-ceiling: 440
+# line-ceiling: 500
 """Regression tests for bounded GitHub reads in one factory picker cycle."""
 
 import io
@@ -35,13 +35,28 @@ def executable_commands(section):
     return commands
 
 
+PICKER_COMMAND = (
+    'python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" '
+    "[--agent <AGENT_ID>] [--family <FAMILY>] --claim --json"
+)
+MERGE_COMMAND = 'python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>'
+RELEASE_COMMAND = (
+    'python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release'
+)
+
+# A second picker call is as much a budget breach as an enrichment read, and
+# `future_github_probe.py` stands in for a command nobody has written yet: the
+# guard has to reject an unknown GitHub-bearing spelling, not just this list.
 EXTRA_GITHUB_COMMANDS = (
+    PICKER_COMMAND,
     'python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" --json',
     'python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --capacity',
     "gh issue view 477",
     "gh pr view 478",
+    "gh api repos/gillella/Aru_Agentic_SDLC/pulls/478",
     'python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr 478',
     'python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr 478 --dry-run',
+    'python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr 478 --merge',
     'python3 "$ARU_SDLC_HOME/scripts/future_github_probe.py" --json',
 )
 
@@ -376,44 +391,90 @@ class LoopOrchestrationBudgetTests(unittest.TestCase):
     def setUpClass(cls):
         cls.skill = (ROOT / "skills/run-aru-factory/SKILL.md").read_text()
         cls.prompt = (ROOT / "prompts/fleet-worker.md").read_text()
-
-    def test_tick_starts_with_one_github_bearing_entrypoint(self):
-        start = self.prompt.split("### The loop", 1)[1].split("#### A.", 1)[0]
-        commands = executable_commands(start)
-        allowed = [
-            'python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json',
-        ]
-        self.assertEqual(commands, allowed)
-        for extra in EXTRA_GITHUB_COMMANDS:
-            with self.subTest(extra=extra):
-                self.assertNotEqual(executable_commands(f"{start}\n`{extra}`"), allowed)
-        contract = " ".join(start.split()).lower()
-        self.assertIn("only routine github-bearing entrypoint", contract)
-
-    def test_waiting_card_uses_picker_snapshot_without_enrichment(self):
-        waiting = self.prompt.split(
+        cls.picker = cls.prompt.split("### The loop", 1)[1].split("#### A.", 1)[0]
+        cls.merge = cls.prompt.split("#### B.", 1)[1].split("#### C.", 1)[0]
+        cls.waiting = cls.prompt.split(
             "### Waiting, continuity, intentional stop, and Slack alerts", 1
         )[1].split("**Slack control-room alerts", 1)[0]
-        lowered = " ".join(waiting.split()).lower()
+
+    def assert_tick_query_budget(self, picker=None, waiting=None, merge=None):
+        """Fail unless every tick phase runs exactly the commands it is allowed.
+
+        The three phases share one guard so the deny tests below can prove the
+        guard itself rejects a prohibited read. Asserting only that the parser
+        *noticed* an injected command would still pass if one of these
+        equalities were later loosened to a substring check.
+        """
+        self.assertEqual(
+            executable_commands(self.picker if picker is None else picker),
+            [PICKER_COMMAND],
+        )
+        self.assertEqual(
+            executable_commands(self.waiting if waiting is None else waiting), []
+        )
+
+        merge_commands = executable_commands(self.merge if merge is None else merge)
+        self.assertEqual(merge_commands, [MERGE_COMMAND, RELEASE_COMMAND])
+        # Stated separately from the allowlist: the sole merge command must pin
+        # the picker head and must never be a probe, whatever the allowlist says.
+        merge_helpers = [c for c in merge_commands if "merge_pr.py" in c]
+        self.assertEqual(len(merge_helpers), 1, merge_helpers)
+        self.assertIn("--expected-head <HEAD_SHA>", merge_helpers[0])
+        self.assertNotIn("--dry-run", merge_helpers[0])
+
+    def test_tick_starts_with_one_github_bearing_entrypoint(self):
+        self.assert_tick_query_budget()
+        contract = " ".join(self.picker.split()).lower()
+        self.assertIn("only routine github-bearing entrypoint", contract)
+        # The prohibition prose is the rule an agent actually reads; deleting it
+        # must fail here even though no command line changed.
+        for redundant in (
+            "fleet_status.py", "triage_backlog.py", "gh issue", "gh pr",
+            "check_ci.py", "merge_pr.py --dry-run",
+        ):
+            with self.subTest(redundant=redundant):
+                self.assertIn(redundant, contract)
+
+    def test_waiting_card_uses_picker_snapshot_without_enrichment(self):
+        self.assert_tick_query_budget()
+        lowered = " ".join(self.waiting.split()).lower()
         self.assertIn("assemble only from the current picker result", lowered)
         self.assertIn("zero follow-up github reads", lowered)
-        self.assertEqual(executable_commands(waiting), [])
-        for extra in EXTRA_GITHUB_COMMANDS:
-            with self.subTest(extra=extra):
-                self.assertEqual(executable_commands(f"{waiting}\n`{extra}`"), [extra])
+        self.assertNotIn("triage_backlog.py", self.waiting)
 
     def test_merge_path_has_no_probe_or_confirmation_read(self):
-        merge = self.prompt.split("#### B.", 1)[1].split("#### C.", 1)[0]
-        commands = executable_commands(merge)
-        allowed = [
-            'python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>',
-            'python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release',
+        self.assert_tick_query_budget()
+        confirmations = [
+            line for line in self.merge.splitlines()
+            if "claim_issue.py" in line and "--release" not in line
         ]
-        self.assertEqual(commands, allowed)
-        for extra in EXTRA_GITHUB_COMMANDS:
-            with self.subTest(extra=extra):
-                self.assertNotEqual(executable_commands(f"{merge}\n`{extra}`"), allowed)
-        self.assertIn("exactly one fresh picker call", merge)
+        self.assertEqual(confirmations, [])
+        self.assertIn("exactly one fresh picker call", self.merge)
+
+    def test_every_prohibited_read_is_rejected_in_every_tick_phase(self):
+        for phase in ("picker", "waiting", "merge"):
+            for command in EXTRA_GITHUB_COMMANDS:
+                with self.subTest(phase=phase, command=command):
+                    section = getattr(self, phase)
+                    with self.assertRaises(AssertionError):
+                        self.assert_tick_query_budget(
+                            **{phase: f"{section}\n\n`{command}`\n"}
+                        )
+
+    def test_merge_guard_requires_the_sole_expected_head_command(self):
+        without_head = self.merge.replace(" --expected-head <HEAD_SHA>", "")
+        with self.assertRaises(AssertionError):
+            self.assert_tick_query_budget(merge=without_head)
+
+        duplicated = f"{self.merge}\n\n`{MERGE_COMMAND}`\n"
+        with self.assertRaises(AssertionError):
+            self.assert_tick_query_budget(merge=duplicated)
+
+        dry_run = self.merge.replace(
+            " --expected-head <HEAD_SHA>", " --expected-head <HEAD_SHA> --dry-run"
+        )
+        with self.assertRaises(AssertionError):
+            self.assert_tick_query_budget(merge=dry_run)
 
     def test_router_carries_the_same_tick_budget(self):
         loop = self.skill.split("### loop", 1)[1].split("### doctor", 1)[0]
@@ -422,6 +483,7 @@ class LoopOrchestrationBudgetTests(unittest.TestCase):
         self.assertIn("zero follow-up github reads", lowered)
         self.assertIn("build the **status card** only from the picker result", lowered)
         self.assertIn("full diagnostics are a separately declared attempt", lowered)
+        self.assertIn("a returned `error` work item", lowered)
 
 
 if __name__ == "__main__":

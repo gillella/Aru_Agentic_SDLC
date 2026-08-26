@@ -1,4 +1,4 @@
-# line-ceiling: 615
+# line-ceiling: 650
 """Contract tests for the run-aru-factory entrypoint skill.
 
 The skill is prose, so these assert the properties a reader depends on rather
@@ -456,6 +456,21 @@ class GovernanceTests(unittest.TestCase):
         self.assertIn("start no work", text)
         self.assertIn("wait/retry path", text)
 
+    def test_loop_distinguishes_transient_picker_error_from_diagnostics(self):
+        """A returned `error` work item is loop state, not a reason to diagnose.
+
+        `fetch_next_work.py` emits `{"type": "error", ...}` as an ordinary,
+        usable result, so a router that only says "diagnose a concrete
+        picker/helper error" reads as licence to spend the tick's remaining
+        budget on diagnostics.
+        """
+        loop = flat(skill_text().split("### loop", 1)[1].split("### doctor", 1)[0])
+        self.assertIn("a returned `error` work item", loop)
+        self.assertIn("transient loop state, not a concrete failure", loop)
+        self.assertIn("yields no usable snapshot", loop)
+        self.assertIn("full diagnostics are a separately declared attempt", loop)
+        self.assertIn("zero follow-up github reads", loop)
+
     def test_picker_claim_semantics_are_work_type_specific(self):
         for text in (
             flat(skill_text()),
@@ -477,6 +492,19 @@ class GovernanceTests(unittest.TestCase):
         merge = fleet.split("#### B.", 1)[1].split("#### C.", 1)[0]
         commands = re.findall(r"(?m)^\s*`(python3 [^`\n]+)`\s*$", merge)
         self.assertEqual(commands, ['python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>', 'python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release'])
+        # Both merge contracts, not just the fleet prompt: the router's own
+        # `### Merging` section is what a desktop agent reads, so a dry-run or a
+        # second merge command reintroduced there has to fail too.
+        contracts = (
+            skill_text().split("### Merging", 1)[1].split("## References", 1)[0],
+            merge,
+        )
+        for contract in contracts:
+            helpers = re.findall(r"python3 [^`\n]*merge_pr\.py[^`\n]*", contract)
+            with self.subTest(contract=contract[:40]):
+                self.assertEqual(len(helpers), 1, helpers)
+                self.assertIn("--expected-head <HEAD_SHA>", helpers[0])
+                self.assertNotIn("--dry-run", helpers[0])
 
     def test_worktree_cleanup_uses_governed_helpers(self):
         board = flat(BOARD_WORKFLOW.read_text(encoding="utf-8"))
