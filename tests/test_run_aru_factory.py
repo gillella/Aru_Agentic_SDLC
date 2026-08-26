@@ -470,13 +470,13 @@ class GovernanceTests(unittest.TestCase):
             self.assertIn("claim mutations", text)
 
     def test_merge_commands_preserve_picker_expected_head(self):
-        for text in (
-            flat(skill_text()),
-            flat(BOARD_WORKFLOW.read_text(encoding="utf-8")),
-            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
-        ):
+        fleet = FLEET_PROMPT.read_text(encoding="utf-8")
+        for text in (flat(skill_text()), flat(BOARD_WORKFLOW.read_text()), flat(fleet)):
             self.assertIn("--expected-head <head_sha>", text)
             self.assertIn("head_sha", text)
+        merge = fleet.split("#### B.", 1)[1].split("#### C.", 1)[0]
+        self.assertNotIn("--dry-run", merge)
+        self.assertFalse([line for line in merge.splitlines() if "claim_issue.py" in line and "--release" not in line])
 
     def test_worktree_cleanup_uses_governed_helpers(self):
         board = flat(BOARD_WORKFLOW.read_text(encoding="utf-8"))

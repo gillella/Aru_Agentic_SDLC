@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 import fetch_next_issue  # noqa: E402
 import fetch_next_work as fnw  # noqa: E402
@@ -334,6 +335,59 @@ class CycleSnapshotTests(unittest.TestCase):
             fnw.main()
 
         select.assert_called_once()
+
+
+class LoopOrchestrationBudgetTests(unittest.TestCase):
+    """The desktop loop must not multiply bounded helper reads across a tick."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.skill = (ROOT / "skills/run-aru-factory/SKILL.md").read_text()
+        cls.prompt = (ROOT / "prompts/fleet-worker.md").read_text()
+
+    def test_tick_starts_with_one_github_bearing_entrypoint(self):
+        start = self.prompt.split("### The loop", 1)[1].split("#### A.", 1)[0]
+        commands = [
+            line.strip() for line in start.splitlines()
+            if line.strip().startswith("python3 ")
+        ]
+        self.assertEqual(len(commands), 1)
+        self.assertIn("fetch_next_work.py", commands[0])
+        self.assertIn("--claim --json", commands[0])
+        contract = " ".join(start.split()).lower()
+        self.assertIn("only routine github-bearing entrypoint", contract)
+        for redundant in (
+            "fleet_status.py", "triage_backlog.py", "gh issue", "gh pr",
+            "check_ci.py", "merge_pr.py --dry-run",
+        ):
+            self.assertIn(redundant, contract)
+
+    def test_waiting_card_uses_picker_snapshot_without_enrichment(self):
+        waiting = self.prompt.split(
+            "### Waiting, continuity, intentional stop, and Slack alerts", 1
+        )[1].split("**Slack control-room alerts", 1)[0]
+        lowered = " ".join(waiting.split()).lower()
+        self.assertIn("assemble only from the current picker result", lowered)
+        self.assertIn("zero follow-up github reads", lowered)
+        self.assertNotIn("triage_backlog.py", waiting)
+
+    def test_merge_path_has_no_probe_or_confirmation_read(self):
+        merge = self.prompt.split("#### B.", 1)[1].split("#### C.", 1)[0]
+        self.assertNotIn("--dry-run", merge)
+        confirmations = [
+            line for line in merge.splitlines()
+            if "claim_issue.py" in line and "--release" not in line
+        ]
+        self.assertEqual(confirmations, [])
+        self.assertEqual(merge.count("merge_pr.py"), 1)
+        self.assertIn("exactly one fresh picker call", merge)
+
+    def test_router_carries_the_same_tick_budget(self):
+        loop = self.skill.split("### loop", 1)[1].split("### doctor", 1)[0]
+        lowered = " ".join(loop.split()).lower()
+        self.assertIn("exactly one authoritative picker call", lowered)
+        self.assertIn("zero follow-up github reads", lowered)
+        self.assertIn("build the **status card** only from the picker result", lowered)
 
 
 if __name__ == "__main__":
