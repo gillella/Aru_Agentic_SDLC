@@ -44,7 +44,7 @@ SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
-from loop_control import resolve_desktop_stop_marker  # noqa: E402
+from loop_control import invalid_stop_marker, resolve_desktop_stop_marker  # noqa: E402
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -810,20 +810,18 @@ def report(aru_home: Path, target_home: Path, project: str | None,
             "capability_gap": gap,
             **wake,
         }
+    marker_path = target_home / ".aru" / "factory-loop.stop"
     try:
         marker_info = resolve_desktop_stop_marker(target_home, project)
         marker_error = None
     except ValueError as exc:
-        marker_path = target_home / ".aru" / "factory-loop.stop"
-        marker_info = {
-            "present": marker_path.is_file(),
-            "applies": False,
-            "scope": "none",
-            "projects": [],
-            "reason": None,
-            "path": str(marker_path),
-        }
         marker_error = str(exc)
+        marker_info = invalid_stop_marker(marker_path, marker_error)
+        # `load_json` swallows the parse error, so the legacy `stop` field would
+        # otherwise be None -- identical to an absent marker. Report the corrupt
+        # file explicitly instead of erasing it.
+        if stop_doc is None and marker_info["present"]:
+            stop_doc = {"valid": False, "error": marker_error, "path": str(marker_path)}
     stopped = marker_info["applies"]
     install = diagnose_install(aru_home, target_home, agents, home=home)
     repo = None
@@ -832,7 +830,7 @@ def report(aru_home: Path, target_home: Path, project: str | None,
         checks.append(check(
             "stop_marker", False, "invalid",
             f"Malformed stop marker: {marker_error}",
-            path=str(target_home / ".aru" / "factory-loop.stop"),
+            path=str(marker_path),
         ))
     if project and _is_git_repo(project, home=home):
         repo = diagnose_repo(project, install["prerequisites"]["gh_logged_in"], home=home)
@@ -849,7 +847,7 @@ def report(aru_home: Path, target_home: Path, project: str | None,
         "status": "healthy",
         "canonical_home": str(aru_home),
         "project": project,
-        "stop_file": str(target_home / ".aru" / "factory-loop.stop"),
+        "stop_file": str(marker_path),
         "desktop_stop_marker": marker_info,
         "loop_stopped": stopped,
         "stop": stop_doc,

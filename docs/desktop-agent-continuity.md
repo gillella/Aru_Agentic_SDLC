@@ -87,6 +87,16 @@ external orchestrator state via a read-only adapter without hard-coding external
 job IDs. Contradictory states (e.g. `orchestrator_paused_without_stop_marker` or
 `stop_marker_without_orchestrator_pause`) are surfaced explicitly.
 
+`desktop_stop_marker` always carries `present`, `valid`, and `error`, so a
+marker that exists but cannot be parsed is never reported as an absent one. A
+corrupt marker keeps `present: true` with `valid: false`, the parse `error`,
+and its `path`, while `applies` stays `false` — an unreadable stop never
+silently authorises the loop to keep running. The legacy `stop` field reports
+the same corruption instead of collapsing to `null`. Adapter-supplied
+`state` that is not one of `enabled`, `paused`, or `unknown` — including
+unhashable values such as lists or objects — degrades to `unknown` rather than
+raising.
+
 `doctor_local_agent_integrations.py` reports continuity adapters, macOS
 `.app` bundle versions (Info.plist only, no credentials), CLI/config evidence
 separately, stop state (including the rich `desktop_stop_marker` block alongside

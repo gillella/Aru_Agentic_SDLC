@@ -290,6 +290,106 @@ class LoopControlTests(unittest.TestCase):
         self.assertTrue(data["desktop_stop_marker"]["present"])
         self.assertIn("error", data)
 
+    def test_corrupt_stop_marker_is_distinguishable_from_an_absent_one(self):
+        """A present-but-unreadable marker must never look like 'no stop requested'."""
+        stop_file = self.aru_dir / "factory-loop.stop"
+        absent = loop_control.get_status(self.target_home, project=self.project_a)
+        self.assertFalse(absent["desktop_stop_marker"]["present"])
+        self.assertTrue(absent["desktop_stop_marker"]["valid"])
+        self.assertIsNone(absent["desktop_stop_marker"]["error"])
+        self.assertEqual(absent["status"], "ok")
+
+        # `parses_to_object` marks the payloads `load_json` can still return, so
+        # the legacy `stop` field keeps the real file contents for those.
+        cases = [("{CORRUPTED JSON", False), (json.dumps(["not", "a", "dict"]), False),
+                 ("", False), (json.dumps({"projects": "not-a-list"}), True)]
+        for payload, parses_to_object in cases:
+            stop_file.write_text(payload, encoding="utf-8")
+            marker = loop_control.get_status(self.target_home, project=self.project_a)["desktop_stop_marker"]
+            self.assertTrue(marker["present"], payload)
+            self.assertFalse(marker["valid"], payload)
+            self.assertFalse(marker["applies"], payload)
+            self.assertIn("malformed stop marker", marker["error"] or "")
+            self.assertEqual(marker["path"], str(stop_file))
+
+            res = self.run_cli("status", "--project", self.project_a)
+            self.assertEqual(res.returncode, 1, payload)
+            self.assertNotIn("Traceback", res.stderr)
+            self.assertIn("valid=False", res.stdout)
+
+            doc = json.loads(self.run_doctor("--json", "--project", self.project_a).stdout)
+            doc_marker = doc["desktop_stop_marker"]
+            self.assertTrue(doc_marker["present"], payload)
+            self.assertFalse(doc_marker["valid"], payload)
+            self.assertIn("malformed stop marker", doc_marker["error"] or "")
+            # The legacy `stop` field must not collapse a corrupt marker to null,
+            # which is exactly what an absent marker reports.
+            self.assertIsNotNone(doc["stop"], payload)
+            if not parses_to_object:
+                self.assertFalse(doc["stop"]["valid"], payload)
+                self.assertEqual(doc["stop"]["path"], str(stop_file))
+
+        stop_file.unlink()
+        doc_absent = json.loads(self.run_doctor("--json", "--project", self.project_a).stdout)
+        self.assertIsNone(doc_absent["stop"])
+        self.assertTrue(doc_absent["desktop_stop_marker"]["valid"])
+
+    def test_valid_stop_marker_reports_itself_as_valid(self):
+        self.run_cli("stop", "--project", self.project_a, "--reason", "maintenance")
+        marker = loop_control.get_status(self.target_home, project=self.project_a)["desktop_stop_marker"]
+        self.assertTrue(marker["present"])
+        self.assertTrue(marker["valid"])
+        self.assertIsNone(marker["error"])
+        self.assertTrue(marker["applies"])
+
+    def test_non_string_adapter_state_never_crashes_status_or_contradictions(self):
+        """Unhashable/non-string adapter state degrades to 'unknown', it does not raise."""
+        hostile_states = [
+            ["paused"], {"paused": True}, {"a": ["b", {"c": 1}]}, [[1, 2], [3, 4]],
+            0, 1, -1, 0.0, True, False, None, "", "PAUSED", "paused ", "enabled\n",
+        ]
+        self.run_cli("stop", "--project", self.project_a)
+        for bad_state in hostile_states:
+            adapter = self.create_adapter({"adapter": "orch", "state": bad_state})
+            orch = loop_control.query_orchestrator(adapter, self.project_a)
+            self.assertEqual(orch["state"], "unknown", repr(bad_state))
+            self.assertIsNone(orch["error"], repr(bad_state))
+            # detect_contradictions must also tolerate the normalised value.
+            marker = loop_control.resolve_desktop_stop_marker(self.target_home, self.project_a)
+            self.assertEqual(loop_control.detect_contradictions(marker, orch), [])
+
+            res = self.run_cli("status", "--project", self.project_a,
+                               "--orchestrator-adapter", adapter, "--json")
+            self.assertEqual(res.returncode, 0, repr(bad_state))
+            self.assertNotIn("Traceback", res.stderr)
+            self.assertEqual(json.loads(res.stdout)["orchestrator"]["state"], "unknown")
+
+    def test_non_string_adapter_keys_and_non_dict_wake_entries_do_not_crash(self):
+        """Adapter/reason/detail and persisted wake entries of the wrong type stay inert."""
+        adapter = self.create_adapter(
+            {"adapter": ["a", "b"], "state": {"x": 1}, "reason": {"r": 1}, "detail": ["d"]}
+        )
+        res = self.run_cli("status", "--project", self.project_a,
+                           "--orchestrator-adapter", adapter, "--json")
+        self.assertEqual(res.returncode, 0)
+        self.assertNotIn("Traceback", res.stderr)
+        self.assertEqual(json.loads(res.stdout)["orchestrator"]["state"], "unknown")
+
+        wake_file = self.aru_dir / "native-wake.json"
+        for doc in ({"projects": {self.project_a: ["enabled"]}},
+                    {"projects": {self.project_a: "enabled"}},
+                    {"projects": {self.project_a: 1}},
+                    {"projects": [self.project_a]},
+                    {"projects": "nope"},
+                    ["not", "a", "dict"]):
+            wake_file.write_text(json.dumps(doc), encoding="utf-8")
+            wake = loop_control.resolve_native_wake(self.target_home, project=self.project_a)
+            self.assertFalse(wake["enabled"], doc)
+            self.assertIsNone(wake["automation_id"], doc)
+            res_w = self.run_cli("status", "--project", self.project_a, "--json")
+            self.assertEqual(res_w.returncode, 0, doc)
+            self.assertNotIn("Traceback", res_w.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

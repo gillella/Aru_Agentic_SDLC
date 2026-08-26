@@ -45,7 +45,8 @@ def resolve_desktop_stop_marker(target_home: Path, project: str | None = None) -
     """Read and resolve the desktop stop marker under target_home/.aru."""
     stop_path = target_home / ".aru" / "factory-loop.stop"
     if not stop_path.is_file():
-        return {"present": False, "applies": False, "scope": "none", "projects": [], "reason": None, "path": str(stop_path)}
+        return {"present": False, "applies": False, "scope": "none", "projects": [], "reason": None,
+                "path": str(stop_path), "valid": True, "error": None}
     try:
         data = json.loads(stop_path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -63,6 +64,20 @@ def resolve_desktop_stop_marker(target_home: Path, project: str | None = None) -
     return {
         "present": True, "applies": stop_applies(data, project), "scope": scope,
         "projects": projects, "reason": data.get("reason") or DEFAULT_PAUSE_REASON, "path": str(stop_path),
+        "valid": True, "error": None,
+    }
+
+
+def invalid_stop_marker(stop_path: Path, error: str) -> dict:
+    """Describe a stop marker that exists on disk but cannot be parsed.
+
+    Presence, path, and the parse error are preserved so a caller can tell a
+    corrupt marker apart from an absent one; `applies` stays False so a marker
+    nobody can read never silently authorises the loop to keep running.
+    """
+    return {
+        "present": stop_path.is_file(), "applies": False, "scope": "none", "projects": [],
+        "reason": None, "path": str(stop_path), "valid": False, "error": error,
     }
 
 
@@ -75,6 +90,8 @@ def resolve_native_wake(target_home: Path, project: str | None = None) -> dict:
         data = json.loads(wake_path.read_text(encoding="utf-8"))
         entry = (data.get("projects") or {}).get(project or "", {}) if isinstance(data, dict) else {}
     except Exception:
+        entry = {}
+    if not isinstance(entry, dict):
         entry = {}
     enabled = bool(entry.get("enabled", False))
     auto_id = entry.get("automation_id")
@@ -140,8 +157,8 @@ def get_status(target_home: Path, project: str | None = None, adapter_cmd: str |
         marker = resolve_desktop_stop_marker(target_home, project)
     except ValueError as exc:
         stop_path = target_home / ".aru" / "factory-loop.stop"
-        marker = {"present": stop_path.is_file(), "applies": False, "scope": "none", "projects": [], "reason": None, "path": str(stop_path)}
         err = str(exc)
+        marker = invalid_stop_marker(stop_path, err)
     wake = resolve_native_wake(target_home, project)
     orch = query_orchestrator(adapter_cmd, project)
     contradictions = detect_contradictions(marker, orch)
@@ -223,7 +240,8 @@ def render_human_status(payload: dict) -> str:
     lines = [
         f"Aru loop-control status: {payload['status']}",
         f"project: {payload['project'] or '(none)'}",
-        f"desktop_stop_marker: present={marker.get('present')} applies={marker.get('applies')} scope={marker.get('scope')} reason={marker.get('reason')}",
+        f"desktop_stop_marker: present={marker.get('present')} applies={marker.get('applies')} "
+        f"valid={marker.get('valid')} scope={marker.get('scope')} reason={marker.get('reason')}",
         f"native_wake: enabled={wake.get('enabled')} automation_id={wake.get('automation_id')} evidence={wake.get('evidence')}",
         f"orchestrator: configured={orch.get('configured')} adapter={orch.get('adapter')} state={orch.get('state')} reason={orch.get('reason')}",
     ]

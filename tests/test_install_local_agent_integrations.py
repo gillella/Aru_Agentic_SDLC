@@ -1,4 +1,4 @@
-# line-ceiling: 490
+# line-ceiling: 505
 import hashlib
 import json
 import os
@@ -467,6 +467,28 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         res_wake_rev = self.run_installer("--disable-native-wake", "--enable-native-wake")
         self.assertNotEqual(res_wake_rev.returncode, 0)
         self.assertIn("cannot specify both --enable-native-wake and --disable-native-wake", res_wake_rev.stderr)
+
+    def test_mutually_exclusive_loop_flags_reject_before_any_side_effect(self):
+        """Rejection happens in argument parsing, so no marker or heartbeat is touched."""
+        project = "/tmp/aru-proj-a"
+        self.run_installer("--stop-loop", "--project", project, "--reason", "maintenance")
+        stop_file = self.target_home / ".aru" / "factory-loop.stop"
+        before = stop_file.read_text()
+
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.mkdir(parents=True, exist_ok=True)
+        toml = managed / "automation.toml"
+        toml.write_text(f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "PAUSED"\n')
+
+        for extra in ([], ["--dry-run"], ["--check"], ["--reason", "operator-requested"],
+                      ["--project", project], ["--codex-only"]):
+            for order in (["--stop-loop", "--resume-loop"], ["--resume-loop", "--stop-loop"]):
+                res = self.run_installer(*(order + extra))
+                self.assertEqual(res.returncode, 1, f"{order} {extra}: {res.stdout}")
+                self.assertIn("cannot specify both --stop-loop and --resume-loop", res.stderr)
+                # A rejected invocation must leave the persisted stop exactly as it was.
+                self.assertEqual(stop_file.read_text(), before, f"{order} {extra}")
+                self.assertIn('status = "PAUSED"', toml.read_text(), f"{order} {extra}")
 
         res_bad_reason = self.run_installer("--stop-loop", "--reason", "invalid-reason")
         self.assertNotEqual(res_bad_reason.returncode, 0)
