@@ -1,9 +1,10 @@
-# line-ceiling: 667
+# line-ceiling: 850
 import json
 import os
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -152,22 +153,12 @@ class AgentPresenceTests(unittest.TestCase):
         clone_b = self.root / "clones" / "agent-b"
         clone_a.mkdir(parents=True)
         clone_b.mkdir(parents=True)
-        aru = self.root / "aru-home"
-        aru.mkdir(mode=0o700)
-        projects_path = aru / "projects.json"
-        projects_path.write_text(
-            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(projects_path, 0o600)
         first = ap.resolve_project_id(
             clone_a,
-            projects_path=projects_path,
             identity_provider=lambda _path: identity,
         )
         second = ap.resolve_project_id(
             clone_b,
-            projects_path=projects_path,
             identity_provider=lambda _path: identity,
         )
         self.assertEqual(first, second)
@@ -247,14 +238,6 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertEqual(store.get("cursor-1").cooldown_reason, "credit-exhausted")
 
     def test_doctor_summary_is_read_only(self):
-        aru = self.root / "aru-isolated"
-        aru.mkdir(mode=0o700)
-        projects_path = aru / "projects.json"
-        projects_path.write_text(
-            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(projects_path, 0o600)
         self.store.register(
             agent_id="cursor-cloud-1",
             family="cursor",
@@ -270,7 +253,6 @@ class AgentPresenceTests(unittest.TestCase):
             agents=agents,
             store=self.store,
             catalog_non_guarantees=["app quit"],
-            projects_path=projects_path,
         )
         after = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(before, after)
@@ -279,14 +261,6 @@ class AgentPresenceTests(unittest.TestCase):
         self.assertIn("app quit", " ".join(summary["wake_limitations"]))
 
     def test_doctor_picks_newest_heartbeat_by_timestamp(self):
-        aru = self.root / "aru-hb"
-        aru.mkdir(mode=0o700)
-        projects_path = aru / "projects.json"
-        projects_path.write_text(
-            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(projects_path, 0o600)
         project_id = ap.path_derived_project_id(self.project_a)
         self.store.register(
             agent_id="cursor-old",
@@ -311,21 +285,12 @@ class AgentPresenceTests(unittest.TestCase):
             project=str(self.project_a),
             agents=agents,
             store=ap.PresenceStore(self.path),
-            projects_path=projects_path,
         )
         self.assertEqual(len(summary["tasks"]), 2)
         # 15:00Z == 20:30 +05:30, so Z form is newer than +05:30 form above.
         self.assertEqual(agents["cursor"]["last_heartbeat"], "2026-08-16T15:00:00Z")
 
     def test_doctor_summary_is_project_scoped(self):
-        aru = self.root / "aru-scoped"
-        aru.mkdir(mode=0o700)
-        projects_path = aru / "projects.json"
-        projects_path.write_text(
-            json.dumps({"schema_version": 1, "projects": {}, "migrations": {}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(projects_path, 0o600)
         self.store.register(
             agent_id="cursor-cloud-1",
             family="cursor",
@@ -351,7 +316,6 @@ class AgentPresenceTests(unittest.TestCase):
             agents=agents,
             store=self.store,
             catalog_non_guarantees=["app quit"],
-            projects_path=projects_path,
         )
         self.assertEqual(len(summary["tasks"]), 1)
         self.assertEqual(summary["tasks"][0]["agent_id"], "cursor-cloud-1")
@@ -661,6 +625,196 @@ class FreeIdentityResolutionTests(unittest.TestCase):
         self.store.resolve_free_identity(["gemini-1"], "session-a")
         with self.assertRaises(ap.PresenceError):
             self.store.resolve_free_identity(["gemini-1"], "session-b")
+
+
+class DurableIdentityAndDirectoryConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def test_resolve_project_id_default_discovers_durable_identity(self):
+        clone_a = self.root / "clones" / "agent-a"
+        clone_b = self.root / "clones" / "agent-b"
+        clone_a.mkdir(parents=True)
+        clone_b.mkdir(parents=True)
+
+        repo_identity = {
+            "github_repo_id": "R_kgDO123456",
+            "github_repo_database_id": 987654,
+            "project_v2_id": "PVT_kwDO789012",
+            "repo_slug": "owner/project-repo",
+            "local_path": str(clone_a.resolve()),
+        }
+
+        with patch.object(ap, "discover_checkout_identity", return_value=repo_identity):
+            first = ap.resolve_project_id(clone_a)
+            second = ap.resolve_project_id(clone_b)
+
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("proj_repo_"))
+        self.assertNotEqual(first, ap.path_derived_project_id(clone_a))
+        self.assertNotEqual(first, ap.path_derived_project_id(clone_b))
+
+    def test_discover_checkout_identity_e2e_mock(self):
+        clone = self.root / "mock_repo"
+        clone.mkdir()
+
+        def mock_bounded(cmd, cwd=None):
+            if cmd[:3] == ["gh", "repo", "view"]:
+                return {"id": "R_node_1", "nameWithOwner": "acme/corp"}
+            if cmd[:3] == ["gh", "api", "repos/acme/corp"]:
+                return {"node_id": "R_node_1", "full_name": "acme/corp", "id": 42}
+            if cmd[:3] == ["gh", "api", "graphql"]:
+                return {
+                    "data": {
+                        "repository": {
+                            "projectsV2": {
+                                "nodes": [
+                                    {
+                                        "id": "PVT_board_1",
+                                        "number": 1,
+                                        "title": "corp Board",
+                                        "repositories": {"nodes": [{"nameWithOwner": "acme/corp"}]},
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            raise RuntimeError(f"unexpected command: {cmd}")
+
+        with patch.object(ap, "_run_gh_json", side_effect=mock_bounded):
+            identity = ap.discover_checkout_identity(clone)
+            project_id = ap.resolve_project_id(clone)
+
+        self.assertEqual(identity["github_repo_id"], "R_node_1")
+        self.assertEqual(identity["project_v2_id"], "PVT_board_1")
+        self.assertEqual(identity["repo_slug"], "acme/corp")
+        self.assertEqual(identity["github_repo_database_id"], 42)
+        self.assertTrue(project_id.startswith("proj_repo_"))
+
+    def test_resolve_project_id_fallback_on_discovery_error(self):
+        non_git_dir = self.root / "random_dir"
+        non_git_dir.mkdir()
+
+        with patch.object(ap, "discover_checkout_identity", side_effect=ap.PresenceError("not git")):
+            project_id = ap.resolve_project_id(non_git_dir)
+
+        self.assertEqual(project_id, ap.path_derived_project_id(non_git_dir))
+
+    def test_read_unlocked_rejects_symlink_and_insecure_file(self):
+        real_file = self.root / "real_store.json"
+        real_file.write_text(json.dumps({"schema": "test"}), encoding="utf-8")
+        os.chmod(real_file, 0o600)
+
+        symlink_file = self.root / "symlink_store.json"
+        symlink_file.symlink_to(real_file)
+
+        with self.assertRaises(ap.PresenceError):
+            ap._read_unlocked(symlink_file)
+
+        insecure_file = self.root / "insecure_store.json"
+        insecure_file.write_text(json.dumps({"schema": "test"}), encoding="utf-8")
+        os.chmod(insecure_file, 0o644)
+
+        with self.assertRaises(ap.PresenceError):
+            ap._read_unlocked(insecure_file)
+
+    def test_read_unlocked_rejects_foreign_owner(self):
+        real_file = self.root / "foreign_owner.json"
+        real_file.write_text(json.dumps({"schema": "test"}), encoding="utf-8")
+        os.chmod(real_file, 0o600)
+
+        real_fstat = os.fstat
+        def mock_fstat(fd):
+            st = real_fstat(fd)
+            # Replace st_uid with foreign UID
+            return os.stat_result((
+                st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                os.getuid() + 1000, st.st_gid, st.st_size,
+                st.st_atime, st.st_mtime, st.st_ctime
+            ))
+
+        with patch("os.fstat", side_effect=mock_fstat):
+            with self.assertRaises(ap.PresenceError):
+                ap._read_unlocked(real_file)
+
+    def test_validate_gh_identity_command_enforces_allowlist(self):
+        # Disallow non-gh executable
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["bash", "-c", "echo pwned"])
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["sh", "-c", "whoami"])
+
+        # Disallow unauthorized gh commands
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["gh", "auth", "token"])
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["gh", "repo", "delete", "owner/repo"])
+
+        # Disallow malicious injection in repository slug
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["gh", "api", "repos/owner/repo;rm -rf /"])
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command(["gh", "api", "repos/--help"])
+
+        # Disallow malicious injection in graphql owner / repo
+        with self.assertRaises(ap.PresenceError):
+            ap._validate_gh_identity_command([
+                "gh", "api", "graphql", "-f", f"query={ap.PROJECTS_V2_QUERY}",
+                "-F", "owner=bad;whoami", "-F", "repo=repo",
+            ])
+
+        # Allow valid shapes
+        ap._validate_gh_identity_command(["gh", "repo", "view", "--json", "id,nameWithOwner"])
+        ap._validate_gh_identity_command(["gh", "api", "repos/owner/repo"])
+        ap._validate_gh_identity_command([
+            "gh", "api", "graphql", "-f", f"query={ap.PROJECTS_V2_QUERY}",
+            "-F", "owner=owner", "-F", "repo=repo",
+        ])
+
+    def test_private_directory_concurrent_creation_race(self):
+        target = self.root / "concurrent_store_dir"
+        original_mkdir = Path.mkdir
+
+        # Simulate losing the mkdir race on first attempt
+        first_call = [True]
+
+        def racing_mkdir(path_self, *args, **kwargs):
+            if path_self == target and first_call[0]:
+                first_call[0] = False
+                original_mkdir(path_self, *args, **kwargs)
+                raise FileExistsError(f"File exists: {path_self}")
+            return original_mkdir(path_self, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", side_effect=racing_mkdir, autospec=True):
+            ap._private_directory(target)
+
+        self.assertTrue(target.is_dir())
+        mode = target.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o700)
+
+    def test_private_directory_threadpool_concurrency(self):
+        target = self.root / "multi_threaded_dir"
+
+        def create_dir(_):
+            ap._private_directory(target)
+            return True
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(create_dir, range(16)))
+
+        self.assertTrue(all(results))
+        self.assertTrue(target.is_dir())
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+
+    def test_private_directory_concurrent_conflict_with_file(self):
+        target = self.root / "conflicting_file"
+        target.write_text("not a directory", encoding="utf-8")
+
+        with self.assertRaises(ap.PresenceError):
+            ap._private_directory(target)
 
 
 if __name__ == "__main__":

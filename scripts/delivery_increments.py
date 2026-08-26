@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-# line-ceiling: 586
+# line-ceiling: 730
 """Operator-authorized Delivery Increment records and transition rules."""
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
 import re
+import stat
+import tempfile
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-from slack_projects import RegistryError, _file_lock, _private_file, _write_unlocked
-
+from typing import Any, Dict, Iterator, List, Optional
 
 SCHEMA_VERSION = 1
 DEFAULT_INCREMENT_PATH = Path.home() / ".aru" / "delivery-increments.json"
@@ -33,8 +35,122 @@ ACTIONS = {
 }
 
 
-class IncrementError(RegistryError):
+class IncrementError(RuntimeError):
     """The requested increment decision is invalid or unsafe."""
+
+
+def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
+    if path.is_symlink():
+        raise IncrementError(f"unsafe directory: {path}")
+    if not path.exists():
+        try:
+            path.mkdir(parents=True, mode=0o700)
+        except FileExistsError:
+            # Concurrent creation race: another process created the directory.
+            pass
+        except OSError as exc:
+            raise IncrementError(f"cannot create directory {path}: {exc}") from exc
+
+    if path.is_symlink() or not path.is_dir():
+        raise IncrementError(f"unsafe directory: {path}")
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise IncrementError(f"cannot stat directory {path}: {exc}") from exc
+    if info.st_uid != os.getuid():
+        raise IncrementError(f"directory is not owned by the current user: {path}")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        raise IncrementError(f"directory is writable by another user: {path}")
+    if mode != 0o700:
+        descriptor = -1
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise IncrementError(f"directory changed while securing it: {path}")
+            if stat.S_IMODE(opened.st_mode) & 0o022:
+                raise IncrementError(f"directory is writable by another user: {path}")
+            os.fchmod(descriptor, 0o700)
+        except OSError as exc:
+            raise IncrementError(f"cannot secure directory {path}: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _private_file(path: Path) -> None:
+    if path.is_symlink():
+        raise IncrementError(f"refusing symlink: {path}")
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise IncrementError(f"cannot stat file {path}: {exc}") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise IncrementError(f"not a regular file: {path}")
+    if info.st_uid != os.getuid():
+        raise IncrementError(f"file is not owned by the current user: {path}")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise IncrementError(f"file must be private (0600): {path}")
+
+
+@contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    _private_directory(path.parent)
+    lock_path = path.with_name(f"{path.name}.lock")
+    if lock_path.exists():
+        _private_file(lock_path)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise IncrementError(f"cannot open lock file {lock_path}: {exc}") from exc
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _write_unlocked(path: Path, value: Any) -> None:
+    if path.is_symlink():
+        raise IncrementError(f"refusing symlink: {path}")
+    if path.exists():
+        _private_file(path)
+    temp_name: Optional[str] = None
+    try:
+        encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
+        descriptor, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        temp_name = None
+        os.chmod(path, 0o600)
+        parent_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except (OSError, TypeError, ValueError) as exc:
+        raise IncrementError(f"cannot write {path}: {exc}") from exc
+    finally:
+        if temp_name:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
 
 
 def _unique_json_object(pairs: List[tuple[str, Any]]) -> Dict[str, Any]:
@@ -62,15 +178,35 @@ def _strict_json_loads(value: str) -> Any:
 
 
 def _read_increment_unlocked(path: Path, default: Any) -> Any:
-    if path.is_symlink():
-        raise IncrementError(f"refusing symlink: {path}")
-    if not path.exists():
-        return deepcopy(default)
-    _private_file(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
     try:
-        return _strict_json_loads(path.read_text(encoding="utf-8"))
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
+        if default is not None:
+            return deepcopy(default)
+        raise IncrementError(f"file does not exist: {path}") from exc
+    except OSError as exc:
+        raise IncrementError(f"cannot open {path}: {exc}") from exc
+
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise IncrementError(f"not a regular file: {path}")
+        if info.st_uid != os.getuid():
+            raise IncrementError(f"file is not owned by the current user: {path}")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise IncrementError(f"file must be private (0600): {path}")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            return _strict_json_loads(handle.read())
+    except IncrementError:
+        raise
     except (OSError, UnicodeError) as exc:
         raise IncrementError(f"cannot read {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _read_increment_json(path: Path, default: Any) -> Any:

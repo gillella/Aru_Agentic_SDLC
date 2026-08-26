@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1232
+# line-ceiling: 1450
 """Project-scoped agent presence and availability registry.
 
 GitHub claims remain authoritative ownership. This registry only records which
@@ -12,16 +12,22 @@ Persistence mirrors the #187 secure JSON discipline (0600, flock, atomic).
 from __future__ import annotations
 
 import argparse
+import copy
+import fcntl
 import hashlib
 import json
 import os
 import re
 import socket
+import stat
+import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 from agent_identity import (
     AGENT_ID_ENV_VAR as AGENT_ID_ENV_VAR,
@@ -33,18 +39,13 @@ from agent_identity import (
     product_for_family as product_for_family,
     worker_fingerprint as worker_fingerprint,
 )
-
-from slack_projects import (
-    PROJECT_ID_RE,
-    RegistryError,
-    mutate_secure_json,
-    read_secure_json,
-)
+from common import select_governed_projects
 
 SCHEMA_VERSION = 1
 SCHEMA_NAME = "aru.agent-presence/v1"
 DEFAULT_PRESENCE_PATH = Path.home() / ".aru" / "agent-presence.json"
 DEFAULT_HEARTBEAT_TTL_SECONDS = 300
+PROJECT_ID_RE = re.compile(r"^proj_[A-Za-z0-9_-]{3,64}$")
 FAMILY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 AVAILABILITY_STATES = frozenset({
@@ -76,7 +77,7 @@ PHASE_TO_AVAILABILITY = {
 }
 
 
-class PresenceError(RegistryError):
+class PresenceError(RuntimeError):
     """Presence registry is unavailable, invalid, or rejects the mutation."""
 
 
@@ -104,6 +105,166 @@ def _parse_iso(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _private_directory(path: Path) -> None:  # noqa: C901, PLR0912
+    if path.is_symlink():
+        raise PresenceError(f"unsafe directory: {path}")
+    if not path.exists():
+        try:
+            path.mkdir(parents=True, mode=0o700)
+        except FileExistsError:
+            # Concurrent creation race: another process created the directory.
+            pass
+        except OSError as exc:
+            raise PresenceError(f"cannot create directory {path}: {exc}") from exc
+
+    if path.is_symlink() or not path.is_dir():
+        raise PresenceError(f"unsafe directory: {path}")
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise PresenceError(f"cannot stat directory {path}: {exc}") from exc
+    if info.st_uid != os.getuid():
+        raise PresenceError(f"directory is not owned by the current user: {path}")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        raise PresenceError(f"directory is writable by another user: {path}")
+    if mode != 0o700:
+        descriptor = -1
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise PresenceError(f"directory changed while securing it: {path}")
+            if stat.S_IMODE(opened.st_mode) & 0o022:
+                raise PresenceError(f"directory is writable by another user: {path}")
+            os.fchmod(descriptor, 0o700)
+        except OSError as exc:
+            raise PresenceError(f"cannot secure directory {path}: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _private_file(path: Path) -> None:
+    if path.is_symlink():
+        raise PresenceError(f"refusing symlink: {path}")
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise PresenceError(f"cannot stat file {path}: {exc}") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise PresenceError(f"not a regular file: {path}")
+    if info.st_uid != os.getuid():
+        raise PresenceError(f"file is not owned by the current user: {path}")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise PresenceError(f"file must be private (0600): {path}")
+
+
+@contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    _private_directory(path.parent)
+    lock_path = path.with_name(f"{path.name}.lock")
+    if lock_path.exists():
+        _private_file(lock_path)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise PresenceError(f"cannot open lock file {lock_path}: {exc}") from exc
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _read_unlocked(path: Path, default: Any = None) -> Any:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
+        if default is not None:
+            return copy.deepcopy(default)
+        raise PresenceError(f"file does not exist: {path}") from exc
+    except OSError as exc:
+        raise PresenceError(f"cannot open {path}: {exc}") from exc
+
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise PresenceError(f"not a regular file: {path}")
+        if info.st_uid != os.getuid():
+            raise PresenceError(f"file is not owned by the current user: {path}")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise PresenceError(f"file must be private (0600): {path}")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            return json.load(handle)
+    except PresenceError:
+        raise
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PresenceError(f"cannot read {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _write_unlocked(path: Path, value: Any) -> None:
+    if path.is_symlink():
+        raise PresenceError(f"refusing symlink: {path}")
+    if path.exists():
+        _private_file(path)
+    temp_name: Optional[str] = None
+    try:
+        encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
+        descriptor, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        temp_name = None
+        os.chmod(path, 0o600)
+        parent_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except (OSError, TypeError, ValueError) as exc:
+        raise PresenceError(f"cannot write {path}: {exc}") from exc
+    finally:
+        if temp_name:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+
+
+def read_secure_json(path: Path, default: Any = None) -> Any:
+    with _file_lock(path):
+        return _read_unlocked(path, default)
+
+
+def mutate_secure_json(path: Path, default: Any, updater: Callable[[Any], Any]) -> Any:
+    """Lock, validate, update, and atomically replace one private JSON file."""
+    with _file_lock(path):
+        current = _read_unlocked(path, default)
+        updated = updater(copy.deepcopy(current))
+        _write_unlocked(path, updated)
+        return updated
+
+
 def _is_live_session(session_id: str) -> bool:
     """Treat a dead local PID as expired while keeping remote claims TTL-bound."""
     host, separator, pid_text = (session_id or "").partition("|")
@@ -124,6 +285,156 @@ def _is_live_session(session_id: str) -> bool:
     return True
 
 
+IDENTITY_TIMEOUT_SECONDS = 15
+REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+GITHUB_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+PROJECTS_V2_QUERY = """
+query($owner:String!, $repo:String!) {
+  repository(owner:$owner, name:$repo) {
+    projectsV2(first:100) {
+      nodes {
+        id number title
+        owner {
+          ... on User { login }
+          ... on Organization { login }
+        }
+        repositories(first:100) { nodes { nameWithOwner } }
+      }
+    }
+  }
+}
+""".strip()
+
+
+def _validate_gh_identity_command(command: Sequence[str]) -> None:
+    if not command or not isinstance(command, (list, tuple)):
+        raise PresenceError("invalid command structure")
+    if command[0] != "gh":
+        raise PresenceError(f"unauthorized executable: {command[0]}")
+
+    if list(command) == ["gh", "repo", "view", "--json", "id,nameWithOwner"]:
+        return
+
+    if (
+        len(command) == 3
+        and command[1] == "api"
+        and command[2].startswith("repos/")
+    ):
+        slug = command[2][len("repos/"):]
+        if REPO_SLUG_RE.fullmatch(slug):
+            return
+        raise PresenceError(f"invalid repository slug in command: {slug}")
+
+    if (
+        len(command) == 9
+        and command[1] == "api"
+        and command[2] == "graphql"
+        and command[3] == "-f"
+        and command[4] == f"query={PROJECTS_V2_QUERY}"
+        and command[5] == "-F"
+        and command[6].startswith("owner=")
+        and command[7] == "-F"
+        and command[8].startswith("repo=")
+    ):
+        owner = command[6][len("owner="):]
+        repo_name = command[8][len("repo="):]
+        if GITHUB_NAME_RE.fullmatch(owner) and GITHUB_NAME_RE.fullmatch(repo_name):
+            return
+        raise PresenceError(
+            f"invalid repository owner/name in command: {owner}/{repo_name}"
+        )
+
+    raise PresenceError(f"unauthorized command invocation: {command}")
+
+
+def _run_gh_json(command: Sequence[str], cwd: Optional[str] = None) -> Any:
+    """Execute an allowlisted gh CLI command for GitHub identity discovery."""
+    _validate_gh_identity_command(command)
+    try:
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+        result = subprocess.run(
+            list(command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            timeout=IDENTITY_TIMEOUT_SECONDS,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PresenceError(
+            f"identity command timed out after {IDENTITY_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise PresenceError(f"identity command failed: {exc}") from exc
+    if result.returncode != 0 or not result.stdout:
+        raise PresenceError(result.stderr.strip() or "identity command returned no data")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise PresenceError(f"identity command returned invalid JSON: {exc}") from exc
+
+
+def _discover_governed_project(repo_slug: str) -> Dict[str, Any]:
+    if not REPO_SLUG_RE.fullmatch(repo_slug or ""):
+        raise PresenceError(f"invalid repository slug: {repo_slug}")
+    owner, repo_name = repo_slug.split("/", 1)
+    if not GITHUB_NAME_RE.fullmatch(owner) or not GITHUB_NAME_RE.fullmatch(repo_name):
+        raise PresenceError(f"invalid repository owner/name: {repo_slug}")
+    response = _run_gh_json([
+        "gh", "api", "graphql", "-f", f"query={PROJECTS_V2_QUERY}",
+        "-F", f"owner={owner}", "-F", f"repo={repo_name}",
+    ])
+    try:
+        available = response["data"]["repository"]["projectsV2"]["nodes"]
+    except (KeyError, TypeError) as exc:
+        raise PresenceError("cannot query governed ProjectV2 boards") from exc
+    projects = select_governed_projects(available, repo_slug)
+    if len(projects) != 1 or not projects[0].get("id"):
+        raise PresenceError("cannot resolve one governed ProjectV2 board")
+    return projects[0]
+
+
+def discover_checkout_identity(local_path: Path) -> Dict[str, Any]:
+    if not local_path.is_dir():
+        raise PresenceError(f"checkout is unavailable: {local_path}")
+    try:
+        repo = _run_gh_json(
+            ["gh", "repo", "view", "--json", "id,nameWithOwner"],
+            cwd=str(local_path),
+        )
+        repo_node_id = repo["id"]
+        repo_slug = repo["nameWithOwner"]
+        if (not isinstance(repo_node_id, str) or not repo_node_id.strip()
+                or not isinstance(repo_slug, str) or not REPO_SLUG_RE.fullmatch(repo_slug)):
+            raise PresenceError("repository identity is missing or invalid")
+        rest_repo = _run_gh_json(
+            ["gh", "api", f"repos/{repo_slug}"], cwd=str(local_path),
+        )
+        rest_node_id = rest_repo["node_id"]
+        rest_slug = rest_repo["full_name"]
+        if (not isinstance(rest_node_id, str) or not rest_node_id.strip()
+                or not isinstance(rest_slug, str) or not REPO_SLUG_RE.fullmatch(rest_slug)):
+            raise PresenceError("repository identity is missing or invalid")
+        if rest_node_id != repo_node_id or rest_slug != repo_slug:
+            raise PresenceError("repository identity APIs returned mismatched data")
+        database_id = rest_repo["id"]
+        if (isinstance(database_id, bool) or not isinstance(database_id, int)
+                or database_id <= 0):
+            raise PresenceError("repository database id is missing or invalid")
+        project = _discover_governed_project(repo["nameWithOwner"])
+    except (KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        raise PresenceError(f"cannot verify GitHub identity for {local_path}: {exc}") from exc
+    return {
+        "github_repo_id": repo_node_id,
+        "github_repo_database_id": database_id,
+        "project_v2_id": str(project["id"]),
+        "repo_slug": repo_slug,
+        "local_path": str(local_path.resolve()),
+    }
+
+
 def path_derived_project_id(checkout: Path) -> str:
     """Last-resort project_id when GitHub identity cannot be resolved."""
     resolved = checkout.expanduser().resolve()
@@ -141,60 +452,24 @@ def identity_derived_project_id(github_repo_id: str, project_v2_id: str) -> str:
     return f"proj_repo_{digest}"
 
 
-def resolve_project_id(  # noqa: C901, PLR0912
+def resolve_project_id(
     checkout: Path,
     *,
-    projects_path: Optional[Path] = None,
     identity_provider: Optional[Callable[[Path], Dict[str, Any]]] = None,
 ) -> str:
     """Resolve a shared project identity for presence.
 
     Preference order:
-    1. Active #187 registry row whose ``local_path`` matches this checkout.
-    2. Active registry row matching durable GitHub repo + ProjectV2 ids.
-    3. Deterministic ``proj_repo_<hash>`` from those durable ids (clone-independent).
-    4. Path hash only when GitHub identity cannot be discovered (offline/hermetic).
+    1. Deterministic ``proj_repo_<hash>`` from durable GitHub repo + ProjectV2 ids (clone-independent).
+    2. Path hash only when GitHub identity cannot be discovered (offline/hermetic).
     """
     resolved = checkout.expanduser().resolve()
+    provider = identity_provider if identity_provider is not None else discover_checkout_identity
     identity: Optional[Dict[str, Any]] = None
-    provider = identity_provider
     try:
-        from slack_projects import ProjectRegistry, discover_checkout_identity
-
-        if provider is None:
-            provider = discover_checkout_identity
-        registry = ProjectRegistry(projects_path) if projects_path else ProjectRegistry()
-        records = registry.list(include_closed=False)
-        for record in records:
-            try:
-                if Path(record.local_path).expanduser().resolve() == resolved:
-                    return record.project_id
-            except OSError:
-                continue
-        try:
-            identity = provider(resolved)
-        except (RegistryError, OSError, ValueError, TypeError):
-            identity = None
-        if identity:
-            repo_id = str(identity.get("github_repo_id") or "")
-            board_id = str(identity.get("project_v2_id") or "")
-            for record in records:
-                if (
-                    record.github_repo_id == repo_id
-                    and record.project_v2_id == board_id
-                ):
-                    return record.project_id
-            if repo_id and board_id:
-                return identity_derived_project_id(repo_id, board_id)
-    except RegistryError:
-        pass
-    except OSError:
-        pass
-    if identity is None and provider is not None:
-        try:
-            identity = provider(resolved)
-        except (RegistryError, OSError, ValueError, TypeError, PresenceError):
-            identity = None
+        identity = provider(resolved)
+    except (PresenceError, OSError, ValueError, TypeError):
+        identity = None
     if identity:
         repo_id = str(identity.get("github_repo_id") or "")
         board_id = str(identity.get("project_v2_id") or "")
@@ -839,7 +1114,6 @@ def doctor_presence_summary(
     agents: Dict[str, Dict[str, Any]],
     store: Optional[PresenceStore] = None,
     catalog_non_guarantees: Optional[Sequence[str]] = None,
-    projects_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Read-only presence + wake-limitation summary for the doctor payload."""
     store = store or PresenceStore()
@@ -848,7 +1122,7 @@ def doctor_presence_summary(
     error = None
     if project:
         try:
-            project_id = resolve_project_id(Path(project), projects_path=projects_path)
+            project_id = resolve_project_id(Path(project))
             # Never expire/mutate on doctor: diagnosis must stay read-only.
             records = store.query_project(
                 checkout_path=project,
@@ -1021,7 +1295,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the clone-independent project_id for a checkout",
     )
     resolve.add_argument("--checkout", type=Path, required=True)
-    resolve.add_argument("--projects-path", type=Path)
 
     return parser
 
@@ -1112,10 +1385,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:  # noqa: C901, PLR0912, P
 
         if command == "resolve-project-id":
             checkout = args.checkout.expanduser().resolve()
-            project_id = resolve_project_id(
-                checkout,
-                projects_path=args.projects_path,
-            )
+            project_id = resolve_project_id(checkout)
             if args.json:
                 print(json.dumps({
                     "checkout": str(checkout),

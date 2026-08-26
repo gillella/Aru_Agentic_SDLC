@@ -1,4 +1,4 @@
-"""The fleet surface is gone and cannot come back by accident (#406).
+"""The fleet and Slack surfaces are gone and cannot come back by accident (#406, #415).
 
 Deleting files is easy; keeping them deleted is the part that needs a test. A
 retained module that still imports a removed one is a broken command nobody
@@ -16,8 +16,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The fleet supervisor, presence launchers, simulation harness, and the
-# standalone metrics product. Each is a runtime the kernel no longer has.
+# The fleet supervisor, presence launchers, simulation harness, standalone
+# metrics product, and the Slack control-room runtime. Each is a runtime the
+# kernel no longer has.
 REMOVED_PATHS = (
     "scripts/run_fleet.py",
     # The runner's prompt/fingerprint helpers, which arrived on `main` while
@@ -35,11 +36,19 @@ REMOVED_PATHS = (
     "tests/e2e/__init__.py",
     "tests/e2e/test_unattended_board_completion.py",
     "tests/fixtures/fleet/unattended_completion.json",
+    # Slack control-room runtime, notifications, projects registry, and direct tests (#415).
+    "scripts/slack_control_room.py",
+    "scripts/slack_notify.py",
+    "scripts/slack_projects.py",
+    "tests/test_slack_control_room.py",
+    "tests/test_slack_notify.py",
+    "tests/test_slack_projects.py",
 )
 
 REMOVED_MODULES = (
     "run_fleet", "fleet_cycle", "spawn_ephemeral_worker", "factory_metrics",
-    "fixtures",
+    "fixtures", "slack_control_room", "slack_notify", "slack_projects", "slack",
+    "slack_sdk", "slack_bolt",
 )
 
 # `scripts/agent_presence.py` outlives this slice. Its three live dependents
@@ -151,6 +160,93 @@ class RemovedSurfaceTests(unittest.TestCase):
         }
         unexpected = dependents - PRESENCE_DEPENDENTS_ALLOWED
         self.assertEqual(unexpected, set(), f"new presence coupling: {unexpected}")
+
+
+class RetainedRuntimeBoundaryTests(unittest.TestCase):
+    """Retained kernel modules cannot import Slack or read retired runtime state."""
+
+    RETAINED_KERNEL_SCRIPTS = (
+        "scripts/fleet_status.py",
+        "scripts/claim_issue.py",
+        "scripts/create_branch.py",
+        "scripts/create_pr.py",
+        "scripts/merge_pr.py",
+        "scripts/revert_merge.py",
+        "scripts/check_ci.py",
+        "scripts/fetch_pr_feedback.py",
+        "scripts/update_issue_status.py",
+        "scripts/common.py",
+        "scripts/agent_identity.py",
+        "scripts/doctor_local_agent_integrations.py",
+        "scripts/fetch_next_issue.py",
+    )
+
+    FORBIDDEN_STORAGE_PATTERNS = (
+        r"slack-control-room",
+        r"slack_control_room",
+        r"slack_notify",
+        r"slack_projects",
+        r"slack-control-room-seen\.json",
+        r"delivery-increments\.json",
+        r"agent-presence\.json",
+        r"projects\.json",
+    )
+
+    def test_retained_kernel_never_imports_slack_packages(self):
+        slack_pkgs = {"slack", "slack_sdk", "slack_bolt", "slack_notify", "slack_control_room"}
+        for rel in self.RETAINED_KERNEL_SCRIPTS:
+            path = ROOT / rel
+            if not path.exists():
+                continue
+            with self.subTest(script=rel):
+                imports = imported_modules(path.read_text(encoding="utf-8"))
+                self.assertEqual(imports & slack_pkgs, set())
+
+    def test_retained_kernel_does_not_read_retired_state_stores(self):
+        """Retained kernel cannot reference retired on-disk stores or registries."""
+        for rel in self.RETAINED_KERNEL_SCRIPTS:
+            path = ROOT / rel
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            vocab = code_vocabulary(text)
+            for pattern in self.FORBIDDEN_STORAGE_PATTERNS:
+                with self.subTest(script=rel, pattern=pattern):
+                    self.assertFalse(
+                        re.search(pattern, vocab, re.IGNORECASE),
+                        f"{rel} references retired storage pattern: {pattern}",
+                    )
+
+    def test_retained_kernel_never_imports_delivery_increments(self):
+        for rel in self.RETAINED_KERNEL_SCRIPTS:
+            path = ROOT / rel
+            if not path.exists():
+                continue
+            with self.subTest(script=rel):
+                imports = imported_modules(path.read_text(encoding="utf-8"))
+                self.assertNotIn("delivery_increments", imports)
+
+    def test_retained_kernel_does_not_read_operator_credentials_or_seen_store(self):
+        """Retained kernel does not read ~/.aru/projects.json, ~/.aru/slack-control-room-seen.json, or Slack env tokens."""
+        forbidden_tokens = (
+            "slack_bot_token", "slack_app_token", ".hermes/.env",
+            "slack-control-room.pid", "slack_channel_id", "slack_team_id",
+        )
+        for rel in self.RETAINED_KERNEL_SCRIPTS:
+            path = ROOT / rel
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            vocab = code_vocabulary(text)
+            for token in forbidden_tokens:
+                with self.subTest(script=rel, token=token):
+                    self.assertNotIn(token, vocab)
+
+    def test_no_retained_module_imports_slack_sdk_or_bolt(self):
+        for rel, text in source_files():
+            with self.subTest(path=rel):
+                leftover = imported_modules(text) & {"slack", "slack_sdk", "slack_bolt"}
+                self.assertEqual(leftover, set(), f"{rel} imports Slack package {leftover}")
 
 
 class CompactStatusTests(unittest.TestCase):

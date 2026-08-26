@@ -1,4 +1,4 @@
-# line-ceiling: 446
+# line-ceiling: 550
 import json
 import os
 import sys
@@ -440,6 +440,101 @@ class EmergencyIncrementTests(IncrementFixture):
         self.assertEqual(emergency["kind"], "emergency")
         self.assertEqual(self.store.get(normal["increment_id"])["issue_scope"], [10, 11])
         self.assertEqual(self.store.active("proj_alpha")["increment_id"], normal["increment_id"])
+
+
+class DirectoryConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_private_directory_concurrent_creation_race(self):
+        from delivery_increments import _private_directory
+
+        target = self.root / "concurrent_inc_dir"
+        original_mkdir = Path.mkdir
+        first_call = [True]
+
+        def racing_mkdir(path_self, *args, **kwargs):
+            if path_self == target and first_call[0]:
+                first_call[0] = False
+                original_mkdir(path_self, *args, **kwargs)
+                raise FileExistsError(f"File exists: {path_self}")
+            return original_mkdir(path_self, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", side_effect=racing_mkdir, autospec=True):
+            _private_directory(target)
+
+        self.assertTrue(target.is_dir())
+        mode = target.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o700)
+
+    def test_private_directory_threadpool_concurrency(self):
+        from delivery_increments import _private_directory
+
+        target = self.root / "multi_threaded_inc_dir"
+
+        def create_dir(_):
+            _private_directory(target)
+            return True
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(create_dir, range(16)))
+
+        self.assertTrue(all(results))
+        self.assertTrue(target.is_dir())
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+
+    def test_private_directory_concurrent_conflict_with_file(self):
+        from delivery_increments import IncrementError, _private_directory
+
+        target = self.root / "conflicting_file"
+        target.write_text("not a directory", encoding="utf-8")
+
+        with self.assertRaises(IncrementError):
+            _private_directory(target)
+
+    def test_read_increment_rejects_symlink_and_insecure_file(self):
+        from delivery_increments import IncrementError, _read_increment_unlocked
+
+        real_file = self.root / "real_inc.json"
+        real_file.write_text(json.dumps({"schema_version": 1, "increments": {}}), encoding="utf-8")
+        os.chmod(real_file, 0o600)
+
+        symlink_file = self.root / "symlink_inc.json"
+        symlink_file.symlink_to(real_file)
+
+        with self.assertRaises(IncrementError):
+            _read_increment_unlocked(symlink_file, {})
+
+        insecure_file = self.root / "insecure_inc.json"
+        insecure_file.write_text(json.dumps({"schema_version": 1, "increments": {}}), encoding="utf-8")
+        os.chmod(insecure_file, 0o644)
+
+        with self.assertRaises(IncrementError):
+            _read_increment_unlocked(insecure_file, {})
+
+    def test_read_increment_rejects_foreign_owner(self):
+        from delivery_increments import IncrementError, _read_increment_unlocked
+
+        real_file = self.root / "foreign_inc.json"
+        real_file.write_text(json.dumps({"schema_version": 1, "increments": {}}), encoding="utf-8")
+        os.chmod(real_file, 0o600)
+
+        real_fstat = os.fstat
+        def mock_fstat(fd):
+            st = real_fstat(fd)
+            return os.stat_result((
+                st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                os.getuid() + 1000, st.st_gid, st.st_size,
+                st.st_atime, st.st_mtime, st.st_ctime
+            ))
+
+        with patch("os.fstat", side_effect=mock_fstat):
+            with self.assertRaises(IncrementError):
+                _read_increment_unlocked(real_file, {})
 
 
 if __name__ == "__main__":

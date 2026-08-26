@@ -208,5 +208,38 @@ class DependencyCodeBlockTests(unittest.TestCase):
         )
 
 
+class DependencyAwareSelectionTests(unittest.TestCase):
+    def test_unresolved_open_dependency_blocks_ready_candidate(self):
+        dep = issue(10, "status:in-progress", "scripts/dep.py")
+        blocked_issue = issue(11, "status:ready", "scripts/main.py")
+        blocked_issue["body"] = "touches: scripts/main.py\ndepends-on: #10\n"
+
+        result = fetch_next_issue.build_candidates([dep, blocked_issue], "agent-1", repo_owner="owner")
+
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["blocked"], [{"number": 11, "blocked_by": [10]}])
+
+    def test_resolved_closed_dependency_allows_ready_candidate(self):
+        # Issue 10 is closed (not in open issues list)
+        ready_issue = issue(11, "status:ready", "scripts/main.py")
+        ready_issue["body"] = "touches: scripts/main.py\ndepends-on: #10\n"
+
+        result = fetch_next_issue.build_candidates([ready_issue], "agent-1", repo_owner="owner")
+
+        self.assertEqual([item["number"] for item in result["candidates"]], [11])
+        self.assertEqual(result["blocked"], [])
+
+    def test_active_increment_scope_is_independent_of_delivery_increments_store(self):
+        self.assertIsNone(fetch_next_issue.active_increment_scope())
+        self.assertIsNone(fetch_next_issue.active_increment_scope("proj_test", fail_on_error=True))
+
+    def test_selection_operates_without_delivery_increments_dependency(self):
+        ready1 = issue(11, "status:ready", "scripts/one.py")
+        ready2 = issue(12, "status:ready", "scripts/two.py")
+        result = fetch_next_issue.build_candidates([ready1, ready2], "agent-1", repo_owner="owner")
+        self.assertEqual([item["number"] for item in result["candidates"]], [11, 12])
+        self.assertEqual(result["future_inventory"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
