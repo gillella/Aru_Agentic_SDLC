@@ -2,7 +2,8 @@
 # +64 for the #344 terminal lease and stale-writer escalation.
 # +26 for the #427 CodeRabbit completed-description allowlist.
 # +80 for the #429 acceptance-interpreter and post-merge persistence fix; #414 ratchets this file to 4,500.
-# line-ceiling: 5416
+# +20 for the #460 live base snapshot for behind-branch admission.
+# line-ceiling: 5440
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -2718,10 +2719,11 @@ MERGE_PARENT_BASE_RECHECK_ATTEMPTS = 3
 def _current_base_tip(pr):
     """The base branch's live tip SHA, or None if it cannot be read.
 
-    `pr["baseRefOid"]` is a snapshot taken before the merge-parent lookup, so
-    on its own it cannot witness a base that advanced since (#371 review).
-    Reading the ref itself lets the identity proof bracket that lookup with two
-    live reads and refuse when the base moves underneath it.
+    `pr.get("baseRefOid")` is a historical snapshot from when the PR was
+    opened/updated on GitHub, so on its own it cannot witness the live base
+    branch tip or whether it advanced (#371 review, #460). Reading the ref
+    itself lets behind-branch admission and the merge gate snapshot the live
+    base tip and verify it has not moved.
 
     Returns None for "could not determine" -- an unresolvable slug or base
     branch, an unreadable ref, or a ref payload without a non-empty string SHA.
@@ -2786,6 +2788,14 @@ def _merge_commit_parents(pr):
             return None
         shas.append(sha)
     return shas
+
+
+def _snapshot_live_base(pr, resolve_base):
+    """Snapshot the live base tip SHA for one gate cycle, failing closed on errors."""
+    try:
+        return resolve_base(pr)
+    except Exception:  # noqa: BLE001 - any failure here must fail closed
+        return None
 
 
 def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolver=None,
@@ -2853,6 +2863,7 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
         )
     if behind > 0:
         plural = "commit" if behind == 1 else "commits"
+        snapshot_base = _snapshot_live_base(pr, base_tip_resolver or _current_base_tip)
         try:
             overlap = _overlap_with_base_advance(pr, paths_resolver)
         except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
@@ -2901,7 +2912,8 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
         # are literally the current base tip and this head -- the identity
         # proof timing alone cannot supply.
         identity_ok, identity_reason = _merge_commit_matches_base(
-            pr, behind, plural, merge_parents_resolver, base_tip_resolver)
+            pr, behind, plural, merge_parents_resolver, base_tip_resolver,
+            snapshot_base=snapshot_base)
         if not identity_ok:
             return False, identity_reason
         return True, (
@@ -3004,7 +3016,7 @@ def _proved_base_and_parents(pr, resolve_base, resolve_parents):
 
 
 def _merge_commit_matches_base(pr, behind, plural, merge_parents_resolver,
-                               base_tip_resolver=None):
+                               base_tip_resolver=None, snapshot_base=None):
     """The literal identity proof `check_rebased` needs for a behind branch.
 
     Confirms the PR's test-merge commit is a genuine two-parent merge of the
@@ -3012,19 +3024,30 @@ def _merge_commit_matches_base(pr, behind, plural, merge_parents_resolver,
     `check_rebased` to keep its branch count within the complexity ceiling.
 
     The base tip used for that comparison is re-read live around the parent
-    lookup rather than taken from the PR snapshot, and the snapshot must still
-    agree with it, so a base that advanced after the snapshot is refused
-    instead of being merged into on evidence that predates it (#371 review).
+    lookup rather than taken from the historical PR payload, and the invocation
+    snapshot must still agree with it, so a base that advanced after the
+    snapshot is refused instead of being merged into on evidence that predates
+    it (#371 review, #460).
     """
-    snapshot_base = pr.get("baseRefOid")
-    head_sha = pr.get("headRefOid")
-    resolve_parents = merge_parents_resolver or _merge_commit_parents
     resolve_base = base_tip_resolver or _current_base_tip
-    if not snapshot_base or not head_sha:
+    resolve_parents = merge_parents_resolver or _merge_commit_parents
+    head_sha = pr.get("headRefOid")
+    if not head_sha:
         return False, _identity_refusal(behind, plural, (
             "the current base tip or head SHA is unknown, so the tested "
             "merge commit's parents cannot be verified. Refusing to merge "
             "on unverified evidence."
+        ))
+    if snapshot_base is None:
+        try:
+            snapshot_base = resolve_base(pr)
+        except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
+            return False, _identity_refusal(behind, plural, (
+                f"the base branch tip could not be read ({type(exc).__name__}: {exc})."
+            ))
+    if not isinstance(snapshot_base, str) or not snapshot_base:
+        return False, _identity_refusal(behind, plural, (
+            "the base branch tip could not be read."
         ))
     try:
         base_tip, parents, failure = _proved_base_and_parents(
@@ -5291,7 +5314,14 @@ def main():  # noqa: C901, PLR0912, PLR0915
             # before the server merge, because `gh pr merge` pins only the head
             # and GitHub would otherwise merge into whatever base it holds at
             # execution time (#371 review).
-            gated_base = fresh.get("baseRefOid")
+            gated_base = _current_base_tip(fresh)
+            if not gated_base:
+                print(
+                    "[ERROR] Final live base tip could not be read. "
+                    "No merge command was run.",
+                    file=sys.stderr,
+                )
+                return EXIT_BLOCKED
 
             print(f"  ✅ merge lock          {lock_message}")
             print(f"  ✅ final base check    {rebased_message}")
