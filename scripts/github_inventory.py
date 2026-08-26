@@ -195,7 +195,7 @@ def open_pull_requests(run: Runner, slug: str) -> Optional[List[Dict[str, Any]]]
             "isDraft": bool(row.get("draft")),
             "labels": labels,
             "reviews": [],
-            "statusCheckRollup": [],
+            "statusCheckRollup": None,
             "updatedAt": row.get("updated_at"),
             "createdAt": row.get("created_at"),
             "headRefName": head.get("ref") or "",
@@ -207,3 +207,38 @@ def open_pull_requests(run: Runner, slug: str) -> Optional[List[Dict[str, Any]]]
             "state": "OPEN",
         })
     return prs
+
+
+RICH_PR_FIELDS = (
+    "number,title,isDraft,labels,reviews,statusCheckRollup,"
+    "updatedAt,createdAt,headRefName,headRefOid,body,state"
+)
+OPEN_PR_LIMIT = 200
+
+
+def rich_open_pull_requests(
+    run: Runner, slug: Optional[str] = None
+) -> Optional[List[Dict[str, Any]]]:
+    """Read rich open-PR snapshot including status checks via gh pr list.
+
+    Returns None on command failure, cap overflow, or unparseable JSON.
+    """
+    cmd = [
+        "gh", "pr", "list", "--state", "open", "--json", RICH_PR_FIELDS,
+        "--limit", str(OPEN_PR_LIMIT),
+    ]
+    if slug:
+        cmd.extend(["-R", slug])
+    code, stdout, _ = run(cmd, check=False)
+    if code != 0 or not stdout:
+        return None
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, list) or len(data) >= OPEN_PR_LIMIT:
+        return None
+    for item in data:
+        if not isinstance(item, dict) or not isinstance(item.get("number"), int):
+            return None
+    return data
