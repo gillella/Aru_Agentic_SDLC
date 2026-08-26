@@ -601,14 +601,12 @@ class WiringTests(unittest.TestCase):
         self.assertNotIn("pick feedback → merge → review → issue", cursor)
 
     def test_loop_pacing_is_dynamic_and_nonblocking(self):
-        text = flat(skill_text())
-        for phrase in (
-            "pace dynamically", "fixed interval", "snapshot → reconcile → decide → dispatch → report",
-            "never waits synchronously for coding-worker, ci, or external-review completion",
-            "same-job single-flight", "no repository-local daemon, private task queue, or competing scheduler",
-            "#479", "#480", "consumer repositories follow their own `agents.md` testing policy",
-        ):
+        raw = skill_text()
+        text = flat(raw)
+        exact = ("pace dynamically", "fixed interval", "snapshot → reconcile → decide → dispatch → report", "never waits synchronously for coding-worker, ci, or external-review completion", "same-job single-flight", "no repository-local daemon, private task queue, or competing scheduler", "each tick starts with **exactly one authoritative picker call**", "do not preflight or enrich it with", "make zero follow-up github reads", "durable worker-state persistence belongs to #479", "worker prompt protocol belongs to #480", "exactly one fresh picker call occurs only at the start of the next tick", "aru's focused-predicate exception remains local to `aru_agentic_sdlc`")
+        for phrase in exact:
             self.assertIn(phrase, text)
+        self.assertIn("consumer repositories follow their own `AGENTS.md` testing policy", raw)
 
     def test_the_fleet_prompt_points_at_the_entrypoint(self):
         text = FLEET_PROMPT.read_text(encoding="utf-8")
