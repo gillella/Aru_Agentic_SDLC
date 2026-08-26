@@ -227,7 +227,7 @@ helper with the picker-supplied `head_sha` pinned as `--expected-head`:
 python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>
 ```
 
-The picker already claimed and evaluated the merge: do not add a claim-confirmation read or separate `merge_pr.py --dry-run`; invoke the helper once, then make one fresh picker call only after a successful mutation.
+The picker already claimed and evaluated the merge: do not add a claim-confirmation read or separate `merge_pr.py --dry-run`; invoke the helper once, then make one fresh picker call only after a successful mutation. On exit `3` (blocked or head mismatch), release the merger claim with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release`, then return to the picker.
 Direct pushes and `gh pr merge` have no merge authority. A finding closes by a
 commit or an explicit `Withdrawn:` reply — resolving a thread proves nothing.
 

@@ -505,6 +505,8 @@ class GovernanceTests(unittest.TestCase):
                 self.assertEqual(len(helpers), 1, helpers)
                 self.assertIn("--expected-head <HEAD_SHA>", helpers[0])
                 self.assertNotIn("--dry-run", helpers[0])
+        releases = re.findall(r"python3 [^`\n]*claim_issue\.py[^`\n]*", contracts[0])
+        self.assertEqual(releases, ['python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release'])
 
     def test_worktree_cleanup_uses_governed_helpers(self):
         board = flat(BOARD_WORKFLOW.read_text(encoding="utf-8"))
