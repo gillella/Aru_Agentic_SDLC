@@ -210,7 +210,7 @@ Execution ticks distinguish eight explicit outcomes:
 Ticks track latency from task availability to assignment and categorize idle causes:
 
 - `no-ready-work`: backlog has no tasks in `Ready` status.
-- `dependency-blocked`: unblocked tasks are held by unresolved `depends-on` relationships.
+- `dependency-blocked`: blocked tasks are held by unresolved `depends-on` relationships.
 - `touches-contention`: ready tasks overlap with `touches:` paths held by active workers.
 - `review-wait`: PRs are awaiting external or assigned review.
 - `ci-wait`: PRs are awaiting CI pipeline completion.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 590
+# line-ceiling: 710
 """Unit tests for factory_loop_ledger.py and fleet_status integration (#471).
 
 Verifies:
@@ -209,6 +209,65 @@ class TestLedgerSchemaValidation(unittest.TestCase):
         with self.assertRaises(fll.LedgerValidationError):
             fll.validate_tick_record(data)
 
+    def test_booleans_and_non_finite_numbers_rejected(self):
+        # Booleans rejected as integers or numbers
+        for val in (True, False):
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(sample_tick_dict(assignment_latency_ms=val))
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(
+                    sample_tick_dict(stage_durations={"total_ms": val})
+                )
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(sample_tick_dict(workers_launched=val))
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(sample_tick_dict(workers_adopted=val))
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(sample_tick_dict(prs_progressed=[val]))
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(sample_tick_dict(merges_completed=[val]))
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(sample_tick_dict(linked_issue=val))
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(sample_tick_dict(linked_pr=val))
+
+        # Non-finite numbers rejected
+        for non_finite in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(
+                    sample_tick_dict(assignment_latency_ms=non_finite)
+                )
+            with self.assertRaises(fll.LedgerValidationError):
+                fll.validate_tick_record(
+                    sample_tick_dict(stage_durations={"total_ms": non_finite})
+                )
+
+    def test_slug_validation_and_containment(self):
+        # Valid slugs
+        self.assertEqual(
+            fll.sanitize_slug("gillella/Aru_Agentic_SDLC"), "gillella__Aru_Agentic_SDLC"
+        )
+        self.assertEqual(fll.sanitize_slug("my-project.1"), "my-project.1")
+
+        # Invalid slugs
+        for bad_slug in (
+            r"..\outside",
+            r"owner\repo",
+            "../traversal",
+            "owner/../repo",
+            "owner/./repo",
+            "/absolute/path",
+            "trailing/slash/",
+            "empty//segment",
+            "invalid char*",
+            "",
+        ):
+            with self.subTest(bad_slug=bad_slug):
+                with self.assertRaises(fll.LedgerValidationError):
+                    fll.sanitize_slug(bad_slug)
+                with self.assertRaises(fll.LedgerValidationError):
+                    fll.validate_tick_record(sample_tick_dict(project_slug=bad_slug))
+
 
 class TestLedgerStorageAndPersistence(unittest.TestCase):
     """Verifies crash-consistent storage, permissions, locking, and recovery."""
@@ -304,6 +363,38 @@ class TestLedgerStorageAndPersistence(unittest.TestCase):
         records = fll.read_tick_records(slug, base_dir=self.ledger_dir)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].run_id, "run_new")
+
+    def test_append_tick_record_handles_write_failure_without_double_close(self):
+        record_data = sample_tick_dict(run_id="run_err_test")
+        original_fdopen = fll.os.fdopen
+
+        class FailingWriter:
+            def __init__(self, fh):
+                self._fh = fh
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return self._fh.__exit__(exc_type, exc_val, exc_tb)
+
+            def fileno(self):
+                return self._fh.fileno()
+
+            def write(self, _):
+                raise OSError("simulated disk full")
+
+            def flush(self):
+                self._fh.flush()
+
+        def mock_fdopen(fd, mode="r", encoding="utf-8"):
+            real_fh = original_fdopen(fd, mode, encoding=encoding)
+            return FailingWriter(real_fh)
+
+        with patch("factory_loop_ledger.os.fdopen", side_effect=mock_fdopen):
+            with self.assertRaises(OSError) as cm:
+                fll.append_tick_record(record_data, base_dir=self.ledger_dir)
+            self.assertEqual(str(cm.exception), "simulated disk full")
 
 
 class TestLedgerSummarization(unittest.TestCase):
@@ -481,6 +572,35 @@ class TestFleetStatusIntegration(unittest.TestCase):
                 formatted = fs.format_status(status)
                 self.assertIn("Run Health & Lane Utilization", formatted)
                 self.assertIn("Ticks: 1", formatted)
+
+    def test_fleet_status_reports_ledger_corruption_without_error_state(self):
+        slug = "gillella/Aru_Agentic_SDLC"
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_dir = Path(tmp)
+            ledger_file = ledger_dir / f"{fll.sanitize_slug(slug)}.jsonl"
+            ledger_file.write_text('{"corrupt": true}\n', encoding="utf-8")
+
+            with patch("fleet_status.query_open_issues", return_value=[]), patch(
+                "fleet_status.governed_board_inventory", return_value=({}, 0)
+            ), patch("fleet_status.list_open_prs", return_value=[]), patch(
+                "fleet_status.list_worktrees",
+                return_value=[{"path": "/repo", "branch": "main"}],
+            ), patch("fleet_status.get_repo_slug", return_value=slug), patch(
+                "factory_loop_ledger.DEFAULT_LEDGER_DIR", ledger_dir
+            ):
+                status = fs.evaluate_fleet_status(".")
+                self.assertIsNone(status["ledger_summary"])
+                self.assertEqual(status["state"], "complete")
+                self.assertEqual(status["exit_code"], fs.EXIT_COMPLETE)
+                self.assertTrue(
+                    any(
+                        "Local factory loop ledger is unreadable:" in r
+                        for r in status["reasons"]
+                    )
+                )
+
+                formatted = fs.format_status(status)
+                self.assertIn("Local factory loop ledger is unreadable:", formatted)
 
 
 class TestLedgerCLI(unittest.TestCase):

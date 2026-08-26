@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 460
+# line-ceiling: 520
 """factory_loop_ledger.py - project-scoped run health and lane utilization ledger (#471).
 
 Maintains a crash-consistent, bounded, append-only JSONL audit ledger for
@@ -16,6 +16,7 @@ import datetime
 import json
 import math
 import os
+import re
 import stat
 import statistics
 from dataclasses import asdict, dataclass
@@ -97,6 +98,25 @@ class TickRecord:
         return asdict(self)
 
 
+_SLUG_PART_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _is_finite_non_negative_number(val: Any) -> bool:
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return False
+    if not math.isfinite(val):
+        return False
+    return val >= 0
+
+
+def _is_non_negative_int(val: Any) -> bool:
+    return isinstance(val, int) and not isinstance(val, bool) and val >= 0
+
+
+def _is_positive_int(val: Any) -> bool:
+    return isinstance(val, int) and not isinstance(val, bool) and val > 0
+
+
 def _parse_iso(value: Any, name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise LedgerValidationError(f"'{name}' must be a non-empty ISO timestamp.")
@@ -118,10 +138,13 @@ def _validate_envelope(data: dict[str, Any]) -> None:
     if data.get("schema_version") != SCHEMA_VERSION:
         raise LedgerValidationError(f"Invalid schema_version: expected '{SCHEMA_VERSION}'")
 
-    for key in ("run_id", "project_slug", "snapshot_hash", "delivery_status"):
+    for key in ("run_id", "snapshot_hash", "delivery_status"):
         val = data.get(key)
         if not isinstance(val, str) or not val.strip():
             raise LedgerValidationError(f"'{key}' must be a non-empty string.")
+
+    slug_val = data.get("project_slug")
+    sanitize_slug(slug_val)
 
     for key in ("scheduled_at", "started_at", "finished_at"):
         _parse_iso(data.get(key), key)
@@ -132,12 +155,12 @@ def _validate_timings_and_lanes(data: dict[str, Any]) -> None:
     if not isinstance(stage_durations, dict):
         raise LedgerValidationError("'stage_durations' must be an object.")
     for k, v in stage_durations.items():
-        if not isinstance(v, (int, float)) or v < 0:
-            raise LedgerValidationError(f"Duration '{k}' must be non-negative number.")
+        if not _is_finite_non_negative_number(v):
+            raise LedgerValidationError(f"Duration '{k}' must be non-negative finite number.")
 
     lat = data.get("assignment_latency_ms")
-    if not isinstance(lat, (int, float)) or lat < 0:
-        raise LedgerValidationError("'assignment_latency_ms' must be non-negative number.")
+    if not _is_finite_non_negative_number(lat):
+        raise LedgerValidationError("'assignment_latency_ms' must be non-negative finite number.")
 
     actions = data.get("actions_selected")
     if not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):
@@ -145,12 +168,12 @@ def _validate_timings_and_lanes(data: dict[str, Any]) -> None:
 
     for key in ("workers_launched", "workers_adopted"):
         val = data.get(key)
-        if not isinstance(val, int) or val < 0:
+        if not _is_non_negative_int(val):
             raise LedgerValidationError(f"'{key}' must be a non-negative integer.")
 
     for key in ("prs_progressed", "merges_completed"):
         val = data.get(key)
-        if not isinstance(val, list) or not all(isinstance(p, int) and p > 0 for p in val):
+        if not isinstance(val, list) or not all(_is_positive_int(p) for p in val):
             raise LedgerValidationError(f"'{key}' must be a list of positive integer IDs.")
 
 
@@ -171,7 +194,7 @@ def _validate_reasons(data: dict[str, Any], outcome: str) -> None:
 
     for key in ("linked_issue", "linked_pr"):
         val = data.get(key)
-        if val is not None and (not isinstance(val, int) or val <= 0):
+        if val is not None and not _is_positive_int(val):
             raise LedgerValidationError(f"'{key}' must be positive integer or null.")
 
 
@@ -206,16 +229,39 @@ def validate_tick_record(data: dict[str, Any]) -> TickRecord:
     )
 
 
-def sanitize_slug(slug: str) -> str:
-    return slug.replace("/", "__")
+def sanitize_slug(slug: Any) -> str:
+    """Validate and sanitize a project slug for filesystem use."""
+    if not isinstance(slug, str) or not slug.strip():
+        raise LedgerValidationError("Project slug must be a non-empty string.")
+    cleaned = slug.strip()
+    if cleaned.startswith("/") or cleaned.endswith("/") or "\\" in cleaned:
+        raise LedgerValidationError(f"Invalid project slug '{slug}'.")
+    parts = cleaned.split("/")
+    for part in parts:
+        if not part or not _SLUG_PART_RE.fullmatch(part) or part in {".", ".."}:
+            raise LedgerValidationError(f"Invalid project slug '{slug}'.")
+    return "__".join(parts)
+
+
+def _contained_ledger_path(slug: str, extension: str, base_dir: Path | None = None) -> Path:
+    sanitized = sanitize_slug(slug)
+    target_dir = (base_dir or DEFAULT_LEDGER_DIR).resolve()
+    target_path = (target_dir / f"{sanitized}{extension}").resolve()
+    try:
+        target_path.relative_to(target_dir)
+    except ValueError as exc:
+        raise LedgerValidationError(f"Path traversal detected for project slug '{slug}'.") from exc
+    if target_path.parent != target_dir:
+        raise LedgerValidationError(f"Path traversal detected for project slug '{slug}'.")
+    return target_path
 
 
 def ledger_file_for_slug(slug: str, base_dir: Path | None = None) -> Path:
-    return (base_dir or DEFAULT_LEDGER_DIR) / f"{sanitize_slug(slug)}.jsonl"
+    return _contained_ledger_path(slug, ".jsonl", base_dir=base_dir)
 
 
 def rotated_file_for_slug(slug: str, base_dir: Path | None = None) -> Path:
-    return (base_dir or DEFAULT_LEDGER_DIR) / f"{sanitize_slug(slug)}.jsonl.1"
+    return _contained_ledger_path(slug, ".jsonl.1", base_dir=base_dir)
 
 
 def _ensure_dir_secure(dir_path: Path) -> None:
@@ -272,7 +318,7 @@ def append_tick_record(
     ledger_file = ledger_file_for_slug(record.project_slug, base_dir=target_dir)
     rotated_file = rotated_file_for_slug(record.project_slug, base_dir=target_dir)
     lock_file = _lock_file_path(ledger_file)
-    line = json.dumps(record.to_dict(), separators=(",", ":")) + "\n"
+    line = json.dumps(record.to_dict(), separators=(",", ":"), allow_nan=False) + "\n"
 
     with open(lock_file, "a+", encoding="utf-8") as lock_handle:
         if fcntl is not None:
@@ -282,20 +328,25 @@ def append_tick_record(
                 _rotate_unlocked(ledger_file, rotated_file)
             fd = os.open(ledger_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
-                try:
-                    os.chmod(ledger_file, 0o600)
-                except OSError:
-                    pass
-                with os.fdopen(fd, "a", encoding="utf-8") as fh:
-                    fh.write(line)
-                    fh.flush()
-                    os.fsync(fh.fileno())
+                fh = os.fdopen(fd, "a", encoding="utf-8")
             except BaseException:
                 try:
                     os.close(fd)
                 except OSError:
                     pass
                 raise
+
+            with fh:
+                try:
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(fh.fileno(), 0o600)
+                    else:
+                        os.chmod(ledger_file, 0o600)
+                except OSError:
+                    pass
+                fh.write(line)
+                fh.flush()
+                os.fsync(fh.fileno())
         finally:
             if fcntl is not None:
                 fcntl.flock(lock_handle, fcntl.LOCK_UN)

@@ -21,7 +21,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from common import (
     claimed_by,
@@ -33,7 +33,7 @@ from common import (
 )
 from github_inventory import open_pull_requests as rest_open_pull_requests
 from picker_board_inventory import governed_board_inventory
-from factory_loop_ledger import read_tick_records, summarize_ledger
+from factory_loop_ledger import LedgerError, read_tick_records, summarize_ledger
 
 EXIT_COMPLETE = 0
 EXIT_ERROR = 1
@@ -186,13 +186,18 @@ def _reasons(issues: List[Dict[str, Any]], prs: List[Dict[str, Any]],
     return lines
 
 
-def _ledger_summary(slug: str) -> Optional[Dict[str, Any]]:
-    """Read local ledger summary read-only; never writes, mutates, or raises."""
+def _ledger_summary(slug: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Read local ledger summary read-only; never writes, mutates, or raises.
+
+    Returns ``(summary, problem)``. ``problem`` carries the reason the local
+    ledger is unreadable so the operator sees it instead of an empty section.
+    """
     try:
-        records = read_tick_records(slug)
-        return summarize_ledger(records)
-    except Exception:
-        return None
+        return summarize_ledger(read_tick_records(slug)), None
+    except LedgerError as exc:
+        return None, f"Local factory loop ledger is unreadable: {exc}"
+    except Exception as exc:  # observational only: never block status
+        return None, f"Local factory loop ledger read failed: {exc}"
 
 
 def _collect(slug: str) -> Dict[str, Any]:
@@ -231,6 +236,10 @@ def _collect(slug: str) -> Dict[str, Any]:
     )
     open_work = bool(issue_rows or pr_rows
                      or any(r["issue"] is not None for r in worktree_rows))
+    ledger_summary, ledger_problem = _ledger_summary(slug)
+    reasons = _reasons(issue_rows, pr_rows, worktree_rows)
+    if ledger_problem:
+        reasons.append(ledger_problem)
     return {
         "state": "waiting" if open_work else "complete",
         "exit_code": EXIT_WAITING if open_work else EXIT_COMPLETE,
@@ -239,14 +248,14 @@ def _collect(slug: str) -> Dict[str, Any]:
             f"{len(claims)} claim(s)." if open_work else
             "COMPLETE: no open issues, no open PRs, no claims, no issue worktrees."
         ),
-        "reasons": _reasons(issue_rows, pr_rows, worktree_rows),
+        "reasons": reasons,
         "repo": slug,
         "open_issues_count": len(issue_rows),
         "open_prs_count": len(pr_rows),
         "ready_count": ready_count,
         "issues": issue_rows, "pull_requests": pr_rows,
         "claims": claims, "worktrees": worktree_rows,
-        "ledger_summary": _ledger_summary(slug),
+        "ledger_summary": ledger_summary,
     }
 
 
