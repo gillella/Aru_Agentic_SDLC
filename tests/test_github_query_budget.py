@@ -29,7 +29,7 @@ def rest_pr(number):
 class RestFallbackTests(unittest.TestCase):
     def test_unavailable_open_issue_inventory_is_not_treated_as_empty(self):
         result = fnw.select(
-            "agent-1", "openai", 3, 30,
+            "agent-1", "openai",
             prs_snapshot=[], issues_snapshot=None,
         )
 
@@ -98,7 +98,7 @@ class RestFallbackTests(unittest.TestCase):
              patch.object(fnw, "dod_status") as dod, \
              patch.object(fnw, "list_open_issues") as issues:
             result = fnw.select(
-                "agent-1", "openai", 3, 30,
+                "agent-1", "openai",
                 prs_snapshot=[candidate], issues_snapshot=[],
             )
 
@@ -115,7 +115,7 @@ class RestFallbackTests(unittest.TestCase):
             with patch.object(fnw, "list_open_prs", return_value=snapshot):
                 self.assertIs(fnw.list_work_prs(), snapshot)
             result = fnw.select(
-                "agent-1", "openai", 3, 30,
+                "agent-1", "openai",
                 prs_snapshot=snapshot, issues_snapshot=[],
             )
 

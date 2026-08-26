@@ -242,31 +242,25 @@ class AdoptPullRequestTests(unittest.TestCase):
 
 
 class AdoptedPullRequestReviewTests(unittest.TestCase):
-    """Adoption composes with the (id, family) peer gate from #307."""
+    """Adoption moves ownership; it never makes the adopter a reviewer (#414)."""
 
-    def test_the_adopting_agent_still_cannot_review_its_own_pr(self):
+    def test_adoption_moves_author_and_family_only(self):
         import merge_pr
         pr = {"labels": [{"name": "author:claude-a3f19c"},
                          {"name": "family:anthropic"},
                          {"name": "adopted-from:codex-9f21"},
-                         {"name": "reviewed-by:claude-a3f19c"},
-                         {"name": "reviewer-family:claude-a3f19c:anthropic"}]}
-        peers, collisions, _unresolved = merge_pr.classify_reviewers(
-            pr, ["claude-a3f19c"], "claude-a3f19c")
-        self.assertEqual(peers, [])
-        self.assertEqual(collisions, [])
+                         {"name": "review:coderabbit"}]}
+        self.assertEqual(merge_pr.label_values(pr, "author:"), ["claude-a3f19c"])
+        self.assertEqual(merge_pr.label_values(pr, "family:"), ["anthropic"])
+        self.assertEqual(merge_pr.assigned_review_service(pr), "coderabbit")
 
-    def test_the_previous_author_is_a_valid_peer_after_adoption(self):
-        # If the original agent returns, it is now somebody else's reviewer.
+    def test_no_coding_agent_reviewer_classification_survives(self):
         import merge_pr
-        pr = {"labels": [{"name": "author:claude-a3f19c"},
-                         {"name": "family:anthropic"},
-                         {"name": "adopted-from:codex-9f21"},
-                         {"name": "reviewed-by:codex-9f21"}]}
-        peers, collisions, _unresolved = merge_pr.classify_reviewers(
-            pr, ["codex-9f21"], "claude-a3f19c")
-        self.assertEqual(peers, ["codex-9f21"])
-        self.assertEqual(collisions, [])
+        for name in ("classify_reviewers", "reviewer_families",
+                     "identity_values", "id_collision_message",
+                     "self_review_message", "_agent_review_verdict"):
+            self.assertFalse(hasattr(merge_pr, name),
+                             f"merge_pr still exposes {name}")
 
 
 def ago_dt(hours):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # +51 for the #344 terminal merge lease guard.
-# line-ceiling: 1581
+# line-ceiling: 1167
 """
 claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
@@ -18,7 +18,6 @@ Exit codes:
 
 import argparse
 import json
-import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -61,10 +60,10 @@ READBACK_DELAY_S = 2.0
 # smaller contender can still apply its label afterward and also declare win.
 SETTLE_ROUNDS = 2
 
-# The review-claim path below still uses a single confirmation read rather than
+# The merge-claim path below uses a single confirmation read rather than
 # SETTLE_ROUNDS. It predates the settle hardening above and was merged forward
 # unchanged; the two claim paths should converge on one protocol. Until they do,
-# review claiming has the weaker guarantee: a contender whose label lands after
+# merge claiming has the weaker guarantee: a contender whose label lands after
 # this confirm is not detected. Tracked as follow-up, not a regression - this is
 # the behaviour PR #16 was reviewed and tested against.
 CONFIRM_DELAY_S = 4.0
@@ -574,25 +573,12 @@ def release_issue(issue_id: int, agent: str) -> int:
     print(f"♻️  Issue #{issue_id} released by '{agent}' and returned to {target_status}.")
 
 
-# --- Reviewing a pull request ----------------------------------------------
-# Review is work an agent claims off the board, not a CI job calling a provider
-# API - agents run the loop under their own subscriptions. Two agents reviewing
-# the same PR is the same waste as two agents implementing the same issue, so
-# it uses the same optimistic protocol: write, read back, deterministic
-# lowest-id tie-break, loser releases.
-#
-# Differences from an issue claim, both deliberate:
-#   * no board status change - the linked issue stays In Review while its PR is
-#     being reviewed; the review is not separate board work.
-#   * no assignee - assignment is already meaningless here, since every agent
-#     authenticates as the same GitHub user.
+# --- Authoring and adopting a pull request ---------------------------------
+# Coding agents author, adopt, remediate, and mechanically merge pull requests.
+# They never claim review: CodeRabbit is the assigned review oracle, and this
+# helper deliberately offers no way to record a coding agent as a reviewer.
 
-REVIEWER_LABEL_PREFIX = "reviewer:"
 AUTHOR_LABEL_PREFIX = "author:"
-
-
-def _reviewer_label_for(agent: str) -> str:
-    return f"{REVIEWER_LABEL_PREFIX}{agent}"
 
 
 def _pr_labels(pr_id: int):
@@ -605,26 +591,6 @@ def _pr_labels(pr_id: int):
     if code != 0:
         return None
     return [line.strip() for line in out.splitlines() if line.strip()]
-
-
-def reviewer_labels(labels) -> list:
-    return sorted(name for name in (labels or []) if name.startswith(REVIEWER_LABEL_PREFIX))
-
-
-def review_claimant(labels):
-    """The agent currently holding the review claim, if any.
-
-    Named for the prefix it actually reads. It was called reviewed_by(), which
-    described a different label - merge_pr.py read `reviewed-by:` while this
-    wrote `reviewer:`, and the mismatch went unnoticed partly because the
-    function name matched the key nobody wrote.
-    """
-    held = reviewer_labels(labels)
-    return held[0][len(REVIEWER_LABEL_PREFIX):] if held else None
-
-
-# Retained so existing callers keep working; prefer review_claimant.
-reviewed_by = review_claimant
 
 
 def pr_author(labels):
@@ -806,313 +772,12 @@ def adopt_pr(pr_id: int, agent: str, family: str = "",
     return EXIT_OK
 
 
-def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
-    code, _, err = run_cmd(
-        ["gh", "pr", "edit", str(pr_id), "--remove-label", _reviewer_label_for(agent)],
-        check=False,
-    )
-    if code != 0:
-        print(f"[WARN] Could not remove review claim for '{agent}': {err}", file=sys.stderr)
-    return code == 0
-
-
-def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901, PLR0912
-    """Resume only an operator-assigned emergency coding-agent review."""
-    labels = _pr_labels(pr_id)
-    if labels is None:
-        print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
-        return EXIT_ERROR
-    authorities = [name for name in labels if name.startswith("review:")]
-    holder = review_claimant(labels)
-    if authorities != ["review:agent"] or holder != agent:
-        print("[CONFLICT] Coding agents cannot claim normal review work. The PR "
-              "must already carry exactly review:agent and reviewer:<this-agent> "
-              "from the emergency reassignment helper.", file=sys.stderr)
-        return EXIT_CONFLICT
-
-    # Refuse the PR's own author here, not only in the picker. fetch_next_work
-    # filters own-authored PRs when it hands out review work, but a direct
-    # `--pr <n> --agent <me>` bypasses that, and merge_pr.py now treats this
-    # claim as the identity of the reviewer. The guarantee has to live where
-    # the label is written.
-    authors = [name[len(AUTHOR_LABEL_PREFIX):] for name in labels
-               if name.startswith(AUTHOR_LABEL_PREFIX)
-               and name[len(AUTHOR_LABEL_PREFIX):]]
-    if len(authors) != 1:
-        print(f"[CONFLICT] PR #{pr_id} must carry exactly one non-empty "
-              "author:<id> before emergency review.", file=sys.stderr)
-        return EXIT_CONFLICT
-    author = authors[0]
-    if author == agent:
-        print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}'. "
-              "An agent may not claim review of its own PR.", file=sys.stderr)
-        return EXIT_CONFLICT
-
-    holder = review_claimant(labels)
-    if holder and holder != agent:
-        print(f"[CONFLICT] PR #{pr_id} is already being reviewed by '{holder}'.", file=sys.stderr)
-        return EXIT_CONFLICT
-    if holder == agent:
-        print(f"[INFO] PR #{pr_id} is already yours to review; resuming.")
-        return EXIT_OK
-
-    my_label = _reviewer_label_for(agent)
-    if not ensure_label(my_label, "0e8a16", f"Under review by agent '{agent}'"):
-        print(f"[ERROR] Could not provision review label '{my_label}'.", file=sys.stderr)
-        return EXIT_ERROR
-
-    code, _, err = run_cmd(
-        ["gh", "pr", "edit", str(pr_id), "--add-label", my_label], check=False
-    )
-    if code != 0:
-        print(f"[ERROR] Could not apply review claim: {err}", file=sys.stderr)
-        return EXIT_ERROR
-
-    time.sleep(READBACK_DELAY_S)
-    labels = _pr_labels(pr_id)
-    if labels is None:
-        print(f"[ERROR] Could not read back PR #{pr_id} after claiming.", file=sys.stderr)
-        _remove_reviewer_label(pr_id, agent)
-        return EXIT_ERROR
-
-    holders = reviewer_labels(labels)
-    if my_label not in holders:
-        print(f"[ERROR] Review label '{my_label}' was not present during read-back.",
-              file=sys.stderr)
-        return EXIT_ERROR
-
-    if len(holders) > 1:
-        winner = holders[0]
-        contenders = ", ".join(h[len(REVIEWER_LABEL_PREFIX):] for h in holders)
-        if winner != my_label:
-            print(f"[CONFLICT] Race to review #{pr_id} between [{contenders}]; "
-                  f"'{winner[len(REVIEWER_LABEL_PREFIX):]}' wins. Releasing.", file=sys.stderr)
-            _remove_reviewer_label(pr_id, agent)
-            return EXIT_CONFLICT
-        print(f"[INFO] Race to review #{pr_id} between [{contenders}]; '{agent}' wins.")
-
-    time.sleep(CONFIRM_DELAY_S)
-    confirm = _pr_labels(pr_id)
-    if confirm is not None:
-        holders = reviewer_labels(confirm)
-        if len(holders) > 1 and holders[0] != my_label:
-            print(f"[CONFLICT] Late contender on PR #{pr_id}; "
-                  f"'{holders[0][len(REVIEWER_LABEL_PREFIX):]}' wins. Releasing.",
-                  file=sys.stderr)
-            _remove_reviewer_label(pr_id, agent)
-            return EXIT_CONFLICT
-
-    print(f"✅ PR #{pr_id} claimed for review by '{agent}'.")
-    return EXIT_OK
-
-
-REVIEWED_BY_LABEL_PREFIX = "reviewed-by:"
-REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
-AGENT_REVIEW_ATTESTATION_VERSION = "aru-agent-review:v1"
-AGENT_REVIEW_LABEL = "review:agent"
-AGENT_REVIEW_DISPOSITIONS = {"no-findings", "findings-resolved"}
-
-
-REVIEWER_FAMILY_LABEL_PREFIX = "reviewer-family:"
-
-
-def _reviewed_by_label_for(agent: str) -> str:
-    return f"{REVIEWED_BY_LABEL_PREFIX}{agent}"
-
-
-def _reviewer_family_label_for(agent: str, family: str) -> str:
-    return f"{REVIEWER_FAMILY_LABEL_PREFIX}{agent}:{family}"
-
-
-def _reviewed_head_for_completion(pr_id: int) -> str | None:
-    """Current head only when a substantive independent review covers it."""
-    slug = get_repo_slug()
-    if not slug or "/" not in slug:
-        return None
-    owner, name = slug.split("/", 1)
-    result = merge_pr._reviewed_current_head(owner, name, pr_id)
-    if result is None:
-        return None
-    head, reviewed_head, _reviews = result
-    if not reviewed_head or not re.fullmatch(r"[0-9a-fA-F]{40,64}", head):
-        return None
-    return head.lower()
-
-
-def _review_head_attestation(agent: str, head: str, family: str,
-                             disposition: str) -> str:
-    completed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    payload = json.dumps(
-        {"agent": agent, "completed_at": completed_at,
-         "disposition": disposition, "family": family, "head": head,
-         "status": "completed"}, sort_keys=True, separators=(",", ":")
-    )
-    return (
-        f"<!-- {AGENT_REVIEW_ATTESTATION_VERSION} {payload} -->\n"
-        "## Emergency independent-agent review completion\n\n"
-        f"- reviewed-by: `{agent}`\n"
-        f"- reviewed-head: `{head}`\n"
-        f"- reviewer-family: `{family}`\n"
-        f"- disposition: `{disposition}`\n"
-        f"- completed-at: `{completed_at}`\n"
-    )
-
-
-def _stamp_reviewer_family(pr_id: int, agent: str, family: str) -> None:
-    """Record the reviewing agent's model family on the PR.
-
-    The merge gate compares identity as the pair (id, family). Without this
-    label a reviewer that shares the author's id cannot be told apart from the
-    author reviewing its own work, so the gate has to fail closed (#307).
-    Advisory rather than fatal: attribution itself already succeeded, and the
-    label only matters in the id-collision case.
-    """
-    if not family:
-        print("[WARN] No --model-family given. If this reviewer ever shares the "
-              "author's agent id, the merge gate cannot tell them apart and "
-              "will refuse the PR.", file=sys.stderr)
-        return
-    stamp = _reviewer_family_label_for(agent, family)
-    if not ensure_label(stamp, "d4a27f", f"Review by a {family}-family model"):
-        print(f"[WARN] Could not provision '{stamp}'; the merge gate will fail "
-              "closed if this reviewer shares the author's id.", file=sys.stderr)
-        return
-    code, _, err = run_cmd(
-        ["gh", "pr", "edit", str(pr_id), "--add-label", stamp], check=False)
-    if code != 0:
-        print(f"[WARN] Could not apply '{stamp}': {err}", file=sys.stderr)
-
-
-def complete_review(pr_id: int, agent: str, family: str = "",  # noqa: C901, PLR0912
-                    disposition: str = "") -> int:
-    """Complete an explicitly assigned emergency independent-agent review.
-
-    This exists because the step had no command. `fleet-worker.md` told the
-    reviewing agent to "label the PR reviewed-by:<id>" in prose and gave a
-    command only for the release that followed. The executable half got done
-    and the prose half did not, so PRs arrived claimed but unattributed and
-    the merge gate refused work that had genuinely been reviewed.
-
-    Ordering matters: attribute first, release second. The reverse would leave
-    a window where the PR is neither claimed nor attributed, and another agent
-    could pick it up for a review that had already happened.
-    """
-    labels = _pr_labels(pr_id)
-    if labels is None:
-        print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
-        return EXIT_ERROR
-    authorities = [name for name in labels if name.startswith("review:")]
-    if authorities != [AGENT_REVIEW_LABEL]:
-        print("[CONFLICT] Coding-agent completion is allowed only for one explicit "
-              "review:agent emergency assignment.", file=sys.stderr)
-        return EXIT_CONFLICT
-    if not family or disposition not in AGENT_REVIEW_DISPOSITIONS:
-        print("[CONFLICT] Agent completion requires --model-family and "
-              "--review-disposition no-findings|findings-resolved.", file=sys.stderr)
-        return EXIT_CONFLICT
-
-    # Attribution is not something a passer-by may write. Requiring the claim
-    # keeps "who reviewed this" tied to the agent that actually took the work.
-    holder = review_claimant(labels)
-    if holder != agent:
-        print(f"[CONFLICT] PR #{pr_id} review is held by "
-              f"'{holder or 'nobody'}', not '{agent}'. Claim it before completing.",
-              file=sys.stderr)
-        return EXIT_CONFLICT
-
-    authors = [name[len(AUTHOR_LABEL_PREFIX):] for name in labels
-               if name.startswith(AUTHOR_LABEL_PREFIX)
-               and name[len(AUTHOR_LABEL_PREFIX):]]
-    if len(authors) != 1:
-        print(f"[CONFLICT] PR #{pr_id} must carry exactly one non-empty "
-              "author:<id> before emergency review completion.", file=sys.stderr)
-        return EXIT_CONFLICT
-    if authors[0] == agent:
-        print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}'. "
-              "An agent may not attribute a review of its own PR.", file=sys.stderr)
-        return EXIT_CONFLICT
-
-    reviewed_head = _reviewed_head_for_completion(pr_id)
-    if reviewed_head is None:
-        print(
-            f"[CONFLICT] PR #{pr_id} has no substantive independent review on its "
-            "current head. Submit the review before completing attribution.",
-            file=sys.stderr,
-        )
-        return EXIT_CONFLICT
-
-    evidence = merge_pr.review_evidence(pr_id)
-    if not isinstance(evidence, dict) or evidence.get("head_oid") != reviewed_head:
-        print("[ERROR] Could not read head-stable completion evidence; refusing "
-              "rather than risking a duplicate marker.", file=sys.stderr)
-        return EXIT_ERROR
-    current = [record for record in evidence.get("agent_review_attestations", [])
-               if record.get("head") == reviewed_head]
-    expected = {"agent": agent, "family": family, "disposition": disposition}
-    if evidence.get("agent_review_marker_errors") or len(current) > 1 or (
-        current and any(current[0].get(key) != value for key, value in expected.items())
-    ):
-        print("[CONFLICT] Existing emergency completion evidence is malformed, "
-              "duplicated, or belongs to a different reviewer.", file=sys.stderr)
-        return EXIT_CONFLICT
-    if not current:
-        code, _, err = run_cmd(
-            ["gh", "pr", "comment", str(pr_id), "--body",
-             _review_head_attestation(agent, reviewed_head, family, disposition)],
-            check=False,
-        )
-        if code != 0:
-            print(f"[ERROR] Could not stamp reviewed-head evidence: {err}", file=sys.stderr)
-            return EXIT_ERROR
-
-    stamp = _reviewed_by_label_for(agent)
-    if not ensure_label(stamp, "0e8a16", f"Reviewed by agent '{agent}'"):
-        print(f"[ERROR] Could not provision attribution label '{stamp}'.", file=sys.stderr)
-        return EXIT_ERROR
-    code, _, err = run_cmd(
-        ["gh", "pr", "edit", str(pr_id), "--add-label", stamp], check=False
-    )
-    if code != 0:
-        print(f"[ERROR] Could not attribute the review: {err}", file=sys.stderr)
-        return EXIT_ERROR
-    print(f"🏷️  Attributed review of PR #{pr_id} to '{agent}'.")
-    _stamp_reviewer_family(pr_id, agent, family)
-
-    if not _remove_reviewer_label(pr_id, agent):
-        # The merge gate deliberately blocks every live claim. Returning
-        # success here would tell the reviewer that completion finished while
-        # leaving the PR unable to merge. Attribution is idempotent, so a
-        # nonzero result makes the same --complete-review command safely
-        # retryable after a transient GitHub label-removal failure.
-        print("[ERROR] Review attributed, but the claim label could not be released. "
-              "Retry --complete-review or release it with --release.", file=sys.stderr)
-        return EXIT_ERROR
-    print(f"✅ Review of PR #{pr_id} completed by '{agent}'; claim released.")
-    return EXIT_OK
-
-
-def release_review(pr_id: int, agent: str) -> int:
-    labels = _pr_labels(pr_id)
-    if labels is None:
-        print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
-        return EXIT_ERROR
-    holder = review_claimant(labels)
-    if holder != agent:
-        print(f"[CONFLICT] PR #{pr_id} review is held by '{holder}', not '{agent}'.",
-              file=sys.stderr)
-        return EXIT_CONFLICT
-    if not _remove_reviewer_label(pr_id, agent):
-        return EXIT_ERROR
-    print(f"♻️  Review claim on PR #{pr_id} released by '{agent}'.")
-    return EXIT_OK
-
-
 # --- Mechanical merge of a pull request ------------------------------------
-# Merge is board work once independent review is proven. Two agents racing the
-# same merge wastes retries and can confuse close-out, so it uses the same
-# optimistic label protocol as review claims. The label is coordination only:
-# merge_pr.py remains the sole merge authority and never treats merger:<id> as
-# review attestation.
+# Merge is board work once the assigned review service has proven the current
+# head. Two agents racing the same merge wastes retries and can confuse
+# close-out, so it uses the same optimistic label protocol as issue claims.
+# The label is coordination only: merge_pr.py remains the sole merge authority
+# and never treats merger:<id> as review evidence.
 
 MERGER_LABEL_PREFIX = "merger:"
 
@@ -1146,9 +811,9 @@ def _terminal_lease_conflict(pr_id: int, labels):
     The terminal-lease label is only a cache. Labels are writable by anyone
     with triage rights, so honouring one on its own would let an outsider
     freeze any PR (CWE-345); the merged-PR record is the authority and the
-    label merely says when it is worth asking. claim_review and
-    complete_review need no equivalent guard, because #412 retired
-    coding-agent review and both are already unconditional refusals.
+    label merely says when it is worth asking. No equivalent guard is
+    needed for review claims, because #414 removed coding-agent review
+    claiming from this helper entirely.
     """
     lease_sha = terminal_lease_sha(labels)
     if not lease_sha:
@@ -1377,7 +1042,7 @@ def reap_stale_merges(  # noqa: C901, PLR0912
     Open and merged PRs are both scanned. A crash right after server-side merge
     leaves ``merger:dead`` on a MERGED PR; peers must be able to reclaim it, and
     a reaper that only looks at ``--state open`` can never free that label.
-    Author and reviewed-by attribution are never touched.
+    Author attribution is never touched.
 
     Staleness is the authoritative GitHub claim timestamp measured against the
     single configured quiet threshold. A claim whose timestamp cannot be read
@@ -1433,100 +1098,25 @@ def reap_stale_merges(  # noqa: C901, PLR0912
     return released
 
 
-def reap_stale_reviews(hours: int = 4, now: Optional[datetime] = None) -> list:  # noqa: C901, PLR0912
-    """Releases review claims that have gone quiet.
-
-    An agent that dies mid-review leaves the PR claimed forever, and a claimed
-    PR is excluded from selection - so without this, one crash removes a PR
-    from the review queue permanently and merge_pr.py blocks on it for good.
-
-    A claim is stale when its latest labeled event on GitHub is older than
-    `hours` and carries no recent submitted review after that claim event.
-    """
-    if hours <= 0:
-        return []
-
-    code, out, _ = run_cmd(
-        ["gh", "pr", "list", "--state", "open", "--limit", "200",
-         "--json", "number,labels,reviews"],
-        check=False,
-    )
-    if code != 0:
-        print("[WARN] Could not list PRs; no review claims were reaped.", file=sys.stderr)
-        return []
-    try:
-        prs = json.loads(out) if out else []
-    except json.JSONDecodeError:
-        print("[WARN] Could not parse PR list; no review claims were reaped.", file=sys.stderr)
-        return []
-
-    claims = _claims_with_timestamps(prs, REVIEWER_LABEL_PREFIX, review_claimant)
-    if claims is None:
-        return []
-    claims = _revalidate_claims(
-        prs, REVIEWER_LABEL_PREFIX, review_claimant, claims
-    )
-    if claims is None:
-        return []
-
-    current_now = now or datetime.now(timezone.utc)
-    cutoff = current_now - timedelta(hours=float(hours))
-    quiet = _quiet_threshold_label(hours)
-    released = []
-    for pr, holder, claimed_at in claims:
-        labels = [str((item or {}).get("name") or "") for item in pr.get("labels") or []]
-        if f"{REVIEWED_BY_LABEL_PREFIX}{holder}" in labels:
-            if _remove_reviewer_label(pr["number"], holder):
-                released.append(pr["number"])
-            continue
-        reviewed_after_claim = False
-        for review in pr.get("reviews") or []:
-            login = ((review.get("author") or {}).get("login") or "")
-            if merge_pr.is_advisory_review_account(login):
-                continue
-            when = parse_iso(review.get("submittedAt") or "")
-            if when is None or when.tzinfo is None:
-                continue
-            if when > claimed_at and when >= cutoff:
-                reviewed_after_claim = True
-                break
-        if reviewed_after_claim:
-            continue
-        if claimed_at >= cutoff:
-            continue
-        if _remove_reviewer_label(pr["number"], holder):
-            released.append(pr["number"])
-            print(f"♻️  Released stale review claim on PR #{pr['number']} "
-                  f"(held by '{holder}', claim age > {quiet} quiet threshold, "
-                  "no recent review submitted after claim).",
-                  file=sys.stderr)
-    return released
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Claim or release a GitHub issue or PR review for one agent.")
+    parser = argparse.ArgumentParser(
+        description="Claim or release a governed GitHub issue, or adopt or "
+                    "claim the mechanical merge of a pull request, for one agent.")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--issue", type=int, help="GitHub Issue Number")
-    target.add_argument("--pr", type=int, help="Pull Request number to claim for review or merge")
+    target.add_argument("--pr", type=int,
+                        help="Pull Request number to adopt or claim for merge")
     parser.add_argument("--agent", type=str, required=True,
                         help="Agent id, e.g. 'agent-1'. Becomes the agent:<id> label.")
     parser.add_argument("--assignee", type=str, default="@me", help="GitHub assignee (default: @me)")
     parser.add_argument("--status", type=str, default="In Progress", help="Target status column")
     parser.add_argument("--release", action="store_true",
                         help="Give up this claim and return the work to the queue")
-    parser.add_argument("--complete-review", action="store_true", dest="complete",
-                        help="Attribute a finished PR review (reviewed-by:<id>) and "
-                             "release the claim. Run after submitting the GitHub review.")
     parser.add_argument("--model-family", "--family", type=str, default="",
                         dest="family",
-                        help="Reviewing agent's model family. With "
-                             "--complete-review, stamps "
-                             "reviewer-family:<id>:<family> so the merge gate "
-                             "can compare identity as (id, family).")
-    parser.add_argument("--review-disposition", default="",
-                        choices=sorted(AGENT_REVIEW_DISPOSITIONS),
-                        help="Required with emergency --complete-review: "
-                             "no-findings or findings-resolved.")
+                        help="Adopting agent's model family. With --adopt, moves "
+                             "family:<family> to this agent so identity and "
+                             "attribution stay correct.")
     parser.add_argument("--adopt", action="store_true",
                         help="With --pr: take over an abandoned PR, moving "
                              "author: and family: to this agent and recording "
@@ -1536,40 +1126,36 @@ def main():
                         help="Hours a PR must be idle before it may be adopted "
                              f"(default: {DEFAULT_ADOPT_AFTER_HOURS})")
     parser.add_argument("--merge", action="store_true",
-                        help="With --pr: claim or release mechanical merge (merger:<id>), "
-                             "not review.")
+                        help="With --pr: claim or release mechanical merge (merger:<id>).")
     parser.add_argument("--reap-after", type=int, default=0, metavar="HOURS",
-                        help="Release review/merge claims idle longer than HOURS")
+                        help="Release merge claims idle longer than HOURS")
     args = parser.parse_args()
 
     if args.reap_after:
-        reap_stale_reviews(args.reap_after)
         reap_stale_merges(args.reap_after)
 
     if args.pr is not None:
         if args.adopt:
             sys.exit(adopt_pr(args.pr, args.agent, args.family, args.adopt_after))
-        if args.merge and args.complete:
-            print("[ERROR] --complete-review does not apply to merge claims.",
-                  file=sys.stderr)
-            sys.exit(EXIT_ERROR)
         if args.merge:
             rc = (release_merge(args.pr, args.agent) if args.release
                   else claim_merge(args.pr, args.agent))
             sys.exit(rc)
-        if args.complete:
-            sys.exit(complete_review(args.pr, args.agent, args.family,
-                                     args.review_disposition))
-        rc = release_review(args.pr, args.agent) if args.release else claim_review(args.pr, args.agent)
-        sys.exit(rc)
+        # Review is not coding-agent work. A bare --pr used to mean "claim this
+        # for review"; leaving it as a silent no-op would let an old command
+        # line report success while nothing was claimed.
+        print("[ERROR] A pull request may only be adopted (--adopt) or claimed "
+              "for mechanical merge (--merge). Coding agents do not claim "
+              "review; the assigned review service reviews the PR.",
+              file=sys.stderr)
+        sys.exit(EXIT_ERROR)
 
     if args.merge:
         print("[ERROR] --merge applies to a PR; use --pr <n> --merge.", file=sys.stderr)
         sys.exit(EXIT_ERROR)
 
-    if args.complete:
-        print("[ERROR] --complete-review applies to a PR review; use --pr <n>.",
-              file=sys.stderr)
+    if args.adopt:
+        print("[ERROR] --adopt applies to a PR; use --pr <n> --adopt.", file=sys.stderr)
         sys.exit(EXIT_ERROR)
 
     if args.release:

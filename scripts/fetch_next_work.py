@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# line-ceiling: 1270
+# line-ceiling: 1172
 """Return the highest-priority work one governed factory agent can perform.
 Finishing beats starting: author feedback, merge-ready work, resumable issues,
-then Ready issues. External review services stay outside the coding-agent queue;
-only a preassigned emergency agent review can resume here. A truly idle claiming
-picker may promote one qualified Backlog issue and reselect it.
+then Ready issues. Review is not coding-agent work at all -- the assigned
+external service is the review oracle, so a PR waiting on it is never routed
+here. A truly idle claiming picker may promote one qualified Backlog issue and
+reselect it.
 """
 
 import argparse
@@ -40,11 +41,6 @@ from fetch_next_issue import (
 from fetch_pr_feedback import fetch_active_review_feedback
 import merge_pr
 from merge_pr import closeout_incomplete, dod_status, is_merged, linked_issues
-# _attested_head_peers is private, and importing it across modules is normally a
-# smell. It is imported deliberately: merge_pr is the single source of truth for
-# whether a peer's completion stamp names the current head, and a second
-# implementation of that predicate in the picker is exactly the drift that let
-# reviewed-but-since-pushed PRs reach no agent at all.
 from merge_pr import review_evidence
 from update_issue_status import update_status
 from picker_board_inventory import governed_board_inventory as _governed_open_issue_statuses, stage_expected_ready_for_triage
@@ -93,14 +89,6 @@ def skill_for_issue(issue: dict[str, Any]) -> str:
         return "research"
     return "implement-next-issue"
 
-# Retained as a backwards-compatible CLI default. Review count is audit data,
-# never an eligibility or human-intervention gate.
-DEFAULT_ROUND_CAP = 3
-
-# How long a PR waits for a cross-family reviewer before any different agent
-# may take it. Long enough that a mixed fleet routes correctly; short enough
-# that a single-family fleet is never stuck.
-DEFAULT_CROSS_FAMILY_WAIT_MIN = 30
 DEFAULT_REAP_AFTER_HOURS = 4
 _UNSET = object()
 
@@ -381,8 +369,8 @@ def review_thread_count(pr: dict[str, Any]) -> int | None:
 
     A same-account blocking review is necessarily COMMENTED, so GitHub's
     reviewDecision cannot route it. Unresolved threads are the fail-closed
-    author-feedback state, while zero threads plus reviewed-by attribution is
-    the approval-equivalent completion state.
+    author-feedback state, while zero threads plus authoritative assigned-service
+    review evidence is the approval-equivalent completion state.
     """
     if "_active_review_feedback" not in pr:
         pr["_active_review_feedback"] = fetch_active_review_feedback(pr["number"])
@@ -430,9 +418,10 @@ def needs_my_attention(pr: dict[str, Any], agent: str) -> bool:
 # Definition-of-Done gates a PR's own author can clear alone. Work arising from
 # these is offered only to author:<id>; the routed skill documents the concrete
 # action for every name in this set.
-# `review-evidence` is the unfixed-resolved-thread case: a peer already
-# reviewed, threads are resolved, but no follow-up commit or `Withdrawn:`
-# reply exists. Generic `review` (needs a peer) is never author-fixable.
+# `review-evidence` is the unfixed-resolved-thread case: the assigned service
+# already reviewed, threads are resolved, but no follow-up commit or
+# `Withdrawn:` reply exists. Generic `review` (the service still has to act)
+# is never author-fixable.
 AUTHOR_FIXABLE_GATES = frozenset({
     "accept", "ci", "rebased", "review-evidence", "size", "tests",
     "verification", "spec-sync",
@@ -440,10 +429,10 @@ AUTHOR_FIXABLE_GATES = frozenset({
 PEER_ROUTABLE_GATES = frozenset({"review"})
 
 # These evaluate_dod names cannot create author work: open and issue-link
-# failures are intercepted before gate evaluation, while review rounds is a
-# visibility-only check that always passes. The exhaustiveness test requires a
-# comment-backed entry here when evaluate_dod gains another deliberate non-route.
-DOD_NON_ROUTABLE_GATES = frozenset({"open", "issue link", "review rounds"})
+# failures are intercepted before gate evaluation. The exhaustiveness test
+# requires a comment-backed entry here when evaluate_dod gains another
+# deliberate non-route.
+DOD_NON_ROUTABLE_GATES = frozenset({"open", "issue link"})
 DETAIL_REQUIRED_GATES = frozenset({"rebased", "tests", "verification"})
 
 
@@ -508,7 +497,7 @@ def _dod_gate_details(pr_number: int) -> dict[str, str] | None:
 def _author_can_repair_review(pr: dict[str, Any]) -> bool:
     """True when DoD `review` fails only because resolved threads lack evidence."""
     service = merge_pr.assigned_review_service(pr)
-    if service not in {"coderabbit", "sourcery", "codeant", "agent"}:
+    if service not in {"coderabbit", "sourcery", "codeant"}:
         return False
     evidence = review_evidence(pr["number"])
     if not evidence:
@@ -590,36 +579,6 @@ def author_gate_fix(pr: dict[str, Any], agent: str,
     return work
 
 
-def review_eligibility(pr: dict[str, Any], agent: str, family: str | None,
-                       round_cap: int, cross_family_wait: int,
-                       merge_reason: str | None = None) -> dict[str, Any]:
-    """Legacy API: ordinary coding-agent review is never queue-eligible."""
-    return {
-        "eligible": False,
-        "reason": ("coding-agent review is never selected from the normal queue; "
-                   "only an explicit emergency review:agent assignment is resumable"),
-        "cross_family": False,
-        "degraded": False,
-        "stale_attribution": False,
-    }
-
-
-def assigned_agent_review(pr: dict[str, Any], agent: str) -> bool:
-    """True only for an explicit emergency assignment to this exact agent."""
-    if pr.get("isDraft") or is_merged(pr):
-        return False
-    labels = label_names(pr)
-    authorities = [name for name in labels if name.startswith("review:")]
-    reviewers = [name[len("reviewer:"):] for name in labels
-                 if name.startswith("reviewer:")]
-    authors = [name[len("author:"):] for name in labels
-               if name.startswith("author:")]
-    completed = [name[len("reviewed-by:"):] for name in labels
-                 if name.startswith("reviewed-by:")]
-    return (authorities == ["review:agent"] and reviewers == [agent]
-            and len(authors) == 1 and authors[0] != agent and agent not in completed)
-
-
 def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa: C901, PLR0912
     """Decides whether `agent` may claim mechanical merge of this PR.
 
@@ -678,8 +637,6 @@ def merge_eligibility(pr: dict[str, Any], agent: str) -> dict[str, Any]:  # noqa
 def select(  # noqa: C901, PLR0912, PLR0915
     agent: str,
     family: str | None,
-    round_cap: int,
-    cross_family_wait: int,
     *,
     prs_snapshot: Any = _UNSET,
     issues_snapshot: Any = _UNSET,
@@ -694,8 +651,7 @@ def select(  # noqa: C901, PLR0912, PLR0915
                 "work": {"type": "error", "skill": None,
                          "reason": "the pull request queue could not be read"},
                 "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
-                "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
-                "escalated_prs": [], "claimable_issues": [],
+                "claimable_issues": [],
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
                 "missing_touches": [], "operator_only_issues": []}
 
@@ -707,8 +663,7 @@ def select(  # noqa: C901, PLR0912, PLR0915
                                     "inventory but cannot prove review, CI, or file state")},
                 "degraded_rest_prs": degraded,
                 "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
-                "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
-                "escalated_prs": [], "claimable_issues": [],
+                "claimable_issues": [],
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
                 "missing_touches": [], "operator_only_issues": []}
 
@@ -742,25 +697,14 @@ def select(  # noqa: C901, PLR0912, PLR0915
         if gate_fix:
             break
 
-    # Normal coding-agent review remains absent. This resumes only a PR the
-    # operator already moved to review:agent and assigned to this exact id.
-    reviewable = [
-        (pr, {"cross_family": False, "degraded": True,
-              "stale_attribution": False})
-        for pr in sorted(prs, key=lambda item: item["number"])
-        if assigned_agent_review(pr, agent)
-    ]
-    skipped = []
-
-    # 4. Otherwise start something new - unchanged issue selection.
+    # 3. Otherwise start something new - unchanged issue selection.
     issues = list_open_issues() if issues_snapshot is _UNSET else issues_snapshot
     if issues is None:
         return {"agent": agent, "family": family,
                 "work": {"type": "error", "skill": None,
                          "reason": "the open issue queue could not be read"},
                 "mergeable_detail": [], "mergeable": [], "merge_skipped": [],
-                "reviewable_detail": [], "reviewable": [], "skipped_prs": [],
-                "escalated_prs": [], "claimable_issues": [],
+                "claimable_issues": [],
                 "blocked_by_dependencies": [], "blocked_by_file_conflict": [],
                 "missing_touches": [], "operator_only_issues": []}
     parts = build_candidates(
@@ -784,10 +728,6 @@ def select(  # noqa: C901, PLR0912, PLR0915
                 "unmet_gates": gate_fix["unmet_gates"], "reason": gate_fix["reason"]}
         if gate_fix.get("gate_details"):
             work["gate_details"] = gate_fix["gate_details"]
-    elif reviewable:
-        pr = reviewable[0][0]
-        work = {"type": "review", "pr": pr["number"], "title": pr["title"],
-                "skill": "code-review", "resuming": True}
     elif parts["my_in_flight"]:
         issue = parts["my_in_flight"]
         work = {"type": "issue", "issue": issue["number"], "title": issue["title"],
@@ -808,19 +748,6 @@ def select(  # noqa: C901, PLR0912, PLR0915
         ],
         "mergeable": [p["number"] for p in mergeable],
         "merge_skipped": merge_skipped,
-        # Ordered candidates, so a lost claim race costs one retry rather than
-        # sending the agent back through the whole picker.
-        "reviewable_detail": [
-            {"pr": p["number"], "title": p["title"],
-             "cross_family": v["cross_family"], "degraded": v["degraded"],
-             "stale_attribution": v.get("stale_attribution", False),
-             "created_at": p.get("createdAt")}
-            for p, v in reviewable
-        ],
-        "reviewable": [p["number"] for p, _ in reviewable],
-        "skipped_prs": skipped,
-        # Backwards-compatible JSON field. Review rounds never populate it.
-        "escalated_prs": [],
         "claimable_issues": [i["number"] for i in parts["candidates"]],
         "blocked_by_dependencies": parts["blocked"],
         "blocked_by_file_conflict": parts["conflicted"],
@@ -956,8 +883,6 @@ def _auto_triage_increment_scope() -> set | None | bool:
 def _promote_one_idle_backlog_issue_locked(
     agent: str,
     family: str | None,
-    round_cap: int,
-    cross_family_wait: int,
     *,
     current_selection: dict[str, Any] | None = None,
     issues_snapshot: Any = _UNSET,
@@ -970,7 +895,7 @@ def _promote_one_idle_backlog_issue_locked(
     candidate clears triage and ordinary picker contracts before the write,
     then a fresh post-write snapshot must prove the expected Ready state.
     """
-    current = current_selection or select(agent, family, round_cap, cross_family_wait)
+    current = current_selection or select(agent, family)
     if current["work"]["type"] != "idle":
         return None
     repo_slug_snapshot = get_repo_slug()
@@ -992,7 +917,7 @@ def _promote_one_idle_backlog_issue_locked(
         print("[WARN] Candidate update time is missing; refusing auto-triage.",
               file=sys.stderr)
         return None
-    if select(agent, family, round_cap, cross_family_wait)["work"]["type"] != "idle":
+    if select(agent, family)["work"]["type"] != "idle":
         print("[WARN] Picker is no longer idle; refusing auto-triage.", file=sys.stderr)
         return None
 
@@ -1033,10 +958,10 @@ def _promote_one_idle_backlog_issue_locked(
     if post_candidate is None:
         post_selection = {"work": {"type": "idle"}}
     elif post_snapshot_out is None:
-        post_selection = select(agent, family, round_cap, cross_family_wait)
+        post_selection = select(agent, family)
     else:
         post_selection = select(
-            agent, family, round_cap, cross_family_wait,
+            agent, family,
             prs_snapshot=post_snapshot_out.get("prs", _UNSET),
             issues_snapshot=post_snapshot_out.get("issues", _UNSET),
         )
@@ -1063,8 +988,6 @@ def _promote_one_idle_backlog_issue_locked(
 def promote_one_idle_backlog_issue(
     agent: str,
     family: str | None = None,
-    round_cap: int = DEFAULT_ROUND_CAP,
-    cross_family_wait: int = DEFAULT_CROSS_FAMILY_WAIT_MIN,
     *,
     current_selection: dict[str, Any] | None = None,
     issues_snapshot: Any = _UNSET,
@@ -1077,7 +1000,8 @@ def promote_one_idle_backlog_issue(
             print(f"[WARN] Auto-triage deferred: {message}.", file=sys.stderr)
             return None
         return _promote_one_idle_backlog_issue_locked(
-            agent, family, round_cap, cross_family_wait,
+            agent,
+            family,
             current_selection=current_selection,
             issues_snapshot=issues_snapshot,
             prs_snapshot=prs_snapshot,
@@ -1099,14 +1023,8 @@ def main():  # noqa: C901, PLR0912, PLR0915
         help="Promote one qualified Backlog item when idle without claiming it",
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
-    parser.add_argument(
-        "--round-cap", type=int, default=DEFAULT_ROUND_CAP,
-        help="Deprecated compatibility option; review count never blocks routing",
-    )
-    parser.add_argument("--cross-family-wait", type=int, default=DEFAULT_CROSS_FAMILY_WAIT_MIN,
-                        metavar="MINUTES")
     parser.add_argument("--reap-after", type=int, default=DEFAULT_REAP_AFTER_HOURS, metavar="HOURS",
-                        help="Release issue and review claims idle longer than HOURS (default: 4h; 0 disables)")
+                        help="Release issue and merge claims idle longer than HOURS (default: 4h; 0 disables)")
     args = parser.parse_args()
 
     rc = _resolve_identity(args)
@@ -1145,7 +1063,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
             print(f"[WARN] Autonomous claim reap encountered error: {err}", file=sys.stderr)
 
     res = select(args.agent, (args.family or "").lower() or None,
-                 args.round_cap, args.cross_family_wait,
                  prs_snapshot=prs_snapshot, issues_snapshot=issues_snapshot)
     work = res["work"]
 
@@ -1157,7 +1074,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
         try:
             promoted = promote_one_idle_backlog_issue(
                 args.agent, (args.family or "").lower() or None,
-                args.round_cap, args.cross_family_wait,
                 current_selection=res,
                 issues_snapshot=issues_snapshot,
                 prs_snapshot=prs_snapshot,
@@ -1170,7 +1086,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
         if promoted is not None:
             res = post_promotion_snapshot.get("_selection") or select(
                 args.agent, (args.family or "").lower() or None,
-                args.round_cap, args.cross_family_wait,
                 prs_snapshot=post_promotion_snapshot.get("prs", _UNSET),
                 issues_snapshot=post_promotion_snapshot.get("issues", _UNSET),
             )
@@ -1205,7 +1120,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
 
     claim_failed = bool(
         args.claim
-        and work["type"] in {"issue", "review", "merge"}
+        and work["type"] in {"issue", "merge"}
         and not work.get("resuming")
         and not work.get("claimed", False)
     )
@@ -1234,9 +1149,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
         verb = "Resume" if work.get("resuming") else "Implement"
         print(f"🛠️  {verb} issue #{work['issue']}")
         print(f"   → {work['skill']}: {work['title']}")
-    elif work["type"] == "review":
-        print(f"🔎 Resume explicitly assigned emergency review for PR #{work['pr']}")
-        print(f"   → {work['skill']}: {work['title']}")
     elif work["type"] == "error":
         print(f"⛔ Picker error: {work.get('reason')}")
     else:
@@ -1245,10 +1157,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
     if res.get("merge_skipped"):
         print("\nMerge candidates not offered to you:")
         for item in res["merge_skipped"]:
-            print(f"  #{item['number']}: {item['why']}")
-    if res["skipped_prs"]:
-        print("\nPRs not offered to you:")
-        for item in res["skipped_prs"]:
             print(f"  #{item['number']}: {item['why']}")
     if work["type"] not in {"issue", "merge"} and res["claimable_issues"]:
         print(f"\nIssues waiting: {res['claimable_issues']}")

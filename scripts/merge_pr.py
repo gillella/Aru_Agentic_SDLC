@@ -3,7 +3,7 @@
 # +26 for the #427 CodeRabbit completed-description allowlist.
 # +80 for the #429 acceptance-interpreter and post-merge persistence fix; #414 ratchets this file to 4,500.
 # +20 for the #460 live base snapshot for behind-branch admission.
-# line-ceiling: 5440
+# line-ceiling: 4666
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -65,27 +65,12 @@ EXIT_BLOCKED = 3
 # rollback target; per-commit tagging was rejected as noise (#80).
 CHECKPOINT_PREFIX = "ckpt/"
 
-# Completed-review attribution, written by claim_issue.py --complete-review.
-# This is the only label that satisfies the gate.
+# The authoring agent's identity, stamped on the PR by create_pr.py.
 AUTHOR_LABEL = "author:"
-REVIEWED_BY_LABEL = "reviewed-by:"
-# The authoring agent's model family, stamped on the PR by create_pr.py.
+# The authoring agent's model family, also stamped by create_pr.py.
 FAMILY_LABEL = "family:"
-# reviewer-family:<id>:<family> - the reviewing agent's model family, stamped by
-# claim_issue.py --complete-review. Needed because the framework's identity is
-# the pair (id, family) and only the PR's own family was ever recorded (#307).
-REVIEWER_FAMILY_LABEL = "reviewer-family:"
-REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
-AGENT_REVIEW_ATTESTATION_VERSION = "aru-agent-review:v1"
-AGENT_REVIEW_ASSIGNMENT_VERSION = "aru-agent-review-assignment:v1"
-AGENT_REVIEW_DISPOSITIONS = {"no-findings", "findings-resolved"}
-# The transient claim, written by claim_review. Deliberately NOT accepted here:
-# it records that an agent took the PR off the queue, not that it read anything.
-# Treating it as attestation would let an author's own same-account review plus
-# any peer's claim satisfy the gate before that peer had looked at the diff.
-REVIEW_CLAIM_LABEL = "reviewer:"
 # Transient merge-execution claim from claim_merge. Cleared on close-out; never
-# treated as review attestation.
+# treated as review evidence.
 MERGER_CLAIM_LABEL = "merger:"
 
 # Review apps can add useful findings, but their comments are not independent
@@ -100,8 +85,21 @@ ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
 CODERABBIT_LOGINS = {"coderabbitai", "coderabbitai[bot]"}
 CODERABBIT_APP_SLUGS = {"coderabbitai"}
 CODERABBIT_ACTOR_TYPES = {"Bot"}
+# CodeRabbit is the default positive oracle; Sourcery and CodeAnt are the
+# bounded external fallbacks an operator may switch to after observed
+# unavailability.
+#
+# `review:agent` stays in this tuple even though #414 removed every way to
+# produce coding-agent review evidence. reassign_review.py can still apply
+# the label, and a label the gate cannot even parse would fail with a
+# generic "unknown review label" that names no way out. Recognising it lets
+# check_reviews refuse it for the real reason and say which service to
+# reassign to. It is a recognised authority that can never be satisfied,
+# not a fourth oracle.
+RETIRED_AGENT_REVIEW_LABEL = "review:agent"
 REVIEW_SERVICE_LABELS = (
-    "review:coderabbit", "review:sourcery", "review:codeant", "review:agent",
+    "review:coderabbit", "review:sourcery", "review:codeant",
+    RETIRED_AGENT_REVIEW_LABEL,
 )
 # Sourcery publishes a commit-scoped REST check run. The app slug is the
 # producer identity: a check merely *named* "Sourcery review" proves nothing,
@@ -143,22 +141,7 @@ KNOWN_REVIEW_ACTOR_TYPES = {
 # necessary. Independent review remains a separate, mandatory gate.
 SIZE_LIMIT = 400
 
-# Review-round threshold for automated scope-reduction guidance (issue #98).
-# Matches fleet_status.REWORK_ATTN. Crossing it never fails DoD and never
-# creates a human gate — it emits split guidance for the authoring agent.
-REVIEW_ROUND_THRESHOLD = 3
-REVIEW_ROUND_SPLIT_MARKER = "<!-- aru-review-round-split:v1 -->"
-# Per-follow-up provenance so retries can reuse issues created before the
-# PR marker comment lands (partial emission / comment-post failure).
-REVIEW_ROUND_SPLIT_ITEM_FMT = "<!-- aru-review-round-split-item:pr={pr}:idx={idx} -->"
-REVIEW_ROUND_SPLIT_ITEM_RE = re.compile(
-    r"<!--\s*aru-review-round-split-item:pr=(\d+):idx=(\d+)\s*-->"
-)
 GITHUB_ACTIONS_RUN_RE = re.compile(r"/actions/runs/(\d+)(?:/jobs/\d+)?(?:$|[?#/])")
-_REWORK_BLOCKING_RE = re.compile(
-    r"changes[\s_-]*requested|(?<![Nn]o )blocking findings?|\*\*blocking:\*\*",
-    re.I,
-)
 
 # One initial close-out attempt plus these bounded retries.  Keeping the policy
 # in the merge authority prevents desktop clients from disagreeing about when
@@ -610,8 +593,14 @@ def _collect_codeant_status_comment(body, author, collector):
         collector.append({"body": body, "author": author})
 
 
-def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912, PLR0915
-    """Read paginated head attestations and exact CodeRabbit command comments."""
+def _review_comment_evidence(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
+    """Read paginated PR comments for provider-owned review markers.
+
+    Only the assigned external services leave evidence worth parsing here:
+    CodeRabbit's exact full-review command/finished comments and CodeAnt's
+    rolling status marker. Coding-agent head attestations were retired with
+    coding-agent review itself (#414), so no agent-written marker is read.
+    """
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
@@ -624,16 +613,8 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
         }
       }
     }"""
-    prefix = f"<!-- {REVIEW_HEAD_ATTESTATION_VERSION} "
-    agent_prefix = f"<!-- {AGENT_REVIEW_ATTESTATION_VERSION} "
-    assignment_prefix = f"<!-- {AGENT_REVIEW_ASSIGNMENT_VERSION} "
     cursor = None
     seen_cursors = set()
-    attestations = []
-    agent_attestations = []
-    agent_marker_errors = 0
-    agent_assignments = []
-    agent_assignment_errors = 0
     coderabbit_full_review_comments = []
     codeant_status_comments = []
     while True:
@@ -686,108 +667,8 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
                         "__typename": author["__typename"],
                     },
                 })
-            if body.startswith(assignment_prefix):
-                marker, separator, _rest = body.partition(" -->")
-                try:
-                    assignment = json.loads(marker[len(assignment_prefix):])
-                except (json.JSONDecodeError, TypeError):
-                    assignment = None
-                author = node.get("author")
-                assigned_at = _parse_review_ts(node.get("createdAt"))
-                required = {"family", "from", "head", "reason", "reviewer"}
-                if (
-                    not separator or not isinstance(assignment, dict)
-                    or set(assignment) != required or assigned_at is None
-                    or not isinstance(author, dict)
-                    or author.get("__typename") != "User"
-                    or not isinstance(author.get("login"), str) or not author["login"]
-                    or assignment.get("from") not in REVIEW_SERVICE_LABELS[:3]
-                    or not isinstance(assignment.get("reviewer"), str)
-                    or not assignment["reviewer"]
-                    or not isinstance(assignment.get("family"), str)
-                    or not assignment["family"]
-                    or not isinstance(assignment.get("reason"), str)
-                    or not assignment["reason"].strip()
-                    or not isinstance(assignment.get("head"), str)
-                    or re.fullmatch(r"[0-9a-fA-F]{40,64}", assignment["head"]) is None
-                ):
-                    agent_assignment_errors += 1
-                else:
-                    agent_assignments.append({
-                        **assignment, "head": assignment["head"].lower(),
-                        "assigned_at": node["createdAt"],
-                        "github_login": author["login"],
-                    })
-                continue
-            if body.startswith(agent_prefix):
-                marker, separator, _rest = body.partition(" -->")
-                try:
-                    agent_payload = json.loads(marker[len(agent_prefix):])
-                except (json.JSONDecodeError, TypeError):
-                    agent_payload = None
-                author = node.get("author")
-                required = {
-                    "agent", "completed_at", "disposition", "family", "head", "status",
-                }
-                if (
-                    not separator or not isinstance(agent_payload, dict)
-                    or set(agent_payload) != required
-                    or not isinstance(author, dict)
-                    or author.get("__typename") != "User"
-                    or not isinstance(author.get("login"), str) or not author["login"]
-                    or not isinstance(agent_payload.get("agent"), str)
-                    or not agent_payload["agent"]
-                    or not isinstance(agent_payload.get("family"), str)
-                    or not agent_payload["family"]
-                    or agent_payload.get("status") != "completed"
-                    or agent_payload.get("disposition") not in AGENT_REVIEW_DISPOSITIONS
-                    or not isinstance(agent_payload.get("head"), str)
-                    or re.fullmatch(r"[0-9a-fA-F]{40,64}", agent_payload["head"]) is None
-                    or _parse_review_ts(agent_payload.get("completed_at")) is None
-                ):
-                    agent_marker_errors += 1
-                else:
-                    agent_attestations.append({
-                        **agent_payload, "head": agent_payload["head"].lower(),
-                        "github_login": author["login"],
-                    })
-                continue
-            if not body.startswith(prefix):
-                continue
-            marker, separator, _rest = body.partition(" -->")
-            if not separator:
-                continue
-            raw_payload = marker[len(prefix):]
-            try:
-                payload = json.loads(raw_payload)
-            except json.JSONDecodeError:
-                continue
-            author = node.get("author")
-            if (
-                not isinstance(author, dict)
-                or author.get("__typename") != "User"
-                or not isinstance(author.get("login"), str)
-                or not author["login"]
-                or not isinstance(payload, dict)
-                or set(payload) != {"agent", "head"}
-                or not isinstance(payload.get("agent"), str)
-                or not payload["agent"]
-                or not isinstance(payload.get("head"), str)
-                or re.fullmatch(r"[0-9a-fA-F]{40,64}", payload["head"]) is None
-            ):
-                continue
-            attestations.append({
-                "agent": payload["agent"],
-                "head": payload["head"].lower(),
-                "github_login": author["login"],
-            })
         if not has_next:
             return {
-                "attestations": attestations,
-                "agent_attestations": agent_attestations,
-                "agent_marker_errors": agent_marker_errors,
-                "agent_assignments": agent_assignments,
-                "agent_assignment_errors": agent_assignment_errors,
                 "coderabbit_full_review_comments": coderabbit_full_review_comments,
                 "codeant_status_comments": codeant_status_comments,
             }
@@ -811,16 +692,11 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     if review_result is None:
         return None
     expected_head, reviewed_head, reviews = review_result
-    comment_evidence = _review_head_attestations(
+    comment_evidence = _review_comment_evidence(
         owner, name, pr_id, expected_head
     )
     if comment_evidence is None:
         return None
-    review_attestations = comment_evidence["attestations"]
-    agent_review_attestations = comment_evidence.get("agent_attestations", [])
-    agent_review_marker_errors = comment_evidence.get("agent_marker_errors", 0)
-    agent_review_assignments = comment_evidence.get("agent_assignments", [])
-    agent_review_assignment_errors = comment_evidence.get("agent_assignment_errors", 0)
     coderabbit_full_review_comments = comment_evidence[
         "coderabbit_full_review_comments"
     ]
@@ -863,7 +739,6 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
         "coderabbit": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
         "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
         "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-        "agent": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
     }
 
     while True:
@@ -1023,10 +898,6 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                         service_threads[thread_service]["unfixed"] += 1
 
         if not has_next:
-            service_threads["agent"] = {
-                "unresolved": unresolved, "unfixed": unfixed,
-                "outdated_unfixed": outdated_unfixed,
-            }
             return {
                 "head_oid": expected_head,
                 "head_commit_committed_at": (
@@ -1034,11 +905,6 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                 ),
                 "github_review_evidence": True,
                 "reviews": reviews,
-                "review_attestations": review_attestations,
-                "agent_review_attestations": agent_review_attestations,
-                "agent_review_marker_errors": agent_review_marker_errors,
-                "agent_review_assignments": agent_review_assignments,
-                "agent_review_assignment_errors": agent_review_assignment_errors,
                 "coderabbit_full_review_comments": (
                     coderabbit_full_review_comments
                 ),
@@ -1254,7 +1120,7 @@ def check_ci(pr):
 
 
 def label_values(pr, prefix):
-    """All values of labels sharing a prefix, e.g. every reviewed-by:<id>."""
+    """All values of labels sharing a prefix, e.g. every author:<id>."""
     return [
         (lab.get("name") or "")[len(prefix):]
         for lab in (pr.get("labels") or [])
@@ -1387,85 +1253,6 @@ def _current_head_reviewers(evidence):
         ):
             reviewers.add(login)
     return sorted(reviewers)
-
-
-def identity_values(pr, prefix):
-    """Return non-empty, trimmed agent identities from labels."""
-    return [value for value in
-            (raw.strip() for raw in label_values(pr, prefix)) if value]
-
-
-def reviewer_families(pr):
-    """Map each reviewer id to every distinct stamped model family."""
-    families = {}
-    for value in label_values(pr, REVIEWER_FAMILY_LABEL):
-        agent_id, _, family = value.partition(":")
-        if agent_id and family:
-            families.setdefault(agent_id, [])
-            if family not in families[agent_id]:
-                families[agent_id].append(family)
-    return {agent_id: sorted(values) for agent_id, values in families.items()}
-
-
-def classify_reviewers(pr, reviewers, author):
-    """Split reviewers into peers, id/family collisions, and unknown identity."""
-    author_families = sorted(set(label_values(pr, FAMILY_LABEL)))
-    families = reviewer_families(pr)
-    peers, collisions, unresolved = [], [], []
-    for agent_id in reviewers:
-        if agent_id != author:
-            peers.append(agent_id)
-            continue
-        reviewer_values = families.get(agent_id, [])
-        # An identity stamped with two different families is not a family we can
-        # compare; it is an ambiguity, and reporting it as one beats picking
-        # either and describing the wrong situation.
-        if len(author_families) > 1 or len(reviewer_values) > 1:
-            ambiguous = (f"the PR ({', '.join(author_families)})"
-                         if len(author_families) > 1
-                         else f"reviewer '{agent_id}' ({', '.join(reviewer_values)})")
-            collisions.append((agent_id, f"ambiguous on {ambiguous}", "unresolvable"))
-            continue
-        author_family = author_families[0] if author_families else ""
-        reviewer_family = reviewer_values[0] if reviewer_values else ""
-        if not author_family or not reviewer_family:
-            missing = []
-            if not author_family:
-                missing.append(f"{FAMILY_LABEL}<family> on the PR")
-            if not reviewer_family:
-                missing.append(
-                    f"{REVIEWER_FAMILY_LABEL}{agent_id}:<family> for the review"
-                )
-            unresolved.append((agent_id, missing))
-        elif reviewer_family != author_family:
-            collisions.append((agent_id, author_family, reviewer_family))
-    return peers, collisions, unresolved
-
-
-def id_collision_message(collisions):
-    """Explain an agent id stamped to distinct author/reviewer families."""
-    agent_id, author_family, reviewer_family = collisions[0]
-    return (
-        f"Agent id '{agent_id}' is stamped as both the author "
-        f"(family:{author_family}) and a reviewer (family:{reviewer_family}) of "
-        "this PR. Two agents are sharing one id, so no attribution on it can be "
-        "trusted - this is neither a self-review nor a valid peer review. "
-        "Reissue one of them a distinct id (see #304) and re-review."
-    )
-
-
-def self_review_message(author, unresolved):
-    """Explain self-review or the labels needed to rule out an id collision."""
-    message = (f"The only review is from '{author}', who wrote this PR. "
-               "A self-review does not satisfy the gate.")
-    if unresolved:
-        _agent_id, missing = unresolved[0]
-        message += (
-            f" Note: {' and '.join(missing)} is missing, so a second agent "
-            "sharing this id (#304) cannot be ruled out - stamp the family "
-            "labels if that is what happened. The gate will not assume a family."
-        )
-    return message
 
 
 def _evidence_note(evidence):
@@ -2123,73 +1910,6 @@ def has_authoritative_codeant_review(pr, evidence):
     return _codeant_status_evidence(evidence) is True
 
 
-def _agent_review_verdict(pr, evidence):  # noqa: C901, PLR0911, PLR0912
-    """Validate the narrow operator-assigned independent-agent exception."""
-    if not isinstance(pr, dict) or not isinstance(evidence, dict):
-        return False, "Emergency agent review evidence is unavailable."
-    authors = identity_values(pr, AUTHOR_LABEL)
-    reviewers = identity_values(pr, REVIEWED_BY_LABEL)
-    if len(authors) != 1 or len(reviewers) != 1:
-        return False, "Agent review requires exactly one author and one completed reviewer."
-    reviewer = reviewers[0]
-    if reviewer == authors[0]:
-        return False, f"The assigned reviewer '{reviewer}' authored or remediated this head."
-    families = reviewer_families(pr).get(reviewer, [])
-    if len(families) != 1:
-        return False, "Agent review requires one unambiguous reviewer model family."
-    if (evidence.get("agent_review_marker_errors")
-            or evidence.get("agent_review_assignment_errors")):
-        return False, "Malformed emergency agent review assignment or completion evidence exists."
-    records = evidence.get("agent_review_attestations")
-    head = evidence.get("head_oid")
-    if not isinstance(records, list) or not isinstance(head, str) or not head:
-        return False, "Emergency agent review completion evidence is missing."
-    current = [record for record in records
-               if isinstance(record, dict) and record.get("head") == head.lower()]
-    if len(current) != 1:
-        return False, "Agent review completion evidence is missing, duplicated, or ambiguous."
-    record = current[0]
-    if record.get("agent") != reviewer or record.get("family") != families[0]:
-        return False, "Agent review identity does not match its completion evidence."
-    completed_at = _parse_review_ts(record.get("completed_at"))
-    committed_at = _parse_review_ts(evidence.get("head_commit_committed_at"))
-    if completed_at is None or committed_at is None or completed_at <= committed_at:
-        return False, "Agent review completion time does not follow the reviewed head."
-    assignments = evidence.get("agent_review_assignments")
-    current_assignments = [item for item in assignments or []
-                           if isinstance(item, dict) and item.get("head") == head.lower()]
-    if len(current_assignments) != 1:
-        return False, "Explicit emergency agent review assignment is missing or ambiguous."
-    assignment = current_assignments[0]
-    assigned_at = _parse_review_ts(assignment.get("assigned_at"))
-    if (assignment.get("reviewer") != reviewer
-            or assignment.get("family") != families[0]):
-        return False, "Agent review identity does not match its operator assignment."
-    if (assigned_at is None or assigned_at <= committed_at
-            or completed_at <= assigned_at):
-        return False, "Agent review assignment, review, and completion are out of order."
-    matching_reviews = []
-    for review in evidence.get("reviews") or []:
-        state = str(review.get("state") or "").upper()
-        author = review.get("author") or {}
-        submitted_at = _parse_review_ts(review.get("submittedAt"))
-        if (
-            (review.get("commit") or {}).get("oid") == head
-            and author.get("__typename") == "User"
-            and author.get("login") == record.get("github_login")
-            and state not in {"PENDING", "DISMISSED", "CHANGES_REQUESTED"}
-            and (state != "COMMENTED" or bool(str(review.get("body") or "").strip()))
-            and submitted_at is not None
-            and assigned_at <= submitted_at <= completed_at
-        ):
-            matching_reviews.append(review)
-    if not matching_reviews:
-        return False, "No substantive independent GitHub review precedes agent completion."
-    return True, (f"Emergency independent review by {reviewer} ({families[0]}) is "
-                  f"complete on current head {head[:12]} with disposition "
-                  f"{record['disposition']}.")
-
-
 def with_service_evidence(pr, pr_id, evidence):
     """Enrich evidence with whichever provider this PR's authority label names.
 
@@ -2204,8 +1924,9 @@ def with_service_evidence(pr, pr_id, evidence):
     if service == "sourcery":
         return _with_sourcery_runs(pr_id, evidence)
     if service in {"codeant", "agent"}:
-        # CodeAnt needs no second round trip: fetching the CodeRabbit status
-        # here would spend a call whose result this PR's gate never reads.
+        # Neither needs a second round trip: CodeAnt attests through
+        # evidence review_evidence() already collected, and a retired
+        # review:agent assignment is refused before any evidence is read.
         return evidence
     return _with_coderabbit_status(pr_id, evidence)
 
@@ -2237,7 +1958,7 @@ def has_authoritative_assigned_review(pr, evidence):
     if service == "codeant":
         return has_authoritative_codeant_review(pr, evidence)
     if service == "agent":
-        return _agent_review_verdict(pr, evidence)[0]
+        return False
     return has_authoritative_coderabbit_review(pr, evidence)
 
 
@@ -2249,6 +1970,15 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
             + " or ".join(REVIEW_SERVICE_LABELS)
             + ". Missing, legacy, unknown, mixed, or duplicate "
             "review labels block merge."
+        )
+    if service == "agent":
+        # Refused before any evidence is read. Coding-agent review claims and
+        # completion attestations were removed in #414, so nothing can produce
+        # evidence for this label and any that appears is forged.
+        return False, (
+            f"{RETIRED_AGENT_REVIEW_LABEL} is retired: coding agents no longer "
+            "supply review evidence. Reassign this PR to review:coderabbit, "
+            "review:sourcery, or review:codeant before merging."
         )
     counts = _service_thread_counts(evidence, service)
     if not isinstance(counts, dict):
@@ -2298,8 +2028,6 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # first would make a genuinely completed clean review unmergeable. The
     # human-blocking and thread gates above already ran for every service, and
     # each branch below still demands producer-validated exact-head proof.
-    if service == "agent":
-        return _agent_review_verdict(pr, evidence)
     if service == "sourcery":
         if not has_authoritative_sourcery_review(pr, evidence):
             return False, (
@@ -3400,450 +3128,6 @@ def check_size(pr):
     return True, f"Diff is {total} lines."
 
 
-def _is_rework_review(review):
-    """Whether a review submission counts as a rework round (issue #98).
-
-    Mirrors ``fleet_status._is_rework_review`` without importing that module
-    (outside this issue's touches declaration).
-    """
-    state = (review.get("state") or "").upper()
-    if state == "CHANGES_REQUESTED":
-        return True
-    if state != "COMMENTED":
-        return False
-    body = review.get("body") or ""
-    return bool(_REWORK_BLOCKING_RE.search(body))
-
-
-def count_review_rounds(pr):
-    """Count rework review rounds visible on a PR snapshot."""
-    return sum(1 for review in (pr.get("reviews") or []) if _is_rework_review(review))
-
-
-def check_review_rounds(pr):
-    """Soft visibility gate: always passes; never escalates to a human.
-
-    Round count raises evidence and triggers automated split guidance via
-    ``--emit-review-split``. It is audit data, not merge authority.
-    """
-    rounds = count_review_rounds(pr)
-    if rounds >= REVIEW_ROUND_THRESHOLD:
-        return True, (
-            f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD}). "
-            "Automated scope-reduction guidance applies — run "
-            "`merge_pr.py --pr <n> --emit-review-split`. Round count alone "
-            "never creates a human gate."
-        )
-    return True, f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD})."
-
-
-def fetch_unresolved_finding_summaries(pr_id, limit=8):  # noqa: C901, PLR0912
-    """Load short unresolved review-thread summaries for split guidance."""
-    slug = get_repo_slug()
-    if not slug:
-        return None
-    owner, name = slug.split("/", 1)
-    query = """
-    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
-      repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          reviewThreads(first:50, after:$cursor) {
-            nodes {
-              isResolved
-              isOutdated
-              path
-              comments(first:1) { nodes { body } }
-            }
-            pageInfo { hasNextPage endCursor }
-          }
-        }
-      }
-    }"""
-    cursor = None
-    seen = set()
-    summaries = []
-    while True:
-        args = [
-            "gh", "api", "graphql",
-            "-f", f"query={query}",
-            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data = _gh_json(args)
-        if not data or (isinstance(data, dict) and data.get("errors")):
-            return None
-        try:
-            connection = data["data"]["repository"]["pullRequest"]["reviewThreads"]
-            nodes = connection["nodes"]
-            page_info = connection["pageInfo"]
-            has_next = page_info["hasNextPage"]
-        except (KeyError, TypeError):
-            return None
-        if not isinstance(nodes, list) or not isinstance(has_next, bool):
-            return None
-        for node in nodes:
-            if bool(node.get("isResolved")) or bool(node.get("isOutdated")):
-                continue
-            comments = ((node.get("comments") or {}).get("nodes") or [])
-            body = ""
-            if comments and isinstance(comments[0], dict):
-                body = (comments[0].get("body") or "").strip()
-            path = node.get("path") or ""
-            line = " ".join(body.split())
-            if len(line) > 160:
-                line = line[:157] + "..."
-            if path and line:
-                summaries.append(f"{path}: {line}")
-            elif line:
-                summaries.append(line)
-            elif path:
-                summaries.append(path)
-            if len(summaries) >= limit:
-                return summaries
-        if not has_next:
-            return summaries
-        next_cursor = page_info.get("endCursor")
-        if not next_cursor or next_cursor in seen:
-            return None
-        seen.add(next_cursor)
-        cursor = next_cursor
-
-
-def _split_item_marker(pr_num, idx):
-    return REVIEW_ROUND_SPLIT_ITEM_FMT.format(pr=pr_num, idx=idx)
-
-
-def build_review_round_split_plan(pr, findings=None, source_issue=None):
-    """Build idempotent split guidance for a PR that crossed the round threshold.
-
-    Returns a dict describing the comment body and proposed follow-up issues.
-    Does not mutate GitHub. ``findings`` is an optional list of short strings.
-
-    Follow-ups carry ``depends-on: #<Closes issue>`` (the original linked work
-    item), not the PR number — Aru's picker and triage resolve depends-on as
-    issue prerequisites.
-    """
-    rounds = count_review_rounds(pr)
-    findings = list(findings or [])
-    pr_num = pr.get("number")
-    source = source_issue or (linked_issues(pr.get("body") or "")[:1] or [None])[0]
-    follow_ups = []
-    for idx, finding in enumerate(findings, start=1):
-        title = f"Split from PR #{pr_num}: finding {idx}"
-        if len(finding) < 80:
-            title = f"Split from PR #{pr_num}: {finding}"
-        if len(title) > 120:
-            title = title[:117] + "..."
-        body_lines = [
-            "## User Story",
-            "",
-            "As the factory, I want a separable review finding tracked as its "
-            "own issue so the original PR can shrink to the smallest coherent change.",
-            "",
-            "## Background",
-            "",
-            f"Automated split guidance from PR #{pr_num} after "
-            f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD}).",
-            "",
-            f"Finding: {finding}",
-            "",
-            "## Acceptance Criteria",
-            "",
-            "- [ ] The finding is addressed or explicitly withdrawn with evidence.",
-            "",
-            "## Dependencies",
-            "",
-            f"depends-on: #{source}" if source else "depends-on:",
-            "touches: `TBD`  # author must declare paths before Ready",
-            "parallel-eligible: false",
-            "",
-            f"Provenance: automated review-round split from PR #{pr_num}",
-            _split_item_marker(pr_num, idx),
-        ]
-        follow_ups.append({
-            "idx": idx,
-            "title": title,
-            "body": "\n".join(body_lines),
-        })
-    if not follow_ups and source:
-        idx = 1
-        follow_ups.append({
-            "idx": idx,
-            "title": f"Split remainder from PR #{pr_num}",
-            "body": "\n".join([
-                "## User Story",
-                "",
-                "As the factory, I want remaining out-of-scope work from an "
-                "over-reviewed PR tracked separately so the original PR can shrink.",
-                "",
-                "## Background",
-                "",
-                f"Automated split guidance from PR #{pr_num} after "
-                f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD}). "
-                "No unresolved thread summaries were available; the author should "
-                "narrow the PR and move separable remainder here.",
-                "",
-                "## Acceptance Criteria",
-                "",
-                "- [ ] Remainder scope is defined with acceptance criteria and touches.",
-                "",
-                "## Dependencies",
-                "",
-                f"depends-on: #{source}",
-                "touches: `TBD`",
-                "parallel-eligible: false",
-                "",
-                f"Provenance: automated review-round split from PR #{pr_num}",
-                _split_item_marker(pr_num, idx),
-            ]),
-        })
-    finding_block = "\n".join(f"- {item}" for item in findings) if findings else (
-        "- (no unresolved thread summaries available; author should still shrink scope)"
-    )
-    source_line = (
-        f"(each carries `depends-on: #{source}` to the original linked issue)."
-        if source
-        else "."
-    )
-    comment = "\n".join([
-        REVIEW_ROUND_SPLIT_MARKER,
-        f"## Automated review-round split guidance ({rounds} rounds)",
-        "",
-        f"This PR crossed the review-round threshold of {REVIEW_ROUND_THRESHOLD}.",
-        "Round count is audit data — it does **not** create a human approval gate "
-        "and does **not** change merge authority (`merge_pr.py` remains the only merge path).",
-        "",
-        "### Required author action",
-        "1. Shrink this PR to the smallest coherent change that can pass review.",
-        f"2. Leave separable findings on the follow-up issues listed below {source_line}",
-        "3. Continue the agent review loop; do not escalate to a human for round count.",
-        "",
-        "### Unresolved findings considered",
-        finding_block,
-        "",
-        "### Proposed follow-up issues",
-    ])
-    for item in follow_ups:
-        comment += f"\n- {item['title']}"
-    return {
-        "rounds": rounds,
-        "threshold": REVIEW_ROUND_THRESHOLD,
-        "crossed": rounds >= REVIEW_ROUND_THRESHOLD,
-        "source_issue": source,
-        "findings": findings,
-        "follow_ups": follow_ups,
-        "comment": comment,
-        "marker": REVIEW_ROUND_SPLIT_MARKER,
-    }
-
-
-def _flatten_comment_pages(data):
-    """Flatten ``gh api --paginate --slurp`` (or a single-page list) to bodies."""
-    if not isinstance(data, list):
-        return []
-    if data and isinstance(data[0], dict):
-        return [c.get("body") or "" for c in data if isinstance(c, dict)]
-    bodies = []
-    for page in data:
-        if isinstance(page, list):
-            bodies.extend(c.get("body") or "" for c in page if isinstance(c, dict))
-    return bodies
-
-
-def _pr_comments_bodies(pr_num):
-    slug = get_repo_slug()
-    if not slug:
-        return None
-    # --slurp yields one JSON array of pages; without it, --paginate concatenates
-    # arrays and a single json.loads fails after the first page.
-    data = _gh_json([
-        "gh", "api", f"repos/{slug}/issues/{pr_num}/comments",
-        "--paginate", "--slurp",
-    ])
-    if data is None:
-        return None
-    return _flatten_comment_pages(data)
-
-
-def _parse_issue_number_from_create(out):
-    match = re.search(r"/issues/(\d+)", out or "")
-    return int(match.group(1)) if match else None
-
-
-def _issue_url(slug, number):
-    return f"https://github.com/{slug}/issues/{number}"
-
-
-def _find_existing_split_follow_ups(pr_num):
-    """Map follow-up idx -> {number, url} for issues already filed for this PR.
-
-    Returns None on query failure (fail closed — do not create duplicates).
-    """
-    data = _gh_json([
-        "gh", "issue", "list",
-        "--state", "all",
-        "--limit", "100",
-        "--search", f"aru-review-round-split-item:pr={pr_num} in:body",
-        "--json", "number,body,url",
-    ])
-    if data is None:
-        return None
-    if not isinstance(data, list):
-        return {}
-    found = {}
-    for issue in data:
-        if not isinstance(issue, dict):
-            continue
-        body = issue.get("body") or ""
-        match = REVIEW_ROUND_SPLIT_ITEM_RE.search(body)
-        if not match:
-            continue
-        if int(match.group(1)) != int(pr_num):
-            continue
-        idx = int(match.group(2))
-        number = issue.get("number")
-        if not number:
-            continue
-        url = issue.get("url") or ""
-        if not url:
-            slug = get_repo_slug()
-            url = _issue_url(slug, number) if slug else f"#{number}"
-        # Prefer the lowest issue number if duplicates somehow exist.
-        prior = found.get(idx)
-        if prior is None or number < prior["number"]:
-            found[idx] = {"number": number, "url": url}
-    return found
-
-
-def _attach_follow_up_to_board(issue_num):
-    """Place a split follow-up on the governed board as Backlog."""
-    return update_status(issue_num, "Backlog", require_board=True)
-
-
-def emit_review_round_split(pr, findings=None, *, apply=True):  # noqa: C901, PLR0912
-    """Post split guidance and file follow-up issues when the threshold is crossed.
-
-    Idempotent: if ``REVIEW_ROUND_SPLIT_MARKER`` is already present on the PR,
-    returns without creating duplicate issues. Retries after partial issue
-    creation reuse provenance-tagged issues. When ``apply`` is False, returns
-    the plan only.
-    """
-    if findings is None and apply:
-        fetched = fetch_unresolved_finding_summaries(pr.get("number"))
-        findings = fetched if fetched is not None else []
-    plan = build_review_round_split_plan(pr, findings=findings)
-    if not plan["crossed"]:
-        return {
-            "emitted": False,
-            "reason": "below threshold",
-            "plan": plan,
-            "created_issues": [],
-        }
-    if not apply:
-        return {
-            "emitted": False,
-            "reason": "dry plan",
-            "plan": plan,
-            "created_issues": [],
-        }
-    pr_num = pr.get("number")
-    bodies = _pr_comments_bodies(pr_num)
-    if bodies is None:
-        return {
-            "emitted": False,
-            "reason": "could not read PR comments",
-            "plan": plan,
-            "created_issues": [],
-        }
-    if any(REVIEW_ROUND_SPLIT_MARKER in body for body in bodies):
-        return {
-            "emitted": False,
-            "reason": "already emitted",
-            "plan": plan,
-            "created_issues": [],
-        }
-    existing = _find_existing_split_follow_ups(pr_num)
-    if existing is None:
-        return {
-            "emitted": False,
-            "reason": "could not query existing split follow-ups",
-            "plan": plan,
-            "created_issues": [],
-        }
-    slug = get_repo_slug()
-    filed = []
-    for item in plan["follow_ups"]:
-        idx = item["idx"]
-        prior = existing.get(idx)
-        if prior:
-            if not _attach_follow_up_to_board(prior["number"]):
-                return {
-                    "emitted": False,
-                    "reason": (
-                        f"board attach failed for existing #{prior['number']}"
-                    ),
-                    "plan": plan,
-                    "created_issues": filed,
-                }
-            filed.append(prior["url"])
-            continue
-        code, out, err = run_cmd(
-            [
-                "gh", "issue", "create",
-                "--title", item["title"],
-                "--body", item["body"],
-                "--label", "status:backlog",
-            ],
-            check=False,
-        )
-        if code != 0:
-            return {
-                "emitted": False,
-                "reason": f"issue create failed: {err.strip()}",
-                "plan": plan,
-                "created_issues": filed,
-            }
-        issue_num = _parse_issue_number_from_create(out)
-        if issue_num is None:
-            return {
-                "emitted": False,
-                "reason": f"issue create returned unparseable ref: {out.strip()}",
-                "plan": plan,
-                "created_issues": filed,
-            }
-        if not _attach_follow_up_to_board(issue_num):
-            return {
-                "emitted": False,
-                "reason": f"board attach failed for #{issue_num}",
-                "plan": plan,
-                "created_issues": filed,
-            }
-        url = out.strip() or (_issue_url(slug, issue_num) if slug else f"#{issue_num}")
-        filed.append(url)
-        existing[idx] = {"number": issue_num, "url": url}
-    comment = plan["comment"]
-    if filed:
-        comment += "\n\n### Filed\n" + "\n".join(f"- {url}" for url in filed)
-    code, _, err = run_cmd(
-        ["gh", "pr", "comment", str(pr_num), "--body", comment],
-        check=False,
-    )
-    if code != 0:
-        return {
-            "emitted": False,
-            "reason": f"comment failed: {err.strip()}",
-            "plan": plan,
-            "created_issues": filed,
-        }
-    return {
-        "emitted": True,
-        "reason": "posted",
-        "plan": plan,
-        "created_issues": filed,
-    }
-
-
 def check_test_coverage(pr):
     """Require a changed test whenever production Python roots are changed."""
     files = pr.get("files") or []
@@ -4527,10 +3811,6 @@ def clear_issue_claims(issue_num, cwd=None):
     return clear_labels("issue", issue_num, "agent:", cwd=cwd)
 
 
-def clear_review_claims(pr_num, cwd=None):
-    return clear_labels("pr", pr_num, REVIEW_CLAIM_LABEL, cwd=cwd)
-
-
 def clear_merger_claims(pr_num, cwd=None):
     return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL, cwd=cwd)
 
@@ -4565,7 +3845,6 @@ def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None,
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
         ("spec-sync", *check_spec_sync(pr)),
-        ("review rounds", *check_review_rounds(pr)),
     ]
     for num in issue_nums:
         gates.append(
@@ -4656,8 +3935,6 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):  # noqa: C901, PLR09
             (f"done #{num}", lambda num=num: reconcile_issue_done(num)),
             (f"issue claim #{num}", lambda num=num: clear_issue_claims(num)),
         ])
-    steps.append(("review claim", lambda: clear_review_claims(pr.get("number"))))
-
     all_ok = True
     print("\n=== Post-merge close-out ===")
     for name, action in steps:
@@ -4944,13 +4221,11 @@ def checkpoint_message(pr, issue_nums, gates, gated_head, merged_sha):
     """Builds the annotated tag body: what landed, who touched it, what was checked."""
     issues = ", ".join(f"#{n}" for n in issue_nums) or "none"
     authors = ", ".join(label_values(pr, "author:")) or "unknown"
-    reviewers = ", ".join(label_values(pr, "reviewed-by:")) or "none recorded"
     lines = [
         f"checkpoint: PR #{pr.get('number')} — {pr.get('title') or ''}".rstrip(" —"),
         "",
         f"issues:      {issues}",
         f"author:      {authors}",
-        f"reviewed-by: {reviewers}",
         f"gated head:  {gated_head}",
         f"merged as:   {merged_sha}",
         "",
@@ -5069,62 +4344,15 @@ def main():  # noqa: C901, PLR0912, PLR0915
         metavar="SHA",
         help="Head SHA selected by the picker; refuse if the live head differs",
     )
-    parser.add_argument(
-        "--emit-review-split",
-        action="store_true",
-        help=(
-            "When review rounds cross the threshold, post automated split "
-            "guidance and file follow-up issues with depends-on edges. "
-            "Never creates a human gate. Compatible with --dry-run (plan only)."
-        ),
-    )
     args = parser.parse_args()
 
-    if args.json and not args.dry_run and not args.emit_review_split:
+    if args.json and not args.dry_run:
         print("[ERROR] --json requires --dry-run (refusing to emit JSON for a live merge).", file=sys.stderr)
-        return EXIT_ERROR
-
-    if args.emit_review_split and args.expected_head:
-        print(
-            "[ERROR] --emit-review-split cannot be combined with --expected-head.",
-            file=sys.stderr,
-        )
         return EXIT_ERROR
 
     pr = fetch_pr(args.pr)
     if not pr:
         return EXIT_ERROR
-
-    if args.emit_review_split:
-        result = emit_review_round_split(pr, apply=not args.dry_run)
-        if args.json:
-            print(json.dumps(result, indent=2, sort_keys=True))
-        else:
-            plan = result["plan"]
-            print(
-                f"=== Review-round split — PR #{args.pr}: "
-                f"{plan['rounds']} round(s), threshold {plan['threshold']} ==="
-            )
-            print(f"  crossed: {plan['crossed']}")
-            print(f"  emitted: {result['emitted']} ({result['reason']})")
-            for url in result.get("created_issues") or []:
-                print(f"  filed: {url}")
-            if args.dry_run or not result["emitted"]:
-                print("\n--- plan comment preview ---")
-                print(plan["comment"])
-        reason = str(result["reason"])
-        fail_prefixes = (
-            "issue create failed",
-            "comment failed",
-            "board attach failed",
-            "could not query existing split follow-ups",
-            "issue create returned unparseable",
-        )
-        if result["reason"] in {"could not read PR comments"} or any(
-            reason.startswith(p) for p in fail_prefixes
-        ):
-            return EXIT_ERROR
-        return EXIT_OK
 
     issue_nums = linked_issues(pr.get("body"))
     if not issue_nums:

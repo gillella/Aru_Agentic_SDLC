@@ -3,7 +3,7 @@
 # +42 for the #410 GitHub pagination/date helpers claims no longer take from metrics.
 # +33 for the #362 fail-closed board reads.
 # +15 for the #457 GraphQL quota reduction.
-# line-ceiling: 1680
+# line-ceiling: 1694
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -510,6 +510,12 @@ def create_worktree(branch_name: str, path: str = None, attempts: int = 5,
     return None
 
 
+# The retired coding-agent review claim. `github_inventory` still reads it so
+# a historical PR keeps rendering its full label set; board identity does not,
+# because a retired label can no longer mean "this id is in use".
+RETIRED_IDENTITY_LABEL_PREFIX = "reviewer:"
+
+
 def board_agent_identities() -> Tuple[Optional[Dict[str, List[str]]], str]:
     """Agent ids GitHub currently shows in use, mapped to where they are held.
 
@@ -526,11 +532,26 @@ def board_agent_identities() -> Tuple[Optional[Dict[str, List[str]]], str]:
 
     Returns (holders, error). ``holders`` is None when the board could not be
     read, so callers fail closed rather than assign a possibly-held id.
+
+    ``reviewer:<id>`` is deliberately dropped. Coding-agent review claiming was
+    removed in #414, so nothing writes that label any more; the ones still on
+    historical pull requests are inert audit data. Counting them would reserve
+    an id against a claim no live session can hold or release, which is the
+    identity-exhaustion failure this function exists to prevent.
     """
     slug = get_repo_slug()
     if not slug:
         return None, "could not resolve the repository from the local origin"
-    return rest_board_agent_identities(run_cmd, slug)
+    holders, error = rest_board_agent_identities(run_cmd, slug)
+    if holders is None:
+        return None, error
+    live = {}
+    for agent, locations in holders.items():
+        kept = [where for where in locations
+                if not where.endswith(f"({RETIRED_IDENTITY_LABEL_PREFIX}{agent})")]
+        if kept:
+            live[agent] = kept
+    return live, error
 
 
 def query_open_issues() -> Optional[List[Dict[str, Any]]]:

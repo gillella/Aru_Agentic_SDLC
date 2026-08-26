@@ -1,4 +1,4 @@
-# line-ceiling: 1530
+# line-ceiling: 1496
 import io
 import json
 import sys
@@ -50,10 +50,6 @@ def pr(number, *labels, draft=False, checks="green", reviews=0, minutes_old=5,
         "reviewDecision": decision, "body": "Closes #1", "headRefName": "x",
         "_active_review_feedback": [],
     }
-
-
-def eligible(p, agent="agent-2", family="openai", cap=3, wait=30):
-    return fnw.review_eligibility(p, agent, family, cap, wait)
 
 
 def merged_api_pr(number, issue_number, *labels):
@@ -164,12 +160,18 @@ class CiStateTests(unittest.TestCase):
         self.assertEqual(fnw.ci_state(pr(1, checks="none")), "none")
 
 
-class EligibilityTests(unittest.TestCase):
-    def test_coding_agents_are_never_eligible_for_review(self):
-        verdict = eligible(pr(1, "author:agent-1", "family:anthropic"))
-        self.assertFalse(verdict["eligible"])
-        self.assertIn("never selected from the normal queue", verdict["reason"])
-        self.assertIn("review:agent", verdict["reason"])
+class RetiredReviewQueueTests(unittest.TestCase):
+    """#414: the picker has no review eligibility surface left to consult."""
+
+    def test_no_review_routing_helpers_remain(self):
+        for name in ("review_eligibility", "assigned_agent_review",
+                     "DEFAULT_ROUND_CAP", "DEFAULT_CROSS_FAMILY_WAIT_MIN"):
+            self.assertFalse(hasattr(fnw, name), f"fetch_next_work still has {name}")
+
+    def test_the_cli_offers_no_round_or_cross_family_knob(self):
+        source = Path(fnw.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("--round-cap", source)
+        self.assertNotIn("--cross-family-wait", source)
 
     def test_picker_json_top_level_agent_is_resolved_identity(self):
         parts = {
@@ -179,7 +181,7 @@ class EligibilityTests(unittest.TestCase):
         with patch.object(fnw, "list_work_prs", return_value=[]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
-            result = fnw.select("resolved-agent", "openai", 3, 30)
+            result = fnw.select("resolved-agent", "openai")
         self.assertEqual(result["agent"], "resolved-agent")
 
 
@@ -219,9 +221,9 @@ class PriorityTests(unittest.TestCase):
         with patch.object(fnw, "list_work_prs", return_value=list(prs)), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
-            return fnw.select(agent, family, 3, 30)
+            return fnw.select(agent, family)
 
-    def test_feedback_outranks_review_and_new_work(self):
+    def test_feedback_outranks_merge_and_new_work(self):
         authored = pr(1, "author:agent-2")
         authored["_active_review_feedback"] = [{"body": "fix this"}]
         res = self._select(
@@ -231,7 +233,7 @@ class PriorityTests(unittest.TestCase):
         self.assertEqual(res["work"]["pr"], 1)
 
 
-    def test_issue_when_nothing_to_review(self):
+    def test_issue_when_no_pr_needs_me(self):
         res = self._select([pr(2, "author:agent-2", "family:openai")], candidates=[7])
         self.assertEqual(res["work"]["type"], "issue")
         self.assertEqual(res["work"]["issue"], 7)
@@ -241,29 +243,32 @@ class PriorityTests(unittest.TestCase):
         self.assertEqual(res["work"]["issue"], 4)
         self.assertTrue(res["work"]["resuming"])
 
-    def test_explicit_agent_review_resumes_before_issue_work(self):
-        assigned = pr(2, "author:agent-1", "review:agent", "reviewer:agent-2",
-                      checks="pending", title="emergency review")
-        res = self._select([assigned], candidates=[7], in_flight=4)
-        self.assertEqual(res["work"]["type"], "review")
-        self.assertEqual(res["work"]["pr"], 2)
-        self.assertTrue(res["work"]["resuming"])
+    def test_a_pr_waiting_on_its_review_service_is_never_agent_work(self):
+        """#414: review is the assigned service's job, so it never routes here."""
+        waiting = pr(2, "author:agent-1", "family:anthropic", checks="pending",
+                     title="waiting on CodeRabbit")
+        res = self._select([waiting], candidates=[7], in_flight=4)
+        self.assertEqual(res["work"]["type"], "issue")
+        self.assertEqual(res["work"]["issue"], 4)
 
-    def test_emergency_review_is_not_a_general_agent_queue(self):
-        assigned = pr(2, "author:agent-1", "review:agent", "reviewer:agent-3",
-                      checks="pending")
-        self.assertEqual(
-            self._select([assigned], candidates=[7])["work"]["type"], "issue")
-        self_review = pr(3, "author:agent-2", "review:agent", "reviewer:agent-2",
-                         checks="pending")
-        self.assertEqual(
-            self._select([self_review], candidates=[7])["work"]["type"], "issue")
+    def test_a_retired_review_agent_assignment_routes_no_work_at_all(self):
+        for labels in (
+            ("author:agent-1", "review:agent", "reviewer:agent-2"),
+            ("author:agent-1", "review:agent", "reviewer:agent-3"),
+            ("author:agent-2", "review:agent", "reviewer:agent-2"),
+            ("author:agent-1", "review:agent", "reviewer:agent-2",
+             "reviewed-by:agent-2"),
+        ):
+            with self.subTest(labels=labels):
+                assigned = pr(2, *labels, checks="pending")
+                res = self._select([assigned], candidates=[7])
+                self.assertEqual(res["work"]["type"], "issue")
 
-    def test_completed_emergency_review_is_not_offered_again(self):
-        completed = pr(2, "author:agent-1", "review:agent", "reviewer:agent-2",
-                       "reviewed-by:agent-2", checks="pending")
-        self.assertEqual(
-            self._select([completed], candidates=[7])["work"]["type"], "issue")
+    def test_the_result_carries_no_review_queue_state(self):
+        res = self._select([pr(2, "author:agent-1")], candidates=[7])
+        for key in ("reviewable", "reviewable_detail", "skipped_prs",
+                    "escalated_prs"):
+            self.assertNotIn(key, res)
 
     def test_idle_when_there_is_nothing_at_all(self):
         self.assertEqual(self._select([], candidates=[])["work"]["type"], "idle")
@@ -290,7 +295,7 @@ class PriorityTests(unittest.TestCase):
              patch.object(fnw, "list_open_issues", return_value=[operator_issue, ordinary_issue]), \
              patch.object(fetch_next_issue, "repository_owner_login", return_value="owner"), \
              patch.object(fetch_next_issue, "repository_trusted_logins", return_value={"owner"}):
-            result = fnw.select("agent-2", "openai", 3, 30)
+            result = fnw.select("agent-2", "openai")
 
         self.assertEqual(result["work"]["issue"], 2)
         self.assertEqual(result["claimable_issues"], [2])
@@ -310,17 +315,15 @@ class MergeWorkTests(unittest.TestCase):
             "my_in_flight": None,
             "blocked": [], "conflicted": [], "missing_touches": [], "not_ready": [],
         }
-        # Legacy-shaped evidence: no `review_attestations` key, so the
-        # head-binding check returns None and these PRs keep the pre-#235
-        # "review complete" verdict these cases were written against. Without
-        # the patch, review_eligibility would reach the live GitHub API.
+        # Minimal head-bound evidence so `_author_can_repair_review` never
+        # reaches the live GitHub API from these selection cases.
         legacy_evidence = {"head_oid": "abc123"}
         with patch.object(fnw, "list_work_prs", return_value=list(prs)), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts), \
              patch.object(fnw, "review_evidence", return_value=legacy_evidence), \
              patch.object(fnw, "dod_status", return_value=(dod_ok, dod_reason)):
-            return fnw.select(agent, family, 3, 30)
+            return fnw.select(agent, family)
 
     def test_merge_outranks_new_work(self):
         ready = pr(9, "author:agent-1", "family:anthropic", "reviewed-by:agent-9",
@@ -420,7 +423,7 @@ class UnreadableQueueTests(unittest.TestCase):
         # Treating an unreadable queue as empty would claim new implementation
         # work as though no review or feedback were waiting.
         with patch.object(fnw, "list_work_prs", return_value=None):
-            res = fnw.select("agent-2", "openai", 3, 30)
+            res = fnw.select("agent-2", "openai")
         self.assertEqual(res["work"]["type"], "error")
         self.assertIn("could not be read", res["work"]["reason"])
 
@@ -438,10 +441,9 @@ class UnreadableQueueTests(unittest.TestCase):
         with patch.object(fnw, "list_work_prs", return_value=[authored, other]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
-            res = fnw.select("agent-2", "openai", 3, 30)
+            res = fnw.select("agent-2", "openai")
         self.assertEqual(res["work"]["type"], "issue")
         self.assertEqual(res["work"]["issue"], 99)
-        self.assertEqual(res["reviewable"], [])
 
     def test_unknown_threads_on_authored_pr_do_not_block_issue_selection(self):
         # With the unreadable PR skipped, a claimable issue is still served.
@@ -455,7 +457,7 @@ class UnreadableQueueTests(unittest.TestCase):
         with patch.object(fnw, "list_work_prs", return_value=[authored]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
-            res = fnw.select("agent-2", "openai", 3, 30)
+            res = fnw.select("agent-2", "openai")
         self.assertEqual(res["work"]["type"], "issue")
         self.assertEqual(res["work"]["issue"], 99)
 
@@ -470,7 +472,7 @@ class UnreadableQueueTests(unittest.TestCase):
         with patch.object(fnw, "list_work_prs", return_value=[unreadable_pr]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "build_candidates", return_value=parts):
-            res = fnw.select("agent-2", "openai", 3, 30)
+            res = fnw.select("agent-2", "openai")
         self.assertEqual(res["work"]["type"], "idle")
         self.assertEqual(res["claimable_issues"], [])
 
@@ -506,7 +508,7 @@ class ResearchRoutingTests(unittest.TestCase):
         with patch.object(fnw, "list_work_prs", return_value=[]), \
              patch.object(fnw, "list_open_issues", return_value=[issue]), \
              patch.object(fnw, "build_candidates", return_value=parts):
-            res = fnw.select("agent-2", "openai", 3, 30)
+            res = fnw.select("agent-2", "openai")
         self.assertEqual(res["work"]["skill"], "research")
         self.assertEqual(res["work"]["issue"], 101)
 
@@ -708,7 +710,7 @@ class AuthorGateFixTests(unittest.TestCase):
 
     def test_external_fallback_assignments_reuse_shared_evidence_helpers(self):
         evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
-        for service, issue in (("sourcery", 2), ("codeant", 3), ("agent", 4)):
+        for service, issue in (("sourcery", 2), ("codeant", 3)):
             candidate = stranded()
             candidate["labels"] = [
                 label for label in candidate["labels"]
@@ -722,6 +724,17 @@ class AuthorGateFixTests(unittest.TestCase):
                 self.assertTrue(fnw._author_can_repair_review(candidate))
             enrich.assert_called_once_with(candidate, candidate["number"], evidence)
             authoritative.assert_called_once_with(candidate, evidence)
+
+    def test_a_retired_review_agent_label_is_never_author_repairable(self):
+        """#414: `review:agent` names no oracle, so nothing can be repaired."""
+        candidate = stranded()
+        candidate["labels"] = [
+            label for label in candidate["labels"]
+            if not label["name"].startswith("review:")
+        ] + [{"name": "review:agent"}]
+        with patch.object(fnw, "review_evidence") as evidence:
+            self.assertFalse(fnw._author_can_repair_review(candidate))
+        evidence.assert_not_called()
 
     def test_author_repair_uses_assigned_service_thread_counts(self):
         evidence = {
@@ -845,7 +858,7 @@ class GateFixSelectionTests(unittest.TestCase):
              patch.object(fnw, "build_candidates", return_value=parts), \
              patch.object(fnw, "_dod_gate_details", return_value=details), \
              patch.object(fnw, "dod_status", return_value=(False, reason)):
-            return fnw.select(agent, "openai", 3, 30)
+            return fnw.select(agent, "openai")
 
     def test_author_is_no_longer_told_idle(self):
         # The whole bug: this returned "idle" while the author's own PR sat one
@@ -919,7 +932,7 @@ class GateFixRoutingContractTests(unittest.TestCase):
              patch.object(fnw, "build_candidates", return_value=parts), \
              patch.object(fnw, "_dod_gate_details", return_value=details), \
              patch.object(fnw, "dod_status", return_value=(False, "unmet: rebased")):
-            return fnw.select("agent-2", "openai", 3, 30)["work"]
+            return fnw.select("agent-2", "openai")["work"]
 
     def test_the_named_skill_actually_exists(self):
         work = self.emitted()
@@ -945,7 +958,7 @@ class GateFixRoutingContractTests(unittest.TestCase):
         check_names = (
             "check_open", "check_issue_link", "check_verification", "check_ci",
             "check_reviews", "check_rebased", "check_size",
-            "check_test_coverage", "check_review_rounds", "check_acceptance",
+            "check_test_coverage", "check_acceptance",
         )
         patches = [patch.object(merge_pr, name, return_value=passing)
                    for name in check_names]
