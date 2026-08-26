@@ -1017,7 +1017,7 @@ class FleetStatusTests(unittest.TestCase):
             },
         }
         sourcery_pr = mock_pr(18, "review:sourcery", decision="COMMENTED")
-        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[]), \
+        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[{"id": 1}]), \
              patch("merge_pr.review_evidence", return_value=evidence), \
              patch("merge_pr.with_service_evidence", return_value=evidence), \
              patch("merge_pr.has_authoritative_assigned_review", return_value=True):

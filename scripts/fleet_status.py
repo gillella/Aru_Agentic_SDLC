@@ -545,11 +545,11 @@ def _assigned_service_review_state(pr: Dict[str, Any]) -> Optional[str]:
 def _review_state(pr: Dict[str, Any]) -> str:
     if pr.get("isDraft"):
         return "none"
-    if _has_active_review_feedback(pr):
-        return "feedback"
     assigned_state = _assigned_service_review_state(pr)
     if assigned_state:
         return assigned_state
+    if _has_active_review_feedback(pr):
+        return "feedback"
     return "pending"
 
 
