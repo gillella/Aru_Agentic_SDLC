@@ -126,9 +126,13 @@ def _resolve_repo_details(target_dir: str) -> Tuple[Optional[Dict[str, Any]], Op
 
     code_branch, branch_out, _ = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], check=False)
     current_branch = branch_out.strip() if code_branch == 0 else ""
+    if code_branch != 0 or not current_branch:
+        return None, f"Could not resolve current git branch for '{target_dir}'."
 
     code_head, head_out, _ = run_cmd(["git", "rev-parse", "HEAD"], check=False)
     head_sha = head_out.strip() if code_head == 0 else ""
+    if code_head != 0 or not head_sha:
+        return None, f"Could not resolve current git HEAD commit SHA for '{target_dir}'."
 
     return {
         "slug": slug,

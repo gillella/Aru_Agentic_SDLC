@@ -146,8 +146,16 @@ class FakeRepo:
             return 1, "", "no origin"
         if cmd[:2] == ["git", "remote"]:
             return 0, f"git@github.com:{self.slug}.git\n", ""
+        if "branch" in self.fail and cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+            return 1, "", "fatal: not a git repository"
+        if "empty_branch" in self.fail and cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+            return 0, "   \n", ""
         if cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
             return 0, "main\n", ""
+        if "head" in self.fail and cmd[:2] == ["git", "rev-parse"]:
+            return 1, "", "fatal: not a git repository"
+        if "empty_head" in self.fail and cmd[:2] == ["git", "rev-parse"]:
+            return 0, "\n", ""
         if cmd[:2] == ["git", "rev-parse"]:
             return 0, "abc1234\n", ""
         if cmd[:2] == ["git", "tag"]:
@@ -214,20 +222,15 @@ class TestSnapshotSchemaAndFields(unittest.TestCase):
         self.assertEqual(snapshot["state"], "waiting")
         self.assertEqual(snapshot["exit_code"], fls.EXIT_WAITING)
 
-        # Repository identity
-        self.assertIsNotNone(snapshot["repository"])
-        self.assertEqual(snapshot["repository"]["slug"], "gillella/Aru_Agentic_SDLC")
-        self.assertEqual(snapshot["repository"]["owner"], "gillella")
-        self.assertEqual(snapshot["repository"]["name"], "Aru_Agentic_SDLC")
-        self.assertEqual(snapshot["repository"]["current_branch"], "main")
-        self.assertEqual(snapshot["repository"]["head_sha"], "abc1234")
-
-        # Board identity and counts
-        self.assertIsNotNone(snapshot["board"])
-        self.assertEqual(snapshot["board"]["number"], 7)
-        self.assertEqual(snapshot["board"]["owner"], "gillella")
-        self.assertIn("Ready", snapshot["board"]["status_counts"])
-        self.assertIn("In Progress", snapshot["board"]["status_counts"])
+        # Repository & board identity
+        r = snapshot["repository"]
+        self.assertIsNotNone(r)
+        self.assertEqual((r["slug"], r["owner"], r["name"], r["current_branch"], r["head_sha"]),
+                         ("gillella/Aru_Agentic_SDLC", "gillella", "Aru_Agentic_SDLC", "main", "abc1234"))
+        b = snapshot["board"]
+        self.assertIsNotNone(b)
+        self.assertEqual((b["number"], b["owner"]), (7, "gillella"))
+        self.assertTrue({"Ready", "In Progress"}.issubset(b["status_counts"]))
 
         # Issues & PRs
         self.assertEqual(len(snapshot["open_issues"]), 2)
@@ -245,19 +248,12 @@ class TestSnapshotSchemaAndFields(unittest.TestCase):
         self.assertEqual(snapshot["dependencies"], [{"issue": 102, "depends_on": [101], "unresolved": [101]}])
         self.assertEqual(snapshot["touches_reservations"], [{"issue": 102, "agent": "agent-1", "paths": ["scripts/b.py"]}])
 
-        # Worktrees
+        # Worktrees & Worker assignments & Tags
         self.assertEqual(len(snapshot["worktrees"]), 2)
         wt_agent = next(wt for wt in snapshot["worktrees"] if wt["issue"] == 102)
-        self.assertEqual(wt_agent["agent"], "agent-1")
-        self.assertFalse(wt_agent["stale"])
-
-        # Worker assignments
-        self.assertIn("agent-1", snapshot["worker_assignments"])
+        self.assertEqual((wt_agent["agent"], wt_agent["stale"]), ("agent-1", False))
         self.assertEqual(snapshot["worker_assignments"]["agent-1"]["issues"], [102])
-        self.assertIn("agent-2", snapshot["worker_assignments"])
         self.assertEqual(snapshot["worker_assignments"]["agent-2"]["prs"], [201])
-
-        # Tags & releases
         self.assertEqual(snapshot["tags_releases"]["latest_tag"], "v0.1.0")
 
         # Claimable work (issue 101 is ready and unblocked)
@@ -315,6 +311,28 @@ class TestFailClosedAndDegraded(unittest.TestCase):
         self.assertTrue(len(snapshot["errors"]) > 0)
         self.assertIsNone(snapshot["repository"])
         self.assertIsNone(snapshot["tags_releases"]["framework_version"])
+
+    def test_unresolvable_git_branch_fails_closed(self):
+        for mode in ("branch", "empty_branch"):
+            repo = FakeRepo(fail={mode})
+            with wired_repo(repo):
+                snapshot = fls.evaluate_factory_loop_snapshot(".")
+            self.assertTrue(snapshot["degraded"])
+            self.assertEqual(snapshot["state"], "error")
+            self.assertEqual(snapshot["exit_code"], fls.EXIT_ERROR)
+            self.assertIsNone(snapshot["repository"])
+            self.assertTrue(any("git branch" in e for e in snapshot["errors"]))
+
+    def test_unresolvable_git_head_fails_closed(self):
+        for mode in ("head", "empty_head"):
+            repo = FakeRepo(fail={mode})
+            with wired_repo(repo):
+                snapshot = fls.evaluate_factory_loop_snapshot(".")
+            self.assertTrue(snapshot["degraded"])
+            self.assertEqual(snapshot["state"], "error")
+            self.assertEqual(snapshot["exit_code"], fls.EXIT_ERROR)
+            self.assertIsNone(snapshot["repository"])
+            self.assertTrue(any("git HEAD" in e for e in snapshot["errors"]))
 
     def test_unreadable_board_is_blocked_and_degraded(self):
         repo = FakeRepo(issues=[make_issue(1)], fail={"board"})
@@ -972,11 +990,8 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
         repo = FakeRepo(issues=[issue1, issue2], fail={"collaborators"})
         with wired_repo(repo):
             snapshot = fls.evaluate_factory_loop_snapshot(".")
-
         self.assertTrue(snapshot["degraded"])
-        self.assertEqual(snapshot["state"], "blocked")
-        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
-        self.assertEqual(snapshot["claimable_work"], [])
+        self.assertEqual((snapshot["state"], snapshot["exit_code"], snapshot["claimable_work"]), ("blocked", fls.EXIT_BLOCKED, []))
         self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in snapshot["errors"]))
 
     def test_repo_owner_resolution_failure_propagates_degraded_blocked_candidate_evaluation(self):
@@ -985,10 +1000,7 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
             claimable, diags, errors, is_degraded, is_blocked = fls._collect_claimable_work(
                 [issue1], slug="gillella/Aru_Agentic_SDLC", repo_owner=None
             )
-
-        self.assertTrue(is_degraded)
-        self.assertTrue(is_blocked)
-        self.assertEqual(claimable, [])
+        self.assertEqual((is_degraded, is_blocked, claimable), (True, True, []))
         self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in errors))
 
     def test_repo_owner_resolution_exception_propagates_degraded_blocked_candidate_evaluation(self):
@@ -997,10 +1009,7 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
             claimable, diags, errors, is_degraded, is_blocked = fls._collect_claimable_work(
                 [issue1], slug="gillella/Aru_Agentic_SDLC", repo_owner=None
             )
-
-        self.assertTrue(is_degraded)
-        self.assertTrue(is_blocked)
-        self.assertEqual(claimable, [])
+        self.assertEqual((is_degraded, is_blocked, claimable), (True, True, []))
         self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in errors))
 
     def test_collaborator_lookup_empty_set_propagates_degraded_blocked_candidate_evaluation(self):
@@ -1008,22 +1017,16 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
         repo = FakeRepo(issues=[issue1])
         with wired_repo(repo), patch("factory_loop_snapshot.repository_trusted_logins", return_value=set()):
             snapshot = fls.evaluate_factory_loop_snapshot(".")
-
         self.assertTrue(snapshot["degraded"])
-        self.assertEqual(snapshot["state"], "blocked")
-        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
-        self.assertEqual(snapshot["claimable_work"], [])
+        self.assertEqual((snapshot["state"], snapshot["exit_code"], snapshot["claimable_work"]), ("blocked", fls.EXIT_BLOCKED, []))
         self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in snapshot["errors"]))
 
     def test_collaborator_lookup_failure_with_empty_issues_blocks_rather_than_complete(self):
         repo = FakeRepo(issues=[], prs=[], fail={"collaborators"})
         with wired_repo(repo):
             snapshot = fls.evaluate_factory_loop_snapshot(".")
-
         self.assertTrue(snapshot["degraded"])
-        self.assertEqual(snapshot["state"], "blocked")
-        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
-        self.assertEqual(snapshot["claimable_work"], [])
+        self.assertEqual((snapshot["state"], snapshot["exit_code"], snapshot["claimable_work"]), ("blocked", fls.EXIT_BLOCKED, []))
         self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in snapshot["errors"]))
 
 
