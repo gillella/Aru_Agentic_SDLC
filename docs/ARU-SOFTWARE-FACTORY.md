@@ -1,13 +1,12 @@
 # Aru Software Factory — Build Plan
 
-> **Current review policy (Issue #382, 2026-08-24):** each ordinary PR is
-> deterministically assigned exactly one review oracle via
-> `review:coderabbit`, `review:sourcery`, or `review:codeant`. Coding-agent
-> `reviewer:` / `reviewed-by:` workflows described in historical sections below
-> are retired and cannot satisfy the merge gate. Claude, Codex, Cursor, and
-> Antigravity implement, remediate, and mechanically merge only through the
-> governed `merge_pr.py` helper after the assigned service supplies
-> authoritative exact-head evidence and every enforced gate passes; they never review.
+> **Current review policy (2026-08-25):** CodeRabbit reviews ordinary PRs by
+> default. An operator may explicitly reassign a stalled PR to Sourcery or
+> CodeAnt. Only after every external reviewer is unavailable, busy, or waiting
+> too long may one independent coding agent be assigned to that exact PR.
+> Legacy coding-agent labels alone remain invalid; emergency review requires
+> exact-head GitHub evidence and merge-gate validation. There is no reviewer
+> rotation, fleet, queue, or second scheduler.
 
 **Goal:** idea → deployed software through an autonomous governed loop, with
 operator visibility and exceptional human intervention only for an unresolved
@@ -237,14 +236,15 @@ operator screen (#106–#108). They expose:
 
 ### 4.3 The operating principle
 
-> **The issue defines direction. The assigned review-pool service reviews. The
+> **The issue defines direction. The explicitly assigned reviewer reviews. The
 > gated helper merges. Human intervention is the last resort for an unresolved
 > severe merge or close-out failure.**
 
-Every proposed automation should be tested against it. There is no separate
-coding-agent review lane: implementation/remediation agents fix findings, and
-the assigned review-pool service is the reviewer of record. A risk label, large
-diff, repeated review, or tool preference is not a human gate.
+Every proposed automation should be tested against it. External services are
+the normal review path. A coding agent can become reviewer of record only for
+one explicit emergency assignment after external exhaustion and must be
+independent of the author. A risk label, large diff, repeated review, or tool
+preference is not a human gate.
 
 ---
 

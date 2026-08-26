@@ -2,16 +2,16 @@
 
 ## Purpose & Scope
 
-Operational procedure for the deterministic three-service review pool
-(CodeRabbit, Sourcery, CodeAnt) introduced by the review-pool cutover
+Operational procedure for CodeRabbit-first review with explicit Sourcery,
+CodeAnt, and last-resort independent-agent fallback
 (`scripts/create_pr.py`, `scripts/merge_pr.py`). It covers what a factory
 agent or human operator does around PR assignment, review triggering, exact-head
 evidence, remediation, governed dry-runs, and billing/trial boundaries.
 
-This runbook does not grant review, merge, or account authority. Assigned
-review-pool services are the sole PR code-review authority
-(`AGENTS.md` §Process Ownership and Merge Authority); coding agents implement
-and remediate only. Real-money execution, production cutover, destructive
+This runbook does not grant merge or account authority. A coding agent may
+review only after an operator explicitly assigns that independent agent to one
+PR because every external reviewer is unavailable, busy, or waiting too long.
+Real-money execution, production cutover, destructive
 migration, credential use, and external-account mutation stay separate,
 mandatory human gates that no review evidence satisfies.
 
@@ -29,20 +29,32 @@ remediation edits in §4 as well as initial assignment.
 
 ## 1. Assignment
 
-`create_pr.py` assigns exactly one review service per issue, deterministically:
-
-```text
-REVIEW_SERVICES[(issue_id - 1) % 3]  ->  coderabbit | sourcery | codeant
-```
-
-The label (`review:coderabbit`, `review:sourcery`, or `review:codeant`) is
+`create_pr.py` assigns `review:coderabbit` by default. The label is
 applied to the PR **while it is still draft**, before the PR is marked ready.
 Only one review-pool label may ever be present; `merge_pr.py` refuses to
 resolve a service when zero or more than one is set
 (`check_reviews` in `scripts/merge_pr.py`). Never add or swap a review-pool
-label by hand. `merge_pr.py` recomputes the assigned service from every
-linked issue and rejects a mismatched label, making the PR unmergeable
-instead of changing accepted review authority.
+label by hand. If CodeRabbit is unavailable, use the governed helper for one
+explicit reassignment:
+
+```shell
+python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> \
+  --to <sourcery|codeant> --reason "<observed unavailability>"
+```
+
+If CodeRabbit, Sourcery, and CodeAnt are all unavailable or busy, or the
+operator declares the wait excessive, the same helper may select one
+independent agent:
+
+```shell
+python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> --to agent \
+  --reviewer <AGENT_ID> --model-family <FAMILY> \
+  --reason "<external attempts and excessive-wait decision>"
+```
+
+The helper replaces one known authority, refuses self-review and ambiguous
+authors, and records the exact head, reviewer, family, and reason. It does not
+discover reviewers, track capacity, rotate agents, or create a second queue.
 
 ## 2. Trigger
 
@@ -102,8 +114,21 @@ after a review invalidates it — re-review the new head before merging
   (`_sourcery_check`).
 - **CodeAnt** — one authoritative exact-head `codeant-ai` review object, not
   `CHANGES_REQUESTED` (`_codeant_latest_review`).
+- **Emergency agent** — exactly one author and one different assigned reviewer,
+  one reviewer model family, a substantive current-head GitHub review from the
+  same login, and exactly one matching completed `aru-agent-review:v1` record.
+  The assigned agent records completion with:
 
-All three additionally require every blocker enforced by `check_reviews`
+  ```shell
+  python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> \
+    --complete-review --agent <AGENT_ID> --model-family <FAMILY> \
+    --review-disposition <no-findings|findings-resolved>
+  ```
+
+  A push invalidates this evidence. Missing, stale, duplicate, malformed, or
+  self-review evidence blocks merge.
+
+Every review path additionally requires every blocker enforced by `check_reviews`
 (`scripts/merge_pr.py`) to be clear:
 
 - The assigned-service thread gate: zero unresolved and zero outdated-unfixed
@@ -223,8 +248,8 @@ dry-run is evidence the PR is mergeable, not a merge —
       obtained before editing.
 - [ ] Local suite is green before any remediation commit or push (§4 step 2,
       `AGENTS.md` "Local Test Verification First").
-- [ ] Exactly one `review:<service>` label, applied before `gh pr ready`.
-- [ ] Assigned service's exact-head evidence present per §3.
+- [ ] Exactly one `review:<authority>` label; ordinary PRs receive it before `gh pr ready`.
+- [ ] Assigned reviewer's exact-head evidence present per §3.
 - [ ] The assigned-service thread gate passes and aggregate unresolved,
       outdated-unfixed, and unfixed counts are zero; every resolved finding
       is fixed, explicitly withdrawn, or supported by the required

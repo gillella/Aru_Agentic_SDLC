@@ -1,9 +1,9 @@
-# line-ceiling: 1500
+# line-ceiling: 1530
 import io
 import json
 import sys
-import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fetch_next_work as fnw
 import fetch_next_issue  # noqa: E402
 import merge_pr
-import agent_presence as ap
 
 
 def ts(minutes_ago):
@@ -158,7 +157,8 @@ class EligibilityTests(unittest.TestCase):
     def test_coding_agents_are_never_eligible_for_review(self):
         verdict = eligible(pr(1, "author:agent-1", "family:anthropic"))
         self.assertFalse(verdict["eligible"])
-        self.assertIn("review-pool", verdict["reason"])
+        self.assertIn("never selected from the normal queue", verdict["reason"])
+        self.assertIn("review:agent", verdict["reason"])
 
     def test_picker_json_top_level_agent_is_resolved_identity(self):
         parts = {
@@ -229,6 +229,30 @@ class PriorityTests(unittest.TestCase):
         res = self._select([], candidates=[7], in_flight=4)
         self.assertEqual(res["work"]["issue"], 4)
         self.assertTrue(res["work"]["resuming"])
+
+    def test_explicit_agent_review_resumes_before_issue_work(self):
+        assigned = pr(2, "author:agent-1", "review:agent", "reviewer:agent-2",
+                      checks="pending", title="emergency review")
+        res = self._select([assigned], candidates=[7], in_flight=4)
+        self.assertEqual(res["work"]["type"], "review")
+        self.assertEqual(res["work"]["pr"], 2)
+        self.assertTrue(res["work"]["resuming"])
+
+    def test_emergency_review_is_not_a_general_agent_queue(self):
+        assigned = pr(2, "author:agent-1", "review:agent", "reviewer:agent-3",
+                      checks="pending")
+        self.assertEqual(
+            self._select([assigned], candidates=[7])["work"]["type"], "issue")
+        self_review = pr(3, "author:agent-2", "review:agent", "reviewer:agent-2",
+                         checks="pending")
+        self.assertEqual(
+            self._select([self_review], candidates=[7])["work"]["type"], "issue")
+
+    def test_completed_emergency_review_is_not_offered_again(self):
+        completed = pr(2, "author:agent-1", "review:agent", "reviewer:agent-2",
+                       "reviewed-by:agent-2", checks="pending")
+        self.assertEqual(
+            self._select([completed], candidates=[7])["work"]["type"], "issue")
 
     def test_idle_when_there_is_nothing_at_all(self):
         self.assertEqual(self._select([], candidates=[])["work"]["type"], "idle")
@@ -369,13 +393,6 @@ class MergeWorkTests(unittest.TestCase):
         self.assertEqual(work["pr"], 2)
         self.assertEqual(work["head_sha"], "bbb")
         self.assertIsNotNone(claimed)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-
 class UnreadableQueueTests(unittest.TestCase):
     def test_selector_fails_closed_when_prs_cannot_be_listed(self):
         # Treating an unreadable queue as empty would claim new implementation
@@ -614,7 +631,7 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_resolved_threads_are_author_fixable(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_assigned_review",
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
                           return_value=True):
             found = self.fix(stranded(), reason="unmet: review")
         self.assertIsNotNone(found)
@@ -628,7 +645,7 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_threads_plus_rebase_are_both_author_work(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 1, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_assigned_review",
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
                           return_value=True):
             found = self.fix(stranded(), reason="unmet: rebased, review")
         self.assertEqual(found["unmet_gates"], ["rebased", "review-evidence"])
@@ -636,14 +653,14 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_without_current_head_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": False}), \
-             patch.object(merge_pr, "has_authoritative_assigned_review",
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
                           return_value=False):
             self.assertIsNone(self.fix(stranded(), reason="unmet: review"))
 
     def test_unfixed_without_peer_attribution_is_author_fixable_with_coderabbit(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_assigned_review",
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
                           return_value=True):
             found = self.fix(stranded(peer=None), reason="unmet: review")
         self.assertEqual(found["unmet_gates"], ["review-evidence"])
@@ -654,75 +671,48 @@ class AuthorGateFixTests(unittest.TestCase):
                               "unresolved": 0, "unfixed": 2,
                               "outdated_unfixed": 1, "reviewed_head": True,
                           }), \
-             patch.object(merge_pr, "has_authoritative_assigned_review",
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
                           return_value=True):
             self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
 
     def test_unfixed_without_authoritative_coderabbit_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_assigned_review",
+             patch.object(merge_pr, "has_authoritative_coderabbit_review",
                           return_value=False):
             self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
 
-    def test_unfixed_with_assigned_codeant_review_is_author_fixable(self):
-        candidate = stranded(peer=None)
-        candidate["labels"] = [
-            label for label in candidate["labels"]
-            if label["name"] != "review:coderabbit"
-        ] + [{"name": "review:codeant"}]
-        # This fixture's default "Closes #1" only matches the deterministic
-        # coderabbit assignment; point it at an issue number that
-        # deterministically maps to codeant so the label-vs-issue cross-check
-        # in assigned_review_service still validates the relabel above.
-        candidate["body"] = "Closes #3"
-        evidence = {
-            "unresolved": 0,
-            "unfixed": 2,
-            "reviewed_head": True,
-            "github_review_evidence": True,
-            "head_oid": "a" * 40,
-            "reviews": [{
-                "id": "codeant-review",
-                "state": "COMMENTED",
-                "submittedAt": "2026-08-24T01:00:00Z",
-                "body": "CodeAnt findings.",
-                "author": {"login": "codeant-ai", "__typename": "Bot"},
-                "commit": {"oid": "a" * 40},
-            }],
-            "service_threads": {"codeant": {"unresolved": 0, "unfixed": 2, "outdated_unfixed": 0}},
-        }
-        with patch.object(fnw, "review_evidence", return_value=evidence), \
-             patch.object(merge_pr, "_with_coderabbit_status", return_value=None) as coderabbit:
-            found = self.fix(candidate, reason="unmet: review")
-        self.assertEqual(found["unmet_gates"], ["review-evidence"])
-        coderabbit.assert_not_called()
-
-    def test_author_repair_enriches_only_the_assigned_service(self):
+    def test_legacy_provider_assignments_are_not_author_fixable(self):
         evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
-        # review_service_for_issue((n - 1) % 3) maps issue 1/2/3 deterministically
-        # onto coderabbit/sourcery/codeant.
-        issue_for_service = {"coderabbit": 1, "sourcery": 2, "codeant": 3}
-        for service in ("coderabbit", "sourcery", "codeant"):
+        for service, issue in (("sourcery", 2), ("codeant", 3)):
             candidate = stranded()
             candidate["labels"] = [
                 label for label in candidate["labels"]
                 if not label["name"].startswith("review:")
             ] + [{"name": f"review:{service}"}]
-            # This fixture's default "Closes #1" only matches the
-            # deterministic coderabbit assignment; point it at the issue
-            # number that maps to each tested service so the label-vs-issue
-            # cross-check in assigned_review_service still validates the
-            # relabel above.
-            candidate["body"] = f"Closes #{issue_for_service[service]}"
+            candidate["body"] = f"Closes #{issue}"
             with self.subTest(service=service), \
                  patch.object(fnw, "review_evidence", return_value=evidence), \
-                 patch.object(merge_pr, "_with_coderabbit_status", return_value=evidence) as coderabbit, \
-                 patch.object(merge_pr, "_with_sourcery_status", return_value=evidence) as sourcery, \
-                 patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True):
-                self.assertTrue(fnw._author_can_repair_review(candidate))
-                self.assertEqual(coderabbit.call_count, int(service == "coderabbit"))
-                self.assertEqual(sourcery.call_count, int(service == "sourcery"))
+                 patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
+                 patch.object(merge_pr, "has_authoritative_coderabbit_review") as authoritative:
+                self.assertFalse(fnw._author_can_repair_review(candidate))
+            coderabbit.assert_not_called()
+            authoritative.assert_not_called()
+
+    def test_author_repair_enriches_coderabbit_evidence(self):
+        candidate = stranded()
+        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(
+                 merge_pr, "_with_coderabbit_status", return_value=evidence,
+             ) as coderabbit, \
+             patch.object(
+                 merge_pr, "has_authoritative_coderabbit_review", return_value=True,
+             ) as authoritative:
+            self.assertTrue(fnw._author_can_repair_review(candidate))
+
+        coderabbit.assert_called_once_with(candidate["number"], evidence)
+        authoritative.assert_called_once_with(candidate, evidence)
 
     def test_author_repair_denies_unavailable_coderabbit_enrichment(self):
         candidate = stranded()
@@ -731,36 +721,12 @@ class AuthorGateFixTests(unittest.TestCase):
              patch.object(
                  merge_pr, "_with_coderabbit_status", return_value=None,
              ) as coderabbit, \
-             patch.object(merge_pr, "_with_sourcery_status") as sourcery, \
              patch.object(
-                 merge_pr, "has_authoritative_assigned_review",
+                 merge_pr, "has_authoritative_coderabbit_review",
              ) as authoritative:
             self.assertFalse(fnw._author_can_repair_review(candidate))
 
         coderabbit.assert_called_once_with(candidate["number"], evidence)
-        sourcery.assert_not_called()
-        authoritative.assert_not_called()
-
-    def test_author_repair_denies_unavailable_sourcery_enrichment(self):
-        candidate = stranded()
-        candidate["labels"] = [
-            label for label in candidate["labels"]
-            if not label["name"].startswith("review:")
-        ] + [{"name": "review:sourcery"}]
-        candidate["body"] = "Closes #2"
-        evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
-        with patch.object(fnw, "review_evidence", return_value=evidence), \
-             patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
-             patch.object(
-                 merge_pr, "_with_sourcery_status", return_value=None,
-             ) as sourcery, \
-             patch.object(
-                 merge_pr, "has_authoritative_assigned_review",
-             ) as authoritative:
-            self.assertFalse(fnw._author_can_repair_review(candidate))
-
-        coderabbit.assert_not_called()
-        sourcery.assert_called_once_with(candidate["number"], evidence)
         authoritative.assert_not_called()
 
     def test_missing_or_unsupported_service_is_not_author_fixable(self):
@@ -769,20 +735,25 @@ class AuthorGateFixTests(unittest.TestCase):
         # to exercise "no assigned service" rather than always landing on the
         # allowed coderabbit path.
         evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
-        for labels in ([], [{"name": "review:unknown-bot"}]):
+        for labels in (
+            [],
+            [{"name": "review:unknown-bot"}],
+            [{"name": "review:coderabbit"}, {"name": "review:sourcery"}],
+        ):
             with self.subTest(labels=labels):
                 candidate = stranded()
                 candidate["labels"] = [
                     label for label in candidate["labels"]
                     if not label["name"].startswith("review:")
                 ] + labels
-                candidate["body"] = ""
                 with patch.object(fnw, "review_evidence", return_value=evidence), \
                      patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
-                     patch.object(merge_pr, "_with_sourcery_status") as sourcery:
+                     patch.object(
+                         merge_pr, "has_authoritative_coderabbit_review",
+                     ) as authoritative:
                     self.assertFalse(fnw._author_can_repair_review(candidate))
                 coderabbit.assert_not_called()
-                sourcery.assert_not_called()
+                authoritative.assert_not_called()
 
     def test_retired_reviewer_claim_does_not_block_merge(self):
         candidate = stranded(peer=None)
@@ -994,74 +965,70 @@ def stale_evidence(peer="agent-9"):
 
 
 class AgentResolutionTests(unittest.TestCase):
-    def setUp(self):
-        import tempfile
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.presence = Path(self.temporary.name)
-        self._patch_path = patch.object(ap, "DEFAULT_PRESENCE_PATH",
-                                        self.presence / "agent-presence.json")
-        self._patch_path.start()
-        self.addCleanup(self._patch_path.stop)
+    @staticmethod
+    def _idle():
+        return {
+            "agent": "unused",
+            "family": None,
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [],
+            "merge_skipped": [],
+            "claimable_issues": [],
+            "mergeable_detail": [],
+            "reviewable_detail": [],
+        }
 
-    def _capture(self):
-        import io
-        return patch("sys.stdout", new_callable=io.StringIO), \
-               patch("sys.stderr", new_callable=io.StringIO)
-
-    def _board(self, holders=None, readable=True):
-        """Stub the GitHub-side identity query (#304)."""
-        value = (holders if readable else None, "" if readable else "boom")
-        return patch.object(fnw, "board_agent_identities", return_value=value)
-
-    def test_omitting_agent_auto_assigns_a_free_identity(self):
-        store = ap.PresenceStore(self.presence / "agent-presence.json")
-        store.resolve_free_identity(["gemini-1"], "setup-session")
+    def _run(self, argv, env=None):
         idle = {"agent": "unused", "family": None, "work": {"type": "idle",
                 "skill": None}, "skipped_prs": [], "merge_skipped": [],
                 "claimable_issues": [], "mergeable_detail": [],
                 "reviewable_detail": []}
-        out, err = self._capture()
         with patch.object(fnw, "select", return_value=idle) as select_mock, \
-             self._board({}), \
-             patch("sys.argv", ["fetch_next_work.py", "--agent-pool"]), out as _o, err as _e:
+             patch.object(fnw, "_reserve_derived_identity", return_value=None), \
+             patch.dict("os.environ", env or {}, clear=True), \
+             patch("sys.argv", [*argv, "--reap-after", "0"]):
             rc = fnw.main()
-        self.assertEqual(rc, None)  # success
-        # A free agent from the pool was assigned and passed to select.
-        args, _kwargs = select_mock.call_args
-        self.assertEqual(args[0], "claude-1")
-        self.assertIn("auto-assigned agent id", _e.getvalue())
+        return rc, select_mock
 
-    def test_explicit_agent_held_by_another_session_exits_nonzero(self):
-        store = ap.PresenceStore(self.presence / "agent-presence.json")
-        store.resolve_free_identity(["gemini-1"], "session-other")
-        idle = {"agent": "unused", "family": None, "work": {"type": "idle",
-                "skill": None}, "skipped_prs": [], "merge_skipped": [],
-                "claimable_issues": []}
-        out, err = self._capture()
-        with patch.object(fnw, "select", return_value=idle) as select_mock, \
-             self._board({}), \
-             patch("sys.argv", ["fetch_next_work.py", "--agent", "gemini-1"]), \
-             out as _o, err as _e:
-            rc = fnw.main()
-        self.assertEqual(rc, 1)
-        select_mock.assert_not_called()
-        self.assertIn("live heartbeat", _e.getvalue())
+    def test_omitting_agent_derives_a_stable_identity(self):
+        rc, select_mock = self._run(["fetch_next_work.py", "--family", "openai"])
+        self.assertIsNone(rc)
+        self.assertTrue(select_mock.call_args.args[0].startswith("codex-"))
 
-    def test_explicit_agent_with_no_conflict_proceeds(self):
-        idle = {"agent": "unused", "family": None, "work": {"type": "idle",
-                "skill": None}, "skipped_prs": [], "merge_skipped": [],
-                "claimable_issues": []}
-        out, err = self._capture()
-        with patch.object(fnw, "select", return_value=idle) as select_mock, \
-             self._board({}), \
-             patch("sys.argv", ["fetch_next_work.py", "--agent", "claude-1",
-                                "--session-id", "me"]), \
-             out as _o, err as _e:
-            rc = fnw.main()
-        self.assertEqual(rc, None)
-        args, _kwargs = select_mock.call_args
-        self.assertEqual(args[0], "claude-1")
+    def test_environment_override_wins_over_fingerprint(self):
+        rc, select_mock = self._run(
+            ["fetch_next_work.py", "--family", "openai"],
+            {"ARU_AGENT_ID": "operator-agent"},
+        )
+        self.assertIsNone(rc)
+        self.assertEqual(select_mock.call_args.args[0], "operator-agent")
+
+    def test_explicit_agent_wins_without_presence_lookup(self):
+        rc, select_mock = self._run(
+            ["fetch_next_work.py", "--agent", "claude-1"],
+            {"ARU_AGENT_ID": "operator-agent"},
+        )
+        self.assertIsNone(rc)
+        self.assertEqual(select_mock.call_args.args[0], "claude-1")
+
+    def test_invalid_explicit_and_environment_ids_fail_closed(self):
+        for argv, env in (
+            (["fetch_next_work.py", "--agent", "bad id"], {}),
+            (["fetch_next_work.py"], {"ARU_AGENT_ID": ""}),
+        ):
+            with self.subTest(argv=argv, env=env):
+                with patch("sys.stderr", new_callable=io.StringIO) as error:
+                    rc, select_mock = self._run(argv, env)
+                self.assertEqual(rc, 1)
+                select_mock.assert_not_called()
+                self.assertIn("invalid", error.getvalue())
+
+    def test_presence_allocation_flags_are_removed(self):
+        for flag in ("--session-id", "--agent-pool"):
+            with self.subTest(flag=flag), patch(
+                "sys.argv", ["fetch_next_work.py", flag, "legacy"]
+            ), self.assertRaises(SystemExit):
+                fnw.main()
 
 class NoFastTrackInThePickerTests(unittest.TestCase):
     """Merge eligibility requires review attribution again (#321).
@@ -1113,96 +1080,16 @@ class NoFastTrackInThePickerTests(unittest.TestCase):
         self.assertFalse(hasattr(fnw, "_fast_track"))
 
 
-class BoardIdentityUniquenessTests(unittest.TestCase):
-    """Identity resolution consults GitHub, not only the local registry (#304).
-
-    The registry's 300s heartbeat TTL freed an id that the board still showed
-    holding an issue claim and authoring an open PR, so the id was reissued and
-    two open PRs ended up stamped with one author: label and two family: labels.
-    """
-
-    def setUp(self):
-        import tempfile
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.presence = Path(self.temporary.name) / "agent-presence.json"
-        patcher = patch.object(ap, "DEFAULT_PRESENCE_PATH", self.presence)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def _idle(self):
-        return {"agent": "unused", "family": None,
-                "work": {"type": "idle", "skill": None}, "skipped_prs": [],
-                "merge_skipped": [], "claimable_issues": [],
-                "mergeable_detail": [], "reviewable_detail": []}
-
-    def _run(self, argv, holders, readable=True):
-        argv = list(argv)
-        if "--agent" not in argv:
-            argv.append("--agent-pool")
-        import io
-        value = (holders if readable else None, "" if readable else "boom")
-        out = patch("sys.stdout", new_callable=io.StringIO)
-        err = patch("sys.stderr", new_callable=io.StringIO)
-        with patch.object(fnw, "select", return_value=self._idle()) as select_mock, \
-             patch.object(fnw, "board_agent_identities", return_value=value), \
-             patch("sys.argv", argv), out as _o, err as _e:
-            rc = fnw.main()
-        return rc, select_mock, _e.getvalue()
-
-    def test_stale_heartbeat_does_not_free_an_id_github_shows_in_use(self):
-        # The exact #304 scenario: registry says free, board says otherwise.
-        holders = {"gemini-1": ["issue #3 (agent:gemini-1)",
-                                "PR #27 (author:gemini-1)"]}
-        rc, select_mock, _err = self._run(["fetch_next_work.py"], holders)
-        self.assertIsNone(rc)
-        # gemini-1 is first in the default ring; the board must exclude it.
-        self.assertNotEqual(select_mock.call_args[0][0], "gemini-1")
-
-    def test_an_id_free_on_both_github_and_the_registry_is_still_assigned(self):
-        # The zero-config path keeps working without operator action.
-        rc, select_mock, err = self._run(["fetch_next_work.py"], {})
-        self.assertIsNone(rc)
-        self.assertEqual(select_mock.call_args[0][0], "gemini-1")
-        self.assertIn("auto-assigned agent id", err)
-
-    def test_exhausted_pool_fails_rather_than_reusing_an_id(self):
-        holders = {a: [f"issue #1 (agent:{a})"] for a in ap.DEFAULT_AGENT_RING}
-        rc, select_mock, err = self._run(["fetch_next_work.py"], holders)
-        self.assertEqual(rc, 1)
-        select_mock.assert_not_called()
-        self.assertIn("Every agent id in the pool is in use", err)
-        self.assertIn("gemini-1", err)
-
-    def test_unreadable_board_fails_closed(self):
-        # A GitHub or network failure must refuse, not assign optimistically.
-        rc, select_mock, err = self._run(["fetch_next_work.py"], None, readable=False)
-        self.assertEqual(rc, 1)
-        select_mock.assert_not_called()
-        self.assertIn("Cannot verify agent id ownership", err)
-
-    def test_explicit_conflict_names_the_work_not_only_the_session(self):
-        store = ap.PresenceStore(self.presence)
-        store.resolve_free_identity(["gemini-1"], "session-other")
-        holders = {"gemini-1": ["PR #27 (author:gemini-1)"]}
-        rc, select_mock, err = self._run(
-            ["fetch_next_work.py", "--agent", "gemini-1"], holders)
-        self.assertEqual(rc, 1)
-        select_mock.assert_not_called()
-        self.assertIn("PR #27", err)
-        self.assertIn("session-other", err)
-
-    def test_explicit_agent_keeps_its_id_while_holding_board_work(self):
-        # An agent legitimately holds its id across the issue it claimed and the
-        # PR it left in review; board presence alone must not lock it out of
-        # picking up its next item.
-        holders = {"claude-1": ["issue #5 (agent:claude-1)",
-                                "PR #9 (author:claude-1)"]}
-        rc, select_mock, _err = self._run(
-            ["fetch_next_work.py", "--agent", "claude-1", "--session-id", "me"],
-            holders)
-        self.assertIsNone(rc)
-        self.assertEqual(select_mock.call_args[0][0], "claude-1")
+class PureIdentityBoundaryTests(unittest.TestCase):
+    def test_picker_has_no_presence_allocation_helpers(self):
+        for name in (
+            "_fingerprint_assign_identity",
+            "_auto_assign_identity",
+            "_pool_assign_identity",
+            "_explicit_identity",
+            "_default_session_id",
+        ):
+            self.assertFalse(hasattr(fnw, name), name)
 
 
 class IssueClaimFailureTests(unittest.TestCase):
@@ -1332,17 +1219,6 @@ class MergeClaimFailureTests(unittest.TestCase):
 
 
 class WorkPickerTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        patcher = patch.object(
-            ap,
-            "DEFAULT_PRESENCE_PATH",
-            Path(self.temporary.name) / "agent-presence.json",
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def _dummy_select(self):
         return {
             "work": {"type": "idle", "skill": None},
@@ -1357,13 +1233,14 @@ class WorkPickerTests(unittest.TestCase):
 
     def test_default_reap_threshold(self):
         with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1"]), \
-             patch.object(fnw, "reap_stale_merges") as mock_merges, \
-             patch.object(fnw, "reap_stale_claims") as mock_claims, \
+             patch.object(fnw, "reap_stale_merges", return_value=[]) as mock_merges, \
+             patch.object(fnw, "reap_stale_claims", return_value=[]) as mock_claims, \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
              patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "select", return_value=self._dummy_select()):
             fnw.main()
-            mock_merges.assert_called_once_with(4)
-            mock_claims.assert_called_once_with([], 4)
+            mock_merges.assert_called_once_with(4, prs_snapshot=[])
+            mock_claims.assert_called_once_with([], 4, open_prs_snapshot=[])
 
     def test_reap_disabled_by_zero(self):
         with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1", "--reap-after", "0"]), \
@@ -1379,10 +1256,176 @@ class WorkPickerTests(unittest.TestCase):
         fake_stderr = io.StringIO()
         with patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1"]), \
              patch("sys.stderr", fake_stderr), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "list_open_issues", return_value=[]), \
              patch.object(fnw, "reap_stale_merges", side_effect=RuntimeError("transient network failure")), \
              patch.object(fnw, "select", return_value=self._dummy_select()):
             fnw.main()
             self.assertIn("[WARN] Autonomous claim reap encountered error: transient network failure", fake_stderr.getvalue())
 
-if __name__ == "__main__":
-    unittest.main()
+class IdleBacklogPromotionTests(unittest.TestCase):
+    def setUp(self):
+        self.inventory_reads = 0
+        self.select_reads = 0
+        def inventory(_slug, numbers):
+            self.inventory_reads += 1; return ({number: ("Ready" if self.inventory_reads >= 3 and number == 10 else "Backlog") for number in numbers}, int(self.inventory_reads >= 3))  # noqa: E702
+        def select(*_args):
+            self.select_reads += 1; return {"work": ({"type": "issue", "issue": 10} if self.select_reads >= 3 else {"type": "idle"})}  # noqa: E702
+        self.enterContext(patch.object(merge_pr, "repository_merge_lock",
+            return_value=nullcontext((True, "locked"))))
+        self.enterContext(patch.object(
+            fnw, "select", side_effect=select))
+        self.enterContext(patch.object(
+            fnw, "_governed_open_issue_statuses", side_effect=inventory))
+    @staticmethod
+    def _issue(number, priority="p1", *, status="backlog", body=None, labels=()):
+        return {
+            "number": number, "title": f"issue {number}",
+            "body": body or (
+                "## Acceptance Criteria\n- [ ] Works (verify: `python3 -m unittest tests.test_example`)\n\n"
+                "## Decision Boundaries\n- Default: bounded\n\n## Non-Goals\n- No extras\n\n"
+                "## Verification\n- `python3 -m unittest tests.test_example`\n\n"
+                "touches: scripts/example.py, tests/test_example.py\ndepends-on: none\n"
+            ),
+            "labels": [
+                {"name": f"status:{status}"}, {"name": f"priority:{priority}"},
+                {"name": "type:feat"}, *({"name": label} for label in labels),
+            ],
+            "author": {"login": "owner"},
+            "updatedAt": "2026-08-25T18:00:00Z",
+        }
+
+    def test_promotes_only_highest_priority_picker_eligible_issue(self):
+        issues = [self._issue(20, "p2"), self._issue(30, "p0"), self._issue(10, "p0")]
+        post = self._issue(10, "p0", status="ready")
+        with patch.object(fnw, "list_open_issues",
+                          side_effect=[issues, issues, [post], [post]]), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "active_increment_scope", return_value=None), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins",
+                          return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login",
+                          return_value="owner"), \
+             patch.object(fetch_next_issue, "is_trusted_metadata_author",
+                          return_value=True), \
+             patch.object(fnw, "query_issue_project_items",
+                          side_effect=[[{"status": {"name": "Backlog"}}],
+                                       [{"status": {"name": "Ready"}}]]), \
+             patch.object(fnw, "select_governed_project_items",
+                          side_effect=lambda items, _slug: items), \
+             patch.object(fnw, "update_status", return_value=True) as update:
+            promoted = fnw.promote_one_idle_backlog_issue("agent-1")
+        self.assertEqual(promoted, 10)
+        update.assert_called_once_with(
+            10, "Ready", require_board=True, expected_status="Backlog",
+            require_unclaimed=True, expected_updated_at="2026-08-25T18:00:00Z")
+
+    def test_does_not_promote_when_any_ready_issue_exists(self):
+        issues = [self._issue(1, status="ready"), self._issue(2)]
+        with patch.object(fnw, "list_open_issues", return_value=issues), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_refuses_conflicting_status_labels(self):
+        issue = self._issue(1)
+        issue["labels"].append({"name": "status:done"})
+        with patch.object(fnw, "list_open_issues", return_value=[issue]), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_refuses_candidate_that_changes_during_live_revalidation(self):
+        original = self._issue(1)
+        changed = {**original, "body": original["body"] + "\nchanged\n"}
+        with patch.object(fnw, "list_open_issues",
+                          side_effect=[[original], [changed]]), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "active_increment_scope", return_value=None), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins",
+                          return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login",
+                          return_value="owner"), \
+             patch.object(fetch_next_issue, "is_trusted_metadata_author",
+                          return_value=True), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_refuses_when_governed_board_is_not_backlog(self):
+        issue = self._issue(1)
+        with patch.object(fnw, "list_open_issues", return_value=[issue]), \
+             patch.object(fnw, "list_work_prs", return_value=[]), \
+             patch.object(fnw, "active_increment_scope", return_value=None), \
+             patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fetch_next_issue, "repository_trusted_logins",
+                          return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login",
+                          return_value="owner"), \
+             patch.object(fetch_next_issue, "is_trusted_metadata_author",
+                          return_value=True), \
+             patch.object(fnw, "query_issue_project_items",
+                          return_value=[{"status": {"name": "Done"}}]), \
+             patch.object(fnw, "select_governed_project_items",
+                          side_effect=lambda items, _slug: items), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_leaves_operator_epic_incomplete_and_oversized_work_in_backlog(self):
+        incomplete = self._issue(1, body="touches: scripts/x.py")
+        operator = self._issue(2, labels=("needs-human",))
+        epic = self._issue(3, labels=("type:epic",))
+        oversized = self._issue(
+            4,
+            body=(self._issue(4)["body"]
+                  .replace("touches: scripts/example.py, tests/test_example.py",
+                           "touches: scripts/a.py, hooks/b.py, tests/test_example.py")),
+        )
+        with patch.object(
+            fnw, "list_open_issues",
+            return_value=[incomplete, operator, epic, oversized],
+        ), patch.object(fnw, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(fnw, "update_status") as update:
+            self.assertIsNone(fnw.promote_one_idle_backlog_issue("agent-1"))
+        update.assert_not_called()
+
+    def test_read_only_picker_does_not_attempt_promotion(self):
+        idle = {
+            "agent": "agent-1", "family": None,
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [], "merge_skipped": [], "claimable_issues": [],
+        }
+        with patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "select", return_value=idle), \
+             patch.object(fnw, "promote_one_idle_backlog_issue") as promote, \
+             patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1",
+                                "--reap-after", "0"]), \
+             patch("sys.stdout", io.StringIO()):
+            fnw.main()
+        promote.assert_not_called()
+
+    def test_claiming_idle_picker_promotes_reselects_and_claims(self):
+        idle = {
+            "agent": "agent-1", "family": None,
+            "work": {"type": "idle", "skill": None},
+            "skipped_prs": [], "merge_skipped": [], "claimable_issues": [],
+        }
+        selected = IssueClaimFailureTests.selection()
+        stdout = io.StringIO()
+        with patch.object(fnw, "_resolve_identity", return_value=None), \
+             patch.object(fnw, "select", side_effect=[idle, selected]), \
+             patch.object(fnw, "promote_one_idle_backlog_issue", return_value=334), \
+             patch("claim_issue.claim_issue", return_value=fnw.EXIT_OK) as claim, \
+             patch("sys.argv", ["fetch_next_work.py", "--agent", "agent-1",
+                                "--claim", "--json", "--reap-after", "0"]), \
+             patch("sys.stdout", stdout):
+            result = fnw.main()
+        payload = json.loads(stdout.getvalue())
+        self.assertIsNone(result)
+        self.assertEqual(payload["auto_promoted_issue"], 334)
+        self.assertTrue(payload["work"]["claimed"])
+        claim.assert_called_once_with(334, "agent-1")

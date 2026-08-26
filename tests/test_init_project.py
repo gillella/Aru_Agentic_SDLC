@@ -1,4 +1,4 @@
-# line-ceiling: 812
+# line-ceiling: 820
 import contextlib
 import io
 import os
@@ -47,16 +47,19 @@ class ProjectBootstrapTests(unittest.TestCase):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
         self.assertIn("introduces a new helper function, module, or script", rules)
 
-    def test_generated_governance_uses_review_pool_and_mechanical_merge(self):
+    def test_generated_governance_uses_guarded_fallback_and_mechanical_merge(self):
         rules = init_project.DEFAULT_AGENTS_TEMPLATE
-        self.assertIn("assigned review-pool service is the sole PR code-review authority", rules)
-        self.assertIn("review:coderabbit", rules)
-        self.assertIn("review:sourcery", rules)
-        self.assertIn("review:codeant", rules)
+        normalized = " ".join(rules.split())
+        self.assertIn("`create_pr.py` assigns CodeRabbit by default", normalized)
+        self.assertIn("Sourcery or CodeAnt", normalized)
+        self.assertIn("review:agent", normalized)
+        self.assertIn("unavailable, busy, or waiting too long", normalized)
+        self.assertIn("never creates a review queue, rotation, fleet, scheduler", normalized)
+        self.assertIn("After authoritative exact-head evidence from the assigned reviewer is present", normalized)
         self.assertIn("including the implementation author", rules)
         self.assertIn("merge_pr.py", rules)
         self.assertIn("--expected-head <HEAD_SHA>", rules)
-        self.assertIn("Coding agents never review", rules)
+        self.assertIn("Authors must never review their own work", rules)
         self.assertIn("severe merge", rules)
         self.assertIn("merge/close-out failure", rules)
         self.assertNotIn("--require-plan-ack", rules)
@@ -67,10 +70,10 @@ class ProjectBootstrapTests(unittest.TestCase):
         normalized = " ".join(rules.split()).lower()
         self.assertIn('merge_pr.py" --pr <ID>', rules)
         self.assertIn("--expected-head <HEAD_SHA>", rules)
-        self.assertIn("Authors must never review.", rules)
+        self.assertIn("Authors must never review their own work.", rules)
         self.assertIn("when the picker supplies `head_sha`", normalized)
 
-    def test_author_merge_and_no_agent_review_are_consistent(self):
+    def test_author_merge_and_emergency_agent_review_are_consistent(self):
         paths = [
             "AGENTS.md", "docs/project_board_workflow.md",
             "skills/run-aru-factory/SKILL.md", "skills/implement-next-issue/SKILL.md",
@@ -81,7 +84,8 @@ class ProjectBootstrapTests(unittest.TestCase):
             normalized = " ".join(copy.split()).lower()
             self.assertIn("including the implementation author", normalized)
             self.assertIn("coderabbit", normalized)
-            self.assertIn("coding agents never review", normalized)
+            self.assertIn("review:agent", normalized)
+            self.assertRegex(normalized, r"(external exhaustion|external reviewer|external paths|external review)")
 
     def test_active_factory_guidance_has_no_legacy_human_only_rule(self):
         paths = [
