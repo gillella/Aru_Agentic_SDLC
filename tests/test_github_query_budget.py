@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -12,6 +13,36 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import fetch_next_issue  # noqa: E402
 import fetch_next_work as fnw  # noqa: E402
+
+
+def executable_commands(section):
+    """Return commands presented for execution, excluding prose mentions."""
+    commands = []
+    fenced = False
+    for line in section.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            fenced = not fenced
+            continue
+        candidate = re.sub(r"^(?:[-*]|\d+\.)\s+", "", stripped)
+        if fenced and candidate.startswith(("python3 ", "gh ")):
+            commands.append(candidate)
+        elif candidate.startswith("`") and candidate.endswith("`"):
+            command = candidate[1:-1]
+            if command.startswith(("python3 ", "gh ")):
+                commands.append(command)
+    return commands
+
+
+EXTRA_GITHUB_COMMANDS = (
+    'python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" --json',
+    'python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --capacity',
+    "gh issue view 477",
+    "gh pr view 478",
+    'python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr 478',
+    'python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr 478 --dry-run',
+    'python3 "$ARU_SDLC_HOME/scripts/future_github_probe.py" --json',
+)
 
 
 def rest_pr(number):
@@ -347,20 +378,16 @@ class LoopOrchestrationBudgetTests(unittest.TestCase):
 
     def test_tick_starts_with_one_github_bearing_entrypoint(self):
         start = self.prompt.split("### The loop", 1)[1].split("#### A.", 1)[0]
-        commands = [
-            line.strip() for line in start.splitlines()
-            if line.strip().startswith("python3 ")
+        commands = executable_commands(start)
+        allowed = [
+            'python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json',
         ]
-        self.assertEqual(len(commands), 1)
-        self.assertIn("fetch_next_work.py", commands[0])
-        self.assertIn("--claim --json", commands[0])
+        self.assertEqual(commands, allowed)
+        for extra in EXTRA_GITHUB_COMMANDS:
+            with self.subTest(extra=extra):
+                self.assertNotEqual(executable_commands(f"{start}\n`{extra}`"), allowed)
         contract = " ".join(start.split()).lower()
         self.assertIn("only routine github-bearing entrypoint", contract)
-        for redundant in (
-            "fleet_status.py", "triage_backlog.py", "gh issue", "gh pr",
-            "check_ci.py", "merge_pr.py --dry-run",
-        ):
-            self.assertIn(redundant, contract)
 
     def test_waiting_card_uses_picker_snapshot_without_enrichment(self):
         waiting = self.prompt.split(
@@ -369,17 +396,22 @@ class LoopOrchestrationBudgetTests(unittest.TestCase):
         lowered = " ".join(waiting.split()).lower()
         self.assertIn("assemble only from the current picker result", lowered)
         self.assertIn("zero follow-up github reads", lowered)
-        self.assertNotIn("triage_backlog.py", waiting)
+        self.assertEqual(executable_commands(waiting), [])
+        for extra in EXTRA_GITHUB_COMMANDS:
+            with self.subTest(extra=extra):
+                self.assertEqual(executable_commands(f"{waiting}\n`{extra}`"), [extra])
 
     def test_merge_path_has_no_probe_or_confirmation_read(self):
         merge = self.prompt.split("#### B.", 1)[1].split("#### C.", 1)[0]
-        self.assertNotIn("--dry-run", merge)
-        confirmations = [
-            line for line in merge.splitlines()
-            if "claim_issue.py" in line and "--release" not in line
+        commands = executable_commands(merge)
+        allowed = [
+            'python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>',
+            'python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release',
         ]
-        self.assertEqual(confirmations, [])
-        self.assertEqual(merge.count("merge_pr.py"), 1)
+        self.assertEqual(commands, allowed)
+        for extra in EXTRA_GITHUB_COMMANDS:
+            with self.subTest(extra=extra):
+                self.assertNotEqual(executable_commands(f"{merge}\n`{extra}`"), allowed)
         self.assertIn("exactly one fresh picker call", merge)
 
     def test_router_carries_the_same_tick_budget(self):
@@ -388,6 +420,7 @@ class LoopOrchestrationBudgetTests(unittest.TestCase):
         self.assertIn("exactly one authoritative picker call", lowered)
         self.assertIn("zero follow-up github reads", lowered)
         self.assertIn("build the **status card** only from the picker result", lowered)
+        self.assertIn("full diagnostics are a separately declared attempt", lowered)
 
 
 if __name__ == "__main__":

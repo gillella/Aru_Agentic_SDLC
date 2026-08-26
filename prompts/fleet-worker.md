@@ -121,9 +121,12 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--fami
 This is the tick's **exactly one authoritative picker call** and its only
 routine GitHub-bearing entrypoint. Treat the returned JSON as the complete
 snapshot for this tick. Do not preflight or enrich it with `fleet_status.py`,
-`triage_backlog.py`, direct `gh issue` / `gh pr` views, `check_ci.py`, or
-`merge_pr.py --dry-run`. Use full diagnostics only for an explicit operator
-`status` / `doctor` request or to diagnose a concrete picker/helper error.
+`triage_backlog.py`, direct gh issue / gh pr views, `check_ci.py`, or
+`merge_pr.py --dry-run`. A transient helper warning inside a usable result
+remains zero-read recovery. If no usable result exists, end the routine tick;
+full diagnostics are a separately declared attempt that replaces the next
+picker tick, only for an explicit operator `status` / `doctor` request or the
+concrete failure.
 
 It returns one work item of type `feedback`, `merge`, `issue`, `error`, or
 `idle`. `feedback`, `error`, and `idle` are returned without claims. `merge`
@@ -369,9 +372,12 @@ idle, the board is Complete, work is waiting on review/CI/dependencies, another
 agent wins a conflict, credits or rate limits are unavailable, or a helper,
 GitHub, or the network fails transiently, record the state, wait with bounded
 dynamic backoff, and ask again. An unchanged, `idle`, or degraded/error picker
-result causes zero follow-up GitHub reads for that tick. Use a supported
-app-native wait/background primitive when available. A fixed-interval busy
-loop wastes credits.
+result—including one with transient helper warnings—causes zero follow-up
+GitHub reads for that tick. A failure with no usable result also stops the tick
+without more reads by default; only the separate diagnostic attempt defined
+above may replace a later routine tick. Use a supported app-native
+wait/background primitive when available. A fixed-interval busy loop wastes
+credits.
 
 ### Standard Waiting / Heartbeat Status Card
 

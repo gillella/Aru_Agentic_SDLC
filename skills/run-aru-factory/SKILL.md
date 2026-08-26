@@ -134,9 +134,9 @@ Read `prompts/fleet-worker.md`, then run its loop **inside the current desktop
 task**. Each tick starts with **exactly one authoritative picker call**, the `fetch_next_work.py --claim --json` command under **next**; its result is the tick snapshot and the only routine GitHub-bearing entrypoint.
 Do not preflight or enrich it with `fleet_status.py`, `triage_backlog.py`, direct `gh issue` / `gh pr` views, `check_ci.py`, or `merge_pr.py --dry-run`.
 Pace dynamically: after a successful mutation invalidates the prior snapshot, ask the picker exactly once again immediately.
-For unchanged, `idle`, Complete, review/CI/dependency wait, rate limit, exhausted credits, helper failure, or a degraded GitHub/network error, make zero follow-up GitHub reads.
+For unchanged, `idle`, Complete, review/CI/dependency wait, rate limit, exhausted credits, or any usable picker result carrying a transient helper/degraded warning, make zero follow-up GitHub reads.
 Build the **Status Card** only from the picker result, mark unavailable fields honestly, and use app-native wait or background primitives with a long fallback heartbeat, not a fixed interval.
-Full diagnostics are for an explicit operator `status` / `doctor` request or a concrete picker/helper error. Do not emit a final response for a recoverable state.
+A picker/helper failure that yields no usable snapshot also ends the routine tick with zero further reads by default. Full diagnostics are a separately declared attempt—replacing, not enriching, a routine tick—for an explicit operator `status` / `doctor` request or that concrete failure. Do not emit a final response for a recoverable state.
 Loop mode ends intentionally only when the operator explicitly stops it or a
 decision needs human intervention. If `$HOME/.aru/factory-loop.stop` applies
 here, stop immediately and do not arm native wakes. Ambiguous board identity,
