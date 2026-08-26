@@ -251,11 +251,10 @@ class PickerTransitionGuardTests(unittest.TestCase):
                 fnw.promote_one_idle_backlog_issue("agent-1")
         self.assertEqual(update.call_count, 2)
 
-    def test_missing_repository_identity_blocks_increment_lookup(self):
-        with patch.object(fetch_next_issue, "repo_project_id", return_value=None), \
-             patch.object(fetch_next_issue, "DeliveryIncrementStore"):
-            with self.assertRaisesRegex(RuntimeError, "repository identity"):
-                fetch_next_issue.active_increment_scope(fail_on_error=True)
+    def test_retired_increment_scope_never_requires_repository_identity(self):
+        with patch.object(fetch_next_issue, "repo_project_id") as repo_project:
+            self.assertIsNone(fetch_next_issue.active_increment_scope(fail_on_error=True))
+        repo_project.assert_not_called()
 
     def test_post_ranking_rolls_back_for_new_higher_priority_backlog(self):
         selected = qualified_issue(20, "p1")
