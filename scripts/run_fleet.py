@@ -667,12 +667,12 @@ class FleetRunner:
                 fleet_state = str(fleet.get("state") or "error")
                 self.last_fleet_snapshot = fleet
                 self.last_fleet_cycle = self.cycle
-                if fleet_state == "complete":
-                    return self._park("complete_watch", fleet, work)
-                if fleet_state == "blocked":
-                    return self._park("blocked_wait", fleet, work)
-                if fleet_state == "error":
-                    return self._park("error_wait", fleet, {"type": "error"})
+            if fleet_state == "complete":
+                return self._park("complete_watch", fleet, work)
+            if fleet_state == "blocked":
+                return self._park("blocked_wait", fleet, work)
+            if fleet_state == "error":
+                return self._park("error_wait", fleet, {"type": "error"})
             return self._park("waiting", fleet, work)
         if work_type == "error":
             return self._park("error_wait", fleet, work)

@@ -1035,6 +1035,7 @@ class FleetStatusTests(unittest.TestCase):
     def test_current_head_coderabbit_review_is_not_reported_as_pending_review(self):
         reviewed = mock_pr(
             18,
+            "review:coderabbit",
             decision="COMMENTED",
             statusCheckRollup=[{
                 "name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",

@@ -44,17 +44,22 @@ def _ci_contexts(head_sha: str) -> list[dict] | None:
     checks = run_gh_json([
         "gh", "api", f"repos/{slug}/commits/{head_sha}/check-runs?per_page=100",
     ])
-    statuses = run_gh_json(["gh", "api", f"repos/{slug}/commits/{head_sha}/status"])
+    statuses = run_gh_json([
+        "gh", "api", f"repos/{slug}/commits/{head_sha}/status?per_page=100",
+    ])
     if not isinstance(checks, dict) or not isinstance(statuses, dict):
         return None
     check_runs = checks.get("check_runs")
     status_rows = statuses.get("statuses")
-    total = checks.get("total_count")
+    check_total = checks.get("total_count")
+    status_total = statuses.get("total_count")
     if (
         not isinstance(check_runs, list)
         or not isinstance(status_rows, list)
-        or not isinstance(total, int)
-        or total != len(check_runs)
+        or type(check_total) is not int
+        or type(status_total) is not int
+        or check_total != len(check_runs)
+        or status_total != len(status_rows)
     ):
         # More than 100 checks is uncommon; silently truncating would let a
         # failure on the next page disappear from the merge gate.

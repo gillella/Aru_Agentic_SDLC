@@ -295,6 +295,21 @@ class DurableRunnerBudgetTests(unittest.TestCase):
                 runner.run_iteration()
         self.assertEqual(fleet.call_count, 1)
 
+    def test_cached_blocked_fleet_state_is_preserved_on_subsequent_idle_cycle(self):
+        with tempfile.TemporaryDirectory() as root:
+            runner = self.runner(root)
+            with patch.object(
+                runner, "_run_fleet_status", return_value={"state": "blocked"},
+            ) as fleet, patch.object(
+                runner, "_run_picker", return_value={"work": {"type": "idle"}},
+            ) as picker:
+                res1 = runner.run_iteration()
+                res2 = runner.run_iteration()
+        self.assertEqual(res1.phase, "blocked_wait")
+        self.assertEqual(res2.phase, "blocked_wait")
+        self.assertEqual(picker.call_count, 1)
+        self.assertEqual(fleet.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,13 +17,37 @@ class CheckCiRestTests(unittest.TestCase):
             {"total_count": 1, "check_runs": [
                 {"name": "CI", "status": "completed", "conclusion": "success"},
             ]},
-            {"statuses": []},
+            {"total_count": 0, "statuses": []},
         ]
 
         self.assertTrue(check_ci.check_ci_status(17))
 
         self.assertTrue(all(call.args[0][1] == "api" for call in api.call_args_list))
         self.assertTrue(all("graphql" not in call.args[0] for call in api.call_args_list))
+
+    @patch.object(check_ci, "get_repo_slug", return_value="owner/repo")
+    @patch.object(check_ci, "run_gh_json")
+    def test_truncated_check_runs_returns_none(self, api, _slug):
+        api.side_effect = [
+            {"total_count": 2, "check_runs": [
+                {"name": "CI", "status": "completed", "conclusion": "success"},
+            ]},
+            {"total_count": 0, "statuses": []},
+        ]
+        self.assertIsNone(check_ci._ci_contexts("abc"))
+
+    @patch.object(check_ci, "get_repo_slug", return_value="owner/repo")
+    @patch.object(check_ci, "run_gh_json")
+    def test_truncated_commit_statuses_returns_none(self, api, _slug):
+        api.side_effect = [
+            {"total_count": 1, "check_runs": [
+                {"name": "CI", "status": "completed", "conclusion": "success"},
+            ]},
+            {"total_count": 2, "statuses": [
+                {"context": "lint", "state": "success"},
+            ]},
+        ]
+        self.assertIsNone(check_ci._ci_contexts("abc"))
 
     @patch.object(check_ci, "_pull_head", return_value="abc")
     @patch.object(check_ci, "_ci_contexts", return_value=None)
