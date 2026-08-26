@@ -1,9 +1,10 @@
-# line-ceiling: 6935
+# line-ceiling: 7300
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
 import json
 import os
+import shutil
 import sys
 import subprocess
 import tempfile
@@ -878,6 +879,335 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         self.assertIsNone(merge_pr.review_evidence(162))
 
 
+class AcceptanceEnvironmentTests(unittest.TestCase):
+    """#429: a refused merge must not corrupt the PR it refused."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        # Resolution consults VIRTUAL_ENV, so a suite run from an activated
+        # virtualenv would otherwise resolve a runner these cases declare
+        # unresolvable and pass or fail on the operator's shell, not the code.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("VIRTUAL_ENV", None)
+
+    def _make_venv_runner(self, name, root=".venv", exit_code=0):
+        binaries = os.path.join(self.tmp, root, "bin")
+        os.makedirs(binaries, exist_ok=True)
+        path = os.path.join(binaries, name)
+        with open(path, "w") as handle:
+            handle.write(f"#!/bin/sh\nexit {exit_code}\n")
+        os.chmod(path, 0o755)
+        return path
+
+    def test_project_virtualenv_wins_over_ambient_path(self):
+        expected = self._make_venv_runner("python3")
+        resolved, error = merge_pr.resolve_project_runner("python3", self.tmp)
+        self.assertIsNone(error)
+        self.assertEqual(resolved, expected)
+
+    def test_legacy_venv_directory_is_also_honoured(self):
+        expected = self._make_venv_runner("python3", root="venv")
+        resolved, error = merge_pr.resolve_project_runner("python3", self.tmp)
+        self.assertIsNone(error)
+        self.assertEqual(resolved, expected)
+
+    def test_falls_back_to_path_when_no_project_virtualenv(self):
+        with patch.object(merge_pr.shutil, "which", return_value="/usr/bin/python3"):
+            resolved, error = merge_pr.resolve_project_runner("python3", self.tmp)
+        self.assertIsNone(error)
+        self.assertEqual(resolved, "/usr/bin/python3")
+
+    def test_unresolvable_runner_is_an_environment_fault(self):
+        with patch.object(merge_pr.shutil, "which", return_value=None):
+            resolved, error = merge_pr.resolve_project_runner("python3", self.tmp)
+        self.assertIsNone(resolved)
+        self.assertIn("environment fault", error)
+        self.assertIn("python3", error)
+
+    def test_malformed_runner_name_fails_closed(self):
+        for name in (None, "", 7, []):
+            with self.subTest(name=name):
+                resolved, error = merge_pr.resolve_project_runner(name, self.tmp)
+                self.assertIsNone(resolved)
+                self.assertTrue(error)
+
+    def test_resolution_reports_the_first_fault_without_running_anything(self):
+        criteria = merge_pr.acceptance_runner.parse_criteria(
+            "## Acceptance Criteria\n\n"
+            "- [x] one (verify: `python3 -m unittest tests.test_a`)\n"
+        )
+        with patch.object(merge_pr.shutil, "which", return_value=None):
+            resolved, error = merge_pr.resolve_acceptance_runners(criteria, self.tmp)
+        self.assertIsNone(resolved)
+        self.assertIn("environment fault", error)
+
+    def test_runner_rewrites_argv0_to_the_resolved_interpreter(self):
+        seen = {}
+
+        def fake_run(argv, cwd=None, evidence=None, check=False):
+            seen["argv"] = list(argv)
+            return 0, "", ""
+
+        runner = merge_pr.acceptance_run_cmd({"python3": "/proj/.venv/bin/python3"})
+        with patch.object(merge_pr.acceptance_runner, "_run_verify", fake_run):
+            runner(["python3", "-m", "unittest", "tests.test_a"], cwd="/tmp")
+        self.assertEqual(
+            seen["argv"], ["/proj/.venv/bin/python3", "-m", "unittest", "tests.test_a"],
+        )
+
+    def test_unmapped_runner_is_passed_through_unchanged(self):
+        seen = {}
+
+        def fake_run(argv, cwd=None, evidence=None, check=False):
+            seen["argv"] = list(argv)
+            return 0, "", ""
+
+        runner = merge_pr.acceptance_run_cmd({})
+        with patch.object(merge_pr.acceptance_runner, "_run_verify", fake_run):
+            runner(["ruff", "check", "scripts/merge_pr.py"])
+        self.assertEqual(seen["argv"], ["ruff", "check", "scripts/merge_pr.py"])
+
+class RefusedMergeIsNonDestructiveTests(unittest.TestCase):
+    """#429: the refusal path end to end, driven through ``main()``.
+
+    The resolver unit tests above prove which executable is chosen. These prove
+    the consequence the issue is actually about: what a refused merge leaves
+    behind on the pull request, and that a second attempt finds it unchanged.
+    """
+
+    BODY = (
+        "## Acceptance Criteria\n\n"
+        "- [x] the gate runs this (verify: `python3 -m unittest tests.test_example`)\n"
+    )
+    # Verbs that reach GitHub. A refusal must issue none of them.
+    MUTATIONS = frozenset({
+        "edit", "comment", "merge", "create", "close", "delete",
+        "--add-label", "--remove-label", "POST", "PATCH", "PUT", "DELETE",
+    })
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("VIRTUAL_ENV", None)
+
+    def _runner(self, exit_code, root=".venv"):
+        binaries = os.path.join(self.tmp, root, "bin")
+        os.makedirs(binaries, exist_ok=True)
+        path = os.path.join(binaries, "python3")
+        with open(path, "w") as handle:
+            handle.write(f"#!/bin/sh\nexit {exit_code}\n")
+        os.chmod(path, 0o755)
+        return path
+
+    def _pr(self):
+        return {
+            "number": 9, "title": "example", "body": "Closes #7", "state": "OPEN",
+            "isDraft": False, "headRefOid": "gated-sha", "baseRefOid": "base-sha",
+            "baseRefName": "main", "mergeStateStatus": "CLEAN",
+            "mergeable": "MERGEABLE", "labels": [],
+        }
+
+    def _drive(
+        self,
+        pr,
+        *,
+        ambient=None,
+        check_rebased_return=(True, "current"),
+        execute_merge_return=None,
+        persist_error=False,
+    ):
+        """Run main() from the DoD pass down through merge execution.
+
+        Every GitHub touch is recorded rather than issued, so the assertions
+        below can speak about mutations that were *attempted*, not merely about
+        ones that happened to succeed against a live API.
+        """
+        commands = []
+        captured_state = {"body": pr.get("body", "")}
+
+        def record_json(argv, *_args, **_kwargs):
+            commands.append(list(argv))
+            if len(argv) >= 3 and argv[0:2] == ["gh", "issue"] and argv[2] == "view":
+                return {"body": self.BODY}
+            if len(argv) >= 3 and argv[0:2] == ["gh", "pr"] and argv[2] == "view":
+                return {"body": captured_state["body"], "headRefOid": pr.get("headRefOid")}
+            return {"body": self.BODY}
+
+        def record_run(argv, *_args, **_kwargs):
+            commands.append(list(argv))
+            if len(argv) >= 4 and argv[0:3] == ["gh", "pr", "edit"]:
+                if persist_error:
+                    return 1, "", "simulated persistence failure"
+                if "--body" in argv:
+                    captured_state["body"] = argv[argv.index("--body") + 1]
+            return 0, "", ""
+
+        def fetch_snapshot(pr_id):
+            snap = dict(pr)
+            snap["body"] = captured_state["body"]
+            return snap
+
+        exec_return = (
+            execute_merge_return
+            if execute_merge_return is not None
+            else (merged_pr(), "merged")
+        )
+
+        which = patch.object(merge_pr.shutil, "which", return_value=ambient) \
+            if ambient else nullcontext()
+        with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
+             patch.object(merge_pr, "fetch_pr", side_effect=fetch_snapshot), \
+             patch.object(merge_pr, "_gh_json", side_effect=record_json), \
+             patch.object(merge_pr, "run_cmd", side_effect=record_run), \
+             patch.object(merge_pr, "review_evidence",
+                          return_value={"head_oid": "gated-sha"}), \
+             patch.object(merge_pr, "with_service_evidence",
+                          side_effect=lambda _pr, _id, evidence: evidence), \
+             patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
+             patch.object(merge_pr, "repository_root", return_value=self.tmp), \
+             patch.object(merge_pr, "ensure_pr_head_checkout",
+                          return_value=(self.tmp, None)), \
+             patch.object(merge_pr, "release_pr_head_checkout"), \
+             patch.object(merge_pr, "repository_merge_lock",
+                          return_value=nullcontext((True, "serialized"))), \
+             patch.object(merge_pr, "check_rebased", return_value=check_rebased_return), \
+             patch.object(merge_pr, "run_closeout", return_value=True), \
+             patch.object(merge_pr, "execute_merge", return_value=exec_return) as execute, \
+             patch.object(merge_pr, "write_checkpoint_tag",
+                          return_value=(True, "checkpoint written")), \
+             which:
+            code = merge_pr.main()
+        return SimpleNamespace(
+            code=code,
+            commands=commands,
+            captured_body=captured_state["body"],
+            execute=execute,
+        )
+
+    def _assert_no_mutation(self, commands):
+        for argv in commands:
+            self.assertFalse(
+                self.MUTATIONS.intersection(argv),
+                f"a refused merge issued a mutating command: {argv}",
+            )
+
+    def test_failed_acceptance_twice_refuses_without_touching_pr(self):
+        """Failed acceptance twice must assert no PR edit and byte-identical PR body."""
+        self._runner(1)
+        pr = self._pr()
+        initial_body = pr["body"]
+
+        first = self._drive(pr)
+        self.assertEqual(first.code, merge_pr.EXIT_BLOCKED)
+        first.execute.assert_not_called()
+        self._assert_no_mutation(first.commands)
+        self.assertEqual(first.captured_body, initial_body)
+
+        second = self._drive(pr)
+        self.assertEqual(second.code, merge_pr.EXIT_BLOCKED)
+        second.execute.assert_not_called()
+        self._assert_no_mutation(second.commands)
+        self.assertEqual(second.captured_body, initial_body)
+        self.assertEqual(
+            first.commands, second.commands,
+            "the second attempt did not repeat the first exactly",
+        )
+
+    def test_final_gate_refusal_after_successful_acceptance_twice_preserves_pr(self):
+        """Final-gate refusal after successful acceptance twice must not edit PR and keep PR body identical."""
+        self._runner(0)
+        pr = self._pr()
+        initial_body = pr["body"]
+
+        first = self._drive(pr, check_rebased_return=(False, "Branch is behind base"))
+        self.assertEqual(first.code, merge_pr.EXIT_BLOCKED)
+        first.execute.assert_not_called()
+        self._assert_no_mutation(first.commands)
+        self.assertEqual(first.captured_body, initial_body)
+
+        second = self._drive(pr, check_rebased_return=(False, "Branch is behind base"))
+        self.assertEqual(second.code, merge_pr.EXIT_BLOCKED)
+        second.execute.assert_not_called()
+        self._assert_no_mutation(second.commands)
+        self.assertEqual(second.captured_body, initial_body)
+        self.assertEqual(
+            first.commands, second.commands,
+            "the second attempt did not repeat the first exactly",
+        )
+
+    def test_successful_acceptance_persists_evidence_post_merge(self):
+        """Acceptance evidence is persisted only after execute_merge succeeds."""
+        self._runner(0)
+        pr = self._pr()
+        initial_body = pr["body"]
+
+        result = self._drive(pr)
+        self.assertEqual(result.code, merge_pr.EXIT_OK)
+        result.execute.assert_called_once()
+        self.assertNotEqual(result.captured_body, initial_body)
+        self.assertIn("aru.verification.v1", result.captured_body)
+        self.assertIn("tests.test_example", result.captured_body)
+        edit_cmds = [
+            cmd for cmd in result.commands
+            if len(cmd) >= 3 and cmd[0:3] == ["gh", "pr", "edit"]
+        ]
+        self.assertEqual(len(edit_cmds), 1)
+
+    def test_post_merge_persistence_failure_triggers_intervention_recovery(self):
+        """A persistence failure post-merge enters human intervention recovery, not pre-merge EXIT_BLOCKED."""
+        self._runner(0)
+        pr = self._pr()
+
+        result = self._drive(pr, persist_error=True)
+        self.assertEqual(result.code, merge_pr.EXIT_ERROR)
+        result.execute.assert_called_once()
+        intervention_comments = [
+            cmd for cmd in result.commands
+            if len(cmd) >= 3 and cmd[0:2] in (["gh", "issue"], ["gh", "pr"]) and cmd[2] == "comment"
+        ]
+        self.assertTrue(
+            intervention_comments,
+            "human intervention comment must be recorded on failure",
+        )
+
+    def test_an_unresolvable_interpreter_refuses_before_running_anything(self):
+        """No project runner exists, so nothing runs and nothing is recorded."""
+        with patch.object(merge_pr.shutil, "which", return_value=None):
+            result = self._drive(self._pr())
+
+        self.assertEqual(result.code, merge_pr.EXIT_BLOCKED)
+        result.execute.assert_not_called()
+        self._assert_no_mutation(result.commands)
+
+    def test_a_command_passing_under_the_project_interpreter_is_not_a_failure(self):
+        """#429's first defect: an ambient shim failed code the project passes."""
+        ambient = os.path.join(self.tmp, "ambient-python3")
+        with open(ambient, "w") as handle:
+            handle.write("#!/bin/sh\nexit 1\n")
+        os.chmod(ambient, 0o755)
+        project = self._runner(0)
+
+        result = self._drive(self._pr(), ambient=ambient)
+
+        self.assertEqual(result.code, merge_pr.EXIT_OK)
+        result.execute.assert_called_once()
+        evidence, error = merge_pr.parse_verification_evidence(result.captured_body)
+        self.assertIsNone(error)
+        self.assertEqual(
+            [record["command"][0] for record in evidence.get("commands", [])],
+            [common.sanitize_command([project])[0]],
+        )
+        self.assertTrue(
+            all(record["status"] == "passed" for record in evidence.get("commands", [])),
+        )
+
+
 class SourceryEvidenceTests(unittest.TestCase):
     """#435: Sourcery satisfies the gate only on producer-validated exact-head proof."""
 
@@ -1747,6 +2077,23 @@ class ReviewGateTests(unittest.TestCase):
             "checkSuite": {"app": {"slug": "coderabbitai"}},
         }]
 
+    @staticmethod
+    def coderabbit_status_context(**overrides):
+        """One authentic, current-head CodeRabbit StatusContext.
+
+        Defaults to the genuine completion shape so each case below overrides
+        exactly the one field it is about.
+        """
+        context = {
+            "type": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+            "creator": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "description": "Review completed",
+        }
+        context.update(overrides)
+        return [context]
+
     @classmethod
     def coderabbit_status_payload(cls, head):
         return {"data": {"repository": {"pullRequest": {
@@ -1930,6 +2277,76 @@ class ReviewGateTests(unittest.TestCase):
             "type": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS",
             "creator": {"login": "spoof", "__typename": "User"},
         }]
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_completed_description_status_passes(self):
+        """The genuine verdict still merges: no currently mergeable PR regresses."""
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context()
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )
+        self.assertTrue(ok, msg)
+        self.assertIn("CodeRabbit", msg)
+
+    def test_rate_limited_description_status_fails_closed(self):
+        """The reported bug: state=SUCCESS meaning 'I did not review this head'."""
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description="Review rate limited",
+        )
+        ok, msg = merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )
+        self.assertFalse(ok)
+        # The refusal already promised rate-limited evidence blocks merge;
+        # this binds that wording to behaviour the code now implements.
+        self.assertIn("rate-limited", msg)
+
+    def test_label_skipped_description_status_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description="Review skipped: excluded by label configuration",
+        )
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_missing_description_status_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        status = self.coderabbit_status_context()
+        del status[0]["description"]
+        evidence["coderabbit_status"] = status
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_empty_description_status_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description="   ",
+        )
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_non_string_description_status_fails_closed(self):
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description={"text": "Review completed"},
+        )
+        self.assertFalse(merge_pr.check_reviews(
+            self.coderabbit_pr("author:agent-1"), evidence,
+        )[0])
+
+    def test_unknown_description_status_fails_closed(self):
+        """A future wording is not silently admitted by a substring rule."""
+        evidence = self.coderabbit_evidence()
+        evidence["coderabbit_status"] = self.coderabbit_status_context(
+            description="Review could not be completed",
+        )
         self.assertFalse(merge_pr.check_reviews(
             self.coderabbit_pr("author:agent-1"), evidence,
         )[0])
@@ -2422,6 +2839,29 @@ class CodeRabbitStatusEvidenceTests(unittest.TestCase):
             [coderabbit, other],
         )
         self.assertIn("cursor=page-2", gh_json.call_args_list[1].args[0])
+
+    @patch.object(merge_pr, "_gh_json")
+    def test_status_context_selection_carries_description_to_the_gate(self, gh_json):
+        """The loader must select the one field the gate reads on a status."""
+        coderabbit = {
+            "__typename": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+            "description": "Review completed",
+            "creator": {"login": "coderabbitai", "__typename": "Bot"},
+        }
+        gh_json.return_value = self.payload(total=1, nodes=[coderabbit])
+
+        statuses = merge_pr._coderabbit_status_evidence("owner", "repo", 17, "head123")
+
+        self.assertEqual(statuses, [coderabbit])
+        query = next(
+            arg for arg in gh_json.call_args.args[0] if arg.startswith("query=")
+        )
+        self.assertIn("description", query.split("on StatusContext {", 1)[1])
+        self.assertIs(
+            merge_pr._coderabbit_check({"coderabbit_status": statuses}), True
+        )
 
     @patch.object(merge_pr, "_gh_json")
     def test_status_pagination_rejects_concurrent_head_change(self, gh_json):

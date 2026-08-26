@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # +64 for the #344 terminal lease and stale-writer escalation.
-# line-ceiling: 5305
+# +26 for the #427 CodeRabbit completed-description allowlist.
+# +80 for the #429 acceptance-interpreter and post-merge persistence fix; #414 ratchets this file to 4,500.
+# line-ceiling: 5416
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -119,6 +121,14 @@ CODEANT_STATUS_MARKER_RE = re.compile(
 CODEANT_STATUS_RECORD_KEYS = {"label", "commit", "started", "finished", "done"}
 CODERABBIT_FULL_REVIEW_REQUEST = "@coderabbitai full review"
 CODERABBIT_FULL_REVIEW_FINISHED = "Full review finished."
+# CodeRabbit reports throttling and configuration skips as state=SUCCESS, byte
+# -identical in state to a genuine verdict and separable only by description:
+# "Review rate limited" and "Review skipped: excluded by label configuration"
+# both mean no review ran against this head. Recognition is therefore an exact
+# allowlist compared after strip()+casefold(), never a substring test - a
+# substring rule for "complete" would silently re-admit a future wording such
+# as "Review could not be completed".
+CODERABBIT_COMPLETED_DESCRIPTIONS = frozenset({"review completed"})
 REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # GraphQL's review author is an Actor. Only a User can supply independent
 # review evidence; all other known actor kinds are automation or identities
@@ -1500,7 +1510,7 @@ def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
             nodes {
               __typename
               ... on CheckRun { name status conclusion checkSuite { app { slug } } }
-              ... on StatusContext { context state creator { login __typename } }
+              ... on StatusContext { context state description creator { login __typename } }
             }
           } } } } }
         }
@@ -1574,7 +1584,15 @@ def _with_coderabbit_status(pr_id, evidence):
 
 
 def _coderabbit_check(evidence):  # noqa: C901, PLR0912
-    """Return an authenticated exact-head CodeRabbit status, or ``None``."""
+    """Return an authenticated exact-head CodeRabbit status, or ``None``.
+
+    ``None`` means the evidence cannot be read as an attestation at all: a
+    wrong or unauthenticated producer, a missing or ambiguous context, or - for
+    a StatusContext - a description that is not an exactly recognized
+    completion wording. CodeRabbit reports both throttling and configuration
+    skips as ``state=SUCCESS``, so for that shape the description is the only
+    field separating "I reviewed this head" from "I did not review it".
+    """
     if not isinstance(evidence, dict):
         return None
     rollup = evidence.get("coderabbit_status")
@@ -1601,6 +1619,16 @@ def _coderabbit_check(evidence):  # noqa: C901, PLR0912
         if (not isinstance(creator, dict)
                 or str(creator.get("login") or "").lower() not in CODERABBIT_LOGINS
                 or creator.get("__typename") not in CODERABBIT_ACTOR_TYPES):
+            return None
+        # An authenticated producer is not yet an attestation. A throttled or
+        # config-skipped status is authentic, current-head, and SUCCESS while
+        # meaning no review ran, so the description must match a recognized
+        # completion wording exactly. Absent, empty, non-string, and unknown
+        # descriptions are unusable evidence, not completions.
+        description = check.get("description")
+        if (not isinstance(description, str)
+                or description.strip().casefold()
+                not in CODERABBIT_COMPLETED_DESCRIPTIONS):
             return None
     else:
         return None
@@ -3207,6 +3235,58 @@ def release_pr_head_checkout(path, repo_root=None):
     repo_root = repo_root or repository_root() or os.getcwd()
     run_cmd(["git", "worktree", "remove", "--force", path], check=False, cwd=repo_root)
     shutil.rmtree(path, ignore_errors=True)
+
+
+PROJECT_VENV_DIRS = (".venv", "venv")
+
+
+def resolve_project_runner(runner, repo_root=None):
+    """Map an allowlisted bare runner name onto this project's own executable.
+
+    Resolving argv[0] from the ambient PATH runs whatever interpreter the shell
+    exposes -- often a shim lacking this project's dependencies -- so the gate
+    blames the code for an environment mismatch (#429). Prefers the repository
+    virtualenv, then VIRTUAL_ENV, then PATH. An error is an environment fault,
+    never a verification failure.
+    """
+    if not isinstance(runner, str) or not runner:
+        return None, "acceptance runner name is missing or malformed"
+    roots = [os.path.join(repo_root, n) for n in PROJECT_VENV_DIRS] if repo_root else []
+    if os.environ.get("VIRTUAL_ENV"):
+        roots.append(os.environ["VIRTUAL_ENV"])
+    for root in roots:
+        candidate = os.path.join(root, "bin", runner)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate, None
+    found = shutil.which(runner)
+    if found:
+        return found, None
+    return None, (
+        f"cannot resolve the project interpreter for {runner!r}: no project "
+        "virtualenv, no VIRTUAL_ENV, and nothing on PATH provides it. This is "
+        "an environment fault, not a verification failure; nothing was recorded."
+    )
+
+
+def resolve_acceptance_runners(criteria, repo_root=None):
+    """Resolve every runner up front, so a bad environment refuses before running."""
+    resolved = {}
+    for item in criteria:
+        if not item.argv or item.argv[0] in resolved:
+            continue
+        resolved[item.argv[0]], error = resolve_project_runner(item.argv[0], repo_root)
+        if error:
+            return None, error
+    return resolved, None
+
+
+def acceptance_run_cmd(resolved):
+    """Wrap the acceptance runner so argv[0] becomes the resolved executable."""
+    def _runner(argv, check=False, cwd=None, evidence=None):
+        if isinstance(argv, list) and argv:
+            argv = [resolved.get(argv[0], argv[0]), *argv[1:]]
+        return acceptance_runner._run_verify(argv, cwd=cwd, evidence=evidence, check=check)
+    return _runner
 
 
 def persist_acceptance_evidence(pr_id, pr, records):
@@ -5034,6 +5114,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
     # Stays None on the resume path, where no gate is evaluated. The checkpoint
     # records that gap rather than inventing a verdict set.
     gates = None
+    acceptance_records = []
     if args.expected_head and not is_merged(pr):
         if not heads_match(gated_head, args.expected_head):
             print(
@@ -5117,20 +5198,33 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 print(f"\n🚫 Not merged. Unmet: accept. {checkout_err}")
                 return EXIT_BLOCKED
             try:
+                # Resolve runners first: an unresolvable interpreter must
+                # refuse before anything runs, so nothing partial is recorded.
+                all_criteria = [
+                    item
+                    for body in issue_bodies.values()
+                    for item in acceptance_runner.parse_criteria(body)
+                ]
+                resolved, resolve_err = resolve_acceptance_runners(
+                    all_criteria, repository_root(),
+                )
+                if resolve_err:
+                    print(f"\n🚫 Not merged. Unmet: accept. {resolve_err}")
+                    return EXIT_BLOCKED
+                run_cmd_fn = acceptance_run_cmd(resolved)
                 records = []
                 for num in issue_nums:
                     passed, message = check_acceptance(
                         num, issue_bodies.get(num, ""), cwd=checkout, execute=True,
-                        records_out=records,
+                        records_out=records, run_cmd_fn=run_cmd_fn,
                     )
                     print(f"  {'✅' if passed else '❌'} accept #{num:<4} {message}")
                     if not passed:
-                        persist_acceptance_evidence(args.pr, pr, records)
+                        # Deliberately does NOT persist: writing these records
+                        # flips the evidence block to failed and blocks the next
+                        # attempt on a gate the author never failed (#429).
                         return EXIT_BLOCKED
-                persisted, persist_msg = persist_acceptance_evidence(args.pr, pr, records)
-                print(f"  {'✅' if persisted else '❌'} evidence    {persist_msg}")
-                if not persisted:
-                    return EXIT_BLOCKED
+                acceptance_records = records
             finally:
                 release_pr_head_checkout(checkout)
 
@@ -5251,6 +5345,25 @@ def main():  # noqa: C901, PLR0912, PLR0915
             file=sys.stderr,
         )
         return EXIT_ERROR
+
+    if acceptance_records:
+        persisted, persist_msg = persist_acceptance_evidence(
+            args.pr, final_pr, acceptance_records
+        )
+        print(f"  {'✅' if persisted else '❌'} evidence          {persist_msg}")
+        if not persisted:
+            failure = f"acceptance evidence persistence: {persist_msg}"
+            evidence_ok = post_human_intervention(
+                final_pr, issue_nums, root, gated_head, merged_sha, [], command,
+                blocked_before_closeout=failure,
+            )
+            print(
+                "[ERROR] Merge succeeded but acceptance evidence could not be persisted; "
+                f"intervention evidence {'was recorded' if evidence_ok else 'could not be fully recorded'}.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+
     # Park the verdicts the moment we hold them, and read them back on a
     # resumed close-out. Re-deriving them post-merge is not an option:
     # check_open fails on a closed PR, so a re-evaluated block would record
