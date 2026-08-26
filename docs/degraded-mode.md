@@ -16,6 +16,28 @@ During an active GitHub outage or authentication failure:
 - **Merge Gate Execution**: `merge_pr.py` refuses to merge, as it cannot verify live CI status, review attestations, or remote head bounds.
 - **CI / Actions**: Remote pipeline verification and test execution on GitHub Actions cease.
 
+### GraphQL quota exhaustion is a partial outage
+
+GitHub REST and GraphQL have separate primary rate-limit buckets. The factory
+uses local Git metadata for repository identity and paginated REST for ordinary
+issue and identity-label inventories, preserving GraphQL for data that has no
+equivalent authoritative batch read: Projects v2 state, review threads, and
+rich pull-request gate evidence.
+
+If the rich pull-request query fails, the picker performs one paginated REST
+inventory read. That fallback is visibility only: it reports which open pull
+requests exist and then fails closed because REST cannot batch-prove review
+threads, CI rollups, and changed-file locks. It must not replace those missing
+facts with one REST call per pull request or make a claim/merge decision from a
+partial snapshot.
+
+One normal picker cycle shares its issue and pull-request snapshots with the
+stale-claim reapers. Per-pull-request review reads occur only for candidates
+whose batched CI state is already green; ordinary file snapshots use REST only
+when a rename requires the previous path. A cycle may refresh the snapshots
+after a successful mutation, but unchanged polling must not re-read the full
+queue.
+
 ---
 
 ## 2. What May Continue Locally

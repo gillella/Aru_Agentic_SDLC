@@ -30,7 +30,6 @@ their procedures. When a step here disagrees with the skill it delegates to,
 the skill wins.
 
 Canonical home: `$ARU_SDLC_HOME`.
-
 ## Identity
 
 The picker auto-assigns an **agent id** when `--agent` is omitted, and its
@@ -47,8 +46,8 @@ Omit `--agent` and the picker derives a stable id from where
 this agent runs — `<product>-<fingerprint>`, e.g. `claude-a3f19c`. The same
 machine, checkout, and family always resolve to the same id, so a restarted
 session reclaims its own board work, and two machines can never be issued one
-id. `ARU_AGENT_ID` pins an id explicitly; `--agent-pool` selects the older
-named ring (`claude-1`, `codex-1`, …) for fleets that want fixed names.
+id. `ARU_AGENT_ID` pins an id explicitly; pass `--agent <AGENT_ID>` when a
+fixed readable name such as `claude-1` or `codex-1` is preferred.
 
 ```shell
 python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" [--agent <AGENT_ID>] [--family <FAMILY>] --claim --json
@@ -107,7 +106,7 @@ the skill for its type:
 | type | skill |
 |---|---|
 | `feedback` | `address-pr-feedback` |
-| `review` | Forbidden legacy state: release your reviewer claim, then return to picker; the assigned review-pool service alone reviews. Coding agents never review |
+| `review` | `code-review`, only when the picker is resuming this exact agent's preassigned `review:agent` emergency fallback |
 | `issue` with `skill: research` | `research` |
 | any other `issue` | `implement-next-issue` |
 | `merge` | `merge_pr.py` only — see **merging** |
@@ -119,9 +118,11 @@ including unnamed workers. The picker's `work.skill` field is authoritative — 
 close-out contract in `$ARU_SDLC_HOME/skills/research/SKILL.md`, so do not route
 every issue through implementation.
 
-If forbidden legacy state or a caller supplies `work.type=review` after
-`--claim`, coding agents never review. Release this agent's legacy reviewer
-claim with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --agent <AGENT_ID> --release`, then return to the picker.
+If `work.type=review` lacks exactly `review:agent` plus
+`reviewer:<AGENT_ID>`, do not inspect the PR; release only this agent's malformed
+claim with `claim_issue.py --release` and return to the picker. A valid item follows `code-review`. The picker
+never selects or claims normal coding-agent review work; it only recovers an
+operator-created emergency assignment.
 
 **If the claim conflicts**, another agent won the race. That ends the
 iteration, not the session — ask the picker again. Treating a lost race as an
@@ -208,18 +209,17 @@ Restated only because skipping one is how each has been broken before.
    `--agent <id>`; `--model-family <family>` is optional.
 7. **Degraded GitHub halts coordination gracefully** — never a secondary local
    task queue or an ungated merge. See `docs/degraded-mode.md`.
-8. **Coding agents never review.** The assigned review-pool service is the
-   sole code-review authority. `create_pr.py` deterministically assigns
-   exactly one of `review:coderabbit`, `review:sourcery`, or `review:codeant`
-   to each ordinary PR. The merge gate requires exact-current-head
-   assigned-service evidence and rejects coding-agent comments, approvals,
-   labels, and attestations. Route findings from the assigned service back
-   through the picker's `feedback` work type for remediation — see
-   **next** above.
+8. **Agent review is emergency-only.** New PRs get exactly `review:coderabbit`;
+   reassignment is never automatic. Only an operator may move one stalled PR
+   from CodeRabbit to Sourcery or CodeAnt with `reassign_review.py`, recording
+   the concrete reason; only after external exhaustion or an operator-declared
+   excessive wait may that helper select one independent `review:agent`. The
+   picker resumes it but never creates a coding-agent review queue. Self-review,
+   stale heads, labels alone, and malformed or duplicate evidence fail closed.
 
 ### Merging
 
-After the assigned review-pool service has supplied exact-current-head evidence
+After the assigned reviewer has supplied exact-current-head evidence
 and every DoD gate passes, any factory agent, including the implementation author,
 may execute the merge
 helper with the picker-supplied `head_sha` pinned as `--expected-head`:

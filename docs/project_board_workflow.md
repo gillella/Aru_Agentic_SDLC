@@ -167,12 +167,14 @@ worktree, PR, review, merge, and cleanup. Other installed frameworks may help
 with a step, but their session-resume files, brainstorming flows, memory, or PR
 bots cannot replace board state or start a competing lifecycle.
 
-After the assigned review-pool service supplies authoritative exact-head
-evidence and all Definition-of-Done checks pass, any factory agent, including
+After the assigned reviewer supplies authoritative exact-head evidence and all
+Definition-of-Done checks pass, any factory agent, including
 the implementation author, may execute the mechanical merge only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID> --expected-head <HEAD_SHA>`
-when the picker supplied `head_sha`. Direct pushes and
-ad-hoc merge commands have no merge authority. Coding agents never review.
+when the picker supplied `head_sha`. Direct pushes and ad-hoc merge commands
+have no merge authority. Coding agents do not enter a normal review queue. An
+operator may assign one independent agent only after CodeRabbit and the
+Sourcery/CodeAnt fallbacks are unavailable, busy, or waiting too long.
 Human intervention is exceptional and applies only when a severe
 merge conflict or merge/close-out failure remains unsafe or impossible for
 agents to resolve through governed remediation; risk category, diff size, and
@@ -250,8 +252,14 @@ Two consequences worth knowing before you hit them:
   head, no unresolved threads, and how many findings were withdrawn rather
   than fixed — so a later reader can reconstruct why.
 
-The assigned review-pool service is the sole code-review authority for a given
-PR. CodeRabbit keeps its current exact-head contract. Sourcery requires a
+CodeRabbit is the default code-review authority, and `review:coderabbit` is
+the only review assignment `create_pr.py` creates. An operator may explicitly
+reassign a stalled PR to Sourcery or CodeAnt after concrete observed
+unavailability; no automatic rotation, load balancer, or scheduler exists.
+That external switch is one-way: an already-reassigned PR is never switched
+to the other external service, and re-running the same target is refused
+because reassignment is not a retry mechanism. The only move accepted from an
+already-switched PR is the terminal independent-agent escalation below. CodeRabbit keeps its current exact-head contract. Sourcery requires a
 successful head-bound `Sourcery review` check and zero Sourcery unresolved
 threads. CodeAnt accepts either of two evidence shapes bound unambiguously to
 the exact current head, plus zero CodeAnt unresolved threads: an authoritative
@@ -271,7 +279,15 @@ authoritative GitHub data. Missing, pending, failed, skipped, stale, ambiguous,
 duplicated, or spoofed evidence blocks - including a status marker that is
 malformed, unfinished, bound to a different commit, or posted from more than
 one trusted comment. Legacy `reviewer:` / `reviewed-by:` coding-agent state is
-non-authoritative and must not be re-dispatched.
+non-authoritative by itself and must not be re-dispatched. If all three
+external paths are unavailable, busy, or waiting too long,
+`reassign_review.py --to agent` records an explicit per-PR `review:agent` operator
+assignment. The merge gate then requires one reviewer different from the
+author, the reviewer's model family, a substantive GitHub review bound to the
+exact current head, and exactly one matching completed `aru-agent-review:v1`
+record. Stale, duplicate, malformed, or self-review evidence fails closed.
+This is emergency recovery, not a second review scheduler, rotation, fleet,
+or queue.
 
 ---
 

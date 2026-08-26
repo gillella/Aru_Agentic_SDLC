@@ -119,14 +119,15 @@ branch, or merge around the Definition-of-Done gate.
   non-authoritative here.
 - Brainstorming frameworks supply input to Aru's plan gate rather than running
   a parallel lifecycle.
-- Memory tools provide context only. **CodeRabbit is the sole positive PR code-review authority.** `create_pr.py` assigns exactly `review:coderabbit`; that label selects the oracle but never satisfies review by itself. Coding agents never review; they only implement, remediate, and mechanically merge through the governed helper after every gate passes.
+- Memory tools provide context only. `create_pr.py` assigns CodeRabbit by default. An operator may explicitly move a stalled PR to Sourcery or CodeAnt. Only after every external reviewer is unavailable, busy, or waiting too long may the operator assign one independent coding agent to that exact PR with `review:agent`. This never creates a review queue, rotation, fleet, scheduler, or permission for an author to review.
 
-After the uniquely newest authenticated completed exact-head CodeRabbit Review is present—
-`APPROVED` may have an empty body; `COMMENTED` must be substantive unless the ordered full-review no-findings proof exists; `CHANGES_REQUESTED` blocks—along with a producer-authenticated successful CodeRabbit status for that head,
-complete review-thread evidence with no unresolved or unfixed finding, and every other enforced gate passes, any factory agent, including the implementation author,
+After authoritative exact-head evidence from the assigned reviewer is present—
+CodeRabbit, explicitly reassigned Sourcery/CodeAnt, or one explicitly selected
+emergency independent agent—along with complete review-thread evidence with no
+unresolved or unfixed finding and every other enforced gate, any factory agent, including the implementation author,
 may execute the mechanical merge only through
 `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`. When the picker
-supplies `head_sha`, pass it as `--expected-head <HEAD_SHA>`. Authors must never review.
+supplies `head_sha`, pass it as `--expected-head <HEAD_SHA>`. Authors must never review their own work.
 Direct pushes and ad-hoc merge commands are forbidden. Money,
 PII, security, schema, migration, irreversible behavior, large diffs, and
 review-round count increase planning, testing, and review depth but do not
@@ -142,7 +143,7 @@ governed remediation.
    - Router: `aru-agentic-sdlc/SKILL.md`
    - Primary Skill: `implement-next-issue/SKILL.md`
    - Issue Creation: `create-github-issue/SKILL.md`
-   - Code Review Skill: `code-review/SKILL.md` (refusal; CodeRabbit alone supplies positive review authority)
+   - Code Review Skill: `code-review/SKILL.md` (only for a preassigned emergency `review:agent` fallback)
    - CI Failure Remediation: `remediate-ci-failure/SKILL.md`
    - PR Review Feedback: `address-pr-feedback/SKILL.md`
 2. **Worktree Isolation**:
