@@ -1,4 +1,4 @@
-# line-ceiling: 1960
+# line-ceiling: 1990
 import io
 import sys
 import tempfile
@@ -1950,6 +1950,30 @@ class SlackNotifyTests(unittest.TestCase):
         payload_file.chmod(0o600)
         read_text = read_alert_payload_file(payload_file)
         self.assertEqual(read_text, valid_text)
+
+    def test_read_alert_payload_file_bounds_collected_chunks_for_multi_chunk_payload(self):
+        payload_file = self.default_root / "multi_chunk_payload.txt"
+        chunk_data = "z" * (64 * 1024)
+        num_chunks = 20
+        with open(payload_file, "w", encoding="utf-8") as f:
+            for _ in range(num_chunks):
+                f.write(chunk_data)
+        payload_file.chmod(0o600)
+        expected_chars = num_chunks * 64 * 1024
+
+        tracemalloc.start()
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                read_alert_payload_file(payload_file)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertIn(
+            f"alert summary exceeds size limit ({expected_chars}/1000 characters, 1/12 lines)",
+            str(ctx.exception),
+        )
+        self.assertLess(peak, 512 * 1024)
 
 
 if __name__ == "__main__":

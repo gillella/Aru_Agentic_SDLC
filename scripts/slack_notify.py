@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1080
+# line-ceiling: 1085
 """Post stamped Slack events for the Aru factory control room.
 
 GitHub remains the work queue. Slack downtime must not halt factory work.
@@ -267,10 +267,12 @@ def read_alert_payload_file(path: Path) -> str:
                 trailing_newlines += len(chunk)
             else:
                 trailing_newlines = len(chunk) - len(stripped)
-            if collected_chars <= MAX_ALERT_TEXT_CHARS:
+            if collected_chars < MAX_ALERT_TEXT_CHARS + 1:
                 needed = (MAX_ALERT_TEXT_CHARS + 1) - collected_chars
-                collected_chunks.append(chunk[:needed])
-                collected_chars += len(collected_chunks[-1])
+                to_add = chunk[:needed]
+                if to_add:
+                    collected_chunks.append(to_add)
+                    collected_chars += len(to_add)
 
         char_count = total_chars - trailing_newlines
         non_trailing_newlines = total_newlines - trailing_newlines
