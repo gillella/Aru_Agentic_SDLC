@@ -75,13 +75,24 @@ def governed_board_inventory(
     statuses: dict[int, str] = {}
     ready_count = 0
     for item in items:
+        # A malformed row is unusable evidence, not an absent one: callers
+        # promise a fail-closed None here, and reading fields off a non-object
+        # would raise past every guard below instead.
+        if not isinstance(item, dict):
+            return None
         status = item.get("status")
         if isinstance(status, str) and status.lower() == "ready":
             ready_count += 1
         content = item.get("content") or {}
+        if not isinstance(content, dict):
+            return None
         issue_number = content.get("number")
         repository = content.get("repository") or item.get("repository")
-        if issue_number not in open_numbers or repository != repo_slug:
+        # A non-integer number is skipped rather than indexed: draft items
+        # legitimately carry none, and the completeness check below still
+        # refuses the snapshot if a real open issue went missing this way.
+        if (not isinstance(issue_number, int) or issue_number not in open_numbers
+                or repository != repo_slug):
             continue
         if issue_number in statuses or not isinstance(status, str) or not status:
             return None

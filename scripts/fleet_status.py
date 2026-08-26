@@ -63,22 +63,40 @@ def _fail(reason: str, summary: str, state: str = "error",
     }
 
 
+# gh is trusted to transport the answer, not to shape it. The open-issue
+# inventory normalizes its own rows exactly this way, and an unchecked pull
+# request row turns a malformed page into a traceback instead of the error
+# state this command promises.
+def _readable_pr(row: Any) -> bool:
+    """True when a row can be read without raising; anything else fails closed."""
+    if not isinstance(row, dict) or not isinstance(row.get("number"), int):
+        return False
+    labels = row.get("labels", [])
+    return isinstance(labels, list) and all(
+        isinstance(label, dict) and isinstance(label.get("name"), str)
+        for label in labels
+    )
+
+
 def list_open_prs() -> Optional[List[Dict[str, Any]]]:
-    """Read every open PR once, or None when the page could be truncated."""
+    """Read every open PR once, or None when the page is truncated or malformed."""
     result = run_gh_json([
         "gh", "pr", "list", "--state", "open",
         "--limit", str(PR_LIMIT), "--json", PR_FIELDS,
     ])
     if not isinstance(result, list) or len(result) >= PR_LIMIT:
         return None
-    return result
+    return result if all(_readable_pr(row) for row in result) else None
 
 
-def list_worktrees() -> List[Dict[str, str]]:
-    """Return ``{path, branch}`` for each worktree of the current checkout."""
+def list_worktrees() -> Optional[List[Dict[str, str]]]:
+    """Return ``{path, branch}`` per worktree, or None when Git cannot answer."""
+    # A live checkout always lists at least its own main worktree, so an empty
+    # or failed read is an unreadable one, not an empty one. Reporting it as
+    # "no worktrees" would hide the leftover state this command exists to find.
     code, out, _err = run_cmd(["git", "worktree", "list", "--porcelain"], check=False)
-    if code != 0 or not out:
-        return []
+    if code != 0 or not out.strip():
+        return None
     rows: List[Dict[str, str]] = []
     for block in out.split("\n\n"):
         fields: Dict[str, str] = {}
@@ -155,8 +173,13 @@ def _reasons(issues: List[Dict[str, Any]], prs: List[Dict[str, Any]],
             )
     for row in prs:
         author = f" by {row['author']}" if row["author"] else ""
-        draft = " (draft)" if row["draft"] else ""
-        lines.append(f"PR #{row['number']}{draft} is open{author} on {row['branch']}.")
+        # The word "review" is load-bearing: slack_control_room.status_text()
+        # selects open review work by filtering these lines for it, so a PR
+        # line without it reports "none" while the PR is still open. Neither
+        # phrase asserts a verdict -- an open PR awaits one or the other.
+        state = "draft, not yet in review" if row["draft"] else "awaiting review or merge"
+        lines.append(
+            f"PR #{row['number']} is open{author} on {row['branch']} ({state}).")
     lines.extend(
         f"Worktree '{row['path']}' remains for closed issue #{row['issue']}."
         for row in worktrees if row["stale"]
@@ -185,8 +208,13 @@ def _collect(slug: str) -> Dict[str, Any]:
         return _fail("Failed to list open pull requests from GitHub.",
                      "ERROR: Could not read open pull requests.")
 
+    worktrees = list_worktrees()
+    if worktrees is None:
+        return _fail("Failed to read local Git worktree state.",
+                     "ERROR: Could not read local worktrees.")
+
     issue_rows, pr_rows = _issue_rows(issues, board), _pr_rows(prs)
-    worktree_rows = _worktree_rows(list_worktrees(), open_numbers)
+    worktree_rows = _worktree_rows(worktrees, open_numbers)
     claims = (
         [{"type": "issue", "number": r["number"], "agent": r["agent"]}
          for r in issue_rows if r["agent"]]

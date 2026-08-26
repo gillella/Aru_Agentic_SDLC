@@ -1,3 +1,7 @@
+# +66 for the #406 Sourcery fail-closed regression tests: unreadable worktree
+# reads, malformed pull-request rows, malformed board items, and the open-review
+# reason its Slack caller filters for.
+# line-ceiling: 457
 """Compact read-only status (#406).
 
 The fleet supervisor these tests used to cover is gone. What is left has to
@@ -25,6 +29,10 @@ import picker_board_inventory as pbi
 
 SLUG = "gillella/Aru_Agentic_SDLC"
 
+# Every live checkout lists at least its own main worktree, so this -- not the
+# empty string -- is what a healthy `git worktree list --porcelain` looks like.
+MAIN_WORKTREE = "worktree /repo\nHEAD abc\nbranch refs/heads/main\n"
+
 
 def issue(number, *, status="Ready", agent=None, title="t"):
     labels = [{"name": f"status:{status.lower().replace(' ', '-')}"}]
@@ -50,12 +58,13 @@ def pull(number, *, branch="chore/issue-1-x", author=None, draft=False):
 class FakeRepo:
     """Answers the exact command set one status run is allowed to issue."""
 
-    def __init__(self, *, issues=(), prs=(), worktrees="", board=None,
-                 projects=None, slug=SLUG, fail=()):
+    def __init__(self, *, issues=(), prs=(), worktrees=None, board=None,
+                 board_items=None, projects=None, slug=SLUG, fail=()):
         self.issues = list(issues)
         self.prs = list(prs)
-        self.worktrees = worktrees
+        self.worktrees = MAIN_WORKTREE if worktrees is None else worktrees
         self.slug = slug
+        self.board_items = board_items
         self.fail = set(fail)
         self.projects = projects if projects is not None else [{
             "id": "PVT_1", "number": 7, "title": "Aru_Agentic_SDLC Board",
@@ -74,7 +83,7 @@ class FakeRepo:
         return [cmd for cmd in self.commands if cmd[0] == "gh"]
 
     def _item_list(self):
-        items = [
+        items = self.board_items if self.board_items is not None else [
             {"status": status,
              "content": {"number": number, "repository": self.slug}}
             for number, status in self.board.items()
@@ -90,6 +99,8 @@ class FakeRepo:
         if cmd[:2] == ["git", "remote"]:
             return (0, f"git@github.com:{self.slug}.git\n", "")
         if cmd[:3] == ["git", "worktree", "list"]:
+            if "worktrees" in self.fail:
+                return (1, "", "fatal: not a git repository")
             return (0, self.worktrees, "")
         if "issues?state=open" in joined:
             if "issues" in self.fail:
@@ -291,6 +302,46 @@ class FailClosedTests(unittest.TestCase):
             status = fs.evaluate_fleet_status(".")
         self.assert_failed(status, "error", fs.EXIT_ERROR)
 
+    def test_unreadable_worktree_list_fails_closed(self):
+        """An unreadable checkout is not an empty one, and must not read ok.
+
+        Both shapes are the same failure: `git worktree list --porcelain`
+        returned nothing usable, and an otherwise empty repository would
+        otherwise be reported COMPLETE while local state is unknown.
+        """
+        for label, kwargs in (("nonzero exit", {"fail": {"worktrees"}}),
+                              ("no output", {"worktrees": ""})):
+            with self.subTest(case=label):
+                repo = FakeRepo(**kwargs)
+                with wired(repo):
+                    status = fs.evaluate_fleet_status(".")
+                self.assert_failed(status, "error", fs.EXIT_ERROR)
+                self.assertEqual(status["worktrees"], [])
+
+    def test_malformed_pull_request_row_fails_closed(self):
+        """Every row the report indexes is validated before it is indexed."""
+        for row in ("not-a-dict", {"title": "no number"}, {"number": "458"},
+                    {"number": 458, "labels": None},
+                    {"number": 458, "labels": ["author:claude-1"]},
+                    {"number": 458, "labels": [{"name": 7}]}):
+            with self.subTest(row=row):
+                repo = FakeRepo(prs=[row])
+                with wired(repo):
+                    status = fs.evaluate_fleet_status(".")
+                self.assert_failed(status, "error", fs.EXIT_ERROR)
+                self.assertEqual(status["pull_requests"], [])
+
+    def test_malformed_board_item_is_blocked_not_raised(self):
+        """The board read is delegated, so the delegate fails closed as well."""
+        for items in (["not-an-object"],
+                      [{"status": "Ready", "content": "not-an-object"}],
+                      [{"status": "Ready", "content": {"number": {"n": 1}}}]):
+            with self.subTest(items=items):
+                repo = FakeRepo(issues=[issue(1)], board_items=items)
+                with wired(repo):
+                    status = fs.evaluate_fleet_status(".")
+                self.assert_failed(status, "blocked", fs.EXIT_BLOCKED)
+
     def test_missing_repository_directory_fails_closed(self):
         repo = FakeRepo()
         with patch.object(common, "run_cmd", repo), \
@@ -385,6 +436,21 @@ class SlackCompatibilityTests(unittest.TestCase):
         for key in ("state", "summary", "reasons", "open_issues_count", "open_prs_count"):
             self.assertIn(key, status)
         self.assertIsInstance(status["reasons"], list)
+
+    def test_open_pull_requests_stay_visible_as_open_review_work(self):
+        """status_text() picks open review work by filtering reasons for 'review'.
+
+        A compact status that never says the word renders "open review work:
+        none" while PRs sit open, hiding the one fact the operator opened the
+        status to see.
+        """
+        repo = FakeRepo(prs=[pull(458, author="claude-1"), pull(459, draft=True)])
+        with wired(repo):
+            status = fs.evaluate_fleet_status(".")
+        matched = [line for line in status["reasons"] if "review" in line.lower()]
+        self.assertEqual(len(matched), 2)
+        self.assertTrue(any("#458" in line and "claude-1" in line for line in matched))
+        self.assertTrue(any("#459" in line and "draft" in line for line in matched))
 
 
 if __name__ == "__main__":
