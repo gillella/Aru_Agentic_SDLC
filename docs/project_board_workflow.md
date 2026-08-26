@@ -252,14 +252,19 @@ Two consequences worth knowing before you hit them:
   head, no unresolved threads, and how many findings were withdrawn rather
   than fixed — so a later reader can reconstruct why.
 
-CodeRabbit is the default code-review authority, and `review:coderabbit` is
-the only review assignment `create_pr.py` creates. An operator may explicitly
-reassign a stalled PR to Sourcery or CodeAnt after concrete observed
-unavailability; no automatic rotation, load balancer, or scheduler exists.
-That external switch is one-way: an already-reassigned PR is never switched
-to the other external service, and re-running the same target is refused
-because reassignment is not a retry mechanism. The only move accepted from an
-already-switched PR is the terminal independent-agent escalation below. CodeRabbit keeps its current exact-head contract. Sourcery requires a
+`create_pr.py` assigns exactly one of `review:coderabbit`, `review:sourcery`,
+or `review:codeant`. It reads the complete paginated open-PR inventory, counts
+only sole canonical authority labels, selects the deterministic least-loaded
+service, and breaks a minimum-load tie with `(issue_id - 1) mod tie_count` in
+the fixed CodeRabbit, Sourcery, CodeAnt order. An unreadable, malformed,
+unknown, or conflicting inventory fails closed instead of appearing to be
+free capacity. Existing open PRs keep their authority and every assigned
+authority is immutable. After concrete observed unavailability, an operator
+may make one audited external reassignment; a second external hop is refused
+because reassignment is not a retry or rotation mechanism. The only move
+accepted from an already-switched PR is the terminal independent-agent
+escalation below. Coding agents never perform ordinary review. CodeRabbit
+keeps its current exact-head contract. Sourcery requires a
 successful head-bound `Sourcery review` check and zero Sourcery unresolved
 threads. CodeAnt accepts either of two evidence shapes bound unambiguously to
 the exact current head, plus zero CodeAnt unresolved threads: an authoritative
