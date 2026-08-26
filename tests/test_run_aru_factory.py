@@ -604,9 +604,9 @@ class WiringTests(unittest.TestCase):
         raw = skill_text()
         text = flat(raw)
         exact = ("pace dynamically", "fixed interval", "snapshot → reconcile → decide → dispatch → report", "never waits synchronously for coding-worker, ci, or external-review completion", "same-job single-flight", "no repository-local daemon, private task queue, or competing scheduler", "each hermes tick starts with **exactly one authoritative picker call**", "do not preflight or enrich it with", "make zero follow-up github reads", "durable worker-state persistence belongs to #479", "worker prompt protocol belongs to #480", "exactly one fresh picker call occurs only at the start of the next tick", "aru's focused-predicate exception remains local to `aru_agentic_sdlc`", "hermes does not execute that worker loop inline", "worker-local ci waits and post-mutation picker transitions remain inside the dispatched worker task", "neither extend the hermes tick nor count as picker calls by that tick", "this slice defines that boundary only")
-        for phrase in exact:
-            self.assertIn(phrase, text)
+        self.assertTrue(all(phrase in text for phrase in exact))
         self.assertIn("consumer repositories follow their own `AGENTS.md` testing policy", raw)
+        self.assertFalse(any(retired in raw for retired in ("then run its loop **inside the current desktop task**", "ask the picker exactly once again immediately")))
         worker = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
         self.assertTrue(all(phrase in worker for phrase in ("immediately make exactly one fresh picker call", "check_ci.py --pr <pr> --wait")))
 
