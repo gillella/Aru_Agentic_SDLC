@@ -212,10 +212,10 @@ Restated only because skipping one is how each has been broken before.
 8. **Agent review is emergency-only.** New PRs get exactly `review:coderabbit`;
    reassignment is never automatic. Only an operator may move one stalled PR
    from CodeRabbit to Sourcery or CodeAnt with `reassign_review.py`, recording
-   the concrete unavailability or excessive wait; only after external
-   exhaustion may that helper select one independent `review:agent`. The picker
-   resumes it but never creates a coding-agent review queue. Self-review, stale
-   heads, labels alone, and malformed or duplicate evidence fail closed.
+   the concrete reason; only after external exhaustion or an operator-declared
+   excessive wait may that helper select one independent `review:agent`. The
+   picker resumes it but never creates a coding-agent review queue. Self-review,
+   stale heads, labels alone, and malformed or duplicate evidence fail closed.
 
 ### Merging
 

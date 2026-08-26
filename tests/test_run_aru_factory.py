@@ -1,4 +1,4 @@
-# line-ceiling: 437
+# line-ceiling: 487
 """Contract tests for the run-aru-factory entrypoint skill.
 
 The skill is prose, so these assert the properties a reader depends on rather
@@ -32,12 +32,33 @@ CURSOR_USER_RULES = ROOT / "templates" / "cursor" / "user-rules-aru-agentic-sdlc
 
 MODES = ("adopt", "status", "next", "loop", "doctor")
 
-# Review machinery #412 removed and #435 did not restore. No denial in either
-# skill uses these phrasings, so a bare mention means it came back.
+# Review machinery #412 removed and #435 did not restore. Listing exact phrases
+# only catches the wording that happened to be retired: "reviewer rotation"
+# would be rejected while "the picker rotates reviewers" walked straight in. So
+# these match the *concepts*, and a match is judged by its context below.
 RETIRED_REVIEW_MACHINERY = (
-    "reviewer rotation", "round-robin", "capacity ledger",
-    "dashboard", "failover", "reviewer pool",
+    r"rotat(?:e|es|ed|ing|ion)|round[- ]?robin",
+    r"fail[- ]?over|hand(?:s|ed|ing)? off to (?:another|the next) review",
+    r"capacity|load[- ]balanc(?:e|es|ed|ing)|ledger",
+    r"pool|roster|queue",
+    r"dashboard|schedul(?:e|es|ed|ing|er)",
 )
+
+# A skill is allowed to *name* retired machinery, and both of these do -- that
+# is what a denial is. What it may not do is describe the machinery as
+# something the factory has, so every match must sit inside a denial.
+DENIAL_MARKER = re.compile(r"\b(?:never|not|no|nor|neither|without|forbidden|refuses?)\b")
+DENIAL_WINDOW = 90
+
+
+def restored_machinery(text):
+    """Machinery mentions in `text` that no nearby denial rules out."""
+    return [
+        match.group(0)
+        for pattern in RETIRED_REVIEW_MACHINERY
+        for match in re.finditer(pattern, text)
+        if not DENIAL_MARKER.search(text[max(0, match.start() - DENIAL_WINDOW):match.start()])
+    ]
 
 
 def flat(text):
@@ -204,6 +225,12 @@ class GovernanceTests(unittest.TestCase):
         self.assertIn("review:coderabbit", text)
         self.assertIn("reassignment is never automatic", text)
         self.assertIn("Only an operator", text)
+        # Both operator-declared conditions, or the router forbids a fallback
+        # the helper and the code-review skill both allow (#454).
+        self.assertIn(
+            "external exhaustion or an operator-declared excessive wait",
+            flat(text),
+        )
         self.assertIn("never creates a coding-agent review", text)
         self.assertIn("address-pr-feedback", text)
         self.assertNotIn("gh pr review --approve", text)
@@ -230,17 +257,40 @@ class GovernanceTests(unittest.TestCase):
             "sourcery or codeant",
             "reassignment is never automatic",
             "reassign_review.py",
-            "external exhaustion",
+            "external exhaustion or an operator-declared excessive wait",
             "not a review queue, rotation, scheduler",
         ):
             self.assertIn(clause, review, f"review contract missing: {clause}")
 
     def test_no_retired_review_machinery_is_restored(self):
-        """AC3: no rotation, ledger, dashboard, failover, or provider pool."""
+        """AC3: no rotation, failover, capacity tracking, pool, or scheduler."""
         for path in (SKILL, REVIEW_SKILL):
             text = flat(path.read_text(encoding="utf-8"))
-            for machinery in RETIRED_REVIEW_MACHINERY:
-                self.assertNotIn(machinery, text, f"{path.name} restored: {machinery}")
+            self.assertEqual(
+                [], restored_machinery(text), f"{path.name} restored review machinery"
+            )
+
+    def test_the_machinery_detector_survives_rewording(self):
+        """The guard above is only worth its line count if it still bites.
+
+        An absence assertion passes when the thing it looks for was merely
+        renamed, so these are the rewordings #454 flagged: each must be caught,
+        and the denials the two skills actually carry must not be.
+        """
+        for restored in (
+            "the picker rotates review:agent across the fleet",
+            "reviewer capacity tracking picks the least loaded agent",
+            "automatic failover moves the pr to the next reviewer",
+            "reviewers are drawn from the reviewer pool in round-robin order",
+            "a scheduler dashboard shows each reviewer's backlog",
+        ):
+            self.assertTrue(restored_machinery(restored), f"undetected: {restored}")
+        for denial in (
+            "not a review queue, rotation, scheduler, or permission to select",
+            "the picker resumes it but never creates a coding-agent review queue",
+            "it does not track capacity, rotate agents, or create a second queue",
+        ):
+            self.assertEqual([], restored_machinery(denial), f"false positive: {denial}")
 
     def test_cursor_code_review_command_is_an_emergency_router(self):
         text = CURSOR_CODE_REVIEW.read_text(encoding="utf-8")

@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Reviews a PR only when the operator explicitly assigned this independent coding agent as the emergency fallback after external reviewers were exhausted.
+description: Reviews a PR only when the operator explicitly assigned this independent coding agent as the emergency fallback after external reviewers were exhausted or their wait was declared excessive.
 ---
 
 # Emergency Independent-Agent Code Review
@@ -10,10 +10,10 @@ External review is normal: `create_pr.py` labels every new PR
 CodeAnt, recording the concrete unavailability or excessive wait that justified
 the move. Reassignment is never automatic. A coding agent may review only when
 `reassign_review.py` has already moved one PR to exactly `review:agent` after
-the operator recorded external exhaustion or an excessive wait, and assigned
-exactly `reviewer:<CURRENT_AGENT_ID>`. This is recovery of one explicit
-assignment, not a review queue, rotation, scheduler, or permission to select a
-PR yourself.
+the operator recorded external exhaustion or an operator-declared excessive
+wait, and assigned exactly `reviewer:<CURRENT_AGENT_ID>`. This is recovery of
+one explicit assignment, not a review queue, rotation, scheduler, or permission
+to select a PR yourself.
 
 Before inspecting the diff, verify all of the following from live GitHub data:
 
