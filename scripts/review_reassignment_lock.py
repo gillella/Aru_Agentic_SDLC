@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # line-ceiling: 135
-"""Owner-bound expiring remote lease for one PR review reassignment."""
+"""Review-authority permission checks and owner-bound reassignment leases."""
 
 from contextlib import contextmanager
 import json
@@ -10,11 +10,23 @@ import sys
 import tempfile
 import time
 
-from common import run_cmd
+from common import get_repo_slug, run_cmd
 
 LOCK_REF_PREFIX = "refs/tags/aru-locks/review-reassignment-"
 LOCK_LEASE_S = 300
 OID_RE = re.compile(r"[0-9a-fA-F]{40}")
+WRITE_PERMISSIONS = {"admin", "maintain", "write"}
+
+
+def review_trigger_authorized(login: str):
+    """Return whether a GitHub actor can write to the repository, or None."""
+    slug = get_repo_slug()
+    if not slug:
+        return None
+    code, out, _ = run_cmd(
+        ["gh", "api", f"repos/{slug}/collaborators/{login}/permission",
+         "--jq", ".permission"], check=False)
+    return None if code != 0 else out.strip().casefold() in WRITE_PERMISSIONS
 
 
 def _new_lock_blob(pr_id: int, head: str):

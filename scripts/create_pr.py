@@ -31,7 +31,6 @@ from common import (
     terminal_lease_refusal,
     terminal_merge_lease,
 
-    TRUSTED_AUTHOR_ASSOCIATIONS,
     VERIFICATION_EVIDENCE_END,
     VERIFICATION_EVIDENCE_SCHEMA,
     VERIFICATION_EVIDENCE_START,
@@ -44,6 +43,7 @@ from common import (
 )
 from github_pr_transport import open_pull_request_with_fallback
 from github_inventory import open_pull_requests
+from review_reassignment_lock import review_trigger_authorized
 
 REVIEW_LABEL_PREFIX = "review:"
 REVIEW_SERVICES = ("coderabbit", "sourcery", "codeant")
@@ -234,10 +234,10 @@ def codeant_already_triggered(pr_ref: str) -> Optional[bool]:
         if not isinstance(body, str) or not isinstance(login, str):
             return None
         if body.strip() == CODEANT_TRIGGER:
-            association = comment.get("authorAssociation")
-            if not isinstance(association, str):
+            authorized = review_trigger_authorized(login)
+            if authorized is None:
                 return None
-            if association.upper() in TRUSTED_AUTHOR_ASSOCIATIONS:
+            if authorized:
                 return True
     return False
 

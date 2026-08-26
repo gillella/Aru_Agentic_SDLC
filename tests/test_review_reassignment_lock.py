@@ -66,6 +66,24 @@ class RemoteReassignmentLockTests(unittest.TestCase):
                 self.assertFalse(acquired)
 
 
+class ReviewTriggerAuthorizationTests(unittest.TestCase):
+    @patch.object(lock, "get_repo_slug", return_value="acme/widgets")
+    @patch.object(lock, "run_cmd", return_value=(0, "write\n", ""))
+    def test_write_permission_is_authorized(self, run, _slug):
+        self.assertTrue(lock.review_trigger_authorized("alice"))
+        self.assertIn("collaborators/alice/permission", run.call_args.args[0][2])
+
+    @patch.object(lock, "get_repo_slug", return_value="acme/widgets")
+    @patch.object(lock, "run_cmd", return_value=(0, "read\n", ""))
+    def test_read_only_commenter_cannot_suppress_trigger(self, _run, _slug):
+        self.assertFalse(lock.review_trigger_authorized("reader"))
+
+    @patch.object(lock, "get_repo_slug", return_value="acme/widgets")
+    @patch.object(lock, "run_cmd", return_value=(1, "", "denied"))
+    def test_unreadable_permission_fails_closed(self, _run, _slug):
+        self.assertIsNone(lock.review_trigger_authorized("unknown"))
+
+
 class HistorySettlementTests(unittest.TestCase):
     def test_eventually_consistent_audit_visibility_is_retried(self):
         prior = []

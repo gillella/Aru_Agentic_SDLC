@@ -385,7 +385,7 @@ class CodeAntTriggerOwnershipTests(unittest.TestCase):
     NO_TRIGGER_YET = (0, '{"comments": []}', "")
 
     def _finalize(self, ready=(0, "", ""), history=NO_TRIGGER_YET,
-                  comment=(0, "", ""), existing="codeant"):
+                  comment=(0, "", ""), existing="codeant", trusted_trigger=True):
         # A failing `gh pr ready` means the PR was already out of draft, and
         # finalization confirms that with an extra isDraft read before it reads
         # the comment history for an existing trigger.
@@ -395,6 +395,7 @@ class CodeAntTriggerOwnershipTests(unittest.TestCase):
         results += [history, comment, (0, "", "")]
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "ensure_label", return_value=True), \
+                patch.object(create_pr, "review_trigger_authorized", return_value=trusted_trigger), \
                 patch.object(create_pr, "existing_review_assignment",
                               side_effect=[existing, existing, existing]):
             run.side_effect = results
@@ -402,9 +403,8 @@ class CodeAntTriggerOwnershipTests(unittest.TestCase):
         return ok, [call.args[0] for call in run.call_args_list]
 
     @staticmethod
-    def comments(*bodies, association="OWNER", login="gillella"):
-        comments = [{"author": {"login": login}, "authorAssociation": association,
-                     "body": body} for body in bodies]
+    def comments(*bodies, login="gillella"):
+        comments = [{"body": body, "author": {"login": login}} for body in bodies]
         return (0, json.dumps({"comments": comments}), "")
 
     def test_trigger_failure_on_an_already_ready_pr_never_redrafts_it(self):
@@ -432,7 +432,7 @@ class CodeAntTriggerOwnershipTests(unittest.TestCase):
 
     def test_an_untrusted_exact_trigger_cannot_suppress_the_real_trigger(self):
         ok, commands = self._finalize(history=self.comments(
-            "@codeant-ai: review", association="NONE", login="drive-by"))
+            "@codeant-ai: review", login="drive-by"), trusted_trigger=False)
         self.assertTrue(ok)
         self.assertEqual(commands[-1][-1], create_pr.CODEANT_TRIGGER)
 
