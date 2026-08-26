@@ -395,6 +395,8 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
     # Persist the one-way audit while both labels are present. If this write
     # fails, the merge gate sees the intentionally ambiguous state and no
     # caller can mistake the missing history for permission to rotate again.
+    own_record = {"from": existing, "head": pr["headRefOid"],
+                  "reason": reason.strip(), "to": target}
     ok, err = _comment(pr_id, audit_body(existing, target, service, reason,
                                          pr["headRefOid"], reviewer, family,
                                          reviewer_login))
@@ -405,19 +407,19 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
               "the audit before completing the swap.", file=sys.stderr)
         return EXIT_ERROR
 
-    # The audit is the committed record, so this is the last point at which a
-    # concurrent move can still be seen. One extra record is this command's
-    # own; more than one means a second operator committed inside the window
-    # and the history now overstates how often authority actually moved.
+    # The audit is the committed record, so require the complete history to be
+    # exactly the prior prefix plus this command's record. Cardinality alone is
+    # insufficient: an eventually-consistent read can still show no new record,
+    # or a rival record can appear with the expected length.
     committed = reassignment_history(pr_id)
-    if committed is None or len(committed) > len(history) + 1:
-        detail = ("the reassignment history could not be re-read"
-                  if committed is None else
-                  f"{len(committed) - len(history)} audited moves landed concurrently")
+    expected_history = [*history, own_record]
+    if committed != expected_history:
+        detail = ("the reassignment history could not be re-read" if committed is None
+                  else "the visible audit history is not the exact record this command wrote")
         print(f"[CONFLICT] PR #{pr_id} recorded this reassignment but {detail}. "
-              f"Both {existing} and {target} remain so the merge gate blocks; an "
-              "operator must remove the label that lost and reconcile the audit "
-              "trail before this pull request can merge.", file=sys.stderr)
+              "Authority is left fail-closed; an operator must re-read the labels "
+              "and reconcile the audit trail before this pull request can merge.",
+              file=sys.stderr)
         return EXIT_CONFLICT
 
     code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--remove-label", existing],

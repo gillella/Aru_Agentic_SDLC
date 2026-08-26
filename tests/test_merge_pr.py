@@ -1,6 +1,7 @@
 # +42 for #472 emergency-agent exact-head authority adversarial coverage.
-# +90 for #472 authorized-login binding on emergency-agent review evidence.
-# line-ceiling: 7290
+# +163 for #472 authorized-login binding and write-access authorization on
+# emergency-agent review evidence.
+# line-ceiling: 7350
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
@@ -391,14 +392,14 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         }, sort_keys=True, separators=(",", ":"))
         nodes = [
             {"body": f"<!-- aru-agent-review-assignment:v1 {assignment} -->",
-             "createdAt": "2026-08-25T10:01:00Z", "authorAssociation": "OWNER",
+             "createdAt": "2026-08-25T10:01:00Z",
              "author": {"login": "gillella", "__typename": "User"}},
             {"body": f"<!-- aru-agent-review:v1 {payload} -->",
-             "createdAt": "2026-08-25T10:03:00Z", "authorAssociation": "OWNER",
+             "createdAt": "2026-08-25T10:03:00Z",
              "author": {"login": "gillella", "__typename": "User"}},
             {"body": '<!-- aru-review-head:v1 {"agent":"agent-2","head":"'
                      + head + '"} -->',
-             "createdAt": "2026-08-25T10:03:00Z", "authorAssociation": "OWNER",
+             "createdAt": "2026-08-25T10:03:00Z",
              "author": {"login": "gillella", "__typename": "User"}},
         ]
         peer = {
@@ -413,54 +414,103 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             self.attestation_page(head=head, nodes=nodes),
             self.thread_page(head=head),
         ]
-        evidence = merge_pr.review_evidence(162)
+        with patch.object(merge_pr, "_repository_write_logins",
+                          return_value={"gillella"}):
+            evidence = merge_pr.review_evidence(162)
         self.assertEqual(len(evidence["agent_review_attestations"]), 1)
-        self.assertEqual(evidence["agent_review_marker_errors"], 0)
+        self.assertEqual(evidence["agent_review_marker_errors"], [])
         self.assertEqual(len(evidence["agent_review_assignments"]), 1)
-        self.assertEqual(evidence["agent_review_assignment_errors"], 0)
+        self.assertEqual(evidence["agent_review_assignment_errors"], [])
         self.assertEqual(evidence["agent_review_assignments"][0]["reviewer_login"],
                          "gillella")
 
-    def test_emergency_assignment_needs_write_access_and_an_authorized_login(self):
-        """The assignment is the authorization step, so a marker anyone who can
-        comment could post is not one. Write access is the boundary, and the
-        record has to name the account it authorizes."""
+    def test_emergency_assignment_marker_must_be_well_formed(self):
+        """The assignment names the account it authorizes, so a record missing
+        or mangling that login authorizes nobody."""
         head = "a" * 40
         base = {"family": "openai", "from": "review:codeant", "head": head,
                 "reason": "all external services unavailable", "reviewer": "agent-2",
                 "reviewer_login": "gillella"}
 
-        def node(payload, association="OWNER", typename="User"):
+        def node(payload, typename="User", login="gillella", created="2026-08-25T10:01:00Z"):
             body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
             return {"body": f"<!-- aru-agent-review-assignment:v1 {body} -->",
-                    "createdAt": "2026-08-25T10:01:00Z",
-                    "authorAssociation": association,
-                    "author": {"login": "gillella", "__typename": typename}}
+                    "createdAt": created,
+                    "author": {"login": login, "__typename": typename}}
 
-        rejected = [
-            node(base, association="CONTRIBUTOR"),
-            node(base, association="NONE"),
-            node(base, association="FIRST_TIME_CONTRIBUTOR"),
-            node(base, typename="Bot"),
-            {**node(base), "authorAssociation": None},
+        malformed = [
             node({key: value for key, value in base.items()
                   if key != "reviewer_login"}),
             node({**base, "reviewer_login": "not a login"}),
             node({**base, "reviewer_login": ""}),
+            node({**base, "from": "review:agent"}),
+            node(base, created="2026-08-25T10:01:00"),
         ]
-        for bad in rejected:
+        for bad in malformed:
             with self.subTest(node=bad):
-                assignments, errors = [], []
-                merge_pr._collect_agent_marker(bad, assignments, errors)
+                assignments = []
+                errors = merge_pr._collect_agent_marker(bad, assignments, [])
                 self.assertEqual(assignments, [])
-        for bad in rejected:
-            with self.subTest(counted=bad):
-                counted = merge_pr._collect_agent_marker(bad, [], [])
-                self.assertEqual(counted["assignment"], 1)
+                self.assertEqual(errors["assignment"], ["gillella"])
         accepted = []
-        merge_pr._collect_agent_marker(node(base, association="COLLABORATOR"),
-                                       accepted, [])
+        merge_pr._collect_agent_marker(node(base), accepted, [])
         self.assertEqual(len(accepted), 1)
+        self.assertEqual(accepted[0]["github_login"], "gillella")
+
+    def test_marker_shaped_comments_from_non_users_are_ignored_not_fatal(self):
+        """Reported hole: any commenter could post a marker-shaped comment and
+        permanently block an emergency merge, because malformed markers counted
+        toward the fail-closed counters regardless of who wrote them. An actor
+        that could never hold the role is now ignored instead."""
+        for author in ({"login": "drive-by", "__typename": "Bot"},
+                       {"login": "", "__typename": "User"},
+                       {"__typename": "User"},
+                       None):
+            for version in ("aru-agent-review-assignment:v1", "aru-agent-review:v1"):
+                with self.subTest(author=author, version=version):
+                    assignments, attestations = [], []
+                    errors = merge_pr._collect_agent_marker(
+                        {"body": f"<!-- {version} {{}} -->",
+                         "createdAt": "2026-08-25T10:01:00Z", "author": author},
+                        assignments, attestations)
+                    self.assertEqual(errors, {"assignment": [], "attestation": []})
+                    self.assertEqual((assignments, attestations), ([], []))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_assignment_markers_without_repository_write_access_are_dropped(
+        self, gh_json, _slug,
+    ):
+        """`authorAssociation` never proved write access - MEMBER covers a
+        read-only organization member and COLLABORATOR a read-only collaborator
+        - so the collaborator roster is the authorization boundary."""
+        head = "a" * 40
+        assignment = json.dumps({
+            "family": "openai", "from": "review:codeant", "head": head,
+            "reason": "all external services unavailable", "reviewer": "agent-2",
+            "reviewer_login": "outsider",
+        }, sort_keys=True, separators=(",", ":"))
+        nodes = [
+            {"body": f"<!-- aru-agent-review-assignment:v1 {assignment} -->",
+             "createdAt": "2026-08-25T10:01:00Z",
+             "author": {"login": "outsider", "__typename": "User"}},
+            {"body": "<!-- aru-agent-review-assignment:v1 {} -->",
+             "createdAt": "2026-08-25T10:01:00Z",
+             "author": {"login": "outsider", "__typename": "User"}},
+        ]
+        pages = [self.review_page(head=head), self.attestation_page(head=head, nodes=nodes),
+                 self.thread_page(head=head)]
+        gh_json.side_effect = list(pages)
+        with patch.object(merge_pr, "_repository_write_logins",
+                          return_value={"gillella"}):
+            evidence = merge_pr.review_evidence(162)
+        self.assertEqual(evidence["agent_review_assignments"], [])
+        self.assertEqual(evidence["agent_review_assignment_errors"], [])
+
+        gh_json.reset_mock(side_effect=True, return_value=True)
+        gh_json.side_effect = list(pages)
+        with patch.object(merge_pr, "_repository_write_logins", return_value=None):
+            self.assertIsNone(merge_pr.review_evidence(162))
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -2715,7 +2765,7 @@ class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
                 "head": self.HEAD, "status": "completed",
                 "github_login": "gillella", "recorded_at": "2026-08-25T10:03:00Z",
             }],
-            "agent_review_marker_errors": 0,
+            "agent_review_marker_errors": [],
             "agent_review_assignments": [{
                 "family": "openai", "from": "review:codeant", "head": self.HEAD,
                 "reason": "External reviewers unavailable", "reviewer": "agent-2",
@@ -2723,7 +2773,7 @@ class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
                 "assigned_at": "2026-08-25T10:01:00Z",
                 "github_login": "gillella",
             }],
-            "agent_review_assignment_errors": 0,
+            "agent_review_assignment_errors": [],
         }
         evidence.update(overrides)
         return evidence
@@ -2771,8 +2821,8 @@ class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
         cases = (
             (self_review, self.evidence()),
             (self.pr(), self.evidence(head_oid="b" * 40)),
-            (self.pr(), self.evidence(agent_review_marker_errors=1)),
-            (self.pr(), self.evidence(agent_review_assignment_errors=1)),
+            (self.pr(), self.evidence(agent_review_marker_errors=["gillella"])),
+            (self.pr(), self.evidence(agent_review_assignment_errors=["gillella"])),
             (self.pr(), self.evidence(agent_review_attestations=[])),
             (self.pr(), self.evidence(agent_review_assignments=[])),
             (self.pr(), self.evidence(reviews=[])),
@@ -2780,6 +2830,25 @@ class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
         for pr, evidence in cases:
             with self.subTest(labels=pr["labels"], evidence=evidence):
                 self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
+
+    def test_a_stranger_completion_record_cannot_shadow_the_real_one(self):
+        """Counting every well-formed completion marker let one extra comment
+        make the authorized record look duplicated and block merge forever."""
+        evidence = self.evidence()
+        evidence["agent_review_attestations"].append({
+            **evidence["agent_review_attestations"][0], "github_login": "drive-by"})
+        self.assertTrue(merge_pr.check_reviews(self.pr(), evidence)[0])
+
+    def test_only_the_authorized_account_can_spoil_completion_evidence(self):
+        """A malformed completion marker is fail-closed evidence only when the
+        authorized account wrote it. Treating a stranger's marker-shaped
+        comment the same way turned one comment into a permanent merge block."""
+        self.assertTrue(merge_pr.check_reviews(
+            self.pr(), self.evidence(agent_review_marker_errors=["drive-by"]))[0])
+        ok, message = merge_pr.check_reviews(
+            self.pr(), self.evidence(agent_review_marker_errors=["GilleLLa"]))
+        self.assertFalse(ok)
+        self.assertIn("malformed emergency completion", message)
 
     def test_a_collaborator_cannot_review_as_the_assigned_agent(self):
         """The reported hole: the substantive review used to be bound to the

@@ -144,8 +144,17 @@ class ReassignHarness:
         # write, so the fixtures are sequences: pass `snapshots`/`histories` to
         # model a concurrent operator moving underneath this one.
         snapshot_reads = list(snapshots) if snapshots is not None else [snapshot]
-        history_reads = ([None if item is None else list(item) for item in histories]
-                         if histories is not None else [list(history)])
+        if histories is not None:
+            history_reads = [None if item is None else list(item) for item in histories]
+        else:
+            initial = list(history)
+            if isinstance(snapshot, dict):
+                existing, _ = rr.current_authority(snapshot.get("labels", []))
+                own = {"from": existing, "to": rr.FALLBACK_LABELS.get(service),
+                       "head": snapshot.get("headRefOid"), "reason": self.REASON}
+                history_reads = [initial, initial, [*initial, own]]
+            else:
+                history_reads = [initial]
 
         def next_read(sequence):
             return sequence.pop(0) if len(sequence) > 1 else sequence[0]

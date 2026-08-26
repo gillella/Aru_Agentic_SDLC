@@ -71,14 +71,12 @@ repeatedly, or create a second queue.
 
 Reassignment is not atomic — GitHub offers no compare-and-set on labels or
 comments — so the helper re-reads the authority, head, and audit history
-immediately before it writes and again after it records the audit. Two
-operators racing the same PR therefore produce one refusal rather than two
-audited moves, which would otherwise look like a rotation and permanently
-block the terminal agent fallback. A rival record that lands inside the
-remaining window leaves both labels in place so the merge gate refuses loudly.
-Only markers posted by an actor with repository write access count as audit
-history: anyone who can see a PR can comment on it, and counting a drive-by
-marker would let an outsider block every later reassignment.
+immediately before it writes. After recording the audit, it requires the
+complete history to equal the prior history plus its exact record; a missing,
+rival, or additional record leaves authority fail-closed for operator
+reconciliation. Only markers posted by an actor with repository write access
+count as audit history: anyone who can see a PR can comment on it, and counting
+a drive-by marker would let an outsider block every later reassignment.
 
 ### When the selected service also fails
 
@@ -132,8 +130,13 @@ not type these `gh` commands directly:
 2. The assigned `review:<service>` label is added.
 3. The PR is marked ready (`gh pr ready`).
 4. For `review:codeant` only, a `@codeant-ai: review` comment fires the
-   manual trigger; on failure, the function attempts to restore draft state so
-   the operator can retry. If that rollback also fails, the PR can remain ready.
+   manual trigger, and only if the comment history does not already carry one:
+   finalization is resumable, and a second trigger enqueues a second review of
+   the same head with competing evidence records. An unreadable comment history
+   stops rather than guessing either way. On trigger failure the function
+   restores draft state only when this run left draft itself; a retry that
+   found the PR already ready leaves it as it was. If that rollback also
+   fails, the PR can remain ready.
 
 CodeRabbit's auto-review is centrally scoped to non-draft PRs carrying
 `review:coderabbit` (`.coderabbit.yaml` `reviews.auto_review`), so step 3
@@ -175,8 +178,12 @@ after a review invalidates it — re-review the new head before merging
   regardless of author precisely so a spoofed one is seen and rejected rather
   than silently skipped.
 - **Emergency agent** — exactly one author and one different assigned reviewer,
-  and an audited `aru-agent-review-assignment:v1` record posted by an actor
-  with repository write access. That record is the authorization: it names the
+  and an audited `aru-agent-review-assignment:v1` record whose author holds
+  repository write access. Write access is resolved from the repository's
+  collaborator roster, because the per-comment author association does not
+  prove it: `MEMBER` covers a read-only organization member and `COLLABORATOR`
+  a read-only collaborator, either of whom could otherwise authorize
+  themselves. That record is the authorization: it names the
   reviewer model family and `reviewer_login`, the single GitHub account allowed
   to perform this review. Both the substantive current-head GitHub review and
   the one matching completed `aru-agent-review:v1` comment must come from that
@@ -185,7 +192,10 @@ after a review invalidates it — re-review the new head before merging
   completion JSON names the assigned agent, family, exact head, completion
   timestamp, `completed` status, and `no-findings` or `findings-resolved`
   disposition. A push invalidates this evidence. Missing, stale, duplicate,
-  malformed, unauthorized, or self-review evidence blocks merge.
+  malformed, unauthorized, or self-review evidence blocks merge — but only from
+  the write-access assignor and the account it authorized. A marker-shaped
+  comment from anyone else is ignored rather than fatal, so one drive-by
+  comment cannot permanently block the emergency path.
 
 Every review path additionally requires every blocker enforced by `check_reviews`
 (`scripts/merge_pr.py`) to be clear:

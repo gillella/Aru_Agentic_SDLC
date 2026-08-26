@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # +12 for the #344 terminal merge lease guard.
 # +85 for #472 complete-inventory review-pool selection and CodeAnt triggering.
-# +90 for #472 confirmed review reservation and draft-rollback ownership.
-# line-ceiling: 755
+# +147 for #472 settled review reservation, draft-rollback ownership, and
+# exactly-once CodeAnt triggering.
+# line-ceiling: 810
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -22,6 +23,7 @@ import argparse
 import json
 import shlex
 import sys
+import time
 from typing import Dict, List, Optional
 
 from common import (
@@ -48,6 +50,8 @@ CODEANT_TRIGGER = "@codeant-ai: review"
 # Bounded: a reservation that keeps losing to concurrent assignment fails
 # closed rather than spinning against the pool.
 REVIEW_RESERVATION_ATTEMPTS = 3
+REVIEW_RESERVATION_SETTLE_ROUNDS = 2
+REVIEW_RESERVATION_SETTLE_DELAY_S = 2.0
 
 # Kept explicit rather than free-form: a typo like "anthropc" would silently
 # make every PR look cross-family to the picker, which is the one failure mode
@@ -164,6 +168,36 @@ def pr_number(pr_ref: str) -> Optional[int]:
     return number if isinstance(number, int) and number > 0 else None
 
 
+def codeant_already_triggered(pr_ref: str) -> Optional[bool]:
+    """Whether this pull request already carries the CodeAnt trigger comment.
+
+    ``None`` when the comment history cannot be read. Finalization is
+    resumable, so a retry that reposts the trigger enqueues a second CodeAnt
+    run and can produce competing evidence records for one head; a retry that
+    guesses "already sent" can leave the assignment with no review at all.
+    The match is the exact trigger body, because CodeAnt's own usage-guide
+    comments quote the same string.
+    """
+    code, out, _ = run_cmd(["gh", "pr", "view", str(pr_ref), "--json", "comments"],
+                           check=False)
+    if code != 0:
+        return None
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    comments = payload.get("comments") if isinstance(payload, dict) else None
+    if not isinstance(comments, list):
+        return None
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, dict) else None
+        if not isinstance(body, str):
+            return None
+        if body.strip() == CODEANT_TRIGGER:
+            return True
+    return False
+
+
 def _confirm_reservation(number: int, issue_id: int, selected: str) -> str:
     """Compare-and-set the applied label against a fresh complete inventory.
 
@@ -238,20 +272,31 @@ def reserve_review_service(pr_ref: str, issue_id: int) -> Optional[str]:  # noqa
             return None
 
         verdict = "unconfirmed"
+        held_rounds = 0
         for _confirm in range(REVIEW_RESERVATION_ATTEMPTS):
+            # One sole-holder read is not settled: a contender selected from
+            # the same snapshot can land immediately afterward and also claim
+            # to have won.
+            time.sleep(REVIEW_RESERVATION_SETTLE_DELAY_S)
             try:
                 verdict = _confirm_reservation(number, issue_id, selected)
             except ReviewAssignmentLookupError as exc:
                 print(f"[ERROR] Could not confirm the {label} reservation on PR "
                       f"{pr_ref}: {exc}", file=sys.stderr)
                 return None
-            if verdict != "unconfirmed":
+            if verdict == "held":
+                held_rounds += 1
+                if held_rounds == REVIEW_RESERVATION_SETTLE_ROUNDS:
+                    break
+                continue
+            held_rounds = 0
+            if verdict == "yield":
                 break
-        if verdict == "held":
+        if held_rounds == REVIEW_RESERVATION_SETTLE_ROUNDS:
             return selected
-        if verdict == "unconfirmed":
-            print(f"[ERROR] {label} was applied to PR {pr_ref} but never appeared in the "
-                  "open-PR inventory, so the reservation could not be confirmed. Re-run "
+        if verdict != "yield":
+            print(f"[ERROR] {label} was applied to PR {pr_ref} but never settled across "
+                  "consecutive open-PR inventory reads. Re-run "
                   f"create_pr.py --finalize-review {number} to resume; the existing "
                   "assignment is immutable and will be retained.", file=sys.stderr)
             return None
@@ -487,6 +532,38 @@ def apply_identity(pr_ref: str, agent: str = "", family: str = "") -> bool:
     return True
 
 
+def trigger_codeant_review(pr_ref: str, made_ready: bool) -> bool:
+    """Fire the CodeAnt manual trigger exactly once for this assignment.
+
+    ``made_ready`` says whether *this* invocation moved the PR out of draft. A
+    retry that found it already ready owns none of that state, so a transient
+    comment failure must not push an already-admitted PR back out of merge
+    admission for want of a rollback it never earned.
+    """
+    triggered = codeant_already_triggered(pr_ref)
+    if triggered is None:
+        print(f"[ERROR] Could not read PR {pr_ref} comments to tell whether CodeAnt was "
+              "already triggered; not posting a second trigger.", file=sys.stderr)
+        return False
+    if triggered:
+        print(f"🔍 CodeAnt review already triggered on PR {pr_ref}")
+        return True
+    code, _, err = run_cmd(["gh", "pr", "comment", pr_ref, "--body", CODEANT_TRIGGER],
+                           check=False)
+    if code == 0:
+        return True
+    if made_ready:
+        rollback, _, rollback_err = run_cmd(["gh", "pr", "ready", pr_ref, "--undo"],
+                                            check=False)
+        detail = "draft state restored" if rollback == 0 else (
+            f"draft rollback also failed: {rollback_err.strip()}")
+    else:
+        detail = "the pull request was already ready and is left as it was"
+    print(f"[ERROR] Could not trigger CodeAnt review: {err.strip()}; {detail}.",
+          file=sys.stderr)
+    return False
+
+
 def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C901, PLR0912
     """Assign one balanced external authority and make the PR reviewable.
 
@@ -523,11 +600,8 @@ def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C90
         )
         return False
 
-    # Whether *this* invocation moved the PR out of draft. A retry that finds
-    # the PR already ready owns none of that state, so a later failure here
-    # must not undraft a pull request it did not draft: doing so would push an
-    # already-admitted PR back out of merge admission and require manual
-    # recovery for what was only a transient comment failure.
+    # Whether *this* invocation moved the PR out of draft; see
+    # trigger_codeant_review for why only that half may be rolled back.
     made_ready = False
     code, _, err = run_cmd(["gh", "pr", "ready", pr_ref], check=False)
     if code == 0:
@@ -559,20 +633,8 @@ def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C90
             return False
         print(f"🔍 PR {pr_ref} was already ready with {label}")
 
-    if selected == "codeant":
-        code, _, err = run_cmd(
-            ["gh", "pr", "comment", pr_ref, "--body", CODEANT_TRIGGER], check=False)
-        if code != 0:
-            if not made_ready:
-                detail = "the pull request was already ready and is left as it was"
-            else:
-                rollback, _, rollback_err = run_cmd(
-                    ["gh", "pr", "ready", pr_ref, "--undo"], check=False)
-                detail = "draft state restored" if rollback == 0 else (
-                    f"draft rollback also failed: {rollback_err.strip()}")
-            print(f"[ERROR] Could not trigger CodeAnt review: {err.strip()}; {detail}.",
-                  file=sys.stderr)
-            return False
+    if selected == "codeant" and not trigger_codeant_review(pr_ref, made_ready):
+        return False
 
     print(f"🔍 Assigned {label} and marked PR ready")
     return True

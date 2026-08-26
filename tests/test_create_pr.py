@@ -1,10 +1,12 @@
 # +16 for the #344 terminal merge lease tests.
 # +85 for #472 deterministic external review-pool assignment coverage.
-# +155 for #472 review-reservation and draft-rollback ownership coverage.
-# line-ceiling: 970
+# +208 for #472 review-reservation, draft-rollback ownership, and
+# exactly-once CodeAnt trigger coverage.
+# line-ceiling: 1010
 import json
 import sys
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +16,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import create_pr  # noqa: E402
 import common  # noqa: E402
 import merge_pr  # noqa: E402
+
+
+def setUpModule():
+    """Reservations settle across reads separated by a real sleep; tests do not."""
+    settle = patch.object(create_pr.time, "sleep")
+    settle.start()
+    unittest.addModuleCleanup(settle.stop)
 
 
 class AgentFlagTests(unittest.TestCase):
@@ -168,12 +177,14 @@ class IdentityStampTests(unittest.TestCase):
     def test_codeant_assignment_triggers_only_after_ready(
         self, _existing, _label, run, _select, _confirm,
     ):
-        run.return_value = (0, "", "")
+        run.side_effect = [(0, "", ""), (0, "", ""), (0, '{"comments": []}', ""),
+                           (0, "", "")]
         self.assertTrue(create_pr.finalize_review_assignment("https://x/pull/9", 9))
         commands = [call.args[0] for call in run.call_args_list]
         self.assertEqual(commands[1][:3], ["gh", "pr", "ready"])
-        self.assertEqual(commands[2][:3], ["gh", "pr", "comment"])
-        self.assertEqual(commands[2][-1], "@codeant-ai: review")
+        self.assertEqual(commands[2][:3], ["gh", "pr", "view"])
+        self.assertEqual(commands[3][:3], ["gh", "pr", "comment"])
+        self.assertEqual(commands[3][-1], "@codeant-ai: review")
 
     @patch.object(create_pr, "run_cmd")
     @patch.object(create_pr, "ensure_label", return_value=True)
@@ -356,16 +367,26 @@ class FailClosedAssignmentTests(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
 
-class DraftRollbackOwnershipTests(unittest.TestCase):
-    """A retry only undoes the draft transition it performed itself."""
+class CodeAntTriggerOwnershipTests(unittest.TestCase):
+    """Finalization owns only what it changed, and triggers exactly once.
 
-    def _finalize(self, ready_result, comment_result, existing="codeant"):
+    A retry undoes only the draft transition it performed itself, and reposts
+    `@codeant-ai: review` only when it is absent: a second trigger enqueues a
+    second review of one head and leaves competing evidence behind, while
+    assuming one landed can leave the assignment unreviewed.
+    """
+
+    NO_TRIGGER_YET = (0, '{"comments": []}', "")
+
+    def _finalize(self, ready=(0, "", ""), history=NO_TRIGGER_YET,
+                  comment=(0, "", ""), existing="codeant"):
         # A failing `gh pr ready` means the PR was already out of draft, and
-        # finalization confirms that with an extra isDraft read.
-        results = [ready_result]
-        if ready_result[0] != 0:
+        # finalization confirms that with an extra isDraft read before it reads
+        # the comment history for an existing trigger.
+        results = [ready]
+        if ready[0] != 0:
             results.append((0, '{"isDraft": false}', ""))
-        results += [comment_result, (0, "", "")]
+        results += [history, comment, (0, "", "")]
         with patch.object(create_pr, "run_cmd") as run, \
                 patch.object(create_pr, "ensure_label", return_value=True), \
                 patch.object(create_pr, "existing_review_assignment",
@@ -374,23 +395,49 @@ class DraftRollbackOwnershipTests(unittest.TestCase):
             ok = create_pr.finalize_review_assignment("https://x/pull/9", 9)
         return ok, [call.args[0] for call in run.call_args_list]
 
+    @staticmethod
+    def comments(*bodies):
+        return (0, json.dumps({"comments": [{"body": body} for body in bodies]}), "")
+
     def test_trigger_failure_on_an_already_ready_pr_never_redrafts_it(self):
         """The reported defect: a transient comment failure on a PR this retry
         found already ready must not push it back out of merge admission."""
-        ok, commands = self._finalize((1, "", "not a draft"), (1, "", "rate limited"))
+        ok, commands = self._finalize(ready=(1, "", "not a draft"),
+                                      comment=(1, "", "rate limited"))
         self.assertFalse(ok)
-        self.assertNotIn(["gh", "pr", "ready", "https://x/pull/9", "--undo"], commands)
         self.assertEqual([c for c in commands if "--undo" in c], [])
 
     def test_trigger_failure_after_this_run_undrafted_it_rolls_back(self):
-        ok, commands = self._finalize((0, "", ""), (1, "", "rate limited"))
+        ok, commands = self._finalize(comment=(1, "", "rate limited"))
         self.assertFalse(ok)
         self.assertEqual(commands[-1], ["gh", "pr", "ready", "https://x/pull/9", "--undo"])
 
     def test_successful_trigger_never_touches_draft_state(self):
-        ok, commands = self._finalize((0, "", ""), (0, "", ""))
+        ok, commands = self._finalize()
         self.assertTrue(ok)
         self.assertEqual([c for c in commands if "--undo" in c], [])
+
+    def test_an_existing_trigger_is_not_posted_a_second_time(self):
+        ok, commands = self._finalize(history=self.comments("@codeant-ai: review\n"))
+        self.assertTrue(ok)
+        self.assertEqual([c for c in commands if c[:3] == ["gh", "pr", "comment"]], [])
+
+    def test_a_quoted_trigger_in_a_provider_comment_is_not_a_trigger(self):
+        """CodeAnt's own usage guide quotes the trigger string, so only a
+        comment whose whole body is the trigger counts as one."""
+        ok, commands = self._finalize(history=self.comments(
+            "Retrigger review by typing:\n@codeant-ai: review\nin a comment."))
+        self.assertTrue(ok)
+        self.assertEqual(commands[-1][-1], create_pr.CODEANT_TRIGGER)
+
+    def test_an_unreadable_comment_history_never_guesses(self):
+        for history in ((1, "", "gh: rate limited"), (0, "not json", ""),
+                        (0, '{"comments": null}', ""), self.comments(None)):
+            with self.subTest(history=history):
+                ok, commands = self._finalize(history=history)
+                self.assertFalse(ok)
+                self.assertEqual(
+                    [c for c in commands if c[:3] == ["gh", "pr", "comment"]], [])
 
 
 class ReviewReservationTests(unittest.TestCase):
@@ -404,6 +451,29 @@ class ReviewReservationTests(unittest.TestCase):
     @staticmethod
     def capacity(counts, holders):
         return {"counts": counts, "holders": holders}
+
+    @contextmanager
+    def reserving(self, confirm, selected="codeant", results=(0, "", "")):
+        """The reservation loop with its collaborators stubbed, yielding run_cmd.
+
+        A list argument is a per-call sequence, an exception is raised, and
+        anything else is a fixed value.
+        """
+        def stub(name, value):
+            key = "side_effect" if isinstance(value, (list, BaseException)) else "return_value"
+            return patch.object(create_pr, name, **{key: value})
+
+        with patch.object(create_pr, "ensure_label", return_value=True), \
+                patch.object(create_pr, "existing_review_assignment", return_value=None), \
+                stub("select_review_service", selected), \
+                stub("_confirm_reservation", confirm), \
+                stub("run_cmd", results) as run:
+            yield run
+
+    @staticmethod
+    def label_moves(run):
+        return [call.args[0][-2:] for call in run.call_args_list
+                if {"--add-label", "--remove-label"} & set(call.args[0])]
 
     def test_pr_number_is_read_from_a_url_or_a_bare_number(self):
         with patch.object(create_pr, "run_cmd") as run:
@@ -440,66 +510,35 @@ class ReviewReservationTests(unittest.TestCase):
             self.assertEqual(create_pr._confirm_reservation(9, 1, "coderabbit"), "yield")
             self.assertEqual(create_pr._confirm_reservation(8, 1, "coderabbit"), "held")
 
-    def test_a_yielding_reservation_is_released_and_reselected(self):
-        with patch.object(create_pr, "ensure_label", return_value=True), \
-                patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "select_review_service",
-                              side_effect=["coderabbit", "sourcery"]), \
-                patch.object(create_pr, "_confirm_reservation",
-                              side_effect=["yield", "held", "held"]), \
-                patch.object(create_pr, "run_cmd", return_value=(0, "", "")) as run:
-            self.assertEqual(
-                create_pr.reserve_review_service("https://x/pull/9", 9), "sourcery")
-        commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(commands[0][-2:], ["--add-label", "review:coderabbit"])
-        self.assertEqual(commands[1][-2:], ["--remove-label", "review:coderabbit"])
-        self.assertEqual(commands[2][-2:], ["--add-label", "review:sourcery"])
+    RESELECTED = [["--add-label", "review:coderabbit"],
+                  ["--remove-label", "review:coderabbit"],
+                  ["--add-label", "review:sourcery"]]
 
-    def test_one_held_read_does_not_commit_before_a_late_contender_is_seen(self):
-        """A sole-holder snapshot is not settled: a lower-numbered contender
-        can land immediately afterward and make this reservation the loser."""
-        with patch.object(create_pr, "ensure_label", return_value=True), \
-                patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "select_review_service",
-                              side_effect=["coderabbit", "sourcery"]), \
-                patch.object(create_pr, "_confirm_reservation",
-                              side_effect=["held", "yield", "held", "held"]), \
-                patch.object(create_pr, "run_cmd", return_value=(0, "", "")) as run:
-            self.assertEqual(
-                create_pr.reserve_review_service("https://x/pull/9", 9), "sourcery")
-        commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(commands[0][-2:], ["--add-label", "review:coderabbit"])
-        self.assertEqual(commands[1][-2:], ["--remove-label", "review:coderabbit"])
-        self.assertEqual(commands[2][-2:], ["--add-label", "review:sourcery"])
+    def test_a_yielding_reservation_is_released_and_reselected(self):
+        """One sole-holder read is not settled either: a lower-numbered
+        contender can land immediately after it and make this one the loser,
+        so a verdict only commits once consecutive reads agree."""
+        for verdicts in (["yield", "held", "held"], ["held", "yield", "held", "held"]):
+            with self.subTest(verdicts=verdicts), \
+                    self.reserving(verdicts, selected=["coderabbit", "sourcery"]) as run:
+                self.assertEqual(
+                    create_pr.reserve_review_service("https://x/pull/9", 9), "sourcery")
+                self.assertEqual(self.label_moves(run), self.RESELECTED)
 
     def test_a_reservation_that_never_confirms_fails_closed(self):
-        with patch.object(create_pr, "ensure_label", return_value=True), \
-                patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "select_review_service", return_value="codeant"), \
-                patch.object(create_pr, "_confirm_reservation",
-                              return_value="unconfirmed"), \
-                patch.object(create_pr, "run_cmd", return_value=(0, "", "")) as run:
+        with self.reserving("unconfirmed") as run:
             self.assertIsNone(create_pr.reserve_review_service("https://x/pull/9", 9))
-        self.assertEqual([c for c in run.call_args_list
-                          if "--remove-label" in c.args[0]], [])
+        self.assertEqual([move for move in self.label_moves(run)
+                          if "--remove-label" in move], [])
 
     def test_endless_contention_fails_closed_instead_of_spinning(self):
-        with patch.object(create_pr, "ensure_label", return_value=True), \
-                patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "select_review_service", return_value="codeant"), \
-                patch.object(create_pr, "_confirm_reservation", return_value="yield"), \
-                patch.object(create_pr, "run_cmd", return_value=(0, "", "")) as run:
+        with self.reserving("yield") as run:
             self.assertIsNone(create_pr.reserve_review_service("https://x/pull/9", 9))
-        adds = [c for c in run.call_args_list if "--add-label" in c.args[0]]
+        adds = [move for move in self.label_moves(run) if "--add-label" in move]
         self.assertEqual(len(adds), create_pr.REVIEW_RESERVATION_ATTEMPTS)
 
     def test_a_failed_release_stops_rather_than_leaving_a_silent_extra_label(self):
-        with patch.object(create_pr, "ensure_label", return_value=True), \
-                patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "select_review_service", return_value="codeant"), \
-                patch.object(create_pr, "_confirm_reservation", return_value="yield"), \
-                patch.object(create_pr, "run_cmd") as run:
-            run.side_effect = [(0, "", ""), (1, "", "denied")]
+        with self.reserving("yield", results=[(0, "", ""), (1, "", "denied")]):
             self.assertIsNone(create_pr.reserve_review_service("https://x/pull/9", 9))
 
     def test_an_unreadable_pr_number_reserves_nothing(self):
@@ -512,11 +551,7 @@ class ReviewReservationTests(unittest.TestCase):
 
     def test_an_unreadable_inventory_during_confirmation_fails_closed(self):
         error = create_pr.ReviewAssignmentLookupError("inventory unreadable")
-        with patch.object(create_pr, "ensure_label", return_value=True), \
-                patch.object(create_pr, "existing_review_assignment", return_value=None), \
-                patch.object(create_pr, "select_review_service", return_value="codeant"), \
-                patch.object(create_pr, "_confirm_reservation", side_effect=error), \
-                patch.object(create_pr, "run_cmd", return_value=(0, "", "")):
+        with self.reserving(error):
             self.assertIsNone(create_pr.reserve_review_service("https://x/pull/9", 9))
 
     def test_capacity_excludes_only_the_named_pull_request(self):
