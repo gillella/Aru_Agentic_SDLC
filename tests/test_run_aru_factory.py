@@ -600,10 +600,15 @@ class WiringTests(unittest.TestCase):
         self.assertIn("pick feedback → merge → issue", cursor)
         self.assertNotIn("pick feedback → merge → review → issue", cursor)
 
-    def test_loop_pacing_is_dynamic(self):
+    def test_loop_pacing_is_dynamic_and_nonblocking(self):
         text = flat(skill_text())
-        self.assertIn("pace dynamically", text)
-        self.assertIn("fixed interval", text)
+        for phrase in (
+            "pace dynamically", "fixed interval", "snapshot → reconcile → decide → dispatch → report",
+            "never waits synchronously for coding-worker, ci, or external-review completion",
+            "same-job single-flight", "no repository-local daemon, private task queue, or competing scheduler",
+            "#479", "#480", "consumer repositories follow their own `agents.md` testing policy",
+        ):
+            self.assertIn(phrase, text)
 
     def test_the_fleet_prompt_points_at_the_entrypoint(self):
         text = FLEET_PROMPT.read_text(encoding="utf-8")
