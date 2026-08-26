@@ -292,6 +292,15 @@ def require_worktree_admission(issue_id: int, agent: str) -> dict[str, Any]:
     return issue
 
 
+def branch_name_for(issue: Optional[dict[str, Any]], issue_id: int, branch_type: str) -> str:
+    """Derives the standard branch name from a live, admission-verified issue."""
+    title_slug = "work"
+    if issue and "title" in issue:
+        clean_title = re.sub(r"^(feat|fix|chore|docs)\s*:\s*", "", issue["title"], flags=re.I)
+        title_slug = sanitize_slug(clean_title)
+    return f"{branch_type}/issue-{issue_id}-{title_slug}"
+
+
 def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool = False,
                   agent: str = "") -> str:
     issue = require_worktree_admission(issue_id, agent)
@@ -323,18 +332,7 @@ def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool =
             print(msg, file=sys.stderr)
             sys.exit(1)
 
-    # Admission is a live predicate, not a one-time snapshot: the plan gate above
-    # reads issue comments, and another agent can release the claim or move the
-    # board while it does. Re-read authority here so the branch name and every
-    # Git write below rest on current state rather than a stale approval.
-    issue = require_worktree_admission(issue_id, agent)
-
-    title_slug = "work"
-    if issue and "title" in issue:
-        clean_title = re.sub(r"^(feat|fix|chore|docs)\s*:\s*", "", issue["title"], flags=re.I)
-        title_slug = sanitize_slug(clean_title)
-
-    branch_name = f"{branch_type}/issue-{issue_id}-{title_slug}"
+    branch_name = branch_name_for(issue, issue_id, branch_type)
 
     # A branch name that already carried a governed merge is spent. Silently
     # checking it out again is how a stale worker rebuilt merged work into an
@@ -342,6 +340,25 @@ def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool =
     lease = terminal_merge_lease(branch_name)
     if lease:
         print(f"[BLOCKED] {terminal_lease_refusal(lease, 'reuse this branch')}", file=sys.stderr)
+        sys.exit(1)
+
+    # Admission is a live predicate, not a one-time snapshot, and both the plan
+    # gate and the lease lookup above are remote reads that another agent can
+    # release the claim or move the board during. Re-verify last, so the final
+    # remote read this invocation makes is the authority read itself and only
+    # local comparison separates it from the Git write below. GitHub exposes no
+    # compare-and-swap on a claim label, so the residual window cannot be closed
+    # outright; it is narrowed to local git work, and every divergence -- an
+    # unreadable issue, a released claim, a moved board item, or a branch name
+    # that no longer matches the one the lease was checked for -- fails closed.
+    issue = require_worktree_admission(issue_id, agent)
+    if branch_name_for(issue, issue_id, branch_type) != branch_name:
+        print(
+            f"[BLOCKED] Issue #{issue_id} changed during admission: the merge "
+            f"lease was checked for '{branch_name}', which is no longer its "
+            "branch name. Re-run once the issue settles.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if use_worktree:

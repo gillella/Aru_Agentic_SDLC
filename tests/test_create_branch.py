@@ -136,6 +136,73 @@ class WorktreeAdmissionTests(unittest.TestCase):
         worktree.assert_not_called()
         run.assert_not_called()
 
+    @patch("create_branch.run_cmd")
+    @patch("create_branch.create_worktree")
+    @patch("create_branch.query_issue_project_items")
+    @patch("create_branch.get_repo_slug", return_value="octocat/widgets")
+    @patch("create_branch.get_issue")
+    def test_authority_revalidation_is_the_last_remote_read_before_mutation(
+        self, issue, _slug, items, worktree, run
+    ):
+        """A claim released during the lease lookup must still refuse the write."""
+        reads = []
+
+        def read_issue(_number):
+            reads.append("admission")
+            claim = "agent:agent-1" if len(reads) == 1 else "agent:agent-2"
+            return self.issue(claim, "status:in-progress")
+
+        def read_lease(_branch):
+            reads.append("lease")
+            return None
+
+        issue.side_effect = read_issue
+        items.return_value = [self.project_item()]
+
+        with patch.object(cb, "terminal_merge_lease", side_effect=read_lease):
+            with self.assertRaisesRegex(SystemExit, "1"):
+                cb.create_branch(
+                    999, branch_type="fix", use_worktree=True, agent="agent-1"
+                )
+
+        self.assertEqual(reads, ["admission", "lease", "admission"])
+        worktree.assert_not_called()
+        run.assert_not_called()
+
+    @patch("create_branch.terminal_merge_lease", return_value=None)
+    @patch("create_branch.run_cmd")
+    @patch("create_branch.create_worktree")
+    @patch("create_branch.query_issue_project_items")
+    @patch("create_branch.get_repo_slug", return_value="octocat/widgets")
+    @patch("create_branch.get_issue")
+    def test_branch_name_that_diverges_from_the_checked_lease_fails_closed(
+        self, issue, _slug, items, worktree, run, _lease
+    ):
+        """A retitled issue means the merge lease was checked for another name."""
+        renamed = self.issue("agent:agent-1", "status:in-progress")
+        renamed["title"] = "fix: renamed after the lease read"
+        issue.side_effect = [
+            self.issue("agent:agent-1", "status:in-progress"),
+            renamed,
+        ]
+        items.return_value = [self.project_item()]
+
+        for use_worktree in (True, False):
+            with self.subTest(use_worktree=use_worktree):
+                issue.side_effect = [
+                    self.issue("agent:agent-1", "status:in-progress"),
+                    renamed,
+                ]
+                with self.assertRaisesRegex(SystemExit, "1"):
+                    cb.create_branch(
+                        999,
+                        branch_type="fix",
+                        use_worktree=use_worktree,
+                        agent="agent-1",
+                    )
+                worktree.assert_not_called()
+                run.assert_not_called()
+
 
 class CreateBranchPlanGateTests(unittest.TestCase):
     def test_requires_plan_for_feat_branch_type(self):
