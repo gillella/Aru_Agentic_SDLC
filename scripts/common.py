@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# +71 for the #344 terminal merge lease and #362 project-item pagination.
-# line-ceiling: 1587
+# +93 for the #344 terminal merge lease and #362 fail-closed board reads.
+# line-ceiling: 1609
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -1056,9 +1056,26 @@ def query_issue_project_items(
         cursor = next_cursor
 
 
-def get_issue_project_items(issue_number: int) -> List[Dict[str, Any]]:
-    """Compatibility wrapper for board mutation helpers expecting a list."""
-    return query_issue_project_items(issue_number) or []
+def governed_project_items(
+    issue_number: int,
+    repo_slug: str,
+) -> Optional[List[Dict[str, Any]]]:
+    """Returns governed board items, or ``None`` when the board read failed.
+
+    Board mutation helpers must be able to tell "the issue is on no board" from
+    "the board is unreadable". Collapsing an incomplete pagination run to an
+    empty list made a denied later page look like a missing item, so a writer
+    would attach a duplicate item or move the wrong one instead of aborting.
+    """
+    items = query_issue_project_items(issue_number)
+    if items is None:
+        print(
+            f"[WARN] Project board items for issue #{issue_number} are "
+            "unreadable; refusing to write board state.",
+            file=sys.stderr,
+        )
+        return None
+    return select_governed_project_items(items, repo_slug)
 
 
 def get_repo_projects(repo_slug: str) -> Optional[List[Dict[str, Any]]]:
@@ -1195,7 +1212,14 @@ def attach_issue_to_governed_project(issue_number: int) -> bool:
         return False
 
     project_id = project.get("id")
-    existing = get_issue_project_items(issue_number)
+    existing = query_issue_project_items(issue_number)
+    if existing is None:
+        print(
+            f"[WARN] Project board items for issue #{issue_number} are "
+            "unreadable; refusing to attach a possibly duplicate item.",
+            file=sys.stderr,
+        )
+        return False
     if project_id and any(
         (item.get("project") or {}).get("id") == project_id
         for item in existing
@@ -1227,14 +1251,13 @@ def set_board_status(issue_number: int, status: str) -> bool:
     slug = get_repo_slug()
     if not slug:
         return False
-    items = get_issue_project_items(issue_number)
-    items = select_governed_project_items(items, slug)
+    items = governed_project_items(issue_number, slug)
+    if items is None:
+        return False
     if not items:
         if not attach_issue_to_governed_project(issue_number):
             return False
-        items = select_governed_project_items(
-            get_issue_project_items(issue_number), slug
-        )
+        items = governed_project_items(issue_number, slug)
     if not items:
         print(
             f"[WARN] Could not identify one governed project board for '{slug}'.",
@@ -1352,14 +1375,13 @@ def set_issue_priority_field(issue_number: int, value: str) -> bool:
     slug = get_repo_slug()
     if not slug or "/" not in slug or "P" not in value:
         return False
-    items = get_issue_project_items(issue_number)
-    items = select_governed_project_items(items, slug)
+    items = governed_project_items(issue_number, slug)
+    if items is None:
+        return False
     if not items:
         if not attach_issue_to_governed_project(issue_number):
             return False
-        items = select_governed_project_items(
-            get_issue_project_items(issue_number), slug
-        )
+        items = governed_project_items(issue_number, slug)
     if not items:
         return False
 

@@ -323,6 +323,12 @@ def create_branch(issue_id: int, branch_type: str = "feat", use_worktree: bool =
             print(msg, file=sys.stderr)
             sys.exit(1)
 
+    # Admission is a live predicate, not a one-time snapshot: the plan gate above
+    # reads issue comments, and another agent can release the claim or move the
+    # board while it does. Re-read authority here so the branch name and every
+    # Git write below rest on current state rather than a stale approval.
+    issue = require_worktree_admission(issue_id, agent)
+
     title_slug = "work"
     if issue and "title" in issue:
         clean_title = re.sub(r"^(feat|fix|chore|docs)\s*:\s*", "", issue["title"], flags=re.I)

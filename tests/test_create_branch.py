@@ -111,6 +111,31 @@ class WorktreeAdmissionTests(unittest.TestCase):
             "fix/issue-999-safe-branch", agent="agent-1"
         )
 
+    @patch("create_branch.terminal_merge_lease", return_value=None)
+    @patch("create_branch.run_cmd")
+    @patch("create_branch.create_worktree")
+    @patch("create_branch.query_issue_project_items")
+    @patch("create_branch.get_repo_slug", return_value="octocat/widgets")
+    @patch("create_branch.get_issue")
+    def test_authority_released_after_admission_blocks_git_mutation(
+        self, issue, _slug, items, worktree, run, _lease
+    ):
+        """A claim revoked between admission and the write must still refuse."""
+        issue.side_effect = [
+            self.issue("agent:agent-1", "status:in-progress"),
+            self.issue("agent:agent-2", "status:in-progress"),
+        ]
+        items.return_value = [self.project_item()]
+
+        with self.assertRaisesRegex(SystemExit, "1"):
+            cb.create_branch(
+                999, branch_type="fix", use_worktree=True, agent="agent-1"
+            )
+
+        self.assertEqual(issue.call_count, 2)
+        worktree.assert_not_called()
+        run.assert_not_called()
+
 
 class CreateBranchPlanGateTests(unittest.TestCase):
     def test_requires_plan_for_feat_branch_type(self):
