@@ -1,4 +1,4 @@
-# line-ceiling: 7300
+# line-ceiling: 7145
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
@@ -18,6 +18,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import common
 import merge_pr
 import cleanup_worktrees
+
+
+def _pull_version(head="head123", reviews=0, comments=0, threads=0,
+                  updated="2026-08-25T00:00:00Z"):
+    """The evidence-version fields merge_pr requires on every review page."""
+    return {"headRefOid": head, "updatedAt": updated,
+            "reviewTotal": {"totalCount": reviews},
+            "commentTotal": {"totalCount": comments},
+            "threadTotal": {"totalCount": threads}}
+
+
+# The tuple merge_pr derives from those fields, for callers that pass a
+# version straight into a paginated reader.
+_VERSION = merge_pr._evidence_version(_pull_version("a" * 40))
 
 
 def _complete_comments(nodes):
@@ -110,7 +124,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 node["author"].setdefault("__typename", "User")
             normalized.append(node)
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": head,
+            **_pull_version(head),
             "reviews": {
                 "nodes": normalized,
                 "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
@@ -131,7 +145,7 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
             node["comments"] = comments
             normalized.append(node)
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": head,
+            **_pull_version(head),
             "commits": {"nodes": [{"commit": {
                 "committedDate": "2026-08-24T00:00:00Z",
             }}]},
@@ -312,10 +326,45 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
                 self.assertEqual(evidence["withdrawn"], withdrawn)
                 self.assertEqual(evidence["unfixed"], unfixed)
 
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_evidence_read_from_two_states_fails_closed(self, gh_json, _slug):
+        """A review or thread created mid-read is never merged around.
+
+        Reviews, comments and threads are three separate paginated calls, so
+        an unchanged head proves only that nobody pushed. Every page reports
+        the size of all three connections, and any disagreement between two
+        pages fails the whole read closed instead of merging on a torn view.
+        """
+        empty_page = {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}
+        for moved in ("reviews", "comments", "threads"):
+            for connection in ("comments", "reviewThreads"):
+                with self.subTest(moved=moved, read=connection):
+                    gh_json.reset_mock(side_effect=True, return_value=True)
+                    later = {"data": {"repository": {"pullRequest": {
+                        **_pull_version(**{moved: 1}),
+                        "commits": {"nodes": [{"commit": {
+                            "committedDate": "2026-08-24T00:00:00Z"}}]},
+                        connection: empty_page,
+                    }}}}
+                    pages = [self.review_page(), later]
+                    if connection == "reviewThreads":
+                        pages.insert(1, self.attestation_page())
+                    gh_json.side_effect = pages
+                    self.assertIsNone(merge_pr.review_evidence(162))
+
+    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
+    @patch.object(merge_pr, "_gh_json")
+    def test_same_counts_from_different_pr_versions_fail_closed(self, gh_json, _slug):
+        later = self.attestation_page()
+        later["data"]["repository"]["pullRequest"]["updatedAt"] = "2026-08-25T00:00:01Z"
+        gh_json.side_effect = [self.review_page(), later]
+        self.assertIsNone(merge_pr.review_evidence(162))
+
     @staticmethod
     def attestation_page(head="head123", nodes=None, has_next=False, cursor=None):
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": head,
+            **_pull_version(head),
             "comments": {
                 "nodes": [] if nodes is None else nodes,
                 "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
@@ -324,44 +373,37 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
-    def test_agent_completion_marker_is_parsed_and_malformed_copy_is_counted(
-        self, gh_json, _slug,
-    ):
+    def test_retired_agent_review_markers_are_not_parsed(self, gh_json, _slug):
+        """#414: an agent-written completion marker is inert comment text.
+
+        Parsing it would keep a merge path alive that nothing can legitimately
+        produce any more, so a forged copy would be the only way to reach it.
+        """
         head = "a" * 40
         payload = json.dumps({
             "agent": "agent-2", "completed_at": "2026-08-25T10:03:00Z",
             "disposition": "no-findings", "family": "openai", "head": head,
             "status": "completed",
         }, sort_keys=True, separators=(",", ":"))
-        assignment = json.dumps({
-            "family": "openai", "from": "review:codeant", "head": head,
-            "reason": "External reviewers busy", "reviewer": "agent-2",
-        }, sort_keys=True, separators=(",", ":"))
         nodes = [
-            {"body": f"<!-- aru-agent-review-assignment:v1 {assignment} -->",
-             "createdAt": "2026-08-25T10:01:00Z",
-             "author": {"login": "gillella", "__typename": "User"}},
             {"body": f"<!-- aru-agent-review:v1 {payload} -->",
+             "createdAt": "2026-08-25T10:03:00Z",
              "author": {"login": "gillella", "__typename": "User"}},
-            {"body": "<!-- aru-agent-review:v1 {bad} -->",
+            {"body": '<!-- aru-review-head:v1 {"agent":"agent-2","head":"'
+                     + head + '"} -->',
+             "createdAt": "2026-08-25T10:03:00Z",
              "author": {"login": "gillella", "__typename": "User"}},
         ]
-        peer = {
-            "id": "peer", "state": "COMMENTED",
-            "submittedAt": "2026-08-25T10:02:00Z", "body": "No findings.",
-            "author": {"login": "gillella", "__typename": "User"},
-            "commit": {"oid": head},
-        }
         gh_json.side_effect = [
-            self.review_page(head=head, nodes=[peer]),
+            self.review_page(head=head),
             self.attestation_page(head=head, nodes=nodes),
             self.thread_page(head=head),
         ]
         evidence = merge_pr.review_evidence(162)
-        self.assertEqual(len(evidence["agent_review_attestations"]), 1)
-        self.assertEqual(evidence["agent_review_marker_errors"], 1)
-        self.assertEqual(len(evidence["agent_review_assignments"]), 1)
-        self.assertEqual(evidence["agent_review_assignment_errors"], 0)
+        for key in ("agent_review_attestations", "agent_review_marker_errors",
+                    "agent_review_assignments", "agent_review_assignment_errors",
+                    "review_attestations"):
+            self.assertNotIn(key, evidence)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -638,84 +680,17 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         }
         gh_json.side_effect = [
             self.review_page(head=head, nodes=[peer_review]),
-            self.attestation_page(nodes=[{
-                "body": '<!-- aru-review-head:v1 {"agent":"cursor-1","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} -->',
-                "author": {"login": "gillella", "__typename": "User"},
-            }], head=head),
+            self.attestation_page(head=head),
             self.thread_page(head=head)
         ]
 
         evidence = merge_pr.review_evidence(215)
 
         self.assertTrue(evidence["reviewed_head"])
-        pr = labelled("author:codex-1", "reviewed-by:cursor-1")
+        # A same-account human review attests the head, but it is not the
+        # assigned service, so it never satisfies the gate on its own.
+        pr = labelled("author:codex-1")
         ok, message = merge_pr.check_reviews(pr, evidence)
-        self.assertFalse(ok)
-        self.assertIn("CodeRabbit", message)
-
-    @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
-    @patch.object(merge_pr, "_gh_json")
-    def test_malformed_attestation_comment_is_ignored(self, gh_json, _slug):
-        head = "a" * 40
-        peer_review = {
-            "id": "peer-current",
-            "state": "COMMENTED",
-            "submittedAt": "2026-08-16T15:20:00Z",
-            "body": "Verdict: approved. I verified the current diff and tests.",
-            "author": {"login": "gillella", "__typename": "User"},
-            "commit": {"oid": head},
-        }
-        valid_stamp = (
-            '<!-- aru-review-head:v1 {"agent":"cursor-1",'
-            '"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} -->'
-        )
-        bot_stamp = (
-            '<!-- aru-review-head:v1 {"agent":"bot",'
-            '"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} -->'
-        )
-        gh_json.side_effect = [
-            self.review_page(head=head, nodes=[peer_review]),
-            self.attestation_page(
-                nodes=[
-                    {
-                        "body": '<!-- aru-review-head:v1 {"agent": -->',
-                        "author": {"login": "malicious", "__typename": "User"},
-                    },
-                    {
-                        "body": bot_stamp,
-                        "author": {"login": "review-app", "__typename": "Bot"},
-                    },
-                    {
-                        "body": valid_stamp,
-                        "author": {"login": "gillella", "__typename": "User"},
-                    },
-                ],
-                head=head,
-            ),
-            self.thread_page(head=head),
-        ]
-
-        evidence = merge_pr.review_evidence(215)
-
-        self.assertEqual(
-            evidence["review_attestations"],
-            [{"agent": "cursor-1", "head": head, "github_login": "gillella"}],
-        )
-
-    def test_head_attestation_without_substantive_review_names_actual_gap(self):
-        head = "a" * 40
-        ok, message = merge_pr.check_reviews(
-            labelled("author:codex-1", "reviewed-by:cursor-1"),
-            {
-                "unresolved": 0,
-                "unfixed": 0,
-                "withdrawn": 0,
-                "reviewed_head": False,
-                "head_oid": head,
-                "review_attestations": [{"agent": "cursor-1", "head": head}],
-            },
-        )
-
         self.assertFalse(ok)
         self.assertIn("CodeRabbit", message)
 
@@ -2653,23 +2628,23 @@ class ReviewGateTests(unittest.TestCase):
             self.assertIsNone(merge_pr._with_coderabbit_status(383, evidence))
 
 
-class EmergencyAgentReviewGateTests(unittest.TestCase):
-    HEAD = "a" * 40
+class RetiredAgentReviewAuthorityTests(unittest.TestCase):
+    """#414: `review:agent` is no longer an authority a PR can be merged on.
 
-    def pr(self, *extra):
-        return labelled(
-            "author:agent-1", "family:anthropic", "review:agent",
-            "reviewed-by:agent-2", "reviewer-family:agent-2:openai", *extra,
-        )
+    The emergency path needed an operator assignment comment, a reviewer
+    identity stamped as (id, family), a substantive exact-head GitHub review,
+    and a matching `aru-agent-review:v1` completion marker. Nothing writes any
+    of that now, so the only way to reach the old verdict would be forged
+    evidence. The gate therefore refuses the label outright.
+    """
+
+    HEAD = "a" * 40
 
     def evidence(self, **overrides):
         evidence = {
             "head_oid": self.HEAD,
             "head_commit_committed_at": "2026-08-25T10:00:00Z",
             "unresolved": 0, "unfixed": 0, "outdated_unfixed": 0,
-            "service_threads": {
-                "agent": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-            },
             "reviews": [{
                 "id": "agent-review", "state": "COMMENTED",
                 "submittedAt": "2026-08-25T10:02:00Z",
@@ -2684,70 +2659,47 @@ class EmergencyAgentReviewGateTests(unittest.TestCase):
                 "github_login": "gillella",
             }],
             "agent_review_marker_errors": 0,
-            "agent_review_assignments": [{
-                "family": "openai", "from": "review:codeant", "head": self.HEAD,
-                "reason": "External reviewers busy", "reviewer": "agent-2",
-                "assigned_at": "2026-08-25T10:01:00Z",
-                "github_login": "gillella",
-            }],
-            "agent_review_assignment_errors": 0,
         }
         evidence.update(overrides)
         return evidence
 
-    def test_complete_exact_head_independent_review_passes(self):
-        ok, msg = merge_pr.check_reviews(self.pr(), self.evidence())
-        self.assertTrue(ok, msg)
-        self.assertIn("agent-2", msg)
-        self.assertTrue(merge_pr.has_authoritative_assigned_review(
-            self.pr(), self.evidence()))
+    def test_review_agent_is_recognised_only_to_be_refused(self):
+        """The gate reads the label so it can name the way out, not accept it."""
+        pr = labelled("author:agent-1", "family:anthropic", "review:agent",
+                      "reviewed-by:agent-2", "reviewer-family:agent-2:openai")
+        self.assertEqual(merge_pr.assigned_review_service(pr), "agent")
+        ok, message = merge_pr.check_reviews(pr, self.evidence())
+        self.assertFalse(ok)
+        self.assertIn("retired", message)
+        self.assertIn("review:coderabbit", message)
+        self.assertFalse(
+            merge_pr.has_authoritative_assigned_review(pr, self.evidence()))
 
-    def test_label_alone_and_missing_completion_fail_closed(self):
-        evidence = self.evidence(agent_review_attestations=[])
-        self.assertFalse(merge_pr.check_reviews(self.pr(), evidence)[0])
-        evidence = self.evidence(agent_review_assignments=[])
-        self.assertFalse(merge_pr.check_reviews(self.pr(), evidence)[0])
+    def test_a_retired_assignment_costs_no_evidence_round_trip(self):
+        pr = labelled("author:agent-1", "review:agent")
+        evidence = self.evidence()
+        with patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
+             patch.object(merge_pr, "_with_sourcery_runs") as sourcery:
+            self.assertIs(
+                merge_pr.with_service_evidence(pr, 9, evidence), evidence)
+        coderabbit.assert_not_called()
+        sourcery.assert_not_called()
 
-    def test_self_review_missing_family_and_ambiguous_identity_fail_closed(self):
-        cases = (
-            labelled("author:agent-1", "review:agent",
-                     "reviewed-by:agent-1", "reviewer-family:agent-1:openai"),
-            labelled("author:agent-1", "review:agent", "reviewed-by:agent-2"),
-            self.pr("reviewed-by:agent-3"),
-            self.pr("reviewer-family:agent-2:google"),
-        )
-        for pr in cases:
-            with self.subTest(labels=pr["labels"]):
-                self.assertFalse(merge_pr.check_reviews(pr, self.evidence())[0])
+    def test_forged_completion_evidence_cannot_merge_a_coderabbit_pr(self):
+        """The retired marker must not become a second, weaker oracle."""
+        pr = labelled("author:agent-1", "family:anthropic",
+                      "reviewed-by:agent-2", "reviewer-family:agent-2:openai")
+        ok, message = merge_pr.check_reviews(pr, self.evidence())
+        self.assertFalse(ok)
+        self.assertIn("CodeRabbit", message)
 
-    def test_stale_malformed_duplicate_or_unmatched_evidence_fails_closed(self):
-        cases = (
-            self.evidence(head_oid="b" * 40),
-            self.evidence(agent_review_marker_errors=1),
-            self.evidence(agent_review_assignment_errors=1),
-            self.evidence(agent_review_attestations=(
-                self.evidence()["agent_review_attestations"] * 2)),
-            self.evidence(agent_review_assignments=(
-                self.evidence()["agent_review_assignments"] * 2)),
-            self.evidence(reviews=[]),
-            self.evidence(reviews=[{
-                **self.evidence()["reviews"][0], "body": "",
-            }]),
-        )
-        for evidence in cases:
-            with self.subTest(evidence=evidence):
-                self.assertFalse(merge_pr.check_reviews(self.pr(), evidence)[0])
-
-    def test_review_and_completion_times_must_follow_the_head_in_order(self):
-        too_early = self.evidence()
-        too_early["reviews"][0]["submittedAt"] = "2026-08-25T09:59:00Z"
-        completion_before_review = self.evidence()
-        completion_before_review["agent_review_attestations"][0][
-            "completed_at"] = "2026-08-25T10:01:00Z"
-        review_before_assignment = self.evidence()
-        review_before_assignment["reviews"][0]["submittedAt"] = "2026-08-25T10:00:30Z"
-        for evidence in (too_early, completion_before_review, review_before_assignment):
-            self.assertFalse(merge_pr.check_reviews(self.pr(), evidence)[0])
+    def test_no_agent_thread_bucket_masquerades_as_a_service(self):
+        payload = {"unresolved": 3,
+                   "service_threads": {"coderabbit": {"unresolved": 0}}}
+        counts = merge_pr._service_thread_counts(payload, "agent")
+        # Falls back to the whole-evidence dict rather than borrowing another
+        # service's bucket, so the retired label reads the outer counts.
+        self.assertIs(counts, payload)
 
 
 class CodeRabbitStatusEvidenceTests(unittest.TestCase):
@@ -4190,229 +4142,33 @@ class SizeGateTests(unittest.TestCase):
         self.assertTrue(merge_pr.check_size({"additions": 10, "deletions": 2})[0])
 
 
-class ReviewRoundGateTests(unittest.TestCase):
-    def _pr(self, *states, body="Closes #98"):
-        reviews = []
-        for idx, state in enumerate(states):
-            entry = {"state": state, "author": {"login": f"r{idx}"}}
-            if state == "COMMENTED":
-                entry["body"] = "**Blocking:** fix this"
-            reviews.append(entry)
-        return {"number": 42, "body": body, "reviews": reviews}
+class RetiredReviewRoundSurfaceTests(unittest.TestCase):
+    """#414: repeated review rounds are history, not a gate or a work source.
 
-    def test_rounds_are_visible_and_never_block(self):
-        ok, msg = merge_pr.check_review_rounds(self._pr("CHANGES_REQUESTED", "CHANGES_REQUESTED"))
-        self.assertTrue(ok)
-        self.assertIn("2 review round(s)", msg)
-        self.assertNotIn("escalate", msg.lower())
+    The removed machinery counted rework rounds, added a soft `review rounds`
+    DoD gate, and -- once past a threshold -- posted split guidance and filed
+    follow-up issues on the board. Automatic issue creation is exactly the
+    project-management layer the kernel is not; these assertions keep it gone.
+    """
 
-    def test_threshold_crossing_still_passes_with_split_guidance(self):
-        ok, msg = merge_pr.check_review_rounds(
-            self._pr("CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED")
-        )
-        self.assertTrue(ok)
-        self.assertIn("3 review round(s)", msg)
-        self.assertIn("--emit-review-split", msg)
-        self.assertIn("never creates a human gate", msg)
+    RETIRED_ATTRIBUTES = (
+        "check_review_rounds", "count_review_rounds", "_is_rework_review",
+        "build_review_round_split_plan", "emit_review_round_split",
+        "fetch_unresolved_finding_summaries", "_split_item_marker",
+        "_find_existing_split_follow_ups", "_attach_follow_up_to_board",
+        "_pr_comments_bodies", "_flatten_comment_pages",
+        "REVIEW_ROUND_THRESHOLD", "REVIEW_ROUND_SPLIT_MARKER",
+        "REVIEW_ROUND_SPLIT_ITEM_FMT", "REVIEW_ROUND_SPLIT_ITEM_RE",
+    )
 
-    def test_commented_blocking_body_counts_as_a_round(self):
-        self.assertEqual(
-            merge_pr.count_review_rounds(self._pr("COMMENTED", "APPROVED")),
-            1,
-        )
+    def test_no_review_round_or_split_surface_remains(self):
+        for name in self.RETIRED_ATTRIBUTES:
+            self.assertFalse(hasattr(merge_pr, name),
+                             f"merge_pr still exposes {name}")
 
-    def test_split_plan_follow_ups_carry_depends_on(self):
-        pr = self._pr(
-            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
-            body="Closes #98\n",
-        )
-        plan = merge_pr.build_review_round_split_plan(
-            pr, findings=["scripts/merge_pr.py: too broad"],
-        )
-        self.assertTrue(plan["crossed"])
-        self.assertEqual(plan["threshold"], 3)
-        self.assertIn(merge_pr.REVIEW_ROUND_SPLIT_MARKER, plan["comment"])
-        self.assertIn("does **not** create a human approval gate", plan["comment"])
-        self.assertTrue(plan["follow_ups"])
-        for item in plan["follow_ups"]:
-            # depends-on targets the linked Closes issue (picker semantics), not the PR.
-            self.assertIn("depends-on: #98", item["body"])
-            self.assertIn(
-                merge_pr._split_item_marker(42, item["idx"]),
-                item["body"],
-            )
-            self.assertNotIn("depends-on: #42", item["body"])
-
-    def test_flatten_comment_pages_handles_slurp_and_flat(self):
-        flat = merge_pr._flatten_comment_pages([
-            {"body": "a"}, {"body": "b"},
-        ])
-        self.assertEqual(flat, ["a", "b"])
-        slurped = merge_pr._flatten_comment_pages([
-            [{"body": "p1a"}, {"body": "p1b"}],
-            [{"body": "p2"}],
-        ])
-        self.assertEqual(slurped, ["p1a", "p1b", "p2"])
-
-    def test_pr_comments_bodies_uses_paginate_slurp(self):
-        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
-             patch.object(merge_pr, "_gh_json") as gh_json:
-            gh_json.return_value = [[{"body": "one"}], [{"body": "two"}]]
-            bodies = merge_pr._pr_comments_bodies(42)
-        self.assertEqual(bodies, ["one", "two"])
-        args = gh_json.call_args[0][0]
-        self.assertIn("--paginate", args)
-        self.assertIn("--slurp", args)
-
-    def test_emit_is_idempotent_when_marker_already_present(self):
-        pr = self._pr(
-            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
-            body="Closes #98\n",
-        )
-        with patch.object(
-            merge_pr, "_pr_comments_bodies",
-            return_value=[f"{merge_pr.REVIEW_ROUND_SPLIT_MARKER}\nalready done"],
-        ), patch.object(merge_pr, "run_cmd") as run_cmd, \
-             patch.object(merge_pr, "_find_existing_split_follow_ups") as find_existing:
-            result = merge_pr.emit_review_round_split(
-                pr, findings=["scripts/x.py: leftover"], apply=True,
-            )
-        self.assertFalse(result["emitted"])
-        self.assertEqual(result["reason"], "already emitted")
-        run_cmd.assert_not_called()
-        find_existing.assert_not_called()
-
-    def test_emit_attaches_new_issues_to_board(self):
-        pr = self._pr(
-            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
-            body="Closes #98\n",
-        )
-        with patch.object(merge_pr, "_pr_comments_bodies", return_value=["prior"]), \
-             patch.object(merge_pr, "_find_existing_split_follow_ups", return_value={}), \
-             patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
-             patch.object(merge_pr, "run_cmd") as run_cmd, \
-             patch.object(merge_pr, "update_status", return_value=True) as update_status:
-            run_cmd.side_effect = [
-                (0, "https://github.com/o/r/issues/501\n", ""),
-                (0, "", ""),
-            ]
-            result = merge_pr.emit_review_round_split(
-                pr, findings=["scripts/x.py: leftover"], apply=True,
-            )
-        self.assertTrue(result["emitted"])
-        self.assertEqual(result["reason"], "posted")
-        update_status.assert_called_once_with(501, "Backlog", require_board=True)
-        create_args = run_cmd.call_args_list[0][0][0]
-        self.assertEqual(create_args[:3], ["gh", "issue", "create"])
-        self.assertIn(
-            merge_pr._split_item_marker(42, 1),
-            create_args[create_args.index("--body") + 1],
-        )
-
-    def test_emit_fails_closed_when_board_attach_fails(self):
-        pr = self._pr(
-            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
-            body="Closes #98\n",
-        )
-        with patch.object(merge_pr, "_pr_comments_bodies", return_value=[]), \
-             patch.object(merge_pr, "_find_existing_split_follow_ups", return_value={}), \
-             patch.object(
-                 merge_pr, "run_cmd",
-                 return_value=(0, "https://github.com/o/r/issues/502\n", ""),
-             ), \
-             patch.object(merge_pr, "update_status", return_value=False):
-            result = merge_pr.emit_review_round_split(
-                pr, findings=["scripts/x.py: leftover"], apply=True,
-            )
-        self.assertFalse(result["emitted"])
-        self.assertIn("board attach failed", result["reason"])
-
-    def test_emit_reuses_partial_creates_on_retry(self):
-        pr = self._pr(
-            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
-            body="Closes #98\n",
-        )
-        existing = {
-            1: {"number": 510, "url": "https://github.com/o/r/issues/510"},
-        }
-        with patch.object(merge_pr, "_pr_comments_bodies", return_value=[]), \
-             patch.object(
-                 merge_pr, "_find_existing_split_follow_ups", return_value=existing,
-             ), \
-             patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
-             patch.object(merge_pr, "run_cmd") as run_cmd, \
-             patch.object(merge_pr, "update_status", return_value=True) as update_status:
-            run_cmd.side_effect = [
-                (0, "https://github.com/o/r/issues/511\n", ""),  # create idx 2
-                (0, "", ""),  # PR comment
-            ]
-            result = merge_pr.emit_review_round_split(
-                pr,
-                findings=["finding one", "finding two"],
-                apply=True,
-            )
-        self.assertTrue(result["emitted"])
-        self.assertEqual(
-            result["created_issues"],
-            [
-                "https://github.com/o/r/issues/510",
-                "https://github.com/o/r/issues/511",
-            ],
-        )
-        # Reused #510 + newly created #511 both get board attach.
-        self.assertEqual(
-            [c.args for c in update_status.call_args_list],
-            [(510, "Backlog",), (511, "Backlog",)],
-        )
-        for call in update_status.call_args_list:
-            self.assertTrue(call.kwargs.get("require_board"))
-        # Only one issue create (idx 2); idx 1 was reused.
-        create_calls = [
-            c for c in run_cmd.call_args_list
-            if c[0][0][:3] == ["gh", "issue", "create"]
-        ]
-        self.assertEqual(len(create_calls), 1)
-
-    def test_emit_retries_comment_after_issues_already_filed(self):
-        pr = self._pr(
-            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
-            body="Closes #98\n",
-        )
-        existing = {
-            1: {"number": 520, "url": "https://github.com/o/r/issues/520"},
-        }
-        with patch.object(merge_pr, "_pr_comments_bodies", return_value=[]), \
-             patch.object(
-                 merge_pr, "_find_existing_split_follow_ups", return_value=existing,
-             ), \
-             patch.object(merge_pr, "run_cmd") as run_cmd, \
-             patch.object(merge_pr, "update_status", return_value=True):
-            run_cmd.side_effect = [
-                (0, "", ""),  # PR comment succeeds on retry
-            ]
-            result = merge_pr.emit_review_round_split(
-                pr, findings=["only one"], apply=True,
-            )
-        self.assertTrue(result["emitted"])
-        self.assertEqual(
-            result["created_issues"],
-            ["https://github.com/o/r/issues/520"],
-        )
-        create_calls = [
-            c for c in run_cmd.call_args_list
-            if c[0][0][:3] == ["gh", "issue", "create"]
-        ]
-        self.assertEqual(create_calls, [])
-        comment_args = run_cmd.call_args_list[0][0][0]
-        self.assertEqual(comment_args[:3], ["gh", "pr", "comment"])
-        body_idx = comment_args.index("--body") + 1
-        self.assertIn(merge_pr.REVIEW_ROUND_SPLIT_MARKER, comment_args[body_idx])
-
-    def test_evaluate_dod_includes_review_rounds_soft_gate(self):
-        pr = self._pr(
-            "CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED",
-            body="Closes #98\n",
-        )
+    def test_the_merge_gate_has_no_review_rounds_entry(self):
+        pr = {"number": 42, "body": "Closes #98\n",
+              "reviews": [{"state": "CHANGES_REQUESTED", "author": {"login": "r"}}] * 5}
         with patch.object(merge_pr, "check_open", return_value=(True, "open")), \
              patch.object(merge_pr, "check_issue_link", return_value=(True, "linked")), \
              patch.object(merge_pr, "check_verification", return_value=(True, "ok")), \
@@ -4421,16 +4177,21 @@ class ReviewRoundGateTests(unittest.TestCase):
              patch.object(merge_pr, "check_rebased", return_value=(True, "current")), \
              patch.object(merge_pr, "check_size", return_value=(True, "small")), \
              patch.object(merge_pr, "check_test_coverage", return_value=(True, "tests")), \
+             patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok")), \
              patch.object(merge_pr, "check_acceptance", return_value=(True, "accept")), \
              patch.object(merge_pr, "linked_issues", return_value=[98]):
             ok, gates = merge_pr.evaluate_dod(pr, {98: "- [x] done\n"}, evidence={})
-        names = [name for name, _, _ in gates]
-        self.assertIn("review rounds", names)
-        rounds_gate = next(g for g in gates if g[0] == "review rounds")
-        self.assertTrue(rounds_gate[1])
-        self.assertIn("--emit-review-split", rounds_gate[2])
         self.assertTrue(ok)
+        self.assertNotIn("review rounds", [name for name, _, _ in gates])
 
+    def test_the_cli_no_longer_offers_review_round_splitting(self):
+        source = Path(merge_pr.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("--emit-review-split", source)
+        self.assertNotIn("aru-review-round-split", source)
+        self.assertNotIn("gh issue create", source)
+
+
+class SpecSyncGateOrderingTests(unittest.TestCase):
     def test_evaluate_dod_includes_spec_sync_gate(self):
         pr = {"body": "Closes #242\n"}
         with patch.object(merge_pr, "check_open", return_value=(True, "open")), \
@@ -4442,7 +4203,6 @@ class ReviewRoundGateTests(unittest.TestCase):
              patch.object(merge_pr, "check_size", return_value=(True, "small")), \
              patch.object(merge_pr, "check_test_coverage", return_value=(True, "tests")), \
              patch.object(merge_pr, "check_spec_sync", return_value=(True, "spec sync ok")), \
-             patch.object(merge_pr, "check_review_rounds", return_value=(True, "ok")), \
              patch.object(merge_pr, "check_acceptance", return_value=(True, "accept")), \
              patch.object(merge_pr, "linked_issues", return_value=[242]):
             ok, gates = merge_pr.evaluate_dod(pr, {242: "- [x] done\n"}, evidence={})
@@ -4584,7 +4344,6 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "post_human_intervention", return_value=False)
     @patch.object(merge_pr.time, "sleep")
     @patch.object(merge_pr, "clear_merger_claims")
-    @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
     @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
     @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
     @patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed"))
@@ -4606,7 +4365,7 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_successful_merge_with_branch_delete_failure_is_resumable(
         self, _base_tip, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
-        _remote, _close, _done, _issue_claim, _review_claim, merger_claim,
+        _remote, _close, _done, _issue_claim, merger_claim,
         sleep, intervention,
     ):
         fetch.return_value = {
@@ -4644,7 +4403,6 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
         self.assertEqual(_close.call_count, 4)
         self.assertEqual(_done.call_count, 4)
         self.assertEqual(_issue_claim.call_count, 4)
-        self.assertEqual(_review_claim.call_count, 4)
         merger_claim.assert_not_called()
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 15, 45])
         intervention.assert_called_once()
@@ -5040,7 +4798,6 @@ class CloseOutRecoveryTests(unittest.TestCase):
             "ensure_issue_closed": (True, "closed"),
             "reconcile_issue_done": (True, "done"),
             "clear_issue_claims": (True, "issue claim clear"),
-            "clear_review_claims": (True, "review claim clear"),
             "clear_merger_claims": (True, "merger claim clear"),
             "sweep_leftovers": (True, "janitor ok"),
         }
@@ -5063,7 +4820,6 @@ class CloseOutRecoveryTests(unittest.TestCase):
         self.assertFalse(ok)
         mocks["ensure_issue_closed"].assert_called_once_with(7)
         mocks["reconcile_issue_done"].assert_called_once_with(7)
-        mocks["clear_review_claims"].assert_called_once_with(9)
         mocks["clear_merger_claims"].assert_not_called()
         mocks["sweep_leftovers"].assert_called_once_with("/repo", retain_merger_pr=9)
 
@@ -5078,7 +4834,6 @@ class CloseOutRecoveryTests(unittest.TestCase):
         ok, mocks = self._run("reconcile_issue_done")
         self.assertFalse(ok)
         mocks["clear_issue_claims"].assert_called_once_with(7)
-        mocks["clear_review_claims"].assert_called_once_with(9)
         mocks["clear_merger_claims"].assert_not_called()
 
     def test_closeout_invokes_janitor_even_when_a_prior_step_fails(self):
@@ -5097,7 +4852,6 @@ class CloseOutRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "record_terminal_lease", return_value=(True, "lease ok"))
     @patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor ok"))
     @patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear"))
-    @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
     @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue clear"))
     @patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done"))
     @patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed"))
@@ -5106,7 +4860,7 @@ class CloseOutRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree"))
     @patch.object(merge_pr.os, "chdir")
     def test_changes_to_surviving_root_before_pruning_caller_worktree(
-        self, chdir, prune, _local, _remote, _close, _done, _issue, _review, _merger,
+        self, chdir, prune, _local, _remote, _close, _done, _issue, _merger,
         _janitor, _lease, _stale,
     ):
         def after_chdir(*_args):
@@ -5403,7 +5157,8 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         run.side_effect = [
             (0, "gated-sha\n", ""),  # rev-parse --verify
             (0, "worktree /repo\nbranch refs/heads/main\n", ""),  # worktree list
-            (0, "", ""),  # git update-ref -d
+            (0, "gated-sha\n", ""),  # leased revalidation
+            (0, "", ""),  # git branch -D
         ]
         ok, message = merge_pr.cleanup_local_branch(
             "/repo", "fix/issue-7-x", "gated-sha"
@@ -5411,8 +5166,8 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("Deleted local branch", message)
         self.assertEqual(
-            run.call_args_list[2].args[0],
-            ["git", "update-ref", "-d", "refs/heads/fix/issue-7-x", "gated-sha"],
+            run.call_args_list[3].args[0],
+            ["git", "branch", "-D", "--", "fix/issue-7-x"],
         )
 
     @patch.object(merge_pr, "run_cmd")
@@ -5420,7 +5175,8 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         run.side_effect = [
             (0, "gated-sha\n", ""),  # rev-parse --verify
             (0, "worktree /repo\nbranch refs/heads/main\n", ""),  # worktree list
-            (1, "", "unable to lock ref"),  # git update-ref -d
+            (0, "gated-sha\n", ""),  # leased revalidation
+            (1, "", "unable to lock ref"),  # git branch -D
             (0, "gated-sha\n", ""),  # post-failure rev-parse check
         ]
         ok, message = merge_pr.cleanup_local_branch(
@@ -5429,6 +5185,19 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Orphan local branch", message)
         self.assertIn("unable to lock ref", message)
+
+    @patch.object(merge_pr, "run_cmd")
+    def test_git_branch_guard_rejects_attachment_after_listing(self, run):
+        run.side_effect = [
+            (0, "gated-sha\n", ""),
+            (0, "worktree /repo\nbranch refs/heads/main\n", ""),
+            (0, "gated-sha\n", ""),
+            (1, "", "cannot delete branch checked out at /repo/late"),
+            (0, "gated-sha\n", ""),
+        ]
+        ok, message = merge_pr.cleanup_local_branch("/repo", "fix/issue-7-x", "gated-sha")
+        self.assertFalse(ok)
+        self.assertIn("worktree guard", message)
 
     @patch.object(merge_pr, "run_cmd")
     def test_local_branch_cleanup_fails_closed_when_worktree_enumeration_fails(self, run):
@@ -5876,7 +5645,6 @@ class IdempotentCloseOutStepTests(unittest.TestCase):
     @patch.object(merge_pr, "_gh_json", return_value={"labels": []})
     def test_absent_claim_labels_are_already_done(self, _gh):
         self.assertTrue(merge_pr.clear_issue_claims(7)[0])
-        self.assertTrue(merge_pr.clear_review_claims(9)[0])
 
 
 class OrphanLocalBranchRegressionTests(unittest.TestCase):
@@ -5914,7 +5682,6 @@ class OrphanLocalBranchRegressionTests(unittest.TestCase):
             patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed")),
             patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done")),
             patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue claim clear")),
-            patch.object(merge_pr, "clear_review_claims", return_value=(True, "review claim clear")),
             patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor ok")),
         ]
 
@@ -5938,7 +5705,7 @@ class OrphanLocalBranchRegressionTests(unittest.TestCase):
 
             def fail_first_branch_delete(command, **kwargs):
                 nonlocal first_delete_seen
-                if command[:3] == ["git", "update-ref", "-d"] and not first_delete_seen:
+                if command[:3] == ["git", "branch", "-D"] and not first_delete_seen:
                     first_delete_seen = True
                     return 1, "", "simulated transient lock"
                 return real_run_cmd(command, **kwargs)
@@ -6318,7 +6085,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
     @classmethod
     def page(cls, nodes, body, *, has_next=False, cursor=None):
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": cls.HEAD,
+            **_pull_version(cls.HEAD),
             "body": body,
             "author": {"login": "author", "__typename": "User"},
             "userContentEdits": {
@@ -6337,7 +6104,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         ], after)
 
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
 
         self.assertEqual(len(events["size-waiver"]), 1)
@@ -6353,7 +6120,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         ], current)
 
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
 
         self.assertEqual(len(events["verification"]), 1)
@@ -6373,7 +6140,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         ], before)
 
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
 
         self.assertEqual(events, {"size-waiver": [], "verification": []})
@@ -6423,7 +6190,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         ], after)
 
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
 
         self.assertEqual(events, {"size-waiver": [], "verification": []})
@@ -6445,7 +6212,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
             ),
         ]
         events = merge_pr._body_edit_events(
-            "owner", "repo", 248, self.HEAD,
+            "owner", "repo", 248, _VERSION,
         )
         self.assertEqual(len(events["size-waiver"]), 1)
         self.assertIn("cursor=older", gh_json.call_args_list[1].args[0])
@@ -6455,7 +6222,7 @@ class BodyEditEvidenceTests(unittest.TestCase):
         gh_json.side_effect = None
         gh_json.return_value = changed
         self.assertIsNone(
-            merge_pr._body_edit_events("owner", "repo", 248, self.HEAD)
+            merge_pr._body_edit_events("owner", "repo", 248, _VERSION)
         )
 
 
@@ -6473,7 +6240,7 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
     @staticmethod
     def thread_page(comments):
         return {"data": {"repository": {"pullRequest": {
-            "headRefOid": ReviewBodyEditIntegrationTests.HEAD,
+            **_pull_version(ReviewBodyEditIntegrationTests.HEAD),
             "commits": {"nodes": [{"commit": {
                 "committedDate": "2026-08-17T00:00:00Z",
             }}]},
@@ -6510,12 +6277,11 @@ class ReviewBodyEditIntegrationTests(unittest.TestCase):
             patch.object(merge_pr, "get_repo_slug", return_value="owner/repo"),
             patch.object(
                 merge_pr, "_reviewed_current_head",
-                return_value=(self.HEAD, True, [self.REVIEW]),
+                return_value=(_VERSION, True, [self.REVIEW]),
             ),
             patch.object(
-                merge_pr, "_review_head_attestations",
+                merge_pr, "_review_comment_evidence",
                 return_value={
-                    "attestations": [{"agent": "agent-2", "head": self.HEAD}],
                     "coderabbit_full_review_comments": [],
                     "codeant_status_comments": [],
                 },
@@ -6712,7 +6478,7 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
             "data": {
                 "repository": {
                     "pullRequest": {
-                        "headRefOid": "head123",
+                        **_pull_version(),
                         "reviews": {
                             "nodes": [{
                                 "id": "review-1", "state": "COMMENTED",
@@ -6751,7 +6517,7 @@ class OutdatedThreadEvidenceTests(unittest.TestCase):
             "data": {
                 "repository": {
                     "pullRequest": {
-                        "headRefOid": "head123",
+                        **_pull_version(),
                         "reviews": {
                             "nodes": [{
                                 "id": "review-1", "state": "COMMENTED",
@@ -7272,6 +7038,107 @@ class DryRunJsonTests(unittest.TestCase):
         payload = __import__("json").loads(printed[0])
         self.assertTrue(payload["already_merged"])
         self.assertTrue(payload["ok"])
+
+    def test_ensure_pr_head_checkout_fetches_from_fork_remote_for_cross_repository_pr(self):
+        pr = {
+            "number": 12,
+            "headRefOid": "abc1234567890",
+            "headRefName": "fix/bug",
+            "isCrossRepository": True,
+            "headRepository": {
+                "nameWithOwner": "contributor/repo",
+                "url": "https://github.com/contributor/repo",
+            },
+        }
+        with patch.object(merge_pr, "get_repo_slug", return_value="base/repo"), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(tempfile, "mkdtemp", return_value="/tmp/checkout"), \
+             patch.object(merge_pr, "run_cmd") as run_cmd:
+            def fake_run(argv, check=False, cwd=None):
+                if argv[:4] == ["git", "fetch", "--no-tags", "https://github.com/contributor/repo"]:
+                    return (0, "", "")
+                if argv[:4] == ["git", "worktree", "add", "--detach"]:
+                    return (0, "", "")
+                if argv == ["git", "rev-parse", "HEAD"]:
+                    return (0, "abc1234567890\n", "")
+                if argv == ["git", "status", "--porcelain"]:
+                    return (0, "", "")
+                return (0, "", "")
+            run_cmd.side_effect = fake_run
+            dest, err = merge_pr.ensure_pr_head_checkout(pr)
+        self.assertEqual(dest, "/tmp/checkout")
+        self.assertIsNone(err)
+        fetch_call = next(c for c in run_cmd.call_args_list if c.args[0][:2] == ["git", "fetch"])
+        self.assertEqual(fetch_call.args[0][3], "https://github.com/contributor/repo")
+
+    def test_ensure_pr_head_checkout_falls_back_to_pull_head_ref(self):
+        pr = {
+            "number": 12,
+            "headRefOid": "abc1234567890",
+            "headRefName": "fix/bug",
+            "isCrossRepository": False,
+        }
+        with patch.object(merge_pr, "get_repo_slug", return_value="base/repo"), \
+             patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(tempfile, "mkdtemp", return_value="/tmp/checkout"), \
+             patch.object(merge_pr, "run_cmd") as run_cmd:
+            def fake_run(argv, check=False, cwd=None):
+                if argv == ["git", "fetch", "--no-tags", "origin", "abc1234567890"]:
+                    return (1, "", "fetch sha failed")
+                if argv == ["git", "fetch", "--no-tags", "origin", "fix/bug"]:
+                    return (1, "", "fetch ref failed")
+                if argv == ["git", "fetch", "--no-tags", "origin", "pull/12/head"]:
+                    return (0, "", "")
+                if argv[:4] == ["git", "worktree", "add", "--detach"]:
+                    return (0, "", "")
+                if argv == ["git", "rev-parse", "HEAD"]:
+                    return (0, "abc1234567890\n", "")
+                if argv == ["git", "status", "--porcelain"]:
+                    return (0, "", "")
+                return (0, "", "")
+            run_cmd.side_effect = fake_run
+            dest, err = merge_pr.ensure_pr_head_checkout(pr)
+        self.assertEqual(dest, "/tmp/checkout")
+        self.assertIsNone(err)
+
+    def test_persist_acceptance_evidence_verifies_post_write(self):
+        pr = {"number": 9, "headRefOid": "head123"}
+        records = [{"command": ["python3", "-m", "unittest"], "status": "passed", "exit_code": 0, "duration_seconds": 0.1}]
+        rendered = merge_pr.render_verification_evidence({"schema": "aru.verification.v1", "head_sha": "head123", "commands": records})
+        with patch.object(merge_pr, "_gh_json") as gh_json, \
+             patch.object(merge_pr, "run_cmd", return_value=(0, "", "")):
+            gh_json.side_effect = [
+                {"body": "Closes #1\n", "headRefOid": "head123"},
+                {"body": f"Closes #1\n{rendered}\n", "headRefOid": "head123"},
+            ]
+            ok, msg = merge_pr.persist_acceptance_evidence(9, pr, records)
+        self.assertTrue(ok)
+        self.assertIn("persisted 1 acceptance record", msg)
+
+    def test_persist_acceptance_evidence_retries_on_concurrent_modification(self):
+        pr = {"number": 9, "headRefOid": "head123"}
+        records = [{"command": ["python3", "-m", "unittest"], "status": "passed", "exit_code": 0, "duration_seconds": 0.1}]
+        rendered = merge_pr.render_verification_evidence({"schema": "aru.verification.v1", "head_sha": "head123", "commands": records})
+        with patch.object(merge_pr, "_gh_json") as gh_json, \
+             patch.object(merge_pr, "run_cmd", return_value=(0, "", "")):
+            gh_json.side_effect = [
+                {"body": "Closes #1\n", "headRefOid": "head123"},
+                {"body": "Closes #1 - author concurrent edit\n", "headRefOid": "head123"},
+                {"body": "Closes #1 - author concurrent edit\n", "headRefOid": "head123"},
+                {"body": f"Closes #1 - author concurrent edit\n{rendered}\n", "headRefOid": "head123"},
+            ]
+            ok, msg = merge_pr.persist_acceptance_evidence(9, pr, records)
+        self.assertTrue(ok)
+        self.assertIn("persisted 1 acceptance record", msg)
+
+    def test_persist_acceptance_evidence_fails_closed_when_verification_fails(self):
+        pr = {"number": 9, "headRefOid": "head123"}
+        records = [{"command": ["python3", "-m", "unittest"], "status": "passed", "exit_code": 0, "duration_seconds": 0.1}]
+        with patch.object(merge_pr, "_gh_json", return_value={"body": "Closes #1\n", "headRefOid": "head123"}), \
+             patch.object(merge_pr, "run_cmd", return_value=(0, "", "")):
+            ok, msg = merge_pr.persist_acceptance_evidence(9, pr, records, max_retries=2)
+        self.assertFalse(ok)
+        self.assertIn("could not verify persisted acceptance evidence", msg)
 
 
 if __name__ == "__main__":

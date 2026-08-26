@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1186
+# line-ceiling: 1177
 """Post-merge janitor: orphan worktrees, merged local branches, stale claims.
 
 Invoked from merge_pr close-out and as
@@ -1092,15 +1092,6 @@ def clear_stale_claim_labels(
         ok, message = merge_pr.clear_issue_claims(number, cwd=repo_root)
         if not _append_claim_result(
             notes, ok, message, f"issue #{number}: {message}"
-        ):
-            failed = True
-    reviewers, review_scan = _items_with_prefix("pr", "merged", "reviewer:", repo_root)
-    if not _record_claim_scan(notes, review_scan, "merged-PR reviewer", "reviewer:"):
-        failed = True
-    for number in reviewers:
-        ok, message = merge_pr.clear_review_claims(number, cwd=repo_root)
-        if not _append_claim_result(
-            notes, ok, message, f"PR #{number} reviewer: {message}"
         ):
             failed = True
     mergers, merge_scan = _items_with_prefix("pr", "merged", "merger:", repo_root)

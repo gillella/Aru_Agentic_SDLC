@@ -1,4 +1,4 @@
-# line-ceiling: 1090
+# line-ceiling: 1077
 import os
 import subprocess
 import tempfile
@@ -788,11 +788,10 @@ class CleanupWorktreesTests(unittest.TestCase):
 
     @patch.object(cleanup_worktrees, "merger_claim_still_needed", return_value=False)
     @patch.object(merge_pr, "clear_merger_claims", return_value=(True, "PR #3 merger:claims cleared"))
-    @patch.object(merge_pr, "clear_review_claims", return_value=(True, "PR #3 reviewer:claims cleared"))
     @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "Issue #2 agent:claims cleared"))
     @patch.object(merge_pr, "_gh_json")
     def test_stale_claim_labels_are_cleared(
-        self, gh_json, issue_clear, review_clear, merger_clear, _needed
+        self, gh_json, issue_clear, merger_clear, _needed
     ):
         def fake_gh(cmd, cwd=None):
             return _claim_gh(
@@ -808,18 +807,18 @@ class CleanupWorktreesTests(unittest.TestCase):
         gh_json.side_effect = fake_gh
         ok, notes = cleanup_worktrees.clear_stale_claim_labels(str(self.clone))
         issue_clear.assert_called_once_with(2, cwd=str(self.clone))
-        review_clear.assert_called_once_with(3, cwd=str(self.clone))
         merger_clear.assert_called_once_with(3, cwd=str(self.clone))
         self.assertTrue(ok)
         self.assertTrue(notes)
+        # #414: the historical reviewer:<id> label is left exactly where it is.
+        self.assertFalse(any("reviewer" in note for note in notes))
 
     @patch.object(cleanup_worktrees, "merger_claim_still_needed", return_value=True)
     @patch.object(merge_pr, "clear_merger_claims")
-    @patch.object(merge_pr, "clear_review_claims", return_value=(True, "PR #3 reviewer:claims cleared"))
     @patch.object(merge_pr, "clear_issue_claims", return_value=(True, "Issue #2 agent:claims cleared"))
     @patch.object(merge_pr, "_gh_json")
     def test_merger_label_kept_when_closeout_incomplete(
-        self, gh_json, issue_clear, review_clear, merger_clear, _needed
+        self, gh_json, issue_clear, merger_clear, _needed
     ):
         def fake_gh(cmd, cwd=None):
             return _claim_gh(
@@ -838,7 +837,6 @@ class CleanupWorktreesTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(any("kept merger claim" in note for note in notes))
         issue_clear.assert_called_once_with(2, cwd=str(self.clone))
-        review_clear.assert_called_once_with(3, cwd=str(self.clone))
 
     @patch.object(merge_pr, "clear_merger_claims")
     @patch.object(merge_pr, "_gh_json")
@@ -905,9 +903,11 @@ class CleanupWorktreesTests(unittest.TestCase):
             cmd[3] for cmd in seen
             if cmd[:3] == ["gh", "api", "--paginate"]
         ]
-        self.assertEqual(len(paths), 3)
+        # One issue scan for agent:<id>, one pull scan for merger:<id>. The
+        # third pull scan was the reviewer:<id> sweep retired in #414.
+        self.assertEqual(len(paths), 2)
         self.assertEqual(sum("/issues?" in path for path in paths), 1)
-        self.assertEqual(sum("/pulls?" in path for path in paths), 2)
+        self.assertEqual(sum("/pulls?" in path for path in paths), 1)
 
     @patch.object(merge_pr, "_gh_json", return_value=None)
     def test_unreadable_claim_list_is_recorded(self, _gh):
@@ -959,7 +959,6 @@ class CloseoutJanitorHookTests(unittest.TestCase):
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
-             patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
              patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")) as merger, \
              patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor:
             pr = {
@@ -980,7 +979,6 @@ class CloseoutJanitorHookTests(unittest.TestCase):
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
-             patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
              patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")) as merger, \
              patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")) as janitor:
             pr = {
@@ -1010,7 +1008,6 @@ class CloseoutJanitorHookTests(unittest.TestCase):
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
-             patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
              patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")) as merger, \
              patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")):
             pr = {
@@ -1031,7 +1028,6 @@ class CloseoutJanitorHookTests(unittest.TestCase):
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
-             patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
              patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")), \
              patch.object(
                  merge_pr, "sweep_leftovers",
@@ -1060,7 +1056,6 @@ class CloseoutJanitorHookTests(unittest.TestCase):
              patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "c")), \
              patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "d")), \
              patch.object(merge_pr, "clear_issue_claims", return_value=(True, "i")), \
-             patch.object(merge_pr, "clear_review_claims", return_value=(True, "v")), \
              patch.object(merge_pr, "clear_merger_claims", return_value=(True, "m")), \
              patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor")):
             pr = {

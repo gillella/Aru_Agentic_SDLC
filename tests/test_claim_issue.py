@@ -1,6 +1,6 @@
 # +59 for the #344 terminal merge lease tests.
 # +7 for the #410 fixed-quiet-threshold recovery tests.
-# line-ceiling: 1263
+# line-ceiling: 1296
 import io
 import json
 import sys
@@ -257,15 +257,49 @@ class ClaimProtocolTests(unittest.TestCase):
         get_issue.side_effect = [
             issue_with_labels("status:ready"),
             issue_with_labels("status:ready", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "needs-human"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
 
         self.assertEqual(result, claim_issue.EXIT_CONFLICT)
-        update_status.assert_called_once_with(7, "Backlog", require_board=True)
+        update_status.assert_called_once_with(
+            7, "Backlog", require_board=True, expected_status="ready",
+            expected_updated_at=None,
+        )
         self.assertEqual(
             run_cmd.call_args_list[-2].args[0],
             ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
+        )
+
+    @patch.object(claim_issue.time, "sleep")
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "ensure_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_settle_rollback_unassigns_the_caller_supplied_assignee(
+        self, get_issue, _ensure, run_cmd, _update_status, _sleep
+    ):
+        """A custom --assignee must be undone by the same name it was made with.
+
+        Rolling back with "@me" leaves the operator-only issue assigned to
+        whoever the claim named, so board ownership and GitHub assignment
+        disagree on an issue no agent may hold.
+        """
+        get_issue.side_effect = [
+            issue_with_labels("status:ready"),
+            issue_with_labels("status:ready", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "needs-human"),
+        ]
+
+        result = claim_issue.claim_issue(7, "agent-a", assignee="octocat")
+
+        self.assertEqual(result, claim_issue.EXIT_CONFLICT)
+        self.assertEqual(
+            run_cmd.call_args_list[-1].args[0],
+            ["gh", "issue", "edit", "7", "--remove-assignee", "octocat"],
         )
 
     @patch.object(claim_issue.time, "sleep")
@@ -281,12 +315,17 @@ class ClaimProtocolTests(unittest.TestCase):
             issue_with_labels("status:ready", "agent:agent-a"),
             issue_with_labels("status:ready", "agent:agent-a"),
             issue_with_labels("status:ready", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "needs-human"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
 
         self.assertEqual(result, claim_issue.EXIT_CONFLICT)
-        update_status.assert_called_once_with(7, "Backlog", require_board=True)
+        update_status.assert_called_once_with(
+            7, "Backlog", require_board=True, expected_status="ready",
+            expected_updated_at=None,
+        )
 
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "update_status", return_value=True)
@@ -302,6 +341,8 @@ class ClaimProtocolTests(unittest.TestCase):
             issue_with_labels("status:ready", "agent:agent-a"),
             issue_with_labels("status:ready", "agent:agent-a"),
             issue_with_labels("status:in-progress", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "agent:agent-a", "needs-human"),
+            issue_with_labels("status:backlog", "needs-human"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
@@ -311,7 +352,8 @@ class ClaimProtocolTests(unittest.TestCase):
             update_status.call_args_list,
             [
                 call(7, "In Progress", require_board=True),
-                call(7, "Backlog", require_board=True),
+                call(7, "Backlog", require_board=True, expected_status="in progress",
+                     expected_updated_at=None),
             ],
         )
 
@@ -414,14 +456,9 @@ class ClaimProtocolTests(unittest.TestCase):
         result = claim_issue.claim_issue(7, "agent-b")
 
         self.assertEqual(result, claim_issue.EXIT_CONFLICT)
-        self.assertEqual(
-            update_status.call_args_list[0],
-            call(7, "In Progress", require_board=True),
-        )
-        self.assertEqual(
-            update_status.call_args_list[1],
-            call(7, "Ready", require_board=True),
-        )
+        update_status.assert_called_once_with(7, "In Progress", require_board=True)
+        self.assertTrue(any(c.args[0][:4] == ["gh", "issue", "edit", "7"] and "--remove-label" in c.args[0]
+                            for c in run_cmd.call_args_list))
 
     @patch.object(claim_issue.time, "sleep")
     @patch.object(claim_issue, "update_status", return_value=True)
@@ -565,8 +602,83 @@ class ClaimProtocolTests(unittest.TestCase):
 
         result = claim_issue.release_issue(7, "agent-a")
 
-        self.assertIsNone(result)
+        self.assertEqual(result, claim_issue.EXIT_OK)
         update_status.assert_called_once_with(7, "Backlog", require_board=True)
+
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "_remove_agent_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_release_removes_custom_assignee_from_issue_record(
+        self, get_issue, _remove_label, run_cmd, _update_status
+    ):
+        issue = issue_with_labels("status:in-progress", "agent:agent-a")
+        issue["assignees"] = [{"login": "custom-user"}]
+        get_issue.return_value = issue
+
+        claim_issue.release_issue(7, "agent-a")
+
+        run_cmd.assert_called_once_with(
+            ["gh", "issue", "edit", "7", "--remove-assignee", "custom-user"],
+            check=False,
+        )
+
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
+    @patch.object(claim_issue, "_remove_agent_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_release_with_explicit_assignee_arg(
+        self, get_issue, _remove_label, run_cmd, _update_status
+    ):
+        issue = issue_with_labels("status:in-progress", "agent:agent-a")
+        get_issue.return_value = issue
+
+        claim_issue.release_issue(7, "agent-a", assignee="custom-user")
+
+        run_cmd.assert_called_once_with(
+            ["gh", "issue", "edit", "7", "--remove-assignee", "custom-user"],
+            check=False,
+        )
+
+    @patch.object(claim_issue, "update_status", return_value=True)
+    @patch.object(claim_issue, "run_cmd", return_value=(1, "", "denied"))
+    @patch.object(claim_issue, "_remove_agent_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_release_reports_assignee_cleanup_failure(
+        self, get_issue, _remove_label, _run_cmd, _update_status
+    ):
+        get_issue.return_value = issue_with_labels("status:in-progress", "agent:agent-a")
+        self.assertEqual(claim_issue.release_issue(7, "agent-a"), claim_issue.EXIT_ERROR)
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "_remove_agent_label", return_value=True)
+    @patch.object(claim_issue, "get_issue")
+    def test_rollback_claim_does_not_revert_status_or_assignee_when_another_agent_wins(
+        self, get_issue, remove_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:in-progress", "agent:agent-a", "agent:agent-b"
+        )
+        claim_issue._rollback_claim(7, "agent-b", "octocat", target_status="Ready")
+        update_status.assert_not_called()
+        run_cmd.assert_not_called()
+        remove_label.assert_called_once_with(7, "agent-b")
+
+    @patch.object(claim_issue, "update_status")
+    @patch.object(claim_issue, "run_cmd")
+    @patch.object(claim_issue, "_remove_agent_label")
+    @patch.object(claim_issue, "get_issue")
+    def test_rollback_claim_does_nothing_when_caller_label_is_missing(
+        self, get_issue, remove_label, run_cmd, update_status
+    ):
+        get_issue.return_value = issue_with_labels(
+            "status:in-progress", "agent:agent-a"
+        )
+        claim_issue._rollback_claim(7, "agent-b", "octocat", target_status="Ready")
+        update_status.assert_not_called()
+        run_cmd.assert_not_called()
+        remove_label.assert_not_called()
 
     @patch.object(claim_issue, "update_status")
     @patch.object(claim_issue, "run_cmd")
@@ -679,12 +791,17 @@ class ClaimProtocolTests(unittest.TestCase):
             "status:ready", "agent:agent-a", author="attacker")
         get_issue.side_effect = [
             ready, labeled, labeled, untrusted,
+            issue_with_labels("status:ready", "agent:agent-a", author="attacker"),
+            issue_with_labels("status:ready", author="attacker"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
 
         self.assertEqual(result, claim_issue.EXIT_CONFLICT)
-        update_status.assert_called_once_with(7, "Ready", require_board=True)
+        update_status.assert_called_once_with(
+            7, "Ready", require_board=True, expected_status="ready",
+            expected_updated_at=None,
+        )
         self.assertEqual(
             run_cmd.call_args_list[-2].args[0],
             ["gh", "issue", "edit", "7", "--remove-label", "agent:agent-a"],
@@ -704,6 +821,8 @@ class ClaimProtocolTests(unittest.TestCase):
             "status:in-progress", "agent:agent-a", author="attacker")
         get_issue.side_effect = [
             ready, labeled, labeled, labeled, untrusted,
+            issue_with_labels("status:ready", "agent:agent-a", author="attacker"),
+            issue_with_labels("status:ready", author="attacker"),
         ]
 
         result = claim_issue.claim_issue(7, "agent-a")
@@ -713,7 +832,8 @@ class ClaimProtocolTests(unittest.TestCase):
             update_status.call_args_list,
             [
                 call(7, "In Progress", require_board=True),
-                call(7, "Ready", require_board=True),
+                call(7, "Ready", require_board=True, expected_status="in progress",
+                     expected_updated_at=None),
             ],
         )
 
@@ -768,214 +888,95 @@ class ClaimAgeReaperTests(unittest.TestCase):
     def _list_result(prs):
         return 0, json.dumps(prs), ""
 
+    @staticmethod
+    def _merged_list_pair(prs):
+        """`reap_stale_merges` scans open PRs and then merged ones."""
+        return [(0, json.dumps(prs), ""), (0, "[]", "")]
+
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
-    def test_recent_pr_activity_does_not_protect_old_review_claim(
+    def test_recent_pr_activity_does_not_protect_old_merge_claim(
         self, run_cmd, fetch_timeline
     ):
         recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         run_cmd.side_effect = [
-            self._list_result([
-                self._pr(247, "reviewer:dead", updated_at=recent),
+            *self._merged_list_pair([
+                self._pr(247, "merger:dead", updated_at=recent),
             ]),
             (0, "", ""),
         ]
-        fetch_timeline.return_value = self._timeline("reviewer:dead", self.OLD)
+        fetch_timeline.return_value = self._timeline("merger:dead", self.OLD)
 
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [247])
+        self.assertEqual(claim_issue.reap_stale_merges(4), [247])
         self.assertNotIn("updatedAt", run_cmd.call_args_list[0].args[0][-1])
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
-    def test_recent_review_claim_survives_idle_pr(self, run_cmd, fetch_timeline):
+    def test_recent_merge_claim_survives_idle_pr(self, run_cmd, fetch_timeline):
         recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        run_cmd.return_value = self._list_result([
-            self._pr(8, "reviewer:busy", updated_at=self.OLD),
+        run_cmd.side_effect = self._merged_list_pair([
+            self._pr(8, "merger:busy", updated_at=self.OLD),
         ])
-        fetch_timeline.return_value = self._timeline("reviewer:busy", recent)
+        fetch_timeline.return_value = self._timeline("merger:busy", recent)
 
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
-        self.assertEqual(run_cmd.call_count, 1)
+        self.assertEqual(claim_issue.reap_stale_merges(4), [])
+        self.assertEqual(run_cmd.call_count, 2)
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
-    def test_recent_review_after_old_claim_exempts(
+    def test_timeline_failure_aborts_all_reaping_before_mutation(
         self, run_cmd, fetch_timeline
     ):
-        claim_time = "2020-01-02T00:00:00Z"
-        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        run_cmd.return_value = self._list_result([
-            self._pr(
-                9,
-                "reviewer:done",
-                reviews=[{"submittedAt": recent}],
-            ),
-        ])
-        fetch_timeline.return_value = self._timeline("reviewer:done", claim_time)
-
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
-
-    @patch.object(claim_issue, "fetch_paginated_gh_api")
-    @patch.object(claim_issue, "run_cmd")
-    def test_recent_advisory_review_does_not_exempt_old_claim(
-        self, run_cmd, fetch_timeline
-    ):
-        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        run_cmd.side_effect = [
-            self._list_result([
-                self._pr(
-                    17,
-                    "reviewer:abandoned",
-                    reviews=[{
-                        "author": {"login": "coderabbitai[bot]"},
-                        "submittedAt": recent,
-                    }],
-                ),
-            ]),
-            (0, "", ""),
-        ]
-        fetch_timeline.return_value = self._timeline(
-            "reviewer:abandoned", self.OLD
-        )
-
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [17])
-
-    @patch.object(claim_issue, "fetch_paginated_gh_api")
-    @patch.object(claim_issue, "run_cmd")
-    def test_recent_non_advisory_review_still_exempts_old_claim(
-        self, run_cmd, fetch_timeline
-    ):
-        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        run_cmd.return_value = self._list_result([
-            self._pr(
-                20,
-                "reviewer:done",
-                reviews=[{
-                    "author": {"login": "peer-reviewer"},
-                    "submittedAt": recent,
-                }],
-            ),
-        ])
-        fetch_timeline.return_value = self._timeline("reviewer:done", self.OLD)
-
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
-
-    @patch.object(claim_issue, "fetch_paginated_gh_api")
-    @patch.object(claim_issue, "run_cmd")
-    def test_completed_legacy_review_claim_is_cleared_immediately(
-        self, run_cmd, fetch_timeline
-    ):
-        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        run_cmd.side_effect = [
-            self._list_result([{
-                "number": 21,
-                "labels": [
-                    {"name": "reviewer:done"},
-                    {"name": "reviewed-by:done"},
-                ],
-                "reviews": [{"submittedAt": recent}],
-            }]),
-            (0, "", ""),
-        ]
-        fetch_timeline.return_value = self._timeline("reviewer:done", self.OLD)
-
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [21])
-
-    @patch.object(claim_issue, "fetch_paginated_gh_api")
-    @patch.object(claim_issue, "run_cmd")
-    def test_old_post_claim_review_does_not_preserve_claim_forever(
-        self, run_cmd, fetch_timeline
-    ):
-        run_cmd.side_effect = [
-            self._list_result([
-                self._pr(
-                    18,
-                    "reviewer:crashed-after-review",
-                    reviews=[{"submittedAt": "2020-01-03T00:00:00Z"}],
-                ),
-            ]),
-            (0, "", ""),
-        ]
-        fetch_timeline.return_value = self._timeline(
-            "reviewer:crashed-after-review", "2020-01-02T00:00:00Z"
-        )
-
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [18])
-
-    @patch.object(claim_issue, "fetch_paginated_gh_api")
-    @patch.object(claim_issue, "run_cmd")
-    def test_review_before_claim_does_not_exempt(self, run_cmd, fetch_timeline):
-        run_cmd.side_effect = [
-            self._list_result([
-                self._pr(
-                    10,
-                    "reviewer:abandoned",
-                    reviews=[{"submittedAt": "2020-01-01T00:00:00Z"}],
-                ),
-            ]),
-            (0, "", ""),
-        ]
-        fetch_timeline.return_value = self._timeline(
-            "reviewer:abandoned", "2020-01-02T00:00:00Z"
-        )
-
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [10])
-
-    @patch.object(claim_issue, "fetch_paginated_gh_api")
-    @patch.object(claim_issue, "run_cmd")
-    def test_timeline_failure_aborts_all_review_reaping_before_mutation(
-        self, run_cmd, fetch_timeline
-    ):
-        run_cmd.return_value = self._list_result([
-            self._pr(11, "reviewer:first"),
-            self._pr(12, "reviewer:unknown"),
+        run_cmd.side_effect = self._merged_list_pair([
+            self._pr(11, "merger:first"),
+            self._pr(12, "merger:unknown"),
         ])
         fetch_timeline.side_effect = [
-            self._timeline("reviewer:first", self.OLD),
+            self._timeline("merger:first", self.OLD),
             None,
         ]
 
         with patch("sys.stderr") as stderr:
-            result = claim_issue.reap_stale_reviews(4)
+            result = claim_issue.reap_stale_merges(4)
 
         self.assertEqual(result, [])
-        self.assertEqual(run_cmd.call_count, 1)
+        self.assertEqual(run_cmd.call_count, 2)
         self.assertTrue(stderr.write.called)
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
-    def test_missing_exact_label_event_aborts_review_reaping(
+    def test_missing_exact_label_event_aborts_reaping(
         self, run_cmd, fetch_timeline
     ):
-        run_cmd.return_value = self._list_result([
-            self._pr(13, "reviewer:exact"),
+        run_cmd.side_effect = self._merged_list_pair([
+            self._pr(13, "merger:exact"),
         ])
         fetch_timeline.return_value = self._timeline(
-            "reviewer:someone-else", self.OLD
+            "merger:someone-else", self.OLD
         )
 
         with patch("sys.stderr") as stderr:
-            result = claim_issue.reap_stale_reviews(4)
+            result = claim_issue.reap_stale_merges(4)
 
         self.assertEqual(result, [])
-        self.assertEqual(run_cmd.call_count, 1)
+        self.assertEqual(run_cmd.call_count, 2)
         self.assertTrue(stderr.write.called)
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
     def test_latest_matching_label_event_wins(self, run_cmd, fetch_timeline):
         recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        run_cmd.return_value = self._list_result([
-            self._pr(14, "reviewer:repeat"),
+        run_cmd.side_effect = self._merged_list_pair([
+            self._pr(14, "merger:repeat"),
         ])
         fetch_timeline.return_value = [
-            *self._timeline("reviewer:repeat", self.OLD),
-            *self._timeline("reviewer:other", self.OLD),
-            *self._timeline("reviewer:repeat", recent),
+            *self._timeline("merger:repeat", self.OLD),
+            *self._timeline("merger:other", self.OLD),
+            *self._timeline("merger:repeat", recent),
         ]
 
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
-        self.assertEqual(run_cmd.call_count, 1)
+        self.assertEqual(claim_issue.reap_stale_merges(4), [])
+        self.assertEqual(run_cmd.call_count, 2)
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
@@ -983,22 +984,53 @@ class ClaimAgeReaperTests(unittest.TestCase):
         self, run_cmd, fetch_timeline
     ):
         recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        run_cmd.return_value = self._list_result([
-            self._pr(19, "reviewer:renewed"),
+        run_cmd.side_effect = self._merged_list_pair([
+            self._pr(19, "merger:renewed"),
         ])
         fetch_timeline.side_effect = [
-            self._timeline("reviewer:renewed", self.OLD),
+            self._timeline("merger:renewed", self.OLD),
             [
-                *self._timeline("reviewer:renewed", self.OLD),
-                *self._timeline("reviewer:renewed", recent),
+                *self._timeline("merger:renewed", self.OLD),
+                *self._timeline("merger:renewed", recent),
             ],
         ]
 
         with patch("sys.stderr") as stderr:
-            result = claim_issue.reap_stale_reviews(4)
+            result = claim_issue.reap_stale_merges(4)
 
         self.assertEqual(result, [])
-        self.assertEqual(run_cmd.call_count, 1)
+        self.assertEqual(run_cmd.call_count, 2)
+        self.assertTrue(stderr.write.called)
+
+    @patch.object(claim_issue, "fetch_paginated_gh_api")
+    @patch.object(claim_issue, "run_cmd")
+    def test_claim_reacquired_after_revalidation_is_not_removed(
+        self, run_cmd, fetch_timeline
+    ):
+        """The sweep re-proves each claim in the instant before removing it.
+
+        Revalidation covers the whole set at preflight time; the removal
+        happens later, so a claim released and re-acquired in between would
+        otherwise be reaped on the strength of the older observation.
+        """
+        recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        run_cmd.side_effect = self._merged_list_pair([
+            self._pr(21, "merger:renewed"),
+        ])
+        fetch_timeline.side_effect = [
+            self._timeline("merger:renewed", self.OLD),
+            self._timeline("merger:renewed", self.OLD),
+            [
+                *self._timeline("merger:renewed", self.OLD),
+                *self._timeline("merger:renewed", recent),
+            ],
+        ]
+
+        with patch("sys.stderr") as stderr:
+            result = claim_issue.reap_stale_merges(4)
+
+        self.assertEqual(result, [])
+        self.assertEqual(run_cmd.call_count, 2)
         self.assertTrue(stderr.write.called)
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
@@ -1042,21 +1074,43 @@ class ClaimAgeReaperTests(unittest.TestCase):
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
     def test_zero_threshold_makes_no_api_calls(self, run_cmd, fetch_timeline):
-        self.assertEqual(claim_issue.reap_stale_reviews(0), [])
         self.assertEqual(claim_issue.reap_stale_merges(0), [])
         run_cmd.assert_not_called()
         fetch_timeline.assert_not_called()
 
 
-class ClaimIssueTests(unittest.TestCase):
-    def test_normal_review_claim_conflict_names_emergency_assignment(self):
-        with patch.object(claim_issue, "_pr_labels",
-                          return_value=["review:coderabbit", "author:agent-1"]), \
-                patch("sys.stderr") as stderr:
-            code = claim_issue.claim_review(17, "codex-review-pool")
-        self.assertEqual(code, claim_issue.EXIT_CONFLICT)
-        self.assertIn("emergency", "".join(
-            call.args[0] for call in stderr.write.call_args_list).lower())
+class RetiredReviewClaimSurfaceTests(unittest.TestCase):
+    """#414: this helper claims issues and merges; review is not its business."""
+
+    def test_no_review_claim_completion_or_reaping_api_remains(self):
+        for name in ("claim_review", "release_review", "complete_review",
+                     "reap_stale_reviews", "review_claimant", "reviewed_by",
+                     "reviewer_labels", "_remove_reviewer_label",
+                     "REVIEWER_LABEL_PREFIX", "REVIEWED_BY_LABEL_PREFIX",
+                     "REVIEWER_FAMILY_LABEL_PREFIX",
+                     "AGENT_REVIEW_ATTESTATION_VERSION"):
+            self.assertFalse(hasattr(claim_issue, name),
+                             f"claim_issue still exposes {name}")
+
+    def test_cli_refuses_a_bare_pr_instead_of_silently_claiming_review(self):
+        argv = ["claim_issue.py", "--pr", "17", "--agent", "codex-1"]
+        with patch.object(sys, "argv", argv), \
+                patch("sys.stderr") as stderr, \
+                self.assertRaises(SystemExit) as exit_info:
+            claim_issue.main()
+        self.assertEqual(exit_info.exception.code, claim_issue.EXIT_ERROR)
+        message = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("--adopt", message)
+        self.assertIn("--merge", message)
+
+    def test_cli_rejects_the_retired_review_completion_flags(self):
+        for flag in ("--complete-review", "--review-disposition"):
+            argv = ["claim_issue.py", "--pr", "17", "--agent", "codex-1", flag]
+            with patch.object(sys, "argv", argv), \
+                    patch("sys.stderr", io.StringIO()), \
+                    self.assertRaises(SystemExit) as exit_info:
+                claim_issue.main()
+            self.assertEqual(exit_info.exception.code, 2)
 
 
 class QuietThresholdReapTests(unittest.TestCase):
@@ -1070,12 +1124,12 @@ class QuietThresholdReapTests(unittest.TestCase):
     OLD = "2020-01-01T00:00:00Z"
 
     @staticmethod
-    def _pr(number, label, reviews=None):
-        return {
-            "number": number,
-            "labels": [{"name": label}],
-            "reviews": reviews or [],
-        }
+    def _pr(number, label):
+        return {"number": number, "labels": [{"name": label}], "reviews": []}
+
+    @classmethod
+    def _merged_list_pair(cls, prs):
+        return [(0, json.dumps(prs), ""), (0, "[]", "")]
 
     @staticmethod
     def _timeline(label, created_at):
@@ -1096,38 +1150,16 @@ class QuietThresholdReapTests(unittest.TestCase):
     ):
         now = datetime.now(timezone.utc)
         claimed_at = (now - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
-        run_cmd.return_value = (
-            0, json.dumps([self._pr(42, "reviewer:unknown-agent")]), "",
+        run_cmd.side_effect = self._merged_list_pair(
+            [self._pr(42, "merger:unknown-agent")]
         )
         fetch_timeline.return_value = self._timeline(
-            "reviewer:unknown-agent", claimed_at
+            "merger:unknown-agent", claimed_at
         )
 
         # A 3h-old claim is stale only under the halved presence threshold.
-        self.assertEqual(claim_issue.reap_stale_reviews(4, now=now), [])
-        self.assertEqual(run_cmd.call_count, 1)
-
-    @patch.object(claim_issue, "fetch_paginated_gh_api")
-    @patch.object(claim_issue, "run_cmd")
-    def test_reap_output_names_the_configured_threshold(
-        self, run_cmd, fetch_timeline
-    ):
-        now = datetime.now(timezone.utc)
-        claimed_at = (now - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
-        run_cmd.side_effect = [
-            (0, json.dumps([self._pr(42, "reviewer:gone")]), ""),
-            (0, "", ""),
-        ]
-        fetch_timeline.return_value = self._timeline("reviewer:gone", claimed_at)
-
-        fake_stderr = io.StringIO()
-        with patch("sys.stderr", fake_stderr):
-            released = claim_issue.reap_stale_reviews(4, now=now)
-
-        self.assertEqual(released, [42])
-        output = fake_stderr.getvalue()
-        self.assertIn("Released stale review claim on PR #42", output)
-        self.assertIn("claim age > 4h quiet threshold", output)
+        self.assertEqual(claim_issue.reap_stale_merges(4, now=now), [])
+        self.assertEqual(run_cmd.call_count, 2)
 
     @patch.object(claim_issue, "fetch_paginated_gh_api")
     @patch.object(claim_issue, "run_cmd")
@@ -1137,8 +1169,7 @@ class QuietThresholdReapTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         claimed_at = (now - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
         run_cmd.side_effect = [
-            (0, json.dumps([self._pr(43, "merger:gone")]), ""),
-            (0, "[]", ""),
+            *self._merged_list_pair([self._pr(43, "merger:gone")]),
             (0, "", ""),
         ]
         fetch_timeline.return_value = self._timeline("merger:gone", claimed_at)
@@ -1148,17 +1179,19 @@ class QuietThresholdReapTests(unittest.TestCase):
             released = claim_issue.reap_stale_merges(4, now=now)
 
         self.assertEqual(released, [43])
-        self.assertIn("claim age > 4h quiet threshold", fake_stderr.getvalue())
+        output = fake_stderr.getvalue()
+        self.assertIn("Released stale merge claim on PR #43", output)
+        self.assertIn("claim age > 4h quiet threshold", output)
 
     @patch.object(claim_issue, "fetch_paginated_gh_api", return_value=None)
     @patch.object(claim_issue, "run_cmd")
     def test_unreadable_claim_history_reaps_nothing(self, run_cmd, _timeline):
-        run_cmd.return_value = (
-            0, json.dumps([self._pr(44, "reviewer:gone")]), "",
+        run_cmd.side_effect = self._merged_list_pair(
+            [self._pr(44, "merger:gone")]
         )
         with patch("sys.stderr", io.StringIO()):
-            self.assertEqual(claim_issue.reap_stale_reviews(4), [])
-        self.assertEqual(run_cmd.call_count, 1)
+            self.assertEqual(claim_issue.reap_stale_merges(4), [])
+        self.assertEqual(run_cmd.call_count, 2)
 
     def test_claim_recovery_imports_no_presence_or_metrics_runtime(self):
         source = (

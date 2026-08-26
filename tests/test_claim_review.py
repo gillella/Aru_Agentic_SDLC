@@ -1,6 +1,4 @@
-# line-ceiling: 627
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,28 +6,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import claim_issue
-import agent_presence as ap
 import fetch_pr_feedback
-
-
-_PRESENCE_TEMPORARY = None
-_PRESENCE_PATCHER = None
-
-
-def setUpModule():
-    global _PRESENCE_TEMPORARY, _PRESENCE_PATCHER
-    _PRESENCE_TEMPORARY = tempfile.TemporaryDirectory()
-    _PRESENCE_PATCHER = patch.object(
-        ap,
-        "DEFAULT_PRESENCE_PATH",
-        Path(_PRESENCE_TEMPORARY.name) / "agent-presence.json",
-    )
-    _PRESENCE_PATCHER.start()
-
-
-def tearDownModule():
-    _PRESENCE_PATCHER.stop()
-    _PRESENCE_TEMPORARY.cleanup()
 
 
 def feedback_page(nodes, has_next=False, cursor=None, head="head-oid", errors=None,
@@ -257,204 +234,39 @@ class ActiveReviewFeedbackTests(unittest.TestCase):
         self.assertIsNone(fetch_pr_feedback.fetch_active_review_feedback(7))
 
 
-class ReviewLabelParsingTests(unittest.TestCase):
-    def test_reads_the_holder(self):
-        self.assertEqual(claim_issue.reviewed_by(["reviewer:agent-3", "type:feat"]), "agent-3")
+class RetiredCodingAgentReviewTests(unittest.TestCase):
+    """#414: nothing here can claim, complete, or reap a coding-agent review.
 
-    def test_no_holder(self):
-        self.assertIsNone(claim_issue.reviewed_by(["type:feat", "author:agent-1"]))
+    The behaviour these replace was real and tested: an optimistic reviewer:<id>
+    claim, a reviewed-by:<id> completion stamp with an exact-head attestation
+    comment, and a reaper that released both. Deleting the code is only half the
+    job -- this asserts the surface cannot come back by accident, because a
+    re-added claim path would silently start competing with CodeRabbit for the
+    same PR.
+    """
 
-    def test_holders_are_sorted_so_the_tie_break_is_deterministic(self):
-        held = claim_issue.reviewer_labels(["reviewer:zeta", "reviewer:alpha"])
-        self.assertEqual(held, ["reviewer:alpha", "reviewer:zeta"])
+    RETIRED_ATTRIBUTES = (
+        "claim_review", "complete_review", "release_review",
+        "reap_stale_reviews", "review_claimant", "reviewed_by",
+        "reviewer_labels", "_remove_reviewer_label", "_reviewer_label_for",
+        "_reviewed_by_label_for", "_reviewer_family_label_for",
+        "_review_head_attestation", "_stamp_reviewer_family",
+        "_reviewed_head_for_completion", "REVIEWER_LABEL_PREFIX",
+        "REVIEWED_BY_LABEL_PREFIX", "REVIEWER_FAMILY_LABEL_PREFIX",
+        "AGENT_REVIEW_ATTESTATION_VERSION", "REVIEW_HEAD_ATTESTATION_VERSION",
+        "AGENT_REVIEW_DISPOSITIONS", "AGENT_REVIEW_LABEL",
+    )
 
+    def test_no_review_claim_surface_remains_on_claim_issue(self):
+        for name in self.RETIRED_ATTRIBUTES:
+            self.assertFalse(hasattr(claim_issue, name),
+                             f"claim_issue still exposes {name}")
 
-class ClaimReviewTests(unittest.TestCase):
-    def test_normal_coding_agent_review_is_still_refused(self):
-        labels = ["review:coderabbit", "author:agent-1"]
-        with patch.object(claim_issue, "_pr_labels", return_value=labels):
-            self.assertEqual(claim_issue.claim_review(7, "agent-2"),
-                             claim_issue.EXIT_CONFLICT)
-
-    def test_preassigned_emergency_reviewer_resumes_without_mutation(self):
-        labels = ["review:agent", "reviewer:agent-2", "author:agent-1"]
-        with patch.object(claim_issue, "_pr_labels", return_value=labels), \
-                patch.object(claim_issue, "run_cmd") as run:
-            self.assertEqual(claim_issue.claim_review(7, "agent-2"),
-                             claim_issue.EXIT_OK)
-        run.assert_not_called()
-
-    def test_wrong_or_self_reviewer_is_refused(self):
-        for agent, labels in (
-            ("agent-3", ["review:agent", "reviewer:agent-2", "author:agent-1"]),
-            ("agent-1", ["review:agent", "reviewer:agent-1", "author:agent-1"]),
-        ):
-            with self.subTest(agent=agent), \
-                    patch.object(claim_issue, "_pr_labels", return_value=labels):
-                self.assertEqual(claim_issue.claim_review(7, agent),
-                                 claim_issue.EXIT_CONFLICT)
-
-    def test_complete_emergency_review_stamps_exact_head_contract(self):
-        labels = ["review:agent", "reviewer:agent-2", "author:agent-1"]
-        calls = []
-
-        def run(cmd, **_kwargs):
-            calls.append(cmd)
-            return 0, "", ""
-
-        with patch.object(claim_issue, "_pr_labels", return_value=labels), \
-                patch.object(claim_issue, "_reviewed_head_for_completion",
-                             return_value="a" * 40), \
-                patch.object(claim_issue.merge_pr, "review_evidence", return_value={
-                    "head_oid": "a" * 40, "agent_review_attestations": [],
-                    "agent_review_marker_errors": 0,
-                }), \
-                patch.object(claim_issue, "ensure_label", return_value=True), \
-                patch.object(claim_issue, "run_cmd", side_effect=run), \
-                patch.object(claim_issue, "_remove_reviewer_label", return_value=True):
-            code = claim_issue.complete_review(
-                7, "agent-2", "openai", "no-findings")
-        self.assertEqual(code, claim_issue.EXIT_OK)
-        comment = next(cmd[-1] for cmd in calls if "comment" in cmd)
-        for expected in ("aru-agent-review:v1", "agent-2", "openai",
-                         "no-findings", "a" * 40):
-            self.assertIn(expected, comment)
-
-    def test_completion_retry_reuses_matching_marker(self):
-        labels = ["review:agent", "reviewer:agent-2", "author:agent-1"]
-        record = {"head": "a" * 40, "agent": "agent-2", "family": "openai",
-                  "disposition": "no-findings"}
-        calls = []
-        with patch.object(claim_issue, "_pr_labels", return_value=labels), \
-                patch.object(claim_issue, "_reviewed_head_for_completion",
-                             return_value="a" * 40), \
-                patch.object(claim_issue.merge_pr, "review_evidence", return_value={
-                    "head_oid": "a" * 40, "agent_review_attestations": [record],
-                    "agent_review_marker_errors": 0,
-                }), \
-                patch.object(claim_issue, "ensure_label", return_value=True), \
-                patch.object(claim_issue, "run_cmd",
-                             side_effect=lambda cmd, **_kwargs: (calls.append(cmd) or (0, "", ""))), \
-                patch.object(claim_issue, "_remove_reviewer_label", return_value=True):
-            code = claim_issue.complete_review(7, "agent-2", "openai", "no-findings")
-        self.assertEqual(code, claim_issue.EXIT_OK)
-        self.assertFalse(any("comment" in cmd for cmd in calls))
-
-    def test_completion_requires_agent_authority_family_and_disposition(self):
-        cases = (
-            (["review:coderabbit", "reviewer:agent-2", "author:agent-1"],
-             "openai", "no-findings"),
-            (["review:agent", "reviewer:agent-2", "author:agent-1"],
-             "", "no-findings"),
-            (["review:agent", "reviewer:agent-2", "author:agent-1"],
-             "openai", ""),
-        )
-        for labels, family, disposition in cases:
-            with self.subTest(labels=labels, family=family, disposition=disposition), \
-                    patch.object(claim_issue, "_pr_labels", return_value=labels):
-                self.assertEqual(
-                    claim_issue.complete_review(7, "agent-2", family, disposition),
-                    claim_issue.EXIT_CONFLICT)
-
-
-class ReleaseReviewTests(unittest.TestCase):
-    @patch.object(claim_issue, "run_cmd", return_value=(0, "", ""))
-    @patch.object(claim_issue, "_pr_labels", return_value=["reviewer:agent-2"])
-    def test_holder_can_release(self, _labels, _run):
-        self.assertEqual(claim_issue.release_review(7, "agent-2"), claim_issue.EXIT_OK)
-
-    @patch.object(claim_issue, "_pr_labels", return_value=["reviewer:agent-9"])
-    def test_non_holder_cannot_release(self, _labels):
-        self.assertEqual(claim_issue.release_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
-
-
-class ReapStaleReviewsTests(unittest.TestCase):
-    OLD = "2020-01-01T00:00:00Z"
-
-    def setUp(self):
-        timeline_patch = patch.object(
-            claim_issue,
-            "fetch_paginated_gh_api",
-            return_value=[{
-                "event": "labeled",
-                "label": {"name": "reviewer:dead"},
-                "created_at": self.OLD,
-            }],
-        )
-        self.timeline = timeline_patch.start()
-        self.addCleanup(timeline_patch.stop)
-
-    def _prs(self, payload):
-        import json
-        return (0, json.dumps(payload), "")
-
-    @patch.object(claim_issue, "run_cmd")
-    def test_idle_unreviewed_claim_is_released(self, run_cmd):
-        run_cmd.side_effect = [
-            self._prs([{"number": 5, "labels": [{"name": "reviewer:dead"}],
-                        "updatedAt": self.OLD, "reviews": []}]),
-            (0, "", ""),
-        ]
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [5])
-
-    @patch.object(claim_issue, "run_cmd")
-    def test_a_recent_review_means_the_claim_is_spent_not_stale(self, run_cmd):
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        self.timeline.return_value = [{
-            "event": "labeled",
-            "label": {"name": "reviewer:done"},
-            "created_at": self.OLD,
-        }]
-        run_cmd.side_effect = [
-            self._prs([{"number": 5, "labels": [{"name": "reviewer:done"}],
-                        "updatedAt": self.OLD,
-                        "reviews": [{"state": "APPROVED", "submittedAt": now}]}]),
-        ]
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
-
-    @patch.object(claim_issue, "run_cmd")
-    def test_an_old_review_does_not_protect_a_later_abandoned_claim(self, run_cmd):
-        # A PR reviewed once, then claimed again by an agent that crashed: any
-        # historical review used to make the claim permanently unreapable, so
-        # the reviewer:* label excluded the PR from the queue forever.
-        self.timeline.return_value = [{
-            "event": "labeled",
-            "label": {"name": "reviewer:crashed"},
-            "created_at": "2021-01-01T00:00:00Z",
-        }]
-        run_cmd.side_effect = [
-            self._prs([{"number": 5, "labels": [{"name": "reviewer:crashed"}],
-                        "updatedAt": self.OLD,
-                        "reviews": [{"state": "APPROVED", "submittedAt": self.OLD}]}]),
-            (0, "", ""),
-        ]
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [5])
-
-    @patch.object(claim_issue, "run_cmd")
-    def test_recent_claim_is_left_alone(self, run_cmd):
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        self.timeline.return_value = [{
-            "event": "labeled",
-            "label": {"name": "reviewer:busy"},
-            "created_at": now,
-        }]
-        run_cmd.side_effect = [
-            self._prs([{"number": 5, "labels": [{"name": "reviewer:busy"}],
-                        "updatedAt": now, "reviews": []}]),
-        ]
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
-
-    @patch.object(claim_issue, "run_cmd")
-    def test_unclaimed_pr_is_ignored(self, run_cmd):
-        run_cmd.side_effect = [
-            self._prs([{"number": 5, "labels": [], "updatedAt": self.OLD, "reviews": []}]),
-        ]
-        self.assertEqual(claim_issue.reap_stale_reviews(4), [])
-
-    def test_reaping_is_off_by_default(self):
-        self.assertEqual(claim_issue.reap_stale_reviews(0), [])
+    def test_the_helper_source_writes_no_reviewer_label(self):
+        source = Path(claim_issue.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('"reviewer:', source)
+        self.assertNotIn('"reviewed-by:', source)
+        self.assertNotIn("aru-agent-review", source)
 
 
 class MergeClaimTests(unittest.TestCase):

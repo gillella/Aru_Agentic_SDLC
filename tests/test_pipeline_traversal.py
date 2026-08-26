@@ -1,4 +1,4 @@
-# line-ceiling: 490
+# line-ceiling: 458
 """Hermetic proof that the issue lifecycle is traversable end to end.
 
 Issue #293 - every governance gate in this repository is individually
@@ -214,44 +214,6 @@ def reassigned_evidence(service: str, **overrides) -> dict:
 FALLBACK_SERVICES = ("sourcery", "codeant")
 
 
-def agent_review_pr(**overrides) -> dict:
-    pr = reassigned_pr("agent")
-    pr["labels"].extend([
-        {"name": "reviewed-by:agent-2"},
-        {"name": "reviewer-family:agent-2:openai"},
-    ])
-    pr.update(overrides)
-    return pr
-
-
-def agent_review_evidence(**overrides) -> dict:
-    head = canonical_pr()["headRefOid"]
-    evidence = canonical_evidence(reviews=[{
-        "id": "agent-review-293", "state": "COMMENTED",
-        "body": "No findings after exact-head inspection and focused tests.",
-        "author": {"login": "gillella", "__typename": "User"},
-        "submittedAt": "2026-08-19T00:02:00Z", "commit": {"oid": head},
-    }])
-    evidence.pop("coderabbit_status")
-    evidence["service_threads"] = {
-        "agent": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-    }
-    evidence["agent_review_attestations"] = [{
-        "agent": "agent-2", "completed_at": "2026-08-19T00:03:00Z",
-        "disposition": "no-findings", "family": "openai", "head": head,
-        "status": "completed", "github_login": "gillella",
-    }]
-    evidence["agent_review_marker_errors"] = 0
-    evidence["agent_review_assignments"] = [{
-        "family": "openai", "from": "review:codeant", "head": head,
-        "reason": "External reviewers busy", "reviewer": "agent-2",
-        "assigned_at": "2026-08-19T00:01:00Z", "github_login": "gillella",
-    }]
-    evidence["agent_review_assignment_errors"] = 0
-    evidence.update(overrides)
-    return evidence
-
-
 def _issue(number: int, status: str) -> dict:
     return {
         "number": number,
@@ -262,7 +224,7 @@ def _issue(number: int, status: str) -> dict:
 
 EXPECTED_GATES = frozenset([
     "open", "issue link", "verification", "ci", "review", "rebased",
-    "size", "tests", "spec-sync", "review rounds",
+    "size", "tests", "spec-sync",
 ])
 
 
@@ -409,35 +371,48 @@ class FallbackReviewTraversalTests(unittest.TestCase):
             merge_pr.check_reviews(pr, reassigned_evidence("sourcery"))[0])
 
 
-class EmergencyAgentReviewTraversalTests(FallbackReviewTraversalTests):
-    """The explicit last-resort agent path preserves the full DoD conjunction."""
+class RetiredAgentReviewTraversalTests(unittest.TestCase):
+    """#414: `review:agent` is not a traversal, only a dead end.
 
-    def test_exact_head_independent_agent_review_is_traversable(self):
-        ok, gates = self._dod(agent_review_pr(), agent_review_evidence())
-        self.assertTrue(ok, [f"{n}: {m}" for n, passed, m in gates if not passed])
+    The emergency coding-agent path used to be a full alternative route to
+    merge. Its removal has to be visible here, in the traversal suite, or a
+    future change could quietly restore a second oracle without any pipeline
+    test noticing.
+    """
 
-    def test_agent_finding_blocks_until_new_head_and_fresh_review(self):
-        evidence = agent_review_evidence()
-        evidence["unresolved"] = 1
-        evidence["service_threads"]["agent"]["unresolved"] = 1
-        self.assertFalse(merge_pr.check_reviews(agent_review_pr(), evidence)[0])
-        pushed = "3" * 40
-        stale = agent_review_evidence(head_oid=pushed)
-        self.assertFalse(
-            merge_pr.check_reviews(agent_review_pr(headRefOid=pushed), stale)[0])
+    def test_review_agent_is_read_only_to_be_refused_with_a_way_out(self):
+        pr = reassigned_pr("agent")
+        ok, message = merge_pr.check_reviews(pr, canonical_evidence())
+        self.assertFalse(ok)
+        self.assertIn("retired", message)
+        self.assertIn("review:coderabbit", message)
 
-    def test_self_review_and_duplicate_completion_fail_closed(self):
-        self_review = agent_review_pr()
-        for label in self_review["labels"]:
-            if label["name"] == "reviewed-by:agent-2":
-                label["name"] = "reviewed-by:agent-1"
-            if label["name"] == "reviewer-family:agent-2:openai":
-                label["name"] = "reviewer-family:agent-1:openai"
-        self.assertFalse(
-            merge_pr.check_reviews(self_review, agent_review_evidence())[0])
-        evidence = agent_review_evidence()
-        evidence["agent_review_attestations"] *= 2
-        self.assertFalse(merge_pr.check_reviews(agent_review_pr(), evidence)[0])
+    def test_a_retired_assignment_fails_only_the_review_gate(self):
+        """It must be a dead end at review, not a mysteriously broken PR."""
+        with patch.object(merge_pr, "check_spec_sync",
+                          return_value=(True, "ok")), \
+             patch.object(merge_pr, "_behind_by", return_value=0):
+            ok, gates = merge_pr.evaluate_dod(
+                reassigned_pr("agent"), {293: CANONICAL_ISSUE_BODY},
+                canonical_evidence(),
+            )
+        self.assertFalse(ok)
+        self.assertEqual([name for name, passed, _ in gates if not passed],
+                         ["review"])
+
+    def test_no_external_fallback_service_is_named_agent(self):
+        """Read the production mapping, not the tuple this module declares.
+
+        `reassign_review` can still label a PR `review:agent`, so the claim
+        worth proving is the one the merge gate depends on: the coding agent
+        is not one of the external review authorities, and an assignment to
+        it yields no positive review authority at any head.
+        """
+        self.assertNotIn("agent", reassign_review.EXTERNAL_FALLBACK_LABELS)
+        self.assertEqual(set(reassign_review.EXTERNAL_FALLBACK_LABELS),
+                         set(FALLBACK_SERVICES))
+        self.assertFalse(merge_pr.has_authoritative_assigned_review(
+            reassigned_pr("agent"), canonical_evidence()))
 
 
 class DefinitionOfDoneTests(unittest.TestCase):
@@ -465,7 +440,6 @@ class DefinitionOfDoneTests(unittest.TestCase):
             "size": "author (size-waiver) or split",
             "tests": "author",
             "spec-sync": "author",
-            "review rounds": "author (audit-only split guidance)",
         }
         self.assertEqual(EXPECTED_GATES, frozenset(routed))
 

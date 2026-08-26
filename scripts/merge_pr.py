@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# +64 for the #344 terminal lease and stale-writer escalation.
-# +26 for the #427 CodeRabbit completed-description allowlist.
-# +80 for the #429 acceptance-interpreter and post-merge persistence fix; #414 ratchets this file to 4,500.
-# +20 for the #460 live base snapshot for behind-branch admission.
-# line-ceiling: 5440
+# #414 removed coding-agent review, review-round gating, and split planning and
+# ratcheted this file down from 5,438 lines. Every earlier +N allowance note
+# (#344, #427, #429, #460) described a ceiling that no longer exists.
+# line-ceiling: 4198
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -25,6 +24,7 @@ Exit codes:
 """
 
 import argparse
+from collections import namedtuple
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -42,19 +42,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import acceptance_runner
-from common import (
-    ensure_label,
-    terminal_lease_label,
-    VERIFICATION_EVIDENCE_END,
-    VERIFICATION_EVIDENCE_SCHEMA,
-    VERIFICATION_EVIDENCE_START,
-    get_repo_slug,
-    run_cmd,
-)
-from create_pr import (
-    render_verification_evidence,
-    replace_verification_evidence,
-)
+from common import (ensure_label, terminal_lease_label, VERIFICATION_EVIDENCE_END,
+                    VERIFICATION_EVIDENCE_SCHEMA, VERIFICATION_EVIDENCE_START, get_repo_slug,
+                    run_cmd)
+from create_pr import render_verification_evidence, replace_verification_evidence
 from update_issue_status import update_status
 
 EXIT_OK = 0
@@ -65,27 +56,12 @@ EXIT_BLOCKED = 3
 # rollback target; per-commit tagging was rejected as noise (#80).
 CHECKPOINT_PREFIX = "ckpt/"
 
-# Completed-review attribution, written by claim_issue.py --complete-review.
-# This is the only label that satisfies the gate.
+# The authoring agent's identity, stamped on the PR by create_pr.py.
 AUTHOR_LABEL = "author:"
-REVIEWED_BY_LABEL = "reviewed-by:"
-# The authoring agent's model family, stamped on the PR by create_pr.py.
+# The authoring agent's model family, also stamped by create_pr.py.
 FAMILY_LABEL = "family:"
-# reviewer-family:<id>:<family> - the reviewing agent's model family, stamped by
-# claim_issue.py --complete-review. Needed because the framework's identity is
-# the pair (id, family) and only the PR's own family was ever recorded (#307).
-REVIEWER_FAMILY_LABEL = "reviewer-family:"
-REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
-AGENT_REVIEW_ATTESTATION_VERSION = "aru-agent-review:v1"
-AGENT_REVIEW_ASSIGNMENT_VERSION = "aru-agent-review-assignment:v1"
-AGENT_REVIEW_DISPOSITIONS = {"no-findings", "findings-resolved"}
-# The transient claim, written by claim_review. Deliberately NOT accepted here:
-# it records that an agent took the PR off the queue, not that it read anything.
-# Treating it as attestation would let an author's own same-account review plus
-# any peer's claim satisfy the gate before that peer had looked at the diff.
-REVIEW_CLAIM_LABEL = "reviewer:"
 # Transient merge-execution claim from claim_merge. Cleared on close-out; never
-# treated as review attestation.
+# treated as review evidence.
 MERGER_CLAIM_LABEL = "merger:"
 
 # Review apps can add useful findings, but their comments are not independent
@@ -100,9 +76,20 @@ ADVISORY_CHECK_CONTEXTS = {"coderabbit"}
 CODERABBIT_LOGINS = {"coderabbitai", "coderabbitai[bot]"}
 CODERABBIT_APP_SLUGS = {"coderabbitai"}
 CODERABBIT_ACTOR_TYPES = {"Bot"}
-REVIEW_SERVICE_LABELS = (
-    "review:coderabbit", "review:sourcery", "review:codeant", "review:agent",
-)
+# CodeRabbit is the default positive oracle; Sourcery and CodeAnt are the
+# bounded external fallbacks an operator may switch to after observed
+# unavailability.
+#
+# `review:agent` stays in this tuple even though #414 removed every way to
+# produce coding-agent review evidence. reassign_review.py can still apply
+# the label, and a label the gate cannot even parse would fail with a
+# generic "unknown review label" that names no way out. Recognising it lets
+# check_reviews refuse it for the real reason and say which service to
+# reassign to. It is a recognised authority that can never be satisfied,
+# not a fourth oracle.
+RETIRED_AGENT_REVIEW_LABEL = "review:agent"
+REVIEW_SERVICE_LABELS = ("review:coderabbit", "review:sourcery", "review:codeant",
+                         RETIRED_AGENT_REVIEW_LABEL)
 # Sourcery publishes a commit-scoped REST check run. The app slug is the
 # producer identity: a check merely *named* "Sourcery review" proves nothing,
 # because any app may choose that name.
@@ -135,30 +122,17 @@ REVIEW_APP_LOGIN_ENV = "ARU_REVIEW_APP_LOGIN"
 # review evidence; all other known actor kinds are automation or identities
 # whose human independence cannot be established. An unrecognized kind makes
 # the query unknown rather than silently becoming trusted.
-KNOWN_REVIEW_ACTOR_TYPES = {
-    "App", "Bot", "EnterpriseUserAccount", "Mannequin", "Organization", "User",
-}
+KNOWN_REVIEW_ACTOR_TYPES = {"App", "Bot", "EnterpriseUserAccount", "Mannequin", "Organization",
+                            "User"}
+# Every state GraphQL may report for a review. An unlisted state is unknown
+# evidence, not neutral evidence, so the reader fails closed on it.
+REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"}
 
 # Large diffs must be split unless the reviewed PR body records why a waiver is
 # necessary. Independent review remains a separate, mandatory gate.
 SIZE_LIMIT = 400
 
-# Review-round threshold for automated scope-reduction guidance (issue #98).
-# Matches fleet_status.REWORK_ATTN. Crossing it never fails DoD and never
-# creates a human gate — it emits split guidance for the authoring agent.
-REVIEW_ROUND_THRESHOLD = 3
-REVIEW_ROUND_SPLIT_MARKER = "<!-- aru-review-round-split:v1 -->"
-# Per-follow-up provenance so retries can reuse issues created before the
-# PR marker comment lands (partial emission / comment-post failure).
-REVIEW_ROUND_SPLIT_ITEM_FMT = "<!-- aru-review-round-split-item:pr={pr}:idx={idx} -->"
-REVIEW_ROUND_SPLIT_ITEM_RE = re.compile(
-    r"<!--\s*aru-review-round-split-item:pr=(\d+):idx=(\d+)\s*-->"
-)
 GITHUB_ACTIONS_RUN_RE = re.compile(r"/actions/runs/(\d+)(?:/jobs/\d+)?(?:$|[?#/])")
-_REWORK_BLOCKING_RE = re.compile(
-    r"changes[\s_-]*requested|(?<![Nn]o )blocking findings?|\*\*blocking:\*\*",
-    re.I,
-)
 
 # One initial close-out attempt plus these bounded retries.  Keeping the policy
 # in the merge authority prevents desktop clients from disagreeing about when
@@ -228,12 +202,8 @@ def linked_issue(body):
 # legitimately argued down - an audit trail that actively lies is worse than
 # the gap this closes.
 WITHDRAWN_MARKER = re.compile(r"^(?:\*\*)?withdrawn:(?:\*\*)?(?:\s|$)", re.IGNORECASE)
-SIZE_WAIVER_REGION_RE = re.compile(
-    r"^\s*size-waiver:\s*(\S.*)$", re.IGNORECASE | re.MULTILINE,
-)
-BODY_REMEDY_MARKER_RE = re.compile(
-    r"\bbody-remedy:\s*(size-waiver|verification)\b", re.IGNORECASE,
-)
+SIZE_WAIVER_REGION_RE = re.compile(r"^\s*size-waiver:\s*(\S.*)$", re.IGNORECASE | re.MULTILINE)
+BODY_REMEDY_MARKER_RE = re.compile(r"\bbody-remedy:\s*(size-waiver|verification)\b", re.IGNORECASE)
 SIZE_WAIVER_REQUEST_RE = re.compile(
     r"\b(?:add|include|put|record)\b[^\n]{0,160}`?size-waiver:\s*`?"
     r"[^\n]{0,120}\b(?:to|in)\s+(?:the\s+)?(?:(?:pull request|pr)\s+)?body\b",
@@ -291,10 +261,7 @@ def _size_waiver_region(body):
 def _verification_region(body):
     """The marker-delimited verification block, or None when absent/ambiguous."""
     text = body or ""
-    if (
-        text.count(VERIFICATION_EVIDENCE_START) != 1
-        or text.count(VERIFICATION_EVIDENCE_END) != 1
-    ):
+    if (text.count(VERIFICATION_EVIDENCE_START) != 1 or text.count(VERIFICATION_EVIDENCE_END) != 1):
         return None
     start = text.find(VERIFICATION_EVIDENCE_START)
     end = text.find(VERIFICATION_EVIDENCE_END)
@@ -316,19 +283,68 @@ def _finding_body_region(body):
     return None
 
 
-def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912, PLR0915
-    """Verified author body-region changes, sourced from GitHub edit history.
+class _PageError(Exception):
+    """One page of a paginated pull-request read was unusable."""
 
-    A bare pull-request ``updatedAt`` cannot distinguish body edits from reviews,
-    labels, or comments. ``userContentEdits`` supplies immutable edit timestamps,
-    editor identity, and the body snapshot after each edit. Unknown, truncated,
-    or internally inconsistent history fails closed with ``None``.
-    """
+
+def _pull_pages(query, owner, name, pr_id, connection):
+    """Yield complete PR connection pages; malformed/repeated cursors fail closed."""
+    cursor, seen_cursors = None, set()
+    while True:
+        args = ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}", "-F",
+                f"name={name}", "-F", f"pr={pr_id}"]
+        if cursor:
+            args.extend(["-F", f"cursor={cursor}"])
+        data = _gh_json(args)
+        if not data or (isinstance(data, dict) and data.get("errors")):
+            raise _PageError
+        try:
+            pull = data["data"]["repository"]["pullRequest"]
+            nodes = pull[connection]["nodes"]
+            page_info = pull[connection]["pageInfo"]
+            has_next = page_info["hasNextPage"]
+        except (KeyError, TypeError):
+            raise _PageError from None
+        if not isinstance(nodes, list) or not isinstance(has_next, bool):
+            raise _PageError
+        yield pull, nodes
+        if not has_next:
+            return
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise _PageError
+        seen_cursors.add(cursor)
+
+
+# Every page carries the same PR mutation version and connection sizes, so
+# separately paginated review inputs cannot be combined across states.
+_EVIDENCE_VERSION_FIELDS = """
+          headRefOid
+          updatedAt
+          reviewTotal: reviews { totalCount }
+          commentTotal: comments { totalCount }
+          threadTotal: reviewThreads { totalCount }"""
+_EvidenceVersion = namedtuple("_EvidenceVersion", "head updated reviews comments threads")
+
+
+def _evidence_version(pull):
+    """The PR version one page was served from, plus every connection size."""
+    head, updated = pull.get("headRefOid"), _parse_ts(pull.get("updatedAt"))
+    if not isinstance(head, str) or not head or updated is None or updated.tzinfo is None:
+        return None
+    nodes = [pull.get(key) for key in ("reviewTotal", "commentTotal", "threadTotal")]
+    if any(not isinstance(node, dict) or type(node.get("totalCount")) is not int for node in nodes):
+        return None
+    totals = [node["totalCount"] for node in nodes]
+    return _EvidenceVersion(head, updated, *totals)
+
+
+def _body_edit_events(owner, name, pr_id, version):  # noqa: C901, PLR0912, PLR0915
+    """Return complete, internally consistent author body-edit history."""
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
+        pullRequest(number:$pr) {""" + _EVIDENCE_VERSION_FIELDS + """
           body
           author { login __typename }
           userContentEdits(first:100, after:$cursor) {
@@ -343,96 +359,52 @@ def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
         }
       }
     }"""
-    cursor = None
-    seen_cursors = set()
     seen_ids = set()
     edits = []
     current_body = None
     author_login = None
 
-    while True:
-        args = [
-            "gh", "api", "graphql",
-            "-f", f"query={query}",
-            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data = _gh_json(args)
-        if not data or (isinstance(data, dict) and data.get("errors")):
-            return None
-        try:
-            pull = data["data"]["repository"]["pullRequest"]
-            connection = pull["userContentEdits"]
-            nodes = connection["nodes"]
-            page_info = connection["pageInfo"]
-            has_next = page_info["hasNextPage"]
-        except (KeyError, TypeError):
-            return None
-        if pull.get("headRefOid") != expected_head:
-            return None
-        body = pull.get("body")
-        author = pull.get("author") or {}
-        if (
-            not isinstance(body, str)
-            or author.get("__typename") != "User"
-            or not isinstance(author.get("login"), str)
-            or not author["login"]
-            or not isinstance(nodes, list)
-            or not isinstance(has_next, bool)
-        ):
-            return None
-        if current_body is None:
-            current_body = body
-            author_login = author["login"]
-        elif current_body != body or author_login != author["login"]:
-            return None
-
-        for node in nodes:
-            if not isinstance(node, dict):
+    try:
+        for pull, nodes in _pull_pages(query, owner, name, pr_id, "userContentEdits"):
+            if _evidence_version(pull) != version:
                 return None
-            edit_id = node.get("id")
-            edited_at = _parse_ts(node.get("editedAt"))
-            snapshot = node.get("diff")
-            editor = node.get("editor") or {}
-            if (
-                not isinstance(edit_id, str) or not edit_id or edit_id in seen_ids
-                or edited_at is None or edited_at.tzinfo is None
-                or not isinstance(snapshot, str)
-                or not isinstance(editor.get("__typename"), str)
-                or not isinstance(editor.get("login"), str)
-                or not editor["login"]
-            ):
+            body = pull.get("body")
+            author = pull.get("author") or {}
+            if (not isinstance(body, str) or author.get("__typename") != "User"
+                    or not isinstance(author.get("login"), str) or not author["login"]):
                 return None
-            seen_ids.add(edit_id)
-            edits.append({
-                "at": edited_at,
-                "snapshot": snapshot,
-                "by_author": (
-                    editor["__typename"] == "User"
-                    and editor["login"] == author_login
-                ),
-            })
+            if current_body is None:
+                current_body = body
+                author_login = author["login"]
+            elif current_body != body or author_login != author["login"]:
+                return None
 
-        if not has_next:
-            break
-        next_cursor = page_info.get("endCursor")
-        if (
-            not isinstance(next_cursor, str) or not next_cursor
-            or next_cursor in seen_cursors
-        ):
-            return None
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
+            for node in nodes:
+                if not isinstance(node, dict):
+                    return None
+                edit_id = node.get("id")
+                edited_at = _parse_ts(node.get("editedAt"))
+                snapshot = node.get("diff")
+                editor = node.get("editor") or {}
+                if (not isinstance(edit_id, str) or not edit_id or edit_id in seen_ids
+                        or edited_at is None or edited_at.tzinfo is None
+                        or not isinstance(snapshot, str)
+                        or not isinstance(editor.get("__typename"), str)
+                        or not isinstance(editor.get("login"), str) or not editor["login"]):
+                    return None
+                seen_ids.add(edit_id)
+                edits.append({"at": edited_at, "snapshot": snapshot,
+                              "by_author": editor["__typename"] == "User"
+                              and editor["login"] == author_login})
+    except _PageError:
+        return None
 
     if not edits:
         return {"size-waiver": [], "verification": []}
 
     groups = {}
     for edit in edits:
-        group = groups.setdefault(
-            edit["at"], {"snapshots": set(), "author_edited": False},
-        )
+        group = groups.setdefault(edit["at"], {"snapshots": set(), "author_edited": False})
         group["snapshots"].add(edit["snapshot"])
         group["author_edited"] = group["author_edited"] or edit["by_author"]
     ordered = []
@@ -440,11 +412,8 @@ def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
         group = groups[edited_at]
         if len(group["snapshots"]) != 1:
             return None
-        ordered.append({
-            "at": edited_at,
-            "snapshot": next(iter(group["snapshots"])),
-            "author_edited": group["author_edited"],
-        })
+        ordered.append({"at": edited_at, "snapshot": next(iter(group["snapshots"])),
+                        "author_edited": group["author_edited"]})
     if ordered[-1]["snapshot"] != current_body:
         return None
 
@@ -465,7 +434,7 @@ def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
                 next_verification
                 and next_verification != prior_verification
                 and evidence is not None
-                and evidence.get("head_sha") == expected_head
+                and evidence.get("head_sha") == version.head
             ):
                 events["verification"].append(edit["at"])
         previous = snapshot
@@ -475,10 +444,7 @@ def _body_edit_events(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912
     if _size_waiver_region(current_body) is None:
         events["size-waiver"] = []
     current_evidence, _ = parse_verification_evidence(current_body)
-    if (
-        current_evidence is None
-        or current_evidence.get("head_sha") != expected_head
-    ):
+    if current_evidence is None or current_evidence.get("head_sha") != version.head:
         events["verification"] = []
     return events
 
@@ -488,8 +454,7 @@ def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
+        pullRequest(number:$pr) {""" + _EVIDENCE_VERSION_FIELDS + """
           reviews(first:100, after:$cursor) {
             nodes {
               id
@@ -504,99 +469,54 @@ def _reviewed_current_head(owner, name, pr_id):  # noqa: C901, PLR0912, PLR0915
         }
       }
     }"""
-    cursor = None
-    seen_cursors = set()
-    expected_head = None
+    expected = None
     reviewed_head = False
     reviews = []
     seen_review_ids = set()
 
-    while True:
-        args = [
-            "gh", "api", "graphql",
-            "-f", f"query={query}",
-            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data = _gh_json(args)
-        if not data or (isinstance(data, dict) and data.get("errors")):
-            return None
-        try:
-            pull = data["data"]["repository"]["pullRequest"]
-            head = pull["headRefOid"]
-            connection = pull["reviews"]
-            nodes = connection["nodes"]
-            page_info = connection["pageInfo"]
-            has_next = page_info["hasNextPage"]
-        except (KeyError, TypeError):
-            return None
-        if (
-            not isinstance(head, str) or not head
-            or not isinstance(nodes, list)
-            or not isinstance(has_next, bool)
-        ):
-            return None
-        if expected_head is None:
-            expected_head = head
-        elif head != expected_head:
-            return None
+    try:
+        for pull, nodes in _pull_pages(query, owner, name, pr_id, "reviews"):
+            version = _evidence_version(pull)
+            if version is None or expected not in (None, version):
+                return None
+            expected = version
 
-        for review in nodes:
-            if not isinstance(review, dict):
-                return None
-            state = review.get("state")
-            author = review.get("author")
-            commit = review.get("commit")
-            review_id = review.get("id")
-            submitted_at = review.get("submittedAt")
-            body = review.get("body")
-            if (
-                state not in {
-                    "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED",
-                    "PENDING",
-                }
-                or not isinstance(review_id, str) or not review_id
-                or review_id in seen_review_ids
-                or not isinstance(author, dict)
-                or (commit is not None and not isinstance(commit, dict))
-                or not isinstance(body, str)
-            ):
-                return None
-            login = author.get("login")
-            actor_type = author.get("__typename")
-            oid = (commit or {}).get("oid")
-            if (
-                not isinstance(login, str) or not login
-                or actor_type not in KNOWN_REVIEW_ACTOR_TYPES
-                or commit is not None and (not isinstance(oid, str) or not oid)
-                or state == "PENDING" and submitted_at is not None
-                or state != "PENDING" and _parse_review_ts(submitted_at) is None
-            ):
-                return None
-            seen_review_ids.add(review_id)
-            reviews.append(review)
-            if state in {"PENDING", "DISMISSED"}:
-                continue
-            if actor_type != "User" and not is_configured_review_app(login):
-                continue
-            if is_advisory_review_account(login):
-                continue
-            if state == "COMMENTED" and not body.strip():
-                continue
-            if oid == expected_head:
-                reviewed_head = True
-
-        if not has_next:
-            return expected_head, reviewed_head, reviews
-        next_cursor = page_info.get("endCursor")
-        if (
-            not isinstance(next_cursor, str) or not next_cursor
-            or next_cursor in seen_cursors
-        ):
-            return None
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
+            for review in nodes:
+                if not isinstance(review, dict):
+                    return None
+                state = review.get("state")
+                author = review.get("author")
+                commit = review.get("commit")
+                review_id = review.get("id")
+                submitted_at = review.get("submittedAt")
+                body = review.get("body")
+                if (state not in REVIEW_STATES
+                        or not isinstance(review_id, str) or not review_id
+                        or review_id in seen_review_ids or not isinstance(author, dict)
+                        or (commit is not None and not isinstance(commit, dict))
+                        or not isinstance(body, str)):
+                    return None
+                login = author.get("login")
+                actor_type = author.get("__typename")
+                oid = (commit or {}).get("oid")
+                if (not isinstance(login, str) or not login
+                        or actor_type not in KNOWN_REVIEW_ACTOR_TYPES
+                        or commit is not None and (not isinstance(oid, str) or not oid)
+                        or state == "PENDING" and submitted_at is not None
+                        or state != "PENDING" and _parse_review_ts(submitted_at) is None):
+                    return None
+                seen_review_ids.add(review_id)
+                reviews.append(review)
+                if (state in {"PENDING", "DISMISSED"}
+                        or actor_type != "User" and not is_configured_review_app(login)
+                        or is_advisory_review_account(login)
+                        or state == "COMMENTED" and not body.strip()):
+                    continue
+                if oid == expected.head:
+                    reviewed_head = True
+    except _PageError:
+        return None
+    return expected, reviewed_head, reviews
 
 
 def _collect_codeant_status_comment(body, author, collector):
@@ -610,13 +530,18 @@ def _collect_codeant_status_comment(body, author, collector):
         collector.append({"body": body, "author": author})
 
 
-def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901, PLR0912, PLR0915
-    """Read paginated head attestations and exact CodeRabbit command comments."""
+def _review_comment_evidence(owner, name, pr_id, version):  # noqa: C901, PLR0912
+    """Read paginated PR comments for provider-owned review markers.
+
+    Only the assigned external services leave evidence worth parsing here:
+    CodeRabbit's exact full-review command/finished comments and CodeAnt's
+    rolling status marker. Coding-agent head attestations were retired with
+    coding-agent review itself (#414), so no agent-written marker is read.
+    """
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
+        pullRequest(number:$pr) {""" + _EVIDENCE_VERSION_FIELDS + """
           comments(first:100, after:$cursor) {
             nodes { body createdAt author { login __typename } }
             pageInfo { hasNextPage endCursor }
@@ -624,181 +549,34 @@ def _review_head_attestations(owner, name, pr_id, expected_head):  # noqa: C901,
         }
       }
     }"""
-    prefix = f"<!-- {REVIEW_HEAD_ATTESTATION_VERSION} "
-    agent_prefix = f"<!-- {AGENT_REVIEW_ATTESTATION_VERSION} "
-    assignment_prefix = f"<!-- {AGENT_REVIEW_ASSIGNMENT_VERSION} "
-    cursor = None
-    seen_cursors = set()
-    attestations = []
-    agent_attestations = []
-    agent_marker_errors = 0
-    agent_assignments = []
-    agent_assignment_errors = 0
     coderabbit_full_review_comments = []
     codeant_status_comments = []
-    while True:
-        args = [
-            "gh", "api", "graphql", "-f", f"query={query}",
-            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data = _gh_json(args)
-        if not data or (isinstance(data, dict) and data.get("errors")):
-            return None
-        try:
-            pull = data["data"]["repository"]["pullRequest"]
-            connection = pull["comments"]
-            nodes = connection["nodes"]
-            page_info = connection["pageInfo"]
-            has_next = page_info["hasNextPage"]
-        except (KeyError, TypeError):
-            return None
-        if (
-            pull.get("headRefOid") != expected_head
-            or not isinstance(nodes, list)
-            or not isinstance(has_next, bool)
-        ):
-            return None
-        for node in nodes:
-            if not isinstance(node, dict) or not isinstance(node.get("body"), str):
+    try:
+        for pull, nodes in _pull_pages(query, owner, name, pr_id, "comments"):
+            if _evidence_version(pull) != version:
                 return None
-            body = node["body"]
-            _collect_codeant_status_comment(body, node.get("author"), codeant_status_comments)
-            comment_kind = _coderabbit_full_review_comment_kind(body)
-            if comment_kind is not None:
+            for node in nodes:
+                if not isinstance(node, dict) or not isinstance(node.get("body"), str):
+                    return None
+                body = node["body"]
+                _collect_codeant_status_comment(body, node.get("author"), codeant_status_comments)
+                comment_kind = _coderabbit_full_review_comment_kind(body)
+                if comment_kind is None:
+                    continue
                 created_at = _parse_review_ts(node.get("createdAt"))
                 author = node.get("author")
-                if (
-                    created_at is None
-                    or not isinstance(author, dict)
-                    or not isinstance(author.get("login"), str)
-                    or not author["login"]
-                    or author.get("__typename") not in KNOWN_REVIEW_ACTOR_TYPES
-                ):
+                if (created_at is None or not isinstance(author, dict)
+                        or not isinstance(author.get("login"), str) or not author["login"]
+                        or author.get("__typename") not in KNOWN_REVIEW_ACTOR_TYPES):
                     return None
                 coderabbit_full_review_comments.append({
-                    "kind": comment_kind,
-                    "body": body,
-                    "createdAt": node["createdAt"],
-                    "author": {
-                        "login": author["login"],
-                        "__typename": author["__typename"],
-                    },
-                })
-            if body.startswith(assignment_prefix):
-                marker, separator, _rest = body.partition(" -->")
-                try:
-                    assignment = json.loads(marker[len(assignment_prefix):])
-                except (json.JSONDecodeError, TypeError):
-                    assignment = None
-                author = node.get("author")
-                assigned_at = _parse_review_ts(node.get("createdAt"))
-                required = {"family", "from", "head", "reason", "reviewer"}
-                if (
-                    not separator or not isinstance(assignment, dict)
-                    or set(assignment) != required or assigned_at is None
-                    or not isinstance(author, dict)
-                    or author.get("__typename") != "User"
-                    or not isinstance(author.get("login"), str) or not author["login"]
-                    or assignment.get("from") not in REVIEW_SERVICE_LABELS[:3]
-                    or not isinstance(assignment.get("reviewer"), str)
-                    or not assignment["reviewer"]
-                    or not isinstance(assignment.get("family"), str)
-                    or not assignment["family"]
-                    or not isinstance(assignment.get("reason"), str)
-                    or not assignment["reason"].strip()
-                    or not isinstance(assignment.get("head"), str)
-                    or re.fullmatch(r"[0-9a-fA-F]{40,64}", assignment["head"]) is None
-                ):
-                    agent_assignment_errors += 1
-                else:
-                    agent_assignments.append({
-                        **assignment, "head": assignment["head"].lower(),
-                        "assigned_at": node["createdAt"],
-                        "github_login": author["login"],
-                    })
-                continue
-            if body.startswith(agent_prefix):
-                marker, separator, _rest = body.partition(" -->")
-                try:
-                    agent_payload = json.loads(marker[len(agent_prefix):])
-                except (json.JSONDecodeError, TypeError):
-                    agent_payload = None
-                author = node.get("author")
-                required = {
-                    "agent", "completed_at", "disposition", "family", "head", "status",
-                }
-                if (
-                    not separator or not isinstance(agent_payload, dict)
-                    or set(agent_payload) != required
-                    or not isinstance(author, dict)
-                    or author.get("__typename") != "User"
-                    or not isinstance(author.get("login"), str) or not author["login"]
-                    or not isinstance(agent_payload.get("agent"), str)
-                    or not agent_payload["agent"]
-                    or not isinstance(agent_payload.get("family"), str)
-                    or not agent_payload["family"]
-                    or agent_payload.get("status") != "completed"
-                    or agent_payload.get("disposition") not in AGENT_REVIEW_DISPOSITIONS
-                    or not isinstance(agent_payload.get("head"), str)
-                    or re.fullmatch(r"[0-9a-fA-F]{40,64}", agent_payload["head"]) is None
-                    or _parse_review_ts(agent_payload.get("completed_at")) is None
-                ):
-                    agent_marker_errors += 1
-                else:
-                    agent_attestations.append({
-                        **agent_payload, "head": agent_payload["head"].lower(),
-                        "github_login": author["login"],
-                    })
-                continue
-            if not body.startswith(prefix):
-                continue
-            marker, separator, _rest = body.partition(" -->")
-            if not separator:
-                continue
-            raw_payload = marker[len(prefix):]
-            try:
-                payload = json.loads(raw_payload)
-            except json.JSONDecodeError:
-                continue
-            author = node.get("author")
-            if (
-                not isinstance(author, dict)
-                or author.get("__typename") != "User"
-                or not isinstance(author.get("login"), str)
-                or not author["login"]
-                or not isinstance(payload, dict)
-                or set(payload) != {"agent", "head"}
-                or not isinstance(payload.get("agent"), str)
-                or not payload["agent"]
-                or not isinstance(payload.get("head"), str)
-                or re.fullmatch(r"[0-9a-fA-F]{40,64}", payload["head"]) is None
-            ):
-                continue
-            attestations.append({
-                "agent": payload["agent"],
-                "head": payload["head"].lower(),
-                "github_login": author["login"],
-            })
-        if not has_next:
-            return {
-                "attestations": attestations,
-                "agent_attestations": agent_attestations,
-                "agent_marker_errors": agent_marker_errors,
-                "agent_assignments": agent_assignments,
-                "agent_assignment_errors": agent_assignment_errors,
-                "coderabbit_full_review_comments": coderabbit_full_review_comments,
-                "codeant_status_comments": codeant_status_comments,
-            }
-        next_cursor = page_info.get("endCursor")
-        if (
-            not isinstance(next_cursor, str) or not next_cursor
-            or next_cursor in seen_cursors
-        ):
-            return None
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
+                    "kind": comment_kind, "body": body, "createdAt": node["createdAt"],
+                    "author": {"login": author["login"],
+                               "__typename": author["__typename"]}})
+    except _PageError:
+        return None
+    return {"coderabbit_full_review_comments": coderabbit_full_review_comments,
+            "codeant_status_comments": codeant_status_comments}
 
 
 def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
@@ -810,26 +588,16 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     review_result = _reviewed_current_head(owner, name, pr_id)
     if review_result is None:
         return None
-    expected_head, reviewed_head, reviews = review_result
-    comment_evidence = _review_head_attestations(
-        owner, name, pr_id, expected_head
-    )
+    version, reviewed_head, reviews = review_result
+    comment_evidence = _review_comment_evidence(owner, name, pr_id, version)
     if comment_evidence is None:
         return None
-    review_attestations = comment_evidence["attestations"]
-    agent_review_attestations = comment_evidence.get("agent_attestations", [])
-    agent_review_marker_errors = comment_evidence.get("agent_marker_errors", 0)
-    agent_review_assignments = comment_evidence.get("agent_assignments", [])
-    agent_review_assignment_errors = comment_evidence.get("agent_assignment_errors", 0)
-    coderabbit_full_review_comments = comment_evidence[
-        "coderabbit_full_review_comments"
-    ]
+    coderabbit_full_review_comments = comment_evidence["coderabbit_full_review_comments"]
     codeant_status_comments = comment_evidence["codeant_status_comments"]
     query = """
     query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          headRefOid
+        pullRequest(number:$pr) {""" + _EVIDENCE_VERSION_FIELDS + """
           commits(last:100) {
             nodes { commit { committedDate } }
           }
@@ -849,8 +617,6 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
       }
     }"""
 
-    cursor = None
-    seen_cursors = set()
     unresolved = 0
     unfixed = 0
     outdated_unfixed = 0
@@ -859,35 +625,19 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
     body_addressed = 0
     body_edit_events = None
     commit_times = None
-    service_threads = {
-        "coderabbit": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-        "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-        "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-        "agent": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-    }
+    service_threads = {"coderabbit": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+                       "sourcery": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+                       "codeant": {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0}}
 
+    pages = _pull_pages(query, owner, name, pr_id, "reviewThreads")
     while True:
-        args = [
-            "gh", "api", "graphql",
-            "-f", f"query={query}",
-            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data = _gh_json(args)
-        if not data or (isinstance(data, dict) and data.get("errors")):
-            return None
         try:
-            pull = data["data"]["repository"]["pullRequest"]
-            connection = pull["reviewThreads"]
-            nodes = connection["nodes"]
-            page_info = connection["pageInfo"]
-            has_next = page_info["hasNextPage"]
-        except (KeyError, TypeError):
+            pull, nodes = next(pages)
+        except _PageError:
             return None
-        if not isinstance(nodes, list) or not isinstance(has_next, bool):
-            return None
-        if pull.get("headRefOid") != expected_head:
+        except StopIteration:
+            break
+        if _evidence_version(pull) != version:
             return None
 
         try:
@@ -898,14 +648,9 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
             return None
         page_commit_times = []
         for item in commit_nodes:
-            if (
-                not isinstance(item, dict)
-                or not isinstance(item.get("commit"), dict)
-            ):
+            if not isinstance(item, dict) or not isinstance(item.get("commit"), dict):
                 return None
-            committed_at = _parse_review_ts(
-                item["commit"].get("committedDate")
-            )
+            committed_at = _parse_review_ts(item["commit"].get("committedDate"))
             if committed_at is None:
                 return None
             page_commit_times.append(committed_at)
@@ -1006,9 +751,7 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                 has_body_edit_after = False
                 if region is not None and raised is not None:
                     if body_edit_events is None:
-                        body_edit_events = _body_edit_events(
-                            owner, name, pr_id, expected_head,
-                        )
+                        body_edit_events = _body_edit_events(owner, name, pr_id, version)
                         if body_edit_events is None:
                             return None
                     has_body_edit_after = any(
@@ -1022,45 +765,22 @@ def review_evidence(pr_id):  # noqa: C901, PLR0912, PLR0915
                     if thread_service:
                         service_threads[thread_service]["unfixed"] += 1
 
-        if not has_next:
-            service_threads["agent"] = {
-                "unresolved": unresolved, "unfixed": unfixed,
-                "outdated_unfixed": outdated_unfixed,
-            }
-            return {
-                "head_oid": expected_head,
-                "head_commit_committed_at": (
-                    commit_times[-1].isoformat() if commit_times else None
-                ),
-                "github_review_evidence": True,
-                "reviews": reviews,
-                "review_attestations": review_attestations,
-                "agent_review_attestations": agent_review_attestations,
-                "agent_review_marker_errors": agent_review_marker_errors,
-                "agent_review_assignments": agent_review_assignments,
-                "agent_review_assignment_errors": agent_review_assignment_errors,
-                "coderabbit_full_review_comments": (
-                    coderabbit_full_review_comments
-                ),
-                "codeant_status_comments": codeant_status_comments,
-                "unresolved": unresolved,
-                "unfixed": unfixed,
-                "outdated_unfixed": outdated_unfixed,
-                "outdated_addressed": outdated_addressed,
-                "body_addressed": body_addressed,
-                "withdrawn": withdrawn,
-                "reviewed_head": reviewed_head,
-                "service_threads": service_threads,
-            }
-        next_cursor = page_info.get("endCursor")
-        if (
-            not isinstance(next_cursor, str)
-            or not next_cursor
-            or next_cursor in seen_cursors
-        ):
-            return None
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
+    return {
+        "head_oid": version.head,
+        "head_commit_committed_at": commit_times[-1].isoformat() if commit_times else None,
+        "github_review_evidence": True,
+        "reviews": reviews,
+        "coderabbit_full_review_comments": coderabbit_full_review_comments,
+        "codeant_status_comments": codeant_status_comments,
+        "unresolved": unresolved,
+        "unfixed": unfixed,
+        "outdated_unfixed": outdated_unfixed,
+        "outdated_addressed": outdated_addressed,
+        "body_addressed": body_addressed,
+        "withdrawn": withdrawn,
+        "reviewed_head": reviewed_head,
+        "service_threads": service_threads,
+    }
 
 
 def unticked_criteria(issue_body):
@@ -1142,8 +862,7 @@ def _check_start_time(check):
 # and merge an unverified head. Only these three mean "passed"; every other
 # completed conclusion fails closed.
 PASSING_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-IN_PROGRESS_STATES = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS",
-                      "WAITING", "REQUESTED"}
+IN_PROGRESS_STATES = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
 
 def _check_outcome(check):
@@ -1171,10 +890,10 @@ def _check_verdict(check):
     """
     status, result = _check_outcome(check)
     if (status and status != "COMPLETED" and not result) or result in IN_PROGRESS_STATES:
-        return ("pending", "")
+        return "pending", ""
     if result in PASSING_CONCLUSIONS:
-        return ("passing", "")
-    return ("failing", result.lower() or "unknown")
+        return "passing", ""
+    return "failing", result.lower() or "unknown"
 
 
 def _current_runs(rollup):
@@ -1228,12 +947,10 @@ def check_ci(pr):
     unorderable = [name for name in unorderable
                    if (name or "").lower() not in ADVISORY_CHECK_CONTEXTS]
     if unorderable:
-        return False, (
-            f"CI recency is undecidable for: {', '.join(unorderable)}. "
-            "Several runs of one check either carry no usable timestamp or are "
-            "tied on the newest one while disagreeing, so which is current "
-            "cannot be established."
-        )
+        return False, (f"CI recency is undecidable for: {', '.join(unorderable)}. "
+                       "Several runs of one check either carry no usable timestamp or are "
+                       "tied on the newest one while disagreeing, so which is current "
+                       "cannot be established.")
 
     failing, pending = [], []
     for name in sorted(current):
@@ -1254,7 +971,7 @@ def check_ci(pr):
 
 
 def label_values(pr, prefix):
-    """All values of labels sharing a prefix, e.g. every reviewed-by:<id>."""
+    """All values of labels sharing a prefix, e.g. every author:<id>."""
     return [
         (lab.get("name") or "")[len(prefix):]
         for lab in (pr.get("labels") or [])
@@ -1358,9 +1075,7 @@ def is_advisory_review_actor(review):
     login = author.get("login") or ""
     if is_configured_review_app(login):
         return False
-    return (
-        actor_type is not None and actor_type != "User"
-    ) or is_advisory_review_account(login)
+    return (actor_type is not None and actor_type != "User") or is_advisory_review_account(login)
 
 
 def _current_head_reviewers(evidence):
@@ -1389,108 +1104,23 @@ def _current_head_reviewers(evidence):
     return sorted(reviewers)
 
 
-def identity_values(pr, prefix):
-    """Return non-empty, trimmed agent identities from labels."""
-    return [value for value in
-            (raw.strip() for raw in label_values(pr, prefix)) if value]
-
-
-def reviewer_families(pr):
-    """Map each reviewer id to every distinct stamped model family."""
-    families = {}
-    for value in label_values(pr, REVIEWER_FAMILY_LABEL):
-        agent_id, _, family = value.partition(":")
-        if agent_id and family:
-            families.setdefault(agent_id, [])
-            if family not in families[agent_id]:
-                families[agent_id].append(family)
-    return {agent_id: sorted(values) for agent_id, values in families.items()}
-
-
-def classify_reviewers(pr, reviewers, author):
-    """Split reviewers into peers, id/family collisions, and unknown identity."""
-    author_families = sorted(set(label_values(pr, FAMILY_LABEL)))
-    families = reviewer_families(pr)
-    peers, collisions, unresolved = [], [], []
-    for agent_id in reviewers:
-        if agent_id != author:
-            peers.append(agent_id)
-            continue
-        reviewer_values = families.get(agent_id, [])
-        # An identity stamped with two different families is not a family we can
-        # compare; it is an ambiguity, and reporting it as one beats picking
-        # either and describing the wrong situation.
-        if len(author_families) > 1 or len(reviewer_values) > 1:
-            ambiguous = (f"the PR ({', '.join(author_families)})"
-                         if len(author_families) > 1
-                         else f"reviewer '{agent_id}' ({', '.join(reviewer_values)})")
-            collisions.append((agent_id, f"ambiguous on {ambiguous}", "unresolvable"))
-            continue
-        author_family = author_families[0] if author_families else ""
-        reviewer_family = reviewer_values[0] if reviewer_values else ""
-        if not author_family or not reviewer_family:
-            missing = []
-            if not author_family:
-                missing.append(f"{FAMILY_LABEL}<family> on the PR")
-            if not reviewer_family:
-                missing.append(
-                    f"{REVIEWER_FAMILY_LABEL}{agent_id}:<family> for the review"
-                )
-            unresolved.append((agent_id, missing))
-        elif reviewer_family != author_family:
-            collisions.append((agent_id, author_family, reviewer_family))
-    return peers, collisions, unresolved
-
-
-def id_collision_message(collisions):
-    """Explain an agent id stamped to distinct author/reviewer families."""
-    agent_id, author_family, reviewer_family = collisions[0]
-    return (
-        f"Agent id '{agent_id}' is stamped as both the author "
-        f"(family:{author_family}) and a reviewer (family:{reviewer_family}) of "
-        "this PR. Two agents are sharing one id, so no attribution on it can be "
-        "trusted - this is neither a self-review nor a valid peer review. "
-        "Reissue one of them a distinct id (see #304) and re-review."
-    )
-
-
-def self_review_message(author, unresolved):
-    """Explain self-review or the labels needed to rule out an id collision."""
-    message = (f"The only review is from '{author}', who wrote this PR. "
-               "A self-review does not satisfy the gate.")
-    if unresolved:
-        _agent_id, missing = unresolved[0]
-        message += (
-            f" Note: {' and '.join(missing)} is missing, so a second agent "
-            "sharing this id (#304) cannot be ruled out - stamp the family "
-            "labels if that is what happened. The gate will not assume a family."
-        )
-    return message
-
-
 def _evidence_note(evidence):
     """Describe the exact evidence that satisfied the review gate."""
     out_addressed = evidence.get("outdated_addressed", 0) if evidence else 0
     head = evidence.get("head_oid") if evidence else None
     head_reviewers = _current_head_reviewers(evidence)
     if head and head_reviewers:
-        head_note = (
-            f"current head {head[:12]} has accepted independent review from "
-            f"{', '.join(head_reviewers)}"
-        )
+        head_note = (f"current head {head[:12]} has accepted independent review from "
+                     f"{', '.join(head_reviewers)}")
     else:
         head_note = "reviewed at head"
     if out_addressed > 0:
-        parts = [
-            head_note,
-            f"no blocking unresolved threads ({out_addressed} outdated with commit evidence)",
-        ]
+        parts = [head_note,
+                 f"no blocking unresolved threads ({out_addressed} outdated with commit evidence)"]
     else:
         parts = [head_note, "no unresolved threads"]
     if evidence and evidence.get("body_addressed"):
-        parts.append(
-            f"{evidence['body_addressed']} finding(s) addressed by relevant PR body edit"
-        )
+        parts.append(f"{evidence['body_addressed']} finding(s) addressed by relevant PR body edit")
     if evidence and evidence.get("withdrawn"):
         parts.append(f"{evidence['withdrawn']} finding(s) withdrawn, not fixed")
     return ", ".join(parts) + "."
@@ -1501,12 +1131,10 @@ def _coderabbit_status_evidence(owner, name, pr_id, expected_head):
     if not isinstance(expected_head, str) or not expected_head:
         return None
     slug = f"{owner}/{name}"
-    checks = _gh_json([
-        "gh", "api", f"repos/{slug}/commits/{expected_head}/check-runs?per_page=100",
-    ])
-    statuses = _gh_json([
-        "gh", "api", f"repos/{slug}/commits/{expected_head}/status?per_page=100",
-    ])
+    checks = _gh_json(["gh", "api",
+                       f"repos/{slug}/commits/{expected_head}/check-runs?per_page=100"])
+    statuses = _gh_json(["gh", "api",
+                         f"repos/{slug}/commits/{expected_head}/status?per_page=100"])
     if not isinstance(checks, dict) or not isinstance(statuses, dict):
         return None
     check_runs = checks.get("check_runs")
@@ -1644,9 +1272,7 @@ def _parse_coderabbit_full_review_comment(comment):
     """Parse one exact-match full-review request/completion comment."""
     if not isinstance(comment, dict):
         return False
-    kind = comment.get("kind") or _coderabbit_full_review_comment_kind(
-        comment.get("body")
-    )
+    kind = comment.get("kind") or _coderabbit_full_review_comment_kind(comment.get("body"))
     if kind is None:
         return None
     created_at = _parse_review_ts(comment.get("createdAt"))
@@ -1713,9 +1339,7 @@ def _coderabbit_no_findings_full_review(review, evidence):
     if not isinstance(body, str) or body.strip():
         return False
     review_time = _parse_review_ts(review.get("submittedAt"))
-    head_commit_time = _parse_review_ts(
-        evidence.get("head_commit_committed_at")
-    )
+    head_commit_time = _parse_review_ts(evidence.get("head_commit_committed_at"))
     comments = evidence.get("coderabbit_full_review_comments")
     if review_time is None or head_commit_time is None or comments is None:
         return False
@@ -2123,73 +1747,6 @@ def has_authoritative_codeant_review(pr, evidence):
     return _codeant_status_evidence(evidence) is True
 
 
-def _agent_review_verdict(pr, evidence):  # noqa: C901, PLR0911, PLR0912
-    """Validate the narrow operator-assigned independent-agent exception."""
-    if not isinstance(pr, dict) or not isinstance(evidence, dict):
-        return False, "Emergency agent review evidence is unavailable."
-    authors = identity_values(pr, AUTHOR_LABEL)
-    reviewers = identity_values(pr, REVIEWED_BY_LABEL)
-    if len(authors) != 1 or len(reviewers) != 1:
-        return False, "Agent review requires exactly one author and one completed reviewer."
-    reviewer = reviewers[0]
-    if reviewer == authors[0]:
-        return False, f"The assigned reviewer '{reviewer}' authored or remediated this head."
-    families = reviewer_families(pr).get(reviewer, [])
-    if len(families) != 1:
-        return False, "Agent review requires one unambiguous reviewer model family."
-    if (evidence.get("agent_review_marker_errors")
-            or evidence.get("agent_review_assignment_errors")):
-        return False, "Malformed emergency agent review assignment or completion evidence exists."
-    records = evidence.get("agent_review_attestations")
-    head = evidence.get("head_oid")
-    if not isinstance(records, list) or not isinstance(head, str) or not head:
-        return False, "Emergency agent review completion evidence is missing."
-    current = [record for record in records
-               if isinstance(record, dict) and record.get("head") == head.lower()]
-    if len(current) != 1:
-        return False, "Agent review completion evidence is missing, duplicated, or ambiguous."
-    record = current[0]
-    if record.get("agent") != reviewer or record.get("family") != families[0]:
-        return False, "Agent review identity does not match its completion evidence."
-    completed_at = _parse_review_ts(record.get("completed_at"))
-    committed_at = _parse_review_ts(evidence.get("head_commit_committed_at"))
-    if completed_at is None or committed_at is None or completed_at <= committed_at:
-        return False, "Agent review completion time does not follow the reviewed head."
-    assignments = evidence.get("agent_review_assignments")
-    current_assignments = [item for item in assignments or []
-                           if isinstance(item, dict) and item.get("head") == head.lower()]
-    if len(current_assignments) != 1:
-        return False, "Explicit emergency agent review assignment is missing or ambiguous."
-    assignment = current_assignments[0]
-    assigned_at = _parse_review_ts(assignment.get("assigned_at"))
-    if (assignment.get("reviewer") != reviewer
-            or assignment.get("family") != families[0]):
-        return False, "Agent review identity does not match its operator assignment."
-    if (assigned_at is None or assigned_at <= committed_at
-            or completed_at <= assigned_at):
-        return False, "Agent review assignment, review, and completion are out of order."
-    matching_reviews = []
-    for review in evidence.get("reviews") or []:
-        state = str(review.get("state") or "").upper()
-        author = review.get("author") or {}
-        submitted_at = _parse_review_ts(review.get("submittedAt"))
-        if (
-            (review.get("commit") or {}).get("oid") == head
-            and author.get("__typename") == "User"
-            and author.get("login") == record.get("github_login")
-            and state not in {"PENDING", "DISMISSED", "CHANGES_REQUESTED"}
-            and (state != "COMMENTED" or bool(str(review.get("body") or "").strip()))
-            and submitted_at is not None
-            and assigned_at <= submitted_at <= completed_at
-        ):
-            matching_reviews.append(review)
-    if not matching_reviews:
-        return False, "No substantive independent GitHub review precedes agent completion."
-    return True, (f"Emergency independent review by {reviewer} ({families[0]}) is "
-                  f"complete on current head {head[:12]} with disposition "
-                  f"{record['disposition']}.")
-
-
 def with_service_evidence(pr, pr_id, evidence):
     """Enrich evidence with whichever provider this PR's authority label names.
 
@@ -2204,8 +1761,9 @@ def with_service_evidence(pr, pr_id, evidence):
     if service == "sourcery":
         return _with_sourcery_runs(pr_id, evidence)
     if service in {"codeant", "agent"}:
-        # CodeAnt needs no second round trip: fetching the CodeRabbit status
-        # here would spend a call whose result this PR's gate never reads.
+        # Neither needs a second round trip: CodeAnt attests through
+        # evidence review_evidence() already collected, and a retired
+        # review:agent assignment is refused before any evidence is read.
         return evidence
     return _with_coderabbit_status(pr_id, evidence)
 
@@ -2237,7 +1795,7 @@ def has_authoritative_assigned_review(pr, evidence):
     if service == "codeant":
         return has_authoritative_codeant_review(pr, evidence)
     if service == "agent":
-        return _agent_review_verdict(pr, evidence)[0]
+        return False
     return has_authoritative_coderabbit_review(pr, evidence)
 
 
@@ -2250,6 +1808,13 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
             + ". Missing, legacy, unknown, mixed, or duplicate "
             "review labels block merge."
         )
+    if service == "agent":
+        # Refused before any evidence is read. Coding-agent review claims and
+        # completion attestations were removed in #414, so nothing can produce
+        # evidence for this label and any that appears is forged.
+        return False, (f"{RETIRED_AGENT_REVIEW_LABEL} is retired: coding agents no longer "
+                       "supply review evidence. Reassign this PR to review:coderabbit, "
+                       "review:sourcery, or review:codeant before merging.")
     counts = _service_thread_counts(evidence, service)
     if not isinstance(counts, dict):
         return False, f"Could not determine {service.title()} review-thread state; refusing rather than guessing."
@@ -2271,10 +1836,8 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
 
     verdicts = latest_state_per_reviewer(reviews)
     if verdicts is None:
-        return False, (
-            "Could not establish an unambiguous latest review verdict; "
-            "refusing rather than trusting review page order."
-        )
+        return False, ("Could not establish an unambiguous latest review verdict; "
+                       "refusing rather than trusting review page order.")
     advisory_accounts = {
         ((r.get("author") or {}).get("login") or "").lower()
         for r in submitted if is_advisory_review_actor(r)
@@ -2298,8 +1861,6 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
     # first would make a genuinely completed clean review unmergeable. The
     # human-blocking and thread gates above already ran for every service, and
     # each branch below still demands producer-validated exact-head proof.
-    if service == "agent":
-        return _agent_review_verdict(pr, evidence)
     if service == "sourcery":
         if not has_authoritative_sourcery_review(pr, evidence):
             return False, (
@@ -2308,65 +1869,48 @@ def check_reviews(pr, evidence):  # noqa: C901, PLR0912
                 "Missing, pending, failed, stale, ambiguous, or unbound evidence "
                 "blocks merge."
             )
-        return True, (
-            "Sourcery review is complete on current head "
-            f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved threads."
-        )
+        return True, ("Sourcery review is complete on current head "
+                      f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved threads.")
 
     if service == "codeant":
         review = _codeant_latest_review(evidence)
         if review is CODEANT_REVIEW_UNUSABLE:
-            return False, (
-                "CodeAnt has an untrustworthy Review object for this PR's exact "
-                "current head (pending, malformed, spoofed, or ambiguous). "
-                "Trusted status evidence cannot override it; refusing rather "
-                "than falling back."
-            )
+            return False, ("CodeAnt has an untrustworthy Review object for this PR's exact "
+                           "current head (pending, malformed, spoofed, or ambiguous). "
+                           "Trusted status evidence cannot override it; refusing rather "
+                           "than falling back.")
         if review is None:
             if _codeant_status_evidence(evidence) is True:
-                return True, (
-                    "CodeAnt clean-review status is complete on current head "
-                    f"{str((evidence or {}).get('head_oid') or '')[:12]}; "
-                    "no unresolved threads."
-                )
-            return False, (
-                "CodeAnt has not supplied one authoritative exact-head review "
-                "object or a trusted completed clean-review status record. "
-                "Missing, stale, unfinished, failed, ambiguous, duplicated, "
-                "malformed, or spoofed evidence blocks merge."
-            )
+                return True, ("CodeAnt clean-review status is complete on current head "
+                              f"{str((evidence or {}).get('head_oid') or '')[:12]}; "
+                              "no unresolved threads.")
+            return False, ("CodeAnt has not supplied one authoritative exact-head review "
+                           "object or a trusted completed clean-review status record. "
+                           "Missing, stale, unfinished, failed, ambiguous, duplicated, "
+                           "malformed, or spoofed evidence blocks merge.")
         if str(review.get("state") or "").upper() == "CHANGES_REQUESTED":
             return False, "CodeAnt requested changes and has not re-reviewed."
-        return True, (
-            "CodeAnt review is complete on current head "
-            f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved threads."
-        )
+        return True, ("CodeAnt review is complete on current head "
+                      f"{str((evidence or {}).get('head_oid') or '')[:12]}; no unresolved threads.")
 
     if not submitted:
         return False, "No review on this PR. At least one review is required."
 
     latest_coderabbit_review = _coderabbit_latest_review(evidence)
     if latest_coderabbit_review is None:
-        return False, (
-            "CodeRabbit has not supplied one accepted completed review verdict in "
-            "this PR's review history plus a successful authoritative "
-            "current-head CodeRabbit status. Missing, malformed, pending, "
-            "ambiguous, or spoofed evidence blocks merge."
-        )
+        return False, ("CodeRabbit has not supplied one accepted completed review verdict in "
+                       "this PR's review history plus a successful authoritative "
+                       "current-head CodeRabbit status. Missing, malformed, pending, "
+                       "ambiguous, or spoofed evidence blocks merge.")
     if str(latest_coderabbit_review.get("state") or "").upper() == "CHANGES_REQUESTED":
         return False, "CodeRabbit requested changes and has not re-approved."
     if not has_authoritative_coderabbit_review(pr, evidence):
-        return False, (
-            "CodeRabbit has not supplied a successful authoritative "
-            "current-head CodeRabbit status tied to the latest accepted "
-            "review verdict for this PR. Missing, pending, failed, "
-            "rate-limited, stale, ambiguous, or spoofed evidence blocks "
-            "merge."
-        )
-    return True, (
-        f"CodeRabbit status is complete on current head "
-        f"{evidence['head_oid'][:12]}; {_evidence_note(evidence)}"
-    )
+        return False, ("CodeRabbit has not supplied a successful authoritative "
+                       "current-head CodeRabbit status tied to the latest accepted "
+                       "review verdict for this PR. Missing, pending, failed, "
+                       "rate-limited, stale, ambiguous, or spoofed evidence blocks merge.")
+    return True, (f"CodeRabbit status is complete on current head "
+                  f"{evidence['head_oid'][:12]}; {_evidence_note(evidence)}")
 
 
 def _behind_by(base_ref, head_sha):
@@ -2561,40 +2105,32 @@ def _ci_saw_base_advance(pr, advance_resolver=None, run_resolver=None):
     # Advisory review bots are not build checks anywhere else in this file, so
     # they neither prove freshness nor block on lacking it (see check_ci).
     def required(names):
-        return sorted(name for name in names
-                      if (name or "").lower() not in ADVISORY_CHECK_CONTEXTS)
+        return sorted(name for name in names if (name or "").lower() not in ADVISORY_CHECK_CONTEXTS)
 
     current, unorderable = _current_runs(pr.get("statusCheckRollup") or [])
     undecidable = required(unorderable)
     if undecidable:
-        return False, (
-            f"which run is current is undecidable for {', '.join(undecidable)}, "
-            f"so their age is unknown"
-        )
+        return False, (f"which run is current is undecidable for {', '.join(undecidable)}, "
+                       f"so their age is unknown")
     started = {name: _check_start_time(current[name]) for name in required(current)}
     if not started:
         return False, "no required check is reported on this head at all"
 
     undated = [name for name, when in started.items() if when is None]
     if undated:
-        return False, (
-            f"no usable start time is recorded for {', '.join(undated)}, so "
-            f"whether those checks ran after the base advance is unverified"
-        )
+        return False, (f"no usable start time is recorded for {', '.join(undated)}, so "
+                       f"whether those checks ran after the base advance is unverified")
     stale = [name for name, when in started.items() if when <= advanced]
     if stale:
         shown = ", ".join(stale[:3])
         more = f" (+{len(stale) - 3} more)" if len(stale) > 3 else ""
-        return False, (
-            f"{shown}{more} started no later than the base advance at "
-            f"{advanced.isoformat()}, so the green result describes a merge "
-            f"with the superseded base"
-        )
+        return False, (f"{shown}{more} started no later than the base advance at "
+                       f"{advanced.isoformat()}, so the green result describes a merge "
+                       f"with the superseded base")
     run_cache = {}
     for name in required(current):
-        evidence = _github_actions_current_base_evidence(
-            pr, current[name], advanced, run_resolver=run_resolver, cache=run_cache,
-        )
+        evidence = _github_actions_current_base_evidence(pr, current[name], advanced,
+                                                         run_resolver=run_resolver, cache=run_cache)
         if evidence is None:
             continue
         ok, reason = evidence
@@ -2632,26 +2168,19 @@ def _github_actions_run_timestamps(data, advanced):
     created = _utc_stamp(data.get("created_at"))
     started = _utc_stamp(data.get("run_started_at"))
     if created is None or started is None:
-        return False, (
-            "does not report usable event-time timestamps for created_at and "
-            "run_started_at"
-        )
+        return False, ("does not report usable event-time timestamps for created_at and "
+                       "run_started_at")
     if started < created:
-        return False, (
-            "reports event-time timestamps out of order: "
-            f"created_at {created.isoformat()}, run_started_at {started.isoformat()}"
-        )
+        return False, ("reports event-time timestamps out of order: "
+                       f"created_at {created.isoformat()}, run_started_at {started.isoformat()}")
     if created <= advanced or started <= advanced:
-        return False, (
-            f"was created at {created.isoformat()} and started at "
-            f"{started.isoformat()}, no later than the base advance at "
-            f"{advanced.isoformat()}"
-        )
+        return False, (f"was created at {created.isoformat()} and started at "
+                       f"{started.isoformat()}, no later than the base advance at "
+                       f"{advanced.isoformat()}")
     return True, ""
 
 
-def _github_actions_current_base_evidence(pr, check, advanced, run_resolver=None,
-                                          cache=None):
+def _github_actions_current_base_evidence(pr, check, advanced, run_resolver=None, cache=None):
     """Current-base proof for one GitHub Actions check run, or None if not one.
 
     Plain workflow re-runs reuse the original event's `GITHUB_SHA` and
@@ -2680,32 +2209,24 @@ def _github_actions_current_base_evidence(pr, check, advanced, run_resolver=None
     event = data.get("event")
     if event != "pull_request":
         shown = str(event or "unknown")
-        return False, (
-            f"comes from a GitHub Actions run triggered by {shown!r} rather than "
-            "a pull_request event"
-        )
+        return False, (f"comes from a GitHub Actions run triggered by {shown!r} rather than "
+                       "a pull_request event")
     attempt = data.get("run_attempt")
     if isinstance(attempt, bool) or not isinstance(attempt, int):
         return False, "comes from a GitHub Actions run whose run_attempt is unreadable"
     if attempt != 1:
-        return False, (
-            f"comes from GitHub Actions run attempt {attempt}, and GitHub "
-            "re-runs preserve the original pull_request event SHA/ref"
-        )
+        return False, (f"comes from GitHub Actions run attempt {attempt}, and GitHub "
+                       "re-runs preserve the original pull_request event SHA/ref")
     current_head = pr.get("headRefOid")
     if not isinstance(current_head, str) or not current_head:
         return False, "comes from a GitHub Actions run whose event-time metadata could not be verified"
     head_sha = data.get("head_sha")
     if not isinstance(head_sha, str) or not head_sha:
-        return False, (
-            "comes from a GitHub Actions run that does not report a usable "
-            "event-time head SHA"
-        )
+        return False, ("comes from a GitHub Actions run that does not report a usable "
+                       "event-time head SHA")
     if head_sha != current_head:
-        return False, (
-            f"records event-time head {head_sha} instead of the current head "
-            f"{current_head}"
-        )
+        return False, (f"records event-time head {head_sha} instead of the current head "
+                       f"{current_head}")
     return _github_actions_run_timestamps(data, advanced)
 
 
@@ -2799,8 +2320,7 @@ def _snapshot_live_base(pr, resolve_base):
 
 
 def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolver=None,
-                  run_resolver=None, merge_parents_resolver=None,
-                  base_tip_resolver=None):
+                  run_resolver=None, merge_parents_resolver=None, base_tip_resolver=None):
     """Staleness gate.
 
     A branch behind the base is not automatically stale. Requiring a literal
@@ -2852,60 +2372,46 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
     try:
         behind = resolve(pr.get("baseRefName"), pr.get("headRefOid"))
     except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
-        return False, (
-            f"Could not determine whether the branch is current with the base "
-            f"({type(exc).__name__}: {exc}). Refusing to merge on unverified ancestry."
-        )
+        return False, (f"Could not determine whether the branch is current with the base "
+                       f"({type(exc).__name__}: {exc}). Refusing to merge on unverified ancestry.")
     if behind is None:
-        return False, (
-            "Could not determine whether the branch is current with the base. "
-            "Refusing to merge on unverified ancestry."
-        )
+        return False, ("Could not determine whether the branch is current with the base. "
+                       "Refusing to merge on unverified ancestry.")
     if behind > 0:
         plural = "commit" if behind == 1 else "commits"
         snapshot_base = _snapshot_live_base(pr, base_tip_resolver or _current_base_tip)
         try:
             overlap = _overlap_with_base_advance(pr, paths_resolver)
         except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
-            return False, (
-                f"Branch is {behind} {plural} behind the base and the overlap with "
-                f"the base advance could not be determined "
-                f"({type(exc).__name__}: {exc}). Rebase on main and re-run."
-            )
+            return False, (f"Branch is {behind} {plural} behind the base and the overlap with "
+                           f"the base advance could not be determined "
+                           f"({type(exc).__name__}: {exc}). Rebase on main and re-run.")
         if overlap is None:
-            return False, (
-                f"Branch is {behind} {plural} behind the base and its changed-file "
-                f"data is unavailable or truncated, so the overlap with the base "
-                f"advance is unverified. Rebase on main and re-run."
-            )
+            return False, (f"Branch is {behind} {plural} behind the base and its changed-file "
+                           f"data is unavailable or truncated, so the overlap with the base "
+                           f"advance is unverified. Rebase on main and re-run.")
         if overlap:
             shown = ", ".join(overlap[:3])
             more = f" (+{len(overlap) - 3} more)" if len(overlap) > 3 else ""
-            return False, (
-                f"Branch is {behind} {plural} behind the base and both changed "
-                f"{shown}{more}. Rebase on main and re-run."
-            )
+            return False, (f"Branch is {behind} {plural} behind the base and both changed "
+                           f"{shown}{more}. Rebase on main and re-run.")
         # Disjointness is necessary but not sufficient: it says nothing about
         # whether the recorded CI ever saw this advance. Prove that too, last,
         # so a branch rejected above costs no extra API call.
         try:
             fresh, reason = _ci_saw_base_advance(pr, advance_resolver, run_resolver)
         except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
-            fresh, reason = False, (
-                f"the age of the base advance could not be determined "
-                f"({type(exc).__name__}: {exc})"
-            )
+            fresh, reason = False, (f"the age of the base advance could not be determined "
+                                    f"({type(exc).__name__}: {exc})")
         if not fresh:
-            return False, (
-                f"Branch is {behind} {plural} behind the base with disjoint "
-                f"changes, but {reason}. Trigger a fresh pull_request event on "
-                f"this head (for example close and reopen the PR) so GitHub "
-                f"recomputes the pull-request merge ref against the current "
-                f"base. A small merge-ref lag window remains, because the run "
-                f"metadata still does not identify the exact merge commit the "
-                f"runner checked out. Do not rebase: that rewrites the head "
-                f"SHA and destroys the review attestation bound to it."
-            )
+            return False, (f"Branch is {behind} {plural} behind the base with disjoint "
+                           f"changes, but {reason}. Trigger a fresh pull_request event on "
+                           f"this head (for example close and reopen the PR) so GitHub "
+                           f"recomputes the pull-request merge ref against the current "
+                           f"base. A small merge-ref lag window remains, because the run "
+                           f"metadata still does not identify the exact merge commit the "
+                           f"runner checked out. Do not rebase: that rewrites the head "
+                           f"SHA and destroys the review attestation bound to it.")
         # Timing proves the checks started late enough to have read the
         # advance; it does not name the commit they actually tested (issue
         # #371). Read the PR's own test-merge commit and confirm its parents
@@ -2916,11 +2422,9 @@ def check_rebased(pr, behind_resolver=None, paths_resolver=None, advance_resolve
             snapshot_base=snapshot_base)
         if not identity_ok:
             return False, identity_reason
-        return True, (
-            f"Branch is {behind} {plural} behind the base, but its changes are "
-            f"disjoint from the base advance, {reason}, and its tested merge "
-            f"commit names the current base tip as a parent."
-        )
+        return True, (f"Branch is {behind} {plural} behind the base, but its changes are "
+                      f"disjoint from the base advance, {reason}, and its tested merge "
+                      f"commit names the current base tip as a parent.")
     return True, "Branch is current with the base."
 
 
@@ -2934,12 +2438,10 @@ def _identity_refusal(behind, plural, detail):
     A rebase is always the wrong remedy: it rewrites the head SHA and destroys
     the head-bound review attestation this gate exists to preserve (#369).
     """
-    return (
-        f"Branch is {behind} {plural} behind the base with disjoint "
-        f"changes and CI that started after the advance, but {detail} Do "
-        f"not rebase: that rewrites the head SHA and destroys the review "
-        f"attestation bound to it."
-    )
+    return (f"Branch is {behind} {plural} behind the base with disjoint "
+            f"changes and CI that started after the advance, but {detail} Do "
+            f"not rebase: that rewrites the head SHA and destroys the review "
+            f"attestation bound to it.")
 
 
 def _well_formed_parents(parents):
@@ -3005,13 +2507,10 @@ def _proved_base_and_parents(pr, resolve_base, resolve_parents):
             return None, None, "the base branch tip could not be re-read."
         if before == after:
             return after, parents, None
-        failure = (
-            f"the base branch kept advancing (last seen moving from "
-            f"{before[:12]} to {after[:12]}) while the tested merge commit "
-            f"was being read, so the merge commit's parents cannot be "
-            f"attributed to any one base tip. Wait for the base to settle "
-            f"and retry."
-        )
+        failure = (f"the base branch kept advancing (last seen moving from "
+                   f"{before[:12]} to {after[:12]}) while the tested merge commit "
+                   f"was being read, so the merge commit's parents cannot be "
+                   f"attributed to any one base tip. Wait for the base to settle and retry.")
     return None, None, failure
 
 
@@ -3046,12 +2545,9 @@ def _merge_commit_matches_base(pr, behind, plural, merge_parents_resolver,
                 f"the base branch tip could not be read ({type(exc).__name__}: {exc})."
             ))
     if not isinstance(snapshot_base, str) or not snapshot_base:
-        return False, _identity_refusal(behind, plural, (
-            "the base branch tip could not be read."
-        ))
+        return False, _identity_refusal(behind, plural, ("the base branch tip could not be read."))
     try:
-        base_tip, parents, failure = _proved_base_and_parents(
-            pr, resolve_base, resolve_parents)
+        base_tip, parents, failure = _proved_base_and_parents(pr, resolve_base, resolve_parents)
     except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
         return False, _identity_refusal(behind, plural, (
             f"the pull request's tested merge commit could not be resolved "
@@ -3216,24 +2712,25 @@ def ensure_pr_head_checkout(pr, repo_root=None):
     # Never pass --depth=1 here: every worktree shares this clone's Git
     # metadata, and a shallow fetch writes `.git/shallow`, which breaks
     # merge-base / rebase / diff for the rest of the factory.
-    fetch_code, _, fetch_err = run_cmd(
-        ["git", "fetch", "--no-tags", "origin", sha],
-        check=False,
-        cwd=repo_root,
-    )
+    head_slug = head_repository_slug(pr) if isinstance(pr, dict) else ""
+    fetch_source = "origin"
+    if pr and (pr.get("isCrossRepository") or (head_slug and head_slug != get_repo_slug())):
+        head_url = (pr.get("headRepository") or {}).get("url") if isinstance(pr.get("headRepository"), dict) else None
+        fetch_source = head_url or (f"https://github.com/{head_slug}.git" if head_slug else "origin")
+
+    fetch_code, _, fetch_err = run_cmd(["git", "fetch", "--no-tags", fetch_source, sha], check=False,
+                                       cwd=repo_root)
     if fetch_code != 0:
         ref = (pr or {}).get("headRefName")
         if ref:
-            fetch_code, _, fetch_err = run_cmd(
-                ["git", "fetch", "--no-tags", "origin", ref],
-                check=False,
-                cwd=repo_root,
-            )
-    add_code, _, add_err = run_cmd(
-        ["git", "worktree", "add", "--detach", dest, sha],
-        check=False,
-        cwd=repo_root,
-    )
+            fetch_code, _, fetch_err = run_cmd(["git", "fetch", "--no-tags", fetch_source, ref],
+                                               check=False, cwd=repo_root)
+        if fetch_code != 0 and (pr or {}).get("number"):
+            fetch_code, _, fetch_err = run_cmd(["git", "fetch", "--no-tags", "origin",
+                                                f"pull/{pr['number']}/head"],
+                                               check=False, cwd=repo_root)
+    add_code, _, add_err = run_cmd(["git", "worktree", "add", "--detach", dest, sha], check=False,
+                                   cwd=repo_root)
     if add_code != 0:
         shutil.rmtree(dest, ignore_errors=True)
         detail = (add_err or fetch_err or "worktree add failed").strip()
@@ -3282,11 +2779,9 @@ def resolve_project_runner(runner, repo_root=None):
     found = shutil.which(runner)
     if found:
         return found, None
-    return None, (
-        f"cannot resolve the project interpreter for {runner!r}: no project "
-        "virtualenv, no VIRTUAL_ENV, and nothing on PATH provides it. This is "
-        "an environment fault, not a verification failure; nothing was recorded."
-    )
+    return None, (f"cannot resolve the project interpreter for {runner!r}: no project "
+                  "virtualenv, no VIRTUAL_ENV, and nothing on PATH provides it. This is "
+                  "an environment fault, not a verification failure; nothing was recorded.")
 
 
 def resolve_acceptance_runners(criteria, repo_root=None):
@@ -3310,77 +2805,80 @@ def acceptance_run_cmd(resolved):
     return _runner
 
 
-def persist_acceptance_evidence(pr_id, pr, records):
+def persist_acceptance_evidence(pr_id, pr, records, max_retries=3):  # noqa: C901, PLR0912
     """Writes live verify: records into the PR's durable evidence block."""
     if not records:
         return True, "no acceptance records to persist"
     sha = pr.get("headRefOid")
-    fresh = _gh_json(["gh", "pr", "view", str(pr_id), "--json", "body,headRefOid"])
-    if not fresh:
-        return False, "could not re-read the PR body to persist acceptance evidence"
-    if fresh.get("headRefOid") != sha:
-        return False, "PR head changed while acceptance commands ran"
-    body = fresh.get("body") or ""
-    existing, error = parse_verification_evidence(body)
-    merged = acceptance_runner.merge_into_evidence(
-        None if error == "missing" else existing,
-        records,
-    )
-    merged["head_sha"] = sha
-    if error == "missing":
-        updated = body + render_verification_evidence(merged)
-    else:
-        if error:
-            return False, f"verification evidence is malformed: {error}"
-        updated = replace_verification_evidence(body, merged)
-        if updated is None:
-            return False, "could not replace the verification evidence block"
-    code, _, err = run_cmd(
-        ["gh", "pr", "edit", str(pr_id), "--body", updated],
-        check=False,
-    )
-    if code != 0:
-        return False, f"could not persist acceptance evidence: {err.strip()}"
-    return True, f"persisted {len(records)} acceptance record(s)"
+    for attempt in range(max_retries):
+        fresh = _gh_json(["gh", "pr", "view", str(pr_id), "--json", "body,headRefOid"])
+        if not fresh:
+            if attempt < max_retries - 1:
+                continue
+            return False, "could not re-read the PR body to persist acceptance evidence"
+        if fresh.get("headRefOid") != sha:
+            return False, "PR head changed while acceptance commands ran"
+        body = fresh.get("body") or ""
+        existing, error = parse_verification_evidence(body)
+        merged = acceptance_runner.merge_into_evidence(None if error == "missing" else existing,
+                                                       records)
+        merged["head_sha"] = sha
+        if error == "missing":
+            updated = body + render_verification_evidence(merged)
+        else:
+            if error:
+                return False, f"verification evidence is malformed: {error}"
+            updated = replace_verification_evidence(body, merged)
+            if updated is None:
+                return False, "could not replace the verification evidence block"
+        if updated == body:
+            return True, f"persisted {len(records)} acceptance record(s)"
+        code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--body", updated], check=False)
+        if code != 0:
+            if attempt < max_retries - 1:
+                continue
+            return False, f"could not persist acceptance evidence: {err.strip()}"
+        verify_fresh = _gh_json(["gh", "pr", "view", str(pr_id), "--json", "body,headRefOid"])
+        if not verify_fresh:
+            if attempt < max_retries - 1:
+                continue
+            return False, "could not verify PR body after persisting acceptance evidence"
+        if verify_fresh.get("headRefOid") != sha:
+            return False, "PR head changed after persisting acceptance evidence"
+        verify_body = verify_fresh.get("body") or ""
+        verify_existing, verify_error = parse_verification_evidence(verify_body)
+        if not verify_error and verify_existing and verify_existing.get("head_sha") == sha:
+            commands = verify_existing.get("commands") or []
+            if all(any(r.get("command") == c.get("command") and r.get("exit_code") == c.get("exit_code")
+                       for c in commands) for r in records):
+                return True, f"persisted {len(records)} acceptance record(s)"
+        if attempt < max_retries - 1:
+            continue
+    return False, "could not verify persisted acceptance evidence after retries"
 
 
 def check_acceptance(issue_num, issue_body, cwd=None, execute=False, run_cmd_fn=None, records_out=None):
     if execute and not cwd:
-        return False, (
-            f"Issue #{issue_num}: no verified PR-head checkout; "
-            "refusing to run verify: commands against an unknown tree"
-        )
-    ok, message, result = acceptance_runner.evaluate_issue(
-        issue_body, cwd=cwd, execute=execute, run_cmd_fn=run_cmd_fn
-    )
+        return False, (f"Issue #{issue_num}: no verified PR-head checkout; "
+                       "refusing to run verify: commands against an unknown tree")
+    ok, message, result = acceptance_runner.evaluate_issue(issue_body, cwd=cwd, execute=execute,
+                                                           run_cmd_fn=run_cmd_fn)
     if records_out is not None:
         records_out.extend(result["records"])
     if not ok:
-        pending = [
-            item.text
-            for item in result["criteria"]
-            if item.argv is None and not item.ticked
-        ]
+        pending = [item.text for item in result["criteria"] if item.argv is None and not item.ticked]
         if pending and "unticked" in message:
             preview = "\n      ".join(pending[:5])
-            more = (
-                f"\n      ... and {len(pending) - 5} more" if len(pending) > 5 else ""
-            )
-            return False, (
-                f"Issue #{issue_num} has {len(pending)} unticked acceptance criteria:\n"
-                f"      {preview}{more}"
-            )
+            more = (f"\n      ... and {len(pending) - 5} more" if len(pending) > 5 else "")
+            return False, (f"Issue #{issue_num} has {len(pending)} unticked acceptance criteria:\n"
+                           f"      {preview}{more}")
         return False, f"Issue #{issue_num}: {message}"
     ran = sum(1 for item in result["criteria"] if item.argv)
     if execute and ran:
-        return True, (
-            f"Acceptance criteria on #{issue_num} passed ({ran} verify: command(s))."
-        )
+        return True, (f"Acceptance criteria on #{issue_num} passed ({ran} verify: command(s)).")
     if ran:
-        return True, (
-            f"Acceptance criteria on #{issue_num} validated "
-            f"({ran} verify: command(s); execution deferred to merge)."
-        )
+        return True, (f"Acceptance criteria on #{issue_num} validated "
+                      f"({ran} verify: command(s); execution deferred to merge).")
     return True, f"All acceptance criteria on #{issue_num} are ticked."
 
 
@@ -3389,459 +2887,11 @@ def check_size(pr):
     if total > SIZE_LIMIT:
         waiver = SIZE_WAIVER_REGION_RE.search(pr.get("body") or "")
         if not waiver:
-            return False, (
-                f"Diff is {total} lines, over the {SIZE_LIMIT}-line limit. "
-                "Split the PR or add 'size-waiver: <rationale>' to its body."
-            )
-        return True, (
-            f"Diff is {total} lines with explicit size waiver: "
-            f"{waiver.group(1).strip()}"
-        )
+            return False, (f"Diff is {total} lines, over the {SIZE_LIMIT}-line limit. "
+                           "Split the PR or add 'size-waiver: <rationale>' to its body.")
+        return True, (f"Diff is {total} lines with explicit size waiver: "
+                      f"{waiver.group(1).strip()}")
     return True, f"Diff is {total} lines."
-
-
-def _is_rework_review(review):
-    """Whether a review submission counts as a rework round (issue #98).
-
-    Mirrors ``fleet_status._is_rework_review`` without importing that module
-    (outside this issue's touches declaration).
-    """
-    state = (review.get("state") or "").upper()
-    if state == "CHANGES_REQUESTED":
-        return True
-    if state != "COMMENTED":
-        return False
-    body = review.get("body") or ""
-    return bool(_REWORK_BLOCKING_RE.search(body))
-
-
-def count_review_rounds(pr):
-    """Count rework review rounds visible on a PR snapshot."""
-    return sum(1 for review in (pr.get("reviews") or []) if _is_rework_review(review))
-
-
-def check_review_rounds(pr):
-    """Soft visibility gate: always passes; never escalates to a human.
-
-    Round count raises evidence and triggers automated split guidance via
-    ``--emit-review-split``. It is audit data, not merge authority.
-    """
-    rounds = count_review_rounds(pr)
-    if rounds >= REVIEW_ROUND_THRESHOLD:
-        return True, (
-            f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD}). "
-            "Automated scope-reduction guidance applies — run "
-            "`merge_pr.py --pr <n> --emit-review-split`. Round count alone "
-            "never creates a human gate."
-        )
-    return True, f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD})."
-
-
-def fetch_unresolved_finding_summaries(pr_id, limit=8):  # noqa: C901, PLR0912
-    """Load short unresolved review-thread summaries for split guidance."""
-    slug = get_repo_slug()
-    if not slug:
-        return None
-    owner, name = slug.split("/", 1)
-    query = """
-    query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
-      repository(owner:$owner, name:$name) {
-        pullRequest(number:$pr) {
-          reviewThreads(first:50, after:$cursor) {
-            nodes {
-              isResolved
-              isOutdated
-              path
-              comments(first:1) { nodes { body } }
-            }
-            pageInfo { hasNextPage endCursor }
-          }
-        }
-      }
-    }"""
-    cursor = None
-    seen = set()
-    summaries = []
-    while True:
-        args = [
-            "gh", "api", "graphql",
-            "-f", f"query={query}",
-            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr_id}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data = _gh_json(args)
-        if not data or (isinstance(data, dict) and data.get("errors")):
-            return None
-        try:
-            connection = data["data"]["repository"]["pullRequest"]["reviewThreads"]
-            nodes = connection["nodes"]
-            page_info = connection["pageInfo"]
-            has_next = page_info["hasNextPage"]
-        except (KeyError, TypeError):
-            return None
-        if not isinstance(nodes, list) or not isinstance(has_next, bool):
-            return None
-        for node in nodes:
-            if bool(node.get("isResolved")) or bool(node.get("isOutdated")):
-                continue
-            comments = ((node.get("comments") or {}).get("nodes") or [])
-            body = ""
-            if comments and isinstance(comments[0], dict):
-                body = (comments[0].get("body") or "").strip()
-            path = node.get("path") or ""
-            line = " ".join(body.split())
-            if len(line) > 160:
-                line = line[:157] + "..."
-            if path and line:
-                summaries.append(f"{path}: {line}")
-            elif line:
-                summaries.append(line)
-            elif path:
-                summaries.append(path)
-            if len(summaries) >= limit:
-                return summaries
-        if not has_next:
-            return summaries
-        next_cursor = page_info.get("endCursor")
-        if not next_cursor or next_cursor in seen:
-            return None
-        seen.add(next_cursor)
-        cursor = next_cursor
-
-
-def _split_item_marker(pr_num, idx):
-    return REVIEW_ROUND_SPLIT_ITEM_FMT.format(pr=pr_num, idx=idx)
-
-
-def build_review_round_split_plan(pr, findings=None, source_issue=None):
-    """Build idempotent split guidance for a PR that crossed the round threshold.
-
-    Returns a dict describing the comment body and proposed follow-up issues.
-    Does not mutate GitHub. ``findings`` is an optional list of short strings.
-
-    Follow-ups carry ``depends-on: #<Closes issue>`` (the original linked work
-    item), not the PR number — Aru's picker and triage resolve depends-on as
-    issue prerequisites.
-    """
-    rounds = count_review_rounds(pr)
-    findings = list(findings or [])
-    pr_num = pr.get("number")
-    source = source_issue or (linked_issues(pr.get("body") or "")[:1] or [None])[0]
-    follow_ups = []
-    for idx, finding in enumerate(findings, start=1):
-        title = f"Split from PR #{pr_num}: finding {idx}"
-        if len(finding) < 80:
-            title = f"Split from PR #{pr_num}: {finding}"
-        if len(title) > 120:
-            title = title[:117] + "..."
-        body_lines = [
-            "## User Story",
-            "",
-            "As the factory, I want a separable review finding tracked as its "
-            "own issue so the original PR can shrink to the smallest coherent change.",
-            "",
-            "## Background",
-            "",
-            f"Automated split guidance from PR #{pr_num} after "
-            f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD}).",
-            "",
-            f"Finding: {finding}",
-            "",
-            "## Acceptance Criteria",
-            "",
-            "- [ ] The finding is addressed or explicitly withdrawn with evidence.",
-            "",
-            "## Dependencies",
-            "",
-            f"depends-on: #{source}" if source else "depends-on:",
-            "touches: `TBD`  # author must declare paths before Ready",
-            "parallel-eligible: false",
-            "",
-            f"Provenance: automated review-round split from PR #{pr_num}",
-            _split_item_marker(pr_num, idx),
-        ]
-        follow_ups.append({
-            "idx": idx,
-            "title": title,
-            "body": "\n".join(body_lines),
-        })
-    if not follow_ups and source:
-        idx = 1
-        follow_ups.append({
-            "idx": idx,
-            "title": f"Split remainder from PR #{pr_num}",
-            "body": "\n".join([
-                "## User Story",
-                "",
-                "As the factory, I want remaining out-of-scope work from an "
-                "over-reviewed PR tracked separately so the original PR can shrink.",
-                "",
-                "## Background",
-                "",
-                f"Automated split guidance from PR #{pr_num} after "
-                f"{rounds} review round(s) (threshold {REVIEW_ROUND_THRESHOLD}). "
-                "No unresolved thread summaries were available; the author should "
-                "narrow the PR and move separable remainder here.",
-                "",
-                "## Acceptance Criteria",
-                "",
-                "- [ ] Remainder scope is defined with acceptance criteria and touches.",
-                "",
-                "## Dependencies",
-                "",
-                f"depends-on: #{source}",
-                "touches: `TBD`",
-                "parallel-eligible: false",
-                "",
-                f"Provenance: automated review-round split from PR #{pr_num}",
-                _split_item_marker(pr_num, idx),
-            ]),
-        })
-    finding_block = "\n".join(f"- {item}" for item in findings) if findings else (
-        "- (no unresolved thread summaries available; author should still shrink scope)"
-    )
-    source_line = (
-        f"(each carries `depends-on: #{source}` to the original linked issue)."
-        if source
-        else "."
-    )
-    comment = "\n".join([
-        REVIEW_ROUND_SPLIT_MARKER,
-        f"## Automated review-round split guidance ({rounds} rounds)",
-        "",
-        f"This PR crossed the review-round threshold of {REVIEW_ROUND_THRESHOLD}.",
-        "Round count is audit data — it does **not** create a human approval gate "
-        "and does **not** change merge authority (`merge_pr.py` remains the only merge path).",
-        "",
-        "### Required author action",
-        "1. Shrink this PR to the smallest coherent change that can pass review.",
-        f"2. Leave separable findings on the follow-up issues listed below {source_line}",
-        "3. Continue the agent review loop; do not escalate to a human for round count.",
-        "",
-        "### Unresolved findings considered",
-        finding_block,
-        "",
-        "### Proposed follow-up issues",
-    ])
-    for item in follow_ups:
-        comment += f"\n- {item['title']}"
-    return {
-        "rounds": rounds,
-        "threshold": REVIEW_ROUND_THRESHOLD,
-        "crossed": rounds >= REVIEW_ROUND_THRESHOLD,
-        "source_issue": source,
-        "findings": findings,
-        "follow_ups": follow_ups,
-        "comment": comment,
-        "marker": REVIEW_ROUND_SPLIT_MARKER,
-    }
-
-
-def _flatten_comment_pages(data):
-    """Flatten ``gh api --paginate --slurp`` (or a single-page list) to bodies."""
-    if not isinstance(data, list):
-        return []
-    if data and isinstance(data[0], dict):
-        return [c.get("body") or "" for c in data if isinstance(c, dict)]
-    bodies = []
-    for page in data:
-        if isinstance(page, list):
-            bodies.extend(c.get("body") or "" for c in page if isinstance(c, dict))
-    return bodies
-
-
-def _pr_comments_bodies(pr_num):
-    slug = get_repo_slug()
-    if not slug:
-        return None
-    # --slurp yields one JSON array of pages; without it, --paginate concatenates
-    # arrays and a single json.loads fails after the first page.
-    data = _gh_json([
-        "gh", "api", f"repos/{slug}/issues/{pr_num}/comments",
-        "--paginate", "--slurp",
-    ])
-    if data is None:
-        return None
-    return _flatten_comment_pages(data)
-
-
-def _parse_issue_number_from_create(out):
-    match = re.search(r"/issues/(\d+)", out or "")
-    return int(match.group(1)) if match else None
-
-
-def _issue_url(slug, number):
-    return f"https://github.com/{slug}/issues/{number}"
-
-
-def _find_existing_split_follow_ups(pr_num):
-    """Map follow-up idx -> {number, url} for issues already filed for this PR.
-
-    Returns None on query failure (fail closed — do not create duplicates).
-    """
-    data = _gh_json([
-        "gh", "issue", "list",
-        "--state", "all",
-        "--limit", "100",
-        "--search", f"aru-review-round-split-item:pr={pr_num} in:body",
-        "--json", "number,body,url",
-    ])
-    if data is None:
-        return None
-    if not isinstance(data, list):
-        return {}
-    found = {}
-    for issue in data:
-        if not isinstance(issue, dict):
-            continue
-        body = issue.get("body") or ""
-        match = REVIEW_ROUND_SPLIT_ITEM_RE.search(body)
-        if not match:
-            continue
-        if int(match.group(1)) != int(pr_num):
-            continue
-        idx = int(match.group(2))
-        number = issue.get("number")
-        if not number:
-            continue
-        url = issue.get("url") or ""
-        if not url:
-            slug = get_repo_slug()
-            url = _issue_url(slug, number) if slug else f"#{number}"
-        # Prefer the lowest issue number if duplicates somehow exist.
-        prior = found.get(idx)
-        if prior is None or number < prior["number"]:
-            found[idx] = {"number": number, "url": url}
-    return found
-
-
-def _attach_follow_up_to_board(issue_num):
-    """Place a split follow-up on the governed board as Backlog."""
-    return update_status(issue_num, "Backlog", require_board=True)
-
-
-def emit_review_round_split(pr, findings=None, *, apply=True):  # noqa: C901, PLR0912
-    """Post split guidance and file follow-up issues when the threshold is crossed.
-
-    Idempotent: if ``REVIEW_ROUND_SPLIT_MARKER`` is already present on the PR,
-    returns without creating duplicate issues. Retries after partial issue
-    creation reuse provenance-tagged issues. When ``apply`` is False, returns
-    the plan only.
-    """
-    if findings is None and apply:
-        fetched = fetch_unresolved_finding_summaries(pr.get("number"))
-        findings = fetched if fetched is not None else []
-    plan = build_review_round_split_plan(pr, findings=findings)
-    if not plan["crossed"]:
-        return {
-            "emitted": False,
-            "reason": "below threshold",
-            "plan": plan,
-            "created_issues": [],
-        }
-    if not apply:
-        return {
-            "emitted": False,
-            "reason": "dry plan",
-            "plan": plan,
-            "created_issues": [],
-        }
-    pr_num = pr.get("number")
-    bodies = _pr_comments_bodies(pr_num)
-    if bodies is None:
-        return {
-            "emitted": False,
-            "reason": "could not read PR comments",
-            "plan": plan,
-            "created_issues": [],
-        }
-    if any(REVIEW_ROUND_SPLIT_MARKER in body for body in bodies):
-        return {
-            "emitted": False,
-            "reason": "already emitted",
-            "plan": plan,
-            "created_issues": [],
-        }
-    existing = _find_existing_split_follow_ups(pr_num)
-    if existing is None:
-        return {
-            "emitted": False,
-            "reason": "could not query existing split follow-ups",
-            "plan": plan,
-            "created_issues": [],
-        }
-    slug = get_repo_slug()
-    filed = []
-    for item in plan["follow_ups"]:
-        idx = item["idx"]
-        prior = existing.get(idx)
-        if prior:
-            if not _attach_follow_up_to_board(prior["number"]):
-                return {
-                    "emitted": False,
-                    "reason": (
-                        f"board attach failed for existing #{prior['number']}"
-                    ),
-                    "plan": plan,
-                    "created_issues": filed,
-                }
-            filed.append(prior["url"])
-            continue
-        code, out, err = run_cmd(
-            [
-                "gh", "issue", "create",
-                "--title", item["title"],
-                "--body", item["body"],
-                "--label", "status:backlog",
-            ],
-            check=False,
-        )
-        if code != 0:
-            return {
-                "emitted": False,
-                "reason": f"issue create failed: {err.strip()}",
-                "plan": plan,
-                "created_issues": filed,
-            }
-        issue_num = _parse_issue_number_from_create(out)
-        if issue_num is None:
-            return {
-                "emitted": False,
-                "reason": f"issue create returned unparseable ref: {out.strip()}",
-                "plan": plan,
-                "created_issues": filed,
-            }
-        if not _attach_follow_up_to_board(issue_num):
-            return {
-                "emitted": False,
-                "reason": f"board attach failed for #{issue_num}",
-                "plan": plan,
-                "created_issues": filed,
-            }
-        url = out.strip() or (_issue_url(slug, issue_num) if slug else f"#{issue_num}")
-        filed.append(url)
-        existing[idx] = {"number": issue_num, "url": url}
-    comment = plan["comment"]
-    if filed:
-        comment += "\n\n### Filed\n" + "\n".join(f"- {url}" for url in filed)
-    code, _, err = run_cmd(
-        ["gh", "pr", "comment", str(pr_num), "--body", comment],
-        check=False,
-    )
-    if code != 0:
-        return {
-            "emitted": False,
-            "reason": f"comment failed: {err.strip()}",
-            "plan": plan,
-            "created_issues": filed,
-        }
-    return {
-        "emitted": True,
-        "reason": "posted",
-        "plan": plan,
-        "created_issues": filed,
-    }
 
 
 def check_test_coverage(pr):
@@ -3849,10 +2899,8 @@ def check_test_coverage(pr):
     files = pr.get("files") or []
     changed_files = pr.get("changedFiles")
     if isinstance(changed_files, int) and changed_files > len(files):
-        return False, (
-            f"Changed-file data is truncated ({len(files)} of {changed_files}); "
-            "split the PR so test coverage can be evaluated completely."
-        )
+        return False, (f"Changed-file data is truncated ({len(files)} of {changed_files}); "
+                       "split the PR so test coverage can be evaluated completely.")
     paths = [entry.get("path", "") for entry in files if isinstance(entry, dict)]
     production = [path for path in paths if path.startswith(("src/", "scripts/"))]
     if not production:
@@ -3866,10 +2914,8 @@ def check_test_coverage(pr):
         and not ((entry.get("additions") or 0) == 0 and (entry.get("deletions") or 0) > 0)
     ]
     if not tests:
-        return False, (
-            "Production changes under src/ or scripts/ require a changed, non-deleted "
-            "test file under tests/."
-        )
+        return False, ("Production changes under src/ or scripts/ require a changed, non-deleted "
+                       "test file under tests/.")
     return True, f"Production changes include test coverage in {len(tests)} test file(s)."
 
 
@@ -3924,17 +2970,13 @@ def closeout_incomplete(pr):
     if any(name.startswith(MERGER_CLAIM_LABEL) for name in labels):
         return True
     for num in linked_issues(pr.get("body")):
-        issue = _gh_json(
-            ["gh", "issue", "view", str(num), "--json", "state,labels"]
-        )
+        issue = _gh_json(["gh", "issue", "view", str(num), "--json", "state,labels"])
         if issue is None:
             # Fail closed: an unreadable linked issue must be treated as unfinished.
             return True
         if (issue.get("state") or "").upper() == "OPEN":
             return True
-        issue_labels = {
-            lab.get("name", "") for lab in (issue.get("labels") or [])
-        }
+        issue_labels = {lab.get("name", "") for lab in (issue.get("labels") or [])}
         if "status:done" not in issue_labels:
             return True
     return False
@@ -3958,10 +3000,8 @@ def head_repository_slug(pr):
 
 def repository_root():
     """Returns the primary worktree root even when invoked from a linked one."""
-    code, common_dir, _ = run_cmd(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        check=False,
-    )
+    code, common_dir, _ = run_cmd(["git", "rev-parse", "--path-format=absolute",
+                                   "--git-common-dir"], check=False)
     if code != 0 or not common_dir:
         return None
     common_dir = os.path.abspath(common_dir.strip())
@@ -4038,32 +3078,23 @@ def _base_tip_unchanged(pr, expected_base, base_tip_resolver=None):
     the caller must never merge on a base it could not re-prove.
     """
     if not isinstance(expected_base, str) or not expected_base:
-        return False, (
-            "no proved base tip was supplied to pin the merge against, so an "
-            "advance since the gates ran could not be ruled out."
-        )
+        return False, ("no proved base tip was supplied to pin the merge against, so an "
+                       "advance since the gates ran could not be ruled out.")
     resolve = base_tip_resolver or _current_base_tip
     try:
         live = resolve(pr)
     except Exception as exc:  # noqa: BLE001 - any failure here must fail closed
-        return False, (
-            f"the base branch tip could not be re-read immediately before the "
-            f"merge ({type(exc).__name__}: {exc})."
-        )
+        return False, (f"the base branch tip could not be re-read immediately before the "
+                       f"merge ({type(exc).__name__}: {exc}).")
     if not isinstance(live, str) or not live:
-        return False, (
-            "the base branch tip could not be re-read immediately before the "
-            "merge."
-        )
+        return False, ("the base branch tip could not be re-read immediately before the merge.")
     if live != expected_base:
-        return False, (
-            f"the base branch advanced from {expected_base[:12]} to "
-            f"{live[:12]} after the final gate reread, so the merge would "
-            f"combine the reviewed head with a base tip no check ever tested. "
-            f"Re-run the merge so every gate is taken against the current base "
-            f"tip. Do not rebase: that rewrites the head SHA and destroys the "
-            f"review attestation bound to it."
-        )
+        return False, (f"the base branch advanced from {expected_base[:12]} to "
+                       f"{live[:12]} after the final gate reread, so the merge would "
+                       f"combine the reviewed head with a base tip no check ever tested. "
+                       f"Re-run the merge so every gate is taken against the current base "
+                       f"tip. Do not rebase: that rewrites the head SHA and destroys the "
+                       f"review attestation bound to it.")
     return True, f"base tip still {live[:12]}"
 
 
@@ -4102,10 +3133,8 @@ def execute_merge(pr_id, pr, merge_method, expected_base, base_tip_resolver=None
         return None, f"GitHub still reports {fresh.get('state', '?')}; {detail}"
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "no command detail").strip()
-        return fresh, (
-            f"GitHub reports merged even though the merge command exited "
-            f"{proc.returncode}: {detail}"
-        )
+        return fresh, (f"GitHub reports merged even though the merge command exited "
+                       f"{proc.returncode}: {detail}")
     return fresh, "GitHub accepted the merge."
 
 
@@ -4134,22 +3163,16 @@ def prune_worktree(repo_root, branch, expected_sha):  # noqa: C901, PLR0912, PLR
     if not path:
         return True, "Worktree already absent."
     if actual_sha != expected_sha:
-        return False, (
-            f"Worktree {path} now points to {actual_sha or 'unknown'}, not gated head "
-            f"{expected_sha}; left untouched."
-        )
+        return False, (f"Worktree {path} now points to {actual_sha or 'unknown'}, not gated head "
+                       f"{expected_sha}; left untouched.")
     if os.path.abspath(path) == os.path.abspath(repo_root):
         return False, "Refusing to remove the primary worktree."
     retained_root = os.path.join(repo_root, ".worktrees", ".retained")
-    retained_path = os.path.join(
-        retained_root, f"{expected_sha[:12]}-{os.path.basename(path)}"
-    )
+    retained_path = os.path.join(retained_root, f"{expected_sha[:12]}-{os.path.basename(path)}")
     if not os.path.exists(path):
         if not os.path.isdir(retained_path):
             return False, f"Worktree path {path} disappeared; no retained copy found."
-        code, _, err = run_cmd(
-            ["git", "worktree", "remove", path], check=False, cwd=repo_root
-        )
+        code, _, err = run_cmd(["git", "worktree", "remove", path], check=False, cwd=repo_root)
         if code == 0:
             return True, f"Worktree already retained at {retained_path}; registration pruned."
         return False, f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
@@ -4162,13 +3185,9 @@ def prune_worktree(repo_root, branch, expected_sha):  # noqa: C901, PLR0912, PLR
     if not marker_text.startswith("gitdir: "):
         return False, f"Unexpected worktree metadata in {marker}; left untouched."
     admin_dir = os.path.realpath(marker_text.split(": ", 1)[1])
-    allowed_admin_root = os.path.realpath(
-        os.path.join(repo_root, ".git", "worktrees")
-    )
+    allowed_admin_root = os.path.realpath(os.path.join(repo_root, ".git", "worktrees"))
     try:
-        inside_admin_root = os.path.commonpath(
-            [admin_dir, allowed_admin_root]
-        ) == allowed_admin_root
+        inside_admin_root = os.path.commonpath([admin_dir, allowed_admin_root]) == allowed_admin_root
     except ValueError:
         inside_admin_root = False
     if not inside_admin_root:
@@ -4182,78 +3201,47 @@ def prune_worktree(repo_root, branch, expected_sha):  # noqa: C901, PLR0912, PLR
     ref_lock_fd = None
     ref_lock = ""
     try:
-        ref_lock_root = os.path.realpath(
-            os.path.join(repo_root, ".git", "refs", "heads")
-        )
-        ref_lock = os.path.realpath(
-            os.path.join(ref_lock_root, f"{branch}.lock")
-        )
+        ref_lock_root = os.path.realpath(os.path.join(repo_root, ".git", "refs", "heads"))
+        ref_lock = os.path.realpath(os.path.join(ref_lock_root, f"{branch}.lock"))
         try:
-            inside_ref_root = os.path.commonpath(
-                [ref_lock, ref_lock_root]
-            ) == ref_lock_root
+            inside_ref_root = os.path.commonpath([ref_lock, ref_lock_root]) == ref_lock_root
         except ValueError:
             inside_ref_root = False
         if not inside_ref_root:
             return False, f"Branch lock points outside {ref_lock_root}; left untouched."
         try:
             os.makedirs(os.path.dirname(ref_lock), exist_ok=True)
-            ref_lock_fd = os.open(
-                ref_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-            )
+            ref_lock_fd = os.open(ref_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except OSError as exc:
             return False, f"Could not lock branch ref for exact ownership check: {exc}"
 
-        ref_code, current_ref, ref_err = run_cmd(
-            ["git", "rev-parse", "--symbolic-full-name", "HEAD"],
-            check=False,
-            cwd=path,
-        )
-        sha_code, current_sha, sha_err = run_cmd(
-            ["git", "rev-parse", "HEAD"], check=False, cwd=path
-        )
+        ref_code, current_ref, ref_err = run_cmd(["git", "rev-parse", "--symbolic-full-name",
+                                                  "HEAD"], check=False, cwd=path)
+        sha_code, current_sha, sha_err = run_cmd(["git", "rev-parse", "HEAD"], check=False, cwd=path)
         if ref_code != 0 or sha_code != 0:
             detail = ref_err.strip() or sha_err.strip()
             return False, f"Could not revalidate locked worktree ownership: {detail}"
         if current_ref.strip() != f"refs/heads/{branch}" or current_sha.strip() != expected_sha:
-            return False, (
-                f"Worktree ownership changed to {current_ref.strip()} at "
-                f"{current_sha.strip()}; left untouched."
-            )
-        status_code, status, status_err = run_cmd(
-            [
-                "git", "status", "--porcelain", "--untracked-files=all",
-                "--ignored=matching",
-            ],
-            check=False,
-            cwd=path,
-        )
+            return False, (f"Worktree ownership changed to {current_ref.strip()} at "
+                           f"{current_sha.strip()}; left untouched.")
+        status_code, status, status_err = run_cmd(["git", "status", "--porcelain",
+                                                   "--untracked-files=all", "--ignored=matching"],
+                                                  check=False, cwd=path)
         if status_code != 0:
             return False, f"Could not inspect worktree {path}: {status_err.strip()}"
-        from cleanup_worktrees import (
-            porcelain_blocks_prune,
-            porcelain_dirty_except_manifest,
-            remove_retain_manifest,
-            write_retain_manifest,
-        )
+        from cleanup_worktrees import (porcelain_blocks_prune, porcelain_dirty_except_manifest,
+                                       remove_retain_manifest, write_retain_manifest)
         if porcelain_blocks_prune(status, path):
-            return False, (
-                f"Worktree {path} has tracked or untracked files; left untouched."
-            )
+            return False, (f"Worktree {path} has tracked or untracked files; left untouched.")
         if os.path.lexists(retained_path):
             return False, f"Retention destination already exists: {retained_path}"
         try:
             write_retain_manifest(path)
         except OSError as exc:
             return False, f"Could not snapshot worktree {path} for retention: {exc}"
-        status_code, status, status_err = run_cmd(
-            [
-                "git", "status", "--porcelain", "--untracked-files=all",
-                "--ignored=matching",
-            ],
-            check=False,
-            cwd=path,
-        )
+        status_code, status, status_err = run_cmd(["git", "status", "--porcelain",
+                                                   "--untracked-files=all", "--ignored=matching"],
+                                                  check=False, cwd=path)
         if status_code != 0:
             remove_retain_manifest(path)
             return False, f"Could not inspect worktree {path}: {status_err.strip()}"
@@ -4262,23 +3250,17 @@ def prune_worktree(repo_root, branch, expected_sha):  # noqa: C901, PLR0912, PLR
             remove_retain_manifest(path)
             if blocked is None:
                 return False, f"Could not inspect worktree {path} after snapshot."
-            return False, (
-                f"Worktree {path} has tracked or untracked files; left untouched."
-            )
+            return False, (f"Worktree {path} has tracked or untracked files; left untouched.")
         try:
             os.makedirs(retained_root, exist_ok=True)
             os.rename(path, retained_path)
         except OSError as exc:
             remove_retain_manifest(path)
             return False, f"Could not atomically retain worktree {path}: {exc}"
-        code, _, err = run_cmd(
-            ["git", "worktree", "remove", path], check=False, cwd=repo_root
-        )
+        code, _, err = run_cmd(["git", "worktree", "remove", path], check=False, cwd=repo_root)
         if code == 0:
             return True, f"Retained worktree at {retained_path}; registration pruned."
-        return False, (
-            f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}"
-        )
+        return False, (f"Worktree retained at {retained_path}; deregistration failed: {err.strip()}")
     finally:
         if ref_lock_fd is not None:
             os.close(ref_lock_fd)
@@ -4299,69 +3281,41 @@ def is_valid_branch_name(branch: str) -> bool:
 
 
 def cleanup_local_branch(repo_root, branch, expected_sha):
-    """Deletes the local branch using an atomic compare-and-delete leased to expected_sha.
-
-    A compare-and-delete protects the ref OID against reuse races, but it cannot
-    atomically stop another process from attaching a new worktree to that ref. Any
-    worktree attachment observed here leaves the branch untouched and returns a
-    failure so close-out remains incomplete and the merger claim remains discoverable.
-    When unattached, deletion uses ``git update-ref -d refs/heads/<branch> <expected_sha>``
-    to guarantee the ref is only deleted if it still equals the exact gated head SHA.
-    If the lease fails because the ref moved or was recreated, the ref is preserved
-    and a close-out failure is returned.
-    """
+    """Delete the exact gated branch using Git's checked-out-worktree guard."""
     if not branch or not expected_sha:
         return False, "Branch and gated head SHA are required; local branch state is unknown."
     if not is_valid_branch_name(branch):
         return False, f"Invalid local branch ref name: {branch!r}."
     ref = f"refs/heads/{branch}"
-    code, actual_sha, _ = run_cmd(
-        ["git", "rev-parse", "--verify", "--quiet", ref],
-        check=False, cwd=repo_root,
-    )
+    code, actual_sha, _ = run_cmd(["git", "rev-parse", "--verify", "--quiet", ref], check=False, cwd=repo_root)
     if code != 0:
         return True, "Local branch already absent."
     if actual_sha.strip() != expected_sha:
-        return False, (
-            f"Local branch {branch} was reused at {actual_sha.strip() or 'unknown'}; "
-            "lease mismatch -- unrelated ref retained."
-        )
-    list_code, porcelain, list_err = run_cmd(
-        ["git", "worktree", "list", "--porcelain"],
-        check=False, cwd=repo_root,
-    )
+        return False, (f"Local branch {branch} reused at {actual_sha.strip() or 'unknown'}; "
+                       "lease mismatch; unrelated ref retained.")
+    list_code, porcelain, list_err = run_cmd(["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root)
     if list_code != 0:
-        return False, (
-            f"Could not enumerate worktrees to prove {branch} is unattached: "
-            f"{list_err.strip()}"
-        )
+        return False, f"Could not enumerate worktrees to prove {branch} is unattached: {list_err.strip()}"
     if find_branch_worktree(porcelain, branch)[0]:
-        return False, (
-            f"Retained local branch {branch}; branch is attached to a worktree."
-        )
-    code, _, err = run_cmd(
-        ["git", "update-ref", "-d", ref, expected_sha],
-        check=False, cwd=repo_root,
-    )
+        return False, (f"Retained local branch {branch}; branch is attached to a worktree.")
+    lease_code, lease_sha, _ = run_cmd(["git", "rev-parse", "--verify", "--quiet", ref], check=False, cwd=repo_root)
+    if lease_code != 0:
+        return True, "Local branch already absent."
+    if lease_sha.strip() != expected_sha:
+        return False, f"Local branch {branch} lease failed (now {lease_sha.strip() or 'unknown'}); ref retained."
+    code, _, err = run_cmd(["git", "branch", "-D", "--", branch], check=False, cwd=repo_root)
     if code == 0:
         return True, f"Deleted local branch {branch}; worktree registration was already gone."
-    # If update-ref failed, check if another process deleted it concurrently
-    # or if the ref moved / was recreated with a different SHA.
-    check_code, current_sha, _ = run_cmd(
-        ["git", "rev-parse", "--verify", "--quiet", ref],
-        check=False, cwd=repo_root,
-    )
+    # Distinguish concurrent deletion from a moved/recreated ref.
+    check_code, current_sha, _ = run_cmd(["git", "rev-parse", "--verify", "--quiet", ref],
+                                         check=False, cwd=repo_root)
     if check_code != 0:
         return True, "Local branch already absent."
     if current_sha.strip() != expected_sha:
-        return False, (
-            f"Local branch {branch} lease failed on {expected_sha} "
-            f"(now at {current_sha.strip() or 'unknown'}): {err.strip()}; ref retained."
-        )
-    return False, (
-        f"Orphan local branch {branch} deletion failed after unattached validation: "
-        f"{err.strip()}"
-    )
+        return False, (f"Local branch {branch} lease failed (now {current_sha.strip() or 'unknown'}): "
+                       f"{err.strip()}; ref retained.")
+    return False, (f"Orphan local branch {branch} deletion failed after unattached validation "
+                   f"and Git's worktree guard: {err.strip()}")
 
 
 def is_harmless_orphan_branch_failure(failure: str) -> bool:
@@ -4372,10 +3326,8 @@ def is_harmless_orphan_branch_failure(failure: str) -> bool:
 
 def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
     if not branch or not expected_sha or not head_repo_slug:
-        return False, (
-            "Branch, gated head SHA, and head repository are required; "
-            "no remote branch removed."
-        )
+        return False, ("Branch, gated head SHA, and head repository are required; "
+                       "no remote branch removed.")
     base_repo_slug = get_repo_slug()
     if not base_repo_slug:
         return False, "Could not identify the base repository; no remote branch removed."
@@ -4385,33 +3337,21 @@ def delete_remote_branch(repo_root, branch, expected_sha, head_repo_slug):
         else f"https://github.com/{head_repo_slug}.git"
     )
     ref = f"refs/heads/{branch}"
-    code, out, err = run_cmd(
-        ["git", "ls-remote", "--heads", remote, ref], check=False, cwd=repo_root
-    )
+    code, out, err = run_cmd(["git", "ls-remote", "--heads", remote, ref], check=False, cwd=repo_root)
     if code != 0:
         return False, f"Could not inspect {head_repo_slug} branch {branch}: {err.strip()}"
     if not out:
         return True, "Remote branch already absent."
     actual_sha = out.split()[0] if out.split() else ""
     if actual_sha != expected_sha:
-        return False, (
-            f"Remote branch {head_repo_slug}:{branch} now points to "
-            f"{actual_sha or 'unknown'}, not gated head {expected_sha}; left untouched."
-        )
-    code, _, err = run_cmd(
-        [
-            "git", "push", f"--force-with-lease={ref}:{expected_sha}",
-            remote, f":{ref}",
-        ],
-        check=False,
-        cwd=repo_root,
-    )
+        return False, (f"Remote branch {head_repo_slug}:{branch} now points to "
+                       f"{actual_sha or 'unknown'}, not gated head {expected_sha}; left untouched.")
+    code, _, err = run_cmd(["git", "push", f"--force-with-lease={ref}:{expected_sha}", remote,
+                            f":{ref}"], check=False, cwd=repo_root)
     if code == 0:
         return True, f"Deleted remote branch {head_repo_slug}:{branch}."
-    return False, (
-        f"Could not atomically delete remote branch {head_repo_slug}:{branch}; "
-        f"it may have changed: {err.strip()}"
-    )
+    return False, (f"Could not atomically delete remote branch {head_repo_slug}:{branch}; "
+                   f"it may have changed: {err.strip()}")
 
 
 def record_terminal_lease(pr_id, gated_sha):
@@ -4427,18 +3367,14 @@ def record_terminal_lease(pr_id, gated_sha):
         return True, "No lease to record."
     label = terminal_lease_label(gated_sha)
     ensure_label(label, "b60205", "Terminally merged; further writes are stale")
-    code, _, err = run_cmd(
-        ["gh", "pr", "edit", str(pr_id), "--add-label", label], check=False,
-    )
+    code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--add-label", label], check=False)
     if code != 0:
         # Non-fatal by design. The merge already succeeded, and
         # common.terminal_merge_lease derives the same fact from merged-PR
         # state, so a missing marker degrades convenience, not protection.
         # Failing close-out here would strand a completed merge over a label.
-        return True, (
-            f"[WARN] Could not record terminal lease {label}: {err.strip()}. "
-            "The derived merged-PR lease still blocks stale continuation."
-        )
+        return True, (f"[WARN] Could not record terminal lease {label}: {err.strip()}. "
+                      "The derived merged-PR lease still blocks stale continuation.")
     return True, f"Recorded terminal lease {label}."
 
 
@@ -4456,32 +3392,26 @@ def detect_stale_writer(repo_root, pr, branch, gated_sha, head_repo_slug):
         return True, "No branch to check for stale writes."
     base = get_repo_slug()
     remote = "origin" if head_repo_slug == base else f"https://github.com/{head_repo_slug}.git"
-    code, out, _ = run_cmd(
-        ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
-        check=False, cwd=repo_root,
-    )
+    code, out, _ = run_cmd(["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+                           check=False, cwd=repo_root)
     if code != 0:
         # Fail closed. A stale worker can recreate the branch between the
         # delete and this re-read, so an unreadable remote is exactly when a
         # stale write is most likely -- reporting success here would let
         # close-out clear the merger claim with no escalation and no retry.
-        return False, (
-            "Could not re-inspect the remote branch after deletion; cannot rule out "
-            "a stale write. Close-out stays incomplete so recovery re-runs it."
-        )
+        return False, ("Could not re-inspect the remote branch after deletion; cannot rule out "
+                       "a stale write. Close-out stays incomplete so recovery re-runs it.")
     if not out.strip():
         return True, "No recreated branch."
     actual = out.split()[0]
     if heads_match(actual, gated_sha):
         return True, "Remote branch still at the gated head."
-    return False, (
-        f"[P0] STALE WRITER: branch {head_repo_slug}:{branch} was recreated at {actual} "
-        f"after PR #{pr.get('number')} merged gated head {gated_sha}. "
-        f"Holder: {pr.get('author', {}).get('login') or 'unknown'}. "
-        "The branch was NOT deleted, so the orphan commit is preserved for inspection. "
-        "This work is outside governance: it did not pass a Definition-of-Done gate. "
-        "Do not adopt it into a new issue; file a new governed issue and branch instead."
-    )
+    return False, (f"[P0] STALE WRITER: branch {head_repo_slug}:{branch} was recreated at {actual} "
+                   f"after PR #{pr.get('number')} merged gated head {gated_sha}. "
+                   f"Holder: {pr.get('author', {}).get('login') or 'unknown'}. "
+                   "The branch was NOT deleted, so the orphan commit is preserved for inspection. "
+                   "This work is outside governance: it did not pass a Definition-of-Done gate. "
+                   "Do not adopt it into a new issue; file a new governed issue and branch instead.")
 
 
 def ensure_issue_closed(issue_num):
@@ -4490,9 +3420,8 @@ def ensure_issue_closed(issue_num):
         return False, f"Could not read issue #{issue_num}."
     if (issue.get("state") or "").upper() == "CLOSED":
         return True, f"Issue #{issue_num} already closed."
-    code, _, err = run_cmd(
-        ["gh", "issue", "close", str(issue_num), "--reason", "completed"], check=False
-    )
+    code, _, err = run_cmd(["gh", "issue", "close", str(issue_num), "--reason", "completed"],
+                           check=False)
     if code == 0:
         return True, f"Closed issue #{issue_num}."
     return False, f"Could not close issue #{issue_num}: {err.strip()}"
@@ -4513,10 +3442,8 @@ def clear_labels(kind, number, prefix, cwd=None):
         if label.get("name", "").startswith(prefix)
     ]
     for name in names:
-        code, _, err = run_cmd(
-            ["gh", kind, "edit", str(number), "--remove-label", name],
-            check=False, cwd=cwd,
-        )
+        code, _, err = run_cmd(["gh", kind, "edit", str(number), "--remove-label", name], check=False,
+                               cwd=cwd)
         if code != 0:
             return False, f"Could not remove {name} from {kind} #{number}: {err.strip()}"
     noun = "claims" if names else "claim"
@@ -4527,17 +3454,12 @@ def clear_issue_claims(issue_num, cwd=None):
     return clear_labels("issue", issue_num, "agent:", cwd=cwd)
 
 
-def clear_review_claims(pr_num, cwd=None):
-    return clear_labels("pr", pr_num, REVIEW_CLAIM_LABEL, cwd=cwd)
-
-
 def clear_merger_claims(pr_num, cwd=None):
     return clear_labels("pr", pr_num, MERGER_CLAIM_LABEL, cwd=cwd)
 
 
-def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None,
-                 paths_resolver=None, advance_resolver=None,
-                 merge_parents_resolver=None, base_tip_resolver=None):
+def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None, paths_resolver=None,
+                 advance_resolver=None, merge_parents_resolver=None, base_tip_resolver=None):
     """Runs every Definition-of-Done check without merging.
 
     Returns ``(ok, gates)`` where ``gates`` is a list of
@@ -4565,12 +3487,10 @@ def evaluate_dod(pr, issue_bodies, evidence, behind_resolver=None,
         ("size", *check_size(pr)),
         ("tests", *check_test_coverage(pr)),
         ("spec-sync", *check_spec_sync(pr)),
-        ("review rounds", *check_review_rounds(pr)),
     ]
     for num in issue_nums:
-        gates.append(
-            (f"accept #{num}", *check_acceptance(num, issue_bodies.get(num, ""), execute=False))
-        )
+        gates.append((f"accept #{num}", *check_acceptance(num, issue_bodies.get(num, ""),
+                                                          execute=False)))
     ok = all(passed for _, passed, _ in gates)
     return ok, gates
 
@@ -4616,10 +3536,8 @@ def dod_status(pr_id):
     evidence_head = evidence.get("head_oid") if evidence else None
     snapshot_head = pr.get("headRefOid")
     if not heads_match(snapshot_head, evidence_head):
-        return False, (
-            f"review evidence covers {evidence_head or 'unknown'}, but the PR "
-            f"snapshot is {snapshot_head or 'unknown'}"
-        )
+        return False, (f"review evidence covers {evidence_head or 'unknown'}, but the PR "
+                       f"snapshot is {snapshot_head or 'unknown'}")
     ok, gates = evaluate_dod(pr, issue_bodies, evidence)
     if ok:
         return True, "every Definition-of-Done gate passed"
@@ -4656,8 +3574,6 @@ def run_closeout(pr, issue_nums, repo_root, failures=None):  # noqa: C901, PLR09
             (f"done #{num}", lambda num=num: reconcile_issue_done(num)),
             (f"issue claim #{num}", lambda num=num: clear_issue_claims(num)),
         ])
-    steps.append(("review claim", lambda: clear_review_claims(pr.get("number"))))
-
     all_ok = True
     print("\n=== Post-merge close-out ===")
     for name, action in steps:
@@ -4727,18 +3643,14 @@ def run_closeout_with_retries(pr, issue_nums, repo_root, sleep_fn=None):
             return True, failed_attempts
         last_failures = failures or ["close-out returned failure without step evidence"]
         failed_attempts.append(last_failures)
-    if last_failures and all(
-        is_harmless_orphan_branch_failure(item) for item in last_failures
-    ):
+    if last_failures and all(is_harmless_orphan_branch_failure(item) for item in last_failures):
             try:
                 ok, message = clear_merger_claims(pr.get("number"))
             except Exception as exc:
                 ok, message = False, f"Unexpected claim clearance error: {exc}"
             print(f"  {'✅' if ok else '❌'} {'merger claim':<18} {message}")
-            print(
-                f"  ⚠️  {'local cleanup':<18} {last_failures[0]}; "
-                "non-blocking -- remote lifecycle already verified complete"
-            )
+            print(f"  ⚠️  {'local cleanup':<18} {last_failures[0]}; "
+                  "non-blocking -- remote lifecycle already verified complete")
             if ok:
                 return True, failed_attempts
     return False, failed_attempts
@@ -4753,9 +3665,7 @@ def surviving_worktree(repo_root, branch):
     """Describe the branch worktree without guessing when inspection fails."""
     if not repo_root:
         return "unavailable (repository root could not be resolved)"
-    code, out, err = run_cmd(
-        ["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root
-    )
+    code, out, err = run_cmd(["git", "worktree", "list", "--porcelain"], check=False, cwd=repo_root)
     if code != 0:
         return f"unavailable ({err.strip() or 'git worktree list failed'})"
     path, head = find_branch_worktree(out, branch)
@@ -4764,10 +3674,8 @@ def surviving_worktree(repo_root, branch):
     return f"{path} at {head or 'unknown'}"
 
 
-def human_intervention_body(
-    pr, repo_root, gated_head, merged_sha, failed_attempts, command,
-    blocked_before_closeout=None,
-):
+def human_intervention_body(pr, repo_root, gated_head, merged_sha, failed_attempts, command,
+                            blocked_before_closeout=None):
     """Build the durable evidence required when close-out cannot self-heal."""
     live_pr = fetch_pr(pr.get("number")) or pr
     claims = label_values(live_pr, MERGER_CLAIM_LABEL)
@@ -4780,10 +3688,8 @@ def human_intervention_body(
         attempt_lines.append("- no close-out attempt evidence was available")
     branch = pr.get("headRefName") or "unknown"
     if failed_attempts:
-        remediation = (
-            f"{len(failed_attempts)} close-out attempt(s); bounded retry delays "
-            f"were {', '.join(map(str, CLOSEOUT_RETRY_DELAYS))} seconds"
-        )
+        remediation = (f"{len(failed_attempts)} close-out attempt(s); bounded retry delays "
+                       f"were {', '.join(map(str, CLOSEOUT_RETRY_DELAYS))} seconds")
     else:
         remediation = "0 close-out attempts; bounded retries were not run"
     return "\n".join([
@@ -4818,37 +3724,25 @@ def human_intervention_body(
     ])
 
 
-def post_human_intervention(
-    pr, issue_nums, repo_root, gated_head, merged_sha, failed_attempts, command,
-    blocked_before_closeout=None,
-):
+def post_human_intervention(pr, issue_nums, repo_root, gated_head, merged_sha, failed_attempts,
+                            command, blocked_before_closeout=None):
     """Post the same authoritative intervention evidence to PR and issues."""
-    body = human_intervention_body(
-        pr, repo_root, gated_head, merged_sha, failed_attempts, command,
-        blocked_before_closeout=blocked_before_closeout,
-    )
+    body = human_intervention_body(pr, repo_root, gated_head, merged_sha, failed_attempts,
+                                   command, blocked_before_closeout=blocked_before_closeout)
     targets = [("pr", pr.get("number"))]
     targets.extend(("issue", number) for number in issue_nums)
     all_ok = True
     for kind, number in targets:
-        code, _, err = run_cmd(
-            ["gh", kind, "comment", str(number), "--body", body], check=False
-        )
+        code, _, err = run_cmd(["gh", kind, "comment", str(number), "--body", body], check=False)
         if code == 0:
             print(f"  ✅ intervention       recorded on {kind} #{number}")
         else:
-            print(
-                f"  ❌ intervention       could not comment on {kind} #{number}: "
-                f"{err.strip()}",
-                file=sys.stderr,
-            )
+            print(f"  ❌ intervention       could not comment on {kind} #{number}: {err.strip()}",
+                  file=sys.stderr)
             all_ok = False
     if not all_ok:
-        print(
-            "[ERROR] Human intervention evidence was not durable on every "
-            f"GitHub target. Local evidence follows:\n{body}",
-            file=sys.stderr,
-        )
+        print("[ERROR] Human intervention evidence was not durable on every "
+              f"GitHub target. Local evidence follows:\n{body}", file=sys.stderr)
     return all_ok
 
 
@@ -4863,9 +3757,7 @@ def gate_verdict_path(repo_root, pr_num):
     Lives in the git common directory so every worktree of the repository sees
     one file, and so it is never mistaken for repository content.
     """
-    code, out, _ = run_cmd(
-        ["git", "rev-parse", "--git-common-dir"], check=False, cwd=repo_root
-    )
+    code, out, _ = run_cmd(["git", "rev-parse", "--git-common-dir"], check=False, cwd=repo_root)
     if code != 0 or not out.strip():
         return ""
     common = out.strip()
@@ -4944,32 +3836,18 @@ def checkpoint_message(pr, issue_nums, gates, gated_head, merged_sha):
     """Builds the annotated tag body: what landed, who touched it, what was checked."""
     issues = ", ".join(f"#{n}" for n in issue_nums) or "none"
     authors = ", ".join(label_values(pr, "author:")) or "unknown"
-    reviewers = ", ".join(label_values(pr, "reviewed-by:")) or "none recorded"
-    lines = [
-        f"checkpoint: PR #{pr.get('number')} — {pr.get('title') or ''}".rstrip(" —"),
-        "",
-        f"issues:      {issues}",
-        f"author:      {authors}",
-        f"reviewed-by: {reviewers}",
-        f"gated head:  {gated_head}",
-        f"merged as:   {merged_sha}",
-        "",
-        "gate verdicts:",
-    ]
+    lines = [f"checkpoint: PR #{pr.get('number')} — {pr.get('title') or ''}".rstrip(" —"), "",
+             f"issues:      {issues}", f"author:      {authors}", f"gated head:  {gated_head}",
+             f"merged as:   {merged_sha}", "", "gate verdicts:"]
     if gates is None:
         # The resume path never evaluates the gates, and re-deriving them now
         # would be actively false: check_open fails on an already-closed PR, so
         # a re-derived block would record failures that never happened. A
         # checkpoint that admits the gap beats one that lies about it.
-        lines.append(
-            "  not reproducible — written by a resumed close-out; the gates "
-            "were evaluated by the original invocation."
-        )
+        lines.append("  not reproducible — written by a resumed close-out; the gates "
+                     "were evaluated by the original invocation.")
     else:
-        lines.extend(
-            f"  {'✅' if passed else '❌'} {name}: {detail}"
-            for name, passed, detail in gates
-        )
+        lines.extend(f"  {'✅' if passed else '❌'} {name}: {detail}" for name, passed, detail in gates)
     return "\n".join(lines) + "\n"
 
 
@@ -5001,35 +3879,25 @@ def write_checkpoint_tag(repo_root, pr, issue_nums, gates, gated_head, merged_sh
         existed = code == 0
 
         if not existed:
-            code, _, _ = run_cmd(
-                ["git", "cat-file", "-e", f"{merged_sha}^{{commit}}"],
-                check=False, cwd=repo_root,
-            )
+            code, _, _ = run_cmd(["git", "cat-file", "-e", f"{merged_sha}^{{commit}}"], check=False,
+                                 cwd=repo_root)
             if code != 0:
-                return False, (
-                    f"Merge commit {merged_sha} is not present locally; "
-                    f"checkpoint {name} not written."
-                )
+                return False, (f"Merge commit {merged_sha} is not present locally; "
+                               f"checkpoint {name} not written.")
 
             message = checkpoint_message(pr, issue_nums, gates, gated_head, merged_sha)
             # Never -f. An existing checkpoint is history; moving it would
             # destroy the very record this tag exists to preserve.
-            code, _, err = run_cmd(
-                ["git", "tag", "-a", name, merged_sha, "-m", message],
-                check=False, cwd=repo_root,
-            )
+            code, _, err = run_cmd(["git", "tag", "-a", name, merged_sha, "-m", message], check=False,
+                                   cwd=repo_root)
             if code != 0:
                 # A concurrent close-out may have created it between the check
                 # and here. The tag existing is the outcome we wanted, so
                 # confirm rather than report a failure that did not occur.
-                code, _, _ = run_cmd(
-                    ["git", "rev-parse", "--verify", "--quiet", ref],
-                    check=False, cwd=repo_root,
-                )
+                code, _, _ = run_cmd(["git", "rev-parse", "--verify", "--quiet", ref], check=False,
+                                     cwd=repo_root)
                 if code != 0:
-                    return False, (
-                        f"Could not write checkpoint {name}: {err or 'git tag failed'}"
-                    )
+                    return False, (f"Could not write checkpoint {name}: {err or 'git tag failed'}")
                 existed = True
 
         # Push on every path, including when the tag already existed locally.
@@ -5038,16 +3906,11 @@ def write_checkpoint_tag(repo_root, pr, issue_nums, gates, gated_head, merged_sh
         # resumed close-out would short-circuit before reaching the push, and
         # nothing would ever reconcile it. Pushing a tag origin already holds is
         # a no-op, so retrying costs nothing and makes the grid self-healing.
-        code, _, err = run_cmd(
-            ["git", "push", "--quiet", "origin", ref],
-            check=False, cwd=repo_root,
-        )
+        code, _, err = run_cmd(["git", "push", "--quiet", "origin", ref], check=False, cwd=repo_root)
         verb = "already recorded" if existed else "written"
         if code != 0:
-            return True, (
-                f"Checkpoint {name} {verb} locally; push failed "
-                f"({err or 'unknown'}). A later close-out retries the push."
-            )
+            return True, (f"Checkpoint {name} {verb} locally; push failed "
+                          f"({err or 'unknown'}). A later close-out retries the push.")
         return True, f"Checkpoint {name} {verb} and published."
     except Exception as exc:  # A tag must never take down a completed merge.
         return False, f"Unexpected checkpoint error: {exc}"
@@ -5069,62 +3932,15 @@ def main():  # noqa: C901, PLR0912, PLR0915
         metavar="SHA",
         help="Head SHA selected by the picker; refuse if the live head differs",
     )
-    parser.add_argument(
-        "--emit-review-split",
-        action="store_true",
-        help=(
-            "When review rounds cross the threshold, post automated split "
-            "guidance and file follow-up issues with depends-on edges. "
-            "Never creates a human gate. Compatible with --dry-run (plan only)."
-        ),
-    )
     args = parser.parse_args()
 
-    if args.json and not args.dry_run and not args.emit_review_split:
+    if args.json and not args.dry_run:
         print("[ERROR] --json requires --dry-run (refusing to emit JSON for a live merge).", file=sys.stderr)
-        return EXIT_ERROR
-
-    if args.emit_review_split and args.expected_head:
-        print(
-            "[ERROR] --emit-review-split cannot be combined with --expected-head.",
-            file=sys.stderr,
-        )
         return EXIT_ERROR
 
     pr = fetch_pr(args.pr)
     if not pr:
         return EXIT_ERROR
-
-    if args.emit_review_split:
-        result = emit_review_round_split(pr, apply=not args.dry_run)
-        if args.json:
-            print(json.dumps(result, indent=2, sort_keys=True))
-        else:
-            plan = result["plan"]
-            print(
-                f"=== Review-round split — PR #{args.pr}: "
-                f"{plan['rounds']} round(s), threshold {plan['threshold']} ==="
-            )
-            print(f"  crossed: {plan['crossed']}")
-            print(f"  emitted: {result['emitted']} ({result['reason']})")
-            for url in result.get("created_issues") or []:
-                print(f"  filed: {url}")
-            if args.dry_run or not result["emitted"]:
-                print("\n--- plan comment preview ---")
-                print(plan["comment"])
-        reason = str(result["reason"])
-        fail_prefixes = (
-            "issue create failed",
-            "comment failed",
-            "board attach failed",
-            "could not query existing split follow-ups",
-            "issue create returned unparseable",
-        )
-        if result["reason"] in {"could not read PR comments"} or any(
-            reason.startswith(p) for p in fail_prefixes
-        ):
-            return EXIT_ERROR
-        return EXIT_OK
 
     issue_nums = linked_issues(pr.get("body"))
     if not issue_nums:
@@ -5138,12 +3954,9 @@ def main():  # noqa: C901, PLR0912, PLR0915
     acceptance_records = []
     if args.expected_head and not is_merged(pr):
         if not heads_match(gated_head, args.expected_head):
-            print(
-                f"[ERROR] Live head {gated_head} does not match picker-selected "
-                f"--expected-head {args.expected_head}. Refusing to merge a "
-                "different commit than the one that was claimed.",
-                file=sys.stderr,
-            )
+            print(f"[ERROR] Live head {gated_head} does not match picker-selected "
+                  f"--expected-head {args.expected_head}. Refusing to merge a "
+                  "different commit than the one that was claimed.", file=sys.stderr)
             return EXIT_BLOCKED
 
     if is_merged(pr):
@@ -5151,14 +3964,8 @@ def main():  # noqa: C901, PLR0912, PLR0915
         if args.dry_run:
             if args.json:
                 # JSON mode must emit only a parseable document on stdout.
-                print(json.dumps({
-                    "pr": args.pr,
-                    "title": pr.get("title") or "",
-                    "ok": True,
-                    "gates": [],
-                    "first_blocking": None,
-                    "already_merged": True,
-                }))
+                print(json.dumps({"pr": args.pr, "title": pr.get("title") or "", "ok": True,
+                                  "gates": [], "first_blocking": None, "already_merged": True}))
             else:
                 print(f"=== Merge execution — PR #{args.pr}: already merged; resuming close-out ===")
                 print("No mutations performed in --dry-run mode.")
@@ -5175,11 +3982,9 @@ def main():  # noqa: C901, PLR0912, PLR0915
         evidence = with_service_evidence(pr, args.pr, review_evidence(args.pr))
         evidence_head = evidence.get("head_oid") if evidence else None
         if not heads_match(gated_head, evidence_head):
-            reason = (
-                f"[ERROR] Review evidence covers head {evidence_head or 'unknown'}, "
-                f"but the gated PR snapshot is {gated_head}. Refusing to combine "
-                "evidence from different commits."
-            )
+            reason = (f"[ERROR] Review evidence covers head {evidence_head or 'unknown'}, "
+                      f"but the gated PR snapshot is {gated_head}. Refusing to combine "
+                      "evidence from different commits.")
             if args.json:
                 print(json.dumps(dry_run_json_payload(
                     pr,
@@ -5226,19 +4031,16 @@ def main():  # noqa: C901, PLR0912, PLR0915
                     for body in issue_bodies.values()
                     for item in acceptance_runner.parse_criteria(body)
                 ]
-                resolved, resolve_err = resolve_acceptance_runners(
-                    all_criteria, repository_root(),
-                )
+                resolved, resolve_err = resolve_acceptance_runners(all_criteria, repository_root())
                 if resolve_err:
                     print(f"\n🚫 Not merged. Unmet: accept. {resolve_err}")
                     return EXIT_BLOCKED
                 run_cmd_fn = acceptance_run_cmd(resolved)
                 records = []
                 for num in issue_nums:
-                    passed, message = check_acceptance(
-                        num, issue_bodies.get(num, ""), cwd=checkout, execute=True,
-                        records_out=records, run_cmd_fn=run_cmd_fn,
-                    )
+                    passed, message = check_acceptance(num, issue_bodies.get(num, ""), cwd=checkout,
+                                                       execute=True, records_out=records,
+                                                       run_cmd_fn=run_cmd_fn)
                     print(f"  {'✅' if passed else '❌'} accept #{num:<4} {message}")
                     if not passed:
                         # Deliberately does NOT persist: writing these records
@@ -5262,11 +4064,8 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 return EXIT_ERROR
             live = fresh.get("headRefOid") or "unknown"
             if not heads_match(live, gated_head):
-                print(
-                    f"[ERROR] Head moved to {live} after DoD checks; gated head was "
-                    f"{gated_head}. No merge command was run.",
-                    file=sys.stderr,
-                )
+                print(f"[ERROR] Head moved to {live} after DoD checks; gated head was "
+                      f"{gated_head}. No merge command was run.", file=sys.stderr)
                 return EXIT_BLOCKED
             # A base that advanced between the initial DoD gate and this lock
             # is not itself disqualifying (issue #371): check_rebased
@@ -5277,35 +4076,22 @@ def main():  # noqa: C901, PLR0912, PLR0915
             # attestation this gate exists to protect.
             rebased, rebased_message = check_rebased(fresh)
             if not rebased:
-                print(
-                    f"[ERROR] Final rebased check failed: {rebased_message}",
-                    file=sys.stderr,
-                )
+                print(f"[ERROR] Final rebased check failed: {rebased_message}", file=sys.stderr)
                 return EXIT_BLOCKED
             # Review, status, and thread evidence can change without moving the
             # head. Re-read it under the merge lock immediately before the
             # server-side mutation, then rerun every gate that consumes it.
-            final_evidence = with_service_evidence(
-                fresh, args.pr, review_evidence(args.pr)
-            )
+            final_evidence = with_service_evidence(fresh, args.pr, review_evidence(args.pr))
             final_head = final_evidence.get("head_oid") if final_evidence else None
             if not heads_match(live, final_head):
-                print(
-                    "[ERROR] Final review evidence is unavailable or stale. "
-                    "No merge command was run.",
-                    file=sys.stderr,
-                )
+                print("[ERROR] Final review evidence is unavailable or stale. "
+                      "No merge command was run.", file=sys.stderr)
                 return EXIT_BLOCKED
             final_ok, final_gates = evaluate_dod(fresh, issue_bodies, final_evidence)
             if not final_ok:
-                final_blocked = ", ".join(
-                    name for name, passed, _ in final_gates if not passed
-                )
-                print(
-                    f"[ERROR] Final Definition-of-Done reread failed: {final_blocked}. "
-                    "No merge command was run.",
-                    file=sys.stderr,
-                )
+                final_blocked = ", ".join(name for name, passed, _ in final_gates if not passed)
+                print(f"[ERROR] Final Definition-of-Done reread failed: {final_blocked}. "
+                      "No merge command was run.", file=sys.stderr)
                 return EXIT_BLOCKED
             pr = fresh
             # Every gate above -- disjointness, CI freshness, the tested merge
@@ -5316,19 +4102,14 @@ def main():  # noqa: C901, PLR0912, PLR0915
             # execution time (#371 review).
             gated_base = _current_base_tip(fresh)
             if not gated_base:
-                print(
-                    "[ERROR] Final live base tip could not be read. "
-                    "No merge command was run.",
-                    file=sys.stderr,
-                )
+                print("[ERROR] Final live base tip could not be read. No merge command was run.",
+                      file=sys.stderr)
                 return EXIT_BLOCKED
 
             print(f"  ✅ merge lock          {lock_message}")
             print(f"  ✅ final base check    {rebased_message}")
             print("\n=== Merge execution ===")
-            final_pr, outcome = execute_merge(
-                args.pr, pr, args.merge_method, gated_base
-            )
+            final_pr, outcome = execute_merge(args.pr, pr, args.merge_method, gated_base)
             if not final_pr:
                 print(f"  ❌ not merged          {outcome}", file=sys.stderr)
                 # A refusal taken before the command ran is a gate block, not a
@@ -5340,10 +4121,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
 
     merged_sha = merge_commit_oid(final_pr) or "unknown"
     audit_ok = merged_sha != "unknown"
-    print(
-        f"AUDIT pr=#{args.pr} gated_head_sha={gated_head} "
-        f"merged_sha={merged_sha}"
-    )
+    print(f"AUDIT pr=#{args.pr} gated_head_sha={gated_head} merged_sha={merged_sha}")
     if not audit_ok:
         print("[ERROR] GitHub reported merged but supplied no merge commit SHA.", file=sys.stderr)
 
@@ -5351,10 +4129,8 @@ def main():  # noqa: C901, PLR0912, PLR0915
     command = intervention_command()
     if not root:
         failure = "repository root: could not resolve the primary worktree"
-        evidence_ok = post_human_intervention(
-            final_pr, issue_nums, None, gated_head, merged_sha, [], command,
-            blocked_before_closeout=failure,
-        )
+        evidence_ok = post_human_intervention(final_pr, issue_nums, None, gated_head, merged_sha,
+                                              [], command, blocked_before_closeout=failure)
         print(
             "[ERROR] Merge succeeded but repository root could not be resolved; "
             f"intervention evidence {'was recorded' if evidence_ok else 'could not be fully recorded'}.",
@@ -5363,28 +4139,21 @@ def main():  # noqa: C901, PLR0912, PLR0915
         return EXIT_ERROR
     if not audit_ok:
         failure = "merge audit: GitHub supplied no merge commit SHA"
-        evidence_ok = post_human_intervention(
-            final_pr, issue_nums, root, gated_head, merged_sha, [], command,
-            blocked_before_closeout=failure,
-        )
-        print(
-            "[ERROR] Merge audit is incomplete; intervention evidence "
-            f"{'was recorded' if evidence_ok else 'could not be fully recorded'}.",
-            file=sys.stderr,
-        )
+        evidence_ok = post_human_intervention(final_pr, issue_nums, root, gated_head, merged_sha,
+                                              [], command, blocked_before_closeout=failure)
+        print("[ERROR] Merge audit is incomplete; intervention evidence "
+              f"{'was recorded' if evidence_ok else 'could not be fully recorded'}.", file=sys.stderr)
         return EXIT_ERROR
 
     if acceptance_records:
-        persisted, persist_msg = persist_acceptance_evidence(
-            args.pr, final_pr, acceptance_records
-        )
+        persisted, persist_msg = persist_acceptance_evidence(args.pr, final_pr,
+                                                             acceptance_records)
         print(f"  {'✅' if persisted else '❌'} evidence          {persist_msg}")
         if not persisted:
             failure = f"acceptance evidence persistence: {persist_msg}"
-            evidence_ok = post_human_intervention(
-                final_pr, issue_nums, root, gated_head, merged_sha, [], command,
-                blocked_before_closeout=failure,
-            )
+            evidence_ok = post_human_intervention(final_pr, issue_nums, root, gated_head,
+                                                  merged_sha, [], command,
+                                                  blocked_before_closeout=failure)
             print(
                 "[ERROR] Merge succeeded but acceptance evidence could not be persisted; "
                 f"intervention evidence {'was recorded' if evidence_ok else 'could not be fully recorded'}.",
@@ -5401,31 +4170,22 @@ def main():  # noqa: C901, PLR0912, PLR0915
     else:
         gates = load_gate_verdicts(root, args.pr)
 
-    closeout_ok, failed_attempts = run_closeout_with_retries(
-        final_pr, issue_nums, root
-    )
+    closeout_ok, failed_attempts = run_closeout_with_retries(final_pr, issue_nums, root)
     if not closeout_ok:
-        evidence_ok = post_human_intervention(
-            final_pr, issue_nums, root, gated_head, merged_sha,
-            failed_attempts, command,
-        )
-        print(
-            "\n❌ Merge is complete, but close-out is incomplete after bounded "
-            "retries. Human intervention evidence "
-            f"{'was recorded' if evidence_ok else 'could not be fully recorded'}."
-        )
+        evidence_ok = post_human_intervention(final_pr, issue_nums, root, gated_head, merged_sha,
+                                              failed_attempts, command)
+        print("\n❌ Merge is complete, but close-out is incomplete after bounded "
+              "retries. Human intervention evidence "
+              f"{'was recorded' if evidence_ok else 'could not be fully recorded'}.")
         return EXIT_ERROR
 
     # Only here: after close-out succeeded, so no checkpoint can ever claim a
     # success that did not happen. A failed write is a warning, not a failure —
     # the merge is already complete and must not be reported as broken.
-    tag_ok, tag_message = write_checkpoint_tag(
-        root, final_pr, issue_nums, gates, gated_head, merged_sha
-    )
+    tag_ok, tag_message = write_checkpoint_tag(root, final_pr, issue_nums, gates, gated_head,
+                                               merged_sha)
     # A push failure still returns ok, so mark the line by what it reports.
-    icon = "✅" if tag_ok and "push failed" not in tag_message else (
-        "⚠️ " if tag_ok else "❌"
-    )
+    icon = "✅" if tag_ok and "push failed" not in tag_message else ("⚠️ " if tag_ok else "❌")
     print(f"  {icon} {'checkpoint':<18} {tag_message}")
     if tag_ok:
         discard_gate_verdicts(root, args.pr)

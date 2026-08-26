@@ -21,23 +21,44 @@ class BoardAgentIdentityTests(unittest.TestCase):
     def _labelled(number, *names):
         return {"number": number, "labels": [{"name": n} for n in names]}
 
-    def test_collects_every_identity_prefix_from_issues_and_prs(self):
+    @staticmethod
+    def _output(rows):
+        return "\n".join(json.dumps(row) for row in rows)
+
+    def test_collects_every_live_identity_prefix_from_issues_and_prs(self):
         issues = [self._labelled(3, "agent:antigravity-1", "status:in-progress")]
-        prs = [self._labelled(27, "author:antigravity-1", "reviewer:claude-1"),
+        prs = [self._labelled(27, "author:antigravity-1"),
                self._labelled(21, "merger:codex-1")]
-        def output(rows):
-            return "\n".join(json.dumps(row) for row in rows)
         with patch.object(common, "get_repo_slug", return_value="owner/repo"), \
              patch.object(common, "run_cmd", side_effect=[
-                 (0, output(issues), ""), (0, output(prs), ""),
+                 (0, self._output(issues), ""), (0, self._output(prs), ""),
              ]):
             holders, error = common.board_agent_identities()
         self.assertEqual(error, "")
         self.assertEqual(
             holders["antigravity-1"],
             ["issue #3 (agent:antigravity-1)", "PR #27 (author:antigravity-1)"])
-        self.assertIn("claude-1", holders)
         self.assertIn("codex-1", holders)
+
+    def test_a_historical_reviewer_label_no_longer_reserves_an_id(self):
+        """#414: nothing writes reviewer:<id>, so it cannot hold an id hostage."""
+        prs = [self._labelled(27, "reviewer:claude-1")]
+        with patch.object(common, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(common, "run_cmd", side_effect=[
+                 (0, "", ""), (0, self._output(prs), ""),
+             ]):
+            holders, error = common.board_agent_identities()
+        self.assertEqual((holders, error), ({}, ""))
+
+    def test_a_reviewer_label_does_not_erase_a_live_claim_on_the_same_id(self):
+        issues = [self._labelled(3, "agent:claude-1")]
+        prs = [self._labelled(27, "reviewer:claude-1")]
+        with patch.object(common, "get_repo_slug", return_value="owner/repo"), \
+             patch.object(common, "run_cmd", side_effect=[
+                 (0, self._output(issues), ""), (0, self._output(prs), ""),
+             ]):
+            holders, _ = common.board_agent_identities()
+        self.assertEqual(holders, {"claude-1": ["issue #3 (agent:claude-1)"]})
 
     def test_unreadable_board_returns_none_so_callers_fail_closed(self):
         with patch.object(common, "get_repo_slug", return_value="owner/repo"), \
