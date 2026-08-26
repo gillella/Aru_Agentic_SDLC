@@ -64,16 +64,62 @@ writes it; `/resume-aru-loop` clears it. A stop without `--project` stores
 clear the global stop without `--project`. `--resume-loop` reactivates a
 managed Codex heartbeat only when that project's `native-wake.json` entry is
 still `enabled`; `--disable-native-wake` therefore survives a later resume.
+Resuming when no stop marker exists is a structured silent success (exit code 0,
+`No stop requested; continuing`), never an error.
+
+Stop and resume transitions accept an optional bounded `--reason <token>`:
+`operator-requested` (default), `factory-complete`, `human-intervention`,
+`quota-exhausted`, `maintenance`, or `error-threshold`. Unrecognized reasons fail
+closed.
+
+The reason is recorded per project token in the marker's `reasons` map, so
+stopping project B never rewrites the reason project A was stopped for, and
+`status --project <abs>` reports the reason that project was actually stopped
+for. A marker written before that map existed still reports its single
+top-level `reason`. Resuming one project drops only that project's entry.
+
+Because every project shares one marker file, `stop` and `resume` take an
+exclusive lock on `$HOME/.aru/factory-loop.stop.lock` around the
+read-modify-write and replace the marker through a temp file unique to each
+call. Concurrent project-scoped stops therefore cannot lose one another's
+durable stop intent or collide on a shared temp path.
+
 While a stop applies to a project, loop mode must not continue and must not
 arm native wakes. If a managed Codex heartbeat (`id = "aru-code-loop"` or
 `id = "aru-code-loop-<12 hex>"`) exists for that project, stop pauses
-**that file only**.
+**that file only**. Desktop stop intent records local desktop intent only;
+it never mutates external orchestrator schedules or durable background daemons.
 
-## Doctor
+## Doctor and operator status
+
+`python3 "$ARU_SDLC_HOME/scripts/loop_control.py" status [--project <abs>] [--orchestrator-adapter <cmd>] [--json]`
+provides a unified, project-agnostic status contract. It reports
+`desktop_stop_marker` applicability and scope, `native_wake` configuration, and
+external orchestrator state via a read-only adapter without hard-coding external
+job IDs. Contradictory states (e.g. `orchestrator_paused_without_stop_marker` or
+`stop_marker_without_orchestrator_pause`) are surfaced explicitly.
+
+`desktop_stop_marker` always carries `present`, `valid`, and `error`, so a
+marker that exists but cannot be parsed is never reported as an absent one. A
+corrupt marker keeps `present: true` with `valid: false`, the parse `error`,
+and its `path`, while `applies` stays `false` — an unreadable stop never
+silently authorises the loop to keep running. The legacy `stop` field reports
+the same corruption instead of collapsing to `null`. Adapter-supplied
+`state` that is not one of `enabled`, `paused`, or `unknown` — including
+unhashable values such as lists or objects — degrades to `unknown` rather than
+raising.
+
+`stop` and `resume` fail closed on the same corruption `status` reports. A
+marker whose `projects` field is not a list (a string, an object, or a number)
+is rejected with `'projects' must be a list` and a non-zero exit; it is never
+coerced into per-character or per-key tokens, and neither the marker nor the
+managed heartbeat is mutated. Clearing an unreadable marker is a deliberate
+operator action on the reported `path`, not a side effect of `--resume-loop`.
 
 `doctor_local_agent_integrations.py` reports continuity adapters, macOS
 `.app` bundle versions (Info.plist only, no credentials), CLI/config evidence
-separately, stop state, and capability gaps. Opt-in `--enable-native-wake`
+separately, stop state (including the rich `desktop_stop_marker` block alongside
+`loop_stopped`), and capability gaps. Opt-in `--enable-native-wake`
 is **prepared/requested** only: it writes `native-wake.json` plus a Codex
 prompt. `native_wake_enabled` is true only when that app has verified
 configured/active vendor state (Codex `automation.toml` with

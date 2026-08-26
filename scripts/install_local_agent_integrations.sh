@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# line-ceiling: 769
+# line-ceiling: 790
 # install_local_agent_integrations.sh — wire Aru_Agentic_SDLC skills and native adapters for local coding agents
 set -euo pipefail
 
@@ -24,6 +24,7 @@ RESUME_LOOP=false
 ENABLE_NATIVE_WAKE=false
 DISABLE_NATIVE_WAKE=false
 PROJECT_PATH=""
+REASON=""
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
@@ -72,6 +73,10 @@ parse_args() {
         RESUME_LOOP=true
         shift
         ;;
+      --reason)
+        REASON="$2"
+        shift 2
+        ;;
       --enable-native-wake)
         ENABLE_NATIVE_WAKE=true
         shift
@@ -104,8 +109,9 @@ Options:
   --claude-only      Target Claude Code integration only
   --cursor-only      Target Cursor integration only
   --antigravity-only Target Antigravity integration only
-  --stop-loop        Persist explicit operator stop (optionally --project)
-  --resume-loop      Clear explicit operator stop (optionally --project)
+  --stop-loop        Persist explicit operator stop (optionally --project, --reason)
+  --resume-loop      Clear explicit operator stop (optionally --project, --reason)
+  --reason <token>   Bounded pause reason token for stop/resume
   --enable-native-wake  Opt-in vendor wake for --project (absolute path)
   --disable-native-wake Remove opt-in wake for --project
   --project <path>   Absolute project path for stop/wake scoping
@@ -120,6 +126,14 @@ EOF
         ;;
     esac
   done
+  if [[ "${STOP_LOOP}" == true && "${RESUME_LOOP}" == true ]]; then
+    echo "error: cannot specify both --stop-loop and --resume-loop" >&2
+    exit 1
+  fi
+  if [[ "${ENABLE_NATIVE_WAKE}" == true && "${DISABLE_NATIVE_WAKE}" == true ]]; then
+    echo "error: cannot specify both --enable-native-wake and --disable-native-wake" >&2
+    exit 1
+  fi
 }
 
 parse_args "$@"
@@ -393,7 +407,6 @@ from datetime import datetime, timezone
 action, target_home, project = sys.argv[1], sys.argv[2], sys.argv[3]
 aru_dir = os.path.join(target_home, ".aru")
 os.makedirs(aru_dir, exist_ok=True)
-stop_path = os.path.join(aru_dir, "factory-loop.stop")
 wake_path = os.path.join(aru_dir, "native-wake.json")
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -410,39 +423,7 @@ def dump(path, data):
         fh.write("\n")
     os.replace(tmp, path)
 
-if action == "stop":
-    data = load(stop_path, {"projects": [], "stopped_at": now})
-    projects = list(data.get("projects") or [])
-    token = project or "*"
-    if token not in projects:
-        projects.append(token)
-    dump(stop_path, {"projects": projects, "stopped_at": now, "source": "install_local_agent_integrations.sh"})
-    print(f"wrote stop marker {stop_path} for {token}")
-elif action == "resume":
-    if not os.path.isfile(stop_path):
-        print(f"no stop marker at {stop_path}")
-        raise SystemExit(0)
-    if not project:
-        os.remove(stop_path)
-        print(f"removed stop marker {stop_path}")
-        raise SystemExit(0)
-    data = load(stop_path, {"projects": []})
-    projects = list(data.get("projects") or [])
-    if "*" in projects:
-        print(
-            "error: global stop (*) is in effect; resume without --project to clear it",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-    projects = [p for p in projects if p != project]
-    if projects:
-        data["projects"] = projects
-        dump(stop_path, data)
-        print(f"cleared stop for {project} in {stop_path}")
-    else:
-        os.remove(stop_path)
-        print(f"removed stop marker {stop_path}")
-elif action in {"enable-wake", "disable-wake"}:
+if action in {"enable-wake", "disable-wake"}:
     if not project:
         raise SystemExit("enable/disable wake requires an absolute --project")
     data = load(wake_path, {"projects": {}})
@@ -591,6 +572,14 @@ resume_managed_codex_heartbeat() {
 }
 
 apply_continuity_actions() {
+  if [[ "${STOP_LOOP}" == true && "${RESUME_LOOP}" == true ]]; then
+    echo "error: cannot specify both --stop-loop and --resume-loop" >&2
+    return 1
+  fi
+  if [[ "${ENABLE_NATIVE_WAKE}" == true && "${DISABLE_NATIVE_WAKE}" == true ]]; then
+    echo "error: cannot specify both --enable-native-wake and --disable-native-wake" >&2
+    return 1
+  fi
   if [[ "${ENABLE_NATIVE_WAKE}" == true || "${DISABLE_NATIVE_WAKE}" == true ]]; then
     if [[ -z "${PROJECT_PATH}" || "${PROJECT_PATH}" != /* ]]; then
       echo "error: --enable-native-wake/--disable-native-wake requires --project <absolute-path>" >&2
@@ -613,12 +602,38 @@ apply_continuity_actions() {
     aru_python_json disable-wake "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
   fi
   if [[ "${STOP_LOOP}" == true ]]; then
-    aru_python_json stop "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
+    if [[ "${DRY_RUN}" == true ]]; then
+      echo "[DRY-RUN] Would stop under ${TARGET_HOME}/.aru for ${PROJECT_PATH:-all-projects}"
+    else
+      local stop_cmd=(python3 "${SDLC_HOME}/scripts/loop_control.py" stop --target-home "${TARGET_HOME}")
+      if [[ -n "${PROJECT_PATH}" ]]; then
+        stop_cmd+=(--project "${PROJECT_PATH}")
+      fi
+      if [[ -n "${REASON}" ]]; then
+        stop_cmd+=(--reason "${REASON}")
+      fi
+      "${stop_cmd[@]}" || return 1
+    fi
     pause_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
   fi
   if [[ "${RESUME_LOOP}" == true ]]; then
-    aru_python_json resume "${TARGET_HOME}" "${PROJECT_PATH}" || return 1
-    resume_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
+    if [[ "${DRY_RUN}" == true ]]; then
+      echo "[DRY-RUN] Would resume under ${TARGET_HOME}/.aru for ${PROJECT_PATH:-all-projects}"
+    else
+      local resume_cmd=(python3 "${SDLC_HOME}/scripts/loop_control.py" resume --target-home "${TARGET_HOME}")
+      if [[ -n "${PROJECT_PATH}" ]]; then
+        resume_cmd+=(--project "${PROJECT_PATH}")
+      fi
+      if [[ -n "${REASON}" ]]; then
+        resume_cmd+=(--reason "${REASON}")
+      fi
+      local resume_out
+      resume_out="$("${resume_cmd[@]}")" || return 1
+      printf '%s\n' "${resume_out}"
+      if [[ "${resume_out}" != *"No stop requested; continuing"* ]]; then
+        resume_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
+      fi
+    fi
   fi
 }
 

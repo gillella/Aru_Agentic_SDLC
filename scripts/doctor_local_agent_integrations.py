@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 914
+# line-ceiling: 935
 """Read-only diagnosis for local coding-agent integrations.
 
 Reports desktop continuity adapters plus install-link checks (canonical home,
@@ -43,6 +43,8 @@ GITHUB_CREDENTIAL_ENV = (
 SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
+
+from loop_control import invalid_stop_marker, resolve_desktop_stop_marker  # noqa: E402
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -205,22 +207,15 @@ def find_macos_app(spec: dict, roots: list[Path]) -> dict | None:
     return None
 
 
-def stop_applies(stop_doc: dict | None, project: str | None) -> bool:
-    if not stop_doc:
-        return False
-    projects = stop_doc.get("projects") or []
-    if "*" in projects:
-        return True
-    if project and project in projects:
-        return True
-    return bool(projects) and project is None
-
-
 def load_json(path: Path) -> dict | None:
     if not path.is_file():
         return None
-    with path.open(encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def project_automation_id(project: str) -> str:
@@ -815,10 +810,28 @@ def report(aru_home: Path, target_home: Path, project: str | None,
             "capability_gap": gap,
             **wake,
         }
-    stopped = stop_applies(stop_doc, project)
+    marker_path = target_home / ".aru" / "factory-loop.stop"
+    try:
+        marker_info = resolve_desktop_stop_marker(target_home, project)
+        marker_error = None
+    except ValueError as exc:
+        marker_error = str(exc)
+        marker_info = invalid_stop_marker(marker_path, marker_error)
+        # `load_json` swallows the parse error, so the legacy `stop` field would
+        # otherwise be None -- identical to an absent marker. Report the corrupt
+        # file explicitly instead of erasing it.
+        if stop_doc is None and marker_info["present"]:
+            stop_doc = {"valid": False, "error": marker_error, "path": str(marker_path)}
+    stopped = marker_info["applies"]
     install = diagnose_install(aru_home, target_home, agents, home=home)
     repo = None
     checks = list(install["checks"])
+    if marker_error:
+        checks.append(check(
+            "stop_marker", False, "invalid",
+            f"Malformed stop marker: {marker_error}",
+            path=str(marker_path),
+        ))
     if project and _is_git_repo(project, home=home):
         repo = diagnose_repo(project, install["prerequisites"]["gh_logged_in"], home=home)
         checks.extend(repo["checks"])
@@ -834,7 +847,8 @@ def report(aru_home: Path, target_home: Path, project: str | None,
         "status": "healthy",
         "canonical_home": str(aru_home),
         "project": project,
-        "stop_file": str(target_home / ".aru" / "factory-loop.stop"),
+        "stop_file": str(marker_path),
+        "desktop_stop_marker": marker_info,
         "loop_stopped": stopped,
         "stop": stop_doc,
         "native_wake": wake_entry or None,

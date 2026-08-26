@@ -1,3 +1,4 @@
+# line-ceiling: 570
 import hashlib
 import json
 import os
@@ -385,6 +386,173 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
             "factory-loop.stop",
             (self.target_home / ".cursor" / "commands" / "continue.md").read_text(),
         )
+
+    def test_resume_without_stop_marker_is_silent_success(self):
+        res = self.run_installer("--resume-loop", "--project", "/tmp/aru-proj-a")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("No stop requested; continuing", res.stdout)
+        self.assertNotIn("no stop marker at", res.stdout)
+
+        # Global resume without stop marker
+        res_global = self.run_installer("--resume-loop")
+        self.assertEqual(res_global.returncode, 0, res_global.stderr)
+        self.assertIn("No stop requested; continuing", res_global.stdout)
+        self.assertNotIn("no stop marker at", res_global.stdout)
+
+    def test_stop_loop_supports_bounded_reasons_and_rejects_invalid(self):
+        project = "/tmp/aru-proj-a"
+        res = self.run_installer("--stop-loop", "--project", project, "--reason", "quota-exhausted")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertEqual(stop.get("reason"), "quota-exhausted")
+
+        # Invalid reason token fails closed
+        res_bad = self.run_installer("--stop-loop", "--project", project, "--reason", "unbounded-custom-reason")
+        self.assertNotEqual(res_bad.returncode, 0)
+        self.assertIn("invalid pause reason", res_bad.stderr)
+
+    def test_cross_project_stop_isolation(self):
+        proj_a = "/tmp/aru-proj-a"
+        proj_b = "/tmp/aru-proj-b"
+        self.run_installer("--stop-loop", "--project", proj_a, "--reason", "maintenance")
+        self.run_installer("--stop-loop", "--project", proj_b, "--reason", "error-threshold")
+
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn(proj_a, stop["projects"])
+        self.assertIn(proj_b, stop["projects"])
+
+        # Resume proj_a leaves proj_b stopped
+        res = self.run_installer("--resume-loop", "--project", proj_a)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        stop_after_a = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertNotIn(proj_a, stop_after_a["projects"])
+        self.assertIn(proj_b, stop_after_a["projects"])
+
+        # Resume proj_b clears marker completely
+        res_b = self.run_installer("--resume-loop", "--project", proj_b)
+        self.assertEqual(res_b.returncode, 0, res_b.stderr)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+
+    def test_stop_and_resume_are_idempotent(self):
+        project = "/tmp/aru-proj-a"
+        self.run_installer("--stop-loop", "--project", project)
+        self.run_installer("--stop-loop", "--project", project)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertEqual(stop["projects"].count(project), 1)
+
+        self.run_installer("--resume-loop", "--project", project)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+        res_repeat = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res_repeat.returncode, 0)
+        self.assertIn("No stop requested; continuing", res_repeat.stdout)
+
+    def test_simultaneous_stop_and_resume_rejected(self):
+        res = self.run_installer("--stop-loop", "--resume-loop")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("cannot specify both --stop-loop and --resume-loop", res.stderr)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+
+        res_rev = self.run_installer("--resume-loop", "--stop-loop")
+        self.assertNotEqual(res_rev.returncode, 0)
+        self.assertIn("cannot specify both --stop-loop and --resume-loop", res_rev.stderr)
+
+        res_proj = self.run_installer("--stop-loop", "--resume-loop", "--project", "/tmp/aru-proj-a")
+        self.assertNotEqual(res_proj.returncode, 0)
+        self.assertIn("cannot specify both --stop-loop and --resume-loop", res_proj.stderr)
+
+        res_wake = self.run_installer("--enable-native-wake", "--disable-native-wake")
+        self.assertNotEqual(res_wake.returncode, 0)
+        self.assertIn("cannot specify both --enable-native-wake and --disable-native-wake", res_wake.stderr)
+
+        res_wake_rev = self.run_installer("--disable-native-wake", "--enable-native-wake")
+        self.assertNotEqual(res_wake_rev.returncode, 0)
+        self.assertIn("cannot specify both --enable-native-wake and --disable-native-wake", res_wake_rev.stderr)
+
+    def test_mutually_exclusive_loop_flags_reject_before_any_side_effect(self):
+        """Rejection happens in argument parsing, so no marker or heartbeat is touched."""
+        project = "/tmp/aru-proj-a"
+        self.run_installer("--stop-loop", "--project", project, "--reason", "maintenance")
+        stop_file = self.target_home / ".aru" / "factory-loop.stop"
+        before = stop_file.read_text()
+
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.mkdir(parents=True, exist_ok=True)
+        toml = managed / "automation.toml"
+        toml.write_text(f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "PAUSED"\n')
+
+        for extra in ([], ["--dry-run"], ["--check"], ["--reason", "operator-requested"],
+                      ["--project", project], ["--codex-only"]):
+            for order in (["--stop-loop", "--resume-loop"], ["--resume-loop", "--stop-loop"]):
+                res = self.run_installer(*(order + extra))
+                self.assertEqual(res.returncode, 1, f"{order} {extra}: {res.stdout}")
+                self.assertIn("cannot specify both --stop-loop and --resume-loop", res.stderr)
+                # A rejected invocation must leave the persisted stop exactly as it was.
+                self.assertEqual(stop_file.read_text(), before, f"{order} {extra}")
+                self.assertIn('status = "PAUSED"', toml.read_text(), f"{order} {extra}")
+
+        res_bad_reason = self.run_installer("--stop-loop", "--reason", "invalid-reason")
+        self.assertNotEqual(res_bad_reason.returncode, 0)
+        self.assertIn("invalid pause reason", res_bad_reason.stderr)
+
+    def test_resume_loop_fails_closed_on_corrupt_stop_marker(self):
+        """A marker the wrapper cannot parse must not report a successful resume."""
+        project = "/tmp/aru-proj-a"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--codex-only")
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.mkdir(parents=True, exist_ok=True)
+        toml = managed / "automation.toml"
+        stop_file = self.target_home / ".aru" / "factory-loop.stop"
+        stop_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # `"abc"` was coerced to per-character tokens and `5` raised a bare
+        # TypeError, so a corrupt stop silently un-paused the managed heartbeat.
+        for payload in ('{"projects": "abc"}', '{"projects": 5}', '{"projects": {"a": 1}}',
+                        '{NOT JSON', '["not", "a", "dict"]'):
+            stop_file.write_text(payload)
+            toml.write_text(f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "PAUSED"\n')
+            res = self.run_installer("--resume-loop", "--project", project)
+            self.assertNotEqual(res.returncode, 0, f"{payload}: {res.stdout}")
+            self.assertIn("malformed stop marker", res.stderr, payload)
+            self.assertNotIn("Traceback", res.stderr, payload)
+            self.assertNotIn("No stop requested", res.stdout, payload)
+            self.assertEqual(stop_file.read_text(), payload, payload)
+            self.assertIn('status = "PAUSED"', toml.read_text(), payload)
+
+    def test_resume_without_active_stop_does_not_reactivate_paused_heartbeat(self):
+        project = "/tmp/aru-proj-a"
+        other_project = "/tmp/aru-proj-b"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--enable-native-wake", "--project", project)
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.joinpath("automation.toml").write_text(
+            f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "PAUSED"\n'
+        )
+
+        # 1. No stop marker exists: project-scoped resume must not reactivate paused heartbeat.
+        res = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("No stop requested; continuing", res.stdout)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+
+        # 2. No stop marker exists: global resume must not reactivate paused heartbeat.
+        res_global = self.run_installer("--resume-loop")
+        self.assertEqual(res_global.returncode, 0, res_global.stderr)
+        self.assertIn("No stop requested; continuing", res_global.stdout)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+
+        # 3. Stop marker exists for a different project: resume for this project must not reactivate heartbeat.
+        self.run_installer("--stop-loop", "--project", other_project)
+        res_other = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res_other.returncode, 0, res_other.stderr)
+        self.assertIn("No stop requested; continuing", res_other.stdout)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+
+        # 4. When stop marker actually applied to this project, resume DOES reactivate heartbeat.
+        self.run_installer("--stop-loop", "--project", project)
+        res_active = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res_active.returncode, 0, res_active.stderr)
+        self.assertIn('status = "ACTIVE"', managed.joinpath("automation.toml").read_text())
 
 
 if __name__ == "__main__":
