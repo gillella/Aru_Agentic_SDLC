@@ -50,15 +50,9 @@ def make_issue(
         doc_body += f"Depends-on: {depends_on}\n"
 
     return {
-        "number": number,
-        "title": title,
-        "labels": labels,
-        "assignees": [],
-        "state": "open",
-        "user": {"login": "gillella"},
-        "body": doc_body,
-        "updated_at": "2026-08-26T00:00:00Z",
-        "author_association": "OWNER",
+        "number": number, "title": title, "labels": labels, "assignees": [],
+        "state": "open", "user": {"login": "gillella"}, "body": doc_body,
+        "updated_at": "2026-08-26T00:00:00Z", "author_association": "OWNER",
     }
 
 
@@ -80,19 +74,11 @@ def make_pull(
         labels.append({"name": review_service})
 
     pr_dict = {
-        "number": number,
-        "title": title,
-        "draft": draft,
-        "isDraft": draft,
-        "labels": labels,
-        "head": {"ref": branch, "sha": head_sha},
-        "headRefName": branch,
-        "headRefOid": head_sha,
-        "updated_at": "2026-08-26T00:00:00Z",
-        "updatedAt": "2026-08-26T00:00:00Z",
-        "createdAt": "2026-08-26T00:00:00Z",
-        "body": "Closes #1",
-        "mergeable_state": "clean",
+        "number": number, "title": title, "draft": draft, "isDraft": draft,
+        "labels": labels, "head": {"ref": branch, "sha": head_sha},
+        "headRefName": branch, "headRefOid": head_sha,
+        "updated_at": "2026-08-26T00:00:00Z", "updatedAt": "2026-08-26T00:00:00Z",
+        "createdAt": "2026-08-26T00:00:00Z", "body": "Closes #1", "mergeable_state": "clean",
     }
     if status_check_rollup is not None:
         pr_dict["statusCheckRollup"] = status_check_rollup
@@ -127,10 +113,7 @@ class FakeRepo:
         self.owner = owner
         self.repo_name = repo_name
         self.projects = projects if projects is not None else [{
-            "id": "PVT_1",
-            "number": 7,
-            "title": f"{repo_name} Board",
-            "owner": {"login": owner},
+            "id": "PVT_1", "number": 7, "title": f"{repo_name} Board", "owner": {"login": owner},
             "repositories": {"nodes": [{"nameWithOwner": slug}]},
         }]
 
@@ -172,37 +155,23 @@ class FakeRepo:
         if cmd[:2] == ["git", "describe"]:
             if cwd and os.path.abspath(str(cwd)) == os.path.abspath(common.get_framework_root()):
                 return 0, f"{self.framework_version}\n", ""
-            if self.tags:
-                return 0, f"{self.tags[-1]}\n", ""
-            return 1, "", "No names found"
+            return (0, f"{self.tags[-1]}\n", "") if self.tags else (1, "", "No names found")
         if cmd[:3] == ["git", "worktree", "list"]:
-            if "worktrees" in self.fail:
-                return 1, "", "fatal: not a git repository"
-            return 0, self.worktrees, ""
+            return (1, "", "fatal: not a git repository") if "worktrees" in self.fail else (0, self.worktrees, "")
         if "collaborators" in joined:
-            if "collaborators" in self.fail:
-                return 1, "", "collaborators api down"
-            return 0, f"{self.owner}\n", ""
+            return (1, "", "collaborators api down") if "collaborators" in self.fail else (0, f"{self.owner}\n", "")
         if "issues?state=open" in joined:
-            if "issues" in self.fail:
-                return 1, "", "issues api down"
-            return 0, "\n".join(json.dumps(row) for row in self.issues), ""
+            return (1, "", "issues api down") if "issues" in self.fail else (0, "\n".join(json.dumps(r) for r in self.issues), "")
         if cmd[:3] == ["gh", "api", "graphql"]:
-            if "projects" in self.fail:
-                return 1, "", "graphql api down"
-            return 0, json.dumps({"data": {"repository": {"projectsV2": {"nodes": self.projects}}}}), ""
+            return (1, "", "graphql api down") if "projects" in self.fail else (0, json.dumps({"data": {"repository": {"projectsV2": {"nodes": self.projects}}}}), "")
         if cmd[:3] == ["gh", "project", "item-list"]:
-            if "board" in self.fail:
-                return 1, "", "board item api down"
-            return 0, self._item_list_json(), ""
+            return (1, "", "board item api down") if "board" in self.fail else (0, self._item_list_json(), "")
         if cmd[:3] == ["gh", "pr", "list"]:
             if "prs" in self.fail or "graphql" in self.fail or "rich_prs" in self.fail:
                 return 1, "", "pr list failed"
             return 0, json.dumps(self.prs), ""
         if "pulls?state=open" in joined:
-            if "prs" in self.fail:
-                return 1, "", "prs api down"
-            return 0, "\n".join(json.dumps(row) for row in self.prs), ""
+            return (1, "", "prs api down") if "prs" in self.fail else (0, "\n".join(json.dumps(r) for r in self.prs), "")
 
         raise AssertionError(f"Unexpected command executed in test: {cmd}")
 
@@ -260,39 +229,21 @@ class TestSnapshotSchemaAndFields(unittest.TestCase):
         self.assertIn("Ready", snapshot["board"]["status_counts"])
         self.assertIn("In Progress", snapshot["board"]["status_counts"])
 
-        # Issues
+        # Issues & PRs
         self.assertEqual(len(snapshot["open_issues"]), 2)
         i1 = snapshot["open_issues"][0]
-        self.assertEqual(i1["number"], 101)
-        self.assertEqual(i1["board_status"], "Ready")
-        self.assertEqual(i1["priority"], "P1")
-        self.assertEqual(i1["touches"], ["scripts/a.py"])
+        self.assertEqual((i1["number"], i1["board_status"], i1["priority"], i1["touches"]), (101, "Ready", "P1", ["scripts/a.py"]))
 
-        # PRs
         self.assertEqual(len(snapshot["open_pull_requests"]), 1)
         p1 = snapshot["open_pull_requests"][0]
-        self.assertEqual(p1["number"], 201)
-        self.assertEqual(p1["author"], "agent-2")
-        self.assertEqual(p1["review_authority"]["assigned"], "coderabbit")
-        self.assertEqual(p1["ci"]["state"], "PASSED")
-        self.assertEqual(p1["ci"]["summary"], "All CI status checks passed.")
-        self.assertTrue(p1["merge_gate"]["ready"])
-        self.assertEqual(p1["merge_gate"]["blockers"], [])
+        self.assertEqual((p1["number"], p1["author"], p1["review_authority"]["assigned"]), (201, "agent-2", "coderabbit"))
+        self.assertEqual((p1["ci"]["state"], p1["ci"]["summary"], p1["merge_gate"]["ready"], p1["merge_gate"]["blockers"]), ("PASSED", "All CI status checks passed.", True, []))
 
-        # Claims
+        # Claims & Dependencies & Reservations
         self.assertIn({"type": "issue", "number": 102, "agent": "agent-1"}, snapshot["claims"])
         self.assertIn({"type": "pr", "number": 201, "agent": "agent-2"}, snapshot["claims"])
-
-        # Dependencies
-        self.assertEqual(len(snapshot["dependencies"]), 1)
-        self.assertEqual(snapshot["dependencies"][0]["issue"], 102)
-        self.assertEqual(snapshot["dependencies"][0]["depends_on"], [101])
-        self.assertEqual(snapshot["dependencies"][0]["unresolved"], [101])
-
-        # Touches reservations
-        self.assertEqual(len(snapshot["touches_reservations"]), 1)
-        self.assertEqual(snapshot["touches_reservations"][0]["issue"], 102)
-        self.assertEqual(snapshot["touches_reservations"][0]["paths"], ["scripts/b.py"])
+        self.assertEqual(snapshot["dependencies"], [{"issue": 102, "depends_on": [101], "unresolved": [101]}])
+        self.assertEqual(snapshot["touches_reservations"], [{"issue": 102, "agent": "agent-1", "paths": ["scripts/b.py"]}])
 
         # Worktrees
         self.assertEqual(len(snapshot["worktrees"]), 2)
@@ -1040,6 +991,18 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
         self.assertEqual(claimable, [])
         self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in errors))
 
+    def test_repo_owner_resolution_exception_propagates_degraded_blocked_candidate_evaluation(self):
+        issue1 = make_issue(10, status="Ready")
+        with patch("factory_loop_snapshot.repository_owner_login", side_effect=RuntimeError("owner resolution boom")):
+            claimable, diags, errors, is_degraded, is_blocked = fls._collect_claimable_work(
+                [issue1], slug="gillella/Aru_Agentic_SDLC", repo_owner=None
+            )
+
+        self.assertTrue(is_degraded)
+        self.assertTrue(is_blocked)
+        self.assertEqual(claimable, [])
+        self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in errors))
+
     def test_collaborator_lookup_empty_set_propagates_degraded_blocked_candidate_evaluation(self):
         issue1 = make_issue(10, status="Ready", touches="scripts/a.py")
         repo = FakeRepo(issues=[issue1])
@@ -1051,6 +1014,18 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
         self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
         self.assertEqual(snapshot["claimable_work"], [])
         self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in snapshot["errors"]))
+
+    def test_collaborator_lookup_failure_with_empty_issues_blocks_rather_than_complete(self):
+        repo = FakeRepo(issues=[], prs=[], fail={"collaborators"})
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertEqual(snapshot["claimable_work"], [])
+        self.assertTrue(any("Could not resolve trusted collaborator logins" in e for e in snapshot["errors"]))
+
 
 if __name__ == "__main__":
     unittest.main()
