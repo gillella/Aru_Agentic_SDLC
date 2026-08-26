@@ -653,7 +653,8 @@ class AuthorGateFixTests(unittest.TestCase):
     def test_unfixed_without_current_head_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": False}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "with_service_evidence", side_effect=lambda _pr, _n, value: value), \
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=False):
             self.assertIsNone(self.fix(stranded(), reason="unmet: review"))
 
@@ -675,16 +676,17 @@ class AuthorGateFixTests(unittest.TestCase):
                           return_value=True):
             self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
 
-    def test_unfixed_without_authoritative_coderabbit_review_stays_a_peer_gate(self):
+    def test_unverifiable_assigned_service_review_stays_a_peer_gate(self):
         with patch.object(fnw, "review_evidence",
                           return_value={"unresolved": 0, "unfixed": 2, "reviewed_head": True}), \
-             patch.object(merge_pr, "has_authoritative_coderabbit_review",
+             patch.object(merge_pr, "with_service_evidence", side_effect=lambda _pr, _n, value: value), \
+             patch.object(merge_pr, "has_authoritative_assigned_review",
                           return_value=False):
             self.assertIsNone(self.fix(stranded(peer=None), reason="unmet: review"))
 
-    def test_legacy_provider_assignments_are_not_author_fixable(self):
+    def test_external_fallback_assignments_reuse_shared_evidence_helpers(self):
         evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
-        for service, issue in (("sourcery", 2), ("codeant", 3)):
+        for service, issue in (("sourcery", 2), ("codeant", 3), ("agent", 4)):
             candidate = stranded()
             candidate["labels"] = [
                 label for label in candidate["labels"]
@@ -693,11 +695,42 @@ class AuthorGateFixTests(unittest.TestCase):
             candidate["body"] = f"Closes #{issue}"
             with self.subTest(service=service), \
                  patch.object(fnw, "review_evidence", return_value=evidence), \
-                 patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
-                 patch.object(merge_pr, "has_authoritative_coderabbit_review") as authoritative:
-                self.assertFalse(fnw._author_can_repair_review(candidate))
-            coderabbit.assert_not_called()
-            authoritative.assert_not_called()
+                 patch.object(merge_pr, "with_service_evidence", return_value=evidence) as enrich, \
+                 patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True) as authoritative:
+                self.assertTrue(fnw._author_can_repair_review(candidate))
+            enrich.assert_called_once_with(candidate, candidate["number"], evidence)
+            authoritative.assert_called_once_with(candidate, evidence)
+
+    def test_author_repair_uses_assigned_service_thread_counts(self):
+        evidence = {
+            "unresolved": 1,
+            "unfixed": 0,
+            "outdated_unfixed": 0,
+            "reviewed_head": True,
+            "service_threads": {
+                "sourcery": {"unresolved": 0, "unfixed": 1, "outdated_unfixed": 0},
+                "codeant": {"unresolved": 1, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        }
+        sourcery_pr = stranded()
+        sourcery_pr["labels"] = [
+            label for label in sourcery_pr["labels"]
+            if not label["name"].startswith("review:")
+        ] + [{"name": "review:sourcery"}]
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(merge_pr, "with_service_evidence", return_value=evidence), \
+             patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True):
+            self.assertTrue(fnw._author_can_repair_review(sourcery_pr))
+
+        codeant_pr = stranded()
+        codeant_pr["labels"] = [
+            label for label in codeant_pr["labels"]
+            if not label["name"].startswith("review:")
+        ] + [{"name": "review:codeant"}]
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(merge_pr, "with_service_evidence", return_value=evidence), \
+             patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True):
+            self.assertFalse(fnw._author_can_repair_review(codeant_pr))
 
     def test_author_repair_enriches_coderabbit_evidence(self):
         candidate = stranded()
@@ -747,12 +780,12 @@ class AuthorGateFixTests(unittest.TestCase):
                     if not label["name"].startswith("review:")
                 ] + labels
                 with patch.object(fnw, "review_evidence", return_value=evidence), \
-                     patch.object(merge_pr, "_with_coderabbit_status") as coderabbit, \
+                     patch.object(merge_pr, "with_service_evidence") as enrich, \
                      patch.object(
-                         merge_pr, "has_authoritative_coderabbit_review",
+                         merge_pr, "has_authoritative_assigned_review",
                      ) as authoritative:
                     self.assertFalse(fnw._author_can_repair_review(candidate))
-                coderabbit.assert_not_called()
+                enrich.assert_not_called()
                 authoritative.assert_not_called()
 
     def test_retired_reviewer_claim_does_not_block_merge(self):
