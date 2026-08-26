@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 425
 import json
 import stat
 import subprocess
@@ -374,6 +375,12 @@ class LoopControlTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         self.assertNotIn("Traceback", res.stderr)
         self.assertEqual(json.loads(res.stdout)["orchestrator"]["state"], "unknown")
+
+        res_human = self.run_cli("status", "--project", self.project_a,
+                                 "--orchestrator-adapter", adapter)
+        self.assertEqual(res_human.returncode, 0)
+        self.assertNotIn("Traceback", res_human.stderr)
+        self.assertIn("Aru loop-control status:", res_human.stdout)
 
         wake_file = self.aru_dir / "native-wake.json"
         for doc in ({"projects": {self.project_a: ["enabled"]}},

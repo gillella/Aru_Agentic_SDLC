@@ -572,6 +572,14 @@ resume_managed_codex_heartbeat() {
 }
 
 apply_continuity_actions() {
+  if [[ "${STOP_LOOP}" == true && "${RESUME_LOOP}" == true ]]; then
+    echo "error: cannot specify both --stop-loop and --resume-loop" >&2
+    return 1
+  fi
+  if [[ "${ENABLE_NATIVE_WAKE}" == true && "${DISABLE_NATIVE_WAKE}" == true ]]; then
+    echo "error: cannot specify both --enable-native-wake and --disable-native-wake" >&2
+    return 1
+  fi
   if [[ "${ENABLE_NATIVE_WAKE}" == true || "${DISABLE_NATIVE_WAKE}" == true ]]; then
     if [[ -z "${PROJECT_PATH}" || "${PROJECT_PATH}" != /* ]]; then
       echo "error: --enable-native-wake/--disable-native-wake requires --project <absolute-path>" >&2

@@ -122,7 +122,16 @@ def query_orchestrator(adapter_cmd: str | None, project: str | None) -> dict:
     state = data.get("state", "unknown")
     if not isinstance(state, str) or state not in {"enabled", "paused", "unknown"}:
         state = "unknown"
-    return {"configured": True, "adapter": data.get("adapter") or adapter_cmd, "state": state, "reason": data.get("reason"), "detail": data.get("detail"), "error": None}
+    adapter_name = data.get("adapter")
+    if not isinstance(adapter_name, str) or not adapter_name:
+        adapter_name = adapter_cmd
+    reason = data.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        reason = str(reason)
+    detail = data.get("detail")
+    if detail is not None and not isinstance(detail, str):
+        detail = str(detail)
+    return {"configured": True, "adapter": adapter_name, "state": state, "reason": reason, "detail": detail, "error": None}
 
 
 def detect_contradictions(marker: dict, orchestrator: dict) -> list[dict]:
