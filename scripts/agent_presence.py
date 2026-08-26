@@ -349,8 +349,10 @@ def _validate_gh_identity_command(command: Sequence[str]) -> None:
 
 
 def _run_gh_json(command: Sequence[str], cwd: Optional[str] = None) -> Any:
+    """Execute an allowlisted gh CLI command for GitHub identity discovery."""
     _validate_gh_identity_command(command)
     try:
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
         result = subprocess.run(
             list(command),
             stdout=subprocess.PIPE,
