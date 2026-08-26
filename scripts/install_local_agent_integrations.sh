@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# line-ceiling: 779
+# line-ceiling: 790
 # install_local_agent_integrations.sh — wire Aru_Agentic_SDLC skills and native adapters for local coding agents
 set -euo pipefail
 
@@ -627,9 +627,13 @@ apply_continuity_actions() {
       if [[ -n "${REASON}" ]]; then
         resume_cmd+=(--reason "${REASON}")
       fi
-      "${resume_cmd[@]}" || return 1
+      local resume_out
+      resume_out="$("${resume_cmd[@]}")" || return 1
+      printf '%s\n' "${resume_out}"
+      if [[ "${resume_out}" != *"No stop requested; continuing"* ]]; then
+        resume_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
+      fi
     fi
-    resume_managed_codex_heartbeat "${PROJECT_PATH}" || return 1
   fi
 }
 

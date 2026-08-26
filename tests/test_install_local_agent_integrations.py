@@ -1,4 +1,4 @@
-# line-ceiling: 525
+# line-ceiling: 570
 import hashlib
 import json
 import os
@@ -518,6 +518,41 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
             self.assertNotIn("No stop requested", res.stdout, payload)
             self.assertEqual(stop_file.read_text(), payload, payload)
             self.assertIn('status = "PAUSED"', toml.read_text(), payload)
+
+    def test_resume_without_active_stop_does_not_reactivate_paused_heartbeat(self):
+        project = "/tmp/aru-proj-a"
+        other_project = "/tmp/aru-proj-b"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--enable-native-wake", "--project", project)
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.joinpath("automation.toml").write_text(
+            f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "PAUSED"\n'
+        )
+
+        # 1. No stop marker exists: project-scoped resume must not reactivate paused heartbeat.
+        res = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("No stop requested; continuing", res.stdout)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+
+        # 2. No stop marker exists: global resume must not reactivate paused heartbeat.
+        res_global = self.run_installer("--resume-loop")
+        self.assertEqual(res_global.returncode, 0, res_global.stderr)
+        self.assertIn("No stop requested; continuing", res_global.stdout)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+
+        # 3. Stop marker exists for a different project: resume for this project must not reactivate heartbeat.
+        self.run_installer("--stop-loop", "--project", other_project)
+        res_other = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res_other.returncode, 0, res_other.stderr)
+        self.assertIn("No stop requested; continuing", res_other.stdout)
+        self.assertIn('status = "PAUSED"', managed.joinpath("automation.toml").read_text())
+
+        # 4. When stop marker actually applied to this project, resume DOES reactivate heartbeat.
+        self.run_installer("--stop-loop", "--project", project)
+        res_active = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res_active.returncode, 0, res_active.stderr)
+        self.assertIn('status = "ACTIVE"', managed.joinpath("automation.toml").read_text())
 
 
 if __name__ == "__main__":
