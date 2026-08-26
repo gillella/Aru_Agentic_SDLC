@@ -1,4 +1,4 @@
-# line-ceiling: 615
+# line-ceiling: 700
 """Contract tests for the run-aru-factory entrypoint skill.
 
 The skill is prose, so these assert the properties a reader depends on rather
@@ -46,78 +46,125 @@ RETIRED_REVIEW_MACHINERY = (
 
 # A skill is allowed to *name* retired machinery, and both of these do -- that
 # is what a denial is. What it may not do is describe the machinery as
-# something the factory has, so every match must sit inside a denial.
-DENIAL_MARKER = re.compile(r"\b(?:never|not|no|nor|neither|without|forbidden|refuses?)\b")
+# something the factory has, so every match must sit inside a limit. "only"
+# counts: "only an operator may reassign it" bounds a hand-off as squarely as
+# "never" denies one.
+LIMIT_MARKER = re.compile(
+    r"\b(?:never|not|no|nor|neither|without|forbidden|refuses?|only)\b"
+)
 
-# A denial only speaks for the clause it stands in. A sentence-wide lookback let
-# a denial of one thing vouch for a different mechanism raised later in the same
-# sentence, so "not a review queue; the picker rotates reviewers" read as denied
-# (#454). The lookback therefore stops at the nearest break before the match:
-# the end of the previous sentence, or a boundary that starts a new predicate.
 SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\n")
 
-# A fresh subject after a connector is what separates "; the picker rotates"
-# from the coordinated denials these skills carry ("not a review queue,
-# rotation, scheduler"), whose later items continue the denied list rather than
-# assert anything. Indefinite subjects are left out on purpose: "or a roster"
-# is far more often the tail of a denial than the head of a restoration.
-SUBJECT = r"(?:the|this|that|these|those|it|its|they|their|we|our|you|each|every|another)"
-CLAUSE_BREAK = re.compile(
-    rf";|:\s|\s--\s|\u2014"
-    rf"|\b(?:and|but|or|yet|so|while|then|though|whereas)\s+{SUBJECT}\b"
-    rf"|,\s*{SUBJECT}\b"
+# Twice this guard tried to infer which words a limit covers from how near they
+# sit to it. A sentence-wide lookback let an unrelated "never" vouch for the
+# next mechanism; narrowing it to the clause still missed a restoration
+# introduced by a conjunction, a subordinator, or a bare-plural subject --
+# "reassignment is never automatic and reviewers are drawn from a pool" read as
+# denied (#454). Proximity is not scope, and every widening of a *suppressor*
+# buys a new blind spot.
+#
+# So the limits are named instead, and a mention counts as bounded only when it
+# falls inside one of these spans -- which is what ties a limit to the exact
+# words it limits. Quoting them is safe in the direction a forbidden-phrase list
+# never was: this list fails closed. Prose that reintroduces machinery or hands
+# a PR on matches nothing here and is reported whatever precedes it, so widening
+# what a skill may say means quoting its new limit here deliberately.
+APPROVED_LIMITS = (
+    r"slack is not a queue",
+    r"never a secondary local task queue or an ungated merge",
+    r"the picker resumes it but never creates a coding-agent review queue",
+    r"not a review queue, rotation, scheduler, or permission to select a pr yourself",
+    r"reassignment is never automatic",
+    r"only an operator may reassign it to sourcery or codeant, recording the concrete"
+    r" unavailability or excessive wait that justified the move",
+    r"only an operator may move one stalled pr from coderabbit to sourcery or codeant"
+    r" with `reassign_review\.py`",
+    r"a coding agent may review only when `reassign_review\.py` has already moved one pr",
 )
 
 
-def clause_start(text, position):
-    """Offset where the clause containing `position` begins."""
-    ends = [match.end() for match in SENTENCE_BREAK.finditer(text, 0, position)]
-    ends += [match.end() for match in CLAUSE_BREAK.finditer(text, 0, position)]
-    return max(ends, default=0)
+# The sentences the two skills actually use to bound this machinery, quoted so
+# the guard's own false-positive cases are the real prose rather than a
+# plausible paraphrase of it.
+APPROVED_SKILL_DENIALS = (
+    "slack is not a queue; direct `gh` only when no helper exists.",
+    "never a secondary local task queue or an ungated merge.",
+    "the picker resumes it but never creates a coding-agent review queue.",
+    "this is recovery of one explicit assignment, not a review queue, rotation,"
+    " scheduler, or permission to select a pr yourself.",
+)
 
 
-def clause_end(text, position):
-    """Offset where the clause containing `position` ends."""
-    breaks = (SENTENCE_BREAK.search(text, position), CLAUSE_BREAK.search(text, position))
-    return min([match.start() for match in breaks if match], default=len(text))
+def limit_spans(text):
+    """Offsets of every approved limit in `text`."""
+    return [
+        match.span() for pattern in APPROVED_LIMITS for match in re.finditer(pattern, text)
+    ]
 
 
-def sentence_with(text, phrase):
-    """The sentence holding `phrase`, so a clause is read in its own context."""
-    position = text.index(phrase)
+def is_limited(spans, match):
+    """Whether `match` lies wholly inside a limit, rather than merely after one."""
+    return any(start <= match.start() and match.end() <= end for start, end in spans)
+
+
+def sentence_at(text, position):
+    """The sentence holding `position`, so a claim is read in its own context."""
     starts = [match.end() for match in SENTENCE_BREAK.finditer(text, 0, position)]
     following = SENTENCE_BREAK.search(text, position)
     return text[max(starts, default=0):following.start() if following else len(text)]
 
 
+def sentence_with(text, phrase):
+    """The sentence holding `phrase`, or "" so a missing anchor fails loudly."""
+    return sentence_at(text, text.index(phrase)) if phrase in text else ""
+
+
+def numbered_rule(text, number):
+    """Guardrail `number` alone, so a rule is asserted where a reader meets it."""
+    match = re.search(rf"^{number}\. (.*?)(?=\n\S|\Z)", text, re.M | re.S)
+    return flat(match.group(1)) if match else ""
+
+
 def restored_machinery(text):
-    """Machinery mentions in `text` that no denial in their clause rules out."""
+    """Machinery mentions in `text` that no approved limit covers."""
+    spans = limit_spans(text)
     return [
         match.group(0)
         for pattern in RETIRED_REVIEW_MACHINERY
         for match in re.finditer(pattern, text)
-        if not DENIAL_MARKER.search(text, clause_start(text, match.start()), match.start())
+        if not is_limited(spans, match)
     ]
 
 
 # The review contract is a pair of claims -- CodeRabbit by default, reassignment
 # only by an operator -- and a document can carry every required phrase while a
-# neighbouring clause hands the PR to the next provider on its own (#454). So
-# automatic hand-off language is read the way machinery is: it may stand only
-# where a denial in the same clause is what makes it true.
+# neighbouring sentence hands the PR to the next provider on its own (#454). So
+# hand-off language is read the way machinery is: it stands only inside a limit.
 AUTOMATIC_CUE = re.compile(r"\b(?:automatic\w*|by default|on its own|unattended|itself)\b")
 HANDOFF_CUE = re.compile(
     r"\b(?:reassign\w*|hand(?:s|ed|ing)?[\s-]off|falls?[\s-]back|moves?|switch\w*)\b"
 )
 
 
-def unqualified_automatic_handoff(text):
-    """Clauses making provider hand-off automatic without denying it."""
+def unqualified_handoff(text):
+    """Hand-off language in `text` that no approved limit bounds.
+
+    Two shapes break the contract and only one of them says "automatic". "The
+    router falls back to CodeAnt" names no actor and carries no automatic word,
+    so it is the bare hand-off that has to be caught; a sentence that keeps a
+    limit verbatim and adds automaticity beside it is caught by the second
+    pass. Sentence scope is deliberate: this reports rather than suppresses, so
+    reading wider errs towards flagging.
+    """
+    spans = limit_spans(text)
     contradictions = []
+    for cue in HANDOFF_CUE.finditer(text):
+        if not is_limited(spans, cue):
+            contradictions.append(sentence_at(text, cue.start()).strip())
     for cue in AUTOMATIC_CUE.finditer(text):
-        clause = text[clause_start(text, cue.start()):clause_end(text, cue.end())]
-        if HANDOFF_CUE.search(clause) and not DENIAL_MARKER.search(clause):
-            contradictions.append(clause.strip())
+        sentence = sentence_at(text, cue.start())
+        if not is_limited(spans, cue) and HANDOFF_CUE.search(sentence):
+            contradictions.append(sentence.strip())
     return contradictions
 
 
@@ -277,24 +324,38 @@ class GovernanceTests(unittest.TestCase):
             self.assertNotIn("auto-assign a free identity", text)
 
     def test_review_paths_keep_external_default_and_agent_exception_narrow(self):
-        """The router must name every authority without creating a scheduler."""
+        """The router must name every authority without creating a scheduler.
+
+        Presence anywhere in a 239-line router proves nothing about the rule a
+        reader actually lands on: the phrases could sit in the references while
+        the guardrail said something else (#454). So the whole contract is
+        asserted inside guardrail 8, which is where the router states it.
+        """
         text = skill_text()
-        for provider in ("CodeRabbit", "Sourcery", "CodeAnt", "review:agent"):
-            self.assertIn(provider, text, f"review path missing: {provider}")
-        self.assertIn("emergency-only", text)
-        self.assertIn("review:coderabbit", text)
-        self.assertIn("reassignment is never automatic", text)
-        self.assertIn("Only an operator", text)
-        # Both operator-declared conditions, or the router forbids a fallback
-        # the helper and the code-review skill both allow (#454).
-        self.assertIn(
+        rule = numbered_rule(text, 8)
+        self.assertIn("agent review is emergency-only", rule)
+        for clause in (
+            "new prs get exactly `review:coderabbit`",
+            "reassignment is never automatic",
+            "only an operator may move one stalled pr",
+            "from coderabbit to sourcery or codeant with `reassign_review.py`",
+            "recording the concrete reason",
+            # Both operator-declared conditions, or the router forbids a
+            # fallback the helper and the code-review skill both allow (#454).
             "external exhaustion or an operator-declared excessive wait",
-            flat(text),
-        )
-        self.assertIn("never creates a coding-agent review", text)
-        self.assertIn("address-pr-feedback", text)
+            "select one independent `review:agent`",
+            "never creates a coding-agent review queue",
+        ):
+            self.assertIn(clause, rule, f"guardrail 8 missing: {clause}")
         self.assertEqual(
-            [], unqualified_automatic_handoff(flat(text)), "router hands off automatically"
+            [], unqualified_handoff(rule), "router hands off automatically"
+        )
+        # Routing lives in the picker's table, so it is read there too.
+        self.assertIn("| `feedback` | `address-pr-feedback` |", text)
+        self.assertIn(
+            "`code-review`, only when the picker is resuming this exact agent's"
+            " preassigned `review:agent` emergency fallback",
+            flat(text),
         )
         self.assertNotIn("gh pr review --approve", text)
 
@@ -311,34 +372,38 @@ class GovernanceTests(unittest.TestCase):
         self.assertNotIn("SKILL.md", review)
         self.assertNotIn("skills/address-pr-feedback", review)
 
+    # Each required phrase is bound to the sentence that has to carry it. A
+    # phrase present anywhere proves only that the words exist somewhere: the
+    # default could be stated for one provider and the operator condition for
+    # another, or the qualifier could sit two paragraphs from the permission it
+    # is supposed to bound, and every assertion would still pass (#454).
+    REVIEW_CONTRACT = (
+        ("`create_pr.py` labels every new pr", ("`review:coderabbit`",)),
+        ("only an operator may reassign", (
+            "sourcery or codeant",
+            "recording the concrete unavailability or excessive wait",
+        )),
+        ("a coding agent may review only when", (
+            "`reassign_review.py` has already moved one pr",
+            "to exactly `review:agent`",
+            "external exhaustion or an operator-declared excessive wait",
+            "assigned exactly `reviewer:<current_agent_id>`",
+        )),
+        ("this is recovery of one explicit assignment", (
+            "not a review queue, rotation, scheduler",
+        )),
+    )
+
     def test_review_skill_states_the_default_and_the_explicit_fallback(self):
         """CodeRabbit at creation; Sourcery/CodeAnt only on an operator move."""
         review = flat(REVIEW_SKILL.read_text(encoding="utf-8"))
-        for clause in (
-            "review:coderabbit",
-            "only an operator may reassign",
-            "sourcery or codeant",
-            "reassignment is never automatic",
-            "reassign_review.py",
-            "external exhaustion or an operator-declared excessive wait",
-            "not a review queue, rotation, scheduler",
-        ):
-            self.assertIn(clause, review, f"review contract missing: {clause}")
-        # Presence anywhere is also satisfied by a document that says elsewhere
-        # that the router hands off by itself (#454), so the two load-bearing
-        # clauses are read in their sentence and contradictions are rejected.
-        reassignment = sentence_with(review, "may reassign")
-        self.assertIn("only an operator", reassignment)
-        self.assertIn("sourcery or codeant", reassignment)
-        emergency = sentence_with(review, "may review only when")
-        for clause in (
-            "reassign_review.py",
-            "external exhaustion or an operator-declared excessive wait",
-            "reviewer:<current_agent_id>",
-        ):
-            self.assertIn(clause, emergency, f"emergency assignment unbounded: {clause}")
+        for anchor, clauses in self.REVIEW_CONTRACT:
+            sentence = sentence_with(review, anchor)
+            for clause in clauses:
+                self.assertIn(clause, sentence, f"{anchor!r} does not carry: {clause}")
+        self.assertIn("reassignment is never automatic.", review)
         self.assertEqual(
-            [], unqualified_automatic_handoff(review), "review skill hands off automatically"
+            [], unqualified_handoff(review), "review skill hands off automatically"
         )
 
     def test_no_retired_review_machinery_is_restored(self):
@@ -364,60 +429,80 @@ class GovernanceTests(unittest.TestCase):
             "a scheduler dashboard shows each reviewer's backlog",
         ):
             self.assertTrue(restored_machinery(restored), f"undetected: {restored}")
-        for denial in (
-            "not a review queue, rotation, scheduler, or permission to select",
-            "the picker resumes it but never creates a coding-agent review queue",
-            "it does not track capacity, rotate agents, or create a second queue",
-        ):
+        for denial in APPROVED_SKILL_DENIALS:
             self.assertEqual([], restored_machinery(denial), f"false positive: {denial}")
 
-    def test_a_denial_does_not_reach_past_its_own_clause(self):
-        """#454: a denial covered later prose in the same sentence.
+    def test_a_denial_does_not_reach_past_what_it_denies(self):
+        """#454: a denial vouched for prose it does not govern.
 
-        Both halves of each line below are things the skills genuinely say, and
-        the denial is real -- but it answers reassignment, not the clause after
-        it. A detector that lets the "never" carry across a full stop, a
-        semicolon, or a conjunction goes quiet on the one shape it exists to
-        catch: machinery reintroduced beside a denial of something else. The
-        denials underneath coordinate one list, so they must stay clear.
+        Each line pairs a denial the skills genuinely make with a restoration
+        of something else, joined the ways English actually joins them: a full
+        stop, a semicolon, a coordinator with its own subject, a bare-plural
+        subject, a subordinator. A guard that reads the denial as covering the
+        second half goes quiet on the one shape it exists to catch. The real
+        denials underneath coordinate a single list and must stay clear.
         """
-        for restored in (
-            "reassignment is never automatic. the picker rotates reviewers",
-            "this is not a review queue; the picker rotates reviewers",
-            "reassignment is never automatic and the picker rotates reviewers",
-            "reassignment is never automatic, the picker rotates reviewers",
-            "not a review queue, rotation, or scheduler, but it rotates reviewers",
+        for restored, expected in (
+            ("reassignment is never automatic. the picker rotates reviewers", "rotate"),
+            ("the picker resumes it but never creates a coding-agent review queue;"
+             " the picker rotates reviewers", "rotate"),
+            ("reassignment is never automatic and reviewers are drawn from a pool", "pool"),
+            ("reassignment is never automatic, so reviewers rotate nightly", "rotate"),
+            ("reassignment is never automatic because capacity tracking picks the"
+             " least loaded agent", "capacity"),
+            ("not a review queue, rotation, scheduler, or permission to select a pr"
+             " yourself, but it rotates reviewers", "rotate"),
         ):
-            self.assertEqual(["rotate"], restored_machinery(restored), f"undetected: {restored}")
-        for denied in (
-            "the picker never rotates reviewers",
-            "not a review queue, rotation, scheduler, or permission to select",
-            "it does not track capacity, rotate agents, or create a second queue",
-        ):
+            self.assertEqual(
+                [expected], restored_machinery(restored), f"undetected: {restored}"
+            )
+        for denied in APPROVED_SKILL_DENIALS:
             self.assertEqual([], restored_machinery(denied), f"false positive: {denied}")
+
+    def test_the_approved_limits_stay_limits_the_skills_state(self):
+        """The allowlist is now the suppressor, so it must not become a permit.
+
+        A pattern carrying no limiting word, or one no skill says, would
+        license every mention it spans while reading as a denial in the diff.
+        """
+        corpus = " ".join(
+            flat(path.read_text(encoding="utf-8")) for path in (SKILL, REVIEW_SKILL)
+        )
+        for pattern in APPROVED_LIMITS:
+            self.assertTrue(LIMIT_MARKER.search(pattern), f"limits nothing: {pattern}")
+            self.assertRegex(corpus, pattern, f"limit no skill states: {pattern}")
 
     def test_the_hand_off_detector_reads_contradictions_in_context(self):
         """#454: required wording plus contradictory prose must still fail.
 
         Each contradiction keeps the contract's own sentence intact and adds a
         clause that undoes it -- the shape a presence-only assertion cannot
-        see. The denials beneath it are what the two skills actually say.
+        see. The last one names no actor and no automatic word at all, which is
+        why the detector cannot key on "automatic" alone. The limits beneath it
+        are what the two skills actually say.
         """
         for contradiction in (
             "reassignment is never automatic. the picker automatically reassigns the pr",
             "reassignment is never automatic, but the router falls back to codeant on its own",
+            "reassignment is never automatic although the pr moves to sourcery by default",
             "when external review stalls the pr moves to codeant automatically",
+            "reassignment is never automatic, and the router falls back to codeant",
         ):
             self.assertTrue(
-                unqualified_automatic_handoff(contradiction), f"undetected: {contradiction}"
+                unqualified_handoff(contradiction), f"undetected: {contradiction}"
             )
-        for denial in (
-            "reassignment is never automatic",
-            "only an operator may reassign it to sourcery or codeant",
-            "the router never falls back to another provider automatically",
+        for limited in (
+            "reassignment is never automatic.",
+            "new prs get exactly `review:coderabbit`; reassignment is never automatic.",
+            "only an operator may reassign it to sourcery or codeant, recording the"
+            " concrete unavailability or excessive wait that justified the move.",
+            "only an operator may move one stalled pr from coderabbit to sourcery or"
+            " codeant with `reassign_review.py`, recording the concrete reason.",
+            "a coding agent may review only when `reassign_review.py` has already"
+            " moved one pr to exactly `review:agent`.",
         ):
             self.assertEqual(
-                [], unqualified_automatic_handoff(denial), f"false positive: {denial}"
+                [], unqualified_handoff(limited), f"false positive: {limited}"
             )
 
     def test_cursor_code_review_command_is_an_emergency_router(self):
