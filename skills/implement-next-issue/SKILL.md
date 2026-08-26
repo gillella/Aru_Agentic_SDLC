@@ -26,10 +26,7 @@ This skill dictates the step-by-step, tool-agnostic workflow for an AI coding ag
 ```mermaid
 flowchart TD
     A[1. Session State Check] --> B[2. Select Next Actionable Issue]
-    B --> C{Independent Task?}
-    C -- Yes --> D[Optional: Spawn Parallel Subagent]
-    C -- No --> E[3. Claim Issue & Set Status: In Progress]
-    D --> E
+    B --> E[3. Claim Issue & Set Status: In Progress]
     E --> F[4. Create Isolated Git Worktree / Branch]
     F --> P[4b. Plan Gate Before First Edit]
     P --> G[5. Research & Implement Solution]
@@ -57,8 +54,11 @@ flowchart TD
 GitHub user, so assignment cannot tell them apart. The `agent:<id>` label is
 the real identity, and `--agent` is required on every claim.
 
-1. Retrieve candidates: `python3 "$ARU_SDLC_HOME/scripts/fetch_next_issue.py" --agent <AGENT_ID>`
-2. The picker already excludes: epics, issues held by another agent, issues with
+1. For unselected work, use the single lifecycle picker:
+   `python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <AGENT_ID> --claim --json`.
+   For a named issue, inspect that issue and continue to Step 3 without asking
+   the picker to select a different item.
+2. The single picker already excludes: epics, issues held by another agent, issues with
    unresolved `depends-on:`, and issues whose `touches:` paths collide with work
    currently in flight.
 3. If the picker reports an in-flight issue for your agent id, **resume that
@@ -74,12 +74,9 @@ releases automatically.
 1. Execute: `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ISSUE_ID> --agent <AGENT_ID>`
 2. **Check the exit code.** `0` claimed, `2` conflict (another agent won — pick
    the next candidate, do NOT proceed), `1` error.
-3. Or let the picker do both in one step:
-   `python3 "$ARU_SDLC_HOME/scripts/fetch_next_issue.py" --agent <AGENT_ID> --claim`
-   It walks candidates and takes the first claim that succeeds.
-4. To hand work back: `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID> --release`
+3. To hand work back: `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID> --release`
 
-### Step 3b: Running Several Agents
+### Step 3b: Coordination boundaries
 
 1. Give each agent a distinct id (`agent-1`, `agent-2`, …).
 2. Every issue MUST declare `touches:` in its body listing the paths it will
@@ -87,9 +84,7 @@ releases automatically.
    nothing about two agents editing the same file. The picker rejects a Ready
    issue whose `touches:` declaration is empty, so triage must complete this
    metadata before an agent can claim it.
-3. Release abandoned claims periodically:
-   `python3 "$ARU_SDLC_HOME/scripts/fetch_next_issue.py" --agent <ID> --reap-after 4`
-4. Beyond ~3 concurrent agents, give each its own clone rather than sharing one
+3. Beyond ~3 concurrent agents, give each its own clone rather than sharing one
    `.git`. Worktree creation retries on lock contention, but separate clones
    remove the contention entirely.
 
@@ -141,34 +136,19 @@ or other irreversible work from the plan gate.
    framework helper must still use that helper.
 2. The plan is **post-and-proceed**. Once the comment is visible on the issue,
    continue without waiting for a human response. Money, PII, security, schema,
-   migration, irreversible behavior, large diffs, and review-round count change
-   the plan, test, and review depth; none creates a human acknowledgement gate.
+   migration, irreversible behavior, and large diffs change the plan, test,
+   and review depth; none creates a human acknowledgement gate.
 3. If the approach materially changes before implementation, post an amended
    plan before making the newly planned edits.
 4. If a required product decision is absent from the issue, document the
-   concrete options and leave the issue blocked for clarification. This is
-   requirement discovery, not a mandatory human review of an otherwise
-   complete implementation. Store the concise blocker or decision in an
-   operator-owned `0600` file using a non-shell file-writing mechanism, and set
-   `ARU_ALERT_TEXT_FILE` or `ARU_ALERT_DECISION_FILE` to that path. After the
-   GitHub comment, notify the Slack control room once via
-   `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" --project-id <PROJECT_ID>
-   --agent <AGENT_ID> --family <FAMILY> --event blocked --repo <OWNER/REPO>
-   --issue <N> --repo-dir <CONSUMER_REPO_ROOT> --text-file "$ARU_ALERT_TEXT_FILE"`.
-   Use `--event hitl --decision-file "$ARU_ALERT_DECISION_FILE"` instead when a
-   human decision is required. The registry record, not these compatibility
-   flags, is authoritative for repository identity and checkout path. See
-   `prompts/fleet-worker.md` for complete examples.
-   Do not post heartbeats or steal another agent's claim.
+   concrete options on the issue and leave it blocked for clarification. This
+   is requirement discovery, not a mandatory human review of an otherwise
+   complete implementation. Stop after reporting the exact decision needed;
+   do not create a local queue or another coordination record.
 5. If work cannot start because of an unresolved `depends-on` or a peer holds
    an overlapping `touches:` claim, comment on the issue naming the peer
-   `agent:` id and the issue/PR they hold, then
-   `python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" --project-id <PROJECT_ID>
-   --agent <AGENT_ID> --family <FAMILY> --event waiting-on --repo <OWNER/REPO>
-   --issue <N> --waiting-on-agent <id> --waiting-on-issue <peer-issue>
-   --repo-dir <CONSUMER_REPO_ROOT>
-   --text-file "$ARU_ALERT_TEXT_FILE"`. Release
-   or wait; never steal the claim.
+   `agent:` id and the issue/PR they hold. Release or wait; never steal the
+   claim or create a second work queue.
 
 ### Step 5: Implement Solution
 1. Confirm the plan gate is satisfied when it applies.
@@ -267,5 +247,5 @@ or other irreversible work from the plan gate.
    issue, move it to Done, and clean up the issue branch/worktree.
 4. Human intervention is exceptional: request it only when a severe merge
    conflict or merge/close-out failure remains unsafe or impossible for agents
-   to resolve through governed remediation. Risk category, diff size, and
-   review-round count alone never require it.
+   to resolve through governed remediation. Risk category and diff size alone
+   never require it.

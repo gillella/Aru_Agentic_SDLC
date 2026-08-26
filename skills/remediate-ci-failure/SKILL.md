@@ -33,39 +33,10 @@ This skill provides a structured failure diagnosis protocol for inspecting and f
 | **Type Compiler Error** | `TypeScript error TS...`, `mypy error`, `compile error` | Correct variable/function type annotations to match schema definitions. |
 | **Missing Dependency / Env** | `ModuleNotFoundError`, `Command not found`, `Missing secret` | Update build manifest / package dependencies or notify maintainer if environment secret is missing. |
 
-#### Blocking and HITL notification
-
-Ordinary actionable CI failures stay in the GitHub remediation loop and do
-not produce Slack noise. If remediation is blocked by an unavailable
-dependency/agent, a missing product decision, exhausted credentials/credits,
-or a severe failure that cannot be resolved safely, use one of these complete
-consumer-repository commands. First write the concise, secret-safe summary or
-decision to an operator-owned `0600` file using a non-shell file-writing
-mechanism, then set `ARU_ALERT_TEXT_FILE` or `ARU_ALERT_DECISION_FILE` to its
-path:
-
-```bash
-python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
-  --project-id <PROJECT_ID> --agent <AGENT_ID> --family <FAMILY> \
-  --event blocked --repo <OWNER/REPO> --pr <PR_ID> \
-  --repo-dir <CONSUMER_REPO_ROOT> --text-file "$ARU_ALERT_TEXT_FILE"
-
-python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
-  --project-id <PROJECT_ID> --agent <AGENT_ID> --family <FAMILY> \
-  --event hitl --repo <OWNER/REPO> --pr <PR_ID> \
-  --repo-dir <CONSUMER_REPO_ROOT> --decision-file "$ARU_ALERT_DECISION_FILE"
-```
-
-The project registry is authoritative for the repository slug and checkout
-path; `--repo` and `--repo-dir` remain compatibility/documentation fields and
-cannot redirect an alert.
-
-The helper must write its durable GitHub alert comment before posting to
-Slack. For HITL, state only the decision needed; the configured operator
-allowlist supplies the mention. Never include prompts, diffs, tokens, test
-logs, or credential values. Slack failure does not halt GitHub remediation,
-but the helper's structured failure audit must remain available for retry and
-recovery evidence.
+If remediation is blocked by an unavailable dependency, a missing product
+decision, exhausted credentials, or a severe failure that cannot be resolved
+safely, record a concise secret-safe blocker on the PR and stop. GitHub remains
+the durable coordination record; do not create another queue or local ledger.
 
 ### Step 3: Local Verification & Fix Commit
 1. Reproduce the failure locally inside the branch worktree.

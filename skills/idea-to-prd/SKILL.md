@@ -14,6 +14,9 @@ do_not_trigger_for:
 
 # Idea-to-PRD Procedure
 
+Lifecycle classification: optional pre-intake planning tool. The runtime
+kernel never invokes it, and it never claims, reviews, or merges board work.
+
 This skill owns orchestration only. It wraps the existing `grill-aru` skill,
 converts the resulting decisions into a stable PRD contract, obtains explicit
 operator approval, and publishes the approved artifact to the governed GitHub
@@ -189,15 +192,15 @@ approved PRD -> specify -> plan -> tasks via prd-to-issues -> governed issue lif
 
 ## Fail-Closed Example
 
-If an idea proposes a Slack intake bot but the operator has not decided whether
-direct messages are accepted, record it as:
+If an idea proposes a support intake bot but the operator has not decided
+whether private messages are accepted, record it as:
 
 ```text
-OQ-001: Does the intake bot accept direct messages?
+OQ-001: Does the intake bot accept private messages?
 Blocking: yes
 Owner: Product owner
-Decision needed: channel-only or channel-and-DM intake
+Decision needed: shared-channel-only or shared-and-private intake
 ```
 
-Set readiness to `BLOCKED`. Do not choose channel-only or channel-and-DM on the
-operator's behalf.
+Set readiness to `BLOCKED`. Do not choose shared-channel-only or
+shared-and-private intake on the operator's behalf.
