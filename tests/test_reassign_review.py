@@ -1,3 +1,5 @@
+# +90 for #472 trusted marker provenance and concurrent-reassignment coverage.
+# line-ceiling: 490
 """Tests for the governed review-reassignment helper added in #435."""
 
 import sys
@@ -16,6 +18,12 @@ HEAD = "0d2a6d0848b5d4e2e6ed03fff73885fbc81f832d"
 def pr(*labels, state="OPEN", head=HEAD):
     return {"state": state, "headRefOid": head,
             "labels": [{"name": n} for n in labels]}
+
+
+def comment(body, login="gillella", kind="User", association="OWNER"):
+    """One REST issue comment with the provenance GitHub actually returns."""
+    return {"body": body, "user": {"login": login, "type": kind},
+            "author_association": association}
 
 
 class CurrentAuthorityTests(unittest.TestCase):
@@ -45,35 +53,84 @@ class CurrentAuthorityTests(unittest.TestCase):
 
 
 class ReassignmentHistoryTests(unittest.TestCase):
-    def test_complete_valid_audit_marker_is_returned(self):
-        body = rr.audit_body(
-            "review:coderabbit", "review:sourcery", "sourcery", "provider stalled", HEAD)
+    @staticmethod
+    def _history(comments):
         with patch.object(rr, "get_repo_slug", return_value="owner/repo"), \
-                patch.object(rr, "fetch_paginated_gh_api", return_value=[{"body": body}]):
-            history = rr.reassignment_history(433)
+                patch.object(rr, "fetch_paginated_gh_api", return_value=comments):
+            return rr.reassignment_history(433)
+
+    @staticmethod
+    def _valid_marker():
+        return rr.audit_body("review:coderabbit", "review:sourcery", "sourcery",
+                             "provider stalled", HEAD)
+
+    def test_complete_valid_audit_marker_is_returned(self):
+        history = self._history([comment(self._valid_marker())])
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["from"], "review:coderabbit")
         self.assertEqual(history[0]["to"], "review:sourcery")
 
     def test_malformed_audit_marker_fails_closed(self):
         body = "<!-- aru-review-reassignment:v1 not-json -->"
-        with patch.object(rr, "get_repo_slug", return_value="owner/repo"), \
-                patch.object(rr, "fetch_paginated_gh_api", return_value=[{"body": body}]):
-            self.assertIsNone(rr.reassignment_history(433))
+        self.assertIsNone(self._history([comment(body)]))
 
     def test_incomplete_comment_inventory_fails_closed(self):
-        with patch.object(rr, "get_repo_slug", return_value="owner/repo"), \
-                patch.object(rr, "fetch_paginated_gh_api", return_value=None):
-            self.assertIsNone(rr.reassignment_history(433))
+        self.assertIsNone(self._history(None))
+
+    def test_marker_from_an_untrusted_commenter_is_ignored(self):
+        """Anyone who can see the PR can comment on it; that is not authority.
+
+        Counting a drive-by marker would let an outsider fabricate a history
+        that refuses the permitted fallback and blocks every later
+        reassignment - an authorization bypass whose effect is denial of
+        service. Ignoring rather than refusing is what denies that lever.
+        """
+        for login, kind, association in (
+            ("outsider", "User", "NONE"),
+            ("drive-by", "User", "CONTRIBUTOR"),
+            ("first-timer", "User", "FIRST_TIME_CONTRIBUTOR"),
+            ("some-app[bot]", "Bot", "OWNER"),
+        ):
+            with self.subTest(association=association, kind=kind):
+                forged = comment(self._valid_marker(), login=login, kind=kind,
+                                 association=association)
+                self.assertEqual(self._history([forged]), [])
+                # A trusted record alongside it still counts exactly once.
+                mixed = self._history([forged, comment(self._valid_marker())])
+                self.assertEqual(len(mixed), 1)
+
+    def test_malformed_marker_from_an_untrusted_commenter_is_not_fatal(self):
+        forged = comment("<!-- aru-review-reassignment:v1 not-json -->",
+                         login="outsider", association="NONE")
+        self.assertEqual(self._history([forged]), [])
+
+    def test_unreadable_provenance_on_a_marker_fails_closed(self):
+        """Neither trusted nor untrusted: the boundary cannot be located."""
+        marker = self._valid_marker()
+        for missing in ({"body": marker},
+                        {"body": marker, "user": {"login": "gillella", "type": "User"}},
+                        {"body": marker, "author_association": "OWNER"},
+                        {"body": marker, "user": None, "author_association": "OWNER"},
+                        {"body": marker, "user": {"login": "", "type": "User"},
+                         "author_association": "OWNER"}):
+            with self.subTest(comment=missing):
+                self.assertIsNone(self._history([missing]))
+
+    def test_unreadable_provenance_without_a_marker_is_ignored(self):
+        """Ordinary chatter has no provenance requirement to fail closed on."""
+        self.assertEqual(self._history([{"body": "looks good to me"}]), [])
 
 
-class ReassignTests(unittest.TestCase):
+class ReassignHarness:
+    """Shared fixture driver for every reassignment scenario."""
+
     REASON = "CodeRabbit reported Review rate limited at abc1234"
 
     def _run(self, snapshot, service="sourcery",
              edit_results=((0, "", ""), (0, "", "")),
              comment_results=((0, "", ""), (0, "", "")),
-             reviewer="agent-2", family="openai", history=()):
+             reviewer="agent-2", family="openai", history=(),
+             histories=None, snapshots=None, reviewer_login=""):
         calls = []
 
         def fake_run_cmd(cmd, **kwargs):
@@ -83,17 +140,33 @@ class ReassignTests(unittest.TestCase):
             index = len([c for c in calls if (group in c)]) - 1
             return results[min(index, len(results) - 1)]
 
-        with patch.object(rr, "run_gh_json", return_value=snapshot), \
-             patch.object(rr, "reassignment_history", return_value=list(history)), \
+        # `reassign` re-reads the snapshot and the history before and after the
+        # write, so the fixtures are sequences: pass `snapshots`/`histories` to
+        # model a concurrent operator moving underneath this one.
+        snapshot_reads = list(snapshots) if snapshots is not None else [snapshot]
+        history_reads = ([None if item is None else list(item) for item in histories]
+                         if histories is not None else [list(history)])
+
+        def next_read(sequence):
+            return sequence.pop(0) if len(sequence) > 1 else sequence[0]
+
+        with patch.object(rr, "run_gh_json",
+                          side_effect=lambda *a, **k: next_read(snapshot_reads)), \
+             patch.object(rr, "reassignment_history",
+                          side_effect=lambda *a, **k: next_read(history_reads)), \
+             patch.object(rr, "authenticated_login", return_value="gillella"), \
              patch.object(rr, "ensure_label", return_value=True), \
              patch.object(rr, "run_cmd", side_effect=fake_run_cmd):
-            code = rr.reassign(433, service, self.REASON, reviewer, family)
+            code = rr.reassign(433, service, self.REASON, reviewer, family,
+                               reviewer_login)
         return code, calls
 
     @staticmethod
     def _comments(calls):
         return [c[-1] for c in calls if "comment" in c]
 
+
+class ReassignTests(ReassignHarness, unittest.TestCase):
     def test_clean_swap_adds_before_removing(self):
         code, calls = self._run(pr("review:coderabbit", "author:x"))
         self.assertEqual(code, rr.EXIT_OK)
@@ -245,6 +318,126 @@ class ReassignTests(unittest.TestCase):
         code, _ = self._run(pr("review:coderabbit"),
                             comment_results=((0, "", ""), (1, "", "denied")))
         self.assertEqual(code, rr.EXIT_ERROR)
+
+
+class ConcurrentReassignmentTests(ReassignHarness, unittest.TestCase):
+    """Two operators reassigning the same PR must not fabricate a rotation.
+
+    Both can read an empty history, add the same label, and post a valid audit
+    record. The history then shows two moves, so the terminal agent fallback -
+    which refuses a history longer than one - is blocked forever even though
+    authority moved exactly once.
+    """
+
+    PRIOR = {"from": "review:coderabbit", "to": "review:codeant",
+             "head": HEAD, "reason": "provider stalled"}
+
+    def test_history_landing_before_the_write_refuses_without_mutating(self):
+        code, calls = self._run(
+            pr("review:coderabbit", "author:agent-1"),
+            histories=[[], [self.PRIOR]])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "edit" in call], [])
+        self.assertEqual(self._comments(calls), [])
+
+    def test_authority_moving_before_the_write_refuses_without_mutating(self):
+        code, calls = self._run(
+            pr("review:coderabbit"),
+            snapshots=[pr("review:coderabbit"), pr("review:codeant")])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "edit" in call], [])
+
+    def test_head_advancing_before_the_write_refuses_without_mutating(self):
+        code, calls = self._run(
+            pr("review:coderabbit"),
+            snapshots=[pr("review:coderabbit"), pr("review:coderabbit", head="b" * 40)])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "edit" in call], [])
+
+    def test_ambiguous_authority_at_recheck_refuses_without_mutating(self):
+        code, calls = self._run(
+            pr("review:coderabbit"),
+            snapshots=[pr("review:coderabbit"),
+                       pr("review:coderabbit", "review:sourcery")])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "edit" in call], [])
+
+    def test_a_rival_audit_landing_inside_the_window_stops_the_swap(self):
+        """Detected after the audit, when no rollback is possible: leave both
+        labels so the merge gate refuses loudly rather than silently shipping a
+        pull request whose history overstates how often authority moved."""
+        rival = {"from": "review:coderabbit", "to": "review:sourcery",
+                 "head": HEAD, "reason": "rival operator"}
+        code, calls = self._run(
+            pr("review:coderabbit"),
+            histories=[[], [], [rival, self.PRIOR]])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "--remove-label" in call], [])
+        self.assertEqual(len(self._comments(calls)), 1)
+
+    def test_only_this_commands_own_record_landing_completes_the_swap(self):
+        own = {"from": "review:coderabbit", "to": "review:sourcery",
+               "head": HEAD, "reason": ReassignHarness.REASON}
+        code, calls = self._run(pr("review:coderabbit"), histories=[[], [], [own]])
+        self.assertEqual(code, rr.EXIT_OK)
+        self.assertIn("review:coderabbit",
+                      [call[-1] for call in calls if "--remove-label" in call])
+
+    def test_success_without_this_commands_visible_audit_keeps_both_labels(self):
+        code, calls = self._run(pr("review:coderabbit"), histories=[[], [], []])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "--remove-label" in call], [])
+
+    def test_a_same_cardinality_rival_audit_cannot_stand_in_for_this_command(self):
+        rival = {"from": "review:coderabbit", "to": "review:codeant",
+                 "head": HEAD, "reason": "rival operator"}
+        code, calls = self._run(pr("review:coderabbit"), histories=[[], [], [rival]])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "--remove-label" in call], [])
+
+    def test_unreadable_history_after_the_audit_fails_closed(self):
+        code, calls = self._run(pr("review:coderabbit"), histories=[[], [], None])
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual([call for call in calls if "--remove-label" in call], [])
+
+
+class AuthorizedReviewerLoginTests(ReassignHarness, unittest.TestCase):
+    """The emergency assignment names the one account allowed to review."""
+
+    def test_assignment_records_the_authorized_github_login(self):
+        code, calls = self._run(pr("review:codeant", "author:agent-1"),
+                                service="agent", reviewer_login="reviewer-acct")
+        self.assertEqual(code, rr.EXIT_OK)
+        audit = self._comments(calls)[0]
+        self.assertIn('"reviewer_login":"reviewer-acct"', audit)
+        self.assertIn("@reviewer-acct", audit)
+
+    def test_authenticated_login_is_the_default_authorized_account(self):
+        code, calls = self._run(pr("review:codeant", "author:agent-1"), service="agent")
+        self.assertEqual(code, rr.EXIT_OK)
+        self.assertIn('"reviewer_login":"gillella"', self._comments(calls)[0])
+
+    def test_unresolvable_or_malformed_login_refuses_before_any_write(self):
+        for login in ("not a login", "-leading-hyphen", "x" * 60, "a/b"):
+            with self.subTest(login=login):
+                code, calls = self._run(pr("review:codeant", "author:agent-1"),
+                                        service="agent", reviewer_login=login)
+                self.assertEqual(code, rr.EXIT_ERROR)
+                self.assertEqual([call for call in calls if "edit" in call], [])
+
+    def test_external_reassignment_needs_no_reviewer_login(self):
+        with patch.object(rr, "authenticated_login", return_value=None):
+            code, calls = self._run(pr("review:coderabbit"), service="sourcery")
+        self.assertEqual(code, rr.EXIT_OK)
+        self.assertNotIn("reviewer_login", self._comments(calls)[0])
+
+    def test_authenticated_login_reads_the_gh_identity(self):
+        with patch.object(rr, "run_cmd", return_value=(0, "gillella\n", "")):
+            self.assertEqual(rr.authenticated_login(), "gillella")
+        for result in ((1, "", "no auth"), (0, "", ""), (0, "not a login", "")):
+            with self.subTest(result=result), \
+                    patch.object(rr, "run_cmd", return_value=result):
+                self.assertIsNone(rr.authenticated_login())
 
 
 class ArgumentTests(unittest.TestCase):

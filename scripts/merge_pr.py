@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # #414 removed retired review/queue machinery and ratcheted this file down.
 # +190 for #472 terminal emergency-agent exact-head evidence restoration.
-# line-ceiling: 4388
+# +60 for #472 authorized-login binding on emergency-agent review evidence.
+# line-ceiling: 4450
 """merge_pr.py - the Definition-of-Done gate.
 
 Branch protection is not available on every plan, and "CI green before merge"
@@ -70,6 +71,12 @@ AGENT_REVIEW_MODEL_FAMILIES = {
     "anthropic", "openai", "codex", "google", "meta", "mistral", "xai", "human",
 }
 AGENT_REVIEW_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
+# GitHub login grammar, plus the ``[bot]`` suffix an App identity carries.
+AGENT_REVIEW_LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?")
+# Only an actor with write access can authorize the emergency exception.
+# `authorAssociation` is computed by GitHub per comment and cannot be set
+# by the commenter, so an outside contributor cannot mint an assignment.
+AGENT_REVIEW_TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 # Transient merge-execution claim from claim_merge. Cleared on close-out; never
 # treated as review evidence.
 MERGER_CLAIM_LABEL = "merger:"
@@ -558,15 +565,23 @@ def _collect_agent_marker(node, assignments, attestations):
     trusted = (created is not None and isinstance(author, dict)
                and author.get("__typename") == "User"
                and isinstance(author.get("login"), str) and bool(author["login"]))
+    association = node.get("authorAssociation")
+    # The assignment is the authorization step, so it needs more than a
+    # well-formed author: a marker anyone who can comment could post would let
+    # a collaborator authorize themselves. Write access is the boundary.
+    authorized = (trusted and isinstance(association, str)
+                  and association.strip().upper() in AGENT_REVIEW_TRUSTED_ASSOCIATIONS)
     errors = {"assignment": 0, "attestation": 0}
 
     present, payload = _agent_marker(body, AGENT_REVIEW_ASSIGNMENT_VERSION)
-    required = {"family", "from", "head", "reason", "reviewer"}
+    required = {"family", "from", "head", "reason", "reviewer", "reviewer_login"}
     if present:
-        if (not trusted or not isinstance(payload, dict) or set(payload) != required
+        if (not authorized or not isinstance(payload, dict) or set(payload) != required
                 or payload.get("from") not in REVIEW_SERVICE_LABELS[:3]
                 or not isinstance(payload.get("reviewer"), str)
                 or AGENT_REVIEW_ID_RE.fullmatch(payload["reviewer"]) is None
+                or not isinstance(payload.get("reviewer_login"), str)
+                or AGENT_REVIEW_LOGIN_RE.fullmatch(payload["reviewer_login"]) is None
                 or payload.get("family") not in AGENT_REVIEW_MODEL_FAMILIES
                 or not isinstance(payload.get("reason"), str) or not payload["reason"].strip()
                 or not isinstance(payload.get("head"), str)
@@ -609,7 +624,7 @@ def _review_comment_evidence(owner, name, pr_id, version):  # noqa: C901, PLR091
       repository(owner:$owner, name:$name) {
         pullRequest(number:$pr) {""" + _EVIDENCE_VERSION_FIELDS + """
           comments(first:100, after:$cursor) {
-            nodes { body createdAt author { login __typename } }
+            nodes { body createdAt authorAssociation author { login __typename } }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -1838,6 +1853,20 @@ def _identity_values(pr, prefix):
     return [value for value in (raw.strip() for raw in label_values(pr, prefix)) if value]
 
 
+def _login_matches(candidate, authorized):
+    """True only when ``candidate`` is exactly the authorized GitHub login.
+
+    GitHub logins are case-insensitive, so the comparison is folded; anything
+    that is not a well-formed login on both sides is not a match.
+    """
+    if not isinstance(candidate, str) or not isinstance(authorized, str):
+        return False
+    if (AGENT_REVIEW_LOGIN_RE.fullmatch(candidate) is None
+            or AGENT_REVIEW_LOGIN_RE.fullmatch(authorized) is None):
+        return False
+    return candidate.casefold() == authorized.casefold()
+
+
 def _agent_review_verdict(pr, evidence):  # noqa: C901, PLR0911, PLR0912
     """Validate the terminal operator-assigned independent-agent exception."""
     if not isinstance(pr, dict) or not isinstance(evidence, dict):
@@ -1865,10 +1894,19 @@ def _agent_review_verdict(pr, evidence):  # noqa: C901, PLR0911, PLR0912
     assignment = current_assignments[0]
     assigned_at = _parse_review_ts(assignment.get("assigned_at"))
     family = assignment.get("family")
+    # The one account the write-access assignment authorized to perform this
+    # review. Everything downstream is checked against this, never against a
+    # login the reviewer asserted about itself: binding the review to the
+    # completion marker's own author only proves the two came from the same
+    # account, which any collaborator can arrange for themselves.
+    authorized_login = assignment.get("reviewer_login")
     if (assignment.get("reviewer") != reviewer
             or family not in AGENT_REVIEW_MODEL_FAMILIES
+            or not isinstance(authorized_login, str)
+            or AGENT_REVIEW_LOGIN_RE.fullmatch(authorized_login) is None
             or assigned_at is None or assigned_at <= committed_at):
-        return False, "Emergency assignment identity, family, head, or timing is invalid."
+        return False, ("Emergency assignment identity, authorized GitHub login, family, "
+                       "head, or timing is invalid.")
 
     attestations = evidence.get("agent_review_attestations")
     current = [record for record in attestations or []
@@ -1882,6 +1920,9 @@ def _agent_review_verdict(pr, evidence):  # noqa: C901, PLR0911, PLR0912
             or completed_at is None or completed_at <= assigned_at
             or recorded_at is None or completed_at > recorded_at):
         return False, "Agent completion identity, family, head, or timing is invalid."
+    if not _login_matches(record.get("github_login"), authorized_login):
+        return False, ("The completion record was posted by an account the emergency "
+                       "assignment did not authorize.")
 
     matches = []
     for review in evidence.get("reviews") or []:
@@ -1893,15 +1934,17 @@ def _agent_review_verdict(pr, evidence):  # noqa: C901, PLR0911, PLR0912
         body = review.get("body")
         if ((review.get("commit") or {}).get("oid") == head
                 and author.get("__typename") == "User"
-                and author.get("login") == record.get("github_login")
+                and _login_matches(author.get("login"), authorized_login)
                 and state not in {"PENDING", "DISMISSED", "CHANGES_REQUESTED"}
                 and (state != "COMMENTED" or isinstance(body, str) and body.strip())
                 and submitted is not None and assigned_at <= submitted <= completed_at):
             matches.append(review)
     if not matches:
-        return False, "No substantive independent GitHub review precedes agent completion."
-    return True, (f"Emergency independent review by {reviewer} ({family}) is complete on "
-                  f"current head {head[:12]} with disposition {record['disposition']}.")
+        return False, ("No substantive independent GitHub review by the authorized "
+                       f"account @{authorized_login} precedes agent completion.")
+    return True, (f"Emergency independent review by {reviewer} ({family}) as "
+                  f"@{authorized_login} is complete on current head {head[:12]} "
+                  f"with disposition {record['disposition']}.")
 
 
 def with_service_evidence(pr, pr_id, evidence):

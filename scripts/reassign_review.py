@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # +70 for #472 balanced-pool one-way reassignment history validation.
-# line-ceiling: 330
+# +150 for #472 trusted marker provenance and serialized reassignment commit.
+# line-ceiling: 480
 """reassign_review.py - move one stalled pull request to a fallback reviewer.
 
 `create_pr.py` assigns one balanced external authority. When that service is
@@ -30,7 +31,14 @@ import json
 import re
 import sys
 
-from common import ensure_label, fetch_paginated_gh_api, get_repo_slug, run_cmd, run_gh_json
+from common import (
+    TRUSTED_AUTHOR_ASSOCIATIONS,
+    ensure_label,
+    fetch_paginated_gh_api,
+    get_repo_slug,
+    run_cmd,
+    run_gh_json,
+)
 from create_pr import MODEL_FAMILIES
 
 EXTERNAL_FALLBACK_LABELS = {
@@ -55,6 +63,8 @@ REASSIGNMENT_MARKER_RE = re.compile(
     re.escape(REASSIGNMENT_MARKER_PREFIX) + r"(\{[^\n]*\}) -->")
 _HEAD_RE = re.compile(r"[0-9a-fA-F]{40}")
 _AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
+# GitHub login grammar, plus the `[bot]` suffix an App identity carries.
+_LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?")
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CONFLICT = 2
@@ -90,12 +100,44 @@ def _comment(pr_id: int, body: str):
     return code == 0, (err or "").strip()
 
 
+def marker_provenance(comment):
+    """Classify one REST comment as trusted, untrusted, or unreadable.
+
+    Returns ``"trusted"``, ``"untrusted"``, or ``None``. Write access is the
+    authority signal: `author_association` is computed by GitHub per comment
+    and cannot be set by the commenter, so a drive-by contributor cannot mint
+    one. An unreadable provenance is neither - the caller fails closed rather
+    than guessing which side of the boundary a marker came from.
+    """
+    if not isinstance(comment, dict):
+        return None
+    user = comment.get("user")
+    association = comment.get("author_association")
+    if (not isinstance(user, dict) or not isinstance(user.get("login"), str)
+            or not user["login"] or not isinstance(association, str)
+            or not association.strip()):
+        return None
+    if user.get("type") != "User":
+        return "untrusted"
+    return ("trusted" if association.strip().upper() in TRUSTED_AUTHOR_ASSOCIATIONS
+            else "untrusted")
+
+
 def reassignment_history(pr_id: int):
     """Return complete, well-formed audited moves, or ``None`` if unknown.
 
     A partial comment read must never look like no previous reassignment; that
     would permit a second external hop. The common paginated REST reader keeps
     transport failure distinct from an empty history.
+
+    Only markers posted by an actor with repository write access count. Anyone
+    who can see the pull request can also comment on it, so accepting every
+    matching marker let an outsider fabricate a history that refuses the
+    permitted fallback and blocks all later reassignment - an authorization
+    bypass whose effect is denial of service. Untrusted markers are ignored
+    rather than fatal, so posting one cannot block the command either; only a
+    malformed *trusted* marker, or provenance that cannot be read at all,
+    fails closed.
     """
     slug = get_repo_slug()
     if not slug:
@@ -110,6 +152,13 @@ def reassignment_history(pr_id: int):
         body = comment.get("body") if isinstance(comment, dict) else None
         if not isinstance(body, str):
             return None
+        if REASSIGNMENT_MARKER_PREFIX not in body:
+            continue
+        provenance = marker_provenance(comment)
+        if provenance is None:
+            return None
+        if provenance == "untrusted":
+            continue
         raw_markers = REASSIGNMENT_MARKER_RE.findall(body)
         if body.count(REASSIGNMENT_MARKER_PREFIX) != len(raw_markers):
             return None
@@ -129,13 +178,34 @@ def reassignment_history(pr_id: int):
     return history
 
 
+def authenticated_login():
+    """The GitHub login `gh` is authenticated as, or ``None``.
+
+    This is the account whose review and completion marker the merge gate will
+    later demand, so the assignment has to name it explicitly rather than let
+    the reviewer assert its own identity after the fact.
+    """
+    code, out, _ = run_cmd(["gh", "api", "user", "--jq", ".login"], check=False)
+    if code != 0:
+        return None
+    login = (out or "").strip()
+    return login if _LOGIN_RE.fullmatch(login) else None
+
+
 def audit_body(existing: str, target: str, service: str, reason: str, head: str,
-               reviewer: str = "", family: str = "") -> str:
+               reviewer: str = "", family: str = "", reviewer_login: str = "") -> str:
     """The auditable record of why authority moved, naming the head it moved at.
 
     The head matters because the merge gate is exact-head bound: a reader
     comparing this record against later evidence needs to know which commit was
     live when the reassignment happened.
+
+    For the emergency agent path the record also names ``reviewer_login``: the
+    one GitHub account authorized to submit that review and post the completion
+    marker. Without it the gate could only check that the completion marker and
+    the review came from the same account, which any collaborator can satisfy
+    for themselves; naming the account here is what makes the later check an
+    authorization test rather than a self-consistency test.
     """
     move = json.dumps({"from": existing, "head": head, "reason": reason.strip(),
                        "to": target}, sort_keys=True, separators=(",", ":"))
@@ -143,14 +213,16 @@ def audit_body(existing: str, target: str, service: str, reason: str, head: str,
     agent_record = ""
     if service == AGENT_SERVICE:
         payload = json.dumps({"family": family, "from": existing, "head": head,
-                              "reason": reason.strip(), "reviewer": reviewer},
+                              "reason": reason.strip(), "reviewer": reviewer,
+                              "reviewer_login": reviewer_login},
                              sort_keys=True, separators=(",", ":"))
         agent_record = f"<!-- aru-agent-review-assignment:v1 {payload} -->\n"
     return (move_record + agent_record
             + f"Review authority reassigned from `{existing}` to `{target}`.\n\n"
             f"Reason: {reason.strip()}\n\n"
             f"Head at reassignment: `{head}`\n\n"
-            + (f"Emergency reviewer: `{reviewer}` (`{family}`).\n\n"
+            + (f"Emergency reviewer: `{reviewer}` (`{family}`) reviewing as "
+               f"`@{reviewer_login}`.\n\n"
                if service == AGENT_SERVICE else "")
             + "This is a one-way per-pull-request fallback, not a rotation. "
             "The merge gate now "
@@ -171,8 +243,46 @@ def _validated_snapshot(pr_id: int):
     return pr, None
 
 
-def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa: C901, PLR0911, PLR0912
-             family: str = "") -> int:
+def _recheck_before_commit(pr_id: int, existing: str, head: str, history):
+    """Re-read authority, head, and history immediately before mutating.
+
+    GitHub offers no compare-and-set on labels or comments, so two operators
+    who read an empty history can both add the same target label and both post
+    a valid audit record. The pull request then shows two audited moves, and
+    the terminal agent fallback - which refuses a history longer than one -
+    is blocked forever even though authority moved once.
+
+    Re-reading here does not make the swap atomic; it narrows the window to
+    the interval between this read and the write, and turns the common case
+    (an operator who started seconds earlier and already committed) into a
+    refusal that changes nothing. Returns ``None`` when it is safe to proceed,
+    or an operator-facing message when it is not.
+    """
+    fresh, problem = _validated_snapshot(pr_id)
+    if problem:
+        return f"could not re-read PR #{pr_id} before committing: {problem}"
+    if fresh.get("state") != "OPEN":
+        return f"PR #{pr_id} became {fresh.get('state')} while this reassignment was being prepared"
+    live, problem = current_authority(fresh.get("labels"))
+    if problem:
+        return f"PR #{pr_id} authority changed while this reassignment was being prepared: {problem}"
+    if live != existing:
+        return (f"PR #{pr_id} moved from {existing} to {live} while this reassignment "
+                "was being prepared")
+    if fresh.get("headRefOid") != head:
+        return (f"PR #{pr_id} advanced to head {str(fresh.get('headRefOid'))[:12]} while this "
+                "reassignment was being prepared; evidence is exact-head bound")
+    fresh_history = reassignment_history(pr_id)
+    if fresh_history is None:
+        return f"could not re-establish the reassignment history for PR #{pr_id}"
+    if fresh_history != list(history):
+        return (f"PR #{pr_id} gained a concurrent audited reassignment while this one "
+                "was being prepared")
+    return None
+
+
+def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa: C901, PLR0911, PLR0912, PLR0915
+             family: str = "", reviewer_login: str = "") -> int:
     target = FALLBACK_LABELS.get(service)
     if not target:
         print(f"[ERROR] Unknown fallback service {service!r}; supported: "
@@ -188,6 +298,14 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
         print("[ERROR] Agent fallback requires --reviewer with a safe agent id and "
               f"--model-family from: {', '.join(MODEL_FAMILIES)}.", file=sys.stderr)
         return EXIT_ERROR
+    if service == AGENT_SERVICE:
+        reviewer_login = (reviewer_login or "").strip() or (authenticated_login() or "")
+        if _LOGIN_RE.fullmatch(reviewer_login) is None:
+            print("[ERROR] Agent fallback must name the GitHub account authorized to "
+                  "submit the emergency review. Pass --reviewer-login, or authenticate "
+                  "`gh` as that account so it can be read from `gh api user`.",
+                  file=sys.stderr)
+            return EXIT_ERROR
 
     pr, problem = _validated_snapshot(pr_id)
     if problem:
@@ -247,6 +365,13 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
                   file=sys.stderr)
             return EXIT_CONFLICT
 
+    problem = _recheck_before_commit(pr_id, existing, pr["headRefOid"], history)
+    if problem:
+        print(f"[CONFLICT] Refusing to reassign PR #{pr_id}: {problem}. "
+              "Nothing was changed; re-run once the concurrent move has settled.",
+              file=sys.stderr)
+        return EXIT_CONFLICT
+
     if not ensure_label(target, "5319e7", f"Fallback review authority: {service}"):
         print(f"[ERROR] Could not provision {target}.", file=sys.stderr)
         return EXIT_ERROR
@@ -270,14 +395,30 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
     # Persist the one-way audit while both labels are present. If this write
     # fails, the merge gate sees the intentionally ambiguous state and no
     # caller can mistake the missing history for permission to rotate again.
-    ok, err = _comment(pr_id, audit_body(existing, target, service,
-                                         reason, pr["headRefOid"], reviewer, family))
+    ok, err = _comment(pr_id, audit_body(existing, target, service, reason,
+                                         pr["headRefOid"], reviewer, family,
+                                         reviewer_login))
     if not ok:
         print(f"[ERROR] Added {target} to PR #{pr_id}, but the reason could not "
               f"be recorded: {err}. Both authority labels remain so the merge "
               f"gate blocks; restore {existing} by removing {target}, or record "
               "the audit before completing the swap.", file=sys.stderr)
         return EXIT_ERROR
+
+    # The audit is the committed record, so this is the last point at which a
+    # concurrent move can still be seen. One extra record is this command's
+    # own; more than one means a second operator committed inside the window
+    # and the history now overstates how often authority actually moved.
+    committed = reassignment_history(pr_id)
+    if committed is None or len(committed) > len(history) + 1:
+        detail = ("the reassignment history could not be re-read"
+                  if committed is None else
+                  f"{len(committed) - len(history)} audited moves landed concurrently")
+        print(f"[CONFLICT] PR #{pr_id} recorded this reassignment but {detail}. "
+              f"Both {existing} and {target} remain so the merge gate blocks; an "
+              "operator must remove the label that lost and reconcile the audit "
+              "trail before this pull request can merge.", file=sys.stderr)
+        return EXIT_CONFLICT
 
     code, _, err = run_cmd(["gh", "pr", "edit", str(pr_id), "--remove-label", existing],
                            check=False)
@@ -319,8 +460,13 @@ def main() -> int:
     parser.add_argument("--model-family", "--family", dest="family", default="",
                         choices=MODEL_FAMILIES,
                         help="Independent agent model family; required with --to agent")
+    parser.add_argument("--reviewer-login", dest="reviewer_login", default="",
+                        help=("GitHub account authorized to submit the emergency review; "
+                              "defaults to the `gh` authenticated login. Used only "
+                              "with --to agent."))
     args = parser.parse_args()
-    return reassign(args.pr, args.to, args.reason, args.reviewer, args.family)
+    return reassign(args.pr, args.to, args.reason, args.reviewer, args.family,
+                    args.reviewer_login)
 
 
 if __name__ == "__main__":

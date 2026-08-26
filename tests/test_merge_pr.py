@@ -1,5 +1,6 @@
 # +42 for #472 emergency-agent exact-head authority adversarial coverage.
-# line-ceiling: 7187
+# +90 for #472 authorized-login binding on emergency-agent review evidence.
+# line-ceiling: 7290
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
@@ -386,17 +387,18 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         assignment = json.dumps({
             "family": "openai", "from": "review:codeant", "head": head,
             "reason": "all external services unavailable", "reviewer": "agent-2",
+            "reviewer_login": "gillella",
         }, sort_keys=True, separators=(",", ":"))
         nodes = [
             {"body": f"<!-- aru-agent-review-assignment:v1 {assignment} -->",
-             "createdAt": "2026-08-25T10:01:00Z",
+             "createdAt": "2026-08-25T10:01:00Z", "authorAssociation": "OWNER",
              "author": {"login": "gillella", "__typename": "User"}},
             {"body": f"<!-- aru-agent-review:v1 {payload} -->",
-             "createdAt": "2026-08-25T10:03:00Z",
+             "createdAt": "2026-08-25T10:03:00Z", "authorAssociation": "OWNER",
              "author": {"login": "gillella", "__typename": "User"}},
             {"body": '<!-- aru-review-head:v1 {"agent":"agent-2","head":"'
                      + head + '"} -->',
-             "createdAt": "2026-08-25T10:03:00Z",
+             "createdAt": "2026-08-25T10:03:00Z", "authorAssociation": "OWNER",
              "author": {"login": "gillella", "__typename": "User"}},
         ]
         peer = {
@@ -416,6 +418,49 @@ class ReviewEvidencePaginationTests(unittest.TestCase):
         self.assertEqual(evidence["agent_review_marker_errors"], 0)
         self.assertEqual(len(evidence["agent_review_assignments"]), 1)
         self.assertEqual(evidence["agent_review_assignment_errors"], 0)
+        self.assertEqual(evidence["agent_review_assignments"][0]["reviewer_login"],
+                         "gillella")
+
+    def test_emergency_assignment_needs_write_access_and_an_authorized_login(self):
+        """The assignment is the authorization step, so a marker anyone who can
+        comment could post is not one. Write access is the boundary, and the
+        record has to name the account it authorizes."""
+        head = "a" * 40
+        base = {"family": "openai", "from": "review:codeant", "head": head,
+                "reason": "all external services unavailable", "reviewer": "agent-2",
+                "reviewer_login": "gillella"}
+
+        def node(payload, association="OWNER", typename="User"):
+            body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            return {"body": f"<!-- aru-agent-review-assignment:v1 {body} -->",
+                    "createdAt": "2026-08-25T10:01:00Z",
+                    "authorAssociation": association,
+                    "author": {"login": "gillella", "__typename": typename}}
+
+        rejected = [
+            node(base, association="CONTRIBUTOR"),
+            node(base, association="NONE"),
+            node(base, association="FIRST_TIME_CONTRIBUTOR"),
+            node(base, typename="Bot"),
+            {**node(base), "authorAssociation": None},
+            node({key: value for key, value in base.items()
+                  if key != "reviewer_login"}),
+            node({**base, "reviewer_login": "not a login"}),
+            node({**base, "reviewer_login": ""}),
+        ]
+        for bad in rejected:
+            with self.subTest(node=bad):
+                assignments, errors = [], []
+                merge_pr._collect_agent_marker(bad, assignments, errors)
+                self.assertEqual(assignments, [])
+        for bad in rejected:
+            with self.subTest(counted=bad):
+                counted = merge_pr._collect_agent_marker(bad, [], [])
+                self.assertEqual(counted["assignment"], 1)
+        accepted = []
+        merge_pr._collect_agent_marker(node(base, association="COLLABORATOR"),
+                                       accepted, [])
+        self.assertEqual(len(accepted), 1)
 
     @patch.object(merge_pr, "get_repo_slug", return_value="owner/repo")
     @patch.object(merge_pr, "_gh_json")
@@ -2674,6 +2719,7 @@ class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
             "agent_review_assignments": [{
                 "family": "openai", "from": "review:codeant", "head": self.HEAD,
                 "reason": "External reviewers unavailable", "reviewer": "agent-2",
+                "reviewer_login": "gillella",
                 "assigned_at": "2026-08-25T10:01:00Z",
                 "github_login": "gillella",
             }],
@@ -2734,6 +2780,46 @@ class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
         for pr, evidence in cases:
             with self.subTest(labels=pr["labels"], evidence=evidence):
                 self.assertFalse(merge_pr.check_reviews(pr, evidence)[0])
+
+    def test_a_collaborator_cannot_review_as_the_assigned_agent(self):
+        """The reported hole: the substantive review used to be bound to the
+        completion marker's own author, so anyone who could submit a review and
+        post a well-formed marker naming the assigned agent id satisfied the
+        gate. The authorization now comes from the assignment, which names the
+        one GitHub account allowed to perform this review."""
+        forged = self.evidence()
+        forged["agent_review_attestations"][0]["github_login"] = "impostor"
+        forged["reviews"][0]["author"] = {"login": "impostor", "__typename": "User"}
+        ok, message = merge_pr.check_reviews(self.pr(), forged)
+        self.assertFalse(ok)
+        self.assertIn("did not authorize", message)
+
+    def test_a_review_from_an_unauthorized_account_is_not_substantive_evidence(self):
+        """The completion marker is honest; only the review is somebody else's."""
+        forged = self.evidence()
+        forged["reviews"][0]["author"] = {"login": "impostor", "__typename": "User"}
+        ok, message = merge_pr.check_reviews(self.pr(), forged)
+        self.assertFalse(ok)
+        self.assertIn("authorized account @gillella", message)
+
+    def test_an_assignment_without_an_authorized_login_fails_closed(self):
+        for login in (None, "", "not a login", "-leading", "a/b", 7):
+            with self.subTest(login=login):
+                evidence = self.evidence()
+                evidence["agent_review_assignments"][0]["reviewer_login"] = login
+                ok, message = merge_pr.check_reviews(self.pr(), evidence)
+                self.assertFalse(ok)
+                self.assertIn("authorized GitHub login", message)
+
+    def test_authorized_login_comparison_is_case_folded_like_github(self):
+        evidence = self.evidence()
+        evidence["agent_review_assignments"][0]["reviewer_login"] = "GilleLLa"
+        self.assertTrue(merge_pr.check_reviews(self.pr(), evidence)[0])
+
+    def test_passing_message_names_the_authorized_account(self):
+        ok, message = merge_pr.check_reviews(self.pr(), self.evidence())
+        self.assertTrue(ok, message)
+        self.assertIn("@gillella", message)
 
     def test_no_agent_thread_bucket_masquerades_as_a_service(self):
         payload = {"unresolved": 3,

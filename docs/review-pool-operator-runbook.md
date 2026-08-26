@@ -55,13 +55,30 @@ independent agent:
 ```shell
 python3 "$ARU_SDLC_HOME/scripts/reassign_review.py" --pr <ID> --to agent \
   --reviewer <AGENT_ID> --model-family <FAMILY> \
+  [--reviewer-login <GITHUB_LOGIN>] \
   --reason "<external attempts and excessive-wait decision>"
 ```
 
 The helper replaces one known authority, refuses self-review and ambiguous
-authors, and records the exact head, reviewer, family, and reason. Coding
-agents never perform ordinary review. The helper does not discover reviewers,
-rotate repeatedly, or create a second queue.
+authors, and records the exact head, reviewer, family, reason, and the one
+GitHub account authorized to perform the review. `--reviewer-login` defaults
+to the `gh` authenticated login; pass it explicitly when the reviewing agent
+authenticates as a different account. The merge gate accepts the emergency
+review only from that account, so an assignment recorded against the wrong
+login has to be corrected before the review is submitted. Coding agents never
+perform ordinary review. The helper does not discover reviewers, rotate
+repeatedly, or create a second queue.
+
+Reassignment is not atomic — GitHub offers no compare-and-set on labels or
+comments — so the helper re-reads the authority, head, and audit history
+immediately before it writes and again after it records the audit. Two
+operators racing the same PR therefore produce one refusal rather than two
+audited moves, which would otherwise look like a rotation and permanently
+block the terminal agent fallback. A rival record that lands inside the
+remaining window leaves both labels in place so the merge gate refuses loudly.
+Only markers posted by an actor with repository write access count as audit
+history: anyone who can see a PR can comment on it, and counting a drive-by
+marker would let an outsider block every later reassignment.
 
 ### When the selected service also fails
 
@@ -158,13 +175,17 @@ after a review invalidates it — re-review the new head before merging
   regardless of author precisely so a spoofed one is seen and rejected rather
   than silently skipped.
 - **Emergency agent** — exactly one author and one different assigned reviewer,
-  one reviewer model family in the audited `aru-agent-review-assignment:v1`
-  record, a substantive current-head GitHub review from the same login, and
-  exactly one matching completed `aru-agent-review:v1` comment. Its JSON names
-  the assigned agent, family, exact head, completion timestamp, `completed`
-  status, and `no-findings` or `findings-resolved` disposition. A push
-  invalidates this evidence. Missing, stale, duplicate, malformed, or
-  self-review evidence blocks merge.
+  and an audited `aru-agent-review-assignment:v1` record posted by an actor
+  with repository write access. That record is the authorization: it names the
+  reviewer model family and `reviewer_login`, the single GitHub account allowed
+  to perform this review. Both the substantive current-head GitHub review and
+  the one matching completed `aru-agent-review:v1` comment must come from that
+  authorized account. Binding them to each other instead would only prove they
+  share an author, which any collaborator can arrange for themselves. The
+  completion JSON names the assigned agent, family, exact head, completion
+  timestamp, `completed` status, and `no-findings` or `findings-resolved`
+  disposition. A push invalidates this evidence. Missing, stale, duplicate,
+  malformed, unauthorized, or self-review evidence blocks merge.
 
 Every review path additionally requires every blocker enforced by `check_reviews`
 (`scripts/merge_pr.py`) to be clear:

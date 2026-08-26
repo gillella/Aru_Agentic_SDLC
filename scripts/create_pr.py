@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # +12 for the #344 terminal merge lease guard.
 # +85 for #472 complete-inventory review-pool selection and CodeAnt triggering.
-# line-ceiling: 662
+# +90 for #472 confirmed review reservation and draft-rollback ownership.
+# line-ceiling: 755
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -44,6 +45,9 @@ REVIEW_LABEL_PREFIX = "review:"
 REVIEW_SERVICES = ("coderabbit", "sourcery", "codeant")
 EMERGENCY_AGENT_LABEL = "review:agent"
 CODEANT_TRIGGER = "@codeant-ai: review"
+# Bounded: a reservation that keeps losing to concurrent assignment fails
+# closed rather than spinning against the pool.
+REVIEW_RESERVATION_ATTEMPTS = 3
 
 # Kept explicit rather than free-form: a typo like "anthropc" would silently
 # make every PR look cross-family to the picker, which is the one failure mode
@@ -69,18 +73,30 @@ def review_label_for_service(service: str) -> str:
     return f"{REVIEW_LABEL_PREFIX}{service}"
 
 
-def select_review_service(issue_id: int) -> str:
-    """Choose the least-loaded external authority with a stable tie-break.
+def _inventory_review_labels(pr) -> List[str]:
+    """Review labels on one inventory record, failing closed on bad shapes."""
+    labels = pr.get("labels") if isinstance(pr, dict) else None
+    if not isinstance(labels, list):
+        raise ReviewAssignmentLookupError("open-PR inventory has malformed labels")
+    names = []
+    for label in labels:
+        if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+            raise ReviewAssignmentLookupError("open-PR inventory has a malformed label")
+        if label["name"].lower().startswith(REVIEW_LABEL_PREFIX):
+            names.append(label["name"])
+    return names
 
-    Capacity is the number of open PRs carrying each sole canonical authority
-    label. The inventory is complete and paginated; unreadable, malformed,
-    unknown, or conflicting authority state fails closed instead of being
-    mistaken for spare capacity. Ties rotate by issue number over the stable
-    ``REVIEW_SERVICES`` order, keeping simultaneous selections deterministic
-    and approximately even without mutating any existing assignment.
+
+def review_capacity(exclude_pr: Optional[int] = None) -> Dict:
+    """Complete open-PR authority load, plus who else holds each label.
+
+    Returns ``{"counts": {service: int}, "holders": {service: [pr_number]}}``
+    computed over the complete paginated inventory, with ``exclude_pr`` left
+    out of both. Excluding one pull request is what lets a caller ask "what
+    would the load look like without my own reservation" without a second
+    round trip. Unreadable, malformed, unknown, or conflicting authority state
+    fails closed instead of being mistaken for spare capacity.
     """
-    if type(issue_id) is not int or issue_id <= 0:
-        raise ReviewAssignmentLookupError("issue id must be a positive integer")
     slug = get_repo_slug()
     if not slug:
         raise ReviewAssignmentLookupError("could not resolve the repository for capacity")
@@ -89,17 +105,11 @@ def select_review_service(issue_id: int) -> str:
         raise ReviewAssignmentLookupError("could not read the complete open-PR inventory")
 
     counts = {service: 0 for service in REVIEW_SERVICES}
+    holders: Dict[str, List[int]] = {service: [] for service in REVIEW_SERVICES}
     canonical = {review_label_for_service(service): service for service in REVIEW_SERVICES}
     for pr in inventory:
-        labels = pr.get("labels") if isinstance(pr, dict) else None
-        if not isinstance(labels, list):
-            raise ReviewAssignmentLookupError("open-PR inventory has malformed labels")
-        names = []
-        for label in labels:
-            if not isinstance(label, dict) or not isinstance(label.get("name"), str):
-                raise ReviewAssignmentLookupError("open-PR inventory has a malformed label")
-            if label["name"].lower().startswith(REVIEW_LABEL_PREFIX):
-                names.append(label["name"])
+        names = _inventory_review_labels(pr)
+        number = pr.get("number") if isinstance(pr, dict) else None
         if not names:
             continue
         if names == [EMERGENCY_AGENT_LABEL]:
@@ -107,15 +117,158 @@ def select_review_service(issue_id: int) -> str:
             # pool and therefore neither consumes nor creates provider capacity.
             continue
         if len(names) != 1 or names[0] not in canonical:
-            number = pr.get("number", "unknown")
             raise ReviewAssignmentLookupError(
-                f"open PR #{number} has ambiguous or unsupported review authority: "
-                f"{', '.join(names)}")
+                f"open PR #{number if number is not None else 'unknown'} has ambiguous or "
+                f"unsupported review authority: {', '.join(names)}")
+        if exclude_pr is not None and number == exclude_pr:
+            continue
         counts[canonical[names[0]]] += 1
+        if isinstance(number, int):
+            holders[canonical[names[0]]].append(number)
+    return {"counts": counts, "holders": holders}
 
+
+def _deterministic_choice(counts: Dict, issue_id: int) -> str:
+    """The least-loaded service, ties rotated by issue number."""
     minimum = min(counts.values())
     eligible = [service for service in REVIEW_SERVICES if counts[service] == minimum]
     return eligible[(issue_id - 1) % len(eligible)]
+
+
+def select_review_service(issue_id: int, exclude_pr: Optional[int] = None) -> str:
+    """Choose the least-loaded external authority with a stable tie-break.
+
+    Capacity is the number of open PRs carrying each sole canonical authority
+    label. Ties rotate by issue number over the stable ``REVIEW_SERVICES``
+    order, keeping simultaneous selections deterministic and approximately
+    even without mutating any existing assignment.
+    """
+    if type(issue_id) is not int or issue_id <= 0:
+        raise ReviewAssignmentLookupError("issue id must be a positive integer")
+    return _deterministic_choice(review_capacity(exclude_pr)["counts"], issue_id)
+
+
+def pr_number(pr_ref: str) -> Optional[int]:
+    """The numeric pull request id behind a number, URL, or branch reference."""
+    tail = str(pr_ref).rstrip("/").rsplit("/", 1)[-1]
+    if tail.isdigit():
+        return int(tail)
+    code, out, _ = run_cmd(["gh", "pr", "view", str(pr_ref), "--json", "number"], check=False)
+    if code != 0:
+        return None
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    number = payload.get("number") if isinstance(payload, dict) else None
+    return number if isinstance(number, int) and number > 0 else None
+
+
+def _confirm_reservation(number: int, issue_id: int, selected: str) -> str:
+    """Compare-and-set the applied label against a fresh complete inventory.
+
+    Returns ``"held"``, ``"yield"``, or ``"unconfirmed"``. Selection reads a
+    snapshot, so two finalizers can pick the same least-loaded service before
+    either label lands and oversubscribe it while each pull request still looks
+    individually valid. The label is therefore a tentative reservation, and
+    this re-read is the set half: it recomputes the deterministic choice from
+    the inventory with this pull request's own reservation removed.
+
+    When two reservations collide, the contender with the highest pull request
+    number yields. Both sides read the same holder list and so agree on who
+    that is, which is what keeps the release deterministic instead of a
+    livelock where both sides step aside.
+    """
+    snapshot = review_capacity()
+    holders = snapshot["holders"].get(selected) or []
+    if number not in holders:
+        # The reservation is not visible in the inventory yet, so the counts
+        # this verdict would use are not the counts that include it.
+        return "unconfirmed"
+    counts = dict(snapshot["counts"])
+    counts[selected] -= 1
+    if _deterministic_choice(counts, issue_id) == selected:
+        return "held"
+    rivals = [holder for holder in holders if holder != number]
+    return "yield" if rivals and number > max(rivals) else "held"
+
+
+def reserve_review_service(pr_ref: str, issue_id: int) -> Optional[str]:  # noqa: C901, PLR0911, PLR0912
+    """Apply exactly one authority label under a confirmed reservation.
+
+    Returns the reserved service, or ``None`` after printing why nothing could
+    be reserved. Every failure leaves either no authority label or the one
+    already confirmed, so `--finalize-review` can resume without recomputing
+    capacity against an assignment that is already immutable.
+    """
+    number = pr_number(pr_ref)
+    if number is None:
+        print(f"[ERROR] Could not resolve a pull request number for {pr_ref}; "
+              "refusing to assign review authority without one to reserve against.",
+              file=sys.stderr)
+        return None
+    for _ in range(REVIEW_RESERVATION_ATTEMPTS):
+        try:
+            selected = select_review_service(issue_id, exclude_pr=number)
+        except ReviewAssignmentLookupError as exc:
+            print(f"[ERROR] Refusing to assign PR {pr_ref}: {exc}", file=sys.stderr)
+            return None
+        label = review_label_for_service(selected)
+        ensure_label(label, "0e8a16", f"Authoritative review service: {selected}")
+        try:
+            live = existing_review_assignment(pr_ref)
+        except ReviewAssignmentLookupError as exc:
+            print(f"[ERROR] Refusing to assign PR {pr_ref}: {exc}", file=sys.stderr)
+            return None
+        if live is not None:
+            if live != selected:
+                print(
+                    f"[ERROR] PR {pr_ref} was assigned concurrently to "
+                    f"{review_label_for_service(live)}, not selected {label}; "
+                    "refusing to arbitrate the race.",
+                    file=sys.stderr,
+                )
+                return None
+            print(f"🔒 {label} was assigned concurrently; resuming finalization.")
+            return selected
+        code, _, err = run_cmd(
+            ["gh", "pr", "edit", pr_ref, "--add-label", label], check=False)
+        if code != 0:
+            print(f"[ERROR] Could not apply {label}: {err.strip()}", file=sys.stderr)
+            return None
+
+        verdict = "unconfirmed"
+        for _confirm in range(REVIEW_RESERVATION_ATTEMPTS):
+            try:
+                verdict = _confirm_reservation(number, issue_id, selected)
+            except ReviewAssignmentLookupError as exc:
+                print(f"[ERROR] Could not confirm the {label} reservation on PR "
+                      f"{pr_ref}: {exc}", file=sys.stderr)
+                return None
+            if verdict != "unconfirmed":
+                break
+        if verdict == "held":
+            return selected
+        if verdict == "unconfirmed":
+            print(f"[ERROR] {label} was applied to PR {pr_ref} but never appeared in the "
+                  "open-PR inventory, so the reservation could not be confirmed. Re-run "
+                  f"create_pr.py --finalize-review {number} to resume; the existing "
+                  "assignment is immutable and will be retained.", file=sys.stderr)
+            return None
+        code, _, err = run_cmd(
+            ["gh", "pr", "edit", pr_ref, "--remove-label", label], check=False)
+        if code != 0:
+            print(f"[ERROR] {label} lost its reservation on PR {pr_ref} to a lower-numbered "
+                  f"pull request but could not be released: {err.strip()}. Remove {label} "
+                  f"manually, then re-run create_pr.py --finalize-review {number}.",
+                  file=sys.stderr)
+            return None
+        print(f"↩️  Released {label} on PR {pr_ref}: a lower-numbered pull request "
+              "reserved it first; re-selecting.")
+    print(f"[ERROR] Could not reserve a review service for PR {pr_ref} in "
+          f"{REVIEW_RESERVATION_ATTEMPTS} attempts; concurrent assignment kept "
+          "invalidating the selection.", file=sys.stderr)
+    return None
 
 
 def existing_review_assignment(pr_ref: str) -> Optional[str]:
@@ -349,46 +502,10 @@ def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C90
         print(f"[ERROR] Refusing to finalize PR {pr_ref}: {exc}", file=sys.stderr)
         return False
     if service is None:
-        try:
-            selected = select_review_service(issue_id)
-        except ReviewAssignmentLookupError as exc:
-            print(f"[ERROR] Refusing to assign PR {pr_ref}: {exc}", file=sys.stderr)
+        selected = reserve_review_service(pr_ref, issue_id)
+        if selected is None:
             return False
         label = review_label_for_service(selected)
-        ensure_label(
-            label,
-            "0e8a16",
-            f"Authoritative review service: {selected}",
-        )
-        try:
-            service = existing_review_assignment(pr_ref)
-        except ReviewAssignmentLookupError as exc:
-            print(f"[ERROR] Refusing to assign PR {pr_ref}: {exc}", file=sys.stderr)
-            return False
-        if service is None:
-            code, _, err = run_cmd(
-                ["gh", "pr", "edit", pr_ref, "--add-label", label],
-                check=False,
-            )
-            if code != 0:
-                print(
-                    f"[ERROR] Could not apply {label}: {err.strip()}",
-                    file=sys.stderr,
-                )
-                return False
-        else:
-            if service != selected:
-                print(
-                    f"[ERROR] PR {pr_ref} was assigned concurrently to "
-                    f"{review_label_for_service(service)}, not selected {label}; "
-                    "refusing to arbitrate the race.",
-                    file=sys.stderr,
-                )
-                return False
-            print(
-                f"🔒 {label} was assigned concurrently; "
-                "resuming finalization."
-            )
     else:
         selected = service
         label = review_label_for_service(service)
@@ -406,8 +523,16 @@ def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C90
         )
         return False
 
+    # Whether *this* invocation moved the PR out of draft. A retry that finds
+    # the PR already ready owns none of that state, so a later failure here
+    # must not undraft a pull request it did not draft: doing so would push an
+    # already-admitted PR back out of merge admission and require manual
+    # recovery for what was only a transient comment failure.
+    made_ready = False
     code, _, err = run_cmd(["gh", "pr", "ready", pr_ref], check=False)
-    if code != 0:
+    if code == 0:
+        made_ready = True
+    else:
         state_code, state_out, state_err = run_cmd(
             ["gh", "pr", "view", pr_ref, "--json", "isDraft"],
             check=False,
@@ -438,10 +563,13 @@ def finalize_review_assignment(pr_ref: str, issue_id: int) -> bool:  # noqa: C90
         code, _, err = run_cmd(
             ["gh", "pr", "comment", pr_ref, "--body", CODEANT_TRIGGER], check=False)
         if code != 0:
-            rollback, _, rollback_err = run_cmd(
-                ["gh", "pr", "ready", pr_ref, "--undo"], check=False)
-            detail = "draft state restored" if rollback == 0 else (
-                f"draft rollback also failed: {rollback_err.strip()}")
+            if not made_ready:
+                detail = "the pull request was already ready and is left as it was"
+            else:
+                rollback, _, rollback_err = run_cmd(
+                    ["gh", "pr", "ready", pr_ref, "--undo"], check=False)
+                detail = "draft state restored" if rollback == 0 else (
+                    f"draft rollback also failed: {rollback_err.strip()}")
             print(f"[ERROR] Could not trigger CodeAnt review: {err.strip()}; {detail}.",
                   file=sys.stderr)
             return False

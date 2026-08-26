@@ -32,6 +32,9 @@ the Definition-of-Done gate.
   `review:coderabbit`, `review:sourcery`, or `review:codeant` using a
   deterministic least-loaded algorithm over the complete paginated open-PR
   inventory. Ties rotate by issue number in that fixed service order. The
+  label is a reservation: it is confirmed against a fresh inventory read, and
+  the higher-numbered pull request releases and re-selects when two
+  assignments collide, so concurrent creation cannot oversubscribe a service. The
   existing assignment is immutable; after concrete observed unavailability an
   operator may make one audited external reassignment, never an automatic retry
   or repeated rotation.
@@ -66,7 +69,11 @@ with a direct push or an ad-hoc merge.
 An emergency agent review requires exactly one different `author:` and
 `reviewer:` identity, a valid reviewer model family, a substantive GitHub
 review of the exact current head, and one matching completed
-`aru-agent-review:v1` record. Missing, stale, duplicate, self-authored, or
+`aru-agent-review:v1` record. Authorization comes from the
+`aru-agent-review-assignment:v1` record, which only an actor with repository
+write access can post and which names the single GitHub account permitted to
+perform that review; both the review and the completion record must come from
+that account. Missing, stale, duplicate, self-authored, unauthorized, or
 malformed evidence fails closed.
 Direct pushes to `main` are also blocked server-side by branch protection;
 an ad-hoc merge (`gh pr merge` or the GitHub UI, run outside `merge_pr.py`)
