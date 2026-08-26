@@ -465,7 +465,7 @@ class AuthorizedReviewerLoginTests(ReassignHarness, unittest.TestCase):
         self.assertIn('"reviewer_login":"gillella"', self._comments(calls)[0])
 
     def test_unresolvable_or_malformed_login_refuses_before_any_write(self):
-        for login in ("not a login", "-leading-hyphen", "x" * 60, "a/b"):
+        for login in ("not a login", "-leading-hyphen", "x" * 60, "a/b", "app[bot]"):
             with self.subTest(login=login):
                 code, calls = self._run(pr("review:codeant", "author:agent-1"),
                                         service="agent", reviewer_login=login)

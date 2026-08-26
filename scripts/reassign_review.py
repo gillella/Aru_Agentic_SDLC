@@ -66,8 +66,8 @@ REASSIGNMENT_MARKER_RE = re.compile(
 HISTORY_SETTLE_DELAYS_S = (0.0, 0.5, 1.5)
 _HEAD_RE = re.compile(r"[0-9a-fA-F]{40}")
 _AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
-# GitHub login grammar, plus the `[bot]` suffix an App identity carries.
-_LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?")
+# Emergency coding-agent reviews require GitHub's User actor type, not Apps.
+_LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CONFLICT = 2

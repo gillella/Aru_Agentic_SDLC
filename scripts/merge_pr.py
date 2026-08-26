@@ -72,8 +72,8 @@ AGENT_REVIEW_MODEL_FAMILIES = {
     "anthropic", "openai", "codex", "google", "meta", "mistral", "xai", "human",
 }
 AGENT_REVIEW_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
-# GitHub login grammar, plus the ``[bot]`` suffix an App identity carries.
-AGENT_REVIEW_LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?")
+# Emergency coding-agent reviews require GitHub's User actor type, not Apps.
+AGENT_REVIEW_LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 # Only an actor with repository write access can authorize the emergency
 # exception. `authorAssociation` does not establish that: MEMBER is any
 # organization member and COLLABORATOR includes read-only collaborators, so

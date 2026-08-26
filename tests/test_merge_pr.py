@@ -2879,7 +2879,7 @@ class EmergencyAgentReviewAuthorityTests(unittest.TestCase):
         self.assertIn("authorized account @gillella", message)
 
     def test_an_assignment_without_an_authorized_login_fails_closed(self):
-        for login in (None, "", "not a login", "-leading", "a/b", 7):
+        for login in (None, "", "not a login", "-leading", "a/b", "app[bot]", 7):
             with self.subTest(login=login):
                 evidence = self.evidence()
                 evidence["agent_review_assignments"][0]["reviewer_login"] = login
