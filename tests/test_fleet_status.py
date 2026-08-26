@@ -1,4 +1,4 @@
-# line-ceiling: 1620
+# line-ceiling: 1640
 import os
 import stat
 import sys
@@ -1311,6 +1311,16 @@ class MergeQueueViewTests(unittest.TestCase):
         self.assertEqual(row["first_blocking"], "review")
         self.assertEqual(row["next_action"], "review")
         self.assertIn("evidence unavailable", row["verdict"])
+
+    def test_queue_row_unresolvable_slug_fails_closed(self):
+        pr = self._full_pr(10, "author:agent-a", "reviewed-by:agent-b")
+        with patch("fleet_status.get_repo_slug", return_value=None), \
+             patch("merge_pr.fetch_pr", return_value=pr), \
+             patch("merge_pr.linked_issues", return_value=[1]):
+            row = evaluate_queue_row(pr)
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["first_blocking"], "accept #1")
+        self.assertIn("could not resolve the repository slug", row["verdict"])
 
     def test_open_pr_list_failure_does_not_look_empty(self):
         payload = build_merge_queue(list_prs_fn=lambda: None)
