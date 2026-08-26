@@ -124,30 +124,27 @@ EOF
 
 parse_args "$@"
 
-# Auto-detect agents if no explicit agent flag was passed
+# `--all` is an explicit contract, not a fallback for failed detection.  The
+# wrapper's documented no-argument mode passes this flag, so host binaries must
+# never narrow an all-agent install to whichever products happen to be found.
 detect_agents() {
-  if [[ "${EXPLICIT_AGENT}" == false ]]; then
+  if [[ "${ALL_AGENTS}" == true ]]; then
+    TARGET_CODEX=true
+    TARGET_CLAUDE=true
+    TARGET_CURSOR=true
+    TARGET_ANTIGRAVITY=true
+  elif [[ "${EXPLICIT_AGENT}" == false ]]; then
     if [[ -d "${TARGET_HOME}/.codex" ]] || command -v codex >/dev/null 2>&1; then
       TARGET_CODEX=true
     fi
     if [[ -d "${TARGET_HOME}/.claude" ]] || command -v claude >/dev/null 2>&1; then
       TARGET_CLAUDE=true
     fi
-    if [[ -d "${TARGET_HOME}/.cursor" ]] || command -v cursor >/dev/null 2>&1; then
+    if [[ -d "${TARGET_HOME}/.cursor" ]] || command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1; then
       TARGET_CURSOR=true
     fi
-    if [[ -d "${TARGET_HOME}/.gemini/antigravity" || -d "${TARGET_HOME}/.antigravity" ]] || command -v antigravity >/dev/null 2>&1; then
+    if [[ -d "${TARGET_HOME}/.gemini/antigravity" || -d "${TARGET_HOME}/.antigravity" ]] || command -v antigravity >/dev/null 2>&1 || command -v agy >/dev/null 2>&1; then
       TARGET_ANTIGRAVITY=true
-    fi
-
-    # If no specific agent directory/binary detected at all, default all to true only when ALL_AGENTS is set
-    if [[ "${TARGET_CODEX}" == false && "${TARGET_CLAUDE}" == false && "${TARGET_CURSOR}" == false && "${TARGET_ANTIGRAVITY}" == false ]]; then
-      if [[ "${ALL_AGENTS}" == true ]]; then
-        TARGET_CODEX=true
-        TARGET_CLAUDE=true
-        TARGET_CURSOR=true
-        TARGET_ANTIGRAVITY=true
-      fi
     fi
   fi
 }
