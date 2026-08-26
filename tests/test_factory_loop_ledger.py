@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 710
+# line-ceiling: 800
 """Unit tests for factory_loop_ledger.py and fleet_status integration (#471).
 
 Verifies:
@@ -242,6 +242,11 @@ class TestLedgerSchemaValidation(unittest.TestCase):
                     sample_tick_dict(stage_durations={"total_ms": non_finite})
                 )
 
+    def test_total_ms_duration_required(self):
+        data = sample_tick_dict(stage_durations={"snapshot_ms": 100})
+        with self.assertRaises(fll.LedgerValidationError):
+            fll.validate_tick_record(data)
+
     def test_slug_validation_and_containment(self):
         # Valid slugs
         self.assertEqual(
@@ -318,6 +323,30 @@ class TestLedgerStorageAndPersistence(unittest.TestCase):
         self.assertEqual(records[0].run_id, "run_complete_1")
         self.assertEqual(records[1].run_id, "run_complete_2")
 
+    def test_append_tick_record_cleans_up_prior_torn_tail(self):
+        slug = "gillella/Aru_Agentic_SDLC"
+        fll.append_tick_record(
+            sample_tick_dict(run_id="run_complete_1"), base_dir=self.ledger_dir
+        )
+        fll.append_tick_record(
+            sample_tick_dict(run_id="run_complete_2"), base_dir=self.ledger_dir
+        )
+
+        ledger_file = fll.ledger_file_for_slug(slug, base_dir=self.ledger_dir)
+        with open(ledger_file, "a", encoding="utf-8") as fh:
+            fh.write('{"schema_version": "aru.factory_loop_ledger.v1", "run_id": "ru')
+
+        # Appending a third record should truncate the partial line and write cleanly
+        fll.append_tick_record(
+            sample_tick_dict(run_id="run_complete_3"), base_dir=self.ledger_dir
+        )
+
+        records = fll.read_tick_records(slug, base_dir=self.ledger_dir)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(records[0].run_id, "run_complete_1")
+        self.assertEqual(records[1].run_id, "run_complete_2")
+        self.assertEqual(records[2].run_id, "run_complete_3")
+
     def test_interior_corruption_fails_closed(self):
         slug = "gillella/Aru_Agentic_SDLC"
         fll.append_tick_record(
@@ -364,9 +393,25 @@ class TestLedgerStorageAndPersistence(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].run_id, "run_new")
 
+        # Size-triggered rotation inside append_tick_record
+        with patch("factory_loop_ledger.MAX_LEDGER_BYTES", 50):
+            fll.append_tick_record(
+                sample_tick_dict(run_id="run_trigger_rotate"), base_dir=self.ledger_dir
+            )
+            self.assertTrue(rotated_file.exists())
+            post_records = fll.read_tick_records(slug, base_dir=self.ledger_dir)
+            self.assertEqual(len(post_records), 1)
+            self.assertEqual(post_records[0].run_id, "run_trigger_rotate")
+
     def test_append_tick_record_handles_write_failure_without_double_close(self):
         record_data = sample_tick_dict(run_id="run_err_test")
         original_fdopen = fll.os.fdopen
+        closed: list[int] = []
+        original_close = fll.os.close
+
+        def tracking_close(fd):
+            closed.append(fd)
+            return original_close(fd)
 
         class FailingWriter:
             def __init__(self, fh):
@@ -391,10 +436,13 @@ class TestLedgerStorageAndPersistence(unittest.TestCase):
             real_fh = original_fdopen(fd, mode, encoding=encoding)
             return FailingWriter(real_fh)
 
-        with patch("factory_loop_ledger.os.fdopen", side_effect=mock_fdopen):
+        with patch("factory_loop_ledger.os.fdopen", side_effect=mock_fdopen), patch(
+            "factory_loop_ledger.os.close", side_effect=tracking_close
+        ):
             with self.assertRaises(OSError) as cm:
                 fll.append_tick_record(record_data, base_dir=self.ledger_dir)
             self.assertEqual(str(cm.exception), "simulated disk full")
+        self.assertEqual(len(closed), len(set(closed)))
 
 
 class TestLedgerSummarization(unittest.TestCase):
@@ -619,6 +667,7 @@ class TestLedgerCLI(unittest.TestCase):
         self.tmp_dir.cleanup()
 
     def test_cli_summary_text_and_json(self):
+        # JSON output
         with patch(
             "sys.argv",
             [
@@ -636,7 +685,27 @@ class TestLedgerCLI(unittest.TestCase):
             output = json.loads(mock_print.call_args[0][0])
             self.assertEqual(output["total_ticks"], 1)
 
+        # Text output
+        with patch(
+            "sys.argv",
+            [
+                "factory_loop_ledger.py",
+                "summary",
+                "--project-slug",
+                self.slug,
+                "--dir",
+                str(self.ledger_dir),
+            ],
+        ), patch("builtins.print") as mock_print:
+            fll.main()
+            printed_lines = [call[0][0] for call in mock_print.call_args_list]
+            self.assertTrue(
+                any("Factory Loop Ledger Summary" in line for line in printed_lines)
+            )
+            self.assertTrue(any("Total Ticks: 1" in line for line in printed_lines))
+
     def test_cli_list_text_and_json(self):
+        # JSON output
         with patch(
             "sys.argv",
             [
@@ -654,6 +723,22 @@ class TestLedgerCLI(unittest.TestCase):
             output = json.loads(mock_print.call_args[0][0])
             self.assertEqual(len(output), 1)
             self.assertEqual(output[0]["run_id"], "run_cli_1")
+
+        # Text output
+        with patch(
+            "sys.argv",
+            [
+                "factory_loop_ledger.py",
+                "list",
+                "--project-slug",
+                self.slug,
+                "--dir",
+                str(self.ledger_dir),
+            ],
+        ), patch("builtins.print") as mock_print:
+            fll.main()
+            mock_print.assert_called_once()
+            self.assertIn("run_cli_1", mock_print.call_args[0][0])
 
     def test_cli_rotate(self):
         with patch(
@@ -683,10 +768,13 @@ class TestLedgerReadOnlyIsolation(unittest.TestCase):
             self.assertEqual(list(ledger_dir.iterdir()), [])
 
     def test_summarize_ledger_is_pure_function(self):
-        records = [fll.validate_tick_record(sample_tick_dict())]
-        summary1 = fll.summarize_ledger(records)
-        summary2 = fll.summarize_ledger(records)
+        raw_dict = sample_tick_dict()
+        record = fll.validate_tick_record(raw_dict)
+        original_dict = record.to_dict()
+        summary1 = fll.summarize_ledger([record])
+        summary2 = fll.summarize_ledger([record])
         self.assertEqual(summary1, summary2)
+        self.assertEqual(record.to_dict(), original_dict)
 
 
 if __name__ == "__main__":

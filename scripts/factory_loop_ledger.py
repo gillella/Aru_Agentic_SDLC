@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 520
+# line-ceiling: 540
 """factory_loop_ledger.py - project-scoped run health and lane utilization ledger (#471).
 
 Maintains a crash-consistent, bounded, append-only JSONL audit ledger for
@@ -157,6 +157,10 @@ def _validate_timings_and_lanes(data: dict[str, Any]) -> None:
     for k, v in stage_durations.items():
         if not _is_finite_non_negative_number(v):
             raise LedgerValidationError(f"Duration '{k}' must be non-negative finite number.")
+    if not _is_finite_non_negative_number(stage_durations.get("total_ms")):
+        raise LedgerValidationError(
+            "'stage_durations.total_ms' is required and must be a non-negative finite number."
+        )
 
     lat = data.get("assignment_latency_ms")
     if not _is_finite_non_negative_number(lat):
@@ -281,6 +285,28 @@ def _rotate_unlocked(ledger_file: Path, rotated_file: Path) -> None:
         os.replace(ledger_file, rotated_file)
 
 
+def _truncate_torn_tail(ledger_file: Path) -> None:
+    try:
+        with open(ledger_file, "rb+") as check_handle:
+            content = check_handle.read()
+            if content and not content.endswith(b"\n"):
+                last_newline = content.rfind(b"\n")
+                check_handle.seek(last_newline + 1 if last_newline != -1 else 0)
+                check_handle.truncate()
+    except OSError:
+        pass
+
+
+def _apply_permissions(fh_fileno: int, ledger_file: Path) -> None:
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fh_fileno, 0o600)
+        else:
+            os.chmod(ledger_file, 0o600)
+    except OSError:
+        pass
+
+
 def rotate_ledger(slug: str, base_dir: Path | None = None) -> bool:
     """Explicitly rotate the project ledger file to its single-generation backup."""
     target_dir = base_dir or DEFAULT_LEDGER_DIR
@@ -324,8 +350,11 @@ def append_tick_record(
         if fcntl is not None:
             fcntl.flock(lock_handle, fcntl.LOCK_EX)
         try:
-            if ledger_file.exists() and ledger_file.stat().st_size >= MAX_LEDGER_BYTES:
-                _rotate_unlocked(ledger_file, rotated_file)
+            if ledger_file.exists():
+                if ledger_file.stat().st_size >= MAX_LEDGER_BYTES:
+                    _rotate_unlocked(ledger_file, rotated_file)
+                else:
+                    _truncate_torn_tail(ledger_file)
             fd = os.open(ledger_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
                 fh = os.fdopen(fd, "a", encoding="utf-8")
@@ -337,13 +366,7 @@ def append_tick_record(
                 raise
 
             with fh:
-                try:
-                    if hasattr(os, "fchmod"):
-                        os.fchmod(fh.fileno(), 0o600)
-                    else:
-                        os.chmod(ledger_file, 0o600)
-                except OSError:
-                    pass
+                _apply_permissions(fh.fileno(), ledger_file)
                 fh.write(line)
                 fh.flush()
                 os.fsync(fh.fileno())
@@ -403,7 +426,12 @@ def summarize_ledger(records: list[TickRecord]) -> dict[str, Any]:
             "last_outcome": None, "last_pause_reason": None,
         }
 
-    durations = [r.stage_durations.get("total_ms", 0) for r in records]
+    durations = [
+        r.stage_durations["total_ms"]
+        for r in records
+        if "total_ms" in r.stage_durations
+        and _is_finite_non_negative_number(r.stage_durations["total_ms"])
+    ]
     latencies = [r.assignment_latency_ms for r in records]
     outcomes: dict[str, int] = {o: 0 for o in OUTCOMES}
     idle_reasons: dict[str, int] = {r: 0 for r in IDLE_REASONS}
