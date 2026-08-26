@@ -479,7 +479,7 @@ def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # noqa: C
     try:
         import merge_pr as mp
 
-        if mp.assigned_review_service(pr) not in {"coderabbit", "sourcery", "codeant"}:
+        if mp.assigned_review_service(pr) not in {"coderabbit", "sourcery", "codeant", "agent"}:
             pr["_review_evidence"] = None
             return None
         evidence = mp.review_evidence(pr["number"])
@@ -529,10 +529,14 @@ def _assigned_service_review_state(pr: Dict[str, Any]) -> Optional[str]:
         return None
     if not mp.has_authoritative_assigned_review(pr, evidence):
         return None
+    service = mp.assigned_review_service(pr)
+    counts = mp._service_thread_counts(evidence, service)
+    if not isinstance(counts, dict):
+        return None
     if (
-        int(evidence.get("unresolved") or 0) > 0
-        or int(evidence.get("unfixed") or 0) > 0
-        or int(evidence.get("outdated_unfixed") or 0) > 0
+        int(counts.get("unresolved") or 0) > 0
+        or int(counts.get("unfixed") or 0) > 0
+        or int(counts.get("outdated_unfixed") or 0) > 0
     ):
         return "feedback"
     return "reviewed"

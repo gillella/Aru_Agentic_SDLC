@@ -686,7 +686,7 @@ class AuthorGateFixTests(unittest.TestCase):
 
     def test_external_fallback_assignments_reuse_shared_evidence_helpers(self):
         evidence = {"unresolved": 0, "unfixed": 1, "reviewed_head": True}
-        for service, issue in (("sourcery", 2), ("codeant", 3)):
+        for service, issue in (("sourcery", 2), ("codeant", 3), ("agent", 4)):
             candidate = stranded()
             candidate["labels"] = [
                 label for label in candidate["labels"]
@@ -700,6 +700,37 @@ class AuthorGateFixTests(unittest.TestCase):
                 self.assertTrue(fnw._author_can_repair_review(candidate))
             enrich.assert_called_once_with(candidate, candidate["number"], evidence)
             authoritative.assert_called_once_with(candidate, evidence)
+
+    def test_author_repair_uses_assigned_service_thread_counts(self):
+        evidence = {
+            "unresolved": 1,
+            "unfixed": 0,
+            "outdated_unfixed": 0,
+            "reviewed_head": True,
+            "service_threads": {
+                "sourcery": {"unresolved": 0, "unfixed": 1, "outdated_unfixed": 0},
+                "codeant": {"unresolved": 1, "unfixed": 0, "outdated_unfixed": 0},
+            },
+        }
+        sourcery_pr = stranded()
+        sourcery_pr["labels"] = [
+            label for label in sourcery_pr["labels"]
+            if not label["name"].startswith("review:")
+        ] + [{"name": "review:sourcery"}]
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(merge_pr, "with_service_evidence", return_value=evidence), \
+             patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True):
+            self.assertTrue(fnw._author_can_repair_review(sourcery_pr))
+
+        codeant_pr = stranded()
+        codeant_pr["labels"] = [
+            label for label in codeant_pr["labels"]
+            if not label["name"].startswith("review:")
+        ] + [{"name": "review:codeant"}]
+        with patch.object(fnw, "review_evidence", return_value=evidence), \
+             patch.object(merge_pr, "with_service_evidence", return_value=evidence), \
+             patch.object(merge_pr, "has_authoritative_assigned_review", return_value=True):
+            self.assertFalse(fnw._author_can_repair_review(codeant_pr))
 
     def test_author_repair_enriches_coderabbit_evidence(self):
         candidate = stranded()
