@@ -1440,13 +1440,28 @@ class MostRecentMergeTests(unittest.TestCase):
         self.assertIn("is:merged", query)
         self.assertIn("merged:>=", query)
 
+    def test_search_extracts_timestamp_from_closed_at_when_pull_request_has_only_url(self):
+        payload = {"total_count": 2, "incomplete_results": False, "items": [
+            {"closed_at": "2026-08-17T02:00:00Z", "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/1"}},
+            {"closed_at": "2026-08-17T08:00:00Z", "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/2"}},
+        ]}
+        with patch.object(fleet_status, "run_gh_json", return_value=[payload]):
+            newest, ok = most_recent_merge_history()
+        self.assertEqual(newest, datetime(2026, 8, 17, 8, 0, tzinfo=timezone.utc))
+        self.assertTrue(ok)
+
     def test_incomplete_or_truncated_search_fails_closed(self):
-        row = {"pull_request": {"merged_at": "2026-08-17T05:00:00Z"}}
+        row = {"closed_at": "2026-08-17T05:00:00Z", "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/1"}}
         for pages in (
             [{"total_count": 1, "incomplete_results": True, "items": [row]}],
             [{"total_count": 2, "incomplete_results": False, "items": [row]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [row, row]}],
             [{"total_count": 1, "incomplete_results": False, "items": ["nonsense"]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [{"closed_at": "2026-08-17T05:00:00Z"}]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [{"closed_at": "2026-08-17T05:00:00Z", "pull_request": None}]}],
             [{"total_count": 1, "incomplete_results": False, "items": [{"pull_request": {}}]}],
+            [{"total_count": 1, "incomplete_results": False, "items": [{"closed_at": "invalid-ts", "pull_request": {}}]}],
+            [{"total_count": 2, "incomplete_results": False, "items": [row, {"pull_request": {}}]}],
         ):
             with self.subTest(pages=pages), \
                  patch.object(fleet_status, "run_gh_json", return_value=pages):
@@ -1469,14 +1484,15 @@ class MostRecentMergeTests(unittest.TestCase):
         self.assertIsNone(newest)
         self.assertTrue(ok)
 
-    def test_malformed_rows_are_skipped(self):
+    def test_malformed_rows_fail_closed(self):
         payload = {"total_count": 3, "incomplete_results": False, "items": [
             "nonsense", {"pull_request": {"merged_at": None}},
             {"pull_request": {"merged_at": "2026-08-17T05:00:00Z"}},
         ]}
         with patch.object(fleet_status, "run_gh_json", return_value=[payload]):
-            newest = most_recent_merge_time()
-        self.assertEqual(newest, datetime(2026, 8, 17, 5, 0, tzinfo=timezone.utc))
+            newest, ok = most_recent_merge_history()
+        self.assertIsNone(newest)
+        self.assertFalse(ok)
 
 
 class StallAlertTests(unittest.TestCase):

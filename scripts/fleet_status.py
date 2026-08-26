@@ -269,19 +269,22 @@ def most_recent_merge_history(repo_slug: Optional[str] = None) -> Tuple[Optional
             return None, False
         total_count = page.get("total_count") if total_count is None else total_count
         rows.extend(page["items"])
-    if not isinstance(total_count, int) or total_count > len(rows):
+    if not isinstance(total_count, int) or total_count != len(rows):
         return None, False
+    if total_count == 0:
+        return None, True
     stamps = []
     for row in rows:
         if not isinstance(row, dict):
-            continue
-        pull = row.get("pull_request") or {}
+            return None, False
+        pull = row.get("pull_request")
+        if not isinstance(pull, dict):
+            return None, False
         parsed = _parse_ts(pull.get("merged_at") or pull.get("mergedAt") or row.get("closed_at"))
-        if parsed is not None:
-            stamps.append(parsed)
-    if total_count > 0 and not stamps:
-        return None, False
-    return (max(stamps) if stamps else None), True
+        if parsed is None:
+            return None, False
+        stamps.append(parsed)
+    return max(stamps), True
 
 
 def most_recent_merge_time() -> Optional[datetime]:
