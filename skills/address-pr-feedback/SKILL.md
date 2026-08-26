@@ -104,6 +104,12 @@ record why on the PR instead of repeating the identical push.
 
 ### Step 2: Implement Fixes in Branch Worktree
 1. Navigate to the branch worktree (`.worktrees/<branch-name>`).
+   If the original author is busy or unavailable, an operator may transfer
+   remediation in place with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <PR_ID> --adopt --agent
+   <SUCCESSOR> --model-family <FAMILY> --operator-authorized --reason <WHY>`.
+   The successor becomes the author and cannot also remain the assigned coding
+   reviewer; reassign review separately before transfer when those identities
+   collide. Never infer authorization from age, presence, or a finding.
 2. Implement code modifications addressing each item in the review checklist.
 3. When split guidance was emitted, shrink this PR to the **smallest coherent
    change** that can pass review; leave separable findings on the follow-up
