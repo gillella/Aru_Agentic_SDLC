@@ -1,3 +1,4 @@
+# line-ceiling: 490
 import hashlib
 import json
 import os
@@ -385,6 +386,65 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
             "factory-loop.stop",
             (self.target_home / ".cursor" / "commands" / "continue.md").read_text(),
         )
+
+    def test_resume_without_stop_marker_is_silent_success(self):
+        res = self.run_installer("--resume-loop", "--project", "/tmp/aru-proj-a")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("No stop requested; continuing", res.stdout)
+        self.assertNotIn("no stop marker at", res.stdout)
+
+        # Global resume without stop marker
+        res_global = self.run_installer("--resume-loop")
+        self.assertEqual(res_global.returncode, 0, res_global.stderr)
+        self.assertIn("No stop requested; continuing", res_global.stdout)
+        self.assertNotIn("no stop marker at", res_global.stdout)
+
+    def test_stop_loop_supports_bounded_reasons_and_rejects_invalid(self):
+        project = "/tmp/aru-proj-a"
+        res = self.run_installer("--stop-loop", "--project", project, "--reason", "quota-exhausted")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertEqual(stop.get("reason"), "quota-exhausted")
+
+        # Invalid reason token fails closed
+        res_bad = self.run_installer("--stop-loop", "--project", project, "--reason", "unbounded-custom-reason")
+        self.assertNotEqual(res_bad.returncode, 0)
+        self.assertIn("invalid pause reason", res_bad.stderr)
+
+    def test_cross_project_stop_isolation(self):
+        proj_a = "/tmp/aru-proj-a"
+        proj_b = "/tmp/aru-proj-b"
+        self.run_installer("--stop-loop", "--project", proj_a, "--reason", "maintenance")
+        self.run_installer("--stop-loop", "--project", proj_b, "--reason", "error-threshold")
+
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertIn(proj_a, stop["projects"])
+        self.assertIn(proj_b, stop["projects"])
+
+        # Resume proj_a leaves proj_b stopped
+        res = self.run_installer("--resume-loop", "--project", proj_a)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        stop_after_a = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertNotIn(proj_a, stop_after_a["projects"])
+        self.assertIn(proj_b, stop_after_a["projects"])
+
+        # Resume proj_b clears marker completely
+        res_b = self.run_installer("--resume-loop", "--project", proj_b)
+        self.assertEqual(res_b.returncode, 0, res_b.stderr)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+
+    def test_stop_and_resume_are_idempotent(self):
+        project = "/tmp/aru-proj-a"
+        self.run_installer("--stop-loop", "--project", project)
+        self.run_installer("--stop-loop", "--project", project)
+        stop = json.loads((self.target_home / ".aru" / "factory-loop.stop").read_text())
+        self.assertEqual(stop["projects"].count(project), 1)
+
+        self.run_installer("--resume-loop", "--project", project)
+        self.assertFalse((self.target_home / ".aru" / "factory-loop.stop").exists())
+        res_repeat = self.run_installer("--resume-loop", "--project", project)
+        self.assertEqual(res_repeat.returncode, 0)
+        self.assertIn("No stop requested; continuing", res_repeat.stdout)
 
 
 if __name__ == "__main__":

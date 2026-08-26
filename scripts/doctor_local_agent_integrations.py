@@ -44,6 +44,8 @@ SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
+from loop_control import resolve_desktop_stop_marker, stop_applies
+
 EXIT_OK = 0
 EXIT_INVALID = 1
 EXIT_DEGRADED = 2
@@ -203,17 +205,6 @@ def find_macos_app(spec: dict, roots: list[Path]) -> dict | None:
             if meta and meta.get("bundle_id") in bundle_ids:
                 return meta
     return None
-
-
-def stop_applies(stop_doc: dict | None, project: str | None) -> bool:
-    if not stop_doc:
-        return False
-    projects = stop_doc.get("projects") or []
-    if "*" in projects:
-        return True
-    if project and project in projects:
-        return True
-    return bool(projects) and project is None
 
 
 def load_json(path: Path) -> dict | None:
@@ -815,7 +806,8 @@ def report(aru_home: Path, target_home: Path, project: str | None,
             "capability_gap": gap,
             **wake,
         }
-    stopped = stop_applies(stop_doc, project)
+    marker_info = resolve_desktop_stop_marker(target_home, project)
+    stopped = marker_info["applies"]
     install = diagnose_install(aru_home, target_home, agents, home=home)
     repo = None
     checks = list(install["checks"])
@@ -835,6 +827,7 @@ def report(aru_home: Path, target_home: Path, project: str | None,
         "canonical_home": str(aru_home),
         "project": project,
         "stop_file": str(target_home / ".aru" / "factory-loop.stop"),
+        "desktop_stop_marker": marker_info,
         "loop_stopped": stopped,
         "stop": stop_doc,
         "native_wake": wake_entry or None,

@@ -64,16 +64,33 @@ writes it; `/resume-aru-loop` clears it. A stop without `--project` stores
 clear the global stop without `--project`. `--resume-loop` reactivates a
 managed Codex heartbeat only when that project's `native-wake.json` entry is
 still `enabled`; `--disable-native-wake` therefore survives a later resume.
+Resuming when no stop marker exists is a structured silent success (exit code 0,
+`No stop requested; continuing`), never an error.
+
+Stop and resume transitions accept an optional bounded `--reason <token>`:
+`operator-requested` (default), `factory-complete`, `human-intervention`,
+`quota-exhausted`, `maintenance`, or `error-threshold`. Unrecognized reasons fail
+closed.
+
 While a stop applies to a project, loop mode must not continue and must not
 arm native wakes. If a managed Codex heartbeat (`id = "aru-code-loop"` or
 `id = "aru-code-loop-<12 hex>"`) exists for that project, stop pauses
-**that file only**.
+**that file only**. Desktop stop intent records local desktop intent only;
+it never mutates external orchestrator schedules or durable background daemons.
 
-## Doctor
+## Doctor and operator status
+
+`python3 "$ARU_SDLC_HOME/scripts/loop_control.py" status [--project <abs>] [--orchestrator-adapter <cmd>] [--json]`
+provides a unified, project-agnostic status contract. It reports
+`desktop_stop_marker` applicability and scope, `native_wake` configuration, and
+external orchestrator state via a read-only adapter without hard-coding external
+job IDs. Contradictory states (e.g. `orchestrator_paused_without_stop_marker` or
+`stop_marker_without_orchestrator_pause`) are surfaced explicitly.
 
 `doctor_local_agent_integrations.py` reports continuity adapters, macOS
 `.app` bundle versions (Info.plist only, no credentials), CLI/config evidence
-separately, stop state, and capability gaps. Opt-in `--enable-native-wake`
+separately, stop state (including the rich `desktop_stop_marker` block alongside
+`loop_stopped`), and capability gaps. Opt-in `--enable-native-wake`
 is **prepared/requested** only: it writes `native-wake.json` plus a Codex
 prompt. `native_wake_enabled` is true only when that app has verified
 configured/active vendor state (Codex `automation.toml` with
