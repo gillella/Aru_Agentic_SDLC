@@ -1,9 +1,10 @@
-# +90 for #472 trusted marker provenance and concurrent-reassignment coverage.
-# line-ceiling: 490
+# +124 for #472 write-authorized marker provenance and atomic reassignment coverage.
+# line-ceiling: 524
 """Tests for the governed review-reassignment helper added in #435."""
 
 import sys
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,9 +55,11 @@ class CurrentAuthorityTests(unittest.TestCase):
 
 class ReassignmentHistoryTests(unittest.TestCase):
     @staticmethod
-    def _history(comments):
+    def _history(comments, writers=("gillella",)):
+        writers = None if writers is None else set(writers)
         with patch.object(rr, "get_repo_slug", return_value="owner/repo"), \
-                patch.object(rr, "fetch_paginated_gh_api", return_value=comments):
+                patch.object(rr, "fetch_paginated_gh_api", return_value=comments), \
+                patch.object(rr, "repository_write_logins", return_value=writers):
             return rr.reassignment_history(433)
 
     @staticmethod
@@ -99,6 +102,18 @@ class ReassignmentHistoryTests(unittest.TestCase):
                 mixed = self._history([forged, comment(self._valid_marker())])
                 self.assertEqual(len(mixed), 1)
 
+    def test_read_only_members_and_collaborators_cannot_forge_history(self):
+        """GitHub's MEMBER/COLLABORATOR association does not imply push;
+        repository permission, not organization relationship, is authority."""
+        for association in ("MEMBER", "COLLABORATOR"):
+            with self.subTest(association=association):
+                forged = comment(self._valid_marker(), login="read-only",
+                                 association=association)
+                self.assertEqual(self._history([forged]), [])
+
+    def test_unreadable_writer_roster_fails_closed(self):
+        self.assertIsNone(self._history([comment(self._valid_marker())], writers=None))
+
     def test_malformed_marker_from_an_untrusted_commenter_is_not_fatal(self):
         forged = comment("<!-- aru-review-reassignment:v1 not-json -->",
                          login="outsider", association="NONE")
@@ -108,13 +123,18 @@ class ReassignmentHistoryTests(unittest.TestCase):
         """Neither trusted nor untrusted: the boundary cannot be located."""
         marker = self._valid_marker()
         for missing in ({"body": marker},
-                        {"body": marker, "user": {"login": "gillella", "type": "User"}},
                         {"body": marker, "author_association": "OWNER"},
                         {"body": marker, "user": None, "author_association": "OWNER"},
                         {"body": marker, "user": {"login": "", "type": "User"},
                          "author_association": "OWNER"}):
             with self.subTest(comment=missing):
                 self.assertIsNone(self._history([missing]))
+
+    def test_comment_association_is_not_part_of_authorization(self):
+        marker = self._valid_marker()
+        writer = {"body": marker,
+                  "user": {"login": "gillella", "type": "User"}}
+        self.assertEqual(len(self._history([writer])), 1)
 
     def test_unreadable_provenance_without_a_marker_is_ignored(self):
         """Ordinary chatter has no provenance requirement to fail closed on."""
@@ -163,6 +183,7 @@ class ReassignHarness:
                           side_effect=lambda *a, **k: next_read(snapshot_reads)), \
              patch.object(rr, "reassignment_history",
                           side_effect=lambda *a, **k: next_read(history_reads)), \
+             patch.object(rr, "reassignment_lock", return_value=nullcontext(True)), \
              patch.object(rr, "authenticated_login", return_value="gillella"), \
              patch.object(rr, "ensure_label", return_value=True), \
              patch.object(rr, "run_cmd", side_effect=fake_run_cmd):
@@ -340,6 +361,24 @@ class ConcurrentReassignmentTests(ReassignHarness, unittest.TestCase):
 
     PRIOR = {"from": "review:coderabbit", "to": "review:codeant",
              "head": HEAD, "reason": "provider stalled"}
+
+    def test_atomic_lock_contention_refuses_before_any_authority_write(self):
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            if command[:4] == ["gh", "api", "--method", "POST"]:
+                return 1, "", "reference already exists"
+            return 0, "", ""
+
+        with patch.object(rr, "run_gh_json", return_value=pr("review:coderabbit")), \
+                patch.object(rr, "reassignment_history", return_value=[]), \
+                patch.object(rr, "ensure_label", return_value=True), \
+                patch.object(rr, "run_cmd", side_effect=run):
+            code = rr.reassign(433, "sourcery", self.REASON)
+        self.assertEqual(code, rr.EXIT_CONFLICT)
+        self.assertEqual(calls[0][:4], ["gh", "api", "--method", "POST"])
+        self.assertEqual([cmd for cmd in calls if cmd[:3] == ["gh", "pr", "edit"]], [])
 
     def test_history_landing_before_the_write_refuses_without_mutating(self):
         code, calls = self._run(

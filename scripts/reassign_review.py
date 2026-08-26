@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # +70 for #472 balanced-pool one-way reassignment history validation.
-# +150 for #472 trusted marker provenance and serialized reassignment commit.
-# line-ceiling: 480
+# +215 for #472 write-authorized marker provenance and atomic reassignment commit.
+# line-ceiling: 545
 """reassign_review.py - move one stalled pull request to a fallback reviewer.
 
 `create_pr.py` assigns one balanced external authority. When that service is
@@ -27,12 +27,12 @@ names, with the manual step needed to finish or undo it.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import re
 import sys
 
 from common import (
-    TRUSTED_AUTHOR_ASSOCIATIONS,
     ensure_label,
     fetch_paginated_gh_api,
     get_repo_slug,
@@ -61,6 +61,7 @@ SERVICE_TRIGGERS = {
 REASSIGNMENT_MARKER_PREFIX = "<!-- aru-review-reassignment:v1 "
 REASSIGNMENT_MARKER_RE = re.compile(
     re.escape(REASSIGNMENT_MARKER_PREFIX) + r"(\{[^\n]*\}) -->")
+REASSIGNMENT_LOCK_REF_PREFIX = "refs/tags/aru-locks/review-reassignment-"
 _HEAD_RE = re.compile(r"[0-9a-fA-F]{40}")
 _AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 # GitHub login grammar, plus the `[bot]` suffix an App identity carries.
@@ -100,27 +101,64 @@ def _comment(pr_id: int, body: str):
     return code == 0, (err or "").strip()
 
 
-def marker_provenance(comment):
+def repository_write_logins(slug: str):
+    """Repository writers, or ``None`` when the authoritative roster is unreadable."""
+    code, out, _ = run_cmd(
+        ["gh", "api", "--paginate",
+         f"repos/{slug}/collaborators?permission=push", "--jq", ".[].login"],
+        check=False)
+    if code != 0:
+        return None
+    return {line.strip().casefold() for line in out.splitlines() if line.strip()}
+
+
+def marker_provenance(comment, write_logins):
     """Classify one REST comment as trusted, untrusted, or unreadable.
 
-    Returns ``"trusted"``, ``"untrusted"``, or ``None``. Write access is the
-    authority signal: `author_association` is computed by GitHub per comment
-    and cannot be set by the commenter, so a drive-by contributor cannot mint
-    one. An unreadable provenance is neither - the caller fails closed rather
-    than guessing which side of the boundary a marker came from.
+    Returns ``"trusted"``, ``"untrusted"``, or ``None``. GitHub's per-comment
+    MEMBER/COLLABORATOR association includes read-only actors, so it is not an
+    authorization boundary. Only the repository collaborator roster filtered
+    to push access can authorize an audit marker.
     """
     if not isinstance(comment, dict):
         return None
     user = comment.get("user")
-    association = comment.get("author_association")
     if (not isinstance(user, dict) or not isinstance(user.get("login"), str)
-            or not user["login"] or not isinstance(association, str)
-            or not association.strip()):
+            or not user["login"] or not isinstance(write_logins, set)):
         return None
     if user.get("type") != "User":
         return "untrusted"
-    return ("trusted" if association.strip().upper() in TRUSTED_AUTHOR_ASSOCIATIONS
-            else "untrusted")
+    return ("trusted" if user["login"].casefold() in write_logins else "untrusted")
+
+
+def marker_records(comment, write_logins):
+    """Parse one authorized marker comment; untrusted comments contribute no records."""
+    provenance = marker_provenance(comment, write_logins)
+    if provenance is None:
+        return None
+    if provenance == "untrusted":
+        return []
+    body = comment["body"]
+    raw_markers = REASSIGNMENT_MARKER_RE.findall(body)
+    if body.count(REASSIGNMENT_MARKER_PREFIX) != len(raw_markers):
+        return None
+    records = []
+    allowed = {*EXTERNAL_FALLBACK_LABELS.values(), AGENT_LABEL}
+    expected = {"from", "head", "reason", "to"}
+    for raw in raw_markers:
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if (not isinstance(record, dict) or set(record) != expected
+                or record.get("from") not in allowed or record.get("to") not in allowed
+                or record["from"] == record["to"]
+                or not isinstance(record.get("reason"), str) or not record["reason"].strip()
+                or not isinstance(record.get("head"), str)
+                or _HEAD_RE.fullmatch(record["head"]) is None):
+            return None
+        records.append(record)
+    return records
 
 
 def reassignment_history(pr_id: int):
@@ -145,36 +183,24 @@ def reassignment_history(pr_id: int):
     comments = fetch_paginated_gh_api(f"repos/{slug}/issues/{pr_id}/comments")
     if comments is None:
         return None
-    history = []
-    allowed = {*EXTERNAL_FALLBACK_LABELS.values(), AGENT_LABEL}
-    expected = {"from", "head", "reason", "to"}
+    marker_comments = []
     for comment in comments:
         body = comment.get("body") if isinstance(comment, dict) else None
         if not isinstance(body, str):
             return None
-        if REASSIGNMENT_MARKER_PREFIX not in body:
-            continue
-        provenance = marker_provenance(comment)
-        if provenance is None:
+        if REASSIGNMENT_MARKER_PREFIX in body:
+            marker_comments.append(comment)
+    if not marker_comments:
+        return []
+    writers = repository_write_logins(slug)
+    if writers is None:
+        return None
+    history = []
+    for comment in marker_comments:
+        records = marker_records(comment, writers)
+        if records is None:
             return None
-        if provenance == "untrusted":
-            continue
-        raw_markers = REASSIGNMENT_MARKER_RE.findall(body)
-        if body.count(REASSIGNMENT_MARKER_PREFIX) != len(raw_markers):
-            return None
-        for raw in raw_markers:
-            try:
-                record = json.loads(raw)
-            except json.JSONDecodeError:
-                return None
-            if (not isinstance(record, dict) or set(record) != expected
-                    or record.get("from") not in allowed or record.get("to") not in allowed
-                    or record["from"] == record["to"]
-                    or not isinstance(record.get("reason"), str) or not record["reason"].strip()
-                    or not isinstance(record.get("head"), str)
-                    or _HEAD_RE.fullmatch(record["head"]) is None):
-                return None
-            history.append(record)
+        history.extend(records)
     return history
 
 
@@ -246,17 +272,10 @@ def _validated_snapshot(pr_id: int):
 def _recheck_before_commit(pr_id: int, existing: str, head: str, history):
     """Re-read authority, head, and history immediately before mutating.
 
-    GitHub offers no compare-and-set on labels or comments, so two operators
-    who read an empty history can both add the same target label and both post
-    a valid audit record. The pull request then shows two audited moves, and
-    the terminal agent fallback - which refuses a history longer than one -
-    is blocked forever even though authority moved once.
-
-    Re-reading here does not make the swap atomic; it narrows the window to
-    the interval between this read and the write, and turns the common case
-    (an operator who started seconds earlier and already committed) into a
-    refusal that changes nothing. Returns ``None`` when it is safe to proceed,
-    or an operator-facing message when it is not.
+    The caller holds the atomic per-PR ref lock, which excludes another helper
+    transaction. This defense-in-depth read still catches state changed by a
+    direct or legacy writer after lock acquisition. Returns ``None`` when it
+    is safe to proceed, or an operator-facing message when it is not.
     """
     fresh, problem = _validated_snapshot(pr_id)
     if problem:
@@ -281,8 +300,47 @@ def _recheck_before_commit(pr_id: int, existing: str, head: str, history):
     return None
 
 
-def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa: C901, PLR0911, PLR0912, PLR0915
+@contextmanager
+def reassignment_lock(pr_id: int):
+    """Atomically serialize one PR's reassignment through a transient ref.
+
+    Re-reading labels/history narrows a race but cannot close the interval
+    between the last read and the first write. Creating a GitHub ref is an
+    atomic server-side claim, so only one operator reaches that interval.
+    """
+    slug = get_repo_slug()
+    snapshot, problem = _validated_snapshot(pr_id)
+    lock_ref = f"{REASSIGNMENT_LOCK_REF_PREFIX}{pr_id}"
+    if not slug or problem:
+        print(f"[CONFLICT] Cannot establish the atomic reassignment lock for PR "
+              f"#{pr_id}: {problem or 'repository is unreadable'}.", file=sys.stderr)
+        yield False
+        return
+    head = snapshot["headRefOid"]
+    code, _, err = run_cmd(
+        ["gh", "api", "--method", "POST", f"repos/{slug}/git/refs",
+         "-f", f"ref={lock_ref}", "-f", f"sha={head}"], check=False)
+    if code != 0:
+        print(f"[CONFLICT] Could not acquire the atomic reassignment lock for PR "
+              f"#{pr_id}; another operator may be active: {err.strip()}.", file=sys.stderr)
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        path = lock_ref.removeprefix("refs/")
+        released, _, release_err = run_cmd(
+            ["gh", "api", "--method", "DELETE", f"repos/{slug}/git/refs/{path}"],
+            check=False)
+        if released != 0:
+            print(f"[ERROR] Reassignment finished but lock release failed: "
+                  f"{release_err.strip()}. Verify no operator is live, then remove "
+                  f"{lock_ref} before retrying PR #{pr_id}.", file=sys.stderr)
+
+
+def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",
              family: str = "", reviewer_login: str = "") -> int:
+    """Run the complete reassignment transaction under its atomic ref lock."""
     target = FALLBACK_LABELS.get(service)
     if not target:
         print(f"[ERROR] Unknown fallback service {service!r}; supported: "
@@ -306,6 +364,18 @@ def reassign(pr_id: int, service: str, reason: str, reviewer: str = "",  # noqa:
                   "`gh` as that account so it can be read from `gh api user`.",
                   file=sys.stderr)
             return EXIT_ERROR
+    with reassignment_lock(pr_id) as acquired:
+        if not acquired:
+            return EXIT_CONFLICT
+        return _reassign_locked(pr_id, service, reason, reviewer, family,
+                                reviewer_login)
+
+
+def _reassign_locked(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    pr_id: int, service: str, reason: str, reviewer: str = "",
+    family: str = "", reviewer_login: str = "",
+) -> int:
+    target = FALLBACK_LABELS[service]
 
     pr, problem = _validated_snapshot(pr_id)
     if problem:

@@ -1,12 +1,12 @@
 # +16 for the #344 terminal merge lease tests.
 # +85 for #472 deterministic external review-pool assignment coverage.
-# +208 for #472 review-reservation, draft-rollback ownership, and
+# +238 for #472 serialized review-reservation, draft-rollback ownership, and
 # exactly-once CodeAnt trigger coverage.
-# line-ceiling: 1010
+# line-ceiling: 1040
 import json
 import sys
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -104,6 +104,12 @@ class AgentFlagTests(unittest.TestCase):
 
 
 class IdentityStampTests(unittest.TestCase):
+    def setUp(self):
+        lock = patch.object(create_pr, "review_assignment_lock",
+                            return_value=nullcontext(True))
+        lock.start()
+        self.addCleanup(lock.stop)
+
     @patch.object(create_pr, "run_cmd", return_value=(0, "", ""))
     @patch.object(create_pr, "ensure_label", return_value=True)
     def test_successful_stamp_reports_success(self, _label, _run):
@@ -248,6 +254,12 @@ class FailClosedAssignmentTests(unittest.TestCase):
     next step is to pick one and label it. That silently switches or
     duplicates an authority the routing contract promises is immutable.
     """
+
+    def setUp(self):
+        lock = patch.object(create_pr, "review_assignment_lock",
+                            return_value=nullcontext(True))
+        lock.start()
+        self.addCleanup(lock.stop)
 
     def test_failed_label_lookup_is_not_read_as_unassigned(self):
         with patch.object(create_pr, "run_cmd", return_value=(1, "", "gh: not authenticated")):
@@ -465,6 +477,8 @@ class ReviewReservationTests(unittest.TestCase):
 
         with patch.object(create_pr, "ensure_label", return_value=True), \
                 patch.object(create_pr, "existing_review_assignment", return_value=None), \
+                patch.object(create_pr, "review_assignment_lock",
+                             return_value=nullcontext(True)), \
                 stub("select_review_service", selected), \
                 stub("_confirm_reservation", confirm), \
                 stub("run_cmd", results) as run:
@@ -488,6 +502,23 @@ class ReviewReservationTests(unittest.TestCase):
             with self.subTest(result=result), \
                     patch.object(create_pr, "run_cmd", return_value=result):
                 self.assertIsNone(create_pr.pr_number("feat/issue-1-x"))
+
+    def test_atomic_lock_contention_refuses_before_applying_a_label(self):
+        """A bounded sequence of inventory reads cannot exclude a contender
+        that lands just after the last read; the server-side ref claim must be
+        acquired before any authority label is written."""
+        with patch.object(create_pr, "pr_number", return_value=9), \
+                patch.object(create_pr, "ensure_label", return_value=True), \
+                patch.object(create_pr, "existing_review_assignment",
+                             return_value=None), \
+                patch.object(create_pr, "select_review_service",
+                             return_value="coderabbit"), \
+                patch.object(create_pr, "run_cmd",
+                             return_value=(1, "", "reference already exists")) as run:
+            self.assertIsNone(create_pr.reserve_review_service("9", 472))
+        commands = [item.args[0] for item in run.call_args_list]
+        self.assertEqual(commands[0][:4], ["gh", "api", "--method", "POST"])
+        self.assertEqual([cmd for cmd in commands if cmd[:3] == ["gh", "pr", "edit"]], [])
 
     def test_reservation_holds_when_it_is_still_the_deterministic_choice(self):
         snapshot = self.capacity({"coderabbit": 1, "sourcery": 1, "codeant": 1},

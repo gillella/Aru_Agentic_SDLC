@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # +12 for the #344 terminal merge lease guard.
 # +85 for #472 complete-inventory review-pool selection and CodeAnt triggering.
-# +147 for #472 settled review reservation, draft-rollback ownership, and
+# +200 for #472 serialized review reservation, draft-rollback ownership, and
 # exactly-once CodeAnt triggering.
-# line-ceiling: 810
+# line-ceiling: 863
 """
 create_pr.py - Opens a Pull Request pre-populated with issue linking ('Closes #X').
 
@@ -20,6 +20,7 @@ running Sonnet, so "a different tool" is not necessarily a different reviewer.
 """
 
 import argparse
+from contextlib import contextmanager
 import json
 import shlex
 import sys
@@ -52,6 +53,7 @@ CODEANT_TRIGGER = "@codeant-ai: review"
 REVIEW_RESERVATION_ATTEMPTS = 3
 REVIEW_RESERVATION_SETTLE_ROUNDS = 2
 REVIEW_RESERVATION_SETTLE_DELAY_S = 2.0
+REVIEW_ASSIGNMENT_LOCK_REF = "refs/tags/aru-locks/review-assignment"
 
 # Kept explicit rather than free-form: a typo like "anthropc" would silently
 # make every PR look cross-family to the picker, which is the one failure mode
@@ -168,6 +170,47 @@ def pr_number(pr_ref: str) -> Optional[int]:
     return number if isinstance(number, int) and number > 0 else None
 
 
+@contextmanager
+def review_assignment_lock(head: str):
+    """Atomically serialize capacity selection through one server-side ref.
+
+    Inventory settling detects contenders that have already become visible,
+    but no bounded number of reads excludes one that lands immediately after
+    the last read. GitHub reference creation is atomic: exactly one finalizer
+    creates this transient tag ref, and every contender fails closed before it
+    writes an authority label. A crash can leave a stale ref; that intentionally
+    blocks new assignment until an operator verifies no finalizer is live and
+    removes the named ref.
+    """
+    slug = get_repo_slug()
+    if not slug or not isinstance(head, str) or not head:
+        print("[ERROR] Could not resolve repository/head for the review-assignment lock.",
+              file=sys.stderr)
+        yield False
+        return
+    code, _, err = run_cmd(
+        ["gh", "api", "--method", "POST", f"repos/{slug}/git/refs",
+         "-f", f"ref={REVIEW_ASSIGNMENT_LOCK_REF}", "-f", f"sha={head}"],
+        check=False)
+    if code != 0:
+        print("[CONFLICT] Could not acquire the atomic review-assignment lock; "
+              f"another finalizer may be active: {err.strip()}.", file=sys.stderr)
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        path = REVIEW_ASSIGNMENT_LOCK_REF.removeprefix("refs/")
+        released, _, release_err = run_cmd(
+            ["gh", "api", "--method", "DELETE", f"repos/{slug}/git/refs/{path}"],
+            check=False)
+        if released != 0:
+            print(f"[ERROR] Review assignment completed but lock release failed: "
+                  f"{release_err.strip()}. Verify no finalizer is live, then remove "
+                  f"{REVIEW_ASSIGNMENT_LOCK_REF} before assigning another PR.",
+                  file=sys.stderr)
+
+
 def codeant_already_triggered(pr_ref: str) -> Optional[bool]:
     """Whether this pull request already carries the CodeAnt trigger comment.
 
@@ -227,13 +270,14 @@ def _confirm_reservation(number: int, issue_id: int, selected: str) -> str:
     return "yield" if rivals and number > max(rivals) else "held"
 
 
-def reserve_review_service(pr_ref: str, issue_id: int) -> Optional[str]:  # noqa: C901, PLR0911, PLR0912
+def reserve_review_service(pr_ref: str, issue_id: int) -> Optional[str]:
     """Apply exactly one authority label under a confirmed reservation.
 
     Returns the reserved service, or ``None`` after printing why nothing could
     be reserved. Every failure leaves either no authority label or the one
     already confirmed, so `--finalize-review` can resume without recomputing
-    capacity against an assignment that is already immutable.
+    capacity against an assignment that is already immutable. Selection and
+    confirmation both run while holding the repository-wide atomic ref lock.
     """
     number = pr_number(pr_ref)
     if number is None:
@@ -241,6 +285,16 @@ def reserve_review_service(pr_ref: str, issue_id: int) -> Optional[str]:  # noqa
               "refusing to assign review authority without one to reserve against.",
               file=sys.stderr)
         return None
+    with review_assignment_lock(get_current_commit()) as acquired:
+        if not acquired:
+            return None
+        return _reserve_review_service_locked(pr_ref, issue_id, number)
+
+
+def _reserve_review_service_locked(  # noqa: C901, PLR0911, PLR0912
+    pr_ref: str, issue_id: int, number: int,
+) -> Optional[str]:
+    """Select and confirm authority while the atomic ref lock is held."""
     for _ in range(REVIEW_RESERVATION_ATTEMPTS):
         try:
             selected = select_review_service(issue_id, exclude_pr=number)

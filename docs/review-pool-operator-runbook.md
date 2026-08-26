@@ -69,14 +69,16 @@ login has to be corrected before the review is submitted. Coding agents never
 perform ordinary review. The helper does not discover reviewers, rotate
 repeatedly, or create a second queue.
 
-Reassignment is not atomic — GitHub offers no compare-and-set on labels or
-comments — so the helper re-reads the authority, head, and audit history
-immediately before it writes. After recording the audit, it requires the
-complete history to equal the prior history plus its exact record; a missing,
-rival, or additional record leaves authority fail-closed for operator
-reconciliation. Only markers posted by an actor with repository write access
-count as audit history: anyone who can see a PR can comment on it, and counting
-a drive-by marker would let an outsider block every later reassignment.
+The helper serializes each PR's complete reassignment transaction with an
+atomic server-side ref lock. It then re-reads the authority, head, and audit
+history immediately before it writes as defense in depth against direct or
+legacy writers. After recording the audit, it requires the complete history to
+equal the prior history plus its exact record; a missing, rival, or additional
+record leaves authority fail-closed for operator reconciliation. Only marker
+authors present in GitHub's collaborator roster filtered to push access count
+as audit history. `MEMBER` and `COLLABORATOR` comment associations are not
+authorization because they can include read-only actors; trusting them would
+let such an actor block every later reassignment.
 
 ### When the selected service also fails
 

@@ -32,9 +32,11 @@ the Definition-of-Done gate.
   `review:coderabbit`, `review:sourcery`, or `review:codeant` using a
   deterministic least-loaded algorithm over the complete paginated open-PR
   inventory. Ties rotate by issue number in that fixed service order. The
-  label is a reservation: it settles across consecutive fresh inventory reads,
-  and the higher-numbered pull request releases and re-selects when a collision
-  is observed. The existing assignment is immutable; after concrete observed
+  label is a reservation: finalizers serialize capacity selection with one
+  atomic server-side ref lock, then settle across consecutive fresh inventory
+  reads; the higher-numbered pull request releases and re-selects if a legacy
+  or direct writer creates a collision. The existing assignment is immutable;
+  after concrete observed
   unavailability an operator may make one audited external reassignment, never
   an automatic retry or repeated rotation.
   Coding agents never perform ordinary review. Only when all external reviewers
