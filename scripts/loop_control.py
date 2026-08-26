@@ -34,11 +34,29 @@ def stop_applies(stop_doc: dict | None, project: str | None) -> bool:
     if not isinstance(stop_doc, dict):
         return False
     projects = stop_doc.get("projects") or []
+    if not isinstance(projects, list):
+        return False
     if "*" in projects:
         return True
     if project and project in projects:
         return True
     return False
+
+
+def parse_stop_projects(data: dict, stop_path: Path) -> list[str]:
+    """Return the marker's project tokens, rejecting a non-list `projects`.
+
+    A string, mapping, or number here would otherwise be silently coerced by
+    `list()` into bogus per-character/per-key tokens, or raise a bare
+    `TypeError` for a non-iterable, so every caller fails closed on it the same
+    way `status` does.
+    """
+    raw = data.get("projects")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"malformed stop marker at {stop_path}: 'projects' must be a list")
+    return [str(p) for p in raw]
 
 
 def resolve_desktop_stop_marker(target_home: Path, project: str | None = None) -> dict:
@@ -53,13 +71,7 @@ def resolve_desktop_stop_marker(target_home: Path, project: str | None = None) -
         raise ValueError(f"malformed stop marker at {stop_path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"malformed stop marker at {stop_path}: expected JSON object")
-    raw_projects = data.get("projects")
-    if raw_projects is None:
-        projects = []
-    elif isinstance(raw_projects, list):
-        projects = [str(p) for p in raw_projects]
-    else:
-        raise ValueError(f"malformed stop marker at {stop_path}: 'projects' must be a list")
+    projects = parse_stop_projects(data, stop_path)
     scope = "global" if "*" in projects else ("project" if projects else "none")
     return {
         "present": True, "applies": stop_applies(data, project), "scope": scope,
@@ -196,9 +208,9 @@ def execute_stop(target_home: Path, project: str | None = None, reason: str = DE
             data = json.loads(stop_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 raise ValueError("expected JSON object")
-            projects = list(data.get("projects") or [])
         except Exception as exc:
             raise ValueError(f"malformed stop marker at {stop_path}: {exc}") from exc
+        projects = parse_stop_projects(data, stop_path)
     token = project or "*"
     if token not in projects:
         projects.append(token)
@@ -224,7 +236,7 @@ def execute_resume(target_home: Path, project: str | None = None, reason: str | 
             raise ValueError("expected JSON object")
     except Exception as exc:
         raise ValueError(f"malformed stop marker at {stop_path}: {exc}") from exc
-    projects = list(data.get("projects") or [])
+    projects = parse_stop_projects(data, stop_path)
     if not project:
         stop_path.unlink(missing_ok=True)
         return EXIT_OK, f"removed stop marker {stop_path}", {"action": "resume", "changed": True, "message": f"removed stop marker {stop_path}"}

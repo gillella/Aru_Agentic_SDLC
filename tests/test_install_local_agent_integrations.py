@@ -1,4 +1,4 @@
-# line-ceiling: 505
+# line-ceiling: 525
 import hashlib
 import json
 import os
@@ -493,6 +493,31 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         res_bad_reason = self.run_installer("--stop-loop", "--reason", "invalid-reason")
         self.assertNotEqual(res_bad_reason.returncode, 0)
         self.assertIn("invalid pause reason", res_bad_reason.stderr)
+
+    def test_resume_loop_fails_closed_on_corrupt_stop_marker(self):
+        """A marker the wrapper cannot parse must not report a successful resume."""
+        project = "/tmp/aru-proj-a"
+        (self.target_home / ".codex").mkdir(parents=True)
+        self.run_installer("--codex-only")
+        managed = self.target_home / ".codex" / "automations" / codex_auto_id(project)
+        managed.mkdir(parents=True, exist_ok=True)
+        toml = managed / "automation.toml"
+        stop_file = self.target_home / ".aru" / "factory-loop.stop"
+        stop_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # `"abc"` was coerced to per-character tokens and `5` raised a bare
+        # TypeError, so a corrupt stop silently un-paused the managed heartbeat.
+        for payload in ('{"projects": "abc"}', '{"projects": 5}', '{"projects": {"a": 1}}',
+                        '{NOT JSON', '["not", "a", "dict"]'):
+            stop_file.write_text(payload)
+            toml.write_text(f'version = 1\nid = "{codex_auto_id(project)}"\nstatus = "PAUSED"\n')
+            res = self.run_installer("--resume-loop", "--project", project)
+            self.assertNotEqual(res.returncode, 0, f"{payload}: {res.stdout}")
+            self.assertIn("malformed stop marker", res.stderr, payload)
+            self.assertNotIn("Traceback", res.stderr, payload)
+            self.assertNotIn("No stop requested", res.stdout, payload)
+            self.assertEqual(stop_file.read_text(), payload, payload)
+            self.assertIn('status = "PAUSED"', toml.read_text(), payload)
 
 
 if __name__ == "__main__":

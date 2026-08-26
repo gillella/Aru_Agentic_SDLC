@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 425
+# line-ceiling: 440
 import json
 import stat
 import subprocess
@@ -396,6 +396,36 @@ class LoopControlTests(unittest.TestCase):
             res_w = self.run_cli("status", "--project", self.project_a, "--json")
             self.assertEqual(res_w.returncode, 0, doc)
             self.assertNotIn("Traceback", res_w.stderr)
+
+    def test_non_list_projects_field_fails_closed_on_stop_resume_and_status(self):
+        """A `projects` value of the wrong type must never crash or be coerced."""
+        stop_file = self.aru_dir / "factory-loop.stop"
+        # Non-iterables previously raised a bare TypeError out of resume; strings
+        # and mappings were silently coerced into per-character/per-key tokens,
+        # which made resume report "No stop requested" for a corrupt marker.
+        for raw in (5, 0, 1.5, True, "abc", self.project_a, {"a": 1}, {"*": 1}):
+            payload = json.dumps({"projects": raw, "reason": "maintenance"})
+            for action in ("resume", "stop"):
+                stop_file.write_text(payload, encoding="utf-8")
+                res = self.run_cli(action, "--project", self.project_a)
+                self.assertEqual(res.returncode, 1, f"{action} {raw!r}: {res.stdout}")
+                self.assertNotIn("Traceback", res.stderr, f"{action} {raw!r}")
+                self.assertIn("'projects' must be a list", res.stderr, f"{action} {raw!r}")
+                # A rejected transition leaves the corrupt marker byte-identical.
+                self.assertEqual(stop_file.read_text(), payload, f"{action} {raw!r}")
+
+            res_global = self.run_cli("resume")
+            self.assertEqual(res_global.returncode, 1, repr(raw))
+            self.assertIn("'projects' must be a list", res_global.stderr, repr(raw))
+            self.assertTrue(stop_file.is_file(), repr(raw))
+
+            status = self.run_cli("status", "--project", self.project_a, "--json")
+            self.assertEqual(status.returncode, 1, repr(raw))
+            marker = json.loads(status.stdout)["desktop_stop_marker"]
+            self.assertTrue(marker["present"], repr(raw))
+            self.assertFalse(marker["valid"], repr(raw))
+            self.assertFalse(marker["applies"], repr(raw))
+            self.assertFalse(loop_control.stop_applies({"projects": raw}, self.project_a))
 
 
 if __name__ == "__main__":

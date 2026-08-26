@@ -97,6 +97,13 @@ the same corruption instead of collapsing to `null`. Adapter-supplied
 unhashable values such as lists or objects — degrades to `unknown` rather than
 raising.
 
+`stop` and `resume` fail closed on the same corruption `status` reports. A
+marker whose `projects` field is not a list (a string, an object, or a number)
+is rejected with `'projects' must be a list` and a non-zero exit; it is never
+coerced into per-character or per-key tokens, and neither the marker nor the
+managed heartbeat is mutated. Clearing an unreadable marker is a deliberate
+operator action on the reported `path`, not a side effect of `--resume-loop`.
+
 `doctor_local_agent_integrations.py` reports continuity adapters, macOS
 `.app` bundle versions (Info.plist only, no credentials), CLI/config evidence
 separately, stop state (including the rich `desktop_stop_marker` block alongside
