@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # +60 for the #344 terminal merge lease shared by all four helpers.
-# line-ceiling: 1576
+# +42 for the #410 GitHub pagination/date helpers claims no longer take from metrics.
+# line-ceiling: 1619
 """
 common.py - Shared GitHub and Git automation utilities for Aru_Agentic_SDLC scripts.
 Provides robust execution of gh CLI commands, git worktree management, and API wrappers.
@@ -15,6 +16,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -309,6 +311,59 @@ def run_gh_json(cmd: List[str]) -> Optional[Any]:
     except json.JSONDecodeError:
         print(f"[WARN] Failed to parse JSON from gh CLI: {stdout}", file=sys.stderr)
         return None
+
+
+def parse_iso(ts_str: str) -> Optional[datetime]:
+    """Parse a GitHub ISO 8601 timestamp, or None when it is unusable.
+
+    Recovery decisions are made from authoritative GitHub timestamps, so a
+    value that cannot be parsed must stay unusable rather than degrade to a
+    guess: callers treat None as "unprovable" and fail closed.
+    """
+    if not ts_str:
+        return None
+    try:
+        if ts_str.endswith("Z"):
+            ts_str = ts_str[:-1] + "+00:00"
+        return datetime.fromisoformat(ts_str)
+    except Exception:
+        return None
+
+
+def fetch_paginated_gh_api(endpoint: str) -> Optional[List[Dict[str, Any]]]:
+    """Fetch every page of a REST endpoint, or None when the read failed.
+
+    ``None`` is reserved for an unreadable answer (transport failure or
+    undecodable payload) and is never conflated with an empty result, so a
+    caller reading claim history can refuse to act on a partial timeline.
+    """
+    code, stdout, stderr = run_cmd(["gh", "api", "--paginate", endpoint], check=False)
+    if code != 0 or not stdout.strip():
+        if code != 0:
+            print(f"[ERROR] GitHub API request failed: {stderr}", file=sys.stderr)
+        return None
+
+    raw = stdout.strip()
+    # gh api --paginate concatenates one JSON array per page: `[...][...]`.
+    items: List[Dict[str, Any]] = []
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(raw):
+        while pos < len(raw) and raw[pos].isspace():
+            pos += 1
+        if pos >= len(raw):
+            break
+        try:
+            chunk, idx = decoder.raw_decode(raw[pos:])
+        except json.JSONDecodeError as exc:
+            print(f"[ERROR] Failed to decode API response JSON: {exc}", file=sys.stderr)
+            return None
+        if isinstance(chunk, list):
+            items.extend(chunk)
+        elif isinstance(chunk, dict):
+            items.append(chunk)
+        pos += idx
+    return items
 
 
 def get_current_branch() -> str:
