@@ -1076,6 +1076,7 @@ class RefusedMergeIsNonDestructiveTests(unittest.TestCase):
              patch.object(merge_pr, "release_pr_head_checkout"), \
              patch.object(merge_pr, "repository_merge_lock",
                           return_value=nullcontext((True, "serialized"))), \
+             patch.object(merge_pr, "_current_base_tip", return_value="base-sha"), \
              patch.object(merge_pr, "check_rebased", return_value=check_rebased_return), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
              patch.object(merge_pr, "execute_merge", return_value=exec_return) as execute, \
@@ -4601,9 +4602,10 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
+    @patch.object(merge_pr, "_current_base_tip", return_value="base-sha")
     @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_successful_merge_with_branch_delete_failure_is_resumable(
-        self, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
+        self, _base_tip, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
         _remote, _close, _done, _issue_claim, _review_claim, merger_claim,
         sleep, intervention,
     ):
@@ -4662,9 +4664,10 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "check_spec_sync", return_value=(True, "ok"))
     @patch.object(merge_pr, "_gh_json", return_value={"body": "## Acceptance Criteria\n- [x] done"})
     @patch.object(merge_pr, "fetch_pr")
+    @patch.object(merge_pr, "_current_base_tip", return_value="base-sha")
     @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
     def test_default_merge_method_is_merge(
-        self, fetch, _json, _sync, _threads, execute, _root, closeout
+        self, _base_tip, fetch, _json, _sync, _threads, execute, _root, closeout
     ):
         fetch.return_value = {
             "number": 9,
@@ -4996,6 +4999,11 @@ class FinalWindowBaseMovementTests(unittest.TestCase):
         self.assertIn("--match-head-commit", merges[0])
         self.assertIn(self.HEAD, merges[0])
 
+    def test_end_to_end_unreadable_final_base_tip_fails_closed_before_merge(self):
+        code, merges = self._drive_main([None, "base-a"])
+        self.assertEqual(code, merge_pr.EXIT_BLOCKED)
+        self.assertEqual(merges, [])
+
     def test_a_failed_merge_command_is_still_reported_as_an_error(self):
         """The blocked classification must not swallow a real merge failure.
 
@@ -5015,6 +5023,7 @@ class FinalWindowBaseMovementTests(unittest.TestCase):
                           return_value={"head_oid": self.HEAD}), \
              patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
              patch.object(merge_pr, "_behind_by", new=lambda _base, _head: 0), \
+             patch.object(merge_pr, "_current_base_tip", return_value="base-a"), \
              patch.object(merge_pr, "repository_merge_lock",
                           return_value=nullcontext((True, "serialized"))):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
@@ -7103,6 +7112,7 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
                           return_value={"head_oid": "gated-sha"}), \
              patch.object(merge_pr, "evaluate_dod",
                           return_value=(True, list(CHECKPOINT_GATES))), \
+             patch.object(merge_pr, "_current_base_tip", return_value="base-sha"), \
              patch.object(merge_pr, "repository_merge_lock",
                           return_value=nullcontext((True, "serialized"))), \
              patch.object(merge_pr, "execute_merge",

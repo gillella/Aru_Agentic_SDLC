@@ -5314,7 +5314,14 @@ def main():  # noqa: C901, PLR0912, PLR0915
             # before the server merge, because `gh pr merge` pins only the head
             # and GitHub would otherwise merge into whatever base it holds at
             # execution time (#371 review).
-            gated_base = _current_base_tip(fresh) or fresh.get("baseRefOid")
+            gated_base = _current_base_tip(fresh)
+            if not gated_base:
+                print(
+                    "[ERROR] Final live base tip could not be read. "
+                    "No merge command was run.",
+                    file=sys.stderr,
+                )
+                return EXIT_BLOCKED
 
             print(f"  ✅ merge lock          {lock_message}")
             print(f"  ✅ final base check    {rebased_message}")
