@@ -2645,12 +2645,12 @@ class RetiredAgentReviewAuthorityTests(unittest.TestCase):
         self.assertIn("CodeRabbit", message)
 
     def test_no_agent_thread_bucket_masquerades_as_a_service(self):
-        evidence = merge_pr.review_evidence
-        self.assertTrue(callable(evidence))
-        counts = merge_pr._service_thread_counts(
-            {"service_threads": {"coderabbit": {"unresolved": 0}}}, "agent")
-        # Falls back to the whole-evidence dict rather than a per-agent bucket.
-        self.assertNotIn("unresolved", counts)
+        payload = {"unresolved": 3,
+                   "service_threads": {"coderabbit": {"unresolved": 0}}}
+        counts = merge_pr._service_thread_counts(payload, "agent")
+        # Falls back to the whole-evidence dict rather than borrowing another
+        # service's bucket, so the retired label reads the outer counts.
+        self.assertIs(counts, payload)
 
 
 class CodeRabbitStatusEvidenceTests(unittest.TestCase):
