@@ -1016,7 +1016,9 @@ class FleetStatusTests(unittest.TestCase):
                 "codeant": {"unresolved": 1, "unfixed": 0, "outdated_unfixed": 0},
             },
         }
-        sourcery_pr = mock_pr(18, "review:sourcery", decision="COMMENTED")
+        sourcery_pr = mock_pr(
+            18, "review:sourcery", decision="COMMENTED", unresolvedReviewThreadsCount=1,
+        )
         with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[{"id": 1}]), \
              patch("merge_pr.review_evidence", return_value=evidence), \
              patch("merge_pr.with_service_evidence", return_value=evidence), \
@@ -1031,6 +1033,16 @@ class FleetStatusTests(unittest.TestCase):
              patch("merge_pr.has_authoritative_assigned_review", return_value=True):
             status = self.evaluate_fixture(prs=[codeant_pr])
         self.assertIn("PR #18 has active review feedback.", status["reasons"])
+
+        pending_reassigned_pr = mock_pr(
+            18, "review:codeant", decision="COMMENTED", unresolvedReviewThreadsCount=1,
+        )
+        with patch("fetch_pr_feedback.fetch_active_review_feedback", return_value=[{"id": 1}]), \
+             patch("merge_pr.review_evidence", return_value=evidence), \
+             patch("merge_pr.with_service_evidence", return_value=evidence), \
+             patch("merge_pr.has_authoritative_assigned_review", return_value=False):
+            status = self.evaluate_fixture(prs=[pending_reassigned_pr])
+        self.assertIn("PR #18 is open and pending review.", status["reasons"])
 
     def test_unknown_feedback_result_keeps_pr_in_feedback_state(self):
         pr = mock_pr(19, decision="COMMENTED", statusCheckRollup=[{

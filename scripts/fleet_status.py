@@ -447,35 +447,12 @@ def _has_reviewed_by(pr: Dict[str, Any]) -> bool:
     )
 
 
-def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # noqa: C901
+def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if "_review_evidence" in pr:
         return pr["_review_evidence"]
-    # Review evidence is the expensive path: several GraphQL pages per PR.
-    # Cheap snapshot fields can already prove these PRs are not review-ready.
     if pr.get("isDraft"):
         pr["_review_evidence"] = None
         return None
-    cached_feedback = pr.get("_active_review_feedback")
-    if cached_feedback is not None and len(cached_feedback) > 0:
-        pr["_review_evidence"] = None
-        return None
-    unresolved = pr.get("unresolvedReviewThreadsCount")
-    if unresolved is not None:
-        try:
-            if int(unresolved) > 0:
-                pr["_review_evidence"] = None
-                return None
-        except (TypeError, ValueError):
-            pass
-    threads = pr.get("reviewThreads")
-    if isinstance(threads, dict) and isinstance(threads.get("nodes"), list):
-        if any(not node.get("isResolved") for node in threads["nodes"] if isinstance(node, dict)):
-            pr["_review_evidence"] = None
-            return None
-    elif isinstance(threads, list):
-        if any(not node.get("isResolved") for node in threads if isinstance(node, dict)):
-            pr["_review_evidence"] = None
-            return None
     try:
         import merge_pr as mp
 
@@ -483,7 +460,8 @@ def _review_evidence(pr: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # noqa: C
             pr["_review_evidence"] = None
             return None
         evidence = mp.review_evidence(pr["number"])
-        evidence = mp.with_service_evidence(pr, pr["number"], evidence)
+        if evidence is not None:
+            evidence = mp.with_service_evidence(pr, pr["number"], evidence)
     except Exception as exc:
         print(f"[WARN] Could not load review evidence for PR #{pr['number']}: {exc}", file=sys.stderr)
         evidence = None
@@ -548,6 +526,13 @@ def _review_state(pr: Dict[str, Any]) -> str:
     assigned_state = _assigned_service_review_state(pr)
     if assigned_state:
         return assigned_state
+    try:
+        import merge_pr as mp
+
+        if mp.assigned_review_service(pr) in {"coderabbit", "sourcery", "codeant", "agent"}:
+            return "pending"
+    except ImportError:
+        pass
     if _has_active_review_feedback(pr):
         return "feedback"
     return "pending"
