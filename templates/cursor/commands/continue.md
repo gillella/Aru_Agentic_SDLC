@@ -2,8 +2,9 @@ Resume the Aru factory from GitHub board state (`aru code` / `aru` loop).
 
 1. Read and follow `$ARU_SDLC_HOME/skills/run-aru-factory/SKILL.md` in **loop**
    mode (not `next`, not `implement-next-issue`).
-2. Omit `--agent` to auto-assign a free identity, or keep this session's id and
-   family and pass `--agent` / `--family` on every picker command.
+2. Keep passing `--family`. Omit `--agent` to recover the stable identity
+   derived from machine, checkout, and family; set `ARU_AGENT_ID` or pass
+   `--agent` only to pin an explicit id.
 3. Recover first: `fetch_next_work.py --claim --json`.
    Finish in-flight work for this id before claiming anything new.
 4. Pace dynamically: after each unit, ask the picker again if it would return

@@ -270,15 +270,91 @@ class ReviewLabelParsingTests(unittest.TestCase):
 
 
 class ClaimReviewTests(unittest.TestCase):
-    def test_claim_review_is_retired(self):
-        with patch.object(claim_issue, "_pr_labels") as labels:
-            self.assertEqual(claim_issue.claim_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
-        labels.assert_not_called()
+    def test_normal_coding_agent_review_is_still_refused(self):
+        labels = ["review:coderabbit", "author:agent-1"]
+        with patch.object(claim_issue, "_pr_labels", return_value=labels):
+            self.assertEqual(claim_issue.claim_review(7, "agent-2"),
+                             claim_issue.EXIT_CONFLICT)
 
-    def test_complete_review_is_retired(self):
-        with patch.object(claim_issue, "_pr_labels") as labels:
-            self.assertEqual(claim_issue.complete_review(7, "agent-2"), claim_issue.EXIT_CONFLICT)
-        labels.assert_not_called()
+    def test_preassigned_emergency_reviewer_resumes_without_mutation(self):
+        labels = ["review:agent", "reviewer:agent-2", "author:agent-1"]
+        with patch.object(claim_issue, "_pr_labels", return_value=labels), \
+                patch.object(claim_issue, "run_cmd") as run:
+            self.assertEqual(claim_issue.claim_review(7, "agent-2"),
+                             claim_issue.EXIT_OK)
+        run.assert_not_called()
+
+    def test_wrong_or_self_reviewer_is_refused(self):
+        for agent, labels in (
+            ("agent-3", ["review:agent", "reviewer:agent-2", "author:agent-1"]),
+            ("agent-1", ["review:agent", "reviewer:agent-1", "author:agent-1"]),
+        ):
+            with self.subTest(agent=agent), \
+                    patch.object(claim_issue, "_pr_labels", return_value=labels):
+                self.assertEqual(claim_issue.claim_review(7, agent),
+                                 claim_issue.EXIT_CONFLICT)
+
+    def test_complete_emergency_review_stamps_exact_head_contract(self):
+        labels = ["review:agent", "reviewer:agent-2", "author:agent-1"]
+        calls = []
+
+        def run(cmd, **_kwargs):
+            calls.append(cmd)
+            return 0, "", ""
+
+        with patch.object(claim_issue, "_pr_labels", return_value=labels), \
+                patch.object(claim_issue, "_reviewed_head_for_completion",
+                             return_value="a" * 40), \
+                patch.object(claim_issue.merge_pr, "review_evidence", return_value={
+                    "head_oid": "a" * 40, "agent_review_attestations": [],
+                    "agent_review_marker_errors": 0,
+                }), \
+                patch.object(claim_issue, "ensure_label", return_value=True), \
+                patch.object(claim_issue, "run_cmd", side_effect=run), \
+                patch.object(claim_issue, "_remove_reviewer_label", return_value=True):
+            code = claim_issue.complete_review(
+                7, "agent-2", "openai", "no-findings")
+        self.assertEqual(code, claim_issue.EXIT_OK)
+        comment = next(cmd[-1] for cmd in calls if "comment" in cmd)
+        for expected in ("aru-agent-review:v1", "agent-2", "openai",
+                         "no-findings", "a" * 40):
+            self.assertIn(expected, comment)
+
+    def test_completion_retry_reuses_matching_marker(self):
+        labels = ["review:agent", "reviewer:agent-2", "author:agent-1"]
+        record = {"head": "a" * 40, "agent": "agent-2", "family": "openai",
+                  "disposition": "no-findings"}
+        calls = []
+        with patch.object(claim_issue, "_pr_labels", return_value=labels), \
+                patch.object(claim_issue, "_reviewed_head_for_completion",
+                             return_value="a" * 40), \
+                patch.object(claim_issue.merge_pr, "review_evidence", return_value={
+                    "head_oid": "a" * 40, "agent_review_attestations": [record],
+                    "agent_review_marker_errors": 0,
+                }), \
+                patch.object(claim_issue, "ensure_label", return_value=True), \
+                patch.object(claim_issue, "run_cmd",
+                             side_effect=lambda cmd, **_kwargs: (calls.append(cmd) or (0, "", ""))), \
+                patch.object(claim_issue, "_remove_reviewer_label", return_value=True):
+            code = claim_issue.complete_review(7, "agent-2", "openai", "no-findings")
+        self.assertEqual(code, claim_issue.EXIT_OK)
+        self.assertFalse(any("comment" in cmd for cmd in calls))
+
+    def test_completion_requires_agent_authority_family_and_disposition(self):
+        cases = (
+            (["review:coderabbit", "reviewer:agent-2", "author:agent-1"],
+             "openai", "no-findings"),
+            (["review:agent", "reviewer:agent-2", "author:agent-1"],
+             "", "no-findings"),
+            (["review:agent", "reviewer:agent-2", "author:agent-1"],
+             "openai", ""),
+        )
+        for labels, family, disposition in cases:
+            with self.subTest(labels=labels, family=family, disposition=disposition), \
+                    patch.object(claim_issue, "_pr_labels", return_value=labels):
+                self.assertEqual(
+                    claim_issue.complete_review(7, "agent-2", family, disposition),
+                    claim_issue.EXIT_CONFLICT)
 
 
 class ReleaseReviewTests(unittest.TestCase):

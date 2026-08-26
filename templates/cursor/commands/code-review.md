@@ -1,5 +1,8 @@
-Refuse coding-agent pull-request review under Aru_Agentic_SDLC.
+Review a pull request only when this exact agent already has an explicit
+`review:agent` emergency assignment made after external reviewer exhaustion or
+an operator-declared excessive wait.
 
-The assigned review-pool service alone reviews pull requests in this repository; coding agents never review.
-Route assigned-service review findings back to the factory picker to remediate them instead.
-Do not inspect the PR, run `gh pr review`, open a review workspace, or submit review comments.
+Follow the `code-review` skill. Verify the reviewer is different from the
+author, inspect only the exact current head in an isolated worktree, and submit
+substantive GitHub evidence before mechanical completion. Otherwise refuse the
+review and return to the factory picker.

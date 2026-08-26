@@ -1,24 +1,14 @@
 #!/usr/bin/env python3
-# line-ceiling: 1514
+# +51 for the #344 terminal merge lease guard.
+# line-ceiling: 1656
 """
-claim_issue.py - Optimistically claims a GitHub issue, or a PR for review,
-for one agent.
+claim_issue.py - Optimistically claims one governed GitHub issue for one agent.
 
 GitHub exposes no compare-and-swap on issue state, so a true lock is not
 available. The protocol here is optimistic:
 
-  1. Read the issue. If another agent already holds it, abort (exit 2).
-  2. Preflight the governed Project item, Ready state, and target Status option.
-  3. Write our agent:<id> label.
-  4. Settle: sleep and read back repeatedly. If two agents raced, both see
-     both labels and compute the same winner - the lowest-sorting agent id.
-     The loser releases. Multiple settle rounds catch late label writes that
-     arrive after an earlier sole-holder readback.
-  5. Move the board item, then verify holders once more; roll back if a
-     lower-sorting contender appeared during the status update.
-
-Steps 4/5 are what make this safe. Without settle+confirm, two agents that
-read "unclaimed" in the same instant both proceed and duplicate the work.
+Claims serialize with other lifecycle transitions on this host, then settle
+optimistically through GitHub so competing machines choose one winner.
 
 Exit codes:
   0 - claimed
@@ -37,6 +27,9 @@ from typing import Any, Optional
 import merge_pr
 from common import (
     AGENT_LABEL_PREFIX,
+    terminal_lease_refusal,
+    terminal_lease_sha,
+    terminal_merge_lease,
     agent_labels,
     claimed_by,
     ensure_label,
@@ -408,12 +401,69 @@ def _start_fresh_issue_claim(
     )
 
 
-def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
-                assignee: str = "@me") -> int:
+def _terminally_merged(issue_id: int, issue=None):
+    """Refusal text when this issue was already closed by a governed merge.
+
+    Re-claiming merged work is how a stale worker resumed a finished issue and
+    pushed an orphan commit onto its deleted branch (#344). None means the
+    issue is claimable as far as merge state is concerned.
+
+    Short-circuits on the already-fetched issue: an open issue cannot have been
+    terminally merged, so the overwhelmingly common path costs no extra API
+    call at all.
+    """
+    if isinstance(issue, dict) and issue.get("state") != "CLOSED":
+        return None
+    data = run_gh_json([
+        "gh", "issue", "view", str(issue_id),
+        "--json", "state,closedByPullRequestsReferences",
+    ])
+    # An unreadable lookup is not "not merged". A closed issue still carrying
+    # status:ready would otherwise sail through on a failed API call, so an
+    # unknown answer blocks on this governance path (CodeRabbit, #344).
+    if not isinstance(data, dict):
+        return (f"Could not read merge state for issue #{issue_id}; refusing to claim "
+                "rather than risk continuing terminally merged work.")
+    if data.get("state") != "CLOSED":
+        return None
+    refs = data.get("closedByPullRequestsReferences") or []
+    # A malformed reference list is another shape of "cannot read merge state".
+    # Skipping the entries we cannot parse would let a closed-by-merge issue be
+    # re-claimed on garbage data, which is the same fail-open the readable-lookup
+    # guard above closes (CodeRabbit, #344).
+    if not isinstance(refs, list):
+        return (f"Closing-PR references for issue #{issue_id} were malformed; refusing "
+                "to claim while merge state is unknown.")
+    for ref in refs:
+        number = ref.get("number") if isinstance(ref, dict) else None
+        if not number:
+            return (f"Issue #{issue_id} lists a closing pull request that could not be "
+                    "identified; refusing to claim while merge state is unknown.")
+        pr = run_gh_json(["gh", "pr", "view", str(number), "--json", "state,headRefName"])
+        if not isinstance(pr, dict):
+            return (f"Could not read the state of PR #{number}, which closed issue "
+                    f"#{issue_id}; refusing to claim while merge state is unknown.")
+        if pr.get("state") != "MERGED":
+            continue
+        lease = terminal_merge_lease(pr.get("headRefName") or "")
+        if lease:
+            return terminal_lease_refusal(lease, f"re-claim issue #{issue_id}")
+        return (f"Issue #{issue_id} was closed by merged PR #{number}; merged work "
+                "cannot be re-claimed. File a new issue for follow-up work.")
+    return None
+
+
+def _claim_issue_locked(issue_id: int, agent: str, status: str,
+                        assignee: str) -> int:
     issue = get_issue(issue_id)
     if not issue:
         print(f"[ERROR] Issue #{issue_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+
+    refusal = _terminally_merged(issue_id, issue)
+    if refusal:
+        print(f"[BLOCKED] {refusal}", file=sys.stderr)
+        return EXIT_CONFLICT
 
     my_label = _label_for(agent)
     owner = repository_owner_login()
@@ -480,6 +530,16 @@ def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
         issue_id, agent, status, assignee, my_label,
         owner, trusted_logins,
     )
+
+
+def claim_issue(issue_id: int, agent: str, status: str = "In Progress",
+                assignee: str = "@me") -> int:
+    """Serialize claims against auto-triage and merge lifecycle transitions."""
+    with merge_pr.repository_merge_lock() as (locked, message):
+        if not locked:
+            print(f"[ERROR] Issue claim deferred: {message}.", file=sys.stderr)
+            return EXIT_ERROR
+        return _claim_issue_locked(issue_id, agent, status, assignee)
 
 
 def release_issue(issue_id: int, agent: str) -> int:
@@ -755,30 +815,34 @@ def _remove_reviewer_label(pr_id: int, agent: str) -> bool:
     return code == 0
 
 
-def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
-    """Reject retired coding-agent review claims."""
-    print(
-        "[CONFLICT] The assigned review-pool service is the sole PR code-review "
-        "authority; coding agents may implement or remediate findings but "
-        "cannot claim review.",
-        file=sys.stderr,
-    )
-    return EXIT_CONFLICT
-
-    # Retained unreachable implementation documents the legacy label protocol
-    # for release/reaping compatibility with already-open PRs.
+def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901, PLR0912
+    """Resume only an operator-assigned emergency coding-agent review."""
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+    authorities = [name for name in labels if name.startswith("review:")]
+    holder = review_claimant(labels)
+    if authorities != ["review:agent"] or holder != agent:
+        print("[CONFLICT] Coding agents cannot claim normal review work. The PR "
+              "must already carry exactly review:agent and reviewer:<this-agent> "
+              "from the emergency reassignment helper.", file=sys.stderr)
+        return EXIT_CONFLICT
 
     # Refuse the PR's own author here, not only in the picker. fetch_next_work
     # filters own-authored PRs when it hands out review work, but a direct
     # `--pr <n> --agent <me>` bypasses that, and merge_pr.py now treats this
     # claim as the identity of the reviewer. The guarantee has to live where
     # the label is written.
-    author = pr_author(labels)
-    if author and author == agent:
+    authors = [name[len(AUTHOR_LABEL_PREFIX):] for name in labels
+               if name.startswith(AUTHOR_LABEL_PREFIX)
+               and name[len(AUTHOR_LABEL_PREFIX):]]
+    if len(authors) != 1:
+        print(f"[CONFLICT] PR #{pr_id} must carry exactly one non-empty "
+              "author:<id> before emergency review.", file=sys.stderr)
+        return EXIT_CONFLICT
+    author = authors[0]
+    if author == agent:
         print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}'. "
               "An agent may not claim review of its own PR.", file=sys.stderr)
         return EXIT_CONFLICT
@@ -843,6 +907,9 @@ def claim_review(pr_id: int, agent: str) -> int:  # noqa: C901
 
 REVIEWED_BY_LABEL_PREFIX = "reviewed-by:"
 REVIEW_HEAD_ATTESTATION_VERSION = "aru-review-head:v1"
+AGENT_REVIEW_ATTESTATION_VERSION = "aru-agent-review:v1"
+AGENT_REVIEW_LABEL = "review:agent"
+AGENT_REVIEW_DISPOSITIONS = {"no-findings", "findings-resolved"}
 
 
 REVIEWER_FAMILY_LABEL_PREFIX = "reviewer-family:"
@@ -871,15 +938,22 @@ def _reviewed_head_for_completion(pr_id: int) -> str | None:
     return head.lower()
 
 
-def _review_head_attestation(agent: str, head: str) -> str:
+def _review_head_attestation(agent: str, head: str, family: str,
+                             disposition: str) -> str:
+    completed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload = json.dumps(
-        {"agent": agent, "head": head}, sort_keys=True, separators=(",", ":")
+        {"agent": agent, "completed_at": completed_at,
+         "disposition": disposition, "family": family, "head": head,
+         "status": "completed"}, sort_keys=True, separators=(",", ":")
     )
     return (
-        f"<!-- {REVIEW_HEAD_ATTESTATION_VERSION} {payload} -->\n"
-        "## Review completion\n\n"
+        f"<!-- {AGENT_REVIEW_ATTESTATION_VERSION} {payload} -->\n"
+        "## Emergency independent-agent review completion\n\n"
         f"- reviewed-by: `{agent}`\n"
         f"- reviewed-head: `{head}`\n"
+        f"- reviewer-family: `{family}`\n"
+        f"- disposition: `{disposition}`\n"
+        f"- completed-at: `{completed_at}`\n"
     )
 
 
@@ -908,8 +982,9 @@ def _stamp_reviewer_family(pr_id: int, agent: str, family: str) -> None:
         print(f"[WARN] Could not apply '{stamp}': {err}", file=sys.stderr)
 
 
-def complete_review(pr_id: int, agent: str, family: str = "") -> int:
-    """Reject retired coding-agent review completion.
+def complete_review(pr_id: int, agent: str, family: str = "",  # noqa: C901, PLR0912
+                    disposition: str = "") -> int:
+    """Complete an explicitly assigned emergency independent-agent review.
 
     This exists because the step had no command. `fleet-worker.md` told the
     reviewing agent to "label the PR reviewed-by:<id>" in prose and gave a
@@ -921,19 +996,19 @@ def complete_review(pr_id: int, agent: str, family: str = "") -> int:
     a window where the PR is neither claimed nor attributed, and another agent
     could pick it up for a review that had already happened.
     """
-    print(
-        "[CONFLICT] Coding-agent review completion is retired; only "
-        "authoritative CodeRabbit evidence can satisfy merge review.",
-        file=sys.stderr,
-    )
-    return EXIT_CONFLICT
-
-    # Legacy implementation remains unreachable so old claims can still be
-    # understood and explicitly released without becoming merge authority.
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+    authorities = [name for name in labels if name.startswith("review:")]
+    if authorities != [AGENT_REVIEW_LABEL]:
+        print("[CONFLICT] Coding-agent completion is allowed only for one explicit "
+              "review:agent emergency assignment.", file=sys.stderr)
+        return EXIT_CONFLICT
+    if not family or disposition not in AGENT_REVIEW_DISPOSITIONS:
+        print("[CONFLICT] Agent completion requires --model-family and "
+              "--review-disposition no-findings|findings-resolved.", file=sys.stderr)
+        return EXIT_CONFLICT
 
     # Attribution is not something a passer-by may write. Requiring the claim
     # keeps "who reviewed this" tied to the agent that actually took the work.
@@ -944,8 +1019,14 @@ def complete_review(pr_id: int, agent: str, family: str = "") -> int:
               file=sys.stderr)
         return EXIT_CONFLICT
 
-    author = pr_author(labels)
-    if author and author == agent:
+    authors = [name[len(AUTHOR_LABEL_PREFIX):] for name in labels
+               if name.startswith(AUTHOR_LABEL_PREFIX)
+               and name[len(AUTHOR_LABEL_PREFIX):]]
+    if len(authors) != 1:
+        print(f"[CONFLICT] PR #{pr_id} must carry exactly one non-empty "
+              "author:<id> before emergency review completion.", file=sys.stderr)
+        return EXIT_CONFLICT
+    if authors[0] == agent:
         print(f"[CONFLICT] PR #{pr_id} was authored by '{agent}'. "
               "An agent may not attribute a review of its own PR.", file=sys.stderr)
         return EXIT_CONFLICT
@@ -959,14 +1040,29 @@ def complete_review(pr_id: int, agent: str, family: str = "") -> int:
         )
         return EXIT_CONFLICT
 
-    code, _, err = run_cmd(
-        ["gh", "pr", "comment", str(pr_id), "--body",
-         _review_head_attestation(agent, reviewed_head)],
-        check=False,
-    )
-    if code != 0:
-        print(f"[ERROR] Could not stamp reviewed-head evidence: {err}", file=sys.stderr)
+    evidence = merge_pr.review_evidence(pr_id)
+    if not isinstance(evidence, dict) or evidence.get("head_oid") != reviewed_head:
+        print("[ERROR] Could not read head-stable completion evidence; refusing "
+              "rather than risking a duplicate marker.", file=sys.stderr)
         return EXIT_ERROR
+    current = [record for record in evidence.get("agent_review_attestations", [])
+               if record.get("head") == reviewed_head]
+    expected = {"agent": agent, "family": family, "disposition": disposition}
+    if evidence.get("agent_review_marker_errors") or len(current) > 1 or (
+        current and any(current[0].get(key) != value for key, value in expected.items())
+    ):
+        print("[CONFLICT] Existing emergency completion evidence is malformed, "
+              "duplicated, or belongs to a different reviewer.", file=sys.stderr)
+        return EXIT_CONFLICT
+    if not current:
+        code, _, err = run_cmd(
+            ["gh", "pr", "comment", str(pr_id), "--body",
+             _review_head_attestation(agent, reviewed_head, family, disposition)],
+            check=False,
+        )
+        if code != 0:
+            print(f"[ERROR] Could not stamp reviewed-head evidence: {err}", file=sys.stderr)
+            return EXIT_ERROR
 
     stamp = _reviewed_by_label_for(agent)
     if not ensure_label(stamp, "0e8a16", f"Reviewed by agent '{agent}'"):
@@ -1043,16 +1139,49 @@ def _remove_merger_label(pr_id: int, agent: str) -> bool:
     return code == 0
 
 
+def _terminal_lease_conflict(pr_id: int, labels):
+    """Exit code when a terminal lease blocks a merge claim, else None.
+
+    The terminal-lease label is only a cache. Labels are writable by anyone
+    with triage rights, so honouring one on its own would let an outsider
+    freeze any PR (CWE-345); the merged-PR record is the authority and the
+    label merely says when it is worth asking. claim_review and
+    complete_review need no equivalent guard, because #412 retired
+    coding-agent review and both are already unconditional refusals.
+    """
+    lease_sha = terminal_lease_sha(labels)
+    if not lease_sha:
+        return None
+    state = run_gh_json(["gh", "pr", "view", str(pr_id), "--json", "state"])
+    if not isinstance(state, dict):
+        print(f"[ERROR] PR #{pr_id} carries a terminal-lease label but its merge "
+              "state could not be read; refusing rather than guessing.", file=sys.stderr)
+        return EXIT_ERROR
+    if state.get("state") == "MERGED":
+        print(f"[CONFLICT] PR #{pr_id} was merged by a governed run (lease "
+              f"{lease_sha}); it cannot be claimed for merge again. File a new "
+              "governed issue and branch for follow-up work.", file=sys.stderr)
+        return EXIT_CONFLICT
+    print(f"[WARN] PR #{pr_id} carries terminal-lease:{lease_sha} but GitHub reports "
+          "it unmerged; ignoring the label and continuing.", file=sys.stderr)
+    return None
+
+
 def claim_merge(pr_id: int, agent: str) -> int:  # noqa: C901
     """Claims a pull request for mechanical merge. Same exit codes as claim_issue.
 
     The author may hold this coordination claim. ``merge_pr.py`` remains the
-    authority and independently requires exact-current-head CodeRabbit review.
+    authority and independently requires exact-current-head assigned-reviewer
+    evidence.
     """
     labels = _pr_labels(pr_id)
     if labels is None:
         print(f"[ERROR] PR #{pr_id} not found.", file=sys.stderr)
         return EXIT_ERROR
+
+    blocked = _terminal_lease_conflict(pr_id, labels)
+    if blocked is not None:
+        return blocked
 
     holder = merge_claimant(labels)
     if holder and holder != agent:
@@ -1291,7 +1420,12 @@ def _effective_reap_threshold(
     return base, "live agent"
 
 
-def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[datetime] = None) -> list:  # noqa: C901
+def reap_stale_merges(  # noqa: C901, PLR0912
+    hours: int = 4,
+    presence_store: Any = None,
+    now: Optional[datetime] = None,
+    prs_snapshot: Optional[list] = None,
+) -> list:
     """Releases merge claims that went quiet without finishing close-out.
 
     Open and merged PRs are both scanned. A crash right after server-side merge
@@ -1302,24 +1436,27 @@ def reap_stale_merges(hours: int = 4, presence_store: Any = None, now: Optional[
     if hours <= 0:
         return []
 
-    prs = []
-    for state in ("open", "merged"):
-        code, out, _ = run_cmd(
-            ["gh", "pr", "list", "--state", state, "--limit", "200",
-             "--json", "number,labels,state,mergedAt"],
-            check=False,
-        )
-        if code != 0:
-            print(f"[WARN] Could not list {state} PRs; merge reaping incomplete.",
-                  file=sys.stderr)
-            return []
-        try:
-            batch = json.loads(out) if out else []
-        except json.JSONDecodeError:
-            print(f"[WARN] Could not parse {state} PR list; merge reaping aborted.",
-                  file=sys.stderr)
-            return []
-        prs.extend(batch)
+    if prs_snapshot is None:
+        prs = []
+        for state in ("open", "merged"):
+            code, out, _ = run_cmd(
+                ["gh", "pr", "list", "--state", state, "--limit", "200",
+                 "--json", "number,labels,state,mergedAt"],
+                check=False,
+            )
+            if code != 0:
+                print(f"[WARN] Could not list {state} PRs; merge reaping incomplete.",
+                      file=sys.stderr)
+                return []
+            try:
+                batch = json.loads(out) if out else []
+            except json.JSONDecodeError:
+                print(f"[WARN] Could not parse {state} PR list; merge reaping aborted.",
+                      file=sys.stderr)
+                return []
+            prs.extend(batch)
+    else:
+        prs = list(prs_snapshot)
 
     claims = _claims_with_timestamps(prs, MERGER_LABEL_PREFIX, merge_claimant)
     if claims is None:
@@ -1461,6 +1598,10 @@ def main():
                              "--complete-review, stamps "
                              "reviewer-family:<id>:<family> so the merge gate "
                              "can compare identity as (id, family).")
+    parser.add_argument("--review-disposition", default="",
+                        choices=sorted(AGENT_REVIEW_DISPOSITIONS),
+                        help="Required with emergency --complete-review: "
+                             "no-findings or findings-resolved.")
     parser.add_argument("--adopt", action="store_true",
                         help="With --pr: take over an abandoned PR, moving "
                              "author: and family: to this agent and recording "
@@ -1492,7 +1633,8 @@ def main():
                   else claim_merge(args.pr, args.agent))
             sys.exit(rc)
         if args.complete:
-            sys.exit(complete_review(args.pr, args.agent, args.family))
+            sys.exit(complete_review(args.pr, args.agent, args.family,
+                                     args.review_disposition))
         rc = release_review(args.pr, args.agent) if args.release else claim_review(args.pr, args.agent)
         sys.exit(rc)
 
