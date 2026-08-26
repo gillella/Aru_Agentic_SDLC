@@ -127,9 +127,13 @@ class AdoptPullRequestTests(unittest.TestCase):
         """Drive adopt_pr. `settled_author` is who the read-back reports."""
         calls = []
         agent = kwargs.pop("agent", "claude-a3f19c")
+        approved = kwargs.pop("approved", True)
+        audit_failure = kwargs.pop("audit_failure", False)
 
         def fake_run_cmd(cmd, *args, **kw):
             calls.append(cmd)
+            if audit_failure and cmd[:3] == ["gh", "pr", "comment"]:
+                return 1, "", "comment denied"
             return 0, "", ""
 
         # adopt_pr reads the PR twice: once to qualify it, once to confirm the
@@ -142,6 +146,8 @@ class AdoptPullRequestTests(unittest.TestCase):
                           side_effect=lambda *a, **k: snapshots.pop(0)
                           if snapshots else after), \
              patch.object(claim_issue, "ensure_label", return_value=True), \
+             patch.object(claim_issue, "operator_transfer_approved",
+                          return_value=approved), \
              patch.object(claim_issue, "run_cmd", side_effect=fake_run_cmd):
             rc = claim_issue.adopt_pr(42, agent, **kwargs)
         return rc, calls
@@ -207,6 +213,20 @@ class AdoptPullRequestTests(unittest.TestCase):
         self.assertIn("operator-authorized transfer", comment[-1])
         self.assertIn("Original author is busy", comment[-1])
 
+    def test_operator_transfer_requires_trusted_exact_transfer_approval(self):
+        rc, calls = self._adopt(self.snapshot(idle_hours=0), family="anthropic",
+                                operator_authorized=True, reason="Author busy",
+                                approved=False)
+        self.assertEqual(rc, claim_issue.EXIT_ERROR)
+        self.assertFalse([c for c in calls if c[:3] == ["gh", "pr", "edit"]])
+
+    def test_operator_transfer_requires_model_family_before_reads(self):
+        with patch.object(claim_issue, "run_gh_json") as read:
+            rc = claim_issue.adopt_pr(42, "claude-a3f19c", "",
+                                      operator_authorized=True, reason="Author busy")
+        self.assertEqual(rc, claim_issue.EXIT_ERROR)
+        read.assert_not_called()
+
     def test_operator_transfer_requires_flag_and_reason_before_reads(self):
         for authorized, reason in ((True, "  "), (False, "author unavailable")):
             with self.subTest(authorized=authorized), \
@@ -233,6 +253,18 @@ class AdoptPullRequestTests(unittest.TestCase):
                                 reason="Original author is unavailable")
         self.assertEqual(rc, claim_issue.EXIT_CONFLICT)
         self.assertFalse([c for c in calls if c[:3] == ["gh", "pr", "edit"]])
+
+    def test_abandoned_adoption_also_rejects_the_assigned_reviewer(self):
+        snapshot = self.snapshot(labels=[{"name": "author:codex-9f21"},
+                                         {"name": "reviewer:claude-a3f19c"}])
+        rc, calls = self._adopt(snapshot, family="anthropic")
+        self.assertEqual(rc, claim_issue.EXIT_CONFLICT)
+        self.assertFalse([c for c in calls if c[:3] == ["gh", "pr", "edit"]])
+
+    def test_failed_audit_comment_reports_error_after_transfer(self):
+        rc, calls = self._adopt(self.snapshot(), family="anthropic", audit_failure=True)
+        self.assertEqual(rc, claim_issue.EXIT_ERROR)
+        self.assertTrue([c for c in calls if c[:3] == ["gh", "pr", "edit"]])
 
     def test_adopting_your_own_pr_is_refused(self):
         rc, _calls = self._adopt(self.snapshot(), agent="codex-9f21")
