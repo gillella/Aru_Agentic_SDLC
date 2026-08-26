@@ -1,6 +1,7 @@
 # line-ceiling: 6935
 from contextlib import nullcontext
 from datetime import datetime, timezone
+import inspect
 import json
 import os
 import sys
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import common
 import merge_pr
 import cleanup_worktrees
 
@@ -1354,6 +1356,145 @@ class CodeAntEvidenceTests(unittest.TestCase):
     def test_codeant_is_recognised_as_a_fallback_authority(self):
         self.assertEqual(merge_pr.assigned_review_service(self.pr()), "codeant")
         self.assertIn("review:codeant", merge_pr.REVIEW_SERVICE_LABELS)
+class TerminalMergeLeaseTests(unittest.TestCase):
+    """#344: a merged branch name is spent; later pushes are stale, not new work."""
+
+    def test_merged_branch_resolves_to_a_lease(self):
+        rows = [{"number": 425, "headRefName": "feat/x",
+                 "headRefOid": "a" * 40, "mergeCommit": {"oid": "b" * 40},
+                 "author": {"login": "someone"}, "mergedAt": "2026-08-25T00:00:00Z"}]
+        with patch.object(common, "run_gh_json", return_value=rows):
+            lease = common.terminal_merge_lease("feat/x")
+        self.assertEqual(lease["pr"], 425)
+        self.assertEqual(lease["gated_sha"], "a" * 40)
+        self.assertEqual(lease["merged_sha"], "b" * 40)
+        self.assertEqual(lease["holder"], "someone")
+
+    def test_never_merged_branch_has_no_lease(self):
+        with patch.object(common, "run_gh_json", return_value=[]):
+            self.assertIsNone(common.terminal_merge_lease("feat/live"))
+
+    def test_unreadable_lookup_fails_closed(self):
+        """Cannot-tell must block continuation, not permit it."""
+        with patch.object(common, "run_gh_json", return_value=None):
+            lease = common.terminal_merge_lease("feat/x")
+        self.assertTrue(lease["unreadable"])
+        self.assertIn("refusing", common.terminal_lease_refusal(lease, "reuse").lower())
+
+    def test_several_merged_prs_for_one_branch_fail_closed(self):
+        rows = [{"number": n, "headRefName": "feat/x", "headRefOid": "a" * 40,
+                 "mergeCommit": {"oid": "b" * 40}, "author": {"login": "x"}} for n in (1, 2)]
+        with patch.object(common, "run_gh_json", return_value=rows):
+            lease = common.terminal_merge_lease("feat/x")
+        self.assertEqual(lease["ambiguous"], [1, 2])
+
+    def test_partial_name_match_is_not_a_lease(self):
+        rows = [{"number": 1, "headRefName": "feat/x-other", "headRefOid": "a" * 40,
+                 "mergeCommit": {"oid": "b" * 40}, "author": {"login": "x"}}]
+        with patch.object(common, "run_gh_json", return_value=rows):
+            self.assertIsNone(common.terminal_merge_lease("feat/x"))
+
+    def test_malformed_payload_fails_closed(self):
+        """A non-list payload is unknown, not empty."""
+        for payload in ({"nope": 1}, "rows", 7):
+            with self.subTest(payload=payload):
+                with patch.object(common, "run_gh_json", return_value=payload):
+                    self.assertTrue(common.terminal_merge_lease("feat/x")["unreadable"])
+
+    def test_a_full_page_is_treated_as_unreadable(self):
+        """A capped result may be hiding another merged PR."""
+        rows = [{"number": n, "headRefName": "feat/x", "headRefOid": "a" * 40,
+                 "mergeCommit": {"oid": "b" * 40}, "author": {"login": "x"}}
+                for n in range(20)]
+        with patch.object(common, "run_gh_json", return_value=rows):
+            self.assertTrue(common.terminal_merge_lease("feat/x")["unreadable"])
+
+    def test_blank_branch_has_no_lease(self):
+        for value in ("", None, 7):
+            with self.subTest(value=value):
+                self.assertIsNone(common.terminal_merge_lease(value))
+
+
+class StaleWriterEscalationTests(unittest.TestCase):
+    """#344 regression, modelled on hermes PR #89."""
+
+    PR = {"number": 89, "author": {"login": "codex-1"}}
+
+    def _detect(self, ls_remote_out, code=0):
+        with patch.object(merge_pr, "get_repo_slug", return_value="o/r"), \
+             patch.object(merge_pr, "run_cmd", return_value=(code, ls_remote_out, "")):
+            return merge_pr.detect_stale_writer(
+                "/repo", self.PR, "feat/issue-87", "0" * 40, "o/r",
+            )
+
+    def test_deleted_branch_is_clean(self):
+        ok, message = self._detect("")
+        self.assertTrue(ok)
+        self.assertIn("No recreated branch", message)
+
+    def test_branch_still_at_gated_head_is_clean(self):
+        ok, _ = self._detect(f"{'0' * 40}\trefs/heads/feat/issue-87")
+        self.assertTrue(ok)
+
+    def test_recreated_branch_escalates_with_every_operator_fact(self):
+        ok, message = self._detect(f"{'3' * 40}\trefs/heads/feat/issue-87")
+        self.assertFalse(ok)
+        self.assertIn("[P0] STALE WRITER", message)
+        self.assertIn("89", message)          # PR
+        self.assertIn("0" * 40, message)      # gated SHA
+        self.assertIn("3" * 40, message)      # new SHA
+        self.assertIn("feat/issue-87", message)   # branch
+        self.assertIn("codex-1", message)     # holder
+
+    def test_escalation_never_deletes_the_orphan(self):
+        _, message = self._detect(f"{'3' * 40}\trefs/heads/feat/issue-87")
+        self.assertIn("NOT deleted", message)
+        self.assertIn("preserved for inspection", message)
+
+    def test_unreadable_remote_keeps_close_out_incomplete(self):
+        """Fail closed: an unreadable remote is when a stale write is likeliest."""
+        ok, message = self._detect("", code=1)
+        self.assertFalse(ok)
+        self.assertIn("cannot rule out", message)
+
+    def test_close_out_runs_the_stale_writer_step(self):
+        source = inspect.getsource(merge_pr)
+        self.assertIn('("stale writer", lambda: detect_stale_writer(', source)
+
+
+class TerminalLeaseRecordingTests(unittest.TestCase):
+    """#344 criterion 1/4: the merge records a lease that no reap path clears."""
+
+    def test_label_is_derived_from_the_gated_sha(self):
+        self.assertEqual(common.terminal_lease_label("A" * 40), "terminal-lease:" + "a" * 12)
+
+    def test_label_round_trips_through_the_reader(self):
+        label = common.terminal_lease_label("abcdef1234567890")
+        self.assertEqual(common.terminal_lease_sha([label]), "abcdef123456")
+
+    def test_reader_ignores_unrelated_labels(self):
+        self.assertIsNone(common.terminal_lease_sha(["status:done", "agent:x", None, 7]))
+
+    def test_recording_stamps_the_pr(self):
+        with patch.object(merge_pr, "ensure_label", return_value=True), \
+             patch.object(merge_pr, "run_cmd", return_value=(0, "", "")) as run:
+            ok, message = merge_pr.record_terminal_lease(89, "a" * 40)
+        self.assertTrue(ok)
+        self.assertIn("terminal-lease:" + "a" * 12, message)
+        self.assertIn("--add-label", run.call_args[0][0])
+
+    def test_recording_failure_warns_without_failing_a_completed_merge(self):
+        """The marker is convenience; the derived lease is the protection."""
+        with patch.object(merge_pr, "ensure_label", return_value=True), \
+             patch.object(merge_pr, "run_cmd", return_value=(1, "", "denied")):
+            ok, message = merge_pr.record_terminal_lease(89, "a" * 40)
+        self.assertTrue(ok, "a failed marker must not strand a completed merge")
+        self.assertIn("[WARN]", message)
+        self.assertIn("derived merged-PR lease still blocks", message)
+
+    def test_close_out_records_the_lease(self):
+        self.assertIn('("terminal lease", lambda: record_terminal_lease(',
+                      inspect.getsource(merge_pr))
 
 
 class CiGateTests(unittest.TestCase):
@@ -4471,6 +4612,8 @@ class CloseOutRecoveryTests(unittest.TestCase):
             "prune_worktree": (True, "worktree ok"),
             "cleanup_local_branch": (True, "local ok"),
             "delete_remote_branch": (True, "remote ok"),
+            "record_terminal_lease": (True, "lease ok"),
+            "detect_stale_writer": (True, "no stale write"),
             "ensure_issue_closed": (True, "closed"),
             "reconcile_issue_done": (True, "done"),
             "clear_issue_claims": (True, "issue claim clear"),
@@ -4527,6 +4670,8 @@ class CloseOutRecoveryTests(unittest.TestCase):
         mocks["reconcile_issue_done"].assert_called_once_with(7)
         mocks["clear_merger_claims"].assert_not_called()
 
+    @patch.object(merge_pr, "detect_stale_writer", return_value=(True, "no stale write"))
+    @patch.object(merge_pr, "record_terminal_lease", return_value=(True, "lease ok"))
     @patch.object(merge_pr, "sweep_leftovers", return_value=(True, "janitor ok"))
     @patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear"))
     @patch.object(merge_pr, "clear_review_claims", return_value=(True, "review clear"))
@@ -4538,7 +4683,8 @@ class CloseOutRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "prune_worktree", return_value=(True, "worktree"))
     @patch.object(merge_pr.os, "chdir")
     def test_changes_to_surviving_root_before_pruning_caller_worktree(
-        self, chdir, prune, _local, _remote, _close, _done, _issue, _review, _merger, _janitor
+        self, chdir, prune, _local, _remote, _close, _done, _issue, _review, _merger,
+        _janitor, _lease, _stale,
     ):
         def after_chdir(*_args):
             chdir.assert_called_once_with("/repo")
@@ -5340,6 +5486,8 @@ class OrphanLocalBranchRegressionTests(unittest.TestCase):
     def _remote_lifecycle_patches(self):
         return [
             patch.object(merge_pr, "delete_remote_branch", return_value=(True, "remote gone")),
+            patch.object(merge_pr, "record_terminal_lease", return_value=(True, "lease ok")),
+            patch.object(merge_pr, "detect_stale_writer", return_value=(True, "no stale write")),
             patch.object(merge_pr, "ensure_issue_closed", return_value=(True, "closed")),
             patch.object(merge_pr, "reconcile_issue_done", return_value=(True, "done")),
             patch.object(merge_pr, "clear_issue_claims", return_value=(True, "issue claim clear")),
@@ -5373,6 +5521,8 @@ class OrphanLocalBranchRegressionTests(unittest.TestCase):
                 return real_run_cmd(command, **kwargs)
 
             with patch.object(merge_pr, "run_cmd", side_effect=fail_first_branch_delete), \
+                 patch.object(merge_pr, "record_terminal_lease", return_value=(True, "lease ok")), \
+                 patch.object(merge_pr, "detect_stale_writer", return_value=(True, "no stale write")), \
                  patch.object(merge_pr.os, "chdir"), \
                  patch.object(merge_pr, "clear_merger_claims", return_value=(True, "merger clear")) as merger:
                 failures_pass1 = []
