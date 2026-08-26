@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# line-ceiling: 700
 """factory_loop_snapshot.py - deterministic read-only factory loop snapshot.
 
 Emits a bounded, normalized read-only snapshot of live coordination state for
@@ -12,17 +13,13 @@ reviews, or merges. Exit codes: complete 0, error 1, waiting 2, blocked 3.
 import argparse
 import json
 import os
-import re
 import sys
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import common
 from common import (
-    agent_labels,
     claimed_by,
     get_current_framework_version,
     get_repo_projects,
-    label_names,
     parse_touches,
     run_cmd,
     select_governed_projects,
@@ -102,7 +99,7 @@ def _fail_closed(
         "worker_assignments": {},
         "tags_releases": {
             "latest_tag": None,
-            "framework_version": "v0.1.0",
+            "framework_version": None,
             "tags": [],
         },
         "claimable_work": [],
@@ -390,10 +387,17 @@ def _collect_dependencies(issue_rows: List[Dict[str, Any]]) -> List[Dict[str, An
 
 
 def _collect_touches_reservations(issue_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """List path reservations held by active In Progress issues."""
+    """List path reservations held by active in-flight issues."""
     locks = []
     for issue in issue_rows:
-        if issue.get("agent") or issue.get("board_status", "").lower() == "in progress":
+        label_status = (issue.get("label_status") or "").lower()
+        board_status = (issue.get("board_status") or "").lower()
+        in_flight = (
+            bool(issue.get("agent"))
+            or board_status in {"in progress", "in review"}
+            or label_status in {"in-progress", "in-review"}
+        )
+        if in_flight:
             touches_list = issue.get("touches") or []
             if touches_list:
                 locks.append({

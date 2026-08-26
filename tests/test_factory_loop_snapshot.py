@@ -1,3 +1,4 @@
+# line-ceiling: 750
 """Unit tests for factory_loop_snapshot.py (#466).
 
 Validates deterministic, project-agnostic read-only factory loop snapshot
@@ -7,7 +8,6 @@ read-only execution guarantee, and hermetic two-repository isolation.
 
 import contextlib
 import json
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -70,7 +70,6 @@ def make_pull(
     author: str = "agent-1",
     draft: bool = False,
     review_service: str = "review:coderabbit",
-    ci_status: str = "SUCCESS",
 ):
     labels = []
     if author:
@@ -78,20 +77,15 @@ def make_pull(
     if review_service:
         labels.append({"name": review_service})
 
-    checks = [{"name": "test", "status": "COMPLETED", "conclusion": ci_status}] if ci_status else []
-
     return {
         "number": number,
         "title": title,
         "draft": draft,
         "labels": labels,
         "head": {"ref": branch, "sha": head_sha},
-        "headRefName": branch,
-        "headRefOid": head_sha,
-        "isDraft": draft,
-        "statusCheckRollup": checks,
         "updated_at": "2026-08-26T00:00:00Z",
         "body": "Closes #1",
+        "mergeable_state": "clean",
     }
 
 
@@ -256,7 +250,10 @@ class TestSnapshotSchemaAndFields(unittest.TestCase):
         self.assertEqual(p1["number"], 201)
         self.assertEqual(p1["author"], "agent-2")
         self.assertEqual(p1["review_authority"]["assigned"], "coderabbit")
-        self.assertEqual(p1["ci"]["state"], "PASSED")
+        self.assertEqual(p1["ci"]["state"], "UNKNOWN")
+        self.assertEqual(p1["ci"]["summary"], "No CI check status rollup available.")
+        self.assertFalse(p1["merge_gate"]["ready"])
+        self.assertIn("CI is UNKNOWN.", p1["merge_gate"]["blockers"])
 
         # Claims
         self.assertIn({"type": "issue", "number": 102, "agent": "agent-1"}, snapshot["claims"])
@@ -342,6 +339,7 @@ class TestFailClosedAndDegraded(unittest.TestCase):
         self.assertEqual(snapshot["exit_code"], fls.EXIT_ERROR)
         self.assertTrue(len(snapshot["errors"]) > 0)
         self.assertIsNone(snapshot["repository"])
+        self.assertIsNone(snapshot["tags_releases"]["framework_version"])
 
     def test_unreadable_board_is_blocked_and_degraded(self):
         repo = FakeRepo(issues=[make_issue(1)], fail={"board"})
@@ -352,6 +350,7 @@ class TestFailClosedAndDegraded(unittest.TestCase):
         self.assertEqual(snapshot["state"], "blocked")
         self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
         self.assertTrue(any("Could not read items for board" in e for e in snapshot["errors"]))
+        self.assertIsNone(snapshot["tags_releases"]["framework_version"])
 
     def test_ambiguous_board_fails_closed(self):
         second = {
@@ -369,6 +368,42 @@ class TestFailClosedAndDegraded(unittest.TestCase):
         self.assertTrue(snapshot["degraded"])
         self.assertEqual(snapshot["state"], "blocked")
         self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+
+    def test_malformed_board_item_content_fails_closed(self):
+        repo = FakeRepo(
+            issues=[make_issue(1)],
+            board_items=[{"status": "Ready", "content": "not-a-dict"}],
+        )
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertTrue(any("Malformed item content" in e for e in snapshot["errors"]))
+
+    def test_malformed_board_item_fails_closed(self):
+        repo = FakeRepo(
+            issues=[make_issue(1)],
+            board_items=["not-a-dict"],
+        )
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertTrue(snapshot["degraded"])
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["exit_code"], fls.EXIT_BLOCKED)
+        self.assertTrue(any("Malformed item on board" in e for e in snapshot["errors"]))
+
+    def test_untrusted_metadata_author_excluded_from_claimable(self):
+        spoofed = make_issue(30, status="Ready")
+        spoofed["user"] = {"login": "outsider"}
+        spoofed["author_association"] = "NONE"
+        repo = FakeRepo(issues=[spoofed])
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        self.assertNotIn(30, [c["issue"] for c in snapshot["claimable_work"]])
 
     def test_api_issue_failure_fails_closed(self):
         repo = FakeRepo(fail={"issues"})
@@ -573,20 +608,46 @@ class TestLifecycleTransitionsAndFilters(unittest.TestCase):
         claimable_issues = [c["issue"] for c in snapshot["claimable_work"]]
         self.assertEqual(claimable_issues, [])
 
-    def test_pr_ci_failing_and_pending_states(self):
-        pr_fail = make_pull(1, title="PR 1", ci_status="FAILURE")
-        pr_pending = make_pull(2, title="PR 2", ci_status="PENDING")
-        repo = FakeRepo(prs=[pr_fail, pr_pending])
+    def test_extract_ci_summary_states(self):
+        pr_fail = {"statusCheckRollup": [{"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"}]}
+        pr_pending = {"statusCheckRollup": [{"name": "test", "status": "IN_PROGRESS", "conclusion": None}]}
+        pr_success = {"statusCheckRollup": [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+        pr_empty = {"statusCheckRollup": []}
+        pr_none = {}
+
+        self.assertEqual(fls._extract_ci_summary(pr_fail)["state"], "FAILED")
+        self.assertEqual(fls._extract_ci_summary(pr_pending)["state"], "PENDING")
+        self.assertEqual(fls._extract_ci_summary(pr_success)["state"], "PASSED")
+        self.assertEqual(fls._extract_ci_summary(pr_empty)["state"], "UNKNOWN")
+        self.assertEqual(fls._extract_ci_summary(pr_none)["state"], "UNKNOWN")
+
+    def test_pr_rest_ci_state_reports_unknown_and_fails_closed(self):
+        pr1 = make_pull(1, title="PR 1")
+        repo = FakeRepo(prs=[pr1])
         with wired_repo(repo):
             snapshot = fls.evaluate_factory_loop_snapshot(".")
 
         p1 = next(p for p in snapshot["open_pull_requests"] if p["number"] == 1)
-        self.assertEqual(p1["ci"]["state"], "FAILED")
+        self.assertEqual(p1["ci"]["state"], "UNKNOWN")
         self.assertFalse(p1["merge_gate"]["ready"])
+        self.assertIn("CI is UNKNOWN.", p1["merge_gate"]["blockers"])
 
-        p2 = next(p for p in snapshot["open_pull_requests"] if p["number"] == 2)
-        self.assertEqual(p2["ci"]["state"], "PENDING")
-        self.assertFalse(p2["merge_gate"]["ready"])
+    def test_touches_reservations_includes_label_status_in_progress_and_in_review(self):
+        issue_ip = make_issue(10, status="In Progress", touches="scripts/a.py")
+        issue_ip["labels"] = [{"name": "status:in-progress"}, {"name": "type:feat"}]
+
+        issue_ir = make_issue(11, status="In Review", touches="scripts/b.py")
+        issue_ir["labels"] = [{"name": "status:in-review"}, {"name": "type:feat"}]
+
+        repo = FakeRepo(issues=[issue_ip, issue_ir])
+        with wired_repo(repo):
+            snapshot = fls.evaluate_factory_loop_snapshot(".")
+
+        res = {r["issue"]: r["paths"] for r in snapshot["touches_reservations"]}
+        self.assertIn(10, res)
+        self.assertEqual(res[10], ["scripts/a.py"])
+        self.assertIn(11, res)
+        self.assertEqual(res[11], ["scripts/b.py"])
 
     def test_pr_review_authority_varieties(self):
         pr_sourcery = make_pull(1, review_service="review:sourcery")
