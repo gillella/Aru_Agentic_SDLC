@@ -69,6 +69,19 @@ docs/**
 
 
 @pytest.mark.parametrize(
+    ("value", "diagnostic"),
+    [
+        ("scripts/a.py\ndocs/**", "single line"),
+        ("../private.py", "unsafe path"),
+    ],
+)
+def test_issue_form_touches_rejects_multiline_or_unsafe_values(value, diagnostic):
+    body = f"### touches:\n\n{value}\n"
+    with pytest.raises(common.KernelError, match=diagnostic):
+        common.parse_touches(body)
+
+
+@pytest.mark.parametrize(
     "declaration",
     [
         "touches: ../secret",

@@ -466,15 +466,15 @@ branch protection appropriate to the consumer project.
 
 An issue can enter `Ready` only when it is open and contains:
 
-- an `## Acceptance Criteria` heading;
+- an `## Acceptance Criteria` heading or issue-form `### Acceptance Criteria`
+  heading;
 - at least one unchecked checklist item;
-- exactly one `touches:` line containing safe repository-relative paths;
+- exactly one inline `touches:` line or issue-form `### touches:` section
+  containing safe repository-relative paths;
 - no unresolved `depends-on: #N` issue.
 
-The installed GitHub issue form renders its field labels as `###` headings; the
-contract parser accepts that equivalent form. Priority is advisory metadata,
-not part of Ready admission. An issue may carry at most one supported
-`priority:p0` through `priority:p3` label.
+Priority is advisory metadata, not part of Ready admission. An issue may carry
+at most one supported `priority:p0` through `priority:p3` label.
 
 ### Example
 
