@@ -165,6 +165,48 @@ If more than one open Project is linked, set the intended number explicitly:
 export ARU_PROJECT_NUMBER=12
 ```
 
+### Split repository and Project authentication
+
+Aru routes GitHub subprocesses by authority. Repository commands (`gh issue`,
+`gh pr`, `gh label`, `gh repo`, and repository REST calls) may use a
+repository-scoped GitHub App runner. Project V2 commands always bypass that
+runner and remove `GH_TOKEN`, `GITHUB_TOKEN`, and their Enterprise variants
+from the child environment so `gh` uses its stored interactive PAT. Aru never
+changes the global `gh` login.
+
+There are two supported repository modes:
+
+- When automation itself is launched by an App wrapper, repository commands
+  inherit its installation token while Project V2 children use the stored PAT.
+- When automation starts under the normal shell identity, set
+  `ARU_GITHUB_APP_RUNNER` to an executable wrapper. Aru prefixes repository
+  commands with `<runner> --` and leaves Project V2 commands on the stored PAT.
+
+For example, on a workstation that provides the Factory wrapper:
+
+```bash
+export ARU_GITHUB_APP_RUNNER="$HOME/.local/bin/aru-code-factory-app-run"
+python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr 123 --json
+```
+
+If `ARU_GITHUB_APP_RUNNER` is unset, repository commands use ordinary `gh`.
+This is the portable behavior for CI and consumer repositories where the local
+wrapper is absent. If the variable is set but the path is missing or not
+executable, Aru stops instead of silently changing identity.
+
+GraphQL callers must declare repository or Project authority. Queries that do
+not declare it, combine repository data with Project V2 data, or send Project
+V2 fields through the repository route fail closed. Failure diagnostics redact
+known GitHub token values; wrappers must likewise avoid writing generated
+installation tokens to stdout or stderr.
+
+`init_project.py --github` is a bootstrap exception because its repository
+does not exist yet and therefore cannot have an installation token. Leave
+`ARU_GITHUB_APP_RUNNER` unset and use an explicitly authorized operator
+identity for repository creation. Configure the App runner only after the new
+repository has an installation; routine governed repository automation should
+then use the App route.
+
 ### External reviewer readiness
 
 The supported reviewer names are:

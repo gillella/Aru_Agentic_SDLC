@@ -7,8 +7,9 @@ import argparse
 import json
 import re
 import shutil
-import subprocess
 from pathlib import Path
+
+from common import PROJECT_AUTH, KernelError, run
 
 STATUSES = ("Backlog", "Ready", "In Progress", "In Review", "Done")
 LABELS = {
@@ -30,10 +31,17 @@ class BootstrapError(RuntimeError):
     pass
 
 
-def command(argv: list[str], *, cwd: Path, json_output: bool = False):
-    result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
-    if result.returncode:
-        raise BootstrapError((result.stderr or result.stdout).strip())
+def command(
+    argv: list[str],
+    *,
+    cwd: Path,
+    json_output: bool = False,
+    auth: str | None = None,
+):
+    try:
+        result = run(argv, cwd=cwd, auth=auth)
+    except KernelError as exc:
+        raise BootstrapError(str(exc)) from exc
     if not json_output:
         return result.stdout.strip()
     try:
@@ -190,6 +198,7 @@ def github_setup(name: str, directory: Path, private: bool) -> dict[str, object]
             f"field={status_fields[0]['id']}",
         ],
         cwd=directory,
+        auth=PROJECT_AUTH,
     )
     return {"repository": slug, "project": project.get("url")}
 

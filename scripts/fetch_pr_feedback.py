@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 
-from common import KernelError, gh_json, json_print, repo_slug
+from common import REPOSITORY_AUTH, KernelError, gh_json, json_print, repo_slug
 
 QUERY = """
 query($owner:String!,$name:String!,$number:Int!,$after:String){
@@ -49,7 +49,7 @@ def fetch_feedback(number: int) -> list[dict[str, object]]:
         ]
         if cursor:
             args.extend(["-F", f"after={cursor}"])
-        data = gh_json(args)
+        data = gh_json(args, auth=REPOSITORY_AUTH)
         pull = ((data.get("data") or {}).get("repository") or {}).get("pullRequest")
         connection = (pull or {}).get("reviewThreads")
         if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):

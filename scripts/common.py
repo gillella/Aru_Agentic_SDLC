@@ -16,10 +16,87 @@ AGENT_PREFIX = "agent:"
 REVIEW_PREFIX = "review:"
 REVIEW_SERVICES = ("coderabbit", "sourcery", "codeant")
 ZERO_SHA = "0" * 40
+REPOSITORY_AUTH = "repository"
+PROJECT_AUTH = "project"
+GITHUB_APP_RUNNER_ENV = "ARU_GITHUB_APP_RUNNER"
+_GH_TOKEN_ENV = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+_REPOSITORY_COMMANDS = {"api", "issue", "label", "pr", "repo"}
 
 
 class KernelError(RuntimeError):
     """A fail-closed authority or command error."""
+
+
+def _graphql_query(args: list[str]) -> str:
+    values = [part.split("=", 1)[1] for part in args if part.startswith("query=")]
+    if len(values) != 1:
+        raise KernelError("GraphQL query is missing or ambiguous")
+    return values[0]
+
+
+def _github_authority(args: list[str], auth: str | None) -> str:
+    if auth not in {None, REPOSITORY_AUTH, PROJECT_AUTH}:
+        raise KernelError(f"unsupported GitHub authority: {auth}")
+    if not args:
+        raise KernelError("GitHub command is missing")
+    if args[:2] == ["api", "graphql"]:
+        if auth is None:
+            raise KernelError("GraphQL authority is ambiguous; declare repository or project")
+        query = _graphql_query(args)
+        has_project = bool(re.search(r"\b(?:projectsV2|ProjectV2|projectV2)\b", query))
+        has_repository_data = bool(
+            re.search(r"\b(?:pullRequest|reviewThreads|issues|refs|commit)\b", query)
+        )
+        if has_project and has_repository_data:
+            raise KernelError("GraphQL query mixes repository and Project V2 authority")
+        if auth == REPOSITORY_AUTH and has_project:
+            raise KernelError("Project V2 GraphQL requires project authority")
+        return auth
+    inferred = PROJECT_AUTH if args[0] == "project" else None
+    if args[0] in _REPOSITORY_COMMANDS:
+        inferred = REPOSITORY_AUTH
+    if inferred is None:
+        raise KernelError(f"GitHub command authority is ambiguous: {args[0]}")
+    if auth is not None and auth != inferred:
+        raise KernelError(f"GitHub command requires {inferred} authority")
+    return inferred
+
+
+def _github_command(
+    args: list[str], auth: str | None
+) -> tuple[list[str], dict[str, str] | None]:
+    authority = _github_authority(args, auth)
+    if authority == PROJECT_AUTH:
+        environment = os.environ.copy()
+        for name in _GH_TOKEN_ENV:
+            environment.pop(name, None)
+        return ["gh", *args], environment
+    runner = os.environ.get(GITHUB_APP_RUNNER_ENV)
+    if not runner:
+        return ["gh", *args], None
+    runner_path = Path(runner).expanduser()
+    if not runner_path.is_file() or not os.access(runner_path, os.X_OK):
+        raise KernelError("configured GitHub App runner is not executable")
+    return [str(runner_path), "--", "gh", *args], None
+
+
+def _redact_diagnostic(value: str) -> str:
+    redacted = value
+    for name in _GH_TOKEN_ENV:
+        secret = os.environ.get(name)
+        if secret:
+            redacted = redacted.replace(secret, "[REDACTED]")
+    redacted = re.sub(
+        r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+)\b",
+        "[REDACTED]",
+        redacted,
+    )
+    return redacted
 
 
 def run(
@@ -28,24 +105,43 @@ def run(
     cwd: str | Path | None = None,
     check: bool = True,
     input_text: str | None = None,
+    auth: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [str(part) for part in argv]
+    environment = None
+    if command and command[0] == "gh":
+        command, environment = _github_command(command[1:], auth)
+    elif auth is not None:
+        raise KernelError("GitHub authority was provided for a non-GitHub command")
     result = subprocess.run(
         command,
         cwd=cwd,
+        env=environment,
         input=input_text,
         text=True,
         capture_output=True,
         check=False,
     )
+    if result.returncode:
+        result = subprocess.CompletedProcess(
+            result.args,
+            result.returncode,
+            _redact_diagnostic(result.stdout or ""),
+            _redact_diagnostic(result.stderr or ""),
+        )
     if check and result.returncode:
         detail = (result.stderr or result.stdout or "command failed").strip()
         raise KernelError(f"{command[0]} failed: {detail}")
     return result
 
 
-def gh_json(args: Iterable[str], *, cwd: str | Path | None = None) -> Any:
-    result = run(["gh", *args], cwd=cwd)
+def gh_json(
+    args: Iterable[str],
+    *,
+    cwd: str | Path | None = None,
+    auth: str | None = None,
+) -> Any:
+    result = run(["gh", *args], cwd=cwd, auth=auth)
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -270,6 +366,7 @@ def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
     data = gh_json(
         ["api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}", "-F", f"name={name}"],
         cwd=cwd,
+        auth=PROJECT_AUTH,
     )
     connection = ((data.get("data") or {}).get("repository") or {}).get("projectsV2") or {}
     nodes = connection.get("nodes")
