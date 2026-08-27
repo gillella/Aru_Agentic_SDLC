@@ -9,6 +9,7 @@ from common import (
     KernelError,
     contract_errors,
     json_print,
+    label_names,
     list_issues,
     set_status,
     unresolved_dependencies,
@@ -17,6 +18,13 @@ from common import (
 
 def evaluate(record: dict) -> list[str]:
     errors = contract_errors(record)
+    priorities = {f"priority:p{value}" for value in range(4)}
+    priority_labels = [name for name in label_names(record) if name in priorities]
+    if len(priority_labels) != 1:
+        errors.append(
+            "issue must have exactly one priority:p0..p3 label; "
+            f"found {len(priority_labels)}"
+        )
     blocked = unresolved_dependencies(record)
     if blocked:
         errors.append("open dependencies: " + ", ".join(f"#{number}" for number in blocked))

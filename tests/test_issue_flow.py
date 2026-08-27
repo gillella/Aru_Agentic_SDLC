@@ -6,6 +6,34 @@ import claim_issue
 import triage_backlog
 
 
+def backlog_issue(*labels: str) -> dict:
+    return {
+        "number": 3,
+        "title": "ready",
+        "body": "## Acceptance Criteria\n\n- [ ] Complete the fix.\n\ntouches: scripts/example.py",
+        "state": "OPEN",
+        "labels": [{"name": label} for label in labels],
+    }
+
+
+def test_triage_accepts_exactly_one_priority():
+    assert triage_backlog.evaluate(backlog_issue("priority:p2")) == []
+
+
+@pytest.mark.parametrize(
+    ("labels", "diagnostic"),
+    [
+        ((), "issue must have exactly one priority:p0..p3 label; found 0"),
+        (
+            ("priority:p0", "priority:p1"),
+            "issue must have exactly one priority:p0..p3 label; found 2",
+        ),
+    ],
+)
+def test_triage_rejects_non_unique_priority(labels, diagnostic):
+    assert triage_backlog.evaluate(backlog_issue(*labels)) == [diagnostic]
+
+
 def test_triage_promotes_one_complete_issue(monkeypatch):
     records = [
         {"number": 2, "title": "blocked"},

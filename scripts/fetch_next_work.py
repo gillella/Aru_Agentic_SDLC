@@ -7,7 +7,7 @@ import argparse
 
 from check_ci import ci_verdict
 from claim_issue import claim, safe_agent
-from common import KernelError, gh_json, json_print, label_names, list_issues
+from common import KernelError, gh_json, gh_paginated, json_print, label_names, repo_slug
 from fetch_pr_feedback import fetch_feedback
 from merge_pr import evaluate
 
@@ -32,6 +32,13 @@ def authored_prs(agent: str) -> list[dict]:
     return sorted(data, key=lambda item: int(item["number"]))
 
 
+def ready_issues() -> list[dict]:
+    records = gh_paginated(
+        f"repos/{repo_slug()}/issues?state=open&labels=status%3Aready&per_page=100"
+    )
+    return [record for record in records if "pull_request" not in record]
+
+
 def select(agent: str) -> dict[str, object]:
     agent = safe_agent(agent)
     for pr in authored_prs(agent):
@@ -53,7 +60,7 @@ def select(agent: str) -> dict[str, object]:
 
     priorities = {f"priority:p{value}": value for value in range(4)}
     ready: list[tuple[int, int, dict]] = []
-    for record in list_issues(label="status:ready"):
+    for record in ready_issues():
         labels = label_names(record)
         if "needs-human" in labels or "type:epic" in labels:
             continue

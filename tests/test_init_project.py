@@ -5,6 +5,19 @@ import pytest
 import init_project
 
 
+def test_bootstrap_provisions_priority_labels():
+    assert {
+        label: metadata
+        for label, metadata in init_project.LABELS.items()
+        if label.startswith("priority:")
+    } == {
+        "priority:p0": ("b60205", "Blocking; drop everything"),
+        "priority:p1": ("d93f0b", "Current phase critical path"),
+        "priority:p2": ("fbca04", "Current phase, not critical path"),
+        "priority:p3": ("c5def5", "Opportunistic"),
+    }
+
+
 def test_scaffold_creates_only_minimal_governance(tmp_path):
     target = tmp_path / "consumer"
     written = init_project.scaffold("consumer", target)
