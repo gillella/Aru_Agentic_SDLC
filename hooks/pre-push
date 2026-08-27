@@ -1,57 +1,31 @@
 #!/usr/bin/env bash
-# Aru_Agentic_SDLC pre-push hook: main is merged into, never pushed to.
-#
-# This is the backstop that does not care which agent or human is driving.
-# Claude Code's PreToolUse hook only sees Claude Code; Codex, Cursor, a stray
-# terminal, and a tired human all go through this one.
-#
-# Override for the merge path only:  ARU_ALLOW_MAIN_PUSH=1 git push ...
 set -euo pipefail
 
-protected_re='^refs/heads/(main|master)$'
+hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+input="$(cat)"
 
-if [ "${ARU_ALLOW_MAIN_PUSH:-0}" = "1" ]; then
-  exit 0
-fi
-
-# Buffer stdin so a chained hook installed before this one can still read it.
-# git feeds the ref list on stdin exactly once; consuming it in the loop below
-# would leave any pre-existing hook with nothing to work from.
-STDIN_COPY="$(cat)"
-export STDIN_COPY
-
-# stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref.
-while read -r _local_ref _local_sha remote_ref _remote_sha; do
-  [ -z "${remote_ref:-}" ] && continue
-  if [[ "$remote_ref" =~ $protected_re ]]; then
-    branch="${remote_ref#refs/heads/}"
-    cat >&2 <<EOF
-
-  ✋ Aru_Agentic_SDLC: direct push to '$branch' refused.
-
-  Changes reach $branch through a reviewed PR:
-      python3 "\$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> --title "..." --body "..."
-      python3 "\$ARU_SDLC_HOME/scripts/merge_pr.py"  --pr <PR>
-
-  This hook is local and skippable (--no-verify, or a clone that never ran
-  install_hooks.sh). Server-side protection is scripts/enable_main_ruleset.py;
-  until GitHub Pro (or a public repo) unlocks rulesets, the server will not
-  refuse the push. See #88 / #133.
-
-  If you are the merge tooling, set ARU_ALLOW_MAIN_PUSH=1 for that one command.
-
-EOF
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ -z "${local_ref:-}" ]] && continue
+  if [[ "${remote_ref}" =~ ^refs/heads/(main|master)$ ]]; then
+    echo "Aru: direct pushes to main/master are refused; merge a PR." >&2
     exit 1
   fi
-done <<< "$STDIN_COPY"
+  [[ "${local_ref}" != refs/heads/* ]] && continue
+  branch="${local_ref#refs/heads/}"
+  if [[ "${remote_sha}" == "0000000000000000000000000000000000000000" ]]; then
+    if git show-ref --verify --quiet refs/remotes/origin/main; then
+      diff_range="origin/main...${local_sha}"
+    else
+      empty_tree="$(git hash-object -t tree /dev/null)"
+      diff_range="${empty_tree}..${local_sha}"
+    fi
+  else
+    diff_range="${remote_sha}..${local_sha}"
+  fi
+  python3 "${hook_dir}/enforce_touches.py" --range "${diff_range}" --branch "${branch}"
+done <<< "${input}"
 
-# Hand off to whatever pre-push hook was here before Aru was installed, so
-# installing enforcement never silently disables a repo's existing tests, secret
-# scanning, or policy checks. install_hooks.sh moves it aside under this name;
-# absent that file this is a no-op.
-PRIOR="$(dirname "$0")/pre-push.pre-aru"
-if [ -x "$PRIOR" ]; then
-  printf '%s\n' "$STDIN_COPY" | "$PRIOR" "$@" || exit $?
+prior="${hook_dir}/pre-push.pre-aru"
+if [[ -x "${prior}" ]]; then
+  printf '%s\n' "${input}" | "${prior}" "$@"
 fi
-
-exit 0

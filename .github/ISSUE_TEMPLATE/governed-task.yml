@@ -1,0 +1,32 @@
+name: Governed task
+description: A minimal-kernel implementation unit
+title: ""
+labels: ["status:backlog"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Describe the observable result.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      value: |
+        - [ ] Observable acceptance condition
+    validations:
+      required: true
+  - type: input
+    id: touches
+    attributes:
+      label: "touches:"
+      description: Comma-separated repository-relative paths.
+    validations:
+      required: true
+  - type: input
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Optional "depends-on: #123".
