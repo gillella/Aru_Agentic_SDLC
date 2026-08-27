@@ -63,25 +63,23 @@ def assignment_pr(*, created_at: datetime, state="pending"):
     }
 
 
-def install_refresh(monkeypatch, pr, *, updated_labels=None, comments=None, events=None):
+def install_refresh(
+    monkeypatch,
+    pr,
+    *,
+    updated_labels=None,
+    comments=None,
+    events=None,
+    statuses=None,
+):
     responses = [pr]
     if updated_labels is not None:
         responses.append({"number": 42, "labels": updated_labels})
     monkeypatch.setattr(create_pr, "gh_json", lambda _argv: responses.pop(0))
     monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
-    evidence = iter([[], comments or [], events or []])
+    evidence = iter([[], comments or [], events or [], statuses or []])
     monkeypatch.setattr(create_pr, "gh_paginated", lambda _endpoint: next(evidence))
     monkeypatch.setattr(create_pr, "run", lambda _argv: None)
-
-
-def test_external_reviewer_assignment_uses_registered_order():
-    reviewer = create_pr.choose_initial_reviewer(
-        8,
-        "codex-author",
-        "openai-codex",
-        external_states=external_states(sourcery=create_pr.AVAILABLE, codeant=create_pr.AVAILABLE),
-    )
-    assert reviewer == ("sourcery", None, None)
 
 
 def test_external_registration_reads_beyond_first_hundred_labels(monkeypatch):
@@ -106,32 +104,6 @@ def test_authority_labels_alone_do_not_register_external_providers(monkeypatch):
         lambda _argv: [{"name": "review:coderabbit"}, {"name": "review:sourcery"}],
     )
     assert set(create_pr.registered_external_states().values()) == {create_pr.UNAVAILABLE}
-
-
-def test_immediate_external_unavailability_assigns_smoke_tested_agent(monkeypatch):
-    calls = []
-    monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")
-
-    def probe(argv):
-        calls.append(argv)
-        return result(argv)
-
-    reviewer = create_pr.choose_initial_reviewer(
-        7,
-        "codex-author",
-        "openai-codex",
-        "author-login",
-        external_states=external_states(),
-        reviewer_actors={
-            "m1": "claude-reviewer-1",
-            "m2": "claude-reviewer-2",
-            "m3": "claude-reviewer-3",
-        },
-        probe_runner=probe,
-    )
-    assert reviewer == ("claude-code", "m2", "claude-reviewer-2")
-    assert [call[1] for call in calls] == ["1", "2", "3"]
-    assert all(call[-1] == "Reply exactly OK" for call in calls)
 
 
 def test_author_family_is_deprioritized_and_author_identity_excluded(monkeypatch):
@@ -302,6 +274,7 @@ def test_explicit_external_error_falls_back_immediately(monkeypatch):
         "Quota exhausted",
         "Provider outage",
         "Rate limit reached",
+        "Reviews paused",
         "Unsupported bot-authored PR",
         "Payment required",
         "Unable to review due to capacity exhausted",
@@ -330,6 +303,43 @@ def test_review_failure_is_not_misclassified_as_provider_unavailability():
         }
     ]
     assert create_pr.external_state(pr, "coderabbit", reviews=[], comments=[]) == create_pr.AVAILABLE
+
+
+def test_external_refresh_degrades_safely_when_status_endpoint_fails(monkeypatch):
+    created = datetime.now(timezone.utc) - timedelta(minutes=1)
+    pr = assignment_pr(created_at=created, state="available")
+    comment = {
+        "user": {"login": "coderabbitai[bot]", "type": "Bot"},
+        "body": "Review rate limited",
+        "created_at": (created + timedelta(seconds=1)).isoformat(),
+    }
+    comments = [comment]
+    monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
+
+    def evidence(endpoint):
+        if endpoint.endswith("/reviews?per_page=100"):
+            return []
+        if endpoint.endswith("/comments?per_page=100"):
+            return comments
+        if endpoint.endswith("/events?per_page=100"):
+            return []
+        raise create_pr.KernelError("commit status endpoint unavailable")
+
+    monkeypatch.setattr(create_pr, "gh_paginated", evidence)
+    assert create_pr._external_decision(
+        42,
+        pr,
+        "coderabbit",
+        datetime.now(timezone.utc),
+    ) == ("external-unavailable", None)
+    comments.clear()
+    decision, _remaining = create_pr._external_decision(
+        42,
+        pr,
+        "coderabbit",
+        datetime.now(timezone.utc),
+    )
+    assert decision == "external-pending"
 
 
 def test_latest_external_evidence_wins_after_provider_recovery():
@@ -626,6 +636,8 @@ def test_create_pr_binds_head_and_exactly_one_reviewer(monkeypatch):
         "Summary",
         "codex-1",
         external_states=external_states(coderabbit=create_pr.AVAILABLE),
+        reviewer_actors={},
+        author_actor="author-login",
     )
     assert outcome["reviewer"] == "coderabbit"
     assert outcome["head"] == "a" * 40
@@ -677,6 +689,8 @@ def test_create_pr_revalidates_ownership_after_reviewer_selection(monkeypatch):
             "Summary",
             "codex-1",
             external_states=external_states(coderabbit=create_pr.AVAILABLE),
+            reviewer_actors={},
+            author_actor="author-login",
         )
 
 

@@ -46,18 +46,24 @@ Done. Do not create another lifecycle store.
 
 ## Reviewer assignment
 
-`create_pr.py` selects the first external reviewer explicitly registered by a
-`reviewer-registered:<service>` label in `coderabbit`, `sourcery`, `codeant`
-order. Authority labels provisioned by bootstrap do not register providers.
+`create_pr.py` builds one stable pool from external reviewers explicitly
+registered by `reviewer-registered:<service>` labels and locally configured,
+bound coding-reviewer identities. The issue number rotates the starting slot,
+so consecutive PRs distribute across eligible authorities without stored
+capacity state. A coding slot must pass its bounded probe; an unavailable slot
+advances to the next candidate. The author identity and GitHub actor are never
+eligible. Authority labels provisioned by bootstrap do not register providers.
 Exactly one authority label remains.
 An explicit unavailable/error response causes immediate fallback; a merely
 pending external assignment is retained until 15 minutes after assignment, then
-falls back. Cost, quota exhaustion, rate limiting, provider outage, unsupported
-bot-authored PRs, and explicit unavailable/error responses are unavailable.
+falls back. Paused reviews, cost or quota exhaustion, rate limiting, provider
+outage, unsupported bot-authored PRs, and explicit unavailable/error responses
+are unavailable and cannot satisfy the merge gate through a nominally
+successful no-op status.
 The newest trusted, timestamped provider evidence determines availability. A
 governed authority-label transition starts a new 15-minute pending window.
 
-Before fallback, smoke-test actual capacity in `claude-code`, `openai-codex`,
+For coding assignment, smoke-test actual capacity in `claude-code`, `openai-codex`,
 `xai-cursor`, `google-antigravity` order, excluding the author identity and
 preferring a different model family. Claude selection probes every configured
 `claude-sub` subscription. A candidate also requires one explicit

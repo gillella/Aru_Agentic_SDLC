@@ -157,10 +157,14 @@ only after exact-head CI and the assigned authoritative review are complete.
 Every PR current head has exactly one authority label. Operators register an
 installed external provider with `reviewer-registered:<service>`; ordinary
 bootstrap `review:*` labels are not registrations. At creation, `create_pr.py`
-chooses the first registered available service in this order: CodeRabbit,
-Sourcery, CodeAnt. An explicit unavailable/error response
-causes immediate fallback. A pending service retains authority for 14 minutes
-59 seconds; at 15 minutes it becomes eligible for immediate fallback through:
+combines registered external services and bound identities from the local
+`ARU_CODING_REVIEWERS` pool in a stable order. The issue number rotates the
+starting slot. A selected coding identity must pass its bounded capacity probe;
+an unavailable candidate advances to the next slot. This distributes
+consecutive PRs without a queue or capacity ledger. An explicit external
+unavailable/error response causes immediate fallback. A pending service retains
+authority for 14 minutes 59 seconds; at 15 minutes it becomes eligible for
+immediate fallback through:
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
@@ -171,7 +175,7 @@ The helper evaluates the newest trusted, timestamped provider evidence. The
 clock starts at the current authority's latest GitHub label-assignment event,
 so a governed recovery receives its own complete 15-minute pending window.
 
-Fallback smoke-tests Claude Code, OpenAI Codex, xAI Cursor, then Google
+Coding fallback smoke-tests Claude Code, OpenAI Codex, xAI Cursor, then Google
 Antigravity; it excludes the author identity and prefers another model family.
 Each identity must have a `reviewer-binding:<identity>=<github-login>` label,
 and that GitHub actor must differ from the PR author. Each machine declares its
@@ -181,10 +185,14 @@ The current MacBook identities are `m1/m2/m3/mo/mx/mg`; the Mac mini uses
 `n1/n2/n3/no/nx/ng`. Adding or removing a Claude subscription changes only this
 configuration and its binding label. Missing, malformed, or duplicate
 configuration blocks coding fallback. Every configured Claude subscription is
-probed and successful bound subscriptions rotate deterministically. Cost or
-quota exhaustion, rate limiting, provider outage, unsupported bot-authored PRs, and explicit
-unavailable/error responses all count as unavailable. If no distinct coding
+probed and successful bound subscriptions rotate deterministically. Paused
+reviews, cost or quota exhaustion, rate limiting, provider outage, unsupported
+bot-authored PRs, and explicit unavailable/error responses all count as
+unavailable. A successful check whose detail says it performed no review does
+not satisfy the exact-head gate. If no distinct coding
 agent has capacity, assignment does not change and the transition fails closed.
+Registered coding bindings with a missing local pool also fail visibly instead
+of silently degrading every assignment to external-only selection.
 If an assigned coding reviewer later aborts or explicitly becomes unavailable,
 recover through the same helper with `--coding-reviewer-unavailable <reason>`;
 it audits and restores the first registered external authority without leaving

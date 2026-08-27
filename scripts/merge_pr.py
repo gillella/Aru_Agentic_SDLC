@@ -27,6 +27,7 @@ from common import (
     issue,
     json_print,
     label_names,
+    review_evidence_unavailable,
     repo_slug,
     run,
     set_status,
@@ -164,7 +165,29 @@ def successful_service_check(pr: dict[str, Any], service: str) -> bool:
     ]
     if len(matches) > 1:
         raise KernelError("assigned review service returned ambiguous checks")
-    return len(matches) == 1 and check_state(matches[0]) == "success"
+    if len(matches) != 1 or check_state(matches[0]) != "success":
+        return False
+    statuses = [
+        record
+        for record in review_statuses(str(pr.get("headRefOid") or ""))
+        if review_check_matches(record, service)
+    ]
+    if not statuses:
+        return True
+    timestamps = [
+        str(record.get("updated_at") or record.get("created_at") or "")
+        for record in statuses
+    ]
+    if any(not timestamp for timestamp in timestamps):
+        raise KernelError("assigned review service status timestamp is incomplete")
+    latest = max(timestamps)
+    current = [
+        record for record, timestamp in zip(statuses, timestamps) if timestamp == latest
+    ]
+    states = {
+        (check_state(record), review_evidence_unavailable(record)) for record in current
+    }
+    return states == {("success", False)}
 
 
 def pull_reviews(number: int) -> list[dict[str, Any]]:
@@ -175,6 +198,11 @@ def pull_reviews(number: int) -> list[dict[str, Any]]:
 def pull_comments(number: int) -> list[dict[str, Any]]:
     slug = repo_slug()
     return gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
+
+
+def review_statuses(head: str) -> list[dict[str, Any]]:
+    slug = repo_slug()
+    return gh_paginated(f"repos/{slug}/commits/{head}/statuses?per_page=100")
 
 
 def _successful_service_review(

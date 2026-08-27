@@ -40,14 +40,17 @@ preview, deployment, release, smoke, incident, or second state store.
 
 ## Reviewer state machine
 
-External authorities are tried in CodeRabbit, Sourcery, CodeAnt order. Only an
-installed provider explicitly registered by `reviewer-registered:<service>` is
-a candidate; bootstrap authority labels do not register providers. The first
-registered available service receives the only `review:*` label. Explicit
-unavailability falls back immediately; pending external work retains authority
-for less than 15 minutes and falls back at 15 minutes. Unavailability includes
-cost or quota exhaustion, rate limiting, provider outage, unsupported
-bot-authored PRs, and explicit unavailable/error responses.
+Initial authority uses one deterministic rotation over registered external
+providers and the locally configured, bound coding identities. Bootstrap
+authority labels do not register providers. The issue number selects the first
+slot; unavailable candidates advance without a queue, ledger, or persistent
+state. A coding slot must pass its bounded probe, and the author identity and
+GitHub actor are excluded. Explicit external unavailability falls back
+immediately; pending external work retains authority for less than 15 minutes
+and falls back at 15 minutes. Unavailability includes paused reviews, cost or
+quota exhaustion, rate limiting, provider outage, unsupported bot-authored PRs,
+and explicit unavailable/error responses. A nominally successful no-op status
+does not satisfy exact-head review.
 Availability uses the newest trusted, timestamped provider evidence. The
 current authority's latest GitHub label-assignment event starts the clock, and
 each governed authority transition receives a fresh 15-minute pending window.

@@ -666,6 +666,18 @@ def test_preserve_coderabbit_and_sourcery_evidence_paths(monkeypatch):
     # 1. CodeRabbit check success
     pr_cr = base_pr(labels=[{"name": "review:coderabbit"}], statusCheckRollup=[{"context": "CodeRabbit", "state": "SUCCESS"}])
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
+    monkeypatch.setattr(
+        merge_pr,
+        "review_statuses",
+        lambda _head: [
+            {
+                "context": "CodeRabbit",
+                "state": "success",
+                "description": "Review completed",
+                "created_at": "2026-08-27T12:00:00Z",
+            }
+        ],
+    )
     assert merge_pr.exact_head_review(pr_cr, 10, "coderabbit") is True
 
     # 2. Sourcery APPROVED review
@@ -692,3 +704,24 @@ def test_preserve_coderabbit_and_sourcery_evidence_paths(monkeypatch):
     sourcery_changes = make_review(commit_id=head, state="CHANGES_REQUESTED", login="sourcery-ai[bot]", actor_type="Bot")
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [sourcery_approved, sourcery_changes])
     assert merge_pr.exact_head_review(pr_sc, 10, "sourcery") is False
+
+
+def test_rate_limited_success_status_does_not_satisfy_coderabbit(monkeypatch):
+    pr = base_pr(
+        labels=[{"name": "review:coderabbit"}],
+        statusCheckRollup=[{"context": "CodeRabbit", "state": "SUCCESS"}],
+    )
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
+    monkeypatch.setattr(
+        merge_pr,
+        "review_statuses",
+        lambda _head: [
+            {
+                "context": "CodeRabbit",
+                "state": "success",
+                "description": "Review rate limited",
+                "created_at": "2026-08-27T12:00:00Z",
+            }
+        ],
+    )
+    assert merge_pr.exact_head_review(pr, 10, "coderabbit") is False
