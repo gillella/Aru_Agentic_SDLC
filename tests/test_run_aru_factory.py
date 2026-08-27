@@ -279,23 +279,18 @@ class GovernanceTests(unittest.TestCase):
     def test_review_paths_keep_external_default_and_agent_exception_narrow(self):
         """The router must name every authority without creating a scheduler."""
         text = skill_text()
+        flat_text = flat(text)
         for provider in ("CodeRabbit", "Sourcery", "CodeAnt", "review:agent"):
             self.assertIn(provider, text, f"review path missing: {provider}")
         self.assertIn("emergency-only", text)
-        self.assertIn("review:coderabbit", text)
-        self.assertIn("reassignment is never automatic", text)
-        self.assertIn("Only an operator", text)
-        # Both operator-declared conditions, or the router forbids a fallback
-        # the helper and the code-review skill both allow (#454).
-        self.assertIn(
-            "external exhaustion or an operator-declared excessive wait",
-            flat(text),
-        )
-        self.assertIn("never creates a coding-agent review", text)
+        self.assertNotIn("review:coderabbit", text)
+        self.assertIn("`create_pr.py` assigns exactly one immutable ordinary authority from coderabbit, sourcery, or codeant using the deterministic balanced policy", flat_text)
+        self.assertIn("reassignment is never automatic", flat_text)
+        self.assertIn("at most one audited external reassignment with `reassign_review.py` after concrete unavailability or excessive wait, never automatic rotation or retry", flat_text)
+        self.assertIn("terminal fallback selected only after external exhaustion or an operator-declared excessive wait", flat_text)
+        self.assertIn("never creates a coding-agent review", flat_text)
         self.assertIn("address-pr-feedback", text)
-        self.assertEqual(
-            [], unqualified_automatic_handoff(flat(text)), "router hands off automatically"
-        )
+        self.assertEqual([], unqualified_automatic_handoff(flat_text), "router hands off automatically")
         self.assertNotIn("gh pr review --approve", text)
 
     def test_merging_goes_through_the_gate_only(self):
