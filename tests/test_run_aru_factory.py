@@ -275,21 +275,26 @@ class GovernanceTests(unittest.TestCase):
     def test_review_paths_keep_external_default_and_agent_exception_narrow(self):
         """The router must name every authority without creating a scheduler."""
         text = skill_text()
+        flat_text = flat(text)
         for provider in ("CodeRabbit", "Sourcery", "CodeAnt", "review:agent"):
             self.assertIn(provider, text, f"review path missing: {provider}")
-        self.assertIn("review:coderabbit", text)
-        self.assertIn("reassignment is never automatic", text)
-        self.assertIn("operator records one audited external reassignment", text)
-        # Both operator-declared conditions, or the router forbids a fallback
-        # the helper and the code-review skill both allow (#454).
-        self.assertIn(
-            "external exhaustion or an operator-declared excessive wait",
-            flat(text),
+        for clause in (
+            "`create_pr.py` assigns exactly one immutable ordinary authority from coderabbit, sourcery, or codeant using the deterministic balanced policy",
+            "an operator may make at most one audited external reassignment after concrete unavailability or excessive wait",
+            "never automatic rotation or retry",
+            "terminal fallback only after external exhaustion or an operator-declared excessive wait",
+        ):
+            self.assertIn(clause, flat_text, f"balanced review contract missing: {clause}")
+        stale_default = re.compile(
+            r"(?:new prs? (?:get|receive)|default (?:reviewer|authority)).{0,80}(?:coderabbit|review:coderabbit)"
         )
+        for wording in ("new PRs get CodeRabbit", "default reviewer is review:coderabbit"):
+            self.assertRegex(flat(wording), stale_default)
+        self.assertNotRegex(flat_text, stale_default)
         self.assertIn("never creates a second queue", text)
         self.assertIn("address-pr-feedback", text)
         self.assertEqual(
-            [], unqualified_automatic_handoff(flat(text)), "router hands off automatically"
+            [], unqualified_automatic_handoff(flat_text), "router hands off automatically"
         )
         self.assertNotIn("gh pr review --approve", text)
 

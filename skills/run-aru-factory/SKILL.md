@@ -159,13 +159,14 @@ worktrees, `git`, and `gh auth status` without printing credentials. Exit `0` he
 7. **Degraded coordination stops safely.** Never invent a secondary task queue
    or bypass the merge gate.
 8. **Exactly one ordinary review authority.** `create_pr.py` assigns exactly
-   one of `review:coderabbit`, `review:sourcery`, or `review:codeant` using the
-   deterministic least-loaded complete open-PR inventory rule. CodeRabbit,
-   Sourcery, and CodeAnt are the only ordinary external authorities. The
-   assignment is immutable unless an operator records one audited external reassignment.
-   Only after external exhaustion or an operator-declared excessive wait may
-   one independent `review:agent` become the terminal fallback. Authors never
-   review their own work.
+   one immutable ordinary authority from CodeRabbit, Sourcery, or CodeAnt using
+   the deterministic balanced policy. It selects `review:coderabbit`,
+   `review:sourcery`, or `review:codeant` with the deterministic least-loaded
+   complete open-PR inventory rule. An operator may make at most one audited
+   external reassignment after concrete unavailability or excessive wait;
+   never automatic rotation or retry. `review:agent` is the terminal fallback
+   only after external exhaustion or an operator-declared excessive wait. It
+   never creates a second queue, and authors never review their own work.
 
 ## Merging
 
