@@ -8,6 +8,7 @@ permissions:
   contents: read
 jobs:
   verify:
+    name: Lint, Verify & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
