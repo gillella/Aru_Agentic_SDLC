@@ -1,12 +1,11 @@
 ---
 name: triage-backlog
-description: Promotes Backlog issues to Ready by verifying the Ready contract, fills the gaps a script cannot, and reports how many parallel agents the board can actually keep busy. Use when the user says triage the backlog, promote issues, prepare the board, size the fleet, or before launching parallel agents.
+description: Promotes Backlog issues to Ready by verifying the Ready contract, fills the gaps a script cannot, and reports the board's safe concurrent-work capacity. Use when the user says triage the backlog, promote issues, prepare the board, or size concurrent work.
 triggers:
   - "triage the backlog"
   - "promote issues to ready"
   - "prepare the board"
-  - "how many agents can I run"
-  - "before launching the fleet"
+  - "how much work can run concurrently"
 do_not_trigger_for:
   - "creating a new issue (use create-github-issue instead)"
   - "implementing a Ready issue (use implement-next-issue instead)"
@@ -14,9 +13,9 @@ do_not_trigger_for:
 
 # Backlog Triage Procedure
 
-Triage is where a human's judgment has the highest leverage per minute, and it
-is the throughput cap on any fleet: `fetch_next_issue.py` cannot hand out a
-Backlog issue, so agents idle the moment the Ready column empties.
+Triage is where a human's judgment has the highest leverage per minute. The
+single `fetch_next_work.py` picker cannot hand out a Backlog issue, so workers
+idle when the Ready column empties.
 
 The script verifies the mechanical half. This skill covers the half it cannot.
 
@@ -29,8 +28,8 @@ python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py"
 ```
 
 Output separates Backlog issues that satisfy the Ready contract from those
-blocked, with the specific missing element per issue, and ends with a fleet
-capacity number.
+blocked, with the specific missing element per issue, and ends with a safe
+concurrent-work capacity number.
 
 ## Step 2: Fill the gaps the script reports
 
@@ -73,7 +72,7 @@ The contract is necessary, not sufficient. Before promoting, ask:
 3. **Does it collide with in-flight work?** The capacity report shows this.
    Deliberately hold an issue back rather than let an agent claim work that
    will conflict at merge.
-4. **Is the phase right?** An issue promoted out of phase order pulls the fleet
+4. **Is the phase right?** An issue promoted out of phase order pulls work
    away from the critical path.
 
 ## Step 4: Promote
@@ -86,7 +85,7 @@ python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --promote --issue 24 --issue 
 `--promote` skips `SPLIT` recommendations. Split or narrow every held issue,
 then rerun triage; no scope override can promote it around that correction.
 
-## Step 5: Size the fleet from the capacity number, not the Ready count
+## Step 5: Size concurrent work from capacity, not the Ready count
 
 ```
 python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --capacity
@@ -100,6 +99,6 @@ tokens on session startup, and clutter the board with reap cycles.
 
 ## When to run this
 
-- Before every fleet launch. Always.
+- Before starting a concurrent work batch.
 - After a batch of issues is filed from a planning session.
-- When the capacity report drops to zero or one and agents start idling.
+- When the capacity report drops to zero or one and workers start idling.

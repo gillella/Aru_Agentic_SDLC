@@ -14,6 +14,9 @@ do_not_trigger_for:
 
 # Grill-Aru Interrogation Procedure
 
+Lifecycle classification: optional pre-intake planning tool. The runtime
+kernel never invokes it, and it never claims, reviews, or merges board work.
+
 This skill owns the product interrogation only. It asks the operator exactly one
 question per turn and never invents a missing product decision. Its output is a
 stable decision inventory that `idea-to-prd` step 3 consumes to draft the PRD.
@@ -97,17 +100,17 @@ decision needed. An assumption must record how it will be validated.
 
 ## Fail-Closed Example
 
-Operator proposes a Slack intake bot but has not decided whether direct
+Operator proposes a support intake bot but has not decided whether private
 messages are accepted. Ask one question:
 
 ```text
-Does the intake bot accept direct messages?
+Does the intake bot accept private messages?
 ```
 
 If the operator defers, record it and do not choose for them:
 
 ```text
-OQ-001: Does the intake bot accept direct messages? | Blocking: yes | Owner: Product owner | Decision needed: channel-only or channel-and-DM intake
+OQ-001: Does the intake bot accept private messages? | Blocking: yes | Owner: Product owner | Decision needed: shared-channel-only or shared-and-private intake
 ```
 
 ## Hand Off

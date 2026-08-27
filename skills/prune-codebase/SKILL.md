@@ -10,6 +10,9 @@ triggers:
 
 # Prune Codebase Procedure
 
+Lifecycle classification: optional audit tool. The runtime kernel never
+invokes it, and it never claims, reviews, merges, or deletes board work.
+
 This workflow gathers cleanup evidence. It is deliberately report-only:
 Vulture is a static analyzer and an unregistered directory can still contain
 user-owned work, so neither finding authorizes deletion.
