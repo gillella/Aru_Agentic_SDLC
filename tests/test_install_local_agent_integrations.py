@@ -90,35 +90,54 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertEqual(res2.returncode, 0)
 
     def test_prunes_only_retired_aru_owned_entries(self):
-        skills = self.target_home / ".cursor" / "skills"
-        shared = self.target_home / ".agents" / "skills"
-        commands = self.target_home / ".cursor" / "commands"
-        for directory in (skills, shared, commands):
+        skill_dirs = [
+            self.target_home / ".agents" / "skills",
+            self.target_home / ".codex" / "skills",
+            self.target_home / ".claude" / "skills",
+            self.target_home / ".cursor" / "skills",
+            self.target_home / ".gemini" / "antigravity" / "skills",
+        ]
+        command_dirs = [
+            self.target_home / ".claude" / "commands",
+            self.target_home / ".cursor" / "commands",
+        ]
+        for directory in (*skill_dirs, *command_dirs):
             directory.mkdir(parents=True)
         retired_target = ROOT / "skills" / "retired-skill"
-        for directory in (skills, shared):
+        for directory in skill_dirs:
             (directory / "retired-skill").symlink_to(retired_target)
-        (skills / "user-skill").mkdir()
-        (skills / "foreign-skill").symlink_to(self.target_home / "foreign-skill")
-        (commands / "retired.md").write_text("$ARU_SDLC_HOME retired command\n")
-        (commands / "user.md").write_text("user-owned command\n")
+        cursor_skills = self.target_home / ".cursor" / "skills"
+        cursor_commands = self.target_home / ".cursor" / "commands"
+        cursor_skills.joinpath("user-skill").mkdir()
+        cursor_skills.joinpath("foreign-skill").symlink_to(
+            self.target_home / "foreign-skill"
+        )
+        for directory in command_dirs:
+            directory.joinpath("retired.md").write_text(
+                "$ARU_SDLC_HOME retired command\n"
+            )
+        cursor_commands.joinpath("user.md").write_text("user-owned command\n")
 
-        checked = self.run_installer("--cursor-only", "--check")
+        checked = self.run_installer("--check")
         self.assertNotEqual(checked.returncode, 0)
         self.assertIn("Retired Aru-owned", checked.stdout)
-        self.assertTrue((skills / "retired-skill").is_symlink())
-        previewed = self.run_installer("--cursor-only", "--dry-run")
+        self.assertTrue((cursor_skills / "retired-skill").is_symlink())
+        previewed = self.run_installer("--dry-run")
         self.assertEqual(previewed.returncode, 0, previewed.stderr)
-        self.assertTrue((commands / "retired.md").exists())
+        for directory in skill_dirs:
+            self.assertTrue((directory / "retired-skill").is_symlink())
+        for directory in command_dirs:
+            self.assertTrue((directory / "retired.md").exists())
 
-        installed = self.run_installer("--cursor-only")
+        installed = self.run_installer()
         self.assertEqual(installed.returncode, 0, installed.stderr)
-        self.assertFalse((skills / "retired-skill").exists())
-        self.assertFalse((shared / "retired-skill").exists())
-        self.assertFalse((commands / "retired.md").exists())
-        self.assertTrue((skills / "user-skill").is_dir())
-        self.assertTrue((skills / "foreign-skill").is_symlink())
-        self.assertTrue((commands / "user.md").is_file())
+        for directory in skill_dirs:
+            self.assertFalse((directory / "retired-skill").exists())
+        for directory in command_dirs:
+            self.assertFalse((directory / "retired.md").exists())
+        self.assertTrue((cursor_skills / "user-skill").is_dir())
+        self.assertTrue((cursor_skills / "foreign-skill").is_symlink())
+        self.assertTrue((cursor_commands / "user.md").is_file())
 
     def test_repair_mode(self):
         (self.target_home / ".codex" / "skills").mkdir(parents=True)

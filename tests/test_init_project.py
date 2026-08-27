@@ -238,7 +238,9 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(run_cmd.call_count, 1)
         mutations = "\n".join(call.args[0][4] for call in run_cmd.call_args_list)
+        self.assertIn("view=VIEW_default", run_cmd.call_args.args[0])
         self.assertIn('name:"Kanban"', mutations)
+        self.assertNotIn("createProjectV2View", mutations)
         self.assertNotIn('name:"Jira-Style Backlog"', mutations)
         self.assertNotIn('name:"Sprint"', mutations)
 
