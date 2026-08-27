@@ -86,6 +86,8 @@ def traverse(monkeypatch, number: int) -> dict:
             "sourcery": create_pr.UNAVAILABLE,
             "codeant": create_pr.UNAVAILABLE,
         },
+        reviewer_actors={},
+        author_actor="author-login",
     )
     assert created["reviewer"] == reviewer
 

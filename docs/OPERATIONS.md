@@ -226,11 +226,18 @@ reviewer-registered:codeant
 ```
 
 The bootstrap `review:*` authority labels do not register providers.
-`create_pr.py` selects the first registered available service, not an
-issue-number rotation. The assigned service must produce verifiable
+`create_pr.py` combines registered external services with locally configured,
+bound coding identities in one stable pool. The issue number rotates the first
+slot. A selected coding identity is assigned only after its bounded probe
+returns exactly `OK`; an unavailable candidate advances to the next slot. The
+author identity and GitHub actor are excluded. This needs no scheduler, private
+queue, or capacity ledger. The assigned authority must produce verifiable
 current-head evidence. On explicit
 unavailability it falls back immediately; while merely pending it retains the
 service for less than 15 minutes and falls back at 15 minutes.
+
+If reviewer bindings exist but `ARU_CODING_REVIEWERS` is missing, assignment
+fails visibly rather than silently collapsing the pool to external services.
 
 The newest trusted, timestamped provider evidence wins. Measure the pending
 window from the current authority's latest GitHub label-assignment event, not
@@ -759,13 +766,14 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --help
 
 ## 13. Review and merge behavior
 
-### Ordered assignment and fallback
+### Distributed assignment and fallback
 
 The state machine is deterministic:
 
 | Current observation | Age | Transition |
 | --- | ---: | --- |
-| First registered available external in CodeRabbit, Sourcery, CodeAnt order | any | Assign that external |
+| New PR with eligible external and coding candidates | any | Rotate by issue number and assign the first available candidate |
+| Rotated coding candidate fails its bounded probe | any | Advance to the next candidate without recording private state |
 | Assigned external is available or has completed review | any | Retain external |
 | Assigned external is pending | `< 15m` | Retain external; no fallback |
 | Assigned external is pending | `>= 15m` | Probe and assign a distinct coding agent |
@@ -773,8 +781,10 @@ The state machine is deterministic:
 | No distinct coding agent answers exactly `OK` | any | Keep authority unchanged and fail closed |
 | Assigned coding reviewer explicitly aborts or becomes unavailable | any | Audit and recover to first registered external authority |
 
-Cost or quota exhaustion, rate limiting, provider outage, unsupported
-bot-authored PRs, and explicit unavailable/error responses are unavailable.
+Paused reviews, cost or quota exhaustion, rate limiting, provider outage,
+unsupported bot-authored PRs, and explicit unavailable/error responses are
+unavailable. A successful status whose detail reports one of those no-op states
+cannot satisfy exact-head review.
 Coding probes run in Claude Code, OpenAI Codex, xAI Cursor, Google Antigravity
 order after moving the author's model family behind other families. Claude
 executes every `claude-sub` probe declared in `ARU_CODING_REVIEWERS`, then

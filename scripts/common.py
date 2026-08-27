@@ -29,6 +29,14 @@ CODING_REVIEWERS = (
 )
 REVIEWER_CONFIG_ENV = "ARU_CODING_REVIEWERS"
 REVIEW_AUTHORITIES = EXTERNAL_REVIEWERS + CODING_REVIEWERS
+REVIEW_UNAVAILABLE_RE = re.compile(
+    r"(?:^\s*(?:error|unavailable)\b|\b(?:quota exhausted|quota exceeded|"
+    r"rate[ -]?limit(?:ed|ing)?|reviews? paused|provider outage|service outage|"
+    r"unsupported bot(?:-authored)? pr|cannot review|unable to review|"
+    r"payment required|insufficient credits?|capacity exhausted|"
+    r"cost (?:limit|quota|cap) (?:reached|exceeded))\b)",
+    re.IGNORECASE,
+)
 # Compatibility name for the external-service evidence paths.
 REVIEW_SERVICES = EXTERNAL_REVIEWERS
 ZERO_SHA = "0" * 40
@@ -46,6 +54,14 @@ _REPOSITORY_COMMANDS = {"api", "issue", "label", "pr", "repo"}
 
 class KernelError(RuntimeError):
     """A fail-closed authority or command error."""
+
+
+def review_evidence_unavailable(record: dict[str, Any]) -> bool:
+    text = "\n".join(
+        str(record.get(key) or "")
+        for key in ("body", "description", "name", "context")
+    )
+    return bool(REVIEW_UNAVAILABLE_RE.search(text))
 
 
 def configured_coding_reviewers(

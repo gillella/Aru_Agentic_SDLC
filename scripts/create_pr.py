@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -18,11 +19,11 @@ from common import (
     AUTHOR_PREFIX,
     CODING_REVIEWERS,
     EXTERNAL_REVIEWERS,
-    REVIEW_BINDING_PREFIX,
     REVIEW_REGISTRATION_PREFIX,
     REVIEWER_ACTOR_PREFIX,
     REVIEWER_PREFIX,
     REVIEW_AUTHORITIES,
+    REVIEWER_CONFIG_ENV,
     REVIEW_PREFIX,
     KernelError,
     agent_family,
@@ -35,30 +36,28 @@ from common import (
     json_print,
     label_names,
     normalized_identity,
+    review_evidence_unavailable,
     repo_slug,
     run,
     set_status,
     status_of,
+)
+from reviewer_selection import (
+    PROBE_PROMPT,
+    coding_reviewer_candidates,
+    probe_coding_candidate,
+    registered_coding_actors,
 )
 
 AVAILABLE = "available"
 PENDING = "pending"
 UNAVAILABLE = "unavailable"
 EXTERNAL_TIMEOUT_SECONDS = 15 * 60
-PROBE_PROMPT = "Reply exactly OK"
 EXTERNAL_ACTORS = {
     "coderabbit": {"coderabbitai", "coderabbitai[bot]"},
     "sourcery": {"sourcery-ai", "sourcery-ai[bot]", "sourcery"},
     "codeant": {"codeant-ai", "codeant-ai[bot]"},
 }
-UNAVAILABLE_RE = re.compile(
-    r"(?:^\s*(?:error|unavailable)\b|\b(?:quota exhausted|quota exceeded|"
-    r"rate[ -]?limit(?:ed|ing)?|provider outage|service outage|"
-    r"unsupported bot(?:-authored)? pr|cannot review|unable to review|"
-    r"payment required|insufficient credits?|capacity exhausted|"
-    r"cost (?:limit|quota|cap) (?:reached|exceeded))\b)",
-    re.IGNORECASE,
-)
 ProbeRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 
@@ -103,29 +102,6 @@ def registered_external_states() -> dict[str, str]:
         else UNAVAILABLE
         for service in EXTERNAL_REVIEWERS
     }
-
-
-def registered_coding_actors() -> dict[str, str]:
-    records = gh_json(["label", "list", "--limit", "1000", "--json", "name"])
-    if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
-        raise KernelError("coding reviewer identity bindings are unavailable")
-    bindings: dict[str, str] = {}
-    for item in records:
-        name = str(item.get("name") or "")
-        if not name.startswith(REVIEW_BINDING_PREFIX):
-            continue
-        values = name[len(REVIEW_BINDING_PREFIX) :].split("=", 1)
-        if len(values) != 2:
-            raise KernelError("coding reviewer identity binding is malformed")
-        identity, actor = values[0].lower(), values[1].lower()
-        if (
-            not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", identity)
-            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?(?:\[bot\])?", actor)
-            or identity in bindings
-        ):
-            raise KernelError("coding reviewer identity binding is malformed or ambiguous")
-        bindings[identity] = actor
-    return bindings
 
 
 def initial_external(states: dict[str, str]) -> str | None:
@@ -240,22 +216,33 @@ def choose_initial_reviewer(
     reviewer_actors: dict[str, str] | None = None,
     probe_runner: ProbeRunner = _default_probe,
 ) -> tuple[str, str | None, str | None]:
-    external = initial_external(external_states or registered_external_states())
-    if external:
-        return external, None, None
-    if not author_actor:
+    states = external_states if external_states is not None else registered_external_states()
+    initial_external(states)
+    external_candidates = [
+        (service, None, None, None)
+        for state in (AVAILABLE, PENDING)
+        for service in EXTERNAL_REVIEWERS
+        if states.get(service) == state
+    ]
+    if os.environ.get(REVIEWER_CONFIG_ENV, "").strip() and not author_actor:
         author_actor = current_github_actor()
-    coding = probe_coding_reviewer(
+    coding_candidates = coding_reviewer_candidates(
         author_identity=author_identity,
-        author_family=author_family,
         author_actor=author_actor,
-        rotation_key=number,
         reviewer_actors=reviewer_actors,
-        runner=probe_runner,
     )
-    if coding is None:
+    candidates = [*external_candidates, *coding_candidates]
+    if not candidates:
         raise KernelError("no external or distinct coding-agent reviewer is available")
-    return coding
+    start = number % len(candidates)
+    rotated = [*candidates[start:], *candidates[:start]]
+    for authority, identity, actor, subscription in rotated:
+        if identity is None:
+            return authority, None, None
+        candidate = (authority, identity, str(actor), subscription)
+        if probe_coding_candidate(candidate, probe_runner):
+            return authority, identity, str(actor)
+    raise KernelError("no external or distinct coding-agent reviewer is available")
 
 
 def _trusted_external_actor(record: dict[str, Any], service: str) -> bool:
@@ -315,12 +302,12 @@ def _external_evidence(records: list[dict[str, Any]], service: str) -> list[tupl
             raise KernelError("external reviewer evidence is malformed")
         if not _trusted_external_actor(record, service):
             continue
-        if str(record.get("state") or "").upper() in {
+        if review_evidence_unavailable(record):
+            state = UNAVAILABLE
+        elif str(record.get("state") or "").upper() in {
             "APPROVED", "CHANGES_REQUESTED", "COMMENTED"
         }:
             state = AVAILABLE
-        elif UNAVAILABLE_RE.search(str(record.get("body") or "")):
-            state = UNAVAILABLE
         else:
             continue
         evidence.append((_evidence_time(record, subject="external reviewer evidence"), state))
@@ -333,6 +320,7 @@ def external_state(
     *,
     reviews: list[dict[str, Any]],
     comments: list[dict[str, Any]],
+    statuses: list[dict[str, Any]] | None = None,
 ) -> str:
     evidence = _external_evidence([*reviews, *comments], service)
 
@@ -342,11 +330,17 @@ def external_state(
     matching = [item for item in checks if isinstance(item, dict) and _check_service(item, service)]
     if len(matching) > 1:
         raise KernelError("external reviewer returned ambiguous checks")
-    if matching:
-        check = matching[0]
+    detailed = [
+        item
+        for item in statuses or []
+        if isinstance(item, dict) and _check_service(item, service)
+    ]
+    for check in detailed or matching:
         state = str(check.get("conclusion") or check.get("state") or "").upper()
         status = str(check.get("status") or "").upper()
-        if state == "SUCCESS":
+        if review_evidence_unavailable(check):
+            check_state = UNAVAILABLE
+        elif state == "SUCCESS":
             check_state = AVAILABLE
         elif state in {"ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "SKIPPED"}:
             check_state = UNAVAILABLE
@@ -387,7 +381,16 @@ def _external_decision(
     reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
     comments = gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
     events = gh_paginated(f"repos/{slug}/issues/{number}/events?per_page=100")
-    state = external_state(pr, authority, reviews=reviews, comments=comments)
+    statuses = gh_paginated(
+        f"repos/{slug}/commits/{pr['headRefOid']}/statuses?per_page=100"
+    )
+    state = external_state(
+        pr,
+        authority,
+        reviews=reviews,
+        comments=comments,
+        statuses=statuses,
+    )
     age = (observed_at - _authority_assigned_at(pr, events, authority)).total_seconds()
     if age < 0:
         raise KernelError("review observation predates assignment")
