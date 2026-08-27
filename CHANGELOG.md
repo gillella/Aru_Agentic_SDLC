@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Expanded the README into a user-friendly adoption entry point.
+- Replaced the terse operations note with a complete graphical developer guide
+  covering prerequisites, new and existing repository adoption, GitHub setup,
+  the full lifecycle, every supported command, recovery, troubleshooting, and
+  a pilot checklist.
+- Documented the operator-owned setup that the kernel intentionally does not
+  automate, including initial publication, Project item admission, real CI,
+  branch protection, and external reviewer installation.
+
 ## v0.2.0 - Minimal Kernel
 
 - Reset Aru to one issue-to-safe-merge lifecycle.
