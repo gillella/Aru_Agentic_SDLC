@@ -580,24 +580,27 @@ class WorkflowCredentialBoundaryTests(unittest.TestCase):
 
     WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
-    def _docs_job(self) -> str:
+    def _docs_job(self, *, on_pull_request: bool = False) -> str:
         text = self.WORKFLOW.read_text(encoding="utf-8")
-        start = text.index("\n  docs-freshness:")
+        job_name = "test-and-lint" if on_pull_request else "trusted-docs-freshness"
+        start = text.index(f"\n  {job_name}:")
         rest = text[start + 1:]
-        # The job ends at the next job key at the same indent level.
-        end = rest.find("\n  test-and-lint:")
+        # The fast job ends where the trusted-only job begins; the trusted job
+        # is last. This keeps the text assertion bound to one credential scope.
+        end = rest.find("\n  trusted-docs-freshness:") if on_pull_request else -1
         return rest if end == -1 else rest[:end]
 
-    def _steps(self):
-        return self._docs_job().split("\n      - name:")[1:]
+    def _steps(self, *, on_pull_request: bool):
+        return self._docs_job(on_pull_request=on_pull_request).split(
+            "\n      - name:")[1:]
 
     def _step_running_checker(self, *, on_pull_request: bool) -> str:
-        wanted = "== 'pull_request'" if on_pull_request else "!= 'pull_request'"
-        for step in self._steps():
+        wanted = "(untrusted PR)" if on_pull_request else "(trusted)"
+        for step in self._steps(on_pull_request=on_pull_request):
             if "check_docs.py" in step and wanted in step:
                 return step
         self.fail(
-            f"no docs-freshness step running check_docs.py guarded by {wanted}"
+            f"no documentation step running check_docs.py named {wanted}"
         )
 
     def test_pull_request_path_receives_no_token(self):
@@ -616,6 +619,10 @@ class WorkflowCredentialBoundaryTests(unittest.TestCase):
         step = self._step_running_checker(on_pull_request=False)
         self.assertIn("GH_TOKEN", step)
         self.assertNotIn("--offline", step)
+        self.assertIn(
+            "if: github.event_name != 'pull_request'",
+            self._docs_job(),
+        )
 
     def _workflow_permissions(self) -> list:
         """Grant lines from the top-level permissions block, comments excluded.
@@ -646,7 +653,7 @@ class WorkflowCredentialBoundaryTests(unittest.TestCase):
     def test_pull_requests_read_stays_granted_for_gitleaks(self):
         """gitleaks-action lists PR commits and needs pull-requests:read.
 
-        Asserted at the workflow level because secret-scan inherits from
+        Asserted at the workflow level because the secret-scan step inherits from
         there. Narrowing this block is what the comment above it warns about.
         """
         self.assertIn("pull-requests: read", self._workflow_permissions())

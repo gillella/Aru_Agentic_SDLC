@@ -94,6 +94,35 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(workflow()["jobs"]["test-and-lint"]["name"],
                          "Lint, Verify & Test")
 
+    def test_pull_requests_allocate_exactly_one_runner(self):
+        jobs = workflow()["jobs"]
+        pull_request_jobs = [
+            job_name
+            for job_name, job in jobs.items()
+            if "github.event_name != 'pull_request'" not in job.get("if", "")
+        ]
+        self.assertEqual(pull_request_jobs, ["test-and-lint"])
+
+    def test_fast_job_contains_every_pull_request_gate(self):
+        step_names = {step.get("name") for step in job_steps("test-and-lint")}
+        for gate in (
+            "Secret scan",
+            "Dependency audit",
+            "Enforce module boundaries",
+            "Check documentation against the code it describes (untrusted PR)",
+            "Lint",
+            "Enforce File Line Ceilings",
+            "Verify Source & Tests Hygiene",
+            "Verify Python Syntax",
+        ):
+            with self.subTest(gate=gate):
+                self.assertIn(gate, step_names)
+
+    def test_trusted_docs_job_is_never_allocated_for_pull_requests(self):
+        job = workflow()["jobs"]["trusted-docs-freshness"]
+        self.assertEqual(job["if"], "github.event_name != 'pull_request'")
+        self.assertEqual(job["permissions"]["issues"], "read")
+
     def test_complete_suite_runs_only_on_schedule_or_manual_dispatch(self):
         step = named_step("test-and-lint", "Execute Tests")
         condition = step.get("if", "")

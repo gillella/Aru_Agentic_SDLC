@@ -20,46 +20,39 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Three gates this playbook already ships to new projects via
-  # scripts/init_project.py. Running them here closes the dogfooding gap
-  # described in docs/ARU-SOFTWARE-FACTORY.md §2.2 / issue #86. Each job
-  # fails the build on its own — none of these steps soft-fail.
-
-  secret-scan:
-    name: Secret Scan
+  test-and-lint:
+    name: Lint, Verify & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-          # fetch-depth: 0 is required so a PR-range scan can resolve base^..head.
-          # push/pull_request: the action scans that event's commits, not the
-          # whole repo. schedule/workflow_dispatch: full-history detect.
+          # Match the secret-scan checkout so a shallow tip cannot hide
+          # history-dependent checks if more are added to this job later.
           fetch-depth: 0
 
+      # gitleaks-action scans the event commit range on push/pull_request and
+      # full history on schedule/workflow_dispatch. Keeping it in this required
+      # job preserves the gate without paying a separate five-minute minimum.
       - name: Secret scan
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  dependency-audit:
-    name: Dependency Audit
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Dependency audit
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Dependency audit
+        run: |
           pip install pip-audit
           audited=0
           for req in requirements-dev.txt requirements.txt; do
@@ -80,101 +73,18 @@ jobs:
             echo "No dependency manifest yet; nothing to audit."
           fi
 
-  import-boundaries:
-    name: Import Boundaries
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      # Enforce architectural layer contracts via import-linter
+      # Enforce architectural layer contracts via import-linter. The tool is
+      # pinned in requirements-dev.txt and was installed by the shared setup.
       - name: Enforce module boundaries
-        run: |
-          pip install -r requirements-dev.txt
-          lint-imports
+        run: lint-imports
 
-  # Documentation drift here accumulated in days (issue #115). A convention
-  # that docs stay accurate is followed probabilistically; this job is the
-  # mechanism. It runs on every push and pull request - so any documentation
-  # change is covered - and on the weekly schedule above, which is what
-  # catches a document that went stale because the *code* moved under it.
-  docs-freshness:
-    name: Documentation Freshness
-    runs-on: ubuntu-latest
-    # The checker reads documentation that a pull request controls. Bound the
-    # job so a stalled lookup cannot hold a runner, and keep the checkout
-    # credential out of .git/config so no excerpt can quote it into the log.
-    timeout-minutes: 10
-    # issues:read is scoped to this job alone, because only the issue-state
-    # lookup needs it. The trusted step below is the only place it is usable.
-    permissions:
-      contents: read
-      issues: read
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      # scripts/check_docs.py is taken from the pull request, so on this event
-      # it is attacker-controlled code. Handing it GH_TOKEN would give a PR the
-      # workflow's read authority over contents, issues, and pull requests --
-      # persist-credentials: false does not close that, because it only removes
-      # the credential from .git/config, not from the process environment.
-      # This path therefore runs with no credential at all. The cost is the
-      # issue-state check, which --offline skips; the drift checks that do not
-      # need the network still run and still fail the build.
+      # Pull requests control scripts/check_docs.py. Run it without a token so
+      # untrusted code cannot inherit the workflow's read authority. The issue
+      # lookup is deliberately skipped; all offline drift checks still fail
+      # this required job when documentation disagrees with the code.
       - name: Check documentation against the code it describes (untrusted PR)
         if: github.event_name == 'pull_request'
-        run: |
-          python3 scripts/check_docs.py --offline
-
-      # push / schedule / workflow_dispatch run code that is already merged or
-      # operator-triggered, so the full check runs here with the token. No
-      # --offline: an issue whose state cannot be resolved fails the job rather
-      # than silently skipping the check it was added for. This is the path
-      # that catches a document gone stale because the code moved under it.
-      - name: Check documentation against the code it describes (trusted)
-        if: github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python3 scripts/check_docs.py
-
-  test-and-lint:
-    name: Lint, Verify & Test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          # Match the secret-scan checkout so a shallow tip cannot hide
-          # history-dependent checks if more are added to this job later.
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        run: python3 scripts/check_docs.py --offline
 
       # Unpinned, this step would drift from what agents run locally. The
       # version comes from requirements-dev.txt and the rules from
@@ -226,3 +136,31 @@ jobs:
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           python -m unittest discover tests
+
+  # The network-backed documentation check needs issues:read. It stays in a
+  # separate job that is skipped before runner allocation for pull requests,
+  # so PR-controlled code never receives a token and does not incur a second
+  # billable job. Push, schedule, and manual events run only trusted code here.
+  trusted-docs-freshness:
+    name: Documentation Freshness
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check documentation against the code it describes (trusted)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/check_docs.py
