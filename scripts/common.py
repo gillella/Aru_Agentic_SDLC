@@ -580,45 +580,106 @@ def board_edit(
     cwd: str | Path | None = None,
 ) -> list[str]:
     project = linked_project(cwd=cwd)
+    project_id = project.get("id")
+    if not isinstance(project_id, str) or not project_id:
+        raise KernelError("linked Project Board identity is unavailable")
     slug = repo_slug(cwd)
-    owner = slug.split("/", 1)[0]
-    project_number = str(project["number"])
-    items = gh_json(
+    issue_record = gh_json(
+        ["api", f"repos/{slug}/issues/{number}"],
+        cwd=cwd,
+    )
+    if (
+        not isinstance(issue_record, dict)
+        or issue_record.get("number") != number
+        or "pull_request" in issue_record
+        or not isinstance(issue_record.get("node_id"), str)
+        or not issue_record["node_id"]
+    ):
+        raise KernelError(f"issue #{number} Project identity is unavailable")
+
+    query = """
+    query($issue:ID!,$project:ID!){
+      issueNode:node(id:$issue){
+        ... on Issue{
+          projectItems(first:20){
+            nodes{id project{id}}
+            pageInfo{hasNextPage}
+          }
+        }
+      }
+      projectNode:node(id:$project){
+        ... on ProjectV2{
+          field(name:"Status"){
+            ... on ProjectV2SingleSelectField{
+              id
+              name
+              options{id name}
+            }
+          }
+        }
+      }
+    }
+    """
+    data = gh_json(
         [
-            "project",
-            "item-list",
-            project_number,
-            "--owner",
-            owner,
-            "--limit",
-            "1000",
-            "--format",
-            "json",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"issue={issue_record['node_id']}",
+            "-F",
+            f"project={project_id}",
         ],
         cwd=cwd,
+        auth=PROJECT_AUTH,
     )
-    fields = gh_json(
-        ["project", "field-list", project_number, "--owner", owner, "--format", "json"],
-        cwd=cwd,
-    )
-    if not isinstance(items, dict) or not isinstance(fields, dict):
-        raise KernelError("Project Board inventory is malformed")
-    if isinstance(items.get("totalCount"), int) and items["totalCount"] != len(items.get("items", [])):
+
+    root = data.get("data") if isinstance(data, dict) else None
+    issue_node = root.get("issueNode") if isinstance(root, dict) else None
+    project_node = root.get("projectNode") if isinstance(root, dict) else None
+    connection = issue_node.get("projectItems") if isinstance(issue_node, dict) else None
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+    if not isinstance(nodes, list) or not isinstance(page_info, dict):
+        raise KernelError("Project Board item inventory is malformed")
+    if page_info.get("hasNextPage") is not False:
         raise KernelError("Project Board item inventory is truncated")
-    if isinstance(fields.get("totalCount"), int) and fields["totalCount"] != len(fields.get("fields", [])):
-        raise KernelError("Project Board field inventory is truncated")
-    issue_items = [
-        item
-        for item in items.get("items", [])
-        if isinstance(item, dict)
-        and isinstance(item.get("content"), dict)
-        and item["content"].get("number") == number
-        and item["content"].get("repository") == slug
-    ]
-    status_fields = [field for field in fields.get("fields", []) if field.get("name") == "Status"]
-    if len(issue_items) != 1 or len(status_fields) != 1:
+
+    issue_items: list[dict[str, Any]] = []
+    for item in nodes:
+        item_project = item.get("project") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), str)
+            or not item["id"]
+            or not isinstance(item_project, dict)
+            or not isinstance(item_project.get("id"), str)
+            or not item_project["id"]
+        ):
+            raise KernelError("Project Board item inventory is malformed")
+        if item_project["id"] == project_id:
+            issue_items.append(item)
+
+    status_field = project_node.get("field") if isinstance(project_node, dict) else None
+    if (
+        len(issue_items) != 1
+        or not isinstance(status_field, dict)
+        or status_field.get("name") != "Status"
+        or not isinstance(status_field.get("id"), str)
+        or not status_field["id"]
+        or not isinstance(status_field.get("options"), list)
+    ):
         raise KernelError("issue or Status field is ambiguous on the linked Project Board")
-    options = [option for option in status_fields[0].get("options", []) if option.get("name") == status]
+    if any(
+        not isinstance(option, dict)
+        or not isinstance(option.get("id"), str)
+        or not option["id"]
+        or not isinstance(option.get("name"), str)
+        for option in status_field["options"]
+    ):
+        raise KernelError("Project Board Status options are malformed")
+    options = [option for option in status_field["options"] if option["name"] == status]
     if len(options) != 1:
         raise KernelError(f"Project Board has no unique {status!r} option")
     return [
@@ -627,9 +688,9 @@ def board_edit(
         "--id",
         str(issue_items[0]["id"]),
         "--project-id",
-        str(project["id"]),
+        project_id,
         "--field-id",
-        str(status_fields[0]["id"]),
+        str(status_field["id"]),
         "--single-select-option-id",
         str(options[0]["id"]),
     ]
