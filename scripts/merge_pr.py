@@ -37,6 +37,11 @@ CODEANT_STATUS_MARKER_RE = re.compile(
 )
 CODEANT_MARKER_PREFIX_RE = re.compile(r"<!--\s*codeant-review-status", re.IGNORECASE)
 CODEANT_STATUS_RECORD_KEYS = {"label", "commit", "started", "finished", "done"}
+CODEANT_FULL_REVIEW_LABEL = "Reviewed your PR"
+CODEANT_STATUS_LABELS = {
+    CODEANT_FULL_REVIEW_LABEL,
+    "Incremental review completed",
+}
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -132,8 +137,9 @@ def pull_comments(number: int) -> list[dict[str, Any]]:
     return gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
 
 
-def successful_service_review(number: int, head: str, service: str) -> bool:
-    reviews = pull_reviews(number)
+def _successful_service_review(
+    reviews: list[dict[str, Any]], head: str, service: str
+) -> bool:
     approved = []
     for review in reviews:
         if not isinstance(review, dict):
@@ -149,22 +155,40 @@ def successful_service_review(number: int, head: str, service: str) -> bool:
     return bool(approved)
 
 
-def trusted_codeant_review_at_head(reviews: list[dict[str, Any]], head: str) -> bool:
-    has_exact_head_review = False
+def successful_service_review(number: int, head: str, service: str) -> bool:
+    return _successful_service_review(pull_reviews(number), head, service)
+
+
+def _trusted_changes_requested_at_head(
+    reviews: list[dict[str, Any]], head: str, service: str
+) -> bool:
     for review in reviews:
         if not isinstance(review, dict):
             raise KernelError("review evidence is malformed")
         actor = review.get("user") or review.get("author")
-        if not _actor_is_trusted(actor, "codeant"):
-            continue
         commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
         state = str(review.get("state") or "").upper()
-        if commit_id == head:
+        if _actor_is_trusted(actor, service) and commit_id == head:
             if state == "CHANGES_REQUESTED":
-                return False
-            if state in {"COMMENTED", "APPROVED"}:
-                has_exact_head_review = True
-    return has_exact_head_review
+                return True
+    return False
+
+
+def trusted_codeant_review_history(reviews: list[dict[str, Any]], head: str) -> bool:
+    if _trusted_changes_requested_at_head(reviews, head, "codeant"):
+        return False
+    for review in reviews:
+        actor = review.get("user") or review.get("author")
+        commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
+        state = str(review.get("state") or "").upper()
+        if (
+            _actor_is_trusted(actor, "codeant")
+            and isinstance(commit_id, str)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", commit_id)
+            and state in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+        ):
+            return True
+    return False
 
 
 def _valid_codeant_record(record: Any) -> bool:
@@ -175,7 +199,7 @@ def _valid_codeant_record(record: Any) -> bool:
         return False
     if _parse_ts(record.get("started")) is None or _parse_ts(record.get("finished")) is None:
         return False
-    if not isinstance(record.get("label"), str) or not record.get("label", "").strip():
+    if record.get("label") not in CODEANT_STATUS_LABELS:
         return False
     return isinstance(record.get("done"), bool)
 
@@ -219,15 +243,24 @@ def validate_codeant_status_comments(comments: list[dict[str, Any]], head: str) 
         return False
 
     records = trusted_payloads[0]
-    head_records = [r for r in records if str(r.get("commit") or "").lower() == head.lower()]
-    if len(head_records) != 1:
+    if any(record["done"] is not True for record in records):
         return False
-    return head_records[0]["done"] is True
+    full_head_records = [
+        record
+        for record in records
+        if record["label"] == CODEANT_FULL_REVIEW_LABEL
+        and record["commit"].lower() == head.lower()
+    ]
+    if len(full_head_records) != 1:
+        return False
+    return True
 
 
-def successful_codeant_status_review(number: int, head: str) -> bool:
-    reviews = pull_reviews(number)
-    if not trusted_codeant_review_at_head(reviews, head):
+def successful_codeant_status_review(
+    number: int, head: str, reviews: list[dict[str, Any]] | None = None
+) -> bool:
+    reviews = pull_reviews(number) if reviews is None else reviews
+    if not trusted_codeant_review_history(reviews, head):
         return False
     comments = pull_comments(number)
     return validate_codeant_status_comments(comments, head)
@@ -235,10 +268,17 @@ def successful_codeant_status_review(number: int, head: str) -> bool:
 
 def exact_head_review(pr: dict[str, Any], number: int, service: str) -> bool:
     head = str(pr["headRefOid"])
+    if service == "codeant":
+        reviews = pull_reviews(number)
+        if _trusted_changes_requested_at_head(reviews, head, service):
+            return False
+        if successful_service_check(pr, service) or _successful_service_review(
+            reviews, head, service
+        ):
+            return True
+        return successful_codeant_status_review(number, head, reviews)
     if successful_service_check(pr, service) or successful_service_review(number, head, service):
         return True
-    if service == "codeant":
-        return successful_codeant_status_review(number, head)
     return False
 
 

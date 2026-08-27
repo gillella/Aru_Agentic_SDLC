@@ -167,11 +167,28 @@ def install_codeant_pr(monkeypatch, head: str, pr_number: int = 146, feedback: l
 
 def test_codeant_clean_status_reproducing_jmc_pr_146(monkeypatch):
     head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
+    prior_head = "1" * 40
     install_codeant_pr(monkeypatch, head, pr_number=146)
 
-    review_obj = make_review(commit_id=head, state="COMMENTED", login="codeant-ai[bot]", actor_type="Bot")
-    status_record = make_codeant_record(commit=head, label="Reviewed your PR", done=True)
-    status_comment = make_codeant_comment(records=[status_record], login="codeant-ai[bot]", actor_type="Bot")
+    review_obj = make_review(
+        commit_id=prior_head,
+        state="COMMENTED",
+        login="codeant-ai[bot]",
+        actor_type="Bot",
+    )
+    status_comment = make_codeant_comment(
+        records=[
+            make_codeant_record(commit=head, label="Reviewed your PR", done=True),
+            make_codeant_record(
+                commit=head,
+                label="Incremental review completed",
+                done=True,
+            ),
+            make_codeant_record(commit=prior_head, label="Reviewed your PR", done=True),
+        ],
+        login="codeant-ai[bot]",
+        actor_type="Bot",
+    )
 
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
@@ -186,7 +203,7 @@ def test_codeant_clean_status_reproducing_jmc_pr_146(monkeypatch):
     assert dry_run["gates"]["reviewer"] == "codeant"
 
 
-def test_codeant_multiple_records_history_with_current_head_passes(monkeypatch):
+def test_codeant_current_head_incremental_without_full_review_fails_closed(monkeypatch):
     head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
     old_head = "1" * 40
     install_codeant_pr(monkeypatch, head, pr_number=146)
@@ -201,8 +218,8 @@ def test_codeant_multiple_records_history_with_current_head_passes(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    gates = merge_pr.evaluate(146, head)
-    assert gates["reviewer"] == "codeant"
+    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
+        merge_pr.evaluate(146, head)
 
 
 def test_codeant_stale_head_fails_closed(monkeypatch):
@@ -371,12 +388,13 @@ def test_codeant_multiple_markers_in_one_comment_fails_closed(monkeypatch):
         merge_pr.evaluate(146, head)
 
 
-def test_codeant_duplicate_records_for_head_fails_closed(monkeypatch):
+def test_codeant_duplicate_full_records_for_head_fails_closed(monkeypatch):
     head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
     install_codeant_pr(monkeypatch, head, pr_number=146)
 
     review_obj = make_review(commit_id=head, state="COMMENTED")
     records = [
+        make_codeant_record(commit=head, label="Reviewed your PR", done=True),
         make_codeant_record(commit=head, label="Reviewed your PR", done=True),
         make_codeant_record(commit=head, label="Incremental review completed", done=True),
     ]
@@ -435,16 +453,84 @@ def test_codeant_spoofed_bot_login_with_user_type_fails_closed(monkeypatch):
         merge_pr.evaluate(146, head)
 
 
-def test_codeant_missing_exact_head_review_object_fails_closed(monkeypatch):
+def test_codeant_trusted_review_history_allows_status_without_exact_head_review(monkeypatch):
     head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
     install_codeant_pr(monkeypatch, head, pr_number=146)
 
-    # Review object exists for old commit, but not current head
     old_review = make_review(commit_id="1" * 40, state="COMMENTED")
     record = make_codeant_record(commit=head, done=True)
     status_comment = make_codeant_comment(records=[record])
 
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [old_review])
+    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
+
+    gates = merge_pr.evaluate(146, head)
+    assert gates["reviewer"] == "codeant"
+
+
+def test_codeant_status_without_trusted_review_history_fails_closed(monkeypatch):
+    head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
+    install_codeant_pr(monkeypatch, head, pr_number=146)
+
+    record = make_codeant_record(commit=head, done=True)
+    status_comment = make_codeant_comment(records=[record])
+
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
+    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
+
+    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
+        merge_pr.evaluate(146, head)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        make_codeant_record(
+            commit="db49ace5f70ae8b5fe8b1ce341ad997bb77db071",
+            label="Review completed",
+        ),
+        make_codeant_record(commit="1" * 40, label="Review completed"),
+        make_codeant_record(commit="1" * 12),
+        make_codeant_record(commit="1" * 40, done=False),
+    ],
+    ids=[
+        "unknown-current-head-label",
+        "unknown-history-label",
+        "abbreviated-history-commit",
+        "unfinished-history-record",
+    ],
+)
+def test_codeant_invalid_status_history_fails_closed(monkeypatch, record):
+    head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
+    install_codeant_pr(monkeypatch, head, pr_number=146)
+
+    review_obj = make_review(commit_id="1" * 40, state="COMMENTED")
+    records = [make_codeant_record(commit=head), record]
+    status_comment = make_codeant_comment(records=records)
+
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
+    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
+
+    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
+        merge_pr.evaluate(146, head)
+
+
+def test_codeant_unfinished_incremental_record_fails_closed(monkeypatch):
+    head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
+    install_codeant_pr(monkeypatch, head, pr_number=146)
+
+    review_obj = make_review(commit_id="1" * 40, state="COMMENTED")
+    records = [
+        make_codeant_record(commit=head),
+        make_codeant_record(
+            commit=head,
+            label="Incremental review completed",
+            done=False,
+        ),
+    ]
+    status_comment = make_codeant_comment(records=records)
+
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
     with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
@@ -521,6 +607,18 @@ def test_codeant_conflicting_approved_and_changes_requested_blocks_merge(monkeyp
     # Test CHANGES_REQUESTED before APPROVED
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [blocking_review, approved_review])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
+    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
+        merge_pr.evaluate(146, head)
+
+
+def test_codeant_check_cannot_override_exact_head_changes_requested(monkeypatch):
+    head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
+    pr = install_codeant_pr(monkeypatch, head, pr_number=146)
+    pr["statusCheckRollup"] = [{"context": "CodeAnt AI", "state": "SUCCESS"}]
+
+    blocking_review = make_review(commit_id=head, state="CHANGES_REQUESTED")
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [blocking_review])
+
     with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
         merge_pr.evaluate(146, head)
 
