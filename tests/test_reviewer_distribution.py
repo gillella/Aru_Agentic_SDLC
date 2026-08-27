@@ -103,6 +103,24 @@ def test_initial_assignment_excludes_author_identity_and_actor(monkeypatch):
     assert reviewer == ("claude-code", "m2", "other-reviewer")
 
 
+def test_initial_assignment_prefers_a_different_author_family(monkeypatch):
+    monkeypatch.setenv(
+        "ARU_CODING_REVIEWERS",
+        "openai-codex:mo,xai-cursor:mx",
+    )
+    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
+    reviewer = create_pr.choose_initial_reviewer(
+        0,
+        "codex-author",
+        "openai-codex",
+        "author-login",
+        external_states=external_states(),
+        reviewer_actors={"mo": "codex-reviewer", "mx": "cursor-reviewer"},
+        probe_runner=lambda argv: result(argv),
+    )
+    assert reviewer == ("xai-cursor", "mx", "cursor-reviewer")
+
+
 def test_unavailable_rotated_candidate_advances_without_state(monkeypatch):
     monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1")
     calls = []
@@ -181,3 +199,14 @@ def test_rate_limited_success_status_is_unavailable():
         )
         == create_pr.UNAVAILABLE
     )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "The provider encountered an error",
+        "Review failed because the service is unavailable",
+    ],
+)
+def test_provider_failure_terms_are_unavailable_anywhere(message):
+    assert common.review_evidence_unavailable({"body": message})

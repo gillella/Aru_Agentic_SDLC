@@ -34,7 +34,7 @@ PROBE_PROMPT = "Reply exactly OK"
 CodingCandidate = tuple[str, str, str, str | None]
 ProbeRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 REVIEW_UNAVAILABLE_RE = re.compile(
-    r"(?:^\s*(?:error|unavailable)\b|\b(?:quota exhausted|quota exceeded|"
+    r"(?:\b(?:error|unavailable)\b|\b(?:quota exhausted|quota exceeded|"
     r"rate[ -]?limit(?:ed|ing)?|reviews? paused|provider outage|service outage|"
     r"unsupported bot(?:-authored)? pr|cannot review|unable to review|"
     r"payment required|insufficient credits?|capacity exhausted|"

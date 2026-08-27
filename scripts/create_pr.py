@@ -229,6 +229,7 @@ def choose_initial_reviewer(
         author_actor=author_actor,
         reviewer_actors=reviewer_actors,
     )
+    coding_candidates.sort(key=lambda candidate: candidate[0] == author_family)
     candidates = [*external_candidates, *coding_candidates]
     if not candidates:
         raise KernelError("no external or distinct coding-agent reviewer is available")
