@@ -44,7 +44,7 @@ def test_feedback_collects_unresolved_threads(monkeypatch):
     monkeypatch.setattr(
         fetch_pr_feedback,
         "gh_json",
-        lambda _argv: {
+        lambda _argv, *, auth: {
             "data": {
                 "repository": {
                     "pullRequest": {
@@ -72,7 +72,9 @@ def test_feedback_collects_unresolved_threads(monkeypatch):
                     }
                 }
             }
-        },
+        }
+        if auth == fetch_pr_feedback.REPOSITORY_AUTH
+        else pytest.fail("expected repository authority"),
     )
     feedback = fetch_pr_feedback.fetch_feedback(9)
     assert feedback[0]["path"] == "a.py"
@@ -84,7 +86,7 @@ def test_feedback_fails_closed_on_comment_truncation(monkeypatch):
     monkeypatch.setattr(
         fetch_pr_feedback,
         "gh_json",
-        lambda _argv: {
+        lambda _argv, *, auth: {
             "data": {
                 "repository": {
                     "pullRequest": {
@@ -104,7 +106,9 @@ def test_feedback_fails_closed_on_comment_truncation(monkeypatch):
                     }
                 }
             }
-        },
+        }
+        if auth == fetch_pr_feedback.REPOSITORY_AUTH
+        else pytest.fail("expected repository authority"),
     )
     with pytest.raises(fetch_pr_feedback.KernelError, match="truncated"):
         fetch_pr_feedback.fetch_feedback(9)
