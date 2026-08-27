@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.2 - Consumer Adoption Ready - 2026-08-27
 
 - Expanded the README into a user-friendly adoption entry point.
 - Replaced the terse operations note with a complete graphical developer guide
@@ -10,6 +10,16 @@
 - Documented the operator-owned setup that the kernel intentionally does not
   automate, including initial publication, Project item admission, real CI,
   branch protection, and external reviewer installation.
+- Reconciled every existing Project Board item to Done and archived the final
+  legacy branch heads before removing their obsolete worktrees and branches.
+- Marked the minimal kernel complete and ready for consumer-project pilots.
+
+## v0.2.1 - Reset Correctness Fixes - 2026-08-27
+
+- Scoped surface-budget checks to tracked kernel files so preserved external
+  worktrees and untracked operator files do not create false failures.
+- Replaced legacy Aru pre-push hooks during installation without chaining the
+  retired lifecycle implementation.
 
 ## v0.2.0 - Minimal Kernel
 

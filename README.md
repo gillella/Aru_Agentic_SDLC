@@ -3,6 +3,10 @@
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
 
+**Project status: Complete and ready for consumer adoption — v0.2.2
+(2026-08-27).** Future kernel improvements should originate in evidence from
+real governed consumer projects.
+
 Aru helps a developer or coding agent answer four questions before changing a
 software project:
 
@@ -49,7 +53,7 @@ The source of truth stays deliberately small:
 
 ## Is it usable for another project?
 
-**Yes, with explicit prerequisites.** Version 0.2.1 can govern a new project or
+**Yes, with explicit prerequisites.** Version 0.2.2 can govern a new project or
 be migrated into an existing project when all of these are true:
 
 - Git, Python 3.11+, and an authenticated GitHub CLI are available.
