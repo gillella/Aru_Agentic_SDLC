@@ -174,9 +174,15 @@ so a governed recovery receives its own complete 15-minute pending window.
 Fallback smoke-tests Claude Code, OpenAI Codex, xAI Cursor, then Google
 Antigravity; it excludes the author identity and prefers another model family.
 Each identity must have a `reviewer-binding:<identity>=<github-login>` label,
-and that GitHub actor must differ from the PR author. All three Claude
-subscriptions are probed. Cost or quota exhaustion, rate
-limiting, provider outage, unsupported bot-authored PRs, and explicit
+and that GitHub actor must differ from the PR author. Each machine declares its
+local pool in `ARU_CODING_REVIEWERS`. Entries use `family:identity`; Claude
+entries add the subscription argument as `claude-code:identity@subscription`.
+The current MacBook identities are `m1/m2/m3/mo/mx/mg`; the Mac mini uses
+`n1/n2/n3/no/nx/ng`. Adding or removing a Claude subscription changes only this
+configuration and its binding label. Missing, malformed, or duplicate
+configuration blocks coding fallback. Every configured Claude subscription is
+probed and successful bound subscriptions rotate deterministically. Cost or
+quota exhaustion, rate limiting, provider outage, unsupported bot-authored PRs, and explicit
 unavailable/error responses all count as unavailable. If no distinct coding
 agent has capacity, assignment does not change and the transition fails closed.
 If an assigned coding reviewer later aborts or explicitly becomes unavailable,

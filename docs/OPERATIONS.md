@@ -238,11 +238,24 @@ from PR creation; a governed recovery starts a fresh 15-minute window.
 
 The fallback pool is Claude Code, OpenAI Codex, xAI Cursor, and Google
 Antigravity. Capacity must answer the exact smoke-test prompt with `OK`; Claude
-probes all three `claude-sub` subscriptions. Before use, bind each configured
-identity to the GitHub actor that will submit its formal Review, for example
+probes every locally configured `claude-sub` subscription. Before use, bind
+each configured identity to the GitHub actor that will submit its formal Review, for example
 `reviewer-binding:xai-cursor=aru-xai-reviewer`. The actor must differ from the
 PR author. The author agent identity is also excluded, and another model family
 is preferred. No bound, distinct successful probe means no assignment change.
+
+This deployment currently uses six local identities per machine:
+
+| Machine | Claude 1 | Claude 2 | Claude 3 | Codex | Cursor | Antigravity |
+| --- | --- | --- | --- | --- | --- | --- |
+| MacBook Pro | `m1` | `m2` | `m3` | `mo` | `mx` | `mg` |
+| Mac mini | `n1` | `n2` | `n3` | `no` | `nx` | `ng` |
+
+The short names keep bindings to `aru-code-factory-gillella[bot]` within
+GitHub's 50-character label-name limit. Register all twelve identities, but a
+factory process probes only its locally configured pool. The App bot submits
+formal reviews; do not bind these identities to the PR-author account
+`gillella`.
 
 ## 5. Install Aru on a developer machine
 
@@ -258,6 +271,23 @@ Set the canonical path in the shell or desktop-agent environment:
 ```bash
 export ARU_SDLC_HOME=/Users/aravindgillella/projects/Aru_Agentic_SDLC
 ```
+
+Set the machine-local reviewer pool before starting the factory:
+
+```bash
+# MacBook Pro
+export ARU_CODING_REVIEWERS='claude-code:m1@1,claude-code:m2@2,claude-code:m3@3,openai-codex:mo,xai-cursor:mx,google-antigravity:mg'
+
+# Mac mini
+export ARU_CODING_REVIEWERS='claude-code:n1@1,claude-code:n2@2,claude-code:n3@3,openai-codex:no,xai-cursor:nx,google-antigravity:ng'
+```
+
+To add or remove a Claude subscription, edit only this comma-separated value
+and create or remove the matching `reviewer-binding:<identity>=<github-login>`
+label. The wrapper subscription appears after `@`; the identity before it is
+the stable audit name. Non-Claude families currently allow one local identity
+each. Missing, malformed, repeated identities, repeated Claude subscriptions,
+or multiple non-Claude identities fail closed.
 
 The installer creates symlinks for exactly six skills under supported local
 agent skill directories. It does not copy the kernel into every consumer
@@ -743,8 +773,9 @@ Cost or quota exhaustion, rate limiting, provider outage, unsupported
 bot-authored PRs, and explicit unavailable/error responses are unavailable.
 Coding probes run in Claude Code, OpenAI Codex, xAI Cursor, Google Antigravity
 order after moving the author's model family behind other families. Claude
-always executes all three required `claude-sub` probes and rotates across the
-successful subscriptions deterministically. An identity is eligible only when
+executes every `claude-sub` probe declared in `ARU_CODING_REVIEWERS`, then
+rotates deterministically across the successful bound subscriptions. An
+identity is eligible only when
 its `reviewer-binding:<identity>=<github-login>` exists and the bound actor is
 not the PR author.
 
