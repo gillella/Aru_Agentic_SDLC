@@ -28,6 +28,13 @@ LABELS = {
     "review:coderabbit": ("0e8a16", "External review: CodeRabbit"),
     "review:sourcery": ("0e8a16", "External review: Sourcery"),
     "review:codeant": ("0e8a16", "External review: CodeAnt"),
+    "review:claude-code": ("5319e7", "Coding-agent review: Claude Code"),
+    "review:openai-codex": ("5319e7", "Coding-agent review: OpenAI Codex"),
+    "review:xai-cursor": ("5319e7", "Coding-agent review: xAI Cursor"),
+    "review:google-antigravity": (
+        "5319e7",
+        "Coding-agent review: Google Antigravity",
+    ),
 }
 
 

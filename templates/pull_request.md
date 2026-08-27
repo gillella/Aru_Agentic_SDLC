@@ -6,7 +6,8 @@ Closes #<!-- issue -->
 
 - [ ] Focused tests pass.
 - [ ] Current-head CI passes.
-- [ ] Assigned external review is complete.
+- [ ] The one assigned external or distinct coding-agent review is complete for
+      the exact current head.
 - [ ] Findings are resolved.
 
 ## Net surface change

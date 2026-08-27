@@ -14,7 +14,22 @@ STATUSES = ("Backlog", "Ready", "In Progress", "In Review", "Done")
 STATUS_PREFIX = "status:"
 AGENT_PREFIX = "agent:"
 REVIEW_PREFIX = "review:"
-REVIEW_SERVICES = ("coderabbit", "sourcery", "codeant")
+REVIEWER_PREFIX = "reviewer:"
+REVIEWER_ACTOR_PREFIX = "reviewer-actor:"
+REVIEW_REGISTRATION_PREFIX = "reviewer-registered:"
+REVIEW_BINDING_PREFIX = "reviewer-binding:"
+AUTHOR_PREFIX = "author:"
+AUTHOR_FAMILY_PREFIX = "author-family:"
+EXTERNAL_REVIEWERS = ("coderabbit", "sourcery", "codeant")
+CODING_REVIEWERS = (
+    "claude-code",
+    "openai-codex",
+    "xai-cursor",
+    "google-antigravity",
+)
+REVIEW_AUTHORITIES = EXTERNAL_REVIEWERS + CODING_REVIEWERS
+# Compatibility name for the external-service evidence paths.
+REVIEW_SERVICES = EXTERNAL_REVIEWERS
 ZERO_SHA = "0" * 40
 REPOSITORY_AUTH = "repository"
 PROJECT_AUTH = "project"

@@ -26,7 +26,7 @@ agents using Aru to guide another software project.
 
 ## 1. What Aru is
 
-Aru is a compact governance layer around GitHub, Git, CI, and external code
+Aru is a compact governance layer around GitHub, Git, CI, and authoritative code
 review. It supplies rules and small mechanical helpers for moving one approved
 issue to one merged pull request without losing ownership, scope, or exact-head
 verification.
@@ -45,7 +45,7 @@ flowchart LR
     OWNED --> BOUNDED[Declared paths]
     BOUNDED --> ISOLATED[Isolated worktree]
     ISOLATED --> VERIFIED[Exact-head CI]
-    VERIFIED --> REVIEWED[One external reviewer]
+    VERIFIED --> REVIEWED[One authoritative reviewer]
     REVIEWED --> MERGED[Mechanical merge]
     MERGED --> CLOSED[Done and cleaned]
 ```
@@ -103,7 +103,7 @@ flowchart TB
     CLAIM --> WORKTREE
     WORKTREE --> CHANGE[Implementation]
     CHANGE --> CI[Exact-head CI]
-    CHANGE --> REVIEW[One external reviewer]
+    CHANGE --> REVIEW[One external or coding-agent authority]
     CI --> GATE[merge_pr.py]
     REVIEW --> GATE
     GATE --> MAIN[Default branch]
@@ -118,7 +118,7 @@ flowchart TB
 | Which files may change? | The issue's single `touches:` declaration |
 | Where may implementation happen? | The issue's `.worktrees/<branch>` checkout |
 | Did tests pass for this code? | CI attached to the exact current PR head |
-| Who reviewed it? | The service named by the only `review:<service>` label |
+| Who reviewed it? | The external service or coding family named by the only `review:<authority>` label |
 | May it merge? | `merge_pr.py --expected-head` succeeds |
 | May it deploy? | Only the consumer project's own policy answers this |
 
@@ -155,10 +155,11 @@ The consumer repository needs:
 - a default branch, normally `main`;
 - one linked, open GitHub Project;
 - one Project `Status` field with the five exact lifecycle options;
-- the Aru `status:*`, `type:*`, `priority:*`, `agent:*`, `author:*`, and
-  `review:*` labels;
+- the Aru `status:*`, `type:*`, `priority:*`, `agent:*`, `author:*`,
+  `author-family:*`, `review:*`, and fallback `reviewer:*` labels;
 - a pull-request CI workflow;
-- at least one installed and functioning supported external reviewer.
+- at least one registered external reviewer or one distinct coding-agent
+  reviewer whose capacity probe succeeds.
 
 If more than one open Project is linked, set the intended number explicitly:
 
@@ -208,20 +209,40 @@ identity for repository creation. Configure the App runner only after the new
 repository has an installation; routine governed repository automation should
 then use the App route.
 
-### External reviewer readiness
+### Reviewer readiness
 
-The supported reviewer names are:
+External reviewers are considered in this order:
 
 - `coderabbit`
 - `sourcery`
 - `codeant`
 
-`create_pr.py` chooses one deterministically from the issue number. Installing
-the labels alone is not enough—the corresponding service must actually produce
-current-head review evidence that `merge_pr.py` can verify.
+Register each installed provider explicitly:
 
-If your organization enables only one service, expect to replace unsupported
-assignments manually after recording the concrete service failure on the PR.
+```text
+reviewer-registered:coderabbit
+reviewer-registered:sourcery
+reviewer-registered:codeant
+```
+
+The bootstrap `review:*` authority labels do not register providers.
+`create_pr.py` selects the first registered available service, not an
+issue-number rotation. The assigned service must produce verifiable
+current-head evidence. On explicit
+unavailability it falls back immediately; while merely pending it retains the
+service for less than 15 minutes and falls back at 15 minutes.
+
+The newest trusted, timestamped provider evidence wins. Measure the pending
+window from the current authority's latest GitHub label-assignment event, not
+from PR creation; a governed recovery starts a fresh 15-minute window.
+
+The fallback pool is Claude Code, OpenAI Codex, xAI Cursor, and Google
+Antigravity. Capacity must answer the exact smoke-test prompt with `OK`; Claude
+probes all three `claude-sub` subscriptions. Before use, bind each configured
+identity to the GitHub actor that will submit its formal Review, for example
+`reviewer-binding:xai-cursor=aru-xai-reviewer`. The actor must differ from the
+PR author. The author agent identity is also excluded, and another model family
+is preferred. No bound, distinct successful probe means no assignment change.
 
 ## 5. Install Aru on a developer machine
 
@@ -300,7 +321,7 @@ The helper intentionally does not:
 - establish an initial remote default-branch baseline;
 - configure branch rulesets;
 - tailor CI to the project's language and test suite;
-- install an external reviewer;
+- install an external reviewer or coding-agent provider;
 - add existing issues to the new Project.
 
 Treat those as operator-owned bootstrap work. Do not claim that ordinary Aru
@@ -385,18 +406,25 @@ the consumer project's real focused checks, for example:
 The required CI result must be attached to the exact current PR head. A green
 result from an earlier commit becomes historical after any new push.
 
-### Reviewer services
+### Reviewer providers
 
 Install and authorize the external reviewer services your repository intends to
-use. The kernel recognizes one label at a time:
+use, and install the coding-agent CLIs that may serve as fallback. The kernel
+recognizes one authority label at a time:
 
 ```text
 review:coderabbit
 review:sourcery
 review:codeant
+review:claude-code
+review:openai-codex
+review:xai-cursor
+review:google-antigravity
 ```
 
-The PR must never carry zero or multiple `review:*` labels at merge time.
+The PR must never carry zero or multiple `review:*` labels at merge time. A
+coding authority also carries exactly one `reviewer:<identity>` and one
+`reviewer-actor:<github-login>` label; an external authority carries neither.
 
 ### Branch protection
 
@@ -474,7 +502,7 @@ sequenceDiagram
     A->>WT: Implement within touches and test
     A->>GH: Push branch and open PR
     GH->>CI: Verify exact current head
-    CI-->>GH: Green CI and external verdict
+    CI-->>GH: Green CI and authoritative verdict
     A->>M: Merge PR with expected head
     M->>GH: Recheck gates, merge, mark Done
     A->>WT: Remove only safe closed worktree
@@ -570,8 +598,11 @@ The helper:
 - verifies issue ownership and branch identity;
 - confirms the published remote head equals local `HEAD`;
 - appends `Closes #42`;
-- adds `author:<agent>`;
-- assigns one stable `review:<service>` label;
+- adds `author:<agent>` and `author-family:<family>`;
+- assigns the first explicitly registered available external
+  `review:<authority>` label,
+  or a smoke-tested distinct coding-agent authority when no external is
+  available;
 - moves the issue to `In Review`.
 
 ### Step 7: wait for current-head evidence
@@ -584,6 +615,20 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr 123 --json
 If CI fails, diagnose the complete current-head logs and make the smallest
 repair. If review findings exist, address every unresolved finding. Any new push
 requires fresh current-head CI and review evidence.
+
+Refresh the authority after an explicit provider failure or while waiting:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+  --refresh-reviewer 123 --json
+```
+
+Pending for less than 15 minutes retains the external authority. At exactly 15
+minutes the helper probes the distinct coding-agent pool and, only after a
+successful capacity test, replaces the one authority and records the exact head,
+old authority, reviewer identity, timestamp, and fallback reason on the PR.
+The timeout is measured from the latest persisted label-assignment event for
+the current authority.
 
 ### Step 8: dry-run and merge
 
@@ -612,7 +657,7 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
   --json
 ```
 
-The merge helper re-reads the PR, exact head, CI, external verdict, unresolved
+The merge helper re-reads the PR, exact head, CI, authoritative verdict, unresolved
 threads, base state, linked issue state, and acceptance criteria immediately
 before merging. It then marks the linked issue Done.
 
@@ -680,35 +725,71 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --help
 
 ## 13. Review and merge behavior
 
-### Stable reviewer assignment
+### Ordered assignment and fallback
 
-The service is chosen once from the issue number:
+The state machine is deterministic:
 
-```text
-[coderabbit, sourcery, codeant][issue_number mod 3]
+| Current observation | Age | Transition |
+| --- | ---: | --- |
+| First registered available external in CodeRabbit, Sourcery, CodeAnt order | any | Assign that external |
+| Assigned external is available or has completed review | any | Retain external |
+| Assigned external is pending | `< 15m` | Retain external; no fallback |
+| Assigned external is pending | `>= 15m` | Probe and assign a distinct coding agent |
+| Assigned external explicitly reports unavailable/error | any | Probe and assign a distinct coding agent immediately |
+| No distinct coding agent answers exactly `OK` | any | Keep authority unchanged and fail closed |
+| Assigned coding reviewer explicitly aborts or becomes unavailable | any | Audit and recover to first registered external authority |
+
+Cost or quota exhaustion, rate limiting, provider outage, unsupported
+bot-authored PRs, and explicit unavailable/error responses are unavailable.
+Coding probes run in Claude Code, OpenAI Codex, xAI Cursor, Google Antigravity
+order after moving the author's model family behind other families. Claude
+always executes all three required `claude-sub` probes and rotates across the
+successful subscriptions deterministically. An identity is eligible only when
+its `reviewer-binding:<identity>=<github-login>` exists and the bound actor is
+not the PR author.
+
+The helper replaces the authority label as one labels update and then verifies
+that exactly one supported `review:*` label remains. A fallback PR comment
+records the old authority, reason, observation time, exact head, reviewer family,
+and reviewer identity. Do not edit authority labels by hand.
+
+For an assigned coding reviewer that explicitly aborts or returns unavailable:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+  --refresh-reviewer 123 \
+  --coding-reviewer-unavailable "full review aborted without a verdict" \
+  --json
 ```
 
-| Issue number | Remainder | Assigned label |
-| ---: | ---: | --- |
-| 42 | 0 | `review:coderabbit` |
-| 43 | 1 | `review:sourcery` |
-| 44 | 2 | `review:codeant` |
+The helper writes the attempted recovery audit first, revalidates the live head
+and authority, restores the first registered external authority, removes coding
+identity/actor metadata, and verifies the result. Without a substantive reason
+or registered external authority, it fails closed.
 
-There is no capacity inventory, retry rotation, coding-agent review, or
-self-review in the minimal kernel.
+### Coding-agent attestation
 
-### Manual reviewer replacement
+A coding agent may implement and remediate code. It may also authoritatively
+review code written by another agent, but not its own PR under normal
+conditions. Authority requires a formal GitHub Review from an actor distinct
+from the PR author and a single strict `aru-coding-review:v1` JSON marker. The
+payload must:
 
-After a concrete service failure, an operator may replace the single review
-label with another supported service. The PR comment should record:
+- match the one `review:<coding-family>`, `reviewer:<identity>`, and
+  `reviewer-actor:<github-login>` assignment;
+- bind the full 40-character current-head SHA and the linked issue numbers;
+- confirm the issue, acceptance criteria, exact diff, and relevant surrounding
+  code were read;
+- give a substantive `APPROVE` or `REQUEST_CHANGES` verdict;
+- list independently run focused verification;
+- record each finding with severity, repository-relative file, line, summary,
+  and resolution state.
 
-- the failed service;
-- evidence of the failure;
-- the old and new labels;
-- the operator;
-- the timestamp and reason.
-
-Never leave two `review:*` labels on the PR.
+An `APPROVE` Review passes only when every included finding is resolved. A
+`REQUEST_CHANGES` Review, any unresolved finding or thread, generic prose,
+self-report, wrong producer, wrong assignment, stale/abbreviated SHA, duplicate
+current-head attestation, or malformed/conflicting evidence blocks. Each push
+changes the exact head and makes all prior attestations historical immediately.
 
 ### Why `--expected-head` matters
 
@@ -787,7 +868,10 @@ Use it for history and recovery evidence, not as a second active kernel.
 | PR creation says exact head is unpublished | Local `HEAD` differs from the remote branch | Push the current issue branch, then retry |
 | CI was green before the latest push | Evidence belongs to an older SHA | Wait for current-head CI |
 | Merge reports zero or multiple reviewers | Review-label authority is ambiguous | Leave exactly one supported review label |
-| External reviewer is unavailable | Assigned integration failed or is not installed | Record evidence and have an operator replace the label once |
+| External reviewer is unavailable | Cost, quota, rate, outage, unsupported PR, or explicit error evidence exists | Run `create_pr.py --refresh-reviewer <PR>` immediately |
+| External reviewer is still pending | It has not produced a verdict | Wait until 15 minutes; then run the reviewer refresh |
+| Coding fallback has no capacity | Every distinct smoke test failed | Keep the existing authority and stop; do not fabricate a reviewer |
+| Coding review is rejected | Identity, actor, payload, head, verdict, or findings are invalid | Obtain one fresh formal attestation from the assigned non-author reviewer |
 | Review thread inventory is truncated | GitHub did not return complete evidence | Stop and retry when complete data is available |
 | Merge expected-head mismatch | PR changed after the SHA was captured | Re-read, re-test, re-review, and use the new SHA |
 | Cleanup retains a worktree | It is dirty, open, unregistered, or ambiguous | Inspect it; never force-delete unknown work |
@@ -801,7 +885,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 - issue-contract validation;
 - exclusive claims and path boundaries;
 - worktree isolation;
-- exact-head CI and external-review gates;
+- exact-head CI and one external-or-coding authoritative review gate;
 - mechanical merge and safe worktree cleanup;
 - governed revert creation.
 
@@ -811,7 +895,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 - architecture and coding standards;
 - real build, test, lint, security, and migration checks;
 - branch rulesets and repository permissions;
-- reviewer-service installation;
+- reviewer-service and coding-agent provider installation;
 - secrets and external accounts;
 - releases, deployment, observability, incidents, and rollback;
 - money, PII, production, and irreversible-operation authorization.
@@ -824,7 +908,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 - Slack bridge or notification runtime;
 - dashboard or visualizer application;
 - release, deploy, preview, smoke, or incident subsystem;
-- coding-agent reviewer fleet;
+- background coding-agent reviewer fleet or capacity ledger;
 - second lifecycle database.
 
 New kernel components require evidence from three governed consumer
@@ -852,14 +936,21 @@ true.
 - [ ] Governed issues are automatically or explicitly added to the Project.
 - [ ] Required lifecycle, type, priority, and reviewer labels exist; the helpers
       can create issue-specific agent and author labels.
+- [ ] Each installed external provider has exactly one corresponding
+      `reviewer-registered:<service>` label; uninstalled providers do not.
+- [ ] Each coding fallback identity has one
+      `reviewer-binding:<identity>=<github-login>` and the actor is not an
+      implementation author account.
 - [ ] GitHub CLI authentication can read and update Issues, PRs, and Projects.
 
 ### Verification and review
 
 - [ ] Consumer-specific CI runs the real focused checks.
 - [ ] CI results are attached to the exact PR head.
-- [ ] At least one supported external reviewer is installed and tested.
-- [ ] Operators know the one-time manual reviewer replacement procedure.
+- [ ] At least one external reviewer is registered or one distinct coding-agent
+      capacity probe succeeds.
+- [ ] Operators know the immediate-unavailability and exact 15-minute reviewer
+      refresh procedure.
 - [ ] Server-side branch rules complement the local hook.
 
 ### Pilot
@@ -867,7 +958,7 @@ true.
 - [ ] One low-risk issue moved from Backlog to Ready.
 - [ ] One agent claimed it and created an isolated worktree.
 - [ ] The path hook rejected a deliberate out-of-budget test change.
-- [ ] The PR received `Closes #N` and exactly one reviewer label.
+- [ ] The PR received `Closes #N` and exactly one authoritative reviewer label.
 - [ ] Current-head CI and review completed.
 - [ ] `merge_pr.py --dry-run` passed before the real merge.
 - [ ] The issue reached Done and cleanup retained nothing unsafe.

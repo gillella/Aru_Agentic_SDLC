@@ -8,8 +8,8 @@ merged pull request.
 ## Lifecycle
 
 Requirement -> issue contract -> Ready -> claim -> isolated worktree -> focused
-implementation -> PR -> exact-head CI and one external review -> mechanical
-merge -> Done and cleanup.
+implementation -> PR -> exact-head CI and one authoritative review ->
+mechanical merge -> Done and cleanup.
 
 ## Authority map
 
@@ -19,7 +19,7 @@ merge -> Done and cleanup.
 | who may write | exclusive claim plus `touches:` |
 | where work occurs | isolated Git worktree |
 | code is verified | exact-current-head CI |
-| code is reviewed | one `review:<service>` authority |
+| code is reviewed | one `review:<authority>` for the exact current head |
 | code may merge | `scripts/merge_pr.py` |
 | code may deploy | consumer repository |
 | who schedules work | Hermes or a human, outside this repository |
@@ -35,8 +35,43 @@ merge -> Done and cleanup.
 ## Non-goals
 
 No scheduler, daemon, private queue, presence registry, worker handoff,
-telemetry, provider-capacity routing, notification bridge, dashboard, preview,
-deployment, release, smoke, incident, or second state store.
+telemetry, persistent capacity registry, notification bridge, dashboard,
+preview, deployment, release, smoke, incident, or second state store.
+
+## Reviewer state machine
+
+External authorities are tried in CodeRabbit, Sourcery, CodeAnt order. Only an
+installed provider explicitly registered by `reviewer-registered:<service>` is
+a candidate; bootstrap authority labels do not register providers. The first
+registered available service receives the only `review:*` label. Explicit
+unavailability falls back immediately; pending external work retains authority
+for less than 15 minutes and falls back at 15 minutes. Unavailability includes
+cost or quota exhaustion, rate limiting, provider outage, unsupported
+bot-authored PRs, and explicit unavailable/error responses.
+Availability uses the newest trusted, timestamped provider evidence. The
+current authority's latest GitHub label-assignment event starts the clock, and
+each governed authority transition receives a fresh 15-minute pending window.
+
+Fallback probes actual capacity in Claude Code, OpenAI Codex, xAI Cursor,
+Google Antigravity order. Every candidate must have one explicit
+`reviewer-binding:<identity>=<github-login>` whose authenticated actor differs
+from the PR author. All three Claude subscriptions are tested. The author
+identity is excluded and another model family is preferred. No successful,
+bound, distinct probe leaves the prior authority unchanged and blocks progress.
+An explicitly unavailable or aborted assigned coding reviewer may recover to
+the first registered external authority only through the audited refresh
+command; hand-editing authority labels is not a state transition.
+
+A coding agent may author or remediate code and may review a different agent's
+code. It may not authoritatively review its own PR under normal conditions. Its
+formal GitHub Review must use the assigned reviewer identity, originate from a
+GitHub actor distinct from the PR author, contain a substantive verdict and
+focused verification, confirm the issue/acceptance criteria and exact diff plus
+surrounding code were read, record severity and `file:line` for findings, and
+bind the full current-head SHA. A push invalidates prior authority immediately.
+Malformed, missing, duplicate, conflicting, spoofed, or stale evidence,
+`REQUEST_CHANGES`, unresolved findings or threads, or multiple authorities
+blocks `merge_pr.py`.
 
 ## Admission rule
 

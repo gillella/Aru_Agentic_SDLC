@@ -7,11 +7,18 @@ import argparse
 import json
 import re
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any
 
 from check_ci import ci_verdict, check_name, check_state
 from common import (
+    AUTHOR_FAMILY_PREFIX,
+    AUTHOR_PREFIX,
+    CODING_REVIEWERS,
     REVIEW_PREFIX,
+    REVIEWER_ACTOR_PREFIX,
+    REVIEWER_PREFIX,
+    REVIEW_AUTHORITIES,
     REVIEW_SERVICES,
     KernelError,
     acceptance_items,
@@ -42,6 +49,29 @@ CODEANT_STATUS_LABELS = {
     CODEANT_FULL_REVIEW_LABEL,
     "Incremental review completed",
 }
+CODING_REVIEW_MARKER_RE = re.compile(
+    r"<!--\s*aru-coding-review:v1\s+(.*?)-->", re.DOTALL
+)
+CODING_REVIEW_MARKER_PREFIX_RE = re.compile(
+    r"<!--\s*aru-coding-review:", re.IGNORECASE
+)
+CODING_REVIEW_KEYS = {
+    "head",
+    "reviewer",
+    "family",
+    "submitted_by",
+    "verdict",
+    "summary",
+    "verification",
+    "findings",
+    "issues",
+    "acceptance_criteria_reviewed",
+    "diff_reviewed",
+    "surrounding_code_reviewed",
+}
+CODING_FINDING_KEYS = {"severity", "file", "line", "summary", "resolved"}
+CODING_FINDING_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+GENERIC_APPROVALS = {"approve", "approved", "looks good", "lgtm", "no issues"}
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -92,10 +122,20 @@ def linked_issues(body: str) -> list[int]:
 def assigned_service(pr: dict[str, Any]) -> str:
     labels = [name for name in label_names(pr) if name.startswith(REVIEW_PREFIX)]
     if len(labels) != 1:
-        raise KernelError("PR must have exactly one review:<service> label")
+        raise KernelError("PR must have exactly one review:<authority> label")
     service = labels[0][len(REVIEW_PREFIX) :]
-    if service not in REVIEW_SERVICES:
-        raise KernelError(f"unsupported review service: {service}")
+    if service not in REVIEW_AUTHORITIES:
+        raise KernelError(f"unsupported review authority: {service}")
+    reviewer_labels = [
+        name for name in label_names(pr) if name.startswith(REVIEWER_PREFIX)
+    ]
+    actor_labels = [
+        name for name in label_names(pr) if name.startswith(REVIEWER_ACTOR_PREFIX)
+    ]
+    if service in CODING_REVIEWERS and (len(reviewer_labels) != 1 or len(actor_labels) != 1):
+        raise KernelError("coding review authority requires one reviewer identity and actor")
+    if service in REVIEW_SERVICES and (reviewer_labels or actor_labels):
+        raise KernelError("external review authority conflicts with coding reviewer metadata")
     return service
 
 
@@ -266,18 +306,199 @@ def successful_codeant_status_review(
     return validate_codeant_status_comments(comments, head)
 
 
-def exact_head_review(pr: dict[str, Any], number: int, service: str) -> bool:
-    head = str(pr["headRefOid"])
-    if service == "codeant":
-        reviews = pull_reviews(number)
-        if _trusted_changes_requested_at_head(reviews, head, service):
+def _one_identity_label(pr: dict[str, Any], prefix: str) -> str | None:
+    values = [name[len(prefix) :] for name in label_names(pr) if name.startswith(prefix)]
+    return values[0] if len(values) == 1 else None
+
+
+def _valid_finding(finding: Any) -> bool:
+    if not isinstance(finding, dict) or set(finding) != CODING_FINDING_KEYS:
+        return False
+    path = finding.get("file")
+    if not isinstance(path, str) or not path or path.startswith("/"):
+        return False
+    if ".." in PurePosixPath(path).parts:
+        return False
+    line = finding.get("line")
+    summary = finding.get("summary")
+    return (
+        finding.get("severity") in CODING_FINDING_SEVERITIES
+        and isinstance(line, int)
+        and not isinstance(line, bool)
+        and line > 0
+        and isinstance(summary, str)
+        and len(summary.strip()) >= 10
+        and isinstance(finding.get("resolved"), bool)
+    )
+
+
+def _valid_coding_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict) or set(payload) != CODING_REVIEW_KEYS:
+        return False
+    head = payload.get("head")
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head):
+        return False
+    for key in ("reviewer", "family", "submitted_by"):
+        if not isinstance(payload.get(key), str) or not payload[key].strip():
             return False
+    verdict = payload.get("verdict")
+    if verdict not in {"APPROVE", "REQUEST_CHANGES"}:
+        return False
+    summary = payload.get("summary")
+    if not isinstance(summary, str) or len(summary.strip()) < 40:
+        return False
+    if re.sub(r"\s+", " ", summary.strip().lower()) in GENERIC_APPROVALS:
+        return False
+    verification = payload.get("verification")
+    if (
+        not isinstance(verification, list)
+        or not verification
+        or any(not isinstance(item, str) or len(item.strip()) < 10 for item in verification)
+    ):
+        return False
+    findings = payload.get("findings")
+    if not isinstance(findings, list) or any(not _valid_finding(item) for item in findings):
+        return False
+    issues = payload.get("issues")
+    if (
+        not isinstance(issues, list)
+        or not issues
+        or any(not isinstance(item, int) or isinstance(item, bool) or item <= 0 for item in issues)
+        or issues != sorted(set(issues))
+    ):
+        return False
+    return all(
+        payload.get(key) is True
+        for key in (
+            "acceptance_criteria_reviewed",
+            "diff_reviewed",
+            "surrounding_code_reviewed",
+        )
+    )
+
+
+def parse_coding_review(review: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+    body = review.get("body")
+    if body is None:
+        return True, None
+    if not isinstance(body, str):
+        return False, None
+    if not CODING_REVIEW_MARKER_PREFIX_RE.search(body):
+        return True, None
+    matches = CODING_REVIEW_MARKER_RE.findall(body)
+    if len(matches) != 1:
+        return False, None
+    try:
+        payload = json.loads(matches[0].strip())
+    except (json.JSONDecodeError, ValueError):
+        return False, None
+    if not _valid_coding_payload(payload):
+        return False, None
+    return True, payload
+
+
+def _current_coding_attestation(
+    reviews: list[dict[str, Any]], head: str, reviewer_actor: str
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    current: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for review in reviews:
+        if not isinstance(review, dict):
+            raise KernelError("review evidence is malformed")
+        actor = review.get("user") or review.get("author") or {}
+        if str(actor.get("login") or "").lower() != reviewer_actor.lower():
+            continue
+        valid, payload = parse_coding_review(review)
+        if not valid:
+            return None
+        if payload is not None and payload["head"].lower() == head.lower():
+            current.append((review, payload))
+    return current[0] if len(current) == 1 else None
+
+
+def _coding_assignment(pr: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
+    reviewer = _one_identity_label(pr, REVIEWER_PREFIX)
+    reviewer_actor = _one_identity_label(pr, REVIEWER_ACTOR_PREFIX)
+    author = _one_identity_label(pr, AUTHOR_PREFIX)
+    family = _one_identity_label(pr, AUTHOR_FAMILY_PREFIX)
+    github_author = str((pr.get("author") or {}).get("login") or "").lower()
+    if not all((reviewer, reviewer_actor, author, family, github_author)) or reviewer == author:
+        return None
+    return reviewer, reviewer_actor, author, family, github_author
+
+
+def _review_submission_matches(
+    review: dict[str, Any], payload: dict[str, Any], head: str, github_author: str
+) -> bool:
+    actor = review.get("user") or review.get("author")
+    if not isinstance(actor, dict):
+        return False
+    actor_login = str(actor.get("login") or "").lower()
+    commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
+    return bool(
+        actor_login
+        and actor_login != github_author
+        and commit_id == head
+        and payload["submitted_by"].lower() == actor_login
+    )
+
+
+def successful_coding_agent_review(
+    pr: dict[str, Any],
+    reviews: list[dict[str, Any]],
+    authority: str,
+    issue_numbers: list[int],
+) -> bool:
+    head = str(pr.get("headRefOid") or "")
+    assignment = _coding_assignment(pr)
+    if assignment is None:
+        return False
+    reviewer_identity, reviewer_actor, author_identity, _author_family, github_author = assignment
+    current = _current_coding_attestation(reviews, head, reviewer_actor)
+    if current is None:
+        return False
+    review, payload = current
+    if not _review_submission_matches(review, payload, head, github_author):
+        return False
+    actor = review.get("user") or review.get("author") or {}
+    if str(actor.get("login") or "").lower() != reviewer_actor.lower():
+        return False
+    if payload["reviewer"] != reviewer_identity or payload["family"] != authority:
+        return False
+    if payload["reviewer"] == author_identity or payload["issues"] != issue_numbers:
+        return False
+    state = str(review.get("state") or "").upper()
+    expected_state = "APPROVED" if payload["verdict"] == "APPROVE" else "CHANGES_REQUESTED"
+    if state != expected_state or payload["verdict"] != "APPROVE":
+        return False
+    if any(not finding["resolved"] for finding in payload["findings"]):
+        return False
+    return True
+
+
+def exact_head_review(
+    pr: dict[str, Any],
+    number: int,
+    service: str,
+    issue_numbers: list[int] | None = None,
+) -> bool:
+    head = str(pr["headRefOid"])
+    if service in CODING_REVIEWERS:
+        return successful_coding_agent_review(
+            pr,
+            pull_reviews(number),
+            service,
+            issue_numbers or linked_issues(str(pr.get("body") or "")),
+        )
+    reviews = pull_reviews(number)
+    if _trusted_changes_requested_at_head(reviews, head, service):
+        return False
+    if service == "codeant":
         if successful_service_check(pr, service) or _successful_service_review(
             reviews, head, service
         ):
             return True
         return successful_codeant_status_review(number, head, reviews)
-    if successful_service_check(pr, service) or successful_service_review(number, head, service):
+    if successful_service_check(pr, service) or _successful_service_review(reviews, head, service):
         return True
     return False
 
@@ -329,7 +550,7 @@ def evaluate(number: int, expected_head: str) -> dict[str, object]:
     if feedback:
         raise KernelError(f"{len(feedback)} unresolved review thread(s)")
     service = assigned_service(pr)
-    if not exact_head_review(pr, number, service):
+    if not exact_head_review(pr, number, service, issues):
         raise KernelError(f"{service} has no successful exact-head verdict")
     base_sha, behind = base_snapshot(pr)
     if behind:

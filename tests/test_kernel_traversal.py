@@ -64,7 +64,7 @@ def traverse(monkeypatch, number: int) -> dict:
     monkeypatch.setattr(create_pr, "require_published_head", lambda _branch: "a" * 40)
     monkeypatch.setattr(create_pr, "ensure_label", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(create_pr, "run", lambda _argv: None)
-    reviewer = create_pr.reviewer_for_issue(number)
+    reviewer = "coderabbit"
 
     def pr_snapshot(_argv):
         return {
@@ -76,7 +76,17 @@ def traverse(monkeypatch, number: int) -> dict:
 
     monkeypatch.setattr(create_pr, "gh_json", pr_snapshot)
     monkeypatch.setattr(create_pr, "set_status", move_status)
-    created = create_pr.create(number, "feat: tiny", "Summary", "codex-1")
+    created = create_pr.create(
+        number,
+        "feat: tiny",
+        "Summary",
+        "codex-1",
+        external_states={
+            "coderabbit": create_pr.AVAILABLE,
+            "sourcery": create_pr.UNAVAILABLE,
+            "codeant": create_pr.UNAVAILABLE,
+        },
+    )
     assert created["reviewer"] == reviewer
 
     state["issue"]["body"] = state["issue"]["body"].replace("- [ ]", "- [x]")
