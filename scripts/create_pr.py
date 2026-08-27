@@ -300,14 +300,8 @@ def _parse_time(value: str, *, subject: str = "review assignment") -> datetime:
 
 def _evidence_time(record: dict[str, Any], *, subject: str) -> datetime:
     keys = (
-        "submitted_at",
-        "submittedAt",
-        "completedAt",
-        "startedAt",
-        "updated_at",
-        "updatedAt",
-        "created_at",
-        "createdAt",
+        "submitted_at", "submittedAt", "completedAt", "startedAt",
+        "updated_at", "updatedAt", "created_at", "createdAt",
     )
     for key in keys:
         value = record.get(key)
@@ -316,9 +310,7 @@ def _evidence_time(record: dict[str, Any], *, subject: str) -> datetime:
     raise KernelError(f"{subject} timestamp is missing")
 
 
-def _latest_state(
-    evidence: list[tuple[datetime, str]], *, subject: str
-) -> str | None:
+def _latest_state(evidence: list[tuple[datetime, str]], *, subject: str) -> str | None:
     if not evidence:
         return None
     latest_at = max(observed_at for observed_at, _state in evidence)
@@ -328,9 +320,7 @@ def _latest_state(
     return states.pop()
 
 
-def _external_evidence(
-    records: list[dict[str, Any]], service: str
-) -> list[tuple[datetime, str]]:
+def _external_evidence(records: list[dict[str, Any]], service: str) -> list[tuple[datetime, str]]:
     evidence: list[tuple[datetime, str]] = []
     for record in records:
         if not isinstance(record, dict):
@@ -338,18 +328,14 @@ def _external_evidence(
         if not _trusted_external_actor(record, service):
             continue
         if str(record.get("state") or "").upper() in {
-            "APPROVED",
-            "CHANGES_REQUESTED",
-            "COMMENTED",
+            "APPROVED", "CHANGES_REQUESTED", "COMMENTED"
         }:
             state = AVAILABLE
         elif UNAVAILABLE_RE.search(str(record.get("body") or "")):
             state = UNAVAILABLE
         else:
             continue
-        evidence.append(
-            (_evidence_time(record, subject="external reviewer evidence"), state)
-        )
+        evidence.append((_evidence_time(record, subject="external reviewer evidence"), state))
     return evidence
 
 
@@ -365,11 +351,7 @@ def external_state(
     checks = pr.get("statusCheckRollup")
     if not isinstance(checks, list):
         raise KernelError("external review check state is incomplete")
-    matching = [
-        item
-        for item in checks
-        if isinstance(item, dict) and _check_service(item, service)
-    ]
+    matching = [item for item in checks if isinstance(item, dict) and _check_service(item, service)]
     if len(matching) > 1:
         raise KernelError("external reviewer returned ambiguous checks")
     if matching:
@@ -378,13 +360,7 @@ def external_state(
         status = str(check.get("status") or "").upper()
         if state == "SUCCESS":
             check_state = AVAILABLE
-        elif state in {
-            "ERROR",
-            "CANCELLED",
-            "TIMED_OUT",
-            "ACTION_REQUIRED",
-            "SKIPPED",
-        }:
+        elif state in {"ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "SKIPPED"}:
             check_state = UNAVAILABLE
         elif state in {"FAILURE", "NEUTRAL"}:
             check_state = AVAILABLE
@@ -393,9 +369,7 @@ def external_state(
         else:
             check_state = None
         if check_state:
-            evidence.append(
-                (_evidence_time(check, subject="external reviewer check"), check_state)
-            )
+            evidence.append((_evidence_time(check, subject="external reviewer check"), check_state))
     return _latest_state(evidence, subject="external reviewer") or PENDING
 
 
@@ -414,13 +388,27 @@ def _authority_assigned_at(
         if not isinstance(label, dict):
             raise KernelError("review assignment evidence is malformed")
         if label.get("name") == expected_label:
-            assignments.append(
-                _evidence_time(
-                    event,
-                    subject="review assignment",
-                )
-            )
+            assignments.append(_evidence_time(event, subject="review assignment"))
     return max(assignments, default=created_at)
+
+
+def _external_decision(
+    number: int, pr: dict[str, Any], authority: str, observed_at: datetime
+) -> tuple[str, int | None]:
+    slug = repo_slug()
+    reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
+    comments = gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
+    events = gh_paginated(f"repos/{slug}/issues/{number}/events?per_page=100")
+    state = external_state(pr, authority, reviews=reviews, comments=comments)
+    age = (observed_at - _authority_assigned_at(pr, events, authority)).total_seconds()
+    if age < 0:
+        raise KernelError("review observation predates assignment")
+    if state == AVAILABLE:
+        return "external-available", None
+    if state == PENDING and age < EXTERNAL_TIMEOUT_SECONDS:
+        return "external-pending", EXTERNAL_TIMEOUT_SECONDS - int(age)
+    reason = "external-unavailable" if state == UNAVAILABLE else "external-pending-15m"
+    return reason, None
 
 
 def _one_authority(pr: dict[str, Any]) -> str:
@@ -453,24 +441,29 @@ def _one_label_value(pr: dict[str, Any], prefix: str) -> str:
     return values[0]
 
 
+def _same_assignment(reference: dict[str, Any], live: dict[str, Any]) -> bool:
+    return bool(
+        isinstance(live, dict)
+        and live.get("headRefOid") == reference.get("headRefOid")
+        and _one_authority(live) == _one_authority(reference)
+        and _one_label_value(live, AUTHOR_PREFIX)
+        == _one_label_value(reference, AUTHOR_PREFIX)
+        and _one_label_value(live, AUTHOR_FAMILY_PREFIX)
+        == _one_label_value(reference, AUTHOR_FAMILY_PREFIX)
+    )
+
+
 def replace_authority(
     number: int,
     pr: dict[str, Any],
     authority: str,
     reviewer_identity: str | None,
     reviewer_actor: str | None,
+    before_write: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
-    live = gh_json(
-        ["pr", "view", str(number), "--json", "number,headRefOid,labels"]
-    )
-    if (
-        not isinstance(live, dict)
-        or live.get("headRefOid") != pr.get("headRefOid")
-        or _one_authority(live) != _one_authority(pr)
-        or _one_label_value(live, AUTHOR_PREFIX) != _one_label_value(pr, AUTHOR_PREFIX)
-        or _one_label_value(live, AUTHOR_FAMILY_PREFIX)
-        != _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
-    ):
+    fields = "number,createdAt,headRefOid,labels,author,statusCheckRollup"
+    live = gh_json(["pr", "view", str(number), "--json", fields])
+    if not _same_assignment(pr, live):
         raise KernelError("review authority changed during fallback selection")
     if authority in CODING_REVIEWERS and not all((reviewer_identity, reviewer_actor)):
         raise KernelError("coding authority replacement requires identity and actor")
@@ -499,17 +492,21 @@ def replace_authority(
             description=f"Trusted review actor: {reviewer_actor}",
         )
         assignment_labels.extend([reviewer_label, actor_label])
-    retained = [
+    live = gh_json(["pr", "view", str(number), "--json", fields])
+    if not _same_assignment(pr, live):
+        raise KernelError("review authority changed during fallback selection")
+    if before_write:
+        before_write(live)
+    controlled = [
         name
         for name in label_names(live)
-        if not name.startswith(REVIEW_PREFIX)
-        and not name.startswith(REVIEWER_PREFIX)
-        and not name.startswith(REVIEWER_ACTOR_PREFIX)
+        if name.startswith((REVIEW_PREFIX, REVIEWER_PREFIX, REVIEWER_ACTOR_PREFIX))
     ]
-    arguments = ["api", "--method", "PUT", f"repos/{repo_slug()}/issues/{number}/labels"]
-    for name in [*retained, *assignment_labels]:
-        arguments.extend(["-f", f"labels[]={name}"])
-    gh_json(arguments)
+    arguments = ["gh", "pr", "edit", str(number), "--add-label", ",".join(assignment_labels)]
+    removed = [name for name in controlled if name not in assignment_labels]
+    if removed:
+        arguments.extend(["--remove-label", ",".join(removed)])
+    run(arguments)
 
 
 def recover_coding_authority(
@@ -588,26 +585,13 @@ def refresh_assignment(
             now or datetime.now(timezone.utc),
         )
 
-    slug = repo_slug()
-    reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
-    comments = gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
-    events = gh_paginated(f"repos/{slug}/issues/{number}/events?per_page=100")
-    state = external_state(pr, authority, reviews=reviews, comments=comments)
     observed_at = now or datetime.now(timezone.utc)
-    assigned_at = _authority_assigned_at(pr, events, authority)
-    age_seconds = (observed_at - assigned_at).total_seconds()
-    if age_seconds < 0:
-        raise KernelError("review observation predates assignment")
-    if state == AVAILABLE:
-        return {"pr": number, "authority": authority, "action": "retained", "reason": "external-available"}
-    if state == PENDING and age_seconds < EXTERNAL_TIMEOUT_SECONDS:
-        return {
-            "pr": number,
-            "authority": authority,
-            "action": "retained",
-            "reason": "external-pending",
-            "remaining_seconds": EXTERNAL_TIMEOUT_SECONDS - int(age_seconds),
-        }
+    reason, remaining = _external_decision(number, pr, authority, observed_at)
+    if reason in {"external-available", "external-pending"}:
+        result = {"pr": number, "authority": authority, "action": "retained", "reason": reason}
+        if remaining is not None:
+            result["remaining_seconds"] = remaining
+        return result
 
     author_identity = _one_label_value(pr, AUTHOR_PREFIX)
     author_family = _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
@@ -621,7 +605,6 @@ def refresh_assignment(
     if coding is None:
         raise KernelError("no distinct coding-agent reviewer has available capacity")
     coding_family, reviewer_identity, reviewer_actor = coding
-    reason = "external-unavailable" if state == UNAVAILABLE else "external-pending-15m"
     status = {
         "head": pr.get("headRefOid"),
         "observed_at": observed_at.isoformat(),
@@ -641,7 +624,22 @@ def refresh_assignment(
         f"<!-- aru-review-assignment:v1 {json.dumps(status, sort_keys=True)} -->"
     )
     run(["gh", "pr", "comment", str(number), "--body", body])
-    replace_authority(number, pr, coding_family, reviewer_identity, reviewer_actor)
+
+    def confirm_external_fallback(live: dict[str, Any]) -> None:
+        confirmed, _remaining = _external_decision(
+            number, live, authority, now or datetime.now(timezone.utc)
+        )
+        if confirmed not in {"external-unavailable", "external-pending-15m"}:
+            raise KernelError(f"external reviewer recovered before fallback: {confirmed}")
+
+    replace_authority(
+        number,
+        pr,
+        coding_family,
+        reviewer_identity,
+        reviewer_actor,
+        confirm_external_fallback,
+    )
     updated = gh_json(["pr", "view", str(number), "--json", "number,labels"])
     if _one_authority(updated) != coding_family:
         raise KernelError("review authority replacement was not confirmed")

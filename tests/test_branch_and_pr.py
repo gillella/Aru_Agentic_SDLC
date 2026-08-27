@@ -215,6 +215,56 @@ def test_reviewer_replacement_rejects_changed_live_authority(monkeypatch):
         )
 
 
+def test_reviewer_replacement_preserves_concurrent_unrelated_labels(monkeypatch):
+    created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    original = assignment_pr(created_at=created)
+    concurrent = assignment_pr(created_at=created)
+    concurrent["labels"].append({"name": "acceptance:passed"})
+    responses = iter([original, concurrent])
+    monkeypatch.setattr(create_pr, "gh_json", lambda _argv: next(responses))
+    monkeypatch.setattr(create_pr, "ensure_label", lambda *_args, **_kwargs: None)
+    commands = []
+    monkeypatch.setattr(create_pr, "run", lambda argv: commands.append(argv))
+
+    create_pr.replace_authority(
+        42,
+        original,
+        "claude-code",
+        "claude-code-sub-1",
+        "claude-reviewer",
+    )
+
+    command = commands[-1]
+    assert command[:4] == ["gh", "pr", "edit", "42"]
+    assert "acceptance:passed" not in command
+    assert command[command.index("--remove-label") + 1] == "review:coderabbit"
+
+
+def test_external_recovery_before_write_aborts_fallback(monkeypatch):
+    created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    initial = assignment_pr(created_at=created, state="unavailable")
+    recovered = assignment_pr(created_at=created, state="available")
+    monkeypatch.setattr(create_pr, "gh_json", lambda _argv: initial)
+    monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(create_pr, "gh_paginated", lambda _endpoint: [])
+    monkeypatch.setattr(
+        create_pr,
+        "probe_coding_reviewer",
+        lambda **_kwargs: ("claude-code", "claude-code-sub-1", "claude-reviewer"),
+    )
+    events = []
+    monkeypatch.setattr(create_pr, "run", lambda _argv: events.append("audit"))
+
+    def replacement(*args):
+        events.append("revalidated")
+        args[-1](recovered)
+
+    monkeypatch.setattr(create_pr, "replace_authority", replacement)
+    with pytest.raises(create_pr.KernelError, match="external reviewer recovered"):
+        create_pr.refresh_assignment(42, now=created + timedelta(seconds=1))
+    assert events == ["audit", "revalidated"]
+
+
 def test_explicit_external_error_falls_back_immediately(monkeypatch):
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=created, state="unavailable")
