@@ -11,6 +11,7 @@ description: Diagnose and fix a failing current-head CI check on an authored PR.
 4. Apply the smallest fix inside the existing claimed worktree and
    `touches:` budget.
 5. Run focused local verification, commit, and push.
-6. Re-read the new head and wait for fresh CI and fresh external review.
+6. Re-read the new head and wait for fresh CI and a fresh exact-head verdict
+   from the one assigned external or distinct coding-agent reviewer.
 
 Never treat a stale successful run as current-head evidence.

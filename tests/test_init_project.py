@@ -18,6 +18,18 @@ def test_bootstrap_provisions_priority_labels():
     }
 
 
+def test_bootstrap_provisions_external_and_coding_review_authorities():
+    assert {
+        "review:coderabbit",
+        "review:sourcery",
+        "review:codeant",
+        "review:claude-code",
+        "review:openai-codex",
+        "review:xai-cursor",
+        "review:google-antigravity",
+    }.issubset(init_project.LABELS)
+
+
 def test_scaffold_creates_only_minimal_governance(tmp_path):
     target = tmp_path / "consumer"
     written = init_project.scaffold("consumer", target)

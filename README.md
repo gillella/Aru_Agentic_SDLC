@@ -13,7 +13,7 @@ software project:
 1. **What work is approved?** — the GitHub issue and Project Board.
 2. **What may this worker change?** — the exclusive claim and `touches:` paths.
 3. **Is this exact revision safe enough to merge?** — current-head CI and one
-   external reviewer.
+   authoritative reviewer distinct from the author.
 4. **Who may merge it?** — only `scripts/merge_pr.py` with the expected head.
 
 It is intentionally a governance layer, not an autonomous agent platform. It
@@ -32,7 +32,7 @@ flowchart LR
     PR --> CI{Exact-head CI green?}
     CI -->|No| FIX[Fix current head]
     FIX --> CI
-    CI -->|Yes| REV{Assigned external review complete?}
+    CI -->|Yes| REV{Assigned authoritative review complete?}
     REV -->|Findings| FIX
     REV -->|Clean| MERGE[merge_pr.py --expected-head]
     MERGE --> DONE[Done + safe cleanup]
@@ -47,7 +47,7 @@ The source of truth stays deliberately small:
 | Writer ownership | One `agent:<id>` claim |
 | Isolation | One Git worktree per issue |
 | Verification | CI result for the exact PR head |
-| Review | Exactly one `review:<service>` label |
+| Review | Exactly one `review:<authority>` label for the current head |
 | Merge | `scripts/merge_pr.py` |
 | Deployment and production | The consumer repository and its operators |
 
@@ -60,14 +60,15 @@ be migrated into an existing project when all of these are true:
 - The repository has exactly one linked, open GitHub Project with the five
   statuses `Backlog`, `Ready`, `In Progress`, `In Review`, and `Done`.
 - New governed issues are added to that Project Board.
-- The repository has CI and at least one supported external review service.
+- The repository has CI and at least one registered external reviewer or one
+  smoke-testable, distinct coding-agent reviewer.
 - Developers and agents can read the canonical Aru directory through
   `ARU_SDLC_HOME`.
 
 The bootstrap helper creates a minimal repository scaffold. It does **not**
-install CodeRabbit, Sourcery, or CodeAnt, publish an initial default branch, or
-merge conflicting files into an existing repository. Those are deliberate
-operator-owned setup steps.
+install CodeRabbit, Sourcery, CodeAnt, or coding-agent providers, publish an
+initial default branch, or merge conflicting files into an existing repository.
+Those are deliberate operator-owned setup steps.
 
 > **Important:** v0.2.x has no `aru code` loop, scheduler, or
 > `run-aru-factory` router. Use the six installed skills or the commands below.
@@ -149,7 +150,37 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
 
 Work only in the worktree reported by `create_branch.py`. After focused local
 verification, publish the branch and open the PR through `create_pr.py`. Merge
-only after exact-head CI and the assigned external review are complete.
+only after exact-head CI and the assigned authoritative review are complete.
+
+## Reviewer state machine
+
+Every PR current head has exactly one authority label. At creation,
+`create_pr.py` chooses the first registered available external service in this
+order: CodeRabbit, Sourcery, CodeAnt. An explicit unavailable/error response
+causes immediate fallback. A pending service retains authority for 14 minutes
+59 seconds; at 15 minutes it becomes eligible for immediate fallback through:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+  --refresh-reviewer <PR> --json
+```
+
+Fallback smoke-tests Claude Code, OpenAI Codex, xAI Cursor, then Google
+Antigravity; it excludes the author identity and prefers another model family.
+All three Claude subscriptions are probed. Cost or quota exhaustion, rate
+limiting, provider outage, unsupported bot-authored PRs, and explicit
+unavailable/error responses all count as unavailable. If no distinct coding
+agent has capacity, assignment does not change and the transition fails closed.
+
+A coding-agent review is authoritative only when a formal GitHub Review from a
+GitHub actor other than the PR author contains the strict `aru-coding-review:v1`
+attestation. It must name the assigned reviewer and family, list the linked
+issues, confirm acceptance-criteria/diff/surrounding-code inspection, record
+focused verification and substantive findings, declare `APPROVE` or
+`REQUEST_CHANGES`, and bind the full 40-character current-head SHA. A new push
+invalidates it immediately. Self-review, generic approval prose, unresolved
+findings or threads, `REQUEST_CHANGES`, and malformed, spoofed, missing,
+duplicate, or conflicting evidence block `merge_pr.py`.
 
 ## The seven-document map
 
