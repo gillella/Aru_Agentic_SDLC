@@ -305,6 +305,43 @@ def test_review_failure_is_not_misclassified_as_provider_unavailability():
     assert create_pr.external_state(pr, "coderabbit", reviews=[], comments=[]) == create_pr.AVAILABLE
 
 
+def test_external_refresh_degrades_safely_when_status_endpoint_fails(monkeypatch):
+    created = datetime.now(timezone.utc) - timedelta(minutes=1)
+    pr = assignment_pr(created_at=created, state="available")
+    comment = {
+        "user": {"login": "coderabbitai[bot]", "type": "Bot"},
+        "body": "Review rate limited",
+        "created_at": (created + timedelta(seconds=1)).isoformat(),
+    }
+    comments = [comment]
+    monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
+
+    def evidence(endpoint):
+        if endpoint.endswith("/reviews?per_page=100"):
+            return []
+        if endpoint.endswith("/comments?per_page=100"):
+            return comments
+        if endpoint.endswith("/events?per_page=100"):
+            return []
+        raise create_pr.KernelError("commit status endpoint unavailable")
+
+    monkeypatch.setattr(create_pr, "gh_paginated", evidence)
+    assert create_pr._external_decision(
+        42,
+        pr,
+        "coderabbit",
+        datetime.now(timezone.utc),
+    ) == ("external-unavailable", None)
+    comments.clear()
+    decision, _remaining = create_pr._external_decision(
+        42,
+        pr,
+        "coderabbit",
+        datetime.now(timezone.utc),
+    )
+    assert decision == "external-pending"
+
+
 def test_latest_external_evidence_wins_after_provider_recovery():
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=created)

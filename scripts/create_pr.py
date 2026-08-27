@@ -379,9 +379,14 @@ def _external_decision(
     reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
     comments = gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
     events = gh_paginated(f"repos/{slug}/issues/{number}/events?per_page=100")
-    statuses = gh_paginated(
-        f"repos/{slug}/commits/{pr['headRefOid']}/statuses?per_page=100"
-    )
+    statuses_complete = True
+    try:
+        statuses = gh_paginated(
+            f"repos/{slug}/commits/{pr['headRefOid']}/statuses?per_page=100"
+        )
+    except KernelError:
+        statuses = []
+        statuses_complete = False
     state = external_state(
         pr,
         authority,
@@ -389,6 +394,8 @@ def _external_decision(
         comments=comments,
         statuses=statuses,
     )
+    if not statuses_complete and state == AVAILABLE:
+        state = PENDING
     age = (observed_at - _authority_assigned_at(pr, events, authority)).total_seconds()
     if age < 0:
         raise KernelError("review observation predates assignment")
