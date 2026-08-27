@@ -16,21 +16,25 @@ def backlog_issue(*labels: str) -> dict:
     }
 
 
-def test_triage_accepts_exactly_one_priority():
+def test_triage_accepts_zero_or_one_supported_priority():
+    assert triage_backlog.evaluate(backlog_issue()) == []
     assert triage_backlog.evaluate(backlog_issue("priority:p2")) == []
 
 
 @pytest.mark.parametrize(
     ("labels", "diagnostic"),
     [
-        ((), "issue must have exactly one priority:p0..p3 label; found 0"),
         (
             ("priority:p0", "priority:p1"),
-            "issue must have exactly one priority:p0..p3 label; found 2",
+            "issue may have at most one supported priority:p0..p3 label",
+        ),
+        (
+            ("priority:urgent",),
+            "issue may have at most one supported priority:p0..p3 label",
         ),
     ],
 )
-def test_triage_rejects_non_unique_priority(labels, diagnostic):
+def test_triage_rejects_ambiguous_or_unsupported_priority(labels, diagnostic):
     assert triage_backlog.evaluate(backlog_issue(*labels)) == [diagnostic]
 
 

@@ -19,11 +19,14 @@ from common import (
 def evaluate(record: dict) -> list[str]:
     errors = contract_errors(record)
     priorities = {f"priority:p{value}" for value in range(4)}
-    priority_labels = [name for name in label_names(record) if name in priorities]
-    if len(priority_labels) != 1:
+    priority_labels = [
+        name for name in label_names(record) if name.startswith("priority:")
+    ]
+    if len(priority_labels) > 1 or any(
+        name not in priorities for name in priority_labels
+    ):
         errors.append(
-            "issue must have exactly one priority:p0..p3 label; "
-            f"found {len(priority_labels)}"
+            "issue may have at most one supported priority:p0..p3 label"
         )
     blocked = unresolved_dependencies(record)
     if blocked:
