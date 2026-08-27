@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
+from datetime import datetime
 from typing import Any
 
 from check_ci import ci_verdict, check_name, check_state
@@ -30,6 +32,32 @@ REVIEW_ACTORS = {
     "sourcery": {"sourcery-ai", "sourcery-ai[bot]", "sourcery"},
     "codeant": {"codeant-ai", "codeant-ai[bot]"},
 }
+CODEANT_STATUS_MARKER_RE = re.compile(
+    r"<!--\s*codeant-review-status:(.*?)-->", re.DOTALL
+)
+CODEANT_MARKER_PREFIX_RE = re.compile(r"<!--\s*codeant-review-status", re.IGNORECASE)
+CODEANT_STATUS_RECORD_KEYS = {"label", "commit", "started", "finished", "done"}
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _actor_is_trusted(actor: Any, service: str) -> bool:
+    if not isinstance(actor, dict):
+        return False
+    login = str(actor.get("login") or "").lower()
+    if login not in REVIEW_ACTORS[service]:
+        return False
+    actor_type = str(actor.get("type") or actor.get("__typename") or "")
+    if actor_type and actor_type != "Bot":
+        return False
+    return True
 
 
 def pull_request(number: int) -> dict[str, Any]:
@@ -94,28 +122,124 @@ def successful_service_check(pr: dict[str, Any], service: str) -> bool:
     return len(matches) == 1 and check_state(matches[0]) == "success"
 
 
-def successful_service_review(number: int, head: str, service: str) -> bool:
+def pull_reviews(number: int) -> list[dict[str, Any]]:
     slug = repo_slug()
-    reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
+    return gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
+
+
+def pull_comments(number: int) -> list[dict[str, Any]]:
+    slug = repo_slug()
+    return gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
+
+
+def successful_service_review(number: int, head: str, service: str) -> bool:
+    reviews = pull_reviews(number)
     approved = []
     for review in reviews:
         if not isinstance(review, dict):
             raise KernelError("review evidence is malformed")
-        login = ((review.get("user") or {}).get("login") or "").lower()
-        if (
-            login in REVIEW_ACTORS[service]
-            and review.get("commit_id") == head
-            and str(review.get("state") or "").upper() == "APPROVED"
-        ):
-            approved.append(review)
+        actor = review.get("user") or review.get("author")
+        commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
+        if _actor_is_trusted(actor, service) and commit_id == head:
+            state = str(review.get("state") or "").upper()
+            if state == "CHANGES_REQUESTED":
+                return False
+            if state == "APPROVED":
+                approved.append(review)
     return bool(approved)
+
+
+def trusted_codeant_review_at_head(reviews: list[dict[str, Any]], head: str) -> bool:
+    has_exact_head_review = False
+    for review in reviews:
+        if not isinstance(review, dict):
+            raise KernelError("review evidence is malformed")
+        actor = review.get("user") or review.get("author")
+        if not _actor_is_trusted(actor, "codeant"):
+            continue
+        commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
+        state = str(review.get("state") or "").upper()
+        if commit_id == head:
+            if state == "CHANGES_REQUESTED":
+                return False
+            if state in {"COMMENTED", "APPROVED"}:
+                has_exact_head_review = True
+    return has_exact_head_review
+
+
+def _valid_codeant_record(record: Any) -> bool:
+    if not isinstance(record, dict) or set(record.keys()) != CODEANT_STATUS_RECORD_KEYS:
+        return False
+    commit = record.get("commit")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        return False
+    if _parse_ts(record.get("started")) is None or _parse_ts(record.get("finished")) is None:
+        return False
+    if not isinstance(record.get("label"), str) or not record.get("label", "").strip():
+        return False
+    return isinstance(record.get("done"), bool)
+
+
+def parse_codeant_status_payload(
+    comment: dict[str, Any],
+) -> tuple[bool, list[dict[str, Any]] | None]:
+    actor = comment.get("user") or comment.get("author")
+    if not _actor_is_trusted(actor, "codeant"):
+        return True, None
+    body = comment.get("body")
+    if not isinstance(body, str):
+        return False, None
+    if not CODEANT_MARKER_PREFIX_RE.search(body):
+        return True, None
+    matches = CODEANT_STATUS_MARKER_RE.findall(body)
+    if len(matches) != 1:
+        return False, None
+    try:
+        payload = json.loads(matches[0].strip())
+    except (json.JSONDecodeError, ValueError):
+        return False, None
+    if not isinstance(payload, list):
+        return False, None
+    if any(not _valid_codeant_record(record) for record in payload):
+        return False, None
+    return True, payload
+
+
+def validate_codeant_status_comments(comments: list[dict[str, Any]], head: str) -> bool:
+    trusted_payloads: list[list[dict[str, Any]]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            raise KernelError("comment evidence is malformed")
+        valid, payload = parse_codeant_status_payload(comment)
+        if not valid:
+            return False
+        if payload is not None:
+            trusted_payloads.append(payload)
+    if len(trusted_payloads) != 1:
+        return False
+
+    records = trusted_payloads[0]
+    head_records = [r for r in records if str(r.get("commit") or "").lower() == head.lower()]
+    if len(head_records) != 1:
+        return False
+    return head_records[0]["done"] is True
+
+
+def successful_codeant_status_review(number: int, head: str) -> bool:
+    reviews = pull_reviews(number)
+    if not trusted_codeant_review_at_head(reviews, head):
+        return False
+    comments = pull_comments(number)
+    return validate_codeant_status_comments(comments, head)
 
 
 def exact_head_review(pr: dict[str, Any], number: int, service: str) -> bool:
     head = str(pr["headRefOid"])
-    return successful_service_check(pr, service) or successful_service_review(
-        number, head, service
-    )
+    if successful_service_check(pr, service) or successful_service_review(number, head, service):
+        return True
+    if service == "codeant":
+        return successful_codeant_status_review(number, head)
+    return False
 
 
 def base_snapshot(pr: dict[str, Any]) -> tuple[str, int]:
