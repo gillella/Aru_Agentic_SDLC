@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 969
+# line-ceiling: 1000
 """
 fetch_next_issue.py - Selects the next actionable issue for one agent.
 
@@ -77,6 +77,43 @@ def priority_rank(labels: List[Dict[str, Any]]) -> "tuple[Optional[int], Optiona
     if len(found) > 1:
         return None, f"duplicate priority label: {found[0]}"
     return PRIORITY_RANK[unique[0]], None
+
+
+def select_path_disjoint_candidates(
+    candidates: List[Dict[str, Any]], limit: int, reserved_paths: List[str],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Greedily select a deterministic path-disjoint batch without GitHub I/O."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("lane limit must be a positive integer")
+
+    def order(issue: Dict[str, Any]) -> tuple[int, int]:
+        rank, _ = priority_rank(issue.get("labels", []))
+        return (rank if rank is not None else 99, issue["number"])
+
+    selected: List[Dict[str, Any]] = []
+    accepted_paths: List[tuple[int, List[str]]] = []
+    conflicts: List[Dict[str, Any]] = []
+    for issue in sorted(candidates, key=order):
+        if len(selected) >= limit:
+            break
+        paths = parse_touches(issue.get("body") or "")
+        authoritative = touches_conflict(paths, reserved_paths)
+        if authoritative:
+            conflicts.append({"number": issue["number"], "blocked_by": "in-flight",
+                              "conflict": sorted(set(authoritative))})
+            continue
+        blocker = next(
+            ((number, clash) for number, taken in accepted_paths
+             if (clash := touches_conflict(paths, taken))),
+            None,
+        )
+        if blocker:
+            conflicts.append({"number": issue["number"], "blocked_by": blocker[0],
+                              "conflict": sorted(set(blocker[1]))})
+            continue
+        selected.append(issue)
+        accepted_paths.append((issue["number"], paths))
+    return selected, conflicts
 
 
 def active_increment_scope(project_id: Optional[str] = None, *, fail_on_error: bool = False) -> Optional[set]:

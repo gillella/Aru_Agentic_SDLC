@@ -556,6 +556,27 @@ class DelegationTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
+    def test_multi_lane_tick_dispatches_every_safe_claimed_item_from_one_snapshot(self):
+        router = flat(skill_text()).lower()
+        worker = flat(FLEET_PROMPT.read_text(encoding="utf-8")).lower()
+        for text in (router, worker):
+            self.assertIn("one authoritative snapshot", text)
+            self.assertIn("every returned work item", text)
+            self.assertIn("claimed: true", text)
+            self.assertIn("resuming: true", text)
+            self.assertIn("fresh tick", text)
+            self.assertIn("one assigned unit", text)
+        self.assertIn("--lanes", router)
+        self.assertIn("--lane-agent", router)
+        self.assertIn("governed adoption", worker)
+
+    def test_terminal_worker_routing_is_acknowledged_in_the_same_store(self):
+        for document in (SKILL, FLEET_PROMPT):
+            text = flat(document.read_text(encoding="utf-8"))
+            self.assertIn("worker-forget", text)
+            self.assertIn("--worker-path", text)
+            self.assertIn("successful governed routing", text)
+
     def test_please_continue_is_loop_not_implement_next_issue(self):
         skill = flat(skill_text())
         self.assertIn("please continue", frontmatter(skill_text()).lower())
@@ -567,7 +588,7 @@ class WiringTests(unittest.TestCase):
     def test_loop_pacing_is_dynamic_and_nonblocking(self):
         raw = skill_text()
         text = flat(raw)
-        exact = ("pace dynamically", "fixed interval", "snapshot → reconcile → decide → dispatch → report", "never waits synchronously for coding-worker, ci, or external-review completion", "same-job single-flight", "no repository-local daemon, private task queue, or competing scheduler", "each hermes tick starts with **exactly one authoritative picker call**", "do not preflight or enrich it with", "make zero follow-up github reads", "durable worker-state persistence belongs to #479", "worker prompt protocol belongs to #480", "exactly one fresh picker call occurs only at the start of the next tick", "aru's focused-predicate exception remains local to `aru_agentic_sdlc`", "hermes does not execute that worker loop inline", "worker-local ci waits and post-mutation picker transitions remain inside the dispatched worker task", "neither extend the hermes tick nor count as picker calls by that tick", "this slice defines that boundary only")
+        exact = ("pace dynamically", "fixed interval", "snapshot → reconcile → decide → dispatch → report", "never waits synchronously for coding-worker, ci, or external-review completion", "same-job single-flight", "no repository-local daemon, private task queue, or competing scheduler", "each hermes tick starts with **exactly one authoritative picker call**", "do not preflight or enrich it with", "make zero follow-up github reads", "one authoritative snapshot", "dispatch every returned work item", "exactly one fresh picker call occurs only at the start of the next tick", "aru's focused-predicate exception remains local to `aru_agentic_sdlc`", "hermes does not execute that worker loop inline", "worker-local ci waits and post-mutation picker transitions remain inside the dispatched worker task", "neither extend the hermes tick nor count as picker calls by that tick")
         self.assertTrue(all(phrase in text for phrase in exact))
         self.assertIn("consumer repositories follow their own `AGENTS.md` testing policy", raw)
         self.assertFalse(any(retired in raw for retired in ("then run its loop **inside the current desktop task**", "ask the picker exactly once again immediately")))

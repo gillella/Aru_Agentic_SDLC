@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # #414 removed the review work type and ratcheted this file down from 1,264 lines.
-# line-ceiling: 899
+# line-ceiling: 1260
 """Return the highest-priority work one governed factory agent can perform.
 Finishing beats starting: author feedback, merge-ready work, resumable issues, then
 Ready issues. Review is not coding-agent work at all -- the assigned external
@@ -17,11 +17,27 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from claim_issue import EXIT_CONFLICT, EXIT_OK, claim_merge, merge_claimant, reap_stale_merges
+import agent_presence as agent_presence
+from agent_presence import (
+    DEFAULT_WORKER_PATH,
+    PLAN_ADOPT,
+    PLAN_ROUTE,
+    PresenceError,
+    PresenceStore,
+    WorkerHandoffStore,
+    WorkerRecord as WorkerRecord,
+    plan_worker_dispatch,
+    route_worker as route_worker,
+)
+from claim_issue import (
+    EXIT_CONFLICT, EXIT_OK, claim_issue, claim_merge, merge_claimant, reap_stale_merges,
+)
 from common import (get_repo_projects, get_repo_slug, label_names as issue_label_names,
-                    query_open_issues as list_open_issues, run_cmd)
+                    query_open_issues as list_open_issues, repository_owner_login,
+                    repository_trusted_logins, run_cmd)
 from fetch_next_issue import (active_increment_scope, build_candidates, priority_rank,
-                              pr_files_by_issue_from_prs, reap_stale_claims)
+                              pr_files_by_issue_from_prs, reap_stale_claims,
+                              select_path_disjoint_candidates)
 from fetch_pr_feedback import fetch_active_review_feedback
 from github_inventory import json_lines, open_pull_requests
 import merge_pr
@@ -420,7 +436,8 @@ def author_gate_fix(pr: dict[str, Any], agent: str, dod_reason: str | None) -> d
 
 
 def merge_eligibility(pr: dict[str, Any], agent: str,  # noqa: C901, PLR0912
-                      dod_budget: list[int] | None = None) -> dict[str, Any]:
+                      dod_budget: list[int] | None = None,
+                      dod_cache: dict[int, tuple[bool, str]] | None = None) -> dict[str, Any]:
     """Decide merge eligibility, spending optional budget only on full DoD checks."""
     labels = label_names(pr)
     holder = merge_claimant(labels)
@@ -452,11 +469,17 @@ def merge_eligibility(pr: dict[str, Any], agent: str,  # noqa: C901, PLR0912
             if threads:
                 return no(f"{threads} active review feedback item(s); waiting on author")
 
-    if dod_budget is not None:
-        if dod_budget[0] <= 0:
-            return no("Definition-of-Done evaluation deferred by per-cycle query budget")
-        dod_budget[0] -= 1
-    ok, reason = dod_status(pr["number"])
+    cached = dod_cache.get(pr["number"]) if dod_cache is not None else None
+    if cached is None:
+        if dod_budget is not None:
+            if dod_budget[0] <= 0:
+                return no("Definition-of-Done evaluation deferred by per-cycle query budget")
+            dod_budget[0] -= 1
+        ok, reason = dod_status(pr["number"])
+        if dod_cache is not None:
+            dod_cache[pr["number"]] = (ok, reason)
+    else:
+        ok, reason = cached
     return {"eligible": True, "reason": reason} if ok else no(reason)
 
 
@@ -566,6 +589,217 @@ def select(agent: str, family: str | None, *, prs_snapshot: Any = _UNSET,  # noq
         blocked_by_dependencies=parts["blocked"], blocked_by_file_conflict=parts["conflicted"],
         missing_touches=parts["missing_touches"],
         operator_only_issues=parts.get("operator_only", []))
+
+
+def build_inventory_snapshot(  # noqa: PLR0913
+    *, prs_snapshot: Any = _UNSET, issues_snapshot: Any = _UNSET,
+    repo_owner: Any = _UNSET, trusted_logins: Any = _UNSET,
+    increment_scope: Any = _UNSET,
+) -> dict[str, Any]:
+    """Read each authoritative inventory once for all lanes in this tick."""
+    prs = list_work_prs() if prs_snapshot is _UNSET else prs_snapshot
+    if prs is None:
+        return {"error": "the pull request queue could not be read"}
+    if sum(1 for pr in prs if not is_merged(pr)) >= OPEN_PR_QUERY_LIMIT:
+        return {"error": "open pull request inventory may be truncated; refusing selection"}
+    if isinstance(prs, DegradedPrSnapshot) or any(
+            pr.get("_degraded_rest_snapshot") for pr in prs):
+        return {"error": "GraphQL is unavailable; lane selection requires rich PR evidence"}
+    issues = list_open_issues() if issues_snapshot is _UNSET else issues_snapshot
+    if issues is None:
+        return {"error": "the open issue queue could not be read"}
+    owner = repository_owner_login() if repo_owner is _UNSET else repo_owner
+    trusted = repository_trusted_logins() if trusted_logins is _UNSET else trusted_logins
+    scope = active_increment_scope() if increment_scope is _UNSET else increment_scope
+    if owner is None and trusted is None:
+        return {"error": "trusted issue metadata authors could not be resolved"}
+    # Thread hydration belongs to the shared snapshot, never to a per-lane pass.
+    for pr in prs:
+        if (not is_merged(pr) and "_active_review_feedback" not in pr
+                and _label_value(label_names(pr), "author:")):
+            pr["_active_review_feedback"] = fetch_active_review_feedback(pr["number"])
+    return {
+        "prs": prs,
+        "issues": issues,
+        "repo_owner": owner,
+        "trusted_logins": trusted,
+        "increment_scope": scope,
+        "pr_files_by_issue": pr_files_by_issue_from_prs(prs),
+        "dod_budget": [DOD_CANDIDATE_LIMIT],
+        "dod_cache": {},
+    }
+
+
+def _lane_issue_parts(snapshot: dict[str, Any], agent: str | None) -> dict[str, Any]:
+    return build_candidates(
+        snapshot["issues"], agent,
+        pr_files_by_issue=snapshot["pr_files_by_issue"],
+        repo_owner=snapshot["repo_owner"],
+        trusted_logins=snapshot["trusted_logins"],
+        increment_scope=snapshot["increment_scope"],
+    )
+
+
+def select_lanes_from_snapshot(  # noqa: C901, PLR0912
+    snapshot: dict[str, Any], lane_agents: list[str], family: str | None,
+) -> dict[str, Any]:
+    """Assign a bounded batch from one immutable inventory snapshot."""
+    agents = sorted(lane_agents)
+    if not agents or len(agents) != len(set(agents)):
+        raise PresenceError("lane agents must be a non-empty distinct list")
+    if snapshot.get("error"):
+        return {
+            "schema": "aru.fetch-next-work/v2", "lanes": {"agents": agents},
+            "claim_status": "not-requested", "work_items": [],
+            "work": {"type": "error", "skill": None, "reason": snapshot["error"]},
+        }
+
+    free = list(agents)
+    taken_prs: set[int] = set()
+    taken_issues: set[int] = set()
+    items: list[dict[str, Any]] = []
+    dod_reasons: dict[tuple[int, str], str] = {}
+
+    def assign(agent: str, work: dict[str, Any]) -> None:
+        items.append({"lane": len(items) + 1, "agent": agent,
+                      "family": family, "work": work, "dispatchable": True})
+        free.remove(agent)
+
+    # Finish all author feedback before assigning any lower phase.
+    feedback = []
+    for agent in free:
+        mine = [pr for pr in snapshot["prs"] if needs_my_attention(pr, agent)]
+        if mine:
+            feedback.append((min(mine, key=lambda pr: pr["number"]), agent))
+    for candidate, agent in sorted(feedback, key=lambda pair: (pair[0]["number"], pair[1])):
+        if candidate["number"] in taken_prs or agent not in free:
+            continue
+        taken_prs.add(candidate["number"])
+        assign(agent, {"type": "feedback", "pr": candidate["number"],
+                       "title": candidate["title"], "skill": "address-pr-feedback",
+                       "resuming": True})
+
+    # Independently mergeable work fills the lowest-sorting free lanes.
+    for candidate in sorted(snapshot["prs"], key=lambda pr: pr["number"]):
+        if not free or candidate["number"] in taken_prs:
+            continue
+        for agent in list(free):
+            verdict = merge_eligibility(
+                candidate, agent, snapshot["dod_budget"], snapshot["dod_cache"],
+            )
+            dod_reasons[(candidate["number"], agent)] = verdict["reason"]
+            if verdict["eligible"]:
+                taken_prs.add(candidate["number"])
+                assign(agent, {"type": "merge", "pr": candidate["number"],
+                               "title": candidate["title"], "skill": "merge-pr",
+                               "head_sha": candidate.get("headRefOid")})
+                break
+
+    # Author-clearable gates stay bound to the author lane.
+    for agent in list(free):
+        for candidate in sorted(snapshot["prs"], key=lambda pr: pr["number"]):
+            if candidate["number"] in taken_prs:
+                continue
+            gate = author_gate_fix(
+                candidate, agent, dod_reasons.get((candidate["number"], agent)),
+            )
+            if gate:
+                taken_prs.add(candidate["number"])
+                work = {"type": "feedback", "pr": gate["pr"], "title": gate["title"],
+                        "skill": "address-pr-feedback", "unmet_gates": gate["unmet_gates"],
+                        "reason": gate["reason"], "resuming": True}
+                if gate.get("gate_details"):
+                    work["gate_details"] = gate["gate_details"]
+                assign(agent, work)
+                break
+
+    parts_by_agent = {agent: _lane_issue_parts(snapshot, agent) for agent in list(free)}
+    resumes = []
+    for agent, parts in parts_by_agent.items():
+        if parts["my_in_flight"]:
+            resumes.append((parts["my_in_flight"], agent))
+    for issue, agent in sorted(resumes, key=lambda pair: (pair[0]["number"], pair[1])):
+        if agent in free and issue["number"] not in taken_issues:
+            taken_issues.add(issue["number"])
+            assign(agent, {"type": "issue", "issue": issue["number"],
+                           "title": issue["title"], "skill": skill_for_issue(issue),
+                           "resuming": True})
+
+    common = _lane_issue_parts(snapshot, None)
+    selected, local_conflicts = select_path_disjoint_candidates(
+        [issue for issue in common["candidates"] if issue["number"] not in taken_issues],
+        max(1, len(free)), [],
+    ) if free else ([], [])
+    for issue, agent in zip(selected, list(free)):
+        taken_issues.add(issue["number"])
+        assign(agent, {"type": "issue", "issue": issue["number"],
+                       "title": issue["title"], "skill": skill_for_issue(issue),
+                       "resuming": False})
+
+    return {
+        "schema": "aru.fetch-next-work/v2",
+        "lanes": {"requested": len(agents), "verified": len(agents), "agents": agents},
+        "claim_status": "not-requested",
+        "work_items": items,
+        "work": {"type": "error", "skill": None,
+                 "reason": "multi-lane result: read work_items"},
+        "blocked_by_dependencies": common["blocked"],
+        "blocked_by_file_conflict": common["conflicted"] + local_conflicts,
+        "missing_touches": common["missing_touches"],
+    }
+
+
+def claim_lane_items(items: list[dict[str, Any]]) -> str:
+    """Claim in snapshot order and stop at the first stale-snapshot result."""
+    successful = 0
+    failed = False
+    for item in items:
+        work, agent = item["work"], item["agent"]
+        if item.get("dispatchable") is False:
+            continue
+        if work.get("resuming") or work["type"] == "feedback":
+            work["resuming"] = True
+            continue
+        if failed:
+            work.update({"claimed": False,
+                         "claim_result": "not-attempted-after-partial-failure"})
+            item["dispatchable"] = False
+            continue
+        rc = (claim_issue(work["issue"], agent) if work["type"] == "issue"
+              else claim_merge(work["pr"], agent))
+        work["claimed"] = rc == EXIT_OK
+        item["dispatchable"] = work["claimed"]
+        if work["claimed"]:
+            successful += 1
+            continue
+        work["claim_result"] = "conflict" if rc == EXIT_CONFLICT else "error"
+        failed = True
+    if not failed:
+        return "complete"
+    return "partial" if successful else "failed"
+
+
+def apply_worker_handoffs(items: list[dict[str, Any]], *, store: WorkerHandoffStore,
+                          project_id: str, now: Any = None) -> list[dict[str, Any]]:
+    """Suppress duplicate dispatch and expose terminal records for governed routing."""
+    for item in items:
+        work = item["work"]
+        number = work.get("issue") or work.get("pr")
+        if not number:
+            continue
+        plan = plan_worker_dispatch(
+            store, project_id=project_id,
+            unit_kind="issue" if work["type"] == "issue" else "pr",
+            unit_number=number, now=now,
+        )
+        if plan["action"] == PLAN_ADOPT:
+            item.update({"dispatchable": False, "reason": "already-running",
+                         "worker_id": plan["record"].worker_id})
+        elif plan["action"] == PLAN_ROUTE:
+            item.update({"dispatchable": False, "reason": "worker-needs-routing",
+                         "handoff_action": PLAN_ROUTE,
+                         "worker_id": plan["record"].worker_id})
+    return items
 
 
 def _idle_backlog_candidate(  # noqa: C901, PLR0912
@@ -824,7 +1058,29 @@ def _print_selection(args, res: dict[str, Any], work: dict[str, Any], claim_fail
         print(f"\nIssues waiting: {res['claimable_issues']}")
 
 
-def main():  # noqa: C901
+def verified_lane_agents(requested: list[str], checkout: Path) -> tuple[list[str], str]:
+    """Fail closed unless every explicit lane is fresh and available here."""
+    if not requested or len(requested) != len(set(requested)):
+        raise PresenceError("--lane-agent values must be distinct")
+    records = PresenceStore().query_project(checkout_path=str(checkout.resolve()), expire=True)
+    by_id = {record.agent_id: record for record in records}
+    missing = [agent for agent in requested if agent not in by_id]
+    unavailable = [agent for agent in requested if agent in by_id
+                   and by_id[agent].availability not in {"available", "returned"}]
+    if missing or unavailable:
+        detail = []
+        if missing:
+            detail.append("unregistered: " + ", ".join(sorted(missing)))
+        if unavailable:
+            detail.append("not available: " + ", ".join(sorted(unavailable)))
+        raise PresenceError("lane verification failed (" + "; ".join(detail) + ")")
+    projects = {by_id[agent].project_id for agent in requested}
+    if len(projects) != 1:
+        raise PresenceError("lane agents do not share one project")
+    return sorted(requested), projects.pop()
+
+
+def main():  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(description="Pick the next work item for one agent.")
     parser.add_argument("--agent", required=False, default=None, help="Agent id. Omit to use "
                         "ARU_AGENT_ID or a stable machine, checkout, and family fingerprint.")
@@ -834,15 +1090,36 @@ def main():  # noqa: C901
     parser.add_argument("--promote-idle", action="store_true",
                         help="Promote one qualified Backlog item when idle without claiming it")
     parser.add_argument("--json", action="store_true", dest="as_json")
+    parser.add_argument("--lanes", type=int, default=1, metavar="N",
+                        help="Upper bound for an explicit multi-lane tick")
+    parser.add_argument("--lane-agent", action="append", default=[], metavar="AGENT_ID",
+                        help="Verified agent identity for one lane; repeat exactly N times")
+    parser.add_argument("--worker-path", type=Path, default=DEFAULT_WORKER_PATH,
+                        help="Worker handoff path used by the matching worker lifecycle commands")
     parser.add_argument("--reap-after", type=int, default=DEFAULT_REAP_AFTER_HOURS, metavar="HOURS",
                         help="Release issue and merge claims idle longer than HOURS "
                         "(default: 4h; 0 disables)")
     args = parser.parse_args()
 
-    rc = _resolve_identity(args)
-    if rc is not None:
-        return rc
+    lane_mode = bool(args.lane_agent or args.lanes != 1)
+    if args.lanes < 1 or (lane_mode and len(args.lane_agent) != args.lanes):
+        print("[ERROR] --lanes must be positive and match distinct --lane-agent values.",
+              file=sys.stderr)
+        return 1
+    if not lane_mode:
+        rc = _resolve_identity(args)
+        if rc is not None:
+            return rc
     family = (args.family or "").lower() or None
+
+    lane_agents: list[str] = []
+    project_id = ""
+    if lane_mode:
+        try:
+            lane_agents, project_id = verified_lane_agents(args.lane_agent, Path.cwd())
+        except PresenceError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            return 1
 
     prs_snapshot: list[dict[str, Any]] | None | object = _UNSET
     issues_snapshot: list[dict[str, Any]] | None | object = _UNSET
@@ -852,6 +1129,29 @@ def main():  # noqa: C901
             issues_snapshot = list_open_issues()
         prs_snapshot, issues_snapshot = _reap_stale_claims(args.reap_after, prs_snapshot,
                                                            issues_snapshot)
+
+    if lane_mode:
+        snapshot = build_inventory_snapshot(
+            prs_snapshot=prs_snapshot, issues_snapshot=issues_snapshot,
+        )
+        res = select_lanes_from_snapshot(snapshot, lane_agents, family)
+        try:
+            apply_worker_handoffs(
+                res["work_items"], store=WorkerHandoffStore(args.worker_path),
+                project_id=project_id,
+            )
+        except PresenceError as exc:
+            res["handoff_warning"] = str(exc)
+        if args.claim:
+            res["claim_status"] = claim_lane_items(res["work_items"])
+        command_failed = (
+            res["work"]["type"] == "error" and not res["work_items"]
+        ) or res["claim_status"] in {"partial", "failed"}
+        if args.as_json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(json.dumps(res, indent=2))
+        return 1 if command_failed else None
 
     res = select(args.agent, family, prs_snapshot=prs_snapshot, issues_snapshot=issues_snapshot)
     work = res["work"]

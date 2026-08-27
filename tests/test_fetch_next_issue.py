@@ -26,6 +26,28 @@ def issue(number, status, touches, author="owner"):
 
 
 class ReservationWindowTests(unittest.TestCase):
+    def test_path_disjoint_batch_is_deterministic_and_reports_local_conflicts(self):
+        candidates = [
+            issue(13, "status:ready", "scripts/a.py"),
+            issue(11, "status:ready", "scripts/a.py, scripts/b.py"),
+            issue(12, "status:ready", "scripts/c.py"),
+        ]
+        selected, conflicts = fetch_next_issue.select_path_disjoint_candidates(
+            candidates, 3, ["scripts/reserved.py"],
+        )
+        self.assertEqual([item["number"] for item in selected], [11, 12])
+        self.assertEqual(conflicts, [{
+            "number": 13, "blocked_by": 11, "conflict": ["scripts/a.py"],
+        }])
+
+    def test_path_disjoint_batch_respects_authoritative_reservations(self):
+        candidates = [issue(11, "status:ready", "scripts/a.py")]
+        selected, conflicts = fetch_next_issue.select_path_disjoint_candidates(
+            candidates, 2, ["scripts/a.py"],
+        )
+        self.assertEqual(selected, [])
+        self.assertEqual(conflicts[0]["blocked_by"], "in-flight")
+
     def test_in_review_overlap_no_longer_blocks_ready_issue(self):
         issues = [
             issue(10, "status:in-review", "scripts/common.py"),

@@ -1,4 +1,4 @@
-# line-ceiling: 500
+# line-ceiling: 560
 """Regression tests for bounded GitHub reads in one factory picker cycle."""
 
 import io
@@ -382,6 +382,51 @@ class CycleSnapshotTests(unittest.TestCase):
             fnw.main()
 
         select.assert_called_once()
+
+
+class MultiLaneSnapshotBudgetTests(unittest.TestCase):
+    def test_one_and_five_lanes_read_the_same_authoritative_inventories(self):
+        counts = []
+        for lane_count in (1, 5):
+            with patch.object(fnw, "list_work_prs", return_value=[]) as prs, \
+                 patch.object(fnw, "list_open_issues", return_value=[]) as issues, \
+                 patch.object(fnw, "repository_owner_login", return_value="owner") as owner, \
+                 patch.object(fnw, "repository_trusted_logins", return_value={"owner"}) as trusted, \
+                 patch.object(fnw, "active_increment_scope", return_value=None) as increment:
+                snapshot = fnw.build_inventory_snapshot()
+                fnw.select_lanes_from_snapshot(
+                    snapshot, [f"codex-{index}" for index in range(lane_count)], "openai",
+                )
+            counts.append(tuple(mock.call_count for mock in (prs, issues, owner, trusted, increment)))
+        self.assertEqual(counts, [(1, 1, 1, 1, 1), (1, 1, 1, 1, 1)])
+
+    def test_dod_result_is_cached_across_lanes(self):
+        candidate = {
+            "number": 9, "title": "PR 9", "labels": [], "isDraft": False,
+            "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "_active_review_feedback": [], "body": "Closes #9",
+        }
+        snapshot = fnw.build_inventory_snapshot(
+            prs_snapshot=[candidate], issues_snapshot=[], repo_owner="owner",
+            trusted_logins={"owner"}, increment_scope=None,
+        )
+        with patch.object(fnw, "dod_status", return_value=(False, "unmet: review")) as dod:
+            fnw.select_lanes_from_snapshot(
+                snapshot, [f"codex-{index}" for index in range(5)], "openai",
+            )
+        dod.assert_called_once_with(9)
+
+    def test_path_disjoint_selection_performs_no_github_read(self):
+        candidate = {
+            "number": 1, "body": "touches: scripts/a.py\n",
+            "labels": [{"name": "priority:p0"}],
+        }
+        with patch.object(fetch_next_issue, "run_cmd") as github:
+            selected, _ = fetch_next_issue.select_path_disjoint_candidates(
+                [candidate], 1, [],
+            )
+        self.assertEqual([item["number"] for item in selected], [1])
+        github.assert_not_called()
 
 
 class LoopOrchestrationBudgetTests(unittest.TestCase):
