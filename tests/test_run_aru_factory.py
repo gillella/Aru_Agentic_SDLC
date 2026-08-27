@@ -272,7 +272,11 @@ class GovernanceTests(unittest.TestCase):
         self.assertIn("emergency-only", text)
         for label in ("review:coderabbit", "review:sourcery", "review:codeant"):
             self.assertIn(label, text)
-        self.assertNotIn("new prs get exactly `review:coderabbit`", flat_text)
+        self.assertNotRegex(
+            flat_text,
+            r"(?:new prs?.{0,80}(?:default\w*|get exactly)|default reviewer.{0,80})"
+            r".{0,80}(?:coderabbit|review:coderabbit)",
+        )
         self.assertIn(
             "`create_pr.py` assigns exactly one immutable ordinary authority from "
             "coderabbit (`review:coderabbit`), sourcery (`review:sourcery`), or "
