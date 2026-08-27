@@ -23,7 +23,7 @@ def traverse(monkeypatch, number: int) -> dict:
                 "touches: app.py, tests/test_app.py\n"
             ),
             "state": "OPEN",
-            "labels": [{"name": "status:backlog"}],
+            "labels": [{"name": "status:backlog"}, {"name": "priority:p2"}],
         },
         "pr": None,
         "merged": False,

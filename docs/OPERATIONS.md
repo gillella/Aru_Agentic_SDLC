@@ -155,7 +155,8 @@ The consumer repository needs:
 - a default branch, normally `main`;
 - one linked, open GitHub Project;
 - one Project `Status` field with the five exact lifecycle options;
-- the Aru `status:*`, `type:*`, `agent:*`, `author:*`, and `review:*` labels;
+- the Aru `status:*`, `type:*`, `priority:*`, `agent:*`, `author:*`, and
+  `review:*` labels;
 - a pull-request CI workflow;
 - at least one installed and functioning supported external reviewer.
 
@@ -410,6 +411,7 @@ An issue can enter `Ready` only when it is open and contains:
 - an `## Acceptance Criteria` heading;
 - at least one unchecked checklist item;
 - exactly one `touches:` line containing safe repository-relative paths;
+- exactly one `priority:p0`, `priority:p1`, `priority:p2`, or `priority:p3` label;
 - no unresolved `depends-on: #N` issue.
 
 ### Example
@@ -509,7 +511,12 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
 ```
 
 The picker first resumes that agent's open feedback, CI failure, merge-ready PR,
-or waiting PR. Only then does it return the lowest-numbered Ready issue.
+or waiting PR. Only then does it fetch every page of Ready issues. It excludes
+issues labeled `needs-human` or `type:epic`, then orders eligible work by
+priority (`P0` → `P1` → `P2` → `P3`) and ascending issue number within each
+priority. Every eligible Ready issue must have exactly one `priority:p0` through
+`priority:p3` label; the picker fails closed if that priority is missing or
+contradictory.
 
 You may claim a known issue explicitly:
 
@@ -843,8 +850,8 @@ true.
 - [ ] Exactly one open Project is linked to the repository.
 - [ ] The Status field has the five exact lifecycle choices.
 - [ ] Governed issues are automatically or explicitly added to the Project.
-- [ ] Required lifecycle, type, and reviewer labels exist; the helpers can
-      create issue-specific agent and author labels.
+- [ ] Required lifecycle, type, priority, and reviewer labels exist; the helpers
+      can create issue-specific agent and author labels.
 - [ ] GitHub CLI authentication can read and update Issues, PRs, and Projects.
 
 ### Verification and review
