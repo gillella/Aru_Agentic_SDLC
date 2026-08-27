@@ -63,6 +63,11 @@ preferring a different model family. Claude selection probes all three
 from the PR author. If no bound distinct reviewer responds exactly `OK`, keep
 the existing authority and fail closed.
 
+If an assigned coding reviewer later returns an explicit unavailable/error
+state or aborts without a verdict, use `create_pr.py --refresh-reviewer <PR>
+--coding-reviewer-unavailable <reason>` to audit and recover to the first
+registered external authority. Do not edit authority labels by hand.
+
 A coding agent may author or remediate code and may authoritatively review code
 written by a different agent. It must never review its own PR under normal
 conditions. Coding-agent authority requires one `reviewer:<identity>` label and

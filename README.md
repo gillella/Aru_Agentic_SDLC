@@ -175,6 +175,10 @@ subscriptions are probed. Cost or quota exhaustion, rate
 limiting, provider outage, unsupported bot-authored PRs, and explicit
 unavailable/error responses all count as unavailable. If no distinct coding
 agent has capacity, assignment does not change and the transition fails closed.
+If an assigned coding reviewer later aborts or explicitly becomes unavailable,
+recover through the same helper with `--coding-reviewer-unavailable <reason>`;
+it audits and restores the first registered external authority without leaving
+coding identity metadata behind.
 
 A coding-agent review is authoritative only when a formal GitHub Review from a
 GitHub actor other than the PR author contains the strict `aru-coding-review:v1`

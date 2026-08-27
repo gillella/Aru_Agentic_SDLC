@@ -282,6 +282,50 @@ def test_refresh_with_no_coding_capacity_preserves_external_authority(monkeypatc
         create_pr.refresh_assignment(42, now=created + timedelta(seconds=1))
 
 
+def test_explicit_coding_reviewer_unavailability_recovers_to_registered_external(
+    monkeypatch,
+):
+    created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    pr = assignment_pr(created_at=created)
+    pr["labels"] = [
+        {"name": "review:xai-cursor"},
+        {"name": "reviewer:xai-cursor"},
+        {"name": "reviewer-actor:cursor-reviewer"},
+        {"name": "author:codex-author"},
+        {"name": "author-family:openai-codex"},
+    ]
+    updated = {
+        "number": 42,
+        "labels": [
+            {"name": "review:codeant"},
+            {"name": "author:codex-author"},
+            {"name": "author-family:openai-codex"},
+        ],
+    }
+    responses = [pr, updated]
+    monkeypatch.setattr(create_pr, "gh_json", lambda _argv: responses.pop(0))
+    monkeypatch.setattr(
+        create_pr,
+        "registered_external_states",
+        lambda: external_states(codeant=create_pr.AVAILABLE),
+    )
+    events = []
+    monkeypatch.setattr(create_pr, "run", lambda _argv: events.append("audit"))
+    monkeypatch.setattr(create_pr, "replace_authority", lambda *_args: events.append("replace"))
+    outcome = create_pr.refresh_assignment(
+        42,
+        now=created + timedelta(minutes=3),
+        coding_unavailable_reason="full review aborted without a verdict",
+    )
+    assert outcome == {
+        "pr": 42,
+        "authority": "codeant",
+        "action": "fallback",
+        "reason": "coding-reviewer-unavailable",
+    }
+    assert events == ["audit", "replace"]
+
+
 def test_create_pr_binds_head_and_exactly_one_reviewer(monkeypatch):
     record = {"number": 6, "labels": [{"name": "agent:codex-1"}]}
     monkeypatch.setattr(create_pr, "issue", lambda _number: record)

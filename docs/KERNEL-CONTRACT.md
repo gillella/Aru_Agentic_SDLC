@@ -55,6 +55,9 @@ Google Antigravity order. Every candidate must have one explicit
 from the PR author. All three Claude subscriptions are tested. The author
 identity is excluded and another model family is preferred. No successful,
 bound, distinct probe leaves the prior authority unchanged and blocks progress.
+An explicitly unavailable or aborted assigned coding reviewer may recover to
+the first registered external authority only through the audited refresh
+command; hand-editing authority labels is not a state transition.
 
 A coding agent may author or remediate code and may review a different agent's
 code. It may not authoritatively review its own PR under normal conditions. Its

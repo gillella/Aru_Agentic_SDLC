@@ -380,8 +380,8 @@ def replace_authority(
     number: int,
     pr: dict[str, Any],
     authority: str,
-    reviewer_identity: str,
-    reviewer_actor: str,
+    reviewer_identity: str | None,
+    reviewer_actor: str | None,
 ) -> None:
     live = gh_json(
         ["pr", "view", str(number), "--json", "number,headRefOid,labels"]
@@ -395,12 +395,33 @@ def replace_authority(
         != _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
     ):
         raise KernelError("review authority changed during fallback selection")
+    if authority in CODING_REVIEWERS and not all((reviewer_identity, reviewer_actor)):
+        raise KernelError("coding authority replacement requires identity and actor")
+    if authority in EXTERNAL_REVIEWERS and any((reviewer_identity, reviewer_actor)):
+        raise KernelError("external authority replacement cannot retain coding metadata")
     review_label = REVIEW_PREFIX + authority
-    reviewer_label = REVIEWER_PREFIX + reviewer_identity
-    actor_label = REVIEWER_ACTOR_PREFIX + reviewer_actor
-    ensure_label(review_label, color="5319e7", description=f"Coding review: {authority}")
-    ensure_label(reviewer_label, color="5319e7", description=f"Assigned reviewer: {reviewer_identity}")
-    ensure_label(actor_label, color="5319e7", description=f"Trusted review actor: {reviewer_actor}")
+    description = (
+        f"Coding review: {authority}"
+        if authority in CODING_REVIEWERS
+        else f"External review: {authority}"
+    )
+    color = "5319e7" if authority in CODING_REVIEWERS else "0e8a16"
+    ensure_label(review_label, color=color, description=description)
+    assignment_labels = [review_label]
+    if reviewer_identity and reviewer_actor:
+        reviewer_label = REVIEWER_PREFIX + reviewer_identity
+        actor_label = REVIEWER_ACTOR_PREFIX + reviewer_actor
+        ensure_label(
+            reviewer_label,
+            color="5319e7",
+            description=f"Assigned reviewer: {reviewer_identity}",
+        )
+        ensure_label(
+            actor_label,
+            color="5319e7",
+            description=f"Trusted review actor: {reviewer_actor}",
+        )
+        assignment_labels.extend([reviewer_label, actor_label])
     retained = [
         name
         for name in label_names(live)
@@ -409,15 +430,57 @@ def replace_authority(
         and not name.startswith(REVIEWER_ACTOR_PREFIX)
     ]
     arguments = ["api", "--method", "PUT", f"repos/{repo_slug()}/issues/{number}/labels"]
-    for name in [*retained, review_label, reviewer_label, actor_label]:
+    for name in [*retained, *assignment_labels]:
         arguments.extend(["-f", f"labels[]={name}"])
     gh_json(arguments)
+
+
+def recover_coding_authority(
+    number: int,
+    pr: dict[str, Any],
+    authority: str,
+    reason: str,
+    observed_at: datetime,
+) -> dict[str, Any]:
+    reason = reason.strip()
+    if len(reason) < 10:
+        raise KernelError("coding reviewer unavailability reason is too short")
+    external = initial_external(registered_external_states())
+    if external is None:
+        raise KernelError("no registered external reviewer is available")
+    status = {
+        "head": pr.get("headRefOid"),
+        "observed_at": observed_at.isoformat(),
+        "previous_authority": authority,
+        "reason": "coding-reviewer-unavailable",
+        "detail": reason,
+        "new_authority": external,
+    }
+    body = (
+        "## Aru authoritative reviewer recovery\n\n"
+        f"Fallback attempt: replace unavailable coding authority `{authority}` "
+        f"with registered external authority `{external}`. Detail: {reason}. "
+        "The labels remain authoritative if this transition command fails.\n\n"
+        f"<!-- aru-review-assignment:v1 {json.dumps(status, sort_keys=True)} -->"
+    )
+    run(["gh", "pr", "comment", str(number), "--body", body])
+    replace_authority(number, pr, external, None, None)
+    updated = gh_json(["pr", "view", str(number), "--json", "number,labels"])
+    if _one_authority(updated) != external:
+        raise KernelError("external reviewer recovery was not confirmed")
+    return {
+        "pr": number,
+        "authority": external,
+        "action": "fallback",
+        "reason": "coding-reviewer-unavailable",
+    }
 
 
 def refresh_assignment(
     number: int,
     *,
     now: datetime | None = None,
+    coding_unavailable_reason: str | None = None,
     probe_runner: ProbeRunner = _default_probe,
 ) -> dict[str, Any]:
     pr = gh_json(
@@ -433,7 +496,20 @@ def refresh_assignment(
         raise KernelError(f"pull request #{number} is unavailable")
     authority = _one_authority(pr)
     if authority in CODING_REVIEWERS:
-        return {"pr": number, "authority": authority, "action": "retained", "reason": "coding-agent-assigned"}
+        if not coding_unavailable_reason:
+            return {
+                "pr": number,
+                "authority": authority,
+                "action": "retained",
+                "reason": "coding-agent-assigned",
+            }
+        return recover_coding_authority(
+            number,
+            pr,
+            authority,
+            coding_unavailable_reason,
+            now or datetime.now(timezone.utc),
+        )
 
     slug = repo_slug()
     reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
@@ -596,6 +672,7 @@ def main() -> int:
     parser.add_argument("--author-family")
     parser.add_argument("--author-github-login")
     parser.add_argument("--refresh-reviewer", type=int, metavar="PR")
+    parser.add_argument("--coding-reviewer-unavailable")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     try:
@@ -611,8 +688,13 @@ def main() -> int:
                 )
             ):
                 raise KernelError("review refresh cannot include PR creation arguments")
-            result = refresh_assignment(args.refresh_reviewer)
+            result = refresh_assignment(
+                args.refresh_reviewer,
+                coding_unavailable_reason=args.coding_reviewer_unavailable,
+            )
         else:
+            if args.coding_reviewer_unavailable:
+                raise KernelError("coding reviewer unavailability requires --refresh-reviewer")
             if args.issue is None or args.title is None or args.body is None:
                 raise KernelError("--issue, --title, and --body are required for PR creation")
             result = create(

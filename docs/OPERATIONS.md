@@ -731,6 +731,7 @@ The state machine is deterministic:
 | Assigned external is pending | `>= 15m` | Probe and assign a distinct coding agent |
 | Assigned external explicitly reports unavailable/error | any | Probe and assign a distinct coding agent immediately |
 | No distinct coding agent answers exactly `OK` | any | Keep authority unchanged and fail closed |
+| Assigned coding reviewer explicitly aborts or becomes unavailable | any | Audit and recover to first registered external authority |
 
 Cost or quota exhaustion, rate limiting, provider outage, unsupported
 bot-authored PRs, and explicit unavailable/error responses are unavailable.
@@ -745,6 +746,20 @@ The helper replaces the authority label as one labels update and then verifies
 that exactly one supported `review:*` label remains. A fallback PR comment
 records the old authority, reason, observation time, exact head, reviewer family,
 and reviewer identity. Do not edit authority labels by hand.
+
+For an assigned coding reviewer that explicitly aborts or returns unavailable:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+  --refresh-reviewer 123 \
+  --coding-reviewer-unavailable "full review aborted without a verdict" \
+  --json
+```
+
+The helper writes the attempted recovery audit first, revalidates the live head
+and authority, restores the first registered external authority, removes coding
+identity/actor metadata, and verifies the result. Without a substantive reason
+or registered external authority, it fails closed.
 
 ### Coding-agent attestation
 
