@@ -19,6 +19,7 @@ from common import (
     AUTHOR_PREFIX,
     CODING_REVIEWERS,
     EXTERNAL_REVIEWERS,
+    PROBE_PROMPT,
     REVIEW_REGISTRATION_PREFIX,
     REVIEWER_ACTOR_PREFIX,
     REVIEWER_PREFIX,
@@ -27,6 +28,7 @@ from common import (
     REVIEW_PREFIX,
     KernelError,
     agent_family,
+    coding_reviewer_candidates,
     configured_coding_reviewers,
     ensure_label,
     gh_json,
@@ -36,17 +38,13 @@ from common import (
     json_print,
     label_names,
     normalized_identity,
+    probe_coding_candidate,
+    registered_coding_actors,
     review_evidence_unavailable,
     repo_slug,
     run,
     set_status,
     status_of,
-)
-from reviewer_selection import (
-    PROBE_PROMPT,
-    coding_reviewer_candidates,
-    probe_coding_candidate,
-    registered_coding_actors,
 )
 
 AVAILABLE = "available"

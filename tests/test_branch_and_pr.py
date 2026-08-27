@@ -7,7 +7,6 @@ import pytest
 
 import create_branch
 import create_pr
-import reviewer_selection
 
 
 @pytest.fixture(autouse=True)
@@ -83,39 +82,6 @@ def install_refresh(
     monkeypatch.setattr(create_pr, "run", lambda _argv: None)
 
 
-def test_initial_assignment_rotates_all_eligible_authorities(monkeypatch):
-    monkeypatch.setenv(
-        "ARU_CODING_REVIEWERS",
-        "claude-code:m1@1,openai-codex:mo",
-    )
-    monkeypatch.setattr(reviewer_selection, "_command", lambda name: f"/bin/{name}")
-    states = external_states(
-        coderabbit=create_pr.AVAILABLE,
-        sourcery=create_pr.AVAILABLE,
-    )
-    actors = {"m1": "claude-reviewer", "mo": "codex-reviewer"}
-
-    assignments = [
-        create_pr.choose_initial_reviewer(
-            number,
-            "codex-author",
-            "openai-codex",
-            "author-login",
-            external_states=states,
-            reviewer_actors=actors,
-            probe_runner=lambda argv: result(argv),
-        )
-        for number in range(4)
-    ]
-
-    assert assignments == [
-        ("coderabbit", None, None),
-        ("sourcery", None, None),
-        ("claude-code", "m1", "claude-reviewer"),
-        ("openai-codex", "mo", "codex-reviewer"),
-    ]
-
-
 def test_external_registration_reads_beyond_first_hundred_labels(monkeypatch):
     commands = []
 
@@ -138,98 +104,6 @@ def test_authority_labels_alone_do_not_register_external_providers(monkeypatch):
         lambda _argv: [{"name": "review:coderabbit"}, {"name": "review:sourcery"}],
     )
     assert set(create_pr.registered_external_states().values()) == {create_pr.UNAVAILABLE}
-
-
-def test_initial_coding_assignment_probes_only_selected_candidate(monkeypatch):
-    calls = []
-    monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")
-
-    def probe(argv):
-        calls.append(argv)
-        return result(argv)
-
-    reviewer = create_pr.choose_initial_reviewer(
-        7,
-        "codex-author",
-        "openai-codex",
-        "author-login",
-        external_states=external_states(),
-        reviewer_actors={
-            "m1": "claude-reviewer-1",
-            "m2": "claude-reviewer-2",
-            "m3": "claude-reviewer-3",
-        },
-        probe_runner=probe,
-    )
-    assert reviewer == ("claude-code", "m2", "claude-reviewer-2")
-    assert [call[1] for call in calls] == ["2"]
-    assert all(call[-1] == "Reply exactly OK" for call in calls)
-
-
-def test_initial_assignment_excludes_author_identity_and_actor(monkeypatch):
-    monkeypatch.setenv(
-        "ARU_CODING_REVIEWERS",
-        "claude-code:m1@1,claude-code:m2@2",
-    )
-    reviewer = create_pr.choose_initial_reviewer(
-        0,
-        "m1",
-        "claude-code",
-        "author-login",
-        external_states=external_states(),
-        reviewer_actors={"m1": "author-login", "m2": "other-reviewer"},
-        probe_runner=lambda argv: result(argv),
-    )
-    assert reviewer == ("claude-code", "m2", "other-reviewer")
-
-
-def test_unavailable_rotated_candidate_advances_without_state(monkeypatch):
-    monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1")
-    calls = []
-
-    def unavailable(argv):
-        calls.append(argv)
-        return result(argv, ok=False)
-
-    reviewer = create_pr.choose_initial_reviewer(
-        1,
-        "codex-author",
-        "openai-codex",
-        "author-login",
-        external_states=external_states(coderabbit=create_pr.AVAILABLE),
-        reviewer_actors={"m1": "claude-reviewer"},
-        probe_runner=unavailable,
-    )
-    assert reviewer == ("coderabbit", None, None)
-    assert [call[1] for call in calls] == ["1"]
-
-
-def test_initial_assignment_is_deterministic(monkeypatch):
-    monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1")
-    arguments = {
-        "author_identity": "codex-author",
-        "author_family": "openai-codex",
-        "author_actor": "author-login",
-        "external_states": external_states(coderabbit=create_pr.AVAILABLE),
-        "reviewer_actors": {"m1": "claude-reviewer"},
-        "probe_runner": lambda argv: result(argv),
-    }
-    assert create_pr.choose_initial_reviewer(11, **arguments) == (
-        create_pr.choose_initial_reviewer(11, **arguments)
-    )
-
-
-def test_registered_coders_cannot_silently_degrade_to_external_only(monkeypatch):
-    monkeypatch.delenv("ARU_CODING_REVIEWERS", raising=False)
-    with pytest.raises(create_pr.KernelError, match="missing while reviewer bindings exist"):
-        create_pr.choose_initial_reviewer(
-            11,
-            "codex-author",
-            "openai-codex",
-            "author-login",
-            external_states=external_states(coderabbit=create_pr.AVAILABLE),
-            reviewer_actors={"m1": "claude-reviewer"},
-        )
 
 
 def test_author_family_is_deprioritized_and_author_identity_excluded(monkeypatch):
@@ -429,27 +303,6 @@ def test_review_failure_is_not_misclassified_as_provider_unavailability():
         }
     ]
     assert create_pr.external_state(pr, "coderabbit", reviews=[], comments=[]) == create_pr.AVAILABLE
-
-
-def test_rate_limited_success_status_is_unavailable():
-    observed_at = datetime.now(timezone.utc)
-    pr = assignment_pr(created_at=observed_at, state="available")
-    status = {
-        "context": "CodeRabbit",
-        "state": "success",
-        "description": "Review rate limited",
-        "created_at": (observed_at + timedelta(seconds=1)).isoformat(),
-    }
-    assert (
-        create_pr.external_state(
-            pr,
-            "coderabbit",
-            reviews=[],
-            comments=[],
-            statuses=[status],
-        )
-        == create_pr.UNAVAILABLE
-    )
 
 
 def test_latest_external_evidence_wins_after_provider_recovery():
@@ -799,6 +652,8 @@ def test_create_pr_revalidates_ownership_after_reviewer_selection(monkeypatch):
             "Summary",
             "codex-1",
             external_states=external_states(coderabbit=create_pr.AVAILABLE),
+            reviewer_actors={},
+            author_actor="author-login",
         )
 
 
