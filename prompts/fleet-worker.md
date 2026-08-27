@@ -47,7 +47,8 @@ Heartbeat locally so peers can see `available` / `busy` / `cooling-down` /
 `temporarily-offline` / `unavailable` / `returned`. Heartbeat expiry never
 releases a GitHub claim. One agent id cannot be rebound to another project while
 its registration exists (`unregister` first, or use a distinct id for a second
-project). Never Slack-post heartbeats.
+project). Never emit heartbeats or retry ticks to an external chat surface from
+this repo's local runtime.
 
 Desktop tasks advertise presence with:
 
@@ -64,9 +65,10 @@ Credit exhaustion, rate limits, provider outages, and failed child sessions are
 temporary, project-scoped capacity reductions. Record `cooling-down` with the
 classified reason and a local next-probe time when one is known. Cooling tasks
 are omitted from new non-claiming role polls; available peers continue. Recheck
-eligibility within five minutes, but do not Slack-post heartbeat or retry ticks.
-Post one concise project-channel `availability` event only when entering
-cooldown or successfully returning.
+eligibility within five minutes, but do not emit heartbeat or retry ticks to an
+external chat surface from this repo's local runtime. If an external operator
+gateway mirrors availability transitions, limit it to one concise cooldown or
+return event.
 
 A claim stays protected during its warning and takeover windows. Staleness is
 not takeover authority: takeover additionally requires affirmative evidence of
@@ -227,9 +229,9 @@ second read and do not run a separate dry-run.
    retries are exhausted, it leaves the `merger:` claim in place and posts
    `## Human intervention required` with the command, exit code, SHAs,
    preserved artifacts, attempted remediation, and operator action to the PR
-   and every linked issue. Verify that evidence, notify Slack with `--event
-   hitl`, and stop; never repeat the retry policy outside the helper or report
-   success.
+   and every linked issue. Verify that evidence, surface the same state in the
+   task's stdout/status output, and stop; never repeat the retry policy outside
+   the helper or report success.
 
 Any factory agent, including the implementation author, may perform this
 mechanical merge once the assigned exact-current-head review-pool oracle and
@@ -408,49 +410,23 @@ Waiting Reason: <CONCISE_EXPLANATION_OF_WAIT_STATE>
 - **Waiting States Only**: Emit on wait or heartbeat boundaries, not on every active loop iteration or progress step.
 - **Zero Extra Dependencies**: Assemble only from the current picker result. If a field is absent, mark it unavailable; never make a second GitHub call merely to enrich the card.
 
-**Slack control-room alerts (GitHub first).** When work is blocked, waiting on
-another agent, or needs HITL, post the same facts to the linked GitHub issue or
-PR, then notify Slack. Never post heartbeats, diffs, prompts, tokens, or test
-logs. Deduplication is built into the helper — do not re-spam on every loop
-tick. Slack downtime must not stop the GitHub loop.
+**Blocked / waiting / HITL reporting (GitHub first).** When work is blocked,
+waiting on another agent, or needs HITL, post the same facts to the linked
+GitHub issue or PR and surface the state in stdout/status output. Never post
+heartbeats, diffs, prompts, tokens, or test logs to any external channel from
+this repo's local runtime.
 
-Before invoking the helper, write the concise secret-safe summary or decision
-to an operator-owned `0600` file using a non-shell file-writing mechanism. Set
-`ARU_ALERT_TEXT_FILE` or `ARU_ALERT_DECISION_FILE` to that path; alert contents
-must never be interpolated into a shell command.
-
-```bash
-# blocked — unresolved depends-on, missing product decision, merge/close-out stuck
-# --project-id is optional: omit it to resolve the binding from --repo-dir.
-python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
-  --project-id <PROJECT_ID> \
-  --agent <AGENT_ID> --family <FAMILY> \
-  --event blocked --repo <OWNER/REPO> --issue <N> \
-  --repo-dir . \
-  --text-file "$ARU_ALERT_TEXT_FILE"
-
-# waiting-on — peer holds a claim, review slot, or overlapping touches path
-python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
-  --project-id <PROJECT_ID> \
-  --agent <AGENT_ID> --family <FAMILY> \
-  --event waiting-on --repo <OWNER/REPO> --issue <N> \
-  --waiting-on-agent <PEER_ID> --waiting-on-issue <PEER_ISSUE> \
-  --repo-dir . \
-  --text-file "$ARU_ALERT_TEXT_FILE"
-
-# hitl — severe merge/close-out failure, exhausted credits, or unresolvable decision
-python3 "$ARU_SDLC_HOME/scripts/slack_notify.py" \
-  --project-id <PROJECT_ID> \
-  --agent <AGENT_ID> --family <FAMILY> \
-  --event hitl --repo <OWNER/REPO> --issue <N> --pr <PR> \
-  --repo-dir . \
-  --decision-file "$ARU_ALERT_DECISION_FILE"
-```
+**Slack control-room alerts remain historical only.** If an external operator
+gateway mirrors those GitHub facts into Slack or Hermes, that routing is
+outside this prompt's supported command surface. Do not invent local Slack
+commands, files, or retries here. The deleted in-repo Slack runtime and helper
+scripts are not available to execute. Slack or gateway downtime must not stop
+the GitHub loop.
 
 For CI remediation that cannot proceed (missing secret, external outage) and
 for `merge_pr.py` exit paths that leave close-out incomplete after retries,
-use `blocked` or `hitl` the same way — comment on the PR, then notify. Do not
-steal another agent's claim when posting `waiting-on`.
+use the same GitHub-first reporting path. Do not steal another agent's claim
+when recording `waiting-on`.
 
 Context running short is a recovery event, not a stop condition. Preserve the
 truth in GitHub, the branch, and the worktree; let the desktop product compact
@@ -465,40 +441,35 @@ End the loop intentionally only when:
   the issue: for example an unsettled schema, external contract, money
   semantics, security posture, approval boundary, or a severe merge/close-out
   failure agents cannot resolve safely. Record the options and exact question
-  on the issue, then post a `hitl` Slack alert as above. Agents still stop;
-  Slack does not replace that stop.
+  on the issue, surface the need in stdout/status output, and stop. Any
+  external operator routing does not replace that stop.
 - Continuing would require breaking a hard governance or safety rule. State
   the rule and the human action required.
 
 A vendor-enforced task termination, app quit, logout, exhausted credits,
 machine sleep, or power-off may physically stop execution. Report those as
 platform limits if observed; instructions cannot honestly override them.
-When credits are exhausted, post `hitl` once (deduped) before the platform
-stops the task.
+When credits are exhausted, record the condition once on GitHub when possible
+and surface it in stdout/status output before the platform stops the task.
 
 If the product cannot wake this same task, it remains unavailable after a
 termination until the operator explicitly reopens it. A new scheduled session
 may recover from GitHub, but it is not evidence that the original task resumed.
 
-### Slack epic splits
+### Epic splits
 
-Brainstorm an epic split in Slack only when the slices are not already obvious.
-A Slack thread, including a thumbs-up, is never a claim, a `depends-on`
-resolution, or merge authority. Turn agreed slices into GitHub issues with:
+Brainstorm an epic split only when the slices are not already obvious. Any
+external chat thread is discussion, not a claim, a `depends-on` resolution, or
+merge authority.
 
-```bash
-python3 "$ARU_SDLC_HOME/scripts/slack_control_room.py" file-split \
-  --epic <N> --from-file <0600-json> --repo-dir "$PWD" [--dry-run] [--thread-ts <ts>]
-```
-
+Turn agreed slices into GitHub issues through the normal issue-creation path.
 Every child must declare the full metadata contract: `depends-on` for sibling
 or prerequisite issues — **never** the still-open parent epic, which deadlocks
-the picker — plus `touches` (the paths it will write, no wider) and
-`parallel-eligible`. Children link the parent with `Epic: #<N>`, not
-`depends-on: #<N>`. A child whose `depends-on` is still open is filed to
-Backlog, not Ready. Then pick work only through `fetch_next_work.py`. If the epic lacks a product
-decision required to write acceptance criteria, `@` the operator (`hitl`) and
-stop.
+the picker — plus `touches` and `parallel-eligible`. Children link the parent
+with `Epic: #<N>`, not `depends-on: #<N>`. A child whose `depends-on` is still
+open is filed to Backlog, not Ready. Then pick work only through
+`fetch_next_work.py`. If the epic lacks a product decision required to write
+acceptance criteria, record the decision needed on GitHub and stop.
 
 ### Final report (only on intentional stop/intervention)
 
