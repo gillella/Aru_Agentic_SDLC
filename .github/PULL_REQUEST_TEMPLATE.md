@@ -1,25 +1,24 @@
-## Summary of Changes
-<!-- Provide a concise summary of the changes introduced by this pull request. -->
+## Summary
 
-Closes #<!-- ISSUE_NUMBER -->
+Closes #<!-- issue -->
 
-## Type of Change
-- [ ] 🚀 Feature (`feat`)
-- [ ] 🐛 Bug Fix (`fix`)
-- [ ] 📚 Documentation (`docs`)
-- [ ] 🔧 Refactoring / Chore (`refactor` / `chore`)
-- [ ] 🧪 Tests (`test`)
+## Verification
 
-## Implementation Details
-- <!-- List key technical changes, files modified, and logic updates -->
+- [ ] Focused local tests pass.
+- [ ] Current-head CI passes.
+- [ ] Assigned external review is complete.
+- [ ] All findings are resolved.
 
-## Dependencies & Blockers
-- <!-- List any dependent PRs or prerequisite issues (e.g., depends-on: #X) -->
+## Net surface change
 
-## Verification & Testing
-- [ ] Local unit / integration tests executed and passing.
-- [ ] Syntax and linter checks pass without errors.
-- [ ] Manual verification completed.
+- Production LOC:
+- Test LOC:
+- Active docs:
+- Supported commands:
+- Runtime skills:
+- Persistent state stores:
 
-## Screenshots / Evidence (if applicable)
-<!-- Attach screenshots or terminal outputs if relevant -->
+## Simpler alternative
+
+Explain why deletion, documentation, GitHub, Git, or an existing command was
+not sufficient for any net-new component.

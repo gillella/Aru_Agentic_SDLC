@@ -1,167 +1,91 @@
 #!/usr/bin/env python3
-"""
-check_ci.py - Checks and polls automated CI pipeline status for a PR or active branch.
-"""
+"""Read exact-current-head CI state for one pull request."""
+
+from __future__ import annotations
 
 import argparse
-import sys
 import time
-from common import get_current_branch, get_repo_slug, run_gh_json
+
+from common import KernelError, REVIEW_SERVICES, gh_json, json_print
 
 
-FAILED_STATES = {
-    "FAILURE", "FAILED", "ERROR", "CANCELLED", "TIMED_OUT",
-    "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE",
-}
-PENDING_STATES = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
-PASSING_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+def check_name(record: dict) -> str:
+    name = record.get("name") or record.get("context")
+    if not isinstance(name, str) or not name:
+        raise KernelError("CI returned a nameless check")
+    return name
 
 
-def _pull_head(target: str) -> str | None:
-    """Resolve a PR head through REST without touching GraphQL quota."""
-    slug = get_repo_slug()
-    if not slug or "/" not in slug:
-        return None
-    if target.isdigit():
-        payload = run_gh_json(["gh", "api", f"repos/{slug}/pulls/{target}"])
+def is_review_check(name: str) -> bool:
+    normalized = name.lower().replace(" ", "").replace("-", "")
+    return any(service in normalized for service in REVIEW_SERVICES)
+
+
+def check_state(record: dict) -> str:
+    status = str(record.get("status") or "").upper()
+    conclusion = str(record.get("conclusion") or record.get("state") or "").upper()
+    if status and status != "COMPLETED":
+        return "pending"
+    if conclusion in {"PENDING", "EXPECTED", ""}:
+        return "pending"
+    if conclusion in {"SUCCESS", "NEUTRAL"}:
+        return "success"
+    return "failure"
+
+
+def ci_verdict(number: int) -> dict[str, object]:
+    pr = gh_json(["pr", "view", str(number), "--json", "number,headRefOid,statusCheckRollup"])
+    head = pr.get("headRefOid")
+    rollup = pr.get("statusCheckRollup")
+    if not isinstance(head, str) or len(head) != 40 or not isinstance(rollup, list):
+        raise KernelError("CI state is incomplete")
+    checks = [
+        {"name": check_name(record), "state": check_state(record)}
+        for record in rollup
+        if isinstance(record, dict) and not is_review_check(check_name(record))
+    ]
+    if not checks:
+        state = "pending"
+    elif any(check["state"] == "failure" for check in checks):
+        state = "failure"
+    elif any(check["state"] == "pending" for check in checks):
+        state = "pending"
     else:
-        owner = slug.split("/", 1)[0]
-        head_filter = target if ":" in target else f"{owner}:{target}"
-        rows = run_gh_json([
-            "gh", "api", "--method", "GET", f"repos/{slug}/pulls",
-            "-f", "state=open", "-f", f"head={head_filter}", "-f", "per_page=100",
-        ])
-        if not rows and ":" not in target:
-            all_open = run_gh_json([
-                "gh", "api", "--method", "GET", f"repos/{slug}/pulls",
-                "-f", "state=open", "-f", "per_page=100",
-            ])
-            if isinstance(all_open, list):
-                matching = [
-                    p for p in all_open
-                    if isinstance(p, dict)
-                    and isinstance(p.get("head"), dict)
-                    and p["head"].get("ref") == target
-                ]
-                rows = matching
-        payload = rows[0] if isinstance(rows, list) and len(rows) == 1 else None
-    head = (payload or {}).get("head") if isinstance(payload, dict) else None
-    sha = (head or {}).get("sha") if isinstance(head, dict) else None
-    return sha if isinstance(sha, str) and sha else None
+        state = "success"
+    return {"pr": number, "head": head, "state": state, "checks": checks}
 
 
-def _ci_contexts(head_sha: str) -> list[dict] | None:
-    """Return check-run and commit-status contexts from their REST endpoints."""
-    slug = get_repo_slug()
-    if not slug:
-        return None
-    checks = run_gh_json([
-        "gh", "api", f"repos/{slug}/commits/{head_sha}/check-runs?per_page=100",
-    ])
-    statuses = run_gh_json([
-        "gh", "api", f"repos/{slug}/commits/{head_sha}/status?per_page=100",
-    ])
-    if not isinstance(checks, dict) or not isinstance(statuses, dict):
-        return None
-    check_runs = checks.get("check_runs")
-    status_rows = statuses.get("statuses")
-    check_total = checks.get("total_count")
-    status_total = statuses.get("total_count")
-    if (
-        not isinstance(check_runs, list)
-        or not isinstance(status_rows, list)
-        or type(check_total) is not int
-        or type(status_total) is not int
-        or check_total != len(check_runs)
-        or status_total != len(status_rows)
-    ):
-        # More than 100 checks is uncommon; silently truncating would let a
-        # failure on the next page disappear from the merge gate.
-        return None
-    contexts: list[dict] = []
-    for check in check_runs:
-        if not isinstance(check, dict) or not isinstance(check.get("name"), str):
-            return None
-        status = str(check.get("status") or "").upper()
-        state = str(check.get("conclusion") or status).upper()
-        contexts.append({"name": check["name"], "state": state})
-    for status in status_rows:
-        if not isinstance(status, dict) or not isinstance(status.get("context"), str):
-            return None
-        contexts.append({
-            "name": status["context"],
-            "state": str(status.get("state") or "").upper(),
-        })
-    return contexts
-
-
-def check_ci_status(pr_id: int = None, wait: bool = False, poll_interval: int = 15, timeout: int = 300) -> bool:
-    target = str(pr_id) if pr_id else get_current_branch()
-    print(f"Checking CI status for target '{target}'...")
-
-    head_sha = _pull_head(target)
-    if not head_sha:
-        print("[ERROR] Could not resolve the pull request head through GitHub REST.", file=sys.stderr)
-        return False
-
-    start_time = time.time()
-    interval = max(1, poll_interval)
+def wait_for_ci(number: int, timeout: int, interval: int) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
     while True:
-        checks = _ci_contexts(head_sha)
-        if checks is None:
-            print("[ERROR] Could not read a complete CI status snapshot.", file=sys.stderr)
-            return False
-
-        failing = [c for c in checks if c.get("state") in FAILED_STATES]
-        pending = [c for c in checks if c.get("state") in PENDING_STATES]
-        unknown = [
-            c for c in checks
-            if c.get("state") not in FAILED_STATES | PENDING_STATES | PASSING_STATES
-        ]
-
-        if failing:
-            print(f"❌ CI Check Failures Detected ({len(failing)} failed):", file=sys.stderr)
-            for f in failing:
-                print(f"  - {f.get('name')}: {f.get('state')}", file=sys.stderr)
-            return False
-
-        if unknown:
-            print("[ERROR] CI returned an unknown or incomplete state:", file=sys.stderr)
-            for item in unknown:
-                print(f"  - {item.get('name')}: {item.get('state') or '<missing>'}", file=sys.stderr)
-            return False
-
-        if checks and not pending:
-            print("✅ All CI pipeline checks passed successfully.")
-            return True
-
-        elapsed = time.time() - start_time
-        if not wait:
-            label = "not started" if not checks else f"still pending ({len(pending)} in progress)"
-            print(f"⏳ CI checks {label}.")
-            return False
-        if elapsed >= timeout:
-            print("❌ Timed out before CI produced a complete passing result.", file=sys.stderr)
-            return False
-
-        pending_label = len(pending) if checks else 0
-        sleep_for = min(interval, max(0, timeout - elapsed))
-        print(f"⏳ Waiting for CI checks to complete ({pending_label} pending)... sleeping {sleep_for:.0f}s")
-        time.sleep(sleep_for)
-        # CI normally takes minutes.  Backing off caps a five-minute wait at
-        # roughly eight REST snapshots instead of twenty-one GraphQL polls.
-        interval = min(60, interval * 2)
+        result = ci_verdict(number)
+        if result["state"] != "pending" or time.monotonic() >= deadline:
+            return result
+        time.sleep(interval)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Check CI pipeline status.")
-    parser.add_argument("--pr", type=int, default=None, help="PR Number (or checks current branch)")
-    parser.add_argument("--wait", action="store_true", help="Poll until checks complete")
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pr", type=int, required=True)
+    parser.add_argument("--wait", action="store_true")
+    parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--interval", type=int, default=15)
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-
-    success = check_ci_status(args.pr, args.wait)
-    sys.exit(0 if success else 1)
+    try:
+        result = (
+            wait_for_ci(args.pr, args.timeout, args.interval)
+            if args.wait
+            else ci_verdict(args.pr)
+        )
+    except KernelError as exc:
+        parser.error(str(exc))
+    if args.json:
+        json_print(result)
+    else:
+        print(f"PR #{args.pr} {result['head']}: {result['state']}")
+    return 0 if result["state"] == "success" else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,110 +1,16 @@
 [tool.ruff]
-# Matches the interpreter CI installs. Without it ruff infers a target from
-# the environment it happens to run in, so a local run and a CI run can
-# disagree about which syntax is modern.
 target-version = "py311"
+line-length = 100
 
 [tool.ruff.lint]
-# Selected explicitly rather than inherited. Ruff's default rule set widens
-# between releases - 0.16.2 reports 140 findings here on defaults, mostly
-# annotation modernisation - so a repository that relies on the default is
-# pinned to a tool version rather than to a policy. Naming the rules means an
-# upgrade changes findings only when we decide it should.
-#
-#   E4  import placement      E7  likely mistakes (ambiguous names, comparisons)
-#   E9  syntax and IO errors  F   pyflakes: undefined names, unused imports
-#   C901 cyclomatic complexity (>12)
-#   PLR0912 too many branches (>12)
-#   PLR0915 too many statements (>50)
-#
-# This is the correctness and complexity core, not a style opinion. Formatting
-# rules are deliberately absent: the repository has no formatter, and enabling
-# E501 would add 305 findings that say nothing about whether the code works.
-select = [
-    "E4",
-    "E7",
-    "E9",
-    "F",
-    "C901",
-    "PLR0912",
-    "PLR0915",
-]
+select = ["E4", "E7", "E9", "F", "C901", "PLR0912", "PLR0915"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 12
 
 [tool.ruff.lint.per-file-ignores]
-# Every test module puts scripts/ or hooks/ on sys.path before importing the
-# module under test. The import cannot precede the path setup, so E402 is
-# wrong here by construction rather than by neglect. Test suites also
-# legitimately contain extensive scenarios and assertions, so complexity
-# checks are suppressed for test fixtures and assertions.
 "tests/*" = ["E402", "C901", "PLR0912", "PLR0915"]
 
-[tool.importlinter]
-root_packages = [
-    "hooks",
-    "scripts",
-]
-include_external_packages = true
-
-[[tool.importlinter.contracts]]
-name = "Contract 1: hooks must not import skills or templates"
-type = "forbidden"
-source_modules = [
-    "hooks",
-]
-forbidden_modules = [
-    "skills",
-    "templates",
-]
-
-[[tool.importlinter.contracts]]
-name = "Contract 2: hooks must not import scripts or common"
-type = "forbidden"
-source_modules = [
-    "hooks",
-]
-forbidden_modules = [
-    "scripts",
-    "common",
-]
-
-[[tool.importlinter.contracts]]
-name = "Contract 3: governance primitives (common.py) cannot import workflow scripts"
-type = "forbidden"
-source_modules = [
-    "scripts.common",
-]
-forbidden_modules = [
-    "scripts.acceptance_runner",
-    "scripts.agent_presence",
-    "scripts.check_ci",
-    "scripts.check_docs",
-    "scripts.claim_issue",
-    "scripts.cleanup_worktrees",
-    "scripts.create_branch",
-    "scripts.create_pr",
-    "scripts.doctor_local_agent_integrations",
-    "scripts.enable_main_ruleset",
-    "scripts.factory_metrics",
-    "scripts.fetch_next_issue",
-    "scripts.fetch_next_work",
-    "scripts.fetch_pr_feedback",
-    "scripts.fixtures",
-    "scripts.fleet_status",
-    "scripts.init_project",
-    "scripts.merge_pr",
-    "scripts.prd_to_issues",
-    "scripts.prune_codebase",
-    "scripts.release",
-    "scripts.revert_merge",
-    "scripts.run_fleet",
-    "scripts.slack_control_room",
-    "scripts.slack_notify",
-    "scripts.slack_projects",
-    "scripts.spawn_ephemeral_worker",
-    "scripts.sync_spec",
-    "scripts.triage_backlog",
-    "scripts.update_issue_status",
-]
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

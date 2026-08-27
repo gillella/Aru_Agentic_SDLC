@@ -1,0 +1,18 @@
+name: Governed task
+description: Work admitted to the Aru lifecycle
+labels: ["status:backlog"]
+body:
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      value: "- [ ] Observable acceptance condition"
+    validations:
+      required: true
+  - type: input
+    id: touches
+    attributes:
+      label: "touches:"
+      description: Comma-separated repository-relative paths
+    validations:
+      required: true
