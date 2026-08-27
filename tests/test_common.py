@@ -185,3 +185,24 @@ def test_unchecked_subprocess_error_also_redacts_token_values(monkeypatch):
     result = common.run(["git", "status"], check=False)
     assert secret not in result.stderr
     assert "[REDACTED]" in result.stderr
+
+
+def test_successful_subprocess_also_redacts_token_values(monkeypatch):
+    secret = "ghs_success-output-must-never-appear"
+    monkeypatch.setenv("GH_TOKEN", secret)
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f'{{"token":"{secret}"}}',
+            stderr=f"warning includes {secret}",
+        )
+
+    monkeypatch.setattr(common.subprocess, "run", fake_run)
+
+    result = common.run(["gh", "api", "repos/owner/repo"])
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    assert "[REDACTED]" in result.stdout
+    assert "[REDACTED]" in result.stderr

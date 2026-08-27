@@ -122,13 +122,12 @@ def run(
         capture_output=True,
         check=False,
     )
-    if result.returncode:
-        result = subprocess.CompletedProcess(
-            result.args,
-            result.returncode,
-            _redact_diagnostic(result.stdout or ""),
-            _redact_diagnostic(result.stderr or ""),
-        )
+    result = subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        _redact_diagnostic(result.stdout or ""),
+        _redact_diagnostic(result.stderr or ""),
+    )
     if check and result.returncode:
         detail = (result.stderr or result.stdout or "command failed").strip()
         raise KernelError(f"{command[0]} failed: {detail}")
