@@ -51,9 +51,23 @@ def select(agent: str) -> dict[str, object]:
             return {"type": "merge", "pr": number, "head": ci["head"]}
         return {"type": "wait", "pr": number, "head": ci["head"], "ci": ci["state"]}
 
-    ready = sorted(list_issues(label="status:ready"), key=lambda item: int(item["number"]))
+    priorities = {f"priority:p{value}": value for value in range(4)}
+    ready: list[tuple[int, int, dict]] = []
+    for record in list_issues(label="status:ready"):
+        labels = label_names(record)
+        if "needs-human" in labels or "type:epic" in labels:
+            continue
+        priority_labels = [name for name in labels if name in priorities]
+        if len(priority_labels) != 1:
+            raise KernelError(
+                f"Ready issue #{record['number']} must have exactly one "
+                f"priority:p0..p3 label; found {len(priority_labels)}"
+            )
+        number = int(record["number"])
+        ready.append((priorities[priority_labels[0]], number, record))
+    ready.sort(key=lambda item: (item[0], item[1]))
     if ready:
-        record = ready[0]
+        record = ready[0][2]
         return {"type": "issue", "issue": int(record["number"]), "title": record["title"]}
     return {"type": "idle"}
 
