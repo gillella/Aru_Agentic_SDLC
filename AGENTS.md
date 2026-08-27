@@ -59,11 +59,15 @@ governed authority-label transition starts a new 15-minute pending window.
 
 Before fallback, smoke-test actual capacity in `claude-code`, `openai-codex`,
 `xai-cursor`, `google-antigravity` order, excluding the author identity and
-preferring a different model family. Claude selection probes all three
-`claude-sub` subscriptions. A candidate also requires one explicit
+preferring a different model family. Claude selection probes every configured
+`claude-sub` subscription. A candidate also requires one explicit
 `reviewer-binding:<identity>=<github-login>` registration whose actor differs
-from the PR author. If no bound distinct reviewer responds exactly `OK`, keep
-the existing authority and fail closed.
+from the PR author. `ARU_CODING_REVIEWERS` is the local allowlist using
+`family:identity` entries and `claude-code:identity@subscription` for each
+Claude subscription. Only configured identities are probed; subscription
+additions and removals are configuration changes. Missing, malformed,
+duplicate, or unbound configuration, or no distinct reviewer responding
+exactly `OK`, keeps the existing authority and fails closed.
 
 If an assigned coding reviewer later returns an explicit unavailable/error
 state or aborts without a verdict, use `create_pr.py --refresh-reviewer <PR>

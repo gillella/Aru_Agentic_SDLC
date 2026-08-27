@@ -27,6 +27,7 @@ CODING_REVIEWERS = (
     "xai-cursor",
     "google-antigravity",
 )
+REVIEWER_CONFIG_ENV = "ARU_CODING_REVIEWERS"
 REVIEW_AUTHORITIES = EXTERNAL_REVIEWERS + CODING_REVIEWERS
 # Compatibility name for the external-service evidence paths.
 REVIEW_SERVICES = EXTERNAL_REVIEWERS
@@ -45,6 +46,71 @@ _REPOSITORY_COMMANDS = {"api", "issue", "label", "pr", "repo"}
 
 class KernelError(RuntimeError):
     """A fail-closed authority or command error."""
+
+
+def configured_coding_reviewers(
+    value: str | None = None,
+) -> dict[str, tuple[tuple[str, str | None], ...]]:
+    raw = os.environ.get(REVIEWER_CONFIG_ENV, "") if value is None else value
+    if not raw.strip():
+        raise KernelError(f"{REVIEWER_CONFIG_ENV} is missing")
+    configured: dict[str, list[tuple[str, str | None]]] = {}
+    identities: set[str] = set()
+    subscriptions: set[str] = set()
+    for entry in raw.split(","):
+        family, separator, candidate = entry.strip().partition(":")
+        identity, marker, subscription = candidate.partition("@")
+        if (
+            not separator
+            or family not in CODING_REVIEWERS
+            or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", identity)
+            or identity in identities
+        ):
+            raise KernelError(f"{REVIEWER_CONFIG_ENV} is malformed or ambiguous")
+        if family == "claude-code":
+            if not marker or not re.fullmatch(r"[1-9][0-9]*", subscription):
+                raise KernelError(f"{REVIEWER_CONFIG_ENV} Claude subscription is malformed")
+            if subscription in subscriptions:
+                raise KernelError(f"{REVIEWER_CONFIG_ENV} repeats a Claude subscription")
+            subscriptions.add(subscription)
+        elif marker or configured.get(family):
+            raise KernelError(f"{REVIEWER_CONFIG_ENV} non-Claude reviewer is ambiguous")
+        identities.add(identity)
+        configured.setdefault(family, []).append((identity, subscription or None))
+    return {family: tuple(candidates) for family, candidates in configured.items()}
+
+
+def configured_reviewer_family(identity: str) -> str | None:
+    if not os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
+        return None
+    for family, candidates in configured_coding_reviewers().items():
+        if any(candidate == identity for candidate, _subscription in candidates):
+            return family
+    return None
+
+
+def normalized_identity(value: str) -> str:
+    identity = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    if not identity:
+        raise KernelError("review identity is empty")
+    return identity[:80]
+
+
+def agent_family(identity: str) -> str:
+    value = normalized_identity(identity)
+    configured = configured_reviewer_family(value)
+    if configured:
+        return configured
+    aliases = {
+        "claude-code": ("claude",),
+        "openai-codex": ("codex", "openai"),
+        "xai-cursor": ("cursor", "xai"),
+        "google-antigravity": ("antigravity", "google", "agy"),
+    }
+    for family, needles in aliases.items():
+        if any(needle in value for needle in needles):
+            return family
+    return "human-or-other"
 
 
 def _graphql_query(args: list[str]) -> str:

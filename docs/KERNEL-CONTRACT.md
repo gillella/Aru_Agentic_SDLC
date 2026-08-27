@@ -55,9 +55,14 @@ each governed authority transition receives a fresh 15-minute pending window.
 Fallback probes actual capacity in Claude Code, OpenAI Codex, xAI Cursor,
 Google Antigravity order. Every candidate must have one explicit
 `reviewer-binding:<identity>=<github-login>` whose authenticated actor differs
-from the PR author. All three Claude subscriptions are tested. The author
-identity is excluded and another model family is preferred. No successful,
-bound, distinct probe leaves the prior authority unchanged and blocks progress.
+from the PR author. `ARU_CODING_REVIEWERS` declares the machine-local pool as
+comma-separated `family:identity` entries; Claude entries use
+`claude-code:identity@subscription`. Every configured Claude subscription is
+tested and successful bound subscriptions rotate deterministically. The author
+identity is excluded and another model family is preferred. Missing,
+malformed, duplicate, or unbound configuration, or no successful distinct
+probe, leaves the prior authority unchanged and blocks progress. Subscription
+membership is configuration, so changing it does not require a code change.
 An explicitly unavailable or aborted assigned coding reviewer may recover to
 the first registered external authority only through the audited refresh
 command; hand-editing authority labels is not a state transition.

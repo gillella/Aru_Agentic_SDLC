@@ -25,6 +25,8 @@ from common import (
     REVIEW_AUTHORITIES,
     REVIEW_PREFIX,
     KernelError,
+    agent_family,
+    configured_coding_reviewers,
     ensure_label,
     gh_json,
     gh_paginated,
@@ -32,6 +34,7 @@ from common import (
     issue,
     json_print,
     label_names,
+    normalized_identity,
     repo_slug,
     run,
     set_status,
@@ -57,27 +60,6 @@ UNAVAILABLE_RE = re.compile(
     re.IGNORECASE,
 )
 ProbeRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
-
-
-def normalized_identity(value: str) -> str:
-    identity = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
-    if not identity:
-        raise KernelError("review identity is empty")
-    return identity[:80]
-
-
-def agent_family(identity: str) -> str:
-    value = normalized_identity(identity)
-    aliases = {
-        "claude-code": ("claude",),
-        "openai-codex": ("codex", "openai"),
-        "xai-cursor": ("cursor", "xai"),
-        "google-antigravity": ("antigravity", "google", "agy"),
-    }
-    for family, needles in aliases.items():
-        if any(needle in value for needle in needles):
-            return family
-    return "human-or-other"
 
 
 def current_branch() -> str:
@@ -199,38 +181,44 @@ def probe_coding_reviewer(
     author_identity = normalized_identity(author_identity)
     author_actor = author_actor.lower()
     actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
+    configured = configured_coding_reviewers()
     family_order = [family for family in CODING_REVIEWERS if family != author_family]
     if author_family in CODING_REVIEWERS:
         family_order.append(author_family)
 
     for family in family_order:
+        candidates = configured.get(family, ())
         if family == "claude-code":
             executable = str(Path.home() / ".local" / "bin" / "claude-sub")
-            identities: list[str] = []
-            for subscription in (1, 2, 3):
+            available: list[tuple[str, str]] = []
+            for identity, subscription in candidates:
                 result = runner([executable, str(subscription), "-p", PROBE_PROMPT])
-                if _probe_ok(result):
-                    identities.append(f"claude-code-sub-{subscription}")
-            identities = [value for value in identities if value != author_identity]
-            identities = [
-                value
-                for value in identities
-                if value in actors and actors[value].lower() != author_actor
-            ]
-            if identities:
-                identity = identities[rotation_key % len(identities)]
-                return family, identity, actors[identity].lower()
+                actor = str(actors.get(identity) or "").lower()
+                if (
+                    _probe_ok(result)
+                    and identity != author_identity
+                    and actor
+                    and actor != author_actor
+                ):
+                    available.append((identity, actor))
+            if available:
+                identity, actor = available[rotation_key % len(available)]
+                return family, identity, actor
             continue
 
+        if not candidates:
+            continue
+        identity, _subscription = candidates[0]
+        actor = str(actors.get(identity) or "").lower()
+        if identity == author_identity or not actor or actor == author_actor:
+            continue
         command_names = {
             "openai-codex": "codex",
             "xai-cursor": "cursor-agent",
             "google-antigravity": "agy",
         }
-        identity = family
         executable = _command(command_names[family])
-        actor = str(actors.get(identity) or "").lower()
-        if identity == author_identity or not actor or actor == author_actor or executable is None:
+        if executable is None:
             continue
         arguments = {
             "openai-codex": [executable, "exec", "--skip-git-repo-check", PROBE_PROMPT],

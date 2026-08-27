@@ -19,7 +19,11 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    `create_pr.py --refresh-reviewer <PR>`; it smoke-tests capacity and may assign
    a coding agent other than the author. Only
    `reviewer-registered:<service>` external providers and coding identities with
-   `reviewer-binding:<identity>=<github-login>` are eligible.
+   `reviewer-binding:<identity>=<github-login>` are eligible. Before coding
+   fallback, require a strict local `ARU_CODING_REVIEWERS` allowlist using
+   `family:identity` and `claude-code:identity@subscription` entries. Missing,
+   malformed, duplicate, or unbound configuration fails closed; subscriptions
+   may be added or removed without changing code.
 10. If feedback exists, use the feedback skill. If CI fails, use the CI skill.
 
 A coding agent may review another agent's code. Never authoritatively review

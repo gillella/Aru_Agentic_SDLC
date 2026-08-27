@@ -9,6 +9,15 @@ import create_branch
 import create_pr
 
 
+@pytest.fixture(autouse=True)
+def configured_reviewers(monkeypatch):
+    monkeypatch.setenv(
+        "ARU_CODING_REVIEWERS",
+        "claude-code:m1@1,claude-code:m2@2,claude-code:m3@3,"
+        "openai-codex:mo,xai-cursor:mx,google-antigravity:mg",
+    )
+
+
 def result(argv, *, ok=True, output="OK"):
     return subprocess.CompletedProcess(argv, 0 if ok else 1, output if ok else "", "")
 
@@ -114,13 +123,13 @@ def test_immediate_external_unavailability_assigns_smoke_tested_agent(monkeypatc
         "author-login",
         external_states=external_states(),
         reviewer_actors={
-            "claude-code-sub-1": "claude-reviewer-1",
-            "claude-code-sub-2": "claude-reviewer-2",
-            "claude-code-sub-3": "claude-reviewer-3",
+            "m1": "claude-reviewer-1",
+            "m2": "claude-reviewer-2",
+            "m3": "claude-reviewer-3",
         },
         probe_runner=probe,
     )
-    assert reviewer == ("claude-code", "claude-code-sub-2", "claude-reviewer-2")
+    assert reviewer == ("claude-code", "m2", "claude-reviewer-2")
     assert [call[1] for call in calls] == ["1", "2", "3"]
     assert all(call[-1] == "Reply exactly OK" for call in calls)
 
@@ -134,14 +143,14 @@ def test_author_family_is_deprioritized_and_author_identity_excluded(monkeypatch
         return result(argv)
 
     reviewer = create_pr.probe_coding_reviewer(
-        author_identity="claude-code-sub-1",
+        author_identity="m1",
         author_family="claude-code",
         author_actor="author-login",
         rotation_key=1,
-        reviewer_actors={"openai-codex": "codex-reviewer"},
+        reviewer_actors={"mo": "codex-reviewer"},
         runner=probe,
     )
-    assert reviewer == ("openai-codex", "openai-codex", "codex-reviewer")
+    assert reviewer == ("openai-codex", "mo", "codex-reviewer")
     assert calls[0][0] == "/bin/codex"
 
 
@@ -409,14 +418,122 @@ def test_no_external_or_coding_reviewer_fails_closed(monkeypatch):
             "author-login",
             external_states=external_states(),
             reviewer_actors={
-                "claude-code-sub-1": "claude-reviewer-1",
-                "claude-code-sub-2": "claude-reviewer-2",
-                "claude-code-sub-3": "claude-reviewer-3",
-                "xai-cursor": "cursor-reviewer",
-                "google-antigravity": "google-reviewer",
+                "m1": "claude-reviewer-1",
+                "m2": "claude-reviewer-2",
+                "m3": "claude-reviewer-3",
+                "mx": "cursor-reviewer",
+                "mg": "google-reviewer",
             },
             probe_runner=lambda argv: result(argv, ok=False),
         )
+
+
+@pytest.mark.parametrize(
+    ("identity", "family"),
+    [
+        ("m1", "claude-code"),
+        ("m2", "claude-code"),
+        ("m3", "claude-code"),
+        ("mo", "openai-codex"),
+        ("mx", "xai-cursor"),
+        ("mg", "google-antigravity"),
+        ("n1", "claude-code"),
+        ("n2", "claude-code"),
+        ("n3", "claude-code"),
+        ("no", "openai-codex"),
+        ("nx", "xai-cursor"),
+        ("ng", "google-antigravity"),
+    ],
+)
+def test_configured_agent_identities_map_to_model_family(monkeypatch, identity, family):
+    if identity.startswith("n"):
+        monkeypatch.setenv(
+            "ARU_CODING_REVIEWERS",
+            "claude-code:n1@1,claude-code:n2@2,claude-code:n3@3,"
+            "openai-codex:no,xai-cursor:nx,google-antigravity:ng",
+        )
+    assert create_pr.agent_family(identity) == family
+
+
+def test_mac_mini_uses_only_its_local_reviewer_pool(monkeypatch):
+    monkeypatch.setenv(
+        "ARU_CODING_REVIEWERS",
+        "claude-code:n1@1,claude-code:n2@2,claude-code:n3@3,"
+        "openai-codex:no,xai-cursor:nx,google-antigravity:ng",
+    )
+    monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")
+    reviewer = create_pr.probe_coding_reviewer(
+        author_identity="n1",
+        author_family="claude-code",
+        author_actor="author-login",
+        rotation_key=0,
+        reviewer_actors={"mo": "wrong-host", "no": "mini-codex"},
+        runner=lambda argv: result(argv),
+    )
+    assert reviewer == ("openai-codex", "no", "mini-codex")
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        None,
+        "",
+        "claude-code",
+        "claude-code:m1",
+        "claude-code:m1@1,claude-code:m2@1",
+        "openai-codex:mo@1",
+        "openai-codex:mo,openai-codex:mx",
+    ],
+)
+def test_missing_or_malformed_reviewer_configuration_fails_closed(
+    monkeypatch, configuration
+):
+    if configuration is None:
+        monkeypatch.delenv("ARU_CODING_REVIEWERS", raising=False)
+    else:
+        monkeypatch.setenv("ARU_CODING_REVIEWERS", configuration)
+    with pytest.raises(create_pr.KernelError, match="ARU_CODING_REVIEWERS"):
+        create_pr.probe_coding_reviewer(
+            author_identity="author",
+            author_family="human-or-other",
+            author_actor="author-login",
+            rotation_key=0,
+            reviewer_actors={"m1": "review-bot"},
+            runner=lambda argv: result(argv),
+        )
+
+
+def test_new_claude_subscription_is_added_by_configuration_only(monkeypatch):
+    monkeypatch.setenv(
+        "ARU_CODING_REVIEWERS",
+        "claude-code:m1@1,claude-code:m2@2,claude-code:m3@3,claude-code:m4@4",
+    )
+    calls = []
+
+    def probe(argv):
+        calls.append(argv)
+        return result(argv, ok=argv[1] == "4")
+
+    reviewer = create_pr.probe_coding_reviewer(
+        author_identity="author",
+        author_family="human-or-other",
+        author_actor="author-login",
+        rotation_key=0,
+        reviewer_actors={"m4": "claude-reviewer-4"},
+        runner=probe,
+    )
+    assert reviewer == ("claude-code", "m4", "claude-reviewer-4")
+    assert [call[1] for call in calls] == ["1", "2", "3", "4"]
+
+
+def test_all_twelve_binding_labels_fit_github_limit():
+    actor = "aru-code-factory-gillella[bot]"
+    identities = (
+        "m1", "m2", "m3", "mo", "mx", "mg",
+        "n1", "n2", "n3", "no", "nx", "ng",
+    )
+    labels = [f"reviewer-binding:{identity}={actor}" for identity in identities]
+    assert all(len(label) <= 50 for label in labels)
 
 
 def test_refresh_with_no_coding_capacity_preserves_external_authority(monkeypatch):
