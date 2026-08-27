@@ -338,10 +338,18 @@ def status_label(status: str) -> str:
 
 
 def parse_touches(body: str) -> list[str]:
-    matches = re.findall(r"(?im)^\s*touches:\s*(.+?)\s*$", body or "")
-    if len(matches) != 1:
+    inline = re.findall(r"(?im)^\s*touches:\s*(.+?)\s*$", body or "")
+    sections = re.findall(
+        r"(?ims)^###\s+touches:\s*$\n(.*?)(?=^#{1,3}\s+|\Z)",
+        body or "",
+    )
+    declarations = [*inline, *(section.strip() for section in sections)]
+    if len(declarations) != 1:
         raise KernelError("issue must contain exactly one touches: declaration")
-    paths = [part.strip() for part in matches[0].split(",") if part.strip()]
+    declaration = declarations[0]
+    if len(declaration.splitlines()) != 1:
+        raise KernelError("touches: declaration must be a single line")
+    paths = [part.strip() for part in declaration.split(",") if part.strip()]
     if not paths:
         raise KernelError("touches: must declare at least one path")
     if any(not safe_declared_path(path) for path in paths):
@@ -372,7 +380,7 @@ def path_allowed(path: str, declared: Iterable[str]) -> bool:
 
 def acceptance_items(body: str) -> list[tuple[bool, str]]:
     match = re.search(
-        r"(?ims)^##\s+Acceptance Criteria\s*$\n(.*?)(?=^##\s+|\Z)",
+        r"(?ims)^#{2,3}\s+Acceptance Criteria\s*$\n(.*?)(?=^#{2,3}\s+|\Z)",
         body or "",
     )
     if not match:

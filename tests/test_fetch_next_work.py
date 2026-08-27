@@ -114,22 +114,53 @@ def test_select_excludes_human_and_epic_work_then_orders_by_priority(monkeypatch
     }
 
 
-@pytest.mark.parametrize(
-    ("record", "diagnostic"),
-    [
-        (ready_issue(21), "Ready issue #21 must have exactly one priority:p0..p3 label; found 0"),
-        (
-            ready_issue(22, "priority:p0", "priority:p1"),
-            "Ready issue #22 must have exactly one priority:p0..p3 label; found 2",
-        ),
-    ],
-)
-def test_select_fails_closed_when_claimable_issue_priority_is_not_unique(
-    monkeypatch, record, diagnostic
-):
+def test_select_treats_missing_priority_as_p2(monkeypatch):
     monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
-    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [record])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [ready_issue(21), ready_issue(22, "priority:p3")],
+    )
 
-    with pytest.raises(fetch_next_work.KernelError) as exc_info:
-        fetch_next_work.select("codex-sol56-issue499")
-    assert str(exc_info.value) == diagnostic
+    assert fetch_next_work.select("codex-sol56-issue499") == {
+        "type": "issue",
+        "issue": 21,
+        "title": "issue 21",
+    }
+
+
+def test_select_skips_bad_priority_and_returns_scoped_diagnostic(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(22, "priority:p0", "priority:p1"),
+            ready_issue(23, "priority:p1"),
+        ],
+    )
+
+    assert fetch_next_work.select("codex-sol56-issue499") == {
+        "type": "issue",
+        "issue": 23,
+        "title": "issue 23",
+        "diagnostics": [
+            "Ready issue #22 has contradictory or unsupported priority labels; skipped"
+        ],
+    }
+
+
+def test_select_returns_idle_diagnostic_when_only_priority_is_bad(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [ready_issue(22, "priority:urgent")],
+    )
+
+    assert fetch_next_work.select("codex-sol56-issue499") == {
+        "type": "idle",
+        "diagnostics": [
+            "Ready issue #22 has contradictory or unsupported priority labels; skipped"
+        ],
+    }

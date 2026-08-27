@@ -60,23 +60,40 @@ def select(agent: str) -> dict[str, object]:
 
     priorities = {f"priority:p{value}": value for value in range(4)}
     ready: list[tuple[int, int, dict]] = []
+    diagnostics: list[str] = []
     for record in ready_issues():
         labels = label_names(record)
         if "needs-human" in labels or "type:epic" in labels:
             continue
-        priority_labels = [name for name in labels if name in priorities]
-        if len(priority_labels) != 1:
-            raise KernelError(
-                f"Ready issue #{record['number']} must have exactly one "
-                f"priority:p0..p3 label; found {len(priority_labels)}"
-            )
         number = int(record["number"])
-        ready.append((priorities[priority_labels[0]], number, record))
+        priority_labels = [name for name in labels if name.startswith("priority:")]
+        if len(priority_labels) > 1 or any(
+            name not in priorities for name in priority_labels
+        ):
+            diagnostics.append(
+                f"Ready issue #{number} has contradictory or unsupported "
+                "priority labels; skipped"
+            )
+            continue
+        priority = (
+            priorities[priority_labels[0]]
+            if priority_labels
+            else priorities["priority:p2"]
+        )
+        ready.append((priority, number, record))
     ready.sort(key=lambda item: (item[0], item[1]))
     if ready:
         record = ready[0][2]
-        return {"type": "issue", "issue": int(record["number"]), "title": record["title"]}
-    return {"type": "idle"}
+        result: dict[str, object] = {
+            "type": "issue",
+            "issue": int(record["number"]),
+            "title": record["title"],
+        }
+    else:
+        result = {"type": "idle"}
+    if diagnostics:
+        result["diagnostics"] = diagnostics
+    return result
 
 
 def main() -> int:

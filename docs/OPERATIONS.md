@@ -466,11 +466,15 @@ branch protection appropriate to the consumer project.
 
 An issue can enter `Ready` only when it is open and contains:
 
-- an `## Acceptance Criteria` heading;
+- an `## Acceptance Criteria` heading or issue-form `### Acceptance Criteria`
+  heading;
 - at least one unchecked checklist item;
-- exactly one `touches:` line containing safe repository-relative paths;
-- exactly one `priority:p0`, `priority:p1`, `priority:p2`, or `priority:p3` label;
+- exactly one inline `touches:` line or issue-form `### touches:` section
+  containing safe repository-relative paths;
 - no unresolved `depends-on: #N` issue.
+
+Priority is advisory metadata, not part of Ready admission. An issue may carry
+at most one supported `priority:p0` through `priority:p3` label.
 
 ### Example
 
@@ -572,9 +576,9 @@ The picker first resumes that agent's open feedback, CI failure, merge-ready PR,
 or waiting PR. Only then does it fetch every page of Ready issues. It excludes
 issues labeled `needs-human` or `type:epic`, then orders eligible work by
 priority (`P0` → `P1` → `P2` → `P3`) and ascending issue number within each
-priority. Every eligible Ready issue must have exactly one `priority:p0` through
-`priority:p3` label; the picker fails closed if that priority is missing or
-contradictory.
+priority. Missing priority defaults to `P2`. An issue with contradictory or
+unsupported priority metadata is skipped with a diagnostic, so it cannot block
+other valid Ready work.
 
 You may claim a known issue explicitly:
 
@@ -891,6 +895,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 | `expected exactly one linked open Project Board` | Zero or multiple linked open Projects | Link one Project or set `ARU_PROJECT_NUMBER` |
 | `issue or Status field is ambiguous` | Issue is absent from the board, duplicated, or the Status field is invalid | Add one issue item and keep one Status field |
 | Backlog issue is rejected | Missing acceptance checklist, unsafe `touches:`, or open dependency | Correct the issue contract; do not force Ready |
+| Ready issue is skipped with a priority diagnostic | Priority labels are contradictory or unsupported | Keep at most one `priority:p0` through `priority:p3` label, then re-fetch work |
 | `issue is not Ready` | Claim attempted before successful triage | Re-read board state and triage normally |
 | `claim race detected` | Another worker claimed simultaneously | Stop; re-fetch work instead of overwriting ownership |
 | Worktree creation refuses tracked changes | Invoking checkout has tracked edits | Preserve them and invoke from a clean primary checkout |

@@ -29,6 +29,58 @@ touches: scripts/a.py, docs/**
     assert common.acceptance_items(body) == [(False, "behavior is observable")]
 
 
+def test_issue_contract_accepts_rendered_issue_form_markdown():
+    body = """
+### Outcome
+
+The behavior is observable.
+
+### Acceptance Criteria
+
+- [ ] behavior is observable
+
+### touches:
+
+scripts/a.py, docs/**
+
+### Dependencies
+
+No response
+"""
+    assert common.contract_errors(record(body)) == []
+    assert common.parse_touches(body) == ["scripts/a.py", "docs/**"]
+    assert common.acceptance_items(body) == [(False, "behavior is observable")]
+
+
+def test_issue_contract_rejects_mixed_inline_and_issue_form_touches():
+    body = """
+## Acceptance Criteria
+
+- [ ] behavior is observable
+
+touches: scripts/a.py
+
+### touches:
+
+docs/**
+"""
+    with pytest.raises(common.KernelError, match="exactly one touches"):
+        common.parse_touches(body)
+
+
+@pytest.mark.parametrize(
+    ("value", "diagnostic"),
+    [
+        ("scripts/a.py\ndocs/**", "single line"),
+        ("../private.py", "unsafe path"),
+    ],
+)
+def test_issue_form_touches_rejects_multiline_or_unsafe_values(value, diagnostic):
+    body = f"### touches:\n\n{value}\n"
+    with pytest.raises(common.KernelError, match=diagnostic):
+        common.parse_touches(body)
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
