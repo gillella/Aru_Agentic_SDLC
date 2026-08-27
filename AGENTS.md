@@ -54,6 +54,8 @@ An explicit unavailable/error response causes immediate fallback; a merely
 pending external assignment is retained until 15 minutes after assignment, then
 falls back. Cost, quota exhaustion, rate limiting, provider outage, unsupported
 bot-authored PRs, and explicit unavailable/error responses are unavailable.
+The newest trusted, timestamped provider evidence determines availability. A
+governed authority-label transition starts a new 15-minute pending window.
 
 Before fallback, smoke-test actual capacity in `claude-code`, `openai-codex`,
 `xai-cursor`, `google-antigravity` order, excluding the author identity and

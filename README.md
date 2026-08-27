@@ -167,6 +167,10 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
   --refresh-reviewer <PR> --json
 ```
 
+The helper evaluates the newest trusted, timestamped provider evidence. The
+clock starts at the current authority's latest GitHub label-assignment event,
+so a governed recovery receives its own complete 15-minute pending window.
+
 Fallback smoke-tests Claude Code, OpenAI Codex, xAI Cursor, then Google
 Antigravity; it excludes the author identity and prefers another model family.
 Each identity must have a `reviewer-binding:<identity>=<github-login>` label,

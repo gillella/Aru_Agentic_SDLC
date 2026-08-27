@@ -22,9 +22,23 @@ def external_states(**overrides):
 def assignment_pr(*, created_at: datetime, state="pending"):
     check = []
     if state == "unavailable":
-        check = [{"name": "CodeRabbit", "conclusion": "ACTION_REQUIRED", "status": "COMPLETED"}]
+        check = [
+            {
+                "name": "CodeRabbit",
+                "conclusion": "ACTION_REQUIRED",
+                "status": "COMPLETED",
+                "completedAt": created_at.isoformat(),
+            }
+        ]
     if state == "available":
-        check = [{"name": "CodeRabbit", "conclusion": "SUCCESS", "status": "COMPLETED"}]
+        check = [
+            {
+                "name": "CodeRabbit",
+                "conclusion": "SUCCESS",
+                "status": "COMPLETED",
+                "completedAt": created_at.isoformat(),
+            }
+        ]
     return {
         "number": 42,
         "url": "https://example/pr/42",
@@ -40,13 +54,13 @@ def assignment_pr(*, created_at: datetime, state="pending"):
     }
 
 
-def install_refresh(monkeypatch, pr, *, updated_labels=None, comments=None):
+def install_refresh(monkeypatch, pr, *, updated_labels=None, comments=None, events=None):
     responses = [pr]
     if updated_labels is not None:
         responses.append({"number": 42, "labels": updated_labels})
     monkeypatch.setattr(create_pr, "gh_json", lambda _argv: responses.pop(0))
     monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
-    evidence = iter([[], comments or []])
+    evidence = iter([[], comments or [], events or []])
     monkeypatch.setattr(create_pr, "gh_paginated", lambda _endpoint: next(evidence))
     monkeypatch.setattr(create_pr, "run", lambda _argv: None)
 
@@ -235,17 +249,104 @@ def test_explicit_external_error_falls_back_immediately(monkeypatch):
     ],
 )
 def test_explicit_provider_unavailability_messages_are_detected(message):
-    pr = assignment_pr(created_at=datetime.now(timezone.utc))
-    comment = {"user": {"login": "coderabbitai[bot]", "type": "Bot"}, "body": message}
+    observed_at = datetime.now(timezone.utc)
+    pr = assignment_pr(created_at=observed_at)
+    comment = {
+        "user": {"login": "coderabbitai[bot]", "type": "Bot"},
+        "body": message,
+        "created_at": observed_at.isoformat(),
+    }
     assert create_pr.external_state(pr, "coderabbit", reviews=[], comments=[comment]) == create_pr.UNAVAILABLE
 
 
 def test_review_failure_is_not_misclassified_as_provider_unavailability():
-    pr = assignment_pr(created_at=datetime.now(timezone.utc))
+    observed_at = datetime.now(timezone.utc)
+    pr = assignment_pr(created_at=observed_at)
     pr["statusCheckRollup"] = [
-        {"name": "CodeRabbit", "conclusion": "FAILURE", "status": "COMPLETED"}
+        {
+            "name": "CodeRabbit",
+            "conclusion": "FAILURE",
+            "status": "COMPLETED",
+            "completedAt": observed_at.isoformat(),
+        }
     ]
     assert create_pr.external_state(pr, "coderabbit", reviews=[], comments=[]) == create_pr.AVAILABLE
+
+
+def test_latest_external_evidence_wins_after_provider_recovery():
+    created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    pr = assignment_pr(created_at=created)
+    outage = {
+        "user": {"login": "coderabbitai[bot]", "type": "Bot"},
+        "body": "Quota exhausted",
+        "created_at": created.isoformat(),
+    }
+    approval = {
+        "user": {"login": "coderabbitai[bot]", "type": "Bot"},
+        "body": "Substantive review complete",
+        "state": "APPROVED",
+        "submitted_at": (created + timedelta(minutes=2)).isoformat(),
+    }
+    assert (
+        create_pr.external_state(
+            pr,
+            "coderabbit",
+            reviews=[approval],
+            comments=[outage],
+        )
+        == create_pr.AVAILABLE
+    )
+
+
+def test_latest_recovered_check_wins_over_old_provider_outage():
+    created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    pr = assignment_pr(created_at=created)
+    pr["statusCheckRollup"] = [
+        {
+            "name": "CodeRabbit",
+            "state": "SUCCESS",
+            "startedAt": (created + timedelta(minutes=3)).isoformat(),
+        }
+    ]
+    outage = {
+        "user": {"login": "coderabbitai[bot]", "type": "Bot"},
+        "body": "Quota exhausted",
+        "created_at": created.isoformat(),
+    }
+    assert (
+        create_pr.external_state(
+            pr,
+            "coderabbit",
+            reviews=[],
+            comments=[outage],
+        )
+        == create_pr.AVAILABLE
+    )
+
+
+def test_recovered_external_gets_full_timeout_from_assignment(monkeypatch):
+    created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    assigned = created + timedelta(hours=1)
+    pr = assignment_pr(created_at=created)
+    event = {
+        "event": "labeled",
+        "label": {"name": "review:coderabbit"},
+        "created_at": assigned.isoformat(),
+    }
+    install_refresh(monkeypatch, pr, events=[event])
+    monkeypatch.setattr(
+        create_pr,
+        "probe_coding_reviewer",
+        lambda **_kwargs: pytest.fail(
+            "recovered reviewer must receive its full timeout"
+        ),
+    )
+    outcome = create_pr.refresh_assignment(
+        42,
+        now=assigned + timedelta(minutes=14, seconds=59),
+    )
+    assert outcome["reason"] == "external-pending"
+    assert outcome["remaining_seconds"] == 1
 
 
 def test_no_external_or_coding_reviewer_fails_closed(monkeypatch):

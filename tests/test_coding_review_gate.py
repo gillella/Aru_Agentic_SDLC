@@ -134,6 +134,14 @@ def test_missing_malformed_or_stale_attestation_is_rejected(reviews):
     assert accepted(reviews=reviews) is False
 
 
+def test_malformed_marker_from_unassigned_actor_does_not_spoof_authority():
+    unrelated = review(
+        actor="unrelated-reviewer",
+        body="<!-- aru-coding-review:v1 {not-json} -->",
+    )
+    assert accepted(reviews=[unrelated, review(payload())]) is True
+
+
 def test_request_changes_blocks_merge():
     finding = {
         "severity": "high",

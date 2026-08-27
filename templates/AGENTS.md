@@ -15,6 +15,8 @@ reviewer. External providers require `reviewer-registered:<service>`; coding
 identities require `reviewer-binding:<identity>=<github-login>` with an actor
 distinct from the author. Never accept self-review or an attestation not bound
 to the full current-head SHA; every push invalidates prior review evidence.
+Use the newest trusted provider evidence and measure pending time from the
+current authority's latest GitHub label-assignment event.
 
 Do not add a scheduler, private queue, handoff file, dashboard, deployment
 system, or repository-owned runtime.

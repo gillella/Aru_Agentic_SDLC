@@ -288,21 +288,69 @@ def _check_service(record: dict[str, Any], service: str) -> bool:
     return normalized in aliases
 
 
-def _external_activity_state(
+def _parse_time(value: str, *, subject: str = "review assignment") -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise KernelError(f"{subject} timestamp is malformed") from exc
+    if parsed.tzinfo is None:
+        raise KernelError(f"{subject} timestamp has no timezone")
+    return parsed
+
+
+def _evidence_time(record: dict[str, Any], *, subject: str) -> datetime:
+    keys = (
+        "submitted_at",
+        "submittedAt",
+        "completedAt",
+        "startedAt",
+        "updated_at",
+        "updatedAt",
+        "created_at",
+        "createdAt",
+    )
+    for key in keys:
+        value = record.get(key)
+        if value:
+            return _parse_time(str(value), subject=subject)
+    raise KernelError(f"{subject} timestamp is missing")
+
+
+def _latest_state(
+    evidence: list[tuple[datetime, str]], *, subject: str
+) -> str | None:
+    if not evidence:
+        return None
+    latest_at = max(observed_at for observed_at, _state in evidence)
+    states = {state for observed_at, state in evidence if observed_at == latest_at}
+    if len(states) != 1:
+        raise KernelError(f"{subject} evidence conflicts at the latest timestamp")
+    return states.pop()
+
+
+def _external_evidence(
     records: list[dict[str, Any]], service: str
-) -> tuple[bool, str | None]:
-    activity = False
+) -> list[tuple[datetime, str]]:
+    evidence: list[tuple[datetime, str]] = []
     for record in records:
         if not isinstance(record, dict):
             raise KernelError("external reviewer evidence is malformed")
         if not _trusted_external_actor(record, service):
             continue
-        activity = True
-        if UNAVAILABLE_RE.search(str(record.get("body") or "")):
-            return True, UNAVAILABLE
-        if str(record.get("state") or "").upper() in {"APPROVED", "CHANGES_REQUESTED"}:
-            return True, AVAILABLE
-    return activity, None
+        if str(record.get("state") or "").upper() in {
+            "APPROVED",
+            "CHANGES_REQUESTED",
+            "COMMENTED",
+        }:
+            state = AVAILABLE
+        elif UNAVAILABLE_RE.search(str(record.get("body") or "")):
+            state = UNAVAILABLE
+        else:
+            continue
+        evidence.append(
+            (_evidence_time(record, subject="external reviewer evidence"), state)
+        )
+    return evidence
 
 
 def external_state(
@@ -312,38 +360,67 @@ def external_state(
     reviews: list[dict[str, Any]],
     comments: list[dict[str, Any]],
 ) -> str:
-    activity, evidence_state = _external_activity_state([*reviews, *comments], service)
-    if evidence_state:
-        return evidence_state
+    evidence = _external_evidence([*reviews, *comments], service)
 
     checks = pr.get("statusCheckRollup")
     if not isinstance(checks, list):
         raise KernelError("external review check state is incomplete")
-    matching = [item for item in checks if isinstance(item, dict) and _check_service(item, service)]
+    matching = [
+        item
+        for item in checks
+        if isinstance(item, dict) and _check_service(item, service)
+    ]
     if len(matching) > 1:
         raise KernelError("external reviewer returned ambiguous checks")
     if matching:
-        state = str(matching[0].get("conclusion") or matching[0].get("state") or "").upper()
-        status = str(matching[0].get("status") or "").upper()
+        check = matching[0]
+        state = str(check.get("conclusion") or check.get("state") or "").upper()
+        status = str(check.get("status") or "").upper()
         if state == "SUCCESS":
-            return AVAILABLE
-        if state in {"ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "SKIPPED"}:
-            return UNAVAILABLE
-        if state in {"FAILURE", "NEUTRAL"}:
-            return AVAILABLE
-        if status in {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING"}:
-            return PENDING
-    return PENDING if activity or not matching else PENDING
+            check_state = AVAILABLE
+        elif state in {
+            "ERROR",
+            "CANCELLED",
+            "TIMED_OUT",
+            "ACTION_REQUIRED",
+            "SKIPPED",
+        }:
+            check_state = UNAVAILABLE
+        elif state in {"FAILURE", "NEUTRAL"}:
+            check_state = AVAILABLE
+        elif status in {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING"}:
+            check_state = PENDING
+        else:
+            check_state = None
+        if check_state:
+            evidence.append(
+                (_evidence_time(check, subject="external reviewer check"), check_state)
+            )
+    return _latest_state(evidence, subject="external reviewer") or PENDING
 
 
-def _parse_time(value: str) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (TypeError, ValueError) as exc:
-        raise KernelError("review assignment timestamp is malformed") from exc
-    if parsed.tzinfo is None:
-        raise KernelError("review assignment timestamp has no timezone")
-    return parsed
+def _authority_assigned_at(
+    pr: dict[str, Any], events: list[dict[str, Any]], authority: str
+) -> datetime:
+    created_at = _parse_time(str(pr.get("createdAt") or ""))
+    assignments: list[datetime] = []
+    expected_label = REVIEW_PREFIX + authority
+    for event in events:
+        if not isinstance(event, dict):
+            raise KernelError("review assignment evidence is malformed")
+        if event.get("event") != "labeled":
+            continue
+        label = event.get("label")
+        if not isinstance(label, dict):
+            raise KernelError("review assignment evidence is malformed")
+        if label.get("name") == expected_label:
+            assignments.append(
+                _evidence_time(
+                    event,
+                    subject="review assignment",
+                )
+            )
+    return max(assignments, default=created_at)
 
 
 def _one_authority(pr: dict[str, Any]) -> str:
@@ -514,9 +591,10 @@ def refresh_assignment(
     slug = repo_slug()
     reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
     comments = gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
+    events = gh_paginated(f"repos/{slug}/issues/{number}/events?per_page=100")
     state = external_state(pr, authority, reviews=reviews, comments=comments)
     observed_at = now or datetime.now(timezone.utc)
-    assigned_at = _parse_time(str(pr.get("createdAt") or ""))
+    assigned_at = _authority_assigned_at(pr, events, authority)
     age_seconds = (observed_at - assigned_at).total_seconds()
     if age_seconds < 0:
         raise KernelError("review observation predates assignment")
@@ -549,6 +627,7 @@ def refresh_assignment(
         "observed_at": observed_at.isoformat(),
         "previous_authority": authority,
         "reason": reason,
+        "new_authority": coding_family,
         "reviewer": reviewer_identity,
         "reviewer_actor": reviewer_actor,
         "reviewer_family": coding_family,

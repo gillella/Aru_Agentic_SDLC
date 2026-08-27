@@ -232,6 +232,10 @@ current-head evidence. On explicit
 unavailability it falls back immediately; while merely pending it retains the
 service for less than 15 minutes and falls back at 15 minutes.
 
+The newest trusted, timestamped provider evidence wins. Measure the pending
+window from the current authority's latest GitHub label-assignment event, not
+from PR creation; a governed recovery starts a fresh 15-minute window.
+
 The fallback pool is Claude Code, OpenAI Codex, xAI Cursor, and Google
 Antigravity. Capacity must answer the exact smoke-test prompt with `OK`; Claude
 probes all three `claude-sub` subscriptions. Before use, bind each configured
@@ -623,6 +627,8 @@ Pending for less than 15 minutes retains the external authority. At exactly 15
 minutes the helper probes the distinct coding-agent pool and, only after a
 successful capacity test, replaces the one authority and records the exact head,
 old authority, reviewer identity, timestamp, and fallback reason on the PR.
+The timeout is measured from the latest persisted label-assignment event for
+the current authority.
 
 ### Step 8: dry-run and merge
 

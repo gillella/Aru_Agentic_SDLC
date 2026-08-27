@@ -48,6 +48,9 @@ unavailability falls back immediately; pending external work retains authority
 for less than 15 minutes and falls back at 15 minutes. Unavailability includes
 cost or quota exhaustion, rate limiting, provider outage, unsupported
 bot-authored PRs, and explicit unavailable/error responses.
+Availability uses the newest trusted, timestamped provider evidence. The
+current authority's latest GitHub label-assignment event starts the clock, and
+each governed authority transition receives a fresh 15-minute pending window.
 
 Fallback probes actual capacity in Claude Code, OpenAI Codex, xAI Cursor,
 Google Antigravity order. Every candidate must have one explicit

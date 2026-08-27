@@ -398,12 +398,15 @@ def parse_coding_review(review: dict[str, Any]) -> tuple[bool, dict[str, Any] | 
 
 
 def _current_coding_attestation(
-    reviews: list[dict[str, Any]], head: str
+    reviews: list[dict[str, Any]], head: str, reviewer_actor: str
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     current: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for review in reviews:
         if not isinstance(review, dict):
             raise KernelError("review evidence is malformed")
+        actor = review.get("user") or review.get("author") or {}
+        if str(actor.get("login") or "").lower() != reviewer_actor.lower():
+            continue
         valid, payload = parse_coding_review(review)
         if not valid:
             return None
@@ -447,10 +450,12 @@ def successful_coding_agent_review(
 ) -> bool:
     head = str(pr.get("headRefOid") or "")
     assignment = _coding_assignment(pr)
-    current = _current_coding_attestation(reviews, head)
-    if assignment is None or current is None:
+    if assignment is None:
         return False
     reviewer_identity, reviewer_actor, author_identity, _author_family, github_author = assignment
+    current = _current_coding_attestation(reviews, head, reviewer_actor)
+    if current is None:
+        return False
     review, payload = current
     if not _review_submission_matches(review, payload, head, github_author):
         return False
