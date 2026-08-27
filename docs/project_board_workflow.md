@@ -312,3 +312,12 @@ python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" [--json]
 | **`waiting`** | `2` | Active work in flight, Ready/In Progress/In Review/Backlog issues, pending CI, pending reviews, or worktree cleanup. |
 | **`blocked`** | `3` | Issues/PRs carrying operator-only labels (`needs-human`), `needs-design` awaiting a product decision, or an unresolvable project board identity. High review-round count is **not** a blocked/human state — it triggers automated scope-reduction guidance (`merge_pr.py --emit-review-split`) while merge authority stays with `merge_pr.py`. |
 | **`error`** | `1` | GitHub API/auth failures; fails closed. |
+
+### Run Health & Lane Utilization Observability:
+
+In addition to GitHub and Git state, `fleet_status.py` includes a read-only summary from the local `aru.factory_loop_ledger.v1` audit ledger (`scripts/factory_loop_ledger.py`):
+- **Durations**: Median and P90 loop tick execution durations and availability-to-assignment latency.
+- **Outcomes**: Distinct tracking for successful ticks, failures, single-flight skips, missed/late fires, stale recoveries, and explicit pauses.
+- **Lane Utilization & Idle Causes**: Breakdowns of active lanes, avoidable idle (contention, quota), dependency blocks, and review/CI wait times.
+- **Progress Tracking**: Timestamp and PR/merge counts of the last material factory progress.
+- **Observational Boundary**: Local metrics never act as a queue or claim authority; GitHub remains authoritative.

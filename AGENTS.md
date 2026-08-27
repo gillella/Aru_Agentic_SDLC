@@ -156,6 +156,7 @@ Helper inventory:
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --issue <ID> --agent <AGENT_ID>`
 * `python3 "$ARU_SDLC_HOME/scripts/create_branch.py" --issue <ID> --type <feat|fix|docs> [--worktree] [--agent <id>]`
 * `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --adopt --agent <id> --model-family <family>` — take over an abandoned PR
+* `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <ID> --adopt --agent <id> --model-family <family> --operator-authorized --reason <WHY>` — immediately transfer remediation authorship with an explicit operator audit reason
 
 ## Agent identity
 
@@ -178,6 +179,19 @@ A successor **adopts** the abandoned PR rather than restarting it: `author:` and
 `family:` move to the adopting agent, `adopted-from:<previous>` is recorded, and
 the commits, CI history, and review threads are preserved. Adoption refuses a PR
 updated inside the abandonment window, so live work cannot be taken.
+An operator may instead authorize an immediate, reason-bearing transfer when the
+original author is busy or unavailable. The successor becomes the sole author
+and remediator; if that agent is the assigned coding reviewer, transfer refuses
+until review is reassigned, and every successor push still requires fresh
+independent exact-head review. Before the transfer command, a repository
+write-capable operator must post the exact head-bound approval comment below on
+the PR; the values must match the command and live head exactly:
+
+```text
+Operator-approved authorship transfer.
+
+<!-- aru-author-transfer-approval:v1 {"agent":"<SUCCESSOR>","family":"<FAMILY>","head":"<HEAD_SHA>","reason":"<WHY>"} -->
+```
 * `python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --issue <ID> --agent <AGENT_ID> [--model-family <family>] --title "<Title>" --body "<body>"`
   — `--agent` is required for author/remediator routing and audit attribution.
 * `python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr <ID>`

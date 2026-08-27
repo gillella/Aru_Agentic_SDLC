@@ -14,6 +14,9 @@ do_not_trigger_for:
 
 # PRD-to-Issues Procedure
 
+Lifecycle classification: optional pre-intake planning tool. The runtime
+kernel never invokes it, and it never claims, reviews, or merges board work.
+
 Turn one operator-approved, planning-ready PRD epic into small governed work.
 This is a planning station: it creates Backlog issues but does not promote,
 claim, branch, implement, or open pull requests for them.

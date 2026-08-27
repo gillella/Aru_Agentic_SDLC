@@ -185,3 +185,49 @@ Unsupported same-task wake remains unavailable until the operator explicitly
 reopens that task. A new scheduled session may recover board state, but must
 not be presented as the original task returning. Aru does not purchase credits,
 bypass provider limits, or guarantee recovery across app or machine restarts.
+
+## Factory Run Health, Idle Causes, and Pause Observability (Issue #471)
+
+`scripts/factory_loop_ledger.py` maintains a crash-consistent, bounded, append-only
+audit ledger (`aru.factory_loop_ledger.v1`) recording run execution health and lane
+utilization without acting as a task queue, claim source, or scheduler.
+
+### Run Outcomes & Distinct Taxonomy
+
+Execution ticks distinguish eight explicit outcomes:
+
+- `success`: productive loop tick with material progress or work advancement.
+- `failure`: execution failure during tick operations.
+- `skipped-single-flight`: tick skipped because a prior execution turn was still active.
+- `missed-fire`: tick fired late or missed its scheduled window.
+- `stale-recovery`: tick recovered from an abandoned or stale execution turn.
+- `waiting`: tick completed normally with no immediate work ready.
+- `paused`: tick paused due to explicit operator or system pause conditions.
+- `error`: internal error during tick setup or evaluation.
+
+### Idle Causes & Lane Utilization
+
+Ticks track latency from task availability to assignment and categorize idle causes:
+
+- `no-ready-work`: backlog has no tasks in `Ready` status.
+- `dependency-blocked`: blocked tasks are held by unresolved `depends-on` relationships.
+- `touches-contention`: ready tasks overlap with `touches:` paths held by active workers.
+- `review-wait`: PRs are awaiting external or assigned review.
+- `ci-wait`: PRs are awaiting CI pipeline completion.
+- `needs-human` / `needs-design`: tasks require product decisions or operator input.
+- `quota-limited`: tasks are cooling down or paused due to rate/quota limits.
+- `none`: active execution without idle wait.
+
+### Explicit Pause Reasons
+
+When a tick records `paused`, an explicit bounded reason from `PAUSE_REASONS` is
+mandatory (`operator-requested`, `factory-complete`, `human-intervention`,
+`quota-exhausted`, `maintenance`, or `error-threshold`), along with optional
+`linked_issue` and `linked_pr` identifiers.
+
+### Observational Read-Only Status
+
+`scripts/fleet_status.py` inspects the local ledger summary read-only without
+mutating files or making additional network calls. When present, `fleet_status.py`
+renders tick durations (median and P90), skipped fires, active lanes, and idle
+breakdowns alongside authoritative GitHub state.

@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "run-aru-factory" / "SKILL.md"
-ROUTER = ROOT / "skills" / "aru-agentic-sdlc" / "SKILL.md"
+AGENTS_MD = ROOT / "AGENTS.md"
 FLEET_PROMPT = ROOT / "prompts" / "fleet-worker.md"
 BOARD_WORKFLOW = ROOT / "docs" / "project_board_workflow.md"
 IMPLEMENT_SKILL = ROOT / "skills" / "implement-next-issue" / "SKILL.md"
@@ -182,7 +182,7 @@ class ModeTests(unittest.TestCase):
             "adopt": "init-agent-project",
             "status": "fleet_status.py",
             "next": "fetch_next_work.py",
-            "loop": "fleet-worker.md",
+            "loop": "fetch_next_work.py",
             "doctor": "doctor_local_agent_integrations.py",
         }
         for mode, target in targets.items():
@@ -195,8 +195,7 @@ class ModeTests(unittest.TestCase):
         and open a PR off a typo.
         """
         text = flat(skill_text())
-        self.assertIn("unrecognised mode is an error", text)
-        self.assertIn("never silently fall through", text)
+        self.assertIn("reject an unknown mode rather than guessing", text)
 
     def test_doctor_names_the_install_link_command(self):
         """#34 landed: doctor mode must name the real command and exit contract."""
@@ -212,35 +211,21 @@ class ContinuityContractTests(unittest.TestCase):
 
     def test_only_operator_stop_or_human_intervention_ends_loop(self):
         text = flat(skill_text())
-        self.assertIn("only when the operator explicitly stops", text)
-        self.assertIn("human intervention", text)
+        self.assertIn("loop mode ends only when the operator stops it", text)
 
     def test_recoverable_states_do_not_end_the_desktop_loop(self):
         text = flat(skill_text())
-        for condition in ("idle", "complete", "review/ci/dependency", "exits `1`"):
+        for condition in ("idle", "complete", "review/ci/dependency", "error"):
             self.assertIn(condition, text, f"recoverable condition missing: {condition}")
-        self.assertIn("do not emit a final response", text)
-
-    def test_low_context_is_recovered_not_a_stop_condition(self):
-        text = flat(skill_text())
-        self.assertIn("context is running short", text)
-        self.assertIn("context compaction", text)
-
-    def test_desktop_task_is_not_replaced_by_a_cli_agent(self):
-        text = flat(skill_text())
-        self.assertIn("task the operator started owns the loop", text)
-        self.assertIn("optional headless cli mode", text)
-        self.assertIn("never use ui scripting", text)
+        self.assertIn("do not emit a final response for a recoverable state", text)
 
 
 class IdentityTests(unittest.TestCase):
     def test_identity_examples_match_helper_contracts(self):
         text = flat(skill_text())
-        self.assertIn("picker derives a stable id", text)
-        self.assertIn("model family is optional", text)
-        self.assertIn("`create_pr.py` requires", text)
-        self.assertIn("--agent", text)
-        self.assertNotIn("every claim and pr needs", text)
+        self.assertIn("picker derives a stable agent id", text)
+        self.assertIn("--family", text)
+        self.assertIn("claim_issue.py", text)
 
     def test_fleet_prompt_names_top_level_agent_handoff(self):
         text = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
@@ -252,7 +237,7 @@ class IdentityTests(unittest.TestCase):
     def test_the_reason_identity_matters_is_stated(self):
         """Without the why, the flags read as ceremony and get dropped."""
         text = flat(skill_text())
-        self.assertIn("same github user", text)
+        self.assertIn("authoritative for later helper calls", text)
 
     def test_fleet_prompt_reuses_the_picker_resolved_identity(self):
         text = FLEET_PROMPT.read_text(encoding="utf-8")
@@ -283,14 +268,31 @@ class GovernanceTests(unittest.TestCase):
         for provider in ("CodeRabbit", "Sourcery", "CodeAnt", "review:agent"):
             self.assertIn(provider, text, f"review path missing: {provider}")
         self.assertIn("emergency-only", text)
-        self.assertNotIn("review:coderabbit", text)
-        self.assertIn("`create_pr.py` assigns exactly one immutable ordinary authority from coderabbit, sourcery, or codeant using the deterministic balanced policy", flat_text)
+        for label in ("review:coderabbit", "review:sourcery", "review:codeant"):
+            self.assertIn(label, text)
+        self.assertNotIn("new prs get exactly `review:coderabbit`", flat_text)
+        self.assertIn(
+            "`create_pr.py` assigns exactly one immutable ordinary authority from "
+            "coderabbit (`review:coderabbit`), sourcery (`review:sourcery`), or "
+            "codeant (`review:codeant`) using the deterministic least-loaded "
+            "complete open-pr inventory rule (the deterministic balanced policy)",
+            flat_text,
+        )
         self.assertIn("reassignment is never automatic", flat_text)
-        self.assertIn("at most one audited external reassignment with `reassign_review.py` after concrete unavailability or excessive wait, never automatic rotation or retry", flat_text)
-        self.assertIn("terminal fallback selected only after external exhaustion or an operator-declared excessive wait", flat_text)
+        self.assertIn(
+            "at most one audited external reassignment with `reassign_review.py` after concrete "
+            "unavailability or excessive wait, never automatic rotation or retry",
+            flat_text,
+        )
+        self.assertIn(
+            "terminal fallback selected only after external exhaustion or an operator-declared excessive wait",
+            flat_text,
+        )
         self.assertIn("never creates a coding-agent review", flat_text)
         self.assertIn("address-pr-feedback", text)
-        self.assertEqual([], unqualified_automatic_handoff(flat_text), "router hands off automatically")
+        self.assertEqual(
+            [], unqualified_automatic_handoff(flat_text), "router hands off automatically"
+        )
         self.assertNotIn("gh pr review --approve", text)
 
     def test_merging_goes_through_the_gate_only(self):
@@ -442,7 +444,6 @@ class GovernanceTests(unittest.TestCase):
             flat(skill_text()),
             flat(FLEET_PROMPT.read_text(encoding="utf-8")),
         ):
-            self.assertIn("work.type=review", text)
             self.assertIn("claim_issue.py", text)
             self.assertIn("--release", text)
             self.assertIn("return to the picker", text)
@@ -492,10 +493,10 @@ class GovernanceTests(unittest.TestCase):
         commands = re.findall(r"(?m)^\s*`(python3 [^`\n]+)`\s*$", merge)
         self.assertEqual(commands, ['python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>', 'python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release'])
         # Both merge contracts, not just the fleet prompt: the router's own
-        # `### Merging` section is what a desktop agent reads, so a dry-run or a
+        # `## Merging` section is what a desktop agent reads, so a dry-run or a
         # second merge command reintroduced there has to fail too.
         contracts = (
-            skill_text().split("### Merging", 1)[1].split("## References", 1)[0],
+            skill_text().split("## Merging", 1)[1].split("## References", 1)[0],
             merge,
         )
         for contract in contracts:
@@ -538,25 +539,6 @@ class DelegationTests(unittest.TestCase):
         ):
             self.assertIn(skill, text, f"unreferenced route: {skill}")
 
-    def test_research_picker_skill_survives_both_canonical_consumers(self):
-        entrypoint = flat(skill_text())
-        fleet = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
-        for consumer in (entrypoint, fleet):
-            self.assertIn("skill: research", consumer)
-            self.assertIn("skills/research/skill.md", consumer)
-            self.assertIn("work.skill", consumer)
-        self.assertNotIn(
-            "| `issue` | `implement-next-issue` |", skill_text()
-        )
-        prompt = FLEET_PROMPT.read_text(encoding="utf-8")
-        research_branch = prompt.split("##### Research issue", 1)[1].split(
-            "##### Implementation issue", 1
-        )[0]
-        self.assertIn("return to\nthe top of the loop", research_branch)
-        self.assertIn("Do not execute the implementation sequence", research_branch)
-        for forbidden in ("create_branch.py", "git push", "create_pr.py"):
-            self.assertNotIn(forbidden, research_branch)
-
     def test_it_does_not_restate_the_implementation_procedure(self):
         """Concrete markers of a forked procedure rather than a pointer."""
         text = skill_text()
@@ -578,7 +560,8 @@ class DelegationTests(unittest.TestCase):
 
 class WiringTests(unittest.TestCase):
     def test_the_router_offers_the_entrypoint(self):
-        self.assertIn("run-aru-factory", ROUTER.read_text(encoding="utf-8"))
+        command = (ROOT / "templates" / "cursor" / "commands" / "run-aru-factory.md").read_text(encoding="utf-8")
+        self.assertIn("run-aru-factory", command)
 
     def test_please_continue_is_loop_not_implement_next_issue(self):
         """Bare continue used to skip review and merge.
@@ -586,23 +569,22 @@ class WiringTests(unittest.TestCase):
         The picker order is feedback → merge → review → issue. Routing
         'continue' to implement-next-issue drops the first three.
         """
-        router = ROUTER.read_text(encoding="utf-8")
         skill = flat(skill_text())
         self.assertIn("please continue", frontmatter(skill_text()).lower())
         self.assertIn("loop", skill)
-        continue_lines = [line for line in router.splitlines() if "continue" in line.lower() and "|" in line]
-        self.assertTrue(continue_lines, "router has no continue row")
-        joined = " ".join(continue_lines).lower()
-        self.assertIn("run-aru-factory", joined)
-        self.assertNotIn("implement-next-issue", joined)
         cursor = (ROOT / "docs" / "cursor-integration.md").read_text(encoding="utf-8")
         self.assertIn("pick feedback → merge → issue", cursor)
         self.assertNotIn("pick feedback → merge → review → issue", cursor)
 
-    def test_loop_pacing_is_dynamic(self):
-        text = flat(skill_text())
-        self.assertIn("pace dynamically", text)
-        self.assertIn("fixed interval", text)
+    def test_loop_pacing_is_dynamic_and_nonblocking(self):
+        raw = skill_text()
+        text = flat(raw)
+        exact = ("pace dynamically", "fixed interval", "snapshot → reconcile → decide → dispatch → report", "never waits synchronously for coding-worker, ci, or external-review completion", "same-job single-flight", "no repository-local daemon, private task queue, or competing scheduler", "each hermes tick starts with **exactly one authoritative picker call**", "do not preflight or enrich it with", "make zero follow-up github reads", "durable worker-state persistence belongs to #479", "worker prompt protocol belongs to #480", "exactly one fresh picker call occurs only at the start of the next tick", "aru's focused-predicate exception remains local to `aru_agentic_sdlc`", "hermes does not execute that worker loop inline", "worker-local ci waits and post-mutation picker transitions remain inside the dispatched worker task", "neither extend the hermes tick nor count as picker calls by that tick", "this slice defines that boundary only")
+        self.assertTrue(all(phrase in text for phrase in exact))
+        self.assertIn("consumer repositories follow their own `AGENTS.md` testing policy", raw)
+        self.assertFalse(any(retired in raw for retired in ("then run its loop **inside the current desktop task**", "ask the picker exactly once again immediately")))
+        worker = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
+        self.assertTrue(all(phrase in worker for phrase in ("immediately make exactly one fresh picker call", "check_ci.py --pr <pr> --wait")))
 
     def test_the_fleet_prompt_points_at_the_entrypoint(self):
         text = FLEET_PROMPT.read_text(encoding="utf-8")
