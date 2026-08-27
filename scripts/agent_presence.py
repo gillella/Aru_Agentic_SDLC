@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1800
+# line-ceiling: 1820
 """Project-scoped agent presence and availability registry.
 
 GitHub claims remain authoritative ownership. This registry only records which
@@ -1456,7 +1456,13 @@ class WorkerHandoffStore:
 
     def forget(self, worker_id: str) -> None:
         def remove(document: Dict[str, Any]) -> Dict[str, Any]:
-            document["workers"].pop(worker_id, None)
+            raw = document["workers"].get(worker_id)
+            if raw is None:
+                raise PresenceError(f"unknown worker: {worker_id}")
+            record = WorkerRecord.from_dict(raw)
+            if record.state not in TERMINAL_WORKER_STATES:
+                raise PresenceError("only a terminal worker may be forgotten")
+            document["workers"].pop(worker_id)
             return document
         self._mutate(remove)
 
@@ -1613,6 +1619,11 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     worker_list = sub.add_parser("worker-list", help="List project worker handoffs")
     worker_list.add_argument("--project-id", required=True)
 
+    worker_forget = sub.add_parser(
+        "worker-forget", help="Forget a terminal worker after successful governed routing",
+    )
+    worker_forget.add_argument("--worker-id", required=True)
+
     return parser
 
 
@@ -1632,6 +1643,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:  # noqa: C901, PLR0912, P
     known = {
         "register", "heartbeat", "set-availability", "unregister",
         "list", "expire", "resolve-project-id", "worker-start", "worker-observe", "worker-list",
+        "worker-forget",
     }
     if not any(token in known for token in argv_list):
         argv_list = ["list", *argv_list]
@@ -1746,6 +1758,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:  # noqa: C901, PLR0912, P
                        "workers": [record.public_dict() for record in records]}
             print(json.dumps(payload, indent=2, sort_keys=True) if args.json
                   else "\n".join(record.worker_id for record in records))
+            return 0
+
+        if command == "worker-forget":
+            worker_store.forget(args.worker_id)
+            payload = {"forgotten": args.worker_id}
+            print(json.dumps(payload, indent=2, sort_keys=True) if args.json
+                  else f"forgotten {args.worker_id}")
             return 0
 
         # list

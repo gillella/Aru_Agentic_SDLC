@@ -755,6 +755,8 @@ def claim_lane_items(items: list[dict[str, Any]]) -> str:
     failed = False
     for item in items:
         work, agent = item["work"], item["agent"]
+        if item.get("dispatchable") is False:
+            continue
         if work.get("resuming") or work["type"] == "feedback":
             work["resuming"] = True
             continue
@@ -1092,6 +1094,8 @@ def main():  # noqa: C901, PLR0912, PLR0915
                         help="Upper bound for an explicit multi-lane tick")
     parser.add_argument("--lane-agent", action="append", default=[], metavar="AGENT_ID",
                         help="Verified agent identity for one lane; repeat exactly N times")
+    parser.add_argument("--worker-path", type=Path, default=DEFAULT_WORKER_PATH,
+                        help="Worker handoff path used by the matching worker lifecycle commands")
     parser.add_argument("--reap-after", type=int, default=DEFAULT_REAP_AFTER_HOURS, metavar="HOURS",
                         help="Release issue and merge claims idle longer than HOURS "
                         "(default: 4h; 0 disables)")
@@ -1133,7 +1137,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
         res = select_lanes_from_snapshot(snapshot, lane_agents, family)
         try:
             apply_worker_handoffs(
-                res["work_items"], store=WorkerHandoffStore(DEFAULT_WORKER_PATH),
+                res["work_items"], store=WorkerHandoffStore(args.worker_path),
                 project_id=project_id,
             )
         except PresenceError as exc:

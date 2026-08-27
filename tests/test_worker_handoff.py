@@ -134,6 +134,16 @@ class WorkerRecordTests(unittest.TestCase):
         with self.assertRaisesRegex(fnw.PresenceError, "terminal"):
             self.store.observe(record.worker_id, state="running")
 
+    def test_forget_refuses_live_worker_but_removes_terminal_acknowledgement(self):
+        record = self.store.record_start(**start_fields())
+        with self.assertRaisesRegex(fnw.PresenceError, "terminal"):
+            self.store.forget(record.worker_id)
+        self.store.observe(record.worker_id, state="completed")
+
+        self.store.forget(record.worker_id)
+
+        self.assertEqual(self.store.inventory(project_id=PROJECT), [])
+
     def test_store_is_project_scoped_bounded_and_evicts_only_terminal_records(self):
         store = fnw.WorkerHandoffStore(self.path, clock=lambda: NOW, max_per_project=2)
         first = store.record_start(**start_fields(470))
@@ -224,6 +234,68 @@ class LaneRecoveryTests(unittest.TestCase):
             records = fnw.WorkerHandoffStore(path).inventory(project_id=PROJECT)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].unit_number, 479)
+
+    def test_worker_cli_forgets_terminal_record_after_governed_routing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "workers.json"
+            store = fnw.WorkerHandoffStore(path, clock=lambda: NOW)
+            record = store.record_start(**start_fields())
+            store.observe(record.worker_id, state="completed")
+            argv = ["--worker-path", str(path), "worker-forget",
+                    "--worker-id", record.worker_id]
+            try:
+                with redirect_stdout(StringIO()):
+                    result = fnw.agent_presence.main(argv)
+            except SystemExit as exc:
+                self.fail(f"worker-forget command is unavailable: {exc}")
+            self.assertEqual(result, 0)
+            self.assertEqual(store.inventory(project_id=PROJECT), [])
+
+    def test_picker_passes_custom_worker_path_to_lane_reconciliation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            custom = Path(temp) / "custom-worker-handoff.json"
+            store = fnw.WorkerHandoffStore(custom, clock=lambda: NOW)
+            record = store.record_start(**start_fields())
+            store.observe(record.worker_id, state="completed")
+            selected = {
+                "work_items": [{"agent": "codex-1", "dispatchable": True, "work": {
+                    "type": "issue", "issue": 479, "resuming": True,
+                }}],
+                "claim_status": "not-requested",
+                "work": {"type": "error", "reason": "read work_items"},
+            }
+            argv = [
+                "fetch_next_work.py", "--lanes", "2", "--lane-agent", "codex-1",
+                "--lane-agent", "codex-2", "--worker-path", str(custom),
+                "--reap-after", "0", "--json",
+            ]
+            output = StringIO()
+            with patch("sys.argv", argv), redirect_stdout(output), \
+                 patch.object(fnw, "verified_lane_agents", return_value=(
+                     ["codex-1", "codex-2"], PROJECT,
+                 )), patch.object(fnw, "build_inventory_snapshot", return_value={}), \
+                 patch.object(fnw, "select_lanes_from_snapshot", return_value=selected):
+                self.assertIsNone(fnw.main())
+        item = json.loads(output.getvalue())["work_items"][0]
+        self.assertFalse(item["dispatchable"])
+        self.assertEqual(item["reason"], "worker-needs-routing")
+
+    def test_non_dispatchable_handoff_is_never_claimed(self):
+        items = [
+            {"agent": "codex-1", "dispatchable": False,
+             "reason": "worker-needs-routing", "work": {
+                 "type": "issue", "issue": 479, "resuming": False,
+             }},
+            {"agent": "codex-2", "dispatchable": True, "work": {
+                 "type": "issue", "issue": 480, "resuming": False,
+             }},
+        ]
+        with patch.object(fnw, "claim_issue", return_value=fnw.EXIT_OK) as claim:
+            status = fnw.claim_lane_items(items)
+        self.assertEqual(status, "complete")
+        claim.assert_called_once_with(480, "codex-2")
+        self.assertNotIn("claimed", items[0]["work"])
+        self.assertTrue(items[1]["work"]["claimed"])
 
     def test_live_handoff_suppresses_duplicate_dispatch(self):
         with tempfile.TemporaryDirectory() as temp:

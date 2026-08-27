@@ -127,7 +127,12 @@ Immediately after launch, the controller records the lane's actual process
 handle, branch, worktree, start commit, and expected evidence with the
 `agent_presence.py worker-start` helper. The worker reports `completed`,
 `failed`, or `quota-limited` through `worker-observe`; the next tick verifies
-external evidence before routing close-out or remediation.
+external evidence before routing close-out or remediation. After successful
+governed routing finishes, the controller acknowledges that terminal record
+through `worker-forget`; it never forgets a running worker. If `--worker-path`
+is overridden, the controller passes the same absolute path to
+`fetch_next_work.py`, `worker-start`, `worker-observe`, and `worker-forget` so
+reconciliation uses the same store.
 
 **Ask what to do:**
 

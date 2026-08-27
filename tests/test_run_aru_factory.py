@@ -570,6 +570,13 @@ class WiringTests(unittest.TestCase):
         self.assertIn("--lane-agent", router)
         self.assertIn("governed adoption", worker)
 
+    def test_terminal_worker_routing_is_acknowledged_in_the_same_store(self):
+        for document in (SKILL, FLEET_PROMPT):
+            text = flat(document.read_text(encoding="utf-8"))
+            self.assertIn("worker-forget", text)
+            self.assertIn("--worker-path", text)
+            self.assertIn("successful governed routing", text)
+
     def test_please_continue_is_loop_not_implement_next_issue(self):
         skill = flat(skill_text())
         self.assertIn("please continue", frontmatter(skill_text()).lower())

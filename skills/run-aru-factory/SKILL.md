@@ -107,6 +107,10 @@ Dispatch every returned work item whose item says `claimed: true` or `resuming: 
 After a worker process starts, record its real session handle, branch, worktree,
 start commit, and expected GitHub evidence through the `agent_presence.py
 worker-start` helper. Record terminal observation through `worker-observe`.
+After successful governed routing finishes, acknowledge the terminal record
+through `worker-forget`; never forget a running worker. If `--worker-path` is
+overridden, pass the same absolute path to `fetch_next_work.py`, `worker-start`,
+`worker-observe`, and `worker-forget` so reconciliation uses the same store.
 These records describe launched or adopted lanes only; they never authorize a
 claim, store a prompt, or become pending work.
 Do not preflight or enrich it with `fleet_status.py`, `triage_backlog.py`, direct `gh issue` / `gh pr` views, `check_ci.py`, or `merge_pr.py --dry-run`.
