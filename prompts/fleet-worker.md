@@ -114,6 +114,21 @@ unavailable.
 
 ### The loop
 
+The Hermes controller may make this same call with `--lanes <N>` and one
+`--lane-agent <AGENT_ID>` for each explicitly verified lane. That response is
+one authoritative snapshot: dispatch every returned work item marked
+`claimed: true` or `resuming: true`, with one coding worker bound to one
+assigned unit and the item's exact agent identity. Never dispatch an unclaimed
+item or reuse an item from an earlier response. A partial claim result ends the
+tick; begin a fresh tick before selecting again. A still-running durable worker
+is adopted without duplicating its claim or worktree, while an abandoned PR
+uses the existing governed adoption helper rather than a second transfer path.
+Immediately after launch, the controller records the lane's actual process
+handle, branch, worktree, start commit, and expected evidence with the
+`agent_presence.py worker-start` helper. The worker reports `completed`,
+`failed`, or `quota-limited` through `worker-observe`; the next tick verifies
+external evidence before routing close-out or remediation.
+
 **Ask what to do:**
 
 ```bash
@@ -130,8 +145,8 @@ full diagnostics are a separately declared attempt that replaces the next
 picker tick, only for an explicit operator `status` / `doctor` request or the
 concrete failure.
 
-It returns one work item of type `feedback`, `merge`, `issue`, `error`, or
-`idle`. `feedback`, `error`, and `idle` are returned without claims. `merge`
+Single-lane mode returns one work item of type `feedback`, `merge`, `issue`,
+`error`, or `idle`. `feedback`, `error`, and `idle` are returned without claims. `merge`
 and non-resume issue paths perform claim mutations; resume results report
 already-held work instead of claiming it again. The priority order is deliberate — **finishing beats
 starting** (feedback → merge → issue). Do the branch below that

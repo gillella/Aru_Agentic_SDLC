@@ -1,4 +1,4 @@
-# line-ceiling: 1502
+# line-ceiling: 1580
 import io
 import json
 import sys
@@ -72,6 +72,80 @@ def issue_api_state(number, state="closed", *labels):
         "state": state,
         "labels": [{"name": name} for name in labels],
     }
+
+
+def ready_issue(number, touches, priority="p3"):
+    return {
+        "number": number,
+        "title": f"Issue {number}",
+        "body": f"touches: {touches}\n",
+        "labels": [{"name": "status:ready"}, {"name": f"priority:{priority}"}],
+        "author": {"login": "owner"},
+    }
+
+
+class MultiLaneSelectionTests(unittest.TestCase):
+    def snapshot(self, issues=None, prs=None):
+        return fnw.build_inventory_snapshot(
+            prs_snapshot=prs or [], issues_snapshot=issues or [],
+            repo_owner="owner", trusted_logins={"owner"}, increment_scope=None,
+        )
+
+    def test_lanes_take_path_disjoint_issues_in_priority_order(self):
+        snapshot = self.snapshot(issues=[
+            ready_issue(13, "scripts/a.py", "p1"),
+            ready_issue(11, "scripts/a.py", "p0"),
+            ready_issue(12, "scripts/b.py", "p1"),
+        ])
+        result = fnw.select_lanes_from_snapshot(
+            snapshot, ["codex-3", "codex-1", "codex-2"], "openai",
+        )
+        self.assertEqual(
+            [(item["agent"], item["work"]["issue"]) for item in result["work_items"]],
+            [("codex-1", 11), ("codex-2", 12)],
+        )
+        self.assertEqual(result["blocked_by_file_conflict"][0]["number"], 13)
+
+    def test_feedback_is_globally_assigned_before_new_issues(self):
+        feedback = pr(7, "author:codex-2")
+        feedback["_active_review_feedback"] = [{"id": "thread"}]
+        snapshot = self.snapshot(
+            issues=[ready_issue(11, "scripts/a.py")], prs=[feedback],
+        )
+        with patch.object(fnw, "dod_status", return_value=(False, "unmet: review")):
+            result = fnw.select_lanes_from_snapshot(
+                snapshot, ["codex-1", "codex-2"], "openai",
+            )
+        self.assertEqual(result["work_items"][0]["work"]["type"], "feedback")
+        self.assertEqual(result["work_items"][0]["agent"], "codex-2")
+        self.assertEqual(result["work_items"][1]["work"]["type"], "issue")
+
+    def test_legacy_select_shape_is_unchanged(self):
+        with patch.object(fetch_next_issue, "repository_trusted_logins", return_value={"owner"}), \
+             patch.object(fetch_next_issue, "repository_owner_login", return_value="owner"):
+            result = fnw.select(
+                "codex-1", "openai", prs_snapshot=[],
+                issues_snapshot=[ready_issue(11, "scripts/a.py")],
+            )
+        self.assertNotIn("schema", result)
+        self.assertEqual(result["work"]["issue"], 11)
+
+    def test_batch_claim_stops_after_first_conflict_without_rollback_or_refill(self):
+        items = [
+            {"agent": f"codex-{n}", "family": "openai", "work": {
+                "type": "issue", "issue": n,
+            }} for n in (11, 12, 13)
+        ]
+        with patch.object(fnw, "claim_issue", side_effect=[fnw.EXIT_OK, fnw.EXIT_CONFLICT]) as claim:
+            status = fnw.claim_lane_items(items)
+        self.assertEqual(status, "partial")
+        self.assertEqual(claim.call_count, 2)
+        self.assertTrue(items[0]["work"]["claimed"])
+        self.assertEqual(items[1]["work"]["claim_result"], "conflict")
+        self.assertEqual(
+            items[2]["work"]["claim_result"], "not-attempted-after-partial-failure",
+        )
+
 
 
 class MergedCloseoutSnapshotTests(unittest.TestCase):

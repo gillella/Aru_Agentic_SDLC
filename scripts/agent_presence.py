@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# line-ceiling: 1450
+# line-ceiling: 1800
 """Project-scoped agent presence and availability registry.
 
 GitHub claims remain authoritative ownership. This registry only records which
@@ -63,6 +63,34 @@ COOLDOWN_REASONS = frozenset({
     "provider-outage",
     "child-crash",
 })
+
+WORKER_SCHEMA_VERSION = 1
+WORKER_SCHEMA_NAME = "aru.worker-handoff/v1"
+DEFAULT_WORKER_PATH = Path.home() / ".aru" / "worker-handoff.json"
+WORKER_STATES = frozenset({"running", "completed", "failed", "quota-limited"})
+TERMINAL_WORKER_STATES = WORKER_STATES - {"running"}
+WORKER_UNIT_KINDS = frozenset({"issue", "pr"})
+WORKER_EVIDENCE_KINDS = frozenset({
+    "pull-request-open", "review-ready", "ci-green", "merged",
+})
+WORKER_EVIDENCE_SOURCES = frozenset({"github", "ci", "project-board", "provider"})
+WORKER_EVIDENCE_SOURCE_BY_KIND = {
+    "pull-request-open": "github",
+    "review-ready": "github",
+    "ci-green": "ci",
+    "merged": "github",
+}
+MAX_WORKERS_PER_PROJECT = 32
+WORKER_OBSERVATION_TTL_SECONDS = 900
+PLAN_DISPATCH = "dispatch"
+PLAN_ADOPT = "adopt"
+PLAN_ROUTE = "route"
+ROUTE_HOLD = "hold"
+ROUTE_REMEDIATION = "remediation"
+ROUTE_CLOSE_OUT = "close-out"
+ROUTE_ADOPTION = "adoption"
+ROUTE_COOLDOWN = "cooldown"
+ROUTE_NEXT_UNIT = "next-unit"
 
 PHASE_TO_AVAILABILITY = {
     "starting": "available",
@@ -1220,7 +1248,271 @@ def sync_runner_presence(
         return None
 
 
-def build_parser() -> argparse.ArgumentParser:
+_WORKER_FIELDS = frozenset({
+    "worker_id", "project_id", "checkout_path", "agent_id", "family",
+    "unit_kind", "unit_number", "lane", "branch", "worktree_path",
+    "session_handle", "start_state", "expected_evidence", "state", "detail",
+    "started_at", "last_observed_at", "updated_at",
+})
+_WORKER_STRING_FIELDS = _WORKER_FIELDS - {"unit_number"}
+_SECRET_SHAPES = re.compile(
+    r"(?:github_pat_|gh[pousr]_|xox[baprs]-|-----BEGIN|token\s*=|password\s*=)", re.I,
+)
+
+
+def _bounded_text(value: Any, name: str, *, maximum: int = 512, empty: bool = False) -> str:
+    if not isinstance(value, str):
+        raise PresenceError(f"{name} must be a string")
+    text = value.strip()
+    if text != value:
+        raise PresenceError(f"{name} has surrounding whitespace")
+    if (not empty and not text) or len(text) > maximum:
+        raise PresenceError(f"invalid {name} length")
+    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+        raise PresenceError(f"{name} contains control characters")
+    if _SECRET_SHAPES.search(text):
+        raise PresenceError(f"{name} looks credential-shaped")
+    return text
+
+
+def _empty_worker_document() -> Dict[str, Any]:
+    return {"schema": WORKER_SCHEMA_NAME, "version": WORKER_SCHEMA_VERSION, "workers": {}}
+
+
+@dataclass
+class WorkerRecord:
+    """Bounded observational state for one governed unit in one project."""
+
+    worker_id: str
+    project_id: str
+    checkout_path: str
+    agent_id: str
+    family: str
+    unit_kind: str
+    unit_number: int
+    lane: str
+    branch: str
+    worktree_path: str
+    session_handle: str
+    start_state: str
+    expected_evidence: str
+    state: str
+    detail: str
+    started_at: str
+    last_observed_at: str
+    updated_at: str
+
+    @classmethod
+    def from_dict(cls, value: Dict[str, Any]) -> "WorkerRecord":
+        if not isinstance(value, dict) or set(value) != _WORKER_FIELDS:
+            raise PresenceError("worker record fields do not match the v1 schema")
+        try:
+            record = cls(**value)
+        except TypeError as exc:
+            raise PresenceError(f"invalid worker record: {exc}") from exc
+        record.validate()
+        return record
+
+    def validate(self) -> None:
+        if any(not isinstance(getattr(self, name), str) for name in _WORKER_STRING_FIELDS):
+            raise PresenceError("worker string fields must contain strings")
+        _validate_project_id(self.project_id)
+        _bounded_text(self.checkout_path, "checkout_path", maximum=1024)
+        _validate_checkout(self.checkout_path)
+        _validate_agent_id(self.agent_id)
+        _validate_family(self.family)
+        if self.unit_kind not in WORKER_UNIT_KINDS:
+            raise PresenceError(f"invalid worker unit kind: {self.unit_kind}")
+        if isinstance(self.unit_number, bool) or not isinstance(self.unit_number, int) \
+                or self.unit_number <= 0:
+            raise PresenceError("unit_number must be a positive integer")
+        expected_id = f"{self.project_id}:{self.unit_kind}-{self.unit_number}"
+        if self.worker_id != expected_id:
+            raise PresenceError("worker_id does not match project and unit")
+        if self.state not in WORKER_STATES:
+            raise PresenceError(f"invalid worker state: {self.state}")
+        if self.expected_evidence not in WORKER_EVIDENCE_KINDS:
+            raise PresenceError(f"invalid expected evidence: {self.expected_evidence}")
+        _validate_agent_id(self.lane)
+        _bounded_text(self.branch, "branch", maximum=255)
+        _bounded_text(self.worktree_path, "worktree_path", maximum=1024)
+        _validate_checkout(self.worktree_path)
+        _bounded_text(self.session_handle, "session_handle", maximum=255)
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", self.start_state):
+            raise PresenceError("start_state must be a commit id")
+        _bounded_text(self.detail, "detail", empty=True)
+        for name in ("started_at", "last_observed_at", "updated_at"):
+            _parse_iso(getattr(self, name))
+
+    def public_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def is_stale(self, now: datetime, ttl_seconds: int = WORKER_OBSERVATION_TTL_SECONDS) -> bool:
+        return (now - _parse_iso(self.last_observed_at)).total_seconds() > ttl_seconds
+
+
+class WorkerHandoffStore:
+    """Crash-consistent, project-scoped inventory; never a task queue."""
+
+    def __init__(self, path: Path | None = None, *, clock: Callable[[], datetime] = _now,
+                 max_per_project: int = MAX_WORKERS_PER_PROJECT):
+        self.path = path or DEFAULT_WORKER_PATH
+        self.clock = clock
+        self.max_per_project = int(max_per_project)
+
+    @staticmethod
+    def _validated(document: Any) -> Dict[str, Any]:
+        if not isinstance(document, dict) or set(document) != {"schema", "version", "workers"}:
+            raise PresenceError("worker document fields do not match the v1 schema")
+        if document["schema"] != WORKER_SCHEMA_NAME or document["version"] != 1:
+            raise PresenceError("unsupported worker handoff schema")
+        if not isinstance(document["workers"], dict):
+            raise PresenceError("workers must be an object")
+        workers = {}
+        for key, value in document["workers"].items():
+            record = WorkerRecord.from_dict(value)
+            if key != record.worker_id:
+                raise PresenceError(f"worker key mismatch: {key}")
+            workers[key] = record.public_dict()
+        return {"schema": WORKER_SCHEMA_NAME, "version": 1, "workers": workers}
+
+    def _read(self) -> Dict[str, Any]:
+        return self._validated(read_secure_json(self.path, _empty_worker_document()))
+
+    def _mutate(self, updater: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
+        def apply(document: Any) -> Dict[str, Any]:
+            return self._validated(updater(self._validated(document)))
+        return mutate_secure_json(self.path, _empty_worker_document(), apply)
+
+    def record_start(self, **fields: Any) -> WorkerRecord:
+        moment = self.clock()
+        stamp = _iso(moment)
+        project_id = _validate_project_id(str(fields.get("project_id") or ""))
+        unit_kind = str(fields.get("unit_kind") or "")
+        unit_number = fields.get("unit_number")
+        worker_id = f"{project_id}:{unit_kind}-{unit_number}"
+        values = dict(fields)
+        values.update({"worker_id": worker_id, "started_at": stamp,
+                       "last_observed_at": stamp, "updated_at": stamp})
+        record = WorkerRecord.from_dict(values)
+        if record.state != "running":
+            raise PresenceError("a worker start record must be running")
+
+        def add(document: Dict[str, Any]) -> Dict[str, Any]:
+            workers = document["workers"]
+            if worker_id in workers:
+                raise PresenceError(f"worker already exists: {worker_id}")
+            same_project = [WorkerRecord.from_dict(item) for item in workers.values()
+                            if item.get("project_id") == project_id]
+            while len(same_project) >= self.max_per_project:
+                terminal = sorted(
+                    (item for item in same_project if item.state in TERMINAL_WORKER_STATES),
+                    key=lambda item: (item.updated_at, item.worker_id),
+                )
+                if not terminal:
+                    raise PresenceError(f"live worker limit reached for {project_id}")
+                evicted = terminal[0]
+                workers.pop(evicted.worker_id)
+                same_project.remove(evicted)
+            workers[worker_id] = record.public_dict()
+            return document
+
+        self._mutate(add)
+        return record
+
+    def observe(self, worker_id: str, *, state: str, detail: str = "") -> WorkerRecord:
+        result: Dict[str, WorkerRecord] = {}
+        stamp = _iso(self.clock())
+
+        def update(document: Dict[str, Any]) -> Dict[str, Any]:
+            raw = document["workers"].get(worker_id)
+            if raw is None:
+                raise PresenceError(f"unknown worker: {worker_id}")
+            current = WorkerRecord.from_dict(raw)
+            if current.state in TERMINAL_WORKER_STATES and state != current.state:
+                raise PresenceError("terminal worker state cannot transition")
+            changed = current.public_dict()
+            changed.update({"state": state, "detail": detail,
+                            "last_observed_at": stamp, "updated_at": stamp})
+            observed = WorkerRecord.from_dict(changed)
+            document["workers"][worker_id] = observed.public_dict()
+            result["record"] = observed
+            return document
+
+        self._mutate(update)
+        return result["record"]
+
+    def inventory(self, *, project_id: str | None = None,
+                  checkout_path: str | None = None) -> List[WorkerRecord]:
+        if bool(project_id) == bool(checkout_path):
+            raise PresenceError("specify exactly one worker inventory scope")
+        records = [WorkerRecord.from_dict(item) for item in self._read()["workers"].values()]
+        if project_id:
+            records = [item for item in records if item.project_id == _validate_project_id(project_id)]
+        else:
+            checkout = _validate_checkout(str(checkout_path))
+            records = [item for item in records if item.checkout_path == checkout]
+        return sorted(records, key=lambda item: (item.started_at, item.worker_id))
+
+    def forget(self, worker_id: str) -> None:
+        def remove(document: Dict[str, Any]) -> Dict[str, Any]:
+            document["workers"].pop(worker_id, None)
+            return document
+        self._mutate(remove)
+
+
+def worker_inventory(store: WorkerHandoffStore, *, project_id: str | None = None,
+                     checkout_path: str | None = None) -> List[WorkerRecord]:
+    return store.inventory(project_id=project_id, checkout_path=checkout_path)
+
+
+def plan_worker_dispatch(store: WorkerHandoffStore, *, project_id: str, unit_kind: str,
+                         unit_number: int, now: datetime | None = None) -> Dict[str, Any]:
+    worker_id = f"{project_id}:{unit_kind}-{unit_number}"
+    records = {record.worker_id: record for record in store.inventory(project_id=project_id)}
+    record = records.get(worker_id)
+    if record is None:
+        return {"action": PLAN_DISPATCH, "record": None}
+    if record.state in TERMINAL_WORKER_STATES:
+        return {"action": PLAN_ROUTE, "record": record}
+    moment = now or _now()
+    if not record.is_stale(moment) and _is_live_session(record.session_handle):
+        return {"action": PLAN_ADOPT, "record": record}
+    return {"action": PLAN_ROUTE, "record": record}
+
+
+def route_worker(record: WorkerRecord, *, now: datetime, evidence: Any = None,
+                 live_process: bool | None = None) -> Dict[str, Any]:
+    if record.state == "running":
+        live = _is_live_session(record.session_handle) if live_process is None else live_process
+        return {"action": ROUTE_HOLD if live else ROUTE_ADOPTION,
+                "reason": "worker still running" if live else "worker process ended"}
+    if record.state == "failed":
+        return {"action": ROUTE_REMEDIATION if live_process is False else ROUTE_HOLD,
+                "reason": record.detail or "failed worker"}
+    if record.state == "quota-limited":
+        valid_quota = (
+            isinstance(evidence, dict)
+            and evidence.get("kind") == "quota-limited"
+            and evidence.get("source") == "provider"
+            and evidence.get("reason") == record.detail
+        )
+        if valid_quota and record.detail in COOLDOWN_REASONS:
+            return {"action": ROUTE_COOLDOWN, "reason": record.detail}
+        return {"action": ROUTE_HOLD, "reason": "quota evidence is missing or mismatched"}
+    valid = (
+        isinstance(evidence, dict)
+        and evidence.get("kind") == record.expected_evidence
+        and evidence.get("unit_number") == record.unit_number
+        and evidence.get("source") == WORKER_EVIDENCE_SOURCE_BY_KIND[record.expected_evidence]
+    )
+    if not valid:
+        return {"action": ROUTE_HOLD, "reason": "completion evidence is missing or mismatched"}
+    return {"action": ROUTE_NEXT_UNIT if evidence.get("settled") is True else ROUTE_CLOSE_OUT,
+            "reason": "independently verified completion"}
+
+
+def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     parser = argparse.ArgumentParser(
         description="Project-scoped agent presence for desktop and headless tasks.",
     )
@@ -1230,6 +1522,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PRESENCE_PATH,
         help="Presence registry path (default: ~/.aru/agent-presence.json)",
     )
+    parser.add_argument("--worker-path", type=Path, default=DEFAULT_WORKER_PATH,
+                        help="Worker handoff path (default: ~/.aru/worker-handoff.json)")
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     sub = parser.add_subparsers(dest="command")
 
@@ -1296,6 +1590,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resolve.add_argument("--checkout", type=Path, required=True)
 
+    worker_start = sub.add_parser("worker-start", help="Record one launched governed worker")
+    worker_start.add_argument("--project-id", required=True)
+    worker_start.add_argument("--checkout", type=Path, required=True)
+    worker_start.add_argument("--agent", required=True)
+    worker_start.add_argument("--family", required=True)
+    worker_start.add_argument("--unit-kind", choices=sorted(WORKER_UNIT_KINDS), required=True)
+    worker_start.add_argument("--unit-number", type=int, required=True)
+    worker_start.add_argument("--lane", required=True)
+    worker_start.add_argument("--branch", required=True)
+    worker_start.add_argument("--worktree", type=Path, required=True)
+    worker_start.add_argument("--session-handle", required=True)
+    worker_start.add_argument("--start-state", required=True)
+    worker_start.add_argument("--expected-evidence", choices=sorted(WORKER_EVIDENCE_KINDS),
+                              required=True)
+
+    worker_observe = sub.add_parser("worker-observe", help="Observe terminal worker state")
+    worker_observe.add_argument("--worker-id", required=True)
+    worker_observe.add_argument("--state", choices=sorted(WORKER_STATES), required=True)
+    worker_observe.add_argument("--detail", default="")
+
+    worker_list = sub.add_parser("worker-list", help="List project worker handoffs")
+    worker_list.add_argument("--project-id", required=True)
+
     return parser
 
 
@@ -1314,13 +1631,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:  # noqa: C901, PLR0912, P
     argv_list = list(argv) if argv is not None else list(sys.argv[1:])
     known = {
         "register", "heartbeat", "set-availability", "unregister",
-        "list", "expire", "resolve-project-id",
+        "list", "expire", "resolve-project-id", "worker-start", "worker-observe", "worker-list",
     }
     if not any(token in known for token in argv_list):
         argv_list = ["list", *argv_list]
 
     args = build_parser().parse_args(argv_list)
     store = PresenceStore(args.path)
+    worker_store = WorkerHandoffStore(args.worker_path)
     command = args.command or "list"
 
     try:
@@ -1393,6 +1711,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:  # noqa: C901, PLR0912, P
                 }, indent=2, sort_keys=True))
             else:
                 print(project_id)
+            return 0
+
+        if command == "worker-start":
+            record = worker_store.record_start(
+                project_id=args.project_id,
+                checkout_path=str(args.checkout.expanduser().resolve()),
+                agent_id=args.agent,
+                family=args.family,
+                unit_kind=args.unit_kind,
+                unit_number=args.unit_number,
+                lane=args.lane,
+                branch=args.branch,
+                worktree_path=str(args.worktree.expanduser().resolve()),
+                session_handle=args.session_handle,
+                start_state=args.start_state,
+                expected_evidence=args.expected_evidence,
+                state="running",
+                detail="",
+            )
+            print(json.dumps(record.public_dict(), indent=2, sort_keys=True)
+                  if args.json else record.worker_id)
+            return 0
+
+        if command == "worker-observe":
+            record = worker_store.observe(args.worker_id, state=args.state, detail=args.detail)
+            print(json.dumps(record.public_dict(), indent=2, sort_keys=True)
+                  if args.json else f"{record.worker_id} {record.state}")
+            return 0
+
+        if command == "worker-list":
+            records = worker_store.inventory(project_id=args.project_id)
+            payload = {"schema": WORKER_SCHEMA_NAME,
+                       "workers": [record.public_dict() for record in records]}
+            print(json.dumps(payload, indent=2, sort_keys=True) if args.json
+                  else "\n".join(record.worker_id for record in records))
             return 0
 
         # list
