@@ -1,4 +1,4 @@
-# line-ceiling: 570
+# line-ceiling: 610
 import hashlib
 import json
 import os
@@ -88,6 +88,37 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         # Check after install -> succeeds
         res2 = self.run_installer("--check")
         self.assertEqual(res2.returncode, 0)
+
+    def test_prunes_only_retired_aru_owned_entries(self):
+        skills = self.target_home / ".cursor" / "skills"
+        shared = self.target_home / ".agents" / "skills"
+        commands = self.target_home / ".cursor" / "commands"
+        for directory in (skills, shared, commands):
+            directory.mkdir(parents=True)
+        retired_target = ROOT / "skills" / "retired-skill"
+        for directory in (skills, shared):
+            (directory / "retired-skill").symlink_to(retired_target)
+        (skills / "user-skill").mkdir()
+        (skills / "foreign-skill").symlink_to(self.target_home / "foreign-skill")
+        (commands / "retired.md").write_text("$ARU_SDLC_HOME retired command\n")
+        (commands / "user.md").write_text("user-owned command\n")
+
+        checked = self.run_installer("--cursor-only", "--check")
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("Retired Aru-owned", checked.stdout)
+        self.assertTrue((skills / "retired-skill").is_symlink())
+        previewed = self.run_installer("--cursor-only", "--dry-run")
+        self.assertEqual(previewed.returncode, 0, previewed.stderr)
+        self.assertTrue((commands / "retired.md").exists())
+
+        installed = self.run_installer("--cursor-only")
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertFalse((skills / "retired-skill").exists())
+        self.assertFalse((shared / "retired-skill").exists())
+        self.assertFalse((commands / "retired.md").exists())
+        self.assertTrue((skills / "user-skill").is_dir())
+        self.assertTrue((skills / "foreign-skill").is_symlink())
+        self.assertTrue((commands / "user.md").is_file())
 
     def test_repair_mode(self):
         (self.target_home / ".codex" / "skills").mkdir(parents=True)

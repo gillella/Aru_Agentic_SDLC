@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# line-ceiling: 1913
+# line-ceiling: 1300
 """
 init_project.py - Automation script for bootstrapping a brand-new repository under
 Aru_Agentic_SDLC governance, scaffolding AGENTS.md, CI workflows, issue/PR templates,
 a private GitHub repo, governance labels, and a configured GitHub Project v2 board.
 
-The board is not decorative: `fetch_next_issue.py` reads `depends-on: #N` from issue
+The board is not decorative: `fetch_next_work.py` reads `depends-on: #N` from issue
 bodies and `claim_issue.py` / `update_issue_status.py` move both the `status:*` label
-and the board item. This script provisions the Status options and custom fields those
+and the board item. This script provisions the minimal Status and Priority fields those
 scripts expect, so the loop works on first use.
 """
 
@@ -19,7 +19,7 @@ from typing import Optional, Tuple
 from common import run_cmd, run_gh_json
 
 # --- Board contract -------------------------------------------------------
-# These five statuses are what fetch_next_issue.py / claim_issue.py assume.
+# These five statuses are what fetch_next_work.py / claim_issue.py assume.
 # Changing them here means changing them there too.
 BOARD_STATUSES = [
     ("Backlog", "GRAY", "Filed, not yet refined"),
@@ -145,6 +145,8 @@ governed remediation.
    - Code Review Skill: `code-review/SKILL.md` (only for a preassigned emergency `review:agent` fallback)
    - CI Failure Remediation: `remediate-ci-failure/SKILL.md`
    - PR Review Feedback: `address-pr-feedback/SKILL.md`
+   - `fetch_next_work.py` is the only work picker; do not use a second issue,
+     review, or remediation queue.
 2. **Worktree Isolation**:
    - Always run feature and remediation work inside `.worktrees/` directories.
 3. **Local Test Verification First**:
@@ -167,6 +169,9 @@ governed remediation.
    is not an audit. The plan is always post-and-proceed unless the issue
    lacks a product decision needed to define acceptance; risk alone does not
    require human acknowledgement.
+8. **Consumer Policy Ownership**: This repository owns its CI, testing,
+   deployment, and release policy. Aru governs issue-to-merge state but does
+   not replace those repository-specific policies.
 
 ---
 
@@ -627,181 +632,6 @@ jobs:
           python .github/scripts/check_touches.py
 """
 
-STACK_RELEASE = {
-    "python": """name: Release
-run-name: "Release ${{ inputs.tag_name || github.ref_name }}"
-
-on:
-  push:
-    tags:
-      - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: 'Release tag (e.g. v1.0.0)'
-        required: true
-        type: string
-
-permissions:
-  contents: write
-  packages: write
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Validate release credentials
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -z "${RELEASE_TOKEN}" ]; then
-            echo "[ERROR] Release credentials absent. Set RELEASE_TOKEN or GITHUB_TOKEN." >&2
-            exit 1
-          fi
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip build
-
-      - name: Build distribution package
-        run: |
-          python -m build
-
-      - name: Create GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
-        run: |
-          gh release create "${TAG_NAME}" dist/* --generate-notes --title "${TAG_NAME}" || true
-""",
-    "node": """name: Release
-run-name: "Release ${{ inputs.tag_name || github.ref_name }}"
-
-on:
-  push:
-    tags:
-      - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: 'Release tag (e.g. v1.0.0)'
-        required: true
-        type: string
-
-permissions:
-  contents: write
-  packages: write
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Validate release credentials
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -z "${RELEASE_TOKEN}" ]; then
-            echo "[ERROR] Release credentials absent. Set RELEASE_TOKEN or GITHUB_TOKEN." >&2
-            exit 1
-          fi
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies and build
-        run: |
-          npm ci || npm install
-          npm run build --if-present
-
-      - name: Create GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
-        run: |
-          gh release create "${TAG_NAME}" --generate-notes --title "${TAG_NAME}" || true
-""",
-    "go": """name: Release
-run-name: "Release ${{ inputs.tag_name || github.ref_name }}"
-
-on:
-  push:
-    tags:
-      - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: 'Release tag (e.g. v1.0.0)'
-        required: true
-        type: string
-
-permissions:
-  contents: write
-  packages: write
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Validate release credentials
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -z "${RELEASE_TOKEN}" ]; then
-            echo "[ERROR] Release credentials absent. Set RELEASE_TOKEN or GITHUB_TOKEN." >&2
-            exit 1
-          fi
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Build release binaries
-        run: |
-          mkdir -p bin
-          go build -v -o bin/ ./...
-
-      - name: Create GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
-        run: |
-          gh release create "${TAG_NAME}" bin/* --generate-notes --title "${TAG_NAME}" || true
-""",
-}
-
-def render_release_workflow(stack: str = "python") -> str:
-    """Renders a Release workflow tailored to the stack with fail-closed credential checks."""
-    normalized = stack.strip().lower()
-    if normalized in {"node", "nodejs", "typescript", "react"}:
-        family = "node"
-    elif normalized == "go":
-        family = "go"
-    else:
-        family = "python"
-    return STACK_RELEASE[family].strip() + "\n"
 def scaffold_directory_structure(target_dir: str):
     """Creates standard directory tree with .gitkeep so empty dirs survive git."""
     dirs = [
@@ -812,7 +642,6 @@ def scaffold_directory_structure(target_dir: str):
         "docs",
         ".github/workflows",
         ".github/scripts",
-        ".github/scenarios",
         ".github/ISSUE_TEMPLATE",
     ]
     for d in dirs:
@@ -843,34 +672,17 @@ def _vendor_helper(name: str, target_scripts_dir: str) -> str:
     return target_path
 
 
-def write_governance_scripts(  # noqa: PLR0915
-    target_dir: str,
-    stack: str = "python",
-    project_name: str = "Project",
-):
-    """Write governed check-touches and release workflows."""
+def write_governance_scripts(target_dir: str):
+    """Write the governed touches check and line-ceiling helper."""
     project_scripts_dir = os.path.join(target_dir, "scripts")
     scripts_dir = os.path.join(target_dir, ".github", "scripts")
     workflows_dir = os.path.join(target_dir, ".github", "workflows")
-    github_dir = os.path.join(target_dir, ".github")
     os.makedirs(scripts_dir, exist_ok=True)
     os.makedirs(workflows_dir, exist_ok=True)
     os.makedirs(project_scripts_dir, exist_ok=True)
 
     for helper in ("check_line_ceilings.py",):
         _vendor_helper(helper, project_scripts_dir)
-
-    scenarios_dir = os.path.join(github_dir, "scenarios")
-    os.makedirs(scenarios_dir, exist_ok=True)
-    smoke_scenario_source = os.path.join(
-        os.path.dirname(__file__), "..", ".github", "scenarios", "smoke.json"
-    )
-    smoke_scenario_target = os.path.join(scenarios_dir, "smoke.json")
-    if os.path.isfile(smoke_scenario_source):
-        with open(smoke_scenario_source, "r", encoding="utf-8") as source:
-            smoke_scenario_content = source.read()
-        with open(smoke_scenario_target, "w", encoding="utf-8") as target:
-            target.write(smoke_scenario_content)
 
     check_touches_path = os.path.join(scripts_dir, "check_touches.py")
     with open(check_touches_path, "w", encoding="utf-8") as f:
@@ -880,10 +692,7 @@ def write_governance_scripts(  # noqa: PLR0915
     with open(check_touches_wf_path, "w", encoding="utf-8") as f:
         f.write(CHECK_TOUCHES_WORKFLOW)
 
-    release_wf_path = os.path.join(workflows_dir, "release.yml")
-    with open(release_wf_path, "w", encoding="utf-8") as f:
-        f.write(render_release_workflow(stack))
-    print("✅ Governance scripts and release workflow written.")
+    print("✅ Governance scripts written.")
 
 
 def create_cursor_project_rule(target_dir: str):
@@ -1218,11 +1027,10 @@ def create_project_board(owner: str, title: str) -> Optional[Tuple[int, str]]:
 
 
 def configure_project_views(project_id: str) -> bool:
-    """Creates the three views promised by the bootstrap contract.
+    """Configure the one Kanban view used by the lifecycle contract.
 
     GitHub creates one table view by default.  Reuse it for Kanban so repeated
-    runs do not leave a stray ``View 1``, then create or repair the Backlog and
-    Sprint views through the ProjectV2 view mutations.
+    runs do not leave a stray ``View 1``.
     """
     if not project_id:
         print("[ERROR] Project node id is required to configure views.", file=sys.stderr)
@@ -1244,11 +1052,7 @@ def configure_project_views(project_id: str) -> bool:
         print("[ERROR] Could not list project views.", file=sys.stderr)
         return False
 
-    desired = [
-        ("Kanban", "BOARD_LAYOUT"),
-        ("Jira-Style Backlog", "TABLE_LAYOUT"),
-        ("Sprint", "TABLE_LAYOUT"),
-    ]
+    desired = [("Kanban", "BOARD_LAYOUT")]
     ok = True
     for index, (name, layout) in enumerate(desired):
         existing = next((v for v in views if v.get("name", "").lower() == name.lower()), None)
@@ -1291,9 +1095,8 @@ def configure_project_views(project_id: str) -> bool:
 
 def configure_board(number: int, owner: str, project_id: str = "") -> bool:
     """Renames the built-in Status options to the five-status contract and adds
-    Priority / Story Points / Phase / Delivery Increment fields. Without this the board ships GitHub's
-    default Todo/In Progress/Done and three of the five statuses the workflow
-    scripts use do not exist."""
+    Priority. Without this the board ships GitHub's default Todo/In Progress/Done
+    and three of the five statuses the workflow scripts use do not exist."""
     if not project_id:
         project = run_gh_json([
             "gh", "project", "view", str(number), "--owner", owner, "--format", "json",
@@ -1333,13 +1136,7 @@ def configure_board(number: int, owner: str, project_id: str = "") -> bool:
     print("✅ Status options set: " + " → ".join(n for n, _, _ in BOARD_STATUSES))
 
     existing_names = {f.get("name") for f in field_list}
-    custom = [
-        ("Priority", "SINGLE_SELECT", "P0,P1,P2,P3"),
-        ("Story Points", "NUMBER", None),
-        ("Phase", "SINGLE_SELECT", "Phase -1,Phase 0,Phase 1,Phase 2,Phase 3,Phase 4,Phase 5,Migration"),
-        ("Delivery Increment", "TEXT", None),
-        ("Increment State", "SINGLE_SELECT", "Authorized,Active,Accepted,Closed"),
-    ]
+    custom = [("Priority", "SINGLE_SELECT", "P0,P1,P2,P3")]
     custom_ok = True
     for name, dtype, options in custom:
         if name in existing_names:
@@ -1414,7 +1211,7 @@ def main():  # noqa: PLR0915
     create_cursor_project_rule(target)
     write_ci_workflow(target, test_runner, args.stack)
     write_templates(target)
-    write_governance_scripts(target, args.stack, args.name)
+    write_governance_scripts(target)
     if not init_git_repo(target) or not initial_commit(target, args.name):
         print("[FATAL] Local repository bootstrap failed.", file=sys.stderr)
         sys.exit(1)

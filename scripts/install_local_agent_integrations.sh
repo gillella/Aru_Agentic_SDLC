@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# line-ceiling: 790
+# line-ceiling: 850
 # install_local_agent_integrations.sh — wire Aru_Agentic_SDLC skills and native adapters for local coding agents
 set -euo pipefail
 
@@ -220,6 +220,35 @@ link_skill() {
   echo "linked ${dest} -> ${src}"
 }
 
+prune_retired_skill_links() {
+  local dest_dir="$1"
+  local dest name current_target skill active
+  [[ -d "${dest_dir}" ]] || return 0
+  for dest in "${dest_dir}"/*; do
+    [[ -L "${dest}" ]] || continue
+    name="$(basename "${dest}")"
+    active=false
+    for skill in "${SKILLS[@]}"; do
+      if [[ "${skill}" == "${name}" ]]; then
+        active=true
+        break
+      fi
+    done
+    ${active} && continue
+    current_target="$(readlink "${dest}")"
+    [[ "${current_target}" == "${SDLC_HOME}/skills/${name}" ]] || continue
+    if [[ "${CHECK_ONLY}" == true ]]; then
+      echo "[CHECK FAILED] Retired Aru-owned skill link: ${dest}"
+      return 1
+    elif [[ "${DRY_RUN}" == true ]]; then
+      echo "[DRY-RUN] Would prune retired Aru-owned skill link ${dest}"
+    else
+      rm -f "${dest}"
+      echo "pruned retired Aru-owned skill link ${dest}"
+    fi
+  done
+}
+
 update_managed_block() {
   local target_file="$1"
   local template_file="${2:-}"
@@ -366,6 +395,27 @@ copy_commands() {
       fi
       cp "${cmd}" "${dest_file}"
       echo "installed command /${base%.md} in ${dest_dir}"
+    fi
+  done
+}
+
+prune_retired_commands() {
+  local dest_dir="$1"
+  local dest base
+  [[ -d "${dest_dir}" ]] || return 0
+  for dest in "${dest_dir}"/*.md; do
+    [[ -f "${dest}" && ! -L "${dest}" ]] || continue
+    base="$(basename "${dest}")"
+    [[ -f "${SDLC_HOME}/templates/cursor/commands/${base}" ]] && continue
+    grep -Fq "ARU_SDLC" "${dest}" || continue
+    if [[ "${CHECK_ONLY}" == true ]]; then
+      echo "[CHECK FAILED] Retired Aru-owned command: ${dest}"
+      return 1
+    elif [[ "${DRY_RUN}" == true ]]; then
+      echo "[DRY-RUN] Would prune retired Aru-owned command ${dest}"
+    else
+      rm -f "${dest}"
+      echo "pruned retired Aru-owned command ${dest}"
     fi
   done
 }
@@ -676,6 +726,7 @@ fi
 
 # Shared ~/.agents/skills
 AGENTS_SKILLS="${TARGET_HOME}/.agents/skills"
+prune_retired_skill_links "${AGENTS_SKILLS}" || ERRORS=$((ERRORS + 1))
 for skill in "${SKILLS[@]}"; do
   link_skill "${skill}" "${AGENTS_SKILLS}" || ERRORS=$((ERRORS + 1))
 done
@@ -684,6 +735,7 @@ done
 if [[ "${TARGET_CODEX}" == true ]]; then
   echo "--- Codex Integration ---"
   CODEX_SKILLS="${TARGET_HOME}/.codex/skills"
+  prune_retired_skill_links "${CODEX_SKILLS}" || ERRORS=$((ERRORS + 1))
   for skill in "${SKILLS[@]}"; do
     link_skill "${skill}" "${CODEX_SKILLS}" || ERRORS=$((ERRORS + 1))
   done
@@ -698,6 +750,8 @@ if [[ "${TARGET_CLAUDE}" == true ]]; then
   echo "--- Claude Code Integration ---"
   CLAUDE_SKILLS="${TARGET_HOME}/.claude/skills"
   CLAUDE_COMMANDS="${TARGET_HOME}/.claude/commands"
+  prune_retired_skill_links "${CLAUDE_SKILLS}" || ERRORS=$((ERRORS + 1))
+  prune_retired_commands "${CLAUDE_COMMANDS}" || ERRORS=$((ERRORS + 1))
   for skill in "${SKILLS[@]}"; do
     link_skill "${skill}" "${CLAUDE_SKILLS}" || ERRORS=$((ERRORS + 1))
   done
@@ -713,6 +767,8 @@ if [[ "${TARGET_CURSOR}" == true ]]; then
   echo "--- Cursor Integration ---"
   CURSOR_SKILLS="${TARGET_HOME}/.cursor/skills"
   CURSOR_COMMANDS="${TARGET_HOME}/.cursor/commands"
+  prune_retired_skill_links "${CURSOR_SKILLS}" || ERRORS=$((ERRORS + 1))
+  prune_retired_commands "${CURSOR_COMMANDS}" || ERRORS=$((ERRORS + 1))
   for skill in "${SKILLS[@]}"; do
     link_skill "${skill}" "${CURSOR_SKILLS}" || ERRORS=$((ERRORS + 1))
   done
@@ -733,6 +789,7 @@ fi
 if [[ "${TARGET_ANTIGRAVITY}" == true ]]; then
   echo "--- Antigravity Integration ---"
   ANTIGRAVITY_SKILLS="${TARGET_HOME}/.gemini/antigravity/skills"
+  prune_retired_skill_links "${ANTIGRAVITY_SKILLS}" || ERRORS=$((ERRORS + 1))
   for skill in "${SKILLS[@]}"; do
     link_skill "${skill}" "${ANTIGRAVITY_SKILLS}" || ERRORS=$((ERRORS + 1))
   done
@@ -740,6 +797,7 @@ if [[ "${TARGET_ANTIGRAVITY}" == true ]]; then
     "${SDLC_HOME}/templates/integrations/antigravity/AGENTS.md" || ERRORS=$((ERRORS + 1))
   install_antigravity_workflow "${TARGET_HOME}/.gemini/antigravity/workflows" || ERRORS=$((ERRORS + 1))
   if [[ -d "${TARGET_HOME}/.antigravity" ]]; then
+    prune_retired_skill_links "${TARGET_HOME}/.antigravity/skills" || ERRORS=$((ERRORS + 1))
     for skill in "${SKILLS[@]}"; do
       link_skill "${skill}" "${TARGET_HOME}/.antigravity/skills" || ERRORS=$((ERRORS + 1))
     done

@@ -20,7 +20,6 @@ from init_project import (  # noqa: E402
     CI_GATE_MARKERS,
     render_ci_workflow,
     render_gitignore,
-    render_release_workflow,
     write_templates,
 )
 
@@ -33,6 +32,13 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertIn("Run `{test_runner}` and confirm all tests pass", rules)
         self.assertIn("Router: `run-aru-factory/SKILL.md`", rules)
         self.assertNotIn("aru-agentic-sdlc/SKILL.md", rules)
+        self.assertIn("fetch_next_work.py", rules)
+        self.assertNotIn("fetch_next_issue.py", rules)
+        normalized = " ".join(rules.split())
+        self.assertIn(
+            "This repository owns its CI, testing, deployment, and release policy",
+            normalized,
+        )
 
     def test_generated_plan_gate_requires_reuse_audit_with_names_and_locations(self):
         """Generated governance must carry the canonical reuse audit contract."""
@@ -214,7 +220,7 @@ class ProjectBootstrapTests(unittest.TestCase):
 
     @patch.object(init_project, "run_cmd", return_value=(0, "", ""))
     @patch.object(init_project, "run_gh_json")
-    def test_three_project_views_are_configured(self, run_gh_json, run_cmd):
+    def test_only_kanban_project_view_is_configured(self, run_gh_json, run_cmd):
         run_gh_json.return_value = {
             "data": {
                 "node": {
@@ -230,31 +236,53 @@ class ProjectBootstrapTests(unittest.TestCase):
         result = init_project.configure_project_views("PROJECT_1")
 
         self.assertTrue(result)
-        self.assertEqual(run_cmd.call_count, 3)
+        self.assertEqual(run_cmd.call_count, 1)
         mutations = "\n".join(call.args[0][4] for call in run_cmd.call_args_list)
         self.assertIn('name:"Kanban"', mutations)
-        self.assertIn('name:"Jira-Style Backlog"', mutations)
-        self.assertIn('name:"Sprint"', mutations)
+        self.assertNotIn('name:"Jira-Style Backlog"', mutations)
+        self.assertNotIn('name:"Sprint"', mutations)
 
-    def test_governance_scripts_written_and_valid(self):
+    @patch.object(init_project, "configure_project_views", return_value=True)
+    @patch.object(init_project, "run_cmd", return_value=(0, "", ""))
+    @patch.object(init_project, "run_gh_json")
+    def test_board_creates_only_priority_custom_field(
+        self, run_gh_json, run_cmd, _configure_views,
+    ):
+        run_gh_json.return_value = {
+            "fields": [{"id": "STATUS_1", "name": "Status"}],
+        }
+
+        self.assertTrue(init_project.configure_board(7, "octocat", "PROJECT_1"))
+
+        field_commands = [
+            call.args[0] for call in run_cmd.call_args_list
+            if "field-create" in call.args[0]
+        ]
+        self.assertEqual(len(field_commands), 1)
+        self.assertEqual(field_commands[0][field_commands[0].index("--name") + 1], "Priority")
+
+    def test_governance_scripts_emit_only_retained_kernel(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             init_project.scaffold_directory_structure(temp_dir)
             init_project.write_governance_scripts(temp_dir)
 
             check_touches = Path(temp_dir) / ".github" / "scripts" / "check_touches.py"
             check_touches_wf = Path(temp_dir) / ".github" / "workflows" / "check_touches.yml"
-            release_workflow = Path(temp_dir) / ".github" / "workflows" / "release.yml"
+            line_ceiling = Path(temp_dir) / "scripts" / "check_line_ceilings.py"
 
             self.assertTrue(check_touches.is_file())
             self.assertTrue(check_touches_wf.is_file())
-            self.assertTrue(release_workflow.is_file())
-
-            smoke_scenario = Path(temp_dir) / ".github" / "scenarios" / "smoke.json"
-            self.assertTrue(smoke_scenario.is_file())
-            self.assertEqual(
-                smoke_scenario.read_text(),
-                (ROOT / ".github" / "scenarios" / "smoke.json").read_text(),
-            )
+            self.assertTrue(line_ceiling.is_file())
+            for retired in (
+                ".github/workflows/deploy-preview.yml",
+                ".github/workflows/release.yml",
+                ".github/workflows/promote.yml",
+                ".github/scenarios/smoke.json",
+                "docs/deploy.md",
+                "scripts/build_preview.py",
+                "scripts/smoke_preview.py",
+            ):
+                self.assertFalse((Path(temp_dir) / retired).exists(), retired)
 
     def test_generated_governance_omits_legacy_model_reviewer_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -597,32 +625,7 @@ class DogfoodCiParityTests(unittest.TestCase):
                 f"stdout={scanned.stdout!r} stderr={scanned.stderr!r}",
             )
 
-    def test_release_workflows_are_stack_aware(self):
-        # Release workflows
-        python_release = render_release_workflow("python")
-        node_release = render_release_workflow("react")
-        go_release = render_release_workflow("go")
-
-        for rwf in (python_release, node_release, go_release):
-            self.assertIn("Validate release credentials", rwf)
-            self.assertIn("RELEASE_TOKEN", rwf)
-            self.assertIn("Release credentials absent", rwf)
-
-        self.assertIn("python -m build", python_release)
-        self.assertIn("npm run build", node_release)
-        self.assertIn("go build", go_release)
-
-    def test_write_governance_scripts_creates_release_workflow_only(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            init_project.scaffold_directory_structure(temp_dir)
-            init_project.write_governance_scripts(temp_dir, stack="node", project_name="node-app")
-
-            release_wf = Path(temp_dir) / ".github" / "workflows" / "release.yml"
-
-            self.assertTrue(release_wf.is_file())
-            self.assertIn("npm run build", release_wf.read_text())
-
-    def test_cli_scaffold_creates_stack_pack_workflows_for_node_and_go(self):
+    def test_cli_scaffold_omits_delivery_workflows_for_node_and_go(self):
         for stack in ("node", "go"):
             with tempfile.TemporaryDirectory() as temp_dir:
                 env = os.environ.copy()
@@ -648,15 +651,8 @@ class DogfoodCiParityTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-                release_wf = Path(temp_dir) / ".github" / "workflows" / "release.yml"
-
-                self.assertTrue(release_wf.is_file())
+                self.assertFalse((Path(temp_dir) / ".github" / "workflows" / "release.yml").exists())
                 self.assertFalse((Path(temp_dir) / ".github" / "workflows" / "deploy-preview.yml").exists())
-
-                if stack == "node":
-                    self.assertIn("npm run build", release_wf.read_text())
-                else:
-                    self.assertIn("go build", release_wf.read_text())
 
 
 class LineCeilingBootstrapTests(unittest.TestCase):
@@ -670,7 +666,7 @@ class LineCeilingBootstrapTests(unittest.TestCase):
         target = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, target, True)
         with contextlib.redirect_stdout(io.StringIO()):
-            init_project.write_governance_scripts(target, stack=stack, project_name="Demo")
+            init_project.write_governance_scripts(target)
             init_project.write_ci_workflow(target, runner, stack)
         return target
 
@@ -713,7 +709,7 @@ class LineCeilingBootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch("builtins.print") as printer:
             init_project.scaffold_directory_structure(temp_dir)
             init_project.write_governance_scripts(temp_dir)
-        printer.assert_any_call("✅ Governance scripts and release workflow written.")
+        printer.assert_any_call("✅ Governance scripts written.")
 
 
 if __name__ == "__main__":

@@ -182,6 +182,12 @@ class InstallerParityTest(unittest.TestCase):
                 f"must be derived from skills/ on disk",
             )
 
+    def test_wrapper_has_one_delegated_linking_implementation(self):
+        text = installer_path().read_text(encoding="utf-8")
+        self.assertNotIn("link_skill()", text)
+        self.assertNotIn("ensure_env_export()", text)
+        self.assertIn('exec "${SCRIPT_DIR}/install_local_agent_integrations.sh"', text)
+
 
 class InstallerRejectionTest(unittest.TestCase):
     """A directory under skills/ that defines no procedure is an error.
