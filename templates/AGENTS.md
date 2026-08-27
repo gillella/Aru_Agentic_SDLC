@@ -11,8 +11,10 @@ and merge through
 Prefer CodeRabbit, then Sourcery, then CodeAnt. On explicit unavailability or
 15 minutes pending, use `create_pr.py --refresh-reviewer <PR>` to smoke-test and
 assign a distinct Claude Code, OpenAI Codex, xAI Cursor, or Google Antigravity
-reviewer. Never accept self-review or a coding-agent attestation not bound to the
-full current-head SHA; every push invalidates prior review evidence.
+reviewer. External providers require `reviewer-registered:<service>`; coding
+identities require `reviewer-binding:<identity>=<github-login>` with an actor
+distinct from the author. Never accept self-review or an attestation not bound
+to the full current-head SHA; every push invalidates prior review evidence.
 
 Do not add a scheduler, private queue, handoff file, dashboard, deployment
 system, or repository-owned runtime.

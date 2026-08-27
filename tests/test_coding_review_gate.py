@@ -25,6 +25,7 @@ def coding_pr(*, labels=None, author_login="author-login"):
         or [
             {"name": "review:claude-code"},
             {"name": "reviewer:claude-code-sub-1"},
+            {"name": "reviewer-actor:independent-reviewer"},
             {"name": "author:codex-author"},
             {"name": "author-family:openai-codex"},
         ],
@@ -96,6 +97,7 @@ def test_distinct_family_exact_head_coding_agent_approval_is_accepted():
                 labels=[
                     {"name": "review:claude-code"},
                     {"name": "reviewer:codex-author"},
+                    {"name": "reviewer-actor:independent-reviewer"},
                     {"name": "author:codex-author"},
                     {"name": "author-family:openai-codex"},
                 ]
@@ -154,6 +156,16 @@ def test_spoofed_producer_and_conflicting_current_head_evidence_are_rejected():
     spoofed = review(payload(submitted_by="someone-else"))
     assert accepted(reviews=[spoofed]) is False
     assert accepted(reviews=[review(payload()), review(payload())]) is False
+
+
+def test_unbound_github_actor_cannot_satisfy_assigned_coding_reviewer():
+    pr = coding_pr()
+    pr["labels"] = [
+        label
+        for label in pr["labels"]
+        if not label["name"].startswith("reviewer-actor:")
+    ] + [{"name": "reviewer-actor:another-reviewer"}]
+    assert accepted(pr, [review(payload())]) is False
 
 
 def test_exact_head_coding_approval_plus_green_ci_passes_gate(monkeypatch):

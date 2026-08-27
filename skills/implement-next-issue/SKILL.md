@@ -17,7 +17,9 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    Prefer CodeRabbit, Sourcery, then CodeAnt. If the assigned external service
    explicitly fails or remains pending for 15 minutes, run
    `create_pr.py --refresh-reviewer <PR>`; it smoke-tests capacity and may assign
-   a coding agent other than the author.
+   a coding agent other than the author. Only
+   `reviewer-registered:<service>` external providers and coding identities with
+   `reviewer-binding:<identity>=<github-login>` are eligible.
 10. If feedback exists, use the feedback skill. If CI fails, use the CI skill.
 
 A coding agent may review another agent's code. Never authoritatively review

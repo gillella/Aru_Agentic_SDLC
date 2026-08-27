@@ -16,6 +16,7 @@ from common import (
     AUTHOR_PREFIX,
     CODING_REVIEWERS,
     REVIEW_PREFIX,
+    REVIEWER_ACTOR_PREFIX,
     REVIEWER_PREFIX,
     REVIEW_AUTHORITIES,
     REVIEW_SERVICES,
@@ -128,10 +129,13 @@ def assigned_service(pr: dict[str, Any]) -> str:
     reviewer_labels = [
         name for name in label_names(pr) if name.startswith(REVIEWER_PREFIX)
     ]
-    if service in CODING_REVIEWERS and len(reviewer_labels) != 1:
-        raise KernelError("coding review authority requires exactly one reviewer identity")
-    if service in REVIEW_SERVICES and reviewer_labels:
-        raise KernelError("external review authority conflicts with coding reviewer identity")
+    actor_labels = [
+        name for name in label_names(pr) if name.startswith(REVIEWER_ACTOR_PREFIX)
+    ]
+    if service in CODING_REVIEWERS and (len(reviewer_labels) != 1 or len(actor_labels) != 1):
+        raise KernelError("coding review authority requires one reviewer identity and actor")
+    if service in REVIEW_SERVICES and (reviewer_labels or actor_labels):
+        raise KernelError("external review authority conflicts with coding reviewer metadata")
     return service
 
 
@@ -408,14 +412,15 @@ def _current_coding_attestation(
     return current[0] if len(current) == 1 else None
 
 
-def _coding_assignment(pr: dict[str, Any]) -> tuple[str, str, str, str] | None:
+def _coding_assignment(pr: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
     reviewer = _one_identity_label(pr, REVIEWER_PREFIX)
+    reviewer_actor = _one_identity_label(pr, REVIEWER_ACTOR_PREFIX)
     author = _one_identity_label(pr, AUTHOR_PREFIX)
     family = _one_identity_label(pr, AUTHOR_FAMILY_PREFIX)
     github_author = str((pr.get("author") or {}).get("login") or "").lower()
-    if not all((reviewer, author, family, github_author)) or reviewer == author:
+    if not all((reviewer, reviewer_actor, author, family, github_author)) or reviewer == author:
         return None
-    return reviewer, author, family, github_author
+    return reviewer, reviewer_actor, author, family, github_author
 
 
 def _review_submission_matches(
@@ -445,9 +450,12 @@ def successful_coding_agent_review(
     current = _current_coding_attestation(reviews, head)
     if assignment is None or current is None:
         return False
-    reviewer_identity, author_identity, _author_family, github_author = assignment
+    reviewer_identity, reviewer_actor, author_identity, _author_family, github_author = assignment
     review, payload = current
     if not _review_submission_matches(review, payload, head, github_author):
+        return False
+    actor = review.get("user") or review.get("author") or {}
+    if str(actor.get("login") or "").lower() != reviewer_actor.lower():
         return False
     if payload["reviewer"] != reviewer_identity or payload["family"] != authority:
         return False

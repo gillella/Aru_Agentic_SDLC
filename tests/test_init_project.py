@@ -28,6 +28,8 @@ def test_bootstrap_provisions_external_and_coding_review_authorities():
         "review:xai-cursor",
         "review:google-antigravity",
     }.issubset(init_project.LABELS)
+    assert not any(label.startswith("reviewer-registered:") for label in init_project.LABELS)
+    assert not any(label.startswith("reviewer-binding:") for label in init_project.LABELS)
 
 
 def test_scaffold_creates_only_minimal_governance(tmp_path):

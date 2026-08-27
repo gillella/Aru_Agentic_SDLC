@@ -40,17 +40,21 @@ preview, deployment, release, smoke, incident, or second state store.
 
 ## Reviewer state machine
 
-External authorities are tried in CodeRabbit, Sourcery, CodeAnt order. The
-first registered available service receives the only `review:*` label. Explicit
+External authorities are tried in CodeRabbit, Sourcery, CodeAnt order. Only an
+installed provider explicitly registered by `reviewer-registered:<service>` is
+a candidate; bootstrap authority labels do not register providers. The first
+registered available service receives the only `review:*` label. Explicit
 unavailability falls back immediately; pending external work retains authority
 for less than 15 minutes and falls back at 15 minutes. Unavailability includes
 cost or quota exhaustion, rate limiting, provider outage, unsupported
 bot-authored PRs, and explicit unavailable/error responses.
 
 Fallback probes actual capacity in Claude Code, OpenAI Codex, xAI Cursor,
-Google Antigravity order. All three Claude subscriptions are tested. The author
-identity is excluded and another model family is preferred. No successful
-distinct probe leaves the prior authority unchanged and blocks progress.
+Google Antigravity order. Every candidate must have one explicit
+`reviewer-binding:<identity>=<github-login>` whose authenticated actor differs
+from the PR author. All three Claude subscriptions are tested. The author
+identity is excluded and another model family is preferred. No successful,
+bound, distinct probe leaves the prior authority unchanged and blocks progress.
 
 A coding agent may author or remediate code and may review a different agent's
 code. It may not authoritatively review its own PR under normal conditions. Its

@@ -18,6 +18,9 @@ from common import (
     AUTHOR_PREFIX,
     CODING_REVIEWERS,
     EXTERNAL_REVIEWERS,
+    REVIEW_BINDING_PREFIX,
+    REVIEW_REGISTRATION_PREFIX,
+    REVIEWER_ACTOR_PREFIX,
     REVIEWER_PREFIX,
     REVIEW_AUTHORITIES,
     REVIEW_PREFIX,
@@ -113,9 +116,34 @@ def registered_external_states() -> dict[str, str]:
         raise KernelError("reviewer registration labels are unavailable")
     names = {str(item.get("name") or "") for item in records}
     return {
-        service: AVAILABLE if REVIEW_PREFIX + service in names else UNAVAILABLE
+        service: AVAILABLE
+        if REVIEW_REGISTRATION_PREFIX + service in names
+        else UNAVAILABLE
         for service in EXTERNAL_REVIEWERS
     }
+
+
+def registered_coding_actors() -> dict[str, str]:
+    records = gh_json(["label", "list", "--limit", "1000", "--json", "name"])
+    if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
+        raise KernelError("coding reviewer identity bindings are unavailable")
+    bindings: dict[str, str] = {}
+    for item in records:
+        name = str(item.get("name") or "")
+        if not name.startswith(REVIEW_BINDING_PREFIX):
+            continue
+        values = name[len(REVIEW_BINDING_PREFIX) :].split("=", 1)
+        if len(values) != 2:
+            raise KernelError("coding reviewer identity binding is malformed")
+        identity, actor = values[0].lower(), values[1].lower()
+        if (
+            not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", identity)
+            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?(?:\[bot\])?", actor)
+            or identity in bindings
+        ):
+            raise KernelError("coding reviewer identity binding is malformed or ambiguous")
+        bindings[identity] = actor
+    return bindings
 
 
 def initial_external(states: dict[str, str]) -> str | None:
@@ -128,6 +156,14 @@ def initial_external(states: dict[str, str]) -> str | None:
         if states.get(service) == PENDING:
             return service
     return None
+
+
+def current_github_actor() -> str:
+    record = gh_json(["api", "user"])
+    login = str(record.get("login") or "").lower() if isinstance(record, dict) else ""
+    if not login:
+        raise KernelError("current GitHub author identity is unavailable")
+    return login
 
 
 def _default_probe(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -155,10 +191,14 @@ def probe_coding_reviewer(
     *,
     author_identity: str,
     author_family: str,
+    author_actor: str = "",
     rotation_key: int,
+    reviewer_actors: dict[str, str] | None = None,
     runner: ProbeRunner = _default_probe,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str] | None:
     author_identity = normalized_identity(author_identity)
+    author_actor = author_actor.lower()
+    actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
     family_order = [family for family in CODING_REVIEWERS if family != author_family]
     if author_family in CODING_REVIEWERS:
         family_order.append(author_family)
@@ -172,8 +212,14 @@ def probe_coding_reviewer(
                 if _probe_ok(result):
                     identities.append(f"claude-code-sub-{subscription}")
             identities = [value for value in identities if value != author_identity]
+            identities = [
+                value
+                for value in identities
+                if value in actors and actors[value].lower() != author_actor
+            ]
             if identities:
-                return family, identities[rotation_key % len(identities)]
+                identity = identities[rotation_key % len(identities)]
+                return family, identity, actors[identity].lower()
             continue
 
         command_names = {
@@ -183,7 +229,8 @@ def probe_coding_reviewer(
         }
         identity = family
         executable = _command(command_names[family])
-        if identity == author_identity or executable is None:
+        actor = str(actors.get(identity) or "").lower()
+        if identity == author_identity or not actor or actor == author_actor or executable is None:
             continue
         arguments = {
             "openai-codex": [executable, "exec", "--skip-git-repo-check", PROBE_PROMPT],
@@ -191,7 +238,7 @@ def probe_coding_reviewer(
             "google-antigravity": [executable, "-p", PROBE_PROMPT],
         }[family]
         if _probe_ok(runner(arguments)):
-            return family, identity
+            return family, identity, actor
     return None
 
 
@@ -199,17 +246,23 @@ def choose_initial_reviewer(
     number: int,
     author_identity: str,
     author_family: str,
+    author_actor: str = "",
     *,
     external_states: dict[str, str] | None = None,
+    reviewer_actors: dict[str, str] | None = None,
     probe_runner: ProbeRunner = _default_probe,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str | None]:
     external = initial_external(external_states or registered_external_states())
     if external:
-        return external, None
+        return external, None, None
+    if not author_actor:
+        author_actor = current_github_actor()
     coding = probe_coding_reviewer(
         author_identity=author_identity,
         author_family=author_family,
+        author_actor=author_actor,
         rotation_key=number,
+        reviewer_actors=reviewer_actors,
         runner=probe_runner,
     )
     if coding is None:
@@ -304,10 +357,15 @@ def _one_authority(pr: dict[str, Any]) -> str:
     reviewer_identities = [
         name for name in label_names(pr) if name.startswith(REVIEWER_PREFIX)
     ]
-    if authorities[0] in CODING_REVIEWERS and len(reviewer_identities) != 1:
-        raise KernelError("coding authority requires exactly one reviewer identity")
-    if authorities[0] in EXTERNAL_REVIEWERS and reviewer_identities:
-        raise KernelError("external authority conflicts with coding reviewer identity")
+    reviewer_actors = [
+        name for name in label_names(pr) if name.startswith(REVIEWER_ACTOR_PREFIX)
+    ]
+    if authorities[0] in CODING_REVIEWERS and (
+        len(reviewer_identities) != 1 or len(reviewer_actors) != 1
+    ):
+        raise KernelError("coding authority requires one reviewer identity and actor")
+    if authorities[0] in EXTERNAL_REVIEWERS and (reviewer_identities or reviewer_actors):
+        raise KernelError("external authority conflicts with coding reviewer metadata")
     return authorities[0]
 
 
@@ -323,18 +381,35 @@ def replace_authority(
     pr: dict[str, Any],
     authority: str,
     reviewer_identity: str,
+    reviewer_actor: str,
 ) -> None:
+    live = gh_json(
+        ["pr", "view", str(number), "--json", "number,headRefOid,labels"]
+    )
+    if (
+        not isinstance(live, dict)
+        or live.get("headRefOid") != pr.get("headRefOid")
+        or _one_authority(live) != _one_authority(pr)
+        or _one_label_value(live, AUTHOR_PREFIX) != _one_label_value(pr, AUTHOR_PREFIX)
+        or _one_label_value(live, AUTHOR_FAMILY_PREFIX)
+        != _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
+    ):
+        raise KernelError("review authority changed during fallback selection")
     review_label = REVIEW_PREFIX + authority
     reviewer_label = REVIEWER_PREFIX + reviewer_identity
+    actor_label = REVIEWER_ACTOR_PREFIX + reviewer_actor
     ensure_label(review_label, color="5319e7", description=f"Coding review: {authority}")
     ensure_label(reviewer_label, color="5319e7", description=f"Assigned reviewer: {reviewer_identity}")
+    ensure_label(actor_label, color="5319e7", description=f"Trusted review actor: {reviewer_actor}")
     retained = [
         name
-        for name in label_names(pr)
-        if not name.startswith(REVIEW_PREFIX) and not name.startswith(REVIEWER_PREFIX)
+        for name in label_names(live)
+        if not name.startswith(REVIEW_PREFIX)
+        and not name.startswith(REVIEWER_PREFIX)
+        and not name.startswith(REVIEWER_ACTOR_PREFIX)
     ]
     arguments = ["api", "--method", "PUT", f"repos/{repo_slug()}/issues/{number}/labels"]
-    for name in [*retained, review_label, reviewer_label]:
+    for name in [*retained, review_label, reviewer_label, actor_label]:
         arguments.extend(["-f", f"labels[]={name}"])
     gh_json(arguments)
 
@@ -385,34 +460,40 @@ def refresh_assignment(
     coding = probe_coding_reviewer(
         author_identity=author_identity,
         author_family=author_family,
+        author_actor=str((pr.get("author") or {}).get("login") or ""),
         rotation_key=number,
         runner=probe_runner,
     )
     if coding is None:
         raise KernelError("no distinct coding-agent reviewer has available capacity")
-    coding_family, reviewer_identity = coding
+    coding_family, reviewer_identity, reviewer_actor = coding
     reason = "external-unavailable" if state == UNAVAILABLE else "external-pending-15m"
-    replace_authority(number, pr, coding_family, reviewer_identity)
     status = {
         "head": pr.get("headRefOid"),
         "observed_at": observed_at.isoformat(),
         "previous_authority": authority,
         "reason": reason,
         "reviewer": reviewer_identity,
+        "reviewer_actor": reviewer_actor,
         "reviewer_family": coding_family,
     }
     body = (
         "## Aru authoritative reviewer fallback\n\n"
-        f"Assigned `{reviewer_identity}` ({coding_family}) because `{authority}` was "
-        f"{reason.replace('-', ' ')}.\n\n"
+        f"Fallback attempt: assign `{reviewer_identity}` ({coding_family}) through "
+        f"GitHub actor `{reviewer_actor}` because `{authority}` was "
+        f"{reason.replace('-', ' ')}. The labels remain authoritative if this "
+        "transition command fails.\n\n"
         f"<!-- aru-review-assignment:v1 {json.dumps(status, sort_keys=True)} -->"
     )
     run(["gh", "pr", "comment", str(number), "--body", body])
+    replace_authority(number, pr, coding_family, reviewer_identity, reviewer_actor)
     updated = gh_json(["pr", "view", str(number), "--json", "number,labels"])
     if _one_authority(updated) != coding_family:
         raise KernelError("review authority replacement was not confirmed")
     if _one_label_value(updated, REVIEWER_PREFIX) != reviewer_identity:
         raise KernelError("reviewer identity replacement was not confirmed")
+    if _one_label_value(updated, REVIEWER_ACTOR_PREFIX) != reviewer_actor:
+        raise KernelError("reviewer actor replacement was not confirmed")
     return {
         "pr": number,
         "authority": coding_family,
@@ -422,6 +503,12 @@ def refresh_assignment(
     }
 
 
+def require_current_owner(number: int, owner: str) -> None:
+    live_issue = issue(number)
+    if status_of(live_issue) != "In Progress" or current_agent(live_issue) != owner:
+        raise KernelError("issue ownership changed before PR creation")
+
+
 def create(
     number: int,
     title: str,
@@ -429,7 +516,9 @@ def create(
     agent: str | None = None,
     *,
     author_family: str | None = None,
+    author_actor: str = "",
     external_states: dict[str, str] | None = None,
+    reviewer_actors: dict[str, str] | None = None,
     probe_runner: ProbeRunner = _default_probe,
 ) -> dict[str, object]:
     record = issue(number)
@@ -446,11 +535,13 @@ def create(
     head = require_published_head(branch)
     owner_identity = normalized_identity(owner)
     family = normalized_identity(author_family) if author_family else agent_family(owner_identity)
-    authority, reviewer_identity = choose_initial_reviewer(
+    authority, reviewer_identity, reviewer_actor = choose_initial_reviewer(
         number,
         owner_identity,
         family,
+        author_actor,
         external_states=external_states,
+        reviewer_actors=reviewer_actors,
         probe_runner=probe_runner,
     )
     review_label = REVIEW_PREFIX + authority
@@ -464,14 +555,17 @@ def create(
     labels = [review_label, author_label, family_label]
     if reviewer_identity:
         reviewer_label = REVIEWER_PREFIX + reviewer_identity
+        actor_label = REVIEWER_ACTOR_PREFIX + str(reviewer_actor)
         label_metadata[reviewer_label] = ("5319e7", f"Assigned reviewer: {reviewer_identity}")
-        labels.append(reviewer_label)
+        label_metadata[actor_label] = ("5319e7", f"Trusted review actor: {reviewer_actor}")
+        labels.extend([reviewer_label, actor_label])
     for label, (color, description) in label_metadata.items():
         ensure_label(label, color=color, description=description)
     final_body = body.rstrip() + f"\n\nCloses #{number}\n"
     arguments = ["gh", "pr", "create", "--title", title, "--body", final_body]
     for label in labels:
         arguments.extend(["--label", label])
+    require_current_owner(number, owner)
     run(arguments)
     pr = gh_json(["pr", "view", branch, "--json", "number,url,headRefOid,labels"])
     if pr.get("headRefOid") != head:
@@ -480,6 +574,8 @@ def create(
         raise KernelError("created PR does not have exactly one assigned reviewer")
     if reviewer_identity and _one_label_value(pr, REVIEWER_PREFIX) != reviewer_identity:
         raise KernelError("created PR does not identify the coding-agent reviewer")
+    if reviewer_actor and _one_label_value(pr, REVIEWER_ACTOR_PREFIX) != reviewer_actor:
+        raise KernelError("created PR does not bind the coding reviewer actor")
     set_status(number, "In Review")
     return {
         "pr": int(pr["number"]),
@@ -487,6 +583,7 @@ def create(
         "head": head,
         "reviewer": authority,
         "reviewer_identity": reviewer_identity,
+        "reviewer_actor": reviewer_actor,
     }
 
 
@@ -497,12 +594,22 @@ def main() -> int:
     parser.add_argument("--body")
     parser.add_argument("--agent")
     parser.add_argument("--author-family")
+    parser.add_argument("--author-github-login")
     parser.add_argument("--refresh-reviewer", type=int, metavar="PR")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     try:
         if args.refresh_reviewer:
-            if any((args.issue, args.title, args.body, args.agent, args.author_family)):
+            if any(
+                (
+                    args.issue,
+                    args.title,
+                    args.body,
+                    args.agent,
+                    args.author_family,
+                    args.author_github_login,
+                )
+            ):
                 raise KernelError("review refresh cannot include PR creation arguments")
             result = refresh_assignment(args.refresh_reviewer)
         else:
@@ -514,6 +621,7 @@ def main() -> int:
                 args.body,
                 args.agent,
                 author_family=args.author_family,
+                author_actor=args.author_github_login or "",
             )
     except KernelError as exc:
         parser.error(str(exc))

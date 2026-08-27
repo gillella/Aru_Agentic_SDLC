@@ -217,17 +217,28 @@ External reviewers are considered in this order:
 - `sourcery`
 - `codeant`
 
+Register each installed provider explicitly:
+
+```text
+reviewer-registered:coderabbit
+reviewer-registered:sourcery
+reviewer-registered:codeant
+```
+
+The bootstrap `review:*` authority labels do not register providers.
 `create_pr.py` selects the first registered available service, not an
-issue-number rotation. Installing labels alone is not enough—the assigned
-service must produce verifiable current-head evidence. On explicit
+issue-number rotation. The assigned service must produce verifiable
+current-head evidence. On explicit
 unavailability it falls back immediately; while merely pending it retains the
 service for less than 15 minutes and falls back at 15 minutes.
 
 The fallback pool is Claude Code, OpenAI Codex, xAI Cursor, and Google
 Antigravity. Capacity must answer the exact smoke-test prompt with `OK`; Claude
-probes all three `claude-sub` subscriptions. The PR author identity is excluded,
-and another model family is preferred. No distinct successful probe means no
-assignment change.
+probes all three `claude-sub` subscriptions. Before use, bind each configured
+identity to the GitHub actor that will submit its formal Review, for example
+`reviewer-binding:xai-cursor=aru-xai-reviewer`. The actor must differ from the
+PR author. The author agent identity is also excluded, and another model family
+is preferred. No bound, distinct successful probe means no assignment change.
 
 ## 5. Install Aru on a developer machine
 
@@ -408,8 +419,8 @@ review:google-antigravity
 ```
 
 The PR must never carry zero or multiple `review:*` labels at merge time. A
-coding authority also carries exactly one `reviewer:<identity>` label; an
-external authority carries none.
+coding authority also carries exactly one `reviewer:<identity>` and one
+`reviewer-actor:<github-login>` label; an external authority carries neither.
 
 ### Branch protection
 
@@ -584,7 +595,8 @@ The helper:
 - confirms the published remote head equals local `HEAD`;
 - appends `Closes #42`;
 - adds `author:<agent>` and `author-family:<family>`;
-- assigns the first registered available external `review:<authority>` label,
+- assigns the first explicitly registered available external
+  `review:<authority>` label,
   or a smoke-tested distinct coding-agent authority when no external is
   available;
 - moves the issue to `In Review`.
@@ -725,7 +737,9 @@ bot-authored PRs, and explicit unavailable/error responses are unavailable.
 Coding probes run in Claude Code, OpenAI Codex, xAI Cursor, Google Antigravity
 order after moving the author's model family behind other families. Claude
 always executes all three required `claude-sub` probes and rotates across the
-successful subscriptions deterministically.
+successful subscriptions deterministically. An identity is eligible only when
+its `reviewer-binding:<identity>=<github-login>` exists and the bound actor is
+not the PR author.
 
 The helper replaces the authority label as one labels update and then verifies
 that exactly one supported `review:*` label remains. A fallback PR comment
@@ -740,7 +754,8 @@ conditions. Authority requires a formal GitHub Review from an actor distinct
 from the PR author and a single strict `aru-coding-review:v1` JSON marker. The
 payload must:
 
-- match the one `review:<coding-family>` and `reviewer:<identity>` assignment;
+- match the one `review:<coding-family>`, `reviewer:<identity>`, and
+  `reviewer-actor:<github-login>` assignment;
 - bind the full 40-character current-head SHA and the linked issue numbers;
 - confirm the issue, acceptance criteria, exact diff, and relevant surrounding
   code were read;
@@ -900,6 +915,11 @@ true.
 - [ ] Governed issues are automatically or explicitly added to the Project.
 - [ ] Required lifecycle, type, priority, and reviewer labels exist; the helpers
       can create issue-specific agent and author labels.
+- [ ] Each installed external provider has exactly one corresponding
+      `reviewer-registered:<service>` label; uninstalled providers do not.
+- [ ] Each coding fallback identity has one
+      `reviewer-binding:<identity>=<github-login>` and the actor is not an
+      implementation author account.
 - [ ] GitHub CLI authentication can read and update Issues, PRs, and Projects.
 
 ### Verification and review

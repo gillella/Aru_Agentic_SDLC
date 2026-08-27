@@ -154,9 +154,11 @@ only after exact-head CI and the assigned authoritative review are complete.
 
 ## Reviewer state machine
 
-Every PR current head has exactly one authority label. At creation,
-`create_pr.py` chooses the first registered available external service in this
-order: CodeRabbit, Sourcery, CodeAnt. An explicit unavailable/error response
+Every PR current head has exactly one authority label. Operators register an
+installed external provider with `reviewer-registered:<service>`; ordinary
+bootstrap `review:*` labels are not registrations. At creation, `create_pr.py`
+chooses the first registered available service in this order: CodeRabbit,
+Sourcery, CodeAnt. An explicit unavailable/error response
 causes immediate fallback. A pending service retains authority for 14 minutes
 59 seconds; at 15 minutes it becomes eligible for immediate fallback through:
 
@@ -167,7 +169,9 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
 
 Fallback smoke-tests Claude Code, OpenAI Codex, xAI Cursor, then Google
 Antigravity; it excludes the author identity and prefers another model family.
-All three Claude subscriptions are probed. Cost or quota exhaustion, rate
+Each identity must have a `reviewer-binding:<identity>=<github-login>` label,
+and that GitHub actor must differ from the PR author. All three Claude
+subscriptions are probed. Cost or quota exhaustion, rate
 limiting, provider outage, unsupported bot-authored PRs, and explicit
 unavailable/error responses all count as unavailable. If no distinct coding
 agent has capacity, assignment does not change and the transition fails closed.

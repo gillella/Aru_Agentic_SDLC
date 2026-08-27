@@ -46,8 +46,10 @@ Done. Do not create another lifecycle store.
 
 ## Reviewer assignment
 
-`create_pr.py` selects the first registered available external reviewer in
-`coderabbit`, `sourcery`, `codeant` order. Exactly one authority label remains.
+`create_pr.py` selects the first external reviewer explicitly registered by a
+`reviewer-registered:<service>` label in `coderabbit`, `sourcery`, `codeant`
+order. Authority labels provisioned by bootstrap do not register providers.
+Exactly one authority label remains.
 An explicit unavailable/error response causes immediate fallback; a merely
 pending external assignment is retained until 15 minutes after assignment, then
 falls back. Cost, quota exhaustion, rate limiting, provider outage, unsupported
@@ -56,7 +58,9 @@ bot-authored PRs, and explicit unavailable/error responses are unavailable.
 Before fallback, smoke-test actual capacity in `claude-code`, `openai-codex`,
 `xai-cursor`, `google-antigravity` order, excluding the author identity and
 preferring a different model family. Claude selection probes all three
-`claude-sub` subscriptions. If no distinct reviewer responds exactly `OK`, keep
+`claude-sub` subscriptions. A candidate also requires one explicit
+`reviewer-binding:<identity>=<github-login>` registration whose actor differs
+from the PR author. If no bound distinct reviewer responds exactly `OK`, keep
 the existing authority and fail closed.
 
 A coding agent may author or remediate code and may authoritatively review code
