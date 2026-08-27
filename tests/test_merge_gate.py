@@ -451,6 +451,43 @@ def test_codeant_missing_exact_head_review_object_fails_closed(monkeypatch):
         merge_pr.evaluate(146, head)
 
 
+def test_codeant_malformed_marker_beside_valid_comment_fails_closed(monkeypatch):
+    head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
+    install_codeant_pr(monkeypatch, head, pr_number=146)
+
+    review_obj = make_review(commit_id=head, state="COMMENTED")
+    valid_record = make_codeant_record(commit=head, done=True)
+    valid_comment = make_codeant_comment(records=[valid_record])
+    malformed_comment = make_codeant_comment(records="{not-valid-json}")
+
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
+    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [valid_comment, malformed_comment])
+
+    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
+        merge_pr.evaluate(146, head)
+
+
+def test_codeant_valid_marker_beside_trusted_prose_comment_passes(monkeypatch):
+    head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
+    install_codeant_pr(monkeypatch, head, pr_number=146)
+
+    review_obj = make_review(commit_id=head, state="COMMENTED")
+    valid_record = make_codeant_record(commit=head, done=True)
+    valid_comment = make_codeant_comment(records=[valid_record])
+    prose_comment = {
+        "id": 2,
+        "body": "## CodeAnt AI\n\nGeneral summary prose with no status marker.",
+        "user": {"login": "codeant-ai[bot]", "type": "Bot"},
+    }
+
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
+    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [valid_comment, prose_comment])
+
+    gates = merge_pr.evaluate(146, head)
+    assert gates["reviewer"] == "codeant"
+    assert gates["head"] == head
+
+
 def test_codeant_changes_requested_review_blocks_merge(monkeypatch):
     head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
     install_codeant_pr(monkeypatch, head, pr_number=146)
@@ -462,6 +499,28 @@ def test_codeant_changes_requested_review_blocks_merge(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [blocking_review])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
+    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
+        merge_pr.evaluate(146, head)
+
+
+def test_codeant_conflicting_approved_and_changes_requested_blocks_merge(monkeypatch):
+    head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
+    install_codeant_pr(monkeypatch, head, pr_number=146)
+
+    approved_review = make_review(commit_id=head, state="APPROVED")
+    blocking_review = make_review(commit_id=head, state="CHANGES_REQUESTED")
+    record = make_codeant_record(commit=head, done=True)
+    status_comment = make_codeant_comment(records=[record])
+
+    # Test APPROVED before CHANGES_REQUESTED
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [approved_review, blocking_review])
+    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
+    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
+        merge_pr.evaluate(146, head)
+
+    # Test CHANGES_REQUESTED before APPROVED
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [blocking_review, approved_review])
+    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
     with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
         merge_pr.evaluate(146, head)
 
@@ -530,3 +589,8 @@ def test_preserve_coderabbit_and_sourcery_evidence_paths(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [])
     assert merge_pr.exact_head_review(pr_cr_no_check, 10, "coderabbit") is False
     assert merge_pr.exact_head_review(pr_ca, 10, "codeant") is False
+
+    # 5. Sourcery conflicting APPROVED + CHANGES_REQUESTED review fails
+    sourcery_changes = make_review(commit_id=head, state="CHANGES_REQUESTED", login="sourcery-ai[bot]", actor_type="Bot")
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [sourcery_approved, sourcery_changes])
+    assert merge_pr.exact_head_review(pr_sc, 10, "sourcery") is False

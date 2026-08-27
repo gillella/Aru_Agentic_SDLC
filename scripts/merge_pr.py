@@ -35,6 +35,7 @@ REVIEW_ACTORS = {
 CODEANT_STATUS_MARKER_RE = re.compile(
     r"<!--\s*codeant-review-status:(.*?)-->", re.DOTALL
 )
+CODEANT_MARKER_PREFIX_RE = re.compile(r"<!--\s*codeant-review-status", re.IGNORECASE)
 CODEANT_STATUS_RECORD_KEYS = {"label", "commit", "started", "finished", "done"}
 
 
@@ -139,12 +140,12 @@ def successful_service_review(number: int, head: str, service: str) -> bool:
             raise KernelError("review evidence is malformed")
         actor = review.get("user") or review.get("author")
         commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
-        if (
-            _actor_is_trusted(actor, service)
-            and commit_id == head
-            and str(review.get("state") or "").upper() == "APPROVED"
-        ):
-            approved.append(review)
+        if _actor_is_trusted(actor, service) and commit_id == head:
+            state = str(review.get("state") or "").upper()
+            if state == "CHANGES_REQUESTED":
+                return False
+            if state == "APPROVED":
+                approved.append(review)
     return bool(approved)
 
 
@@ -166,25 +167,6 @@ def trusted_codeant_review_at_head(reviews: list[dict[str, Any]], head: str) -> 
     return has_exact_head_review
 
 
-def parse_codeant_status_payload(comment: dict[str, Any]) -> list[dict[str, Any]] | None:
-    actor = comment.get("user") or comment.get("author")
-    if not _actor_is_trusted(actor, "codeant"):
-        return None
-    body = comment.get("body")
-    if not isinstance(body, str):
-        return None
-    matches = CODEANT_STATUS_MARKER_RE.findall(body)
-    if len(matches) != 1:
-        return None
-    try:
-        payload = json.loads(matches[0].strip())
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(payload, list):
-        return None
-    return payload
-
-
 def _valid_codeant_record(record: Any) -> bool:
     if not isinstance(record, dict) or set(record.keys()) != CODEANT_STATUS_RECORD_KEYS:
         return False
@@ -198,21 +180,45 @@ def _valid_codeant_record(record: Any) -> bool:
     return isinstance(record.get("done"), bool)
 
 
+def parse_codeant_status_payload(
+    comment: dict[str, Any],
+) -> tuple[bool, list[dict[str, Any]] | None]:
+    actor = comment.get("user") or comment.get("author")
+    if not _actor_is_trusted(actor, "codeant"):
+        return True, None
+    body = comment.get("body")
+    if not isinstance(body, str):
+        return False, None
+    if not CODEANT_MARKER_PREFIX_RE.search(body):
+        return True, None
+    matches = CODEANT_STATUS_MARKER_RE.findall(body)
+    if len(matches) != 1:
+        return False, None
+    try:
+        payload = json.loads(matches[0].strip())
+    except (json.JSONDecodeError, ValueError):
+        return False, None
+    if not isinstance(payload, list):
+        return False, None
+    if any(not _valid_codeant_record(record) for record in payload):
+        return False, None
+    return True, payload
+
+
 def validate_codeant_status_comments(comments: list[dict[str, Any]], head: str) -> bool:
     trusted_payloads: list[list[dict[str, Any]]] = []
     for comment in comments:
         if not isinstance(comment, dict):
             raise KernelError("comment evidence is malformed")
-        payload = parse_codeant_status_payload(comment)
+        valid, payload = parse_codeant_status_payload(comment)
+        if not valid:
+            return False
         if payload is not None:
             trusted_payloads.append(payload)
     if len(trusted_payloads) != 1:
         return False
 
     records = trusted_payloads[0]
-    if any(not _valid_codeant_record(record) for record in records):
-        return False
-
     head_records = [r for r in records if str(r.get("commit") or "").lower() == head.lower()]
     if len(head_records) != 1:
         return False
