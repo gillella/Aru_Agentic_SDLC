@@ -429,6 +429,13 @@ gh project item-add <project-number> \
   --url https://github.com/<owner>/<repo>/issues/<issue-number>
 ```
 
+Lifecycle transitions resolve only the affected issue's Project item and the
+linked Project's `Status` field. Do not enumerate the full Project item or
+field inventory for a single status change: those queries grow with board size
+and can consume the shared GraphQL allowance after only a few transitions.
+Missing, duplicated, malformed, or truncated targeted evidence still blocks
+the update.
+
 ### CI
 
 The generated workflow only compiles Python files. Replace or extend it with
