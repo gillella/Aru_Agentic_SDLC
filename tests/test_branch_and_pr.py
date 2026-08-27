@@ -61,6 +61,21 @@ def test_external_reviewer_assignment_uses_registered_order():
     assert reviewer == ("sourcery", None)
 
 
+def test_external_registration_reads_beyond_first_hundred_labels(monkeypatch):
+    commands = []
+
+    def labels(argv):
+        commands.append(argv)
+        return [{"name": f"label-{index}"} for index in range(150)] + [
+            {"name": "review:sourcery"}
+        ]
+
+    monkeypatch.setattr(create_pr, "gh_json", labels)
+    states = create_pr.registered_external_states()
+    assert states["sourcery"] == create_pr.AVAILABLE
+    assert commands[0][commands[0].index("--limit") + 1] == "1000"
+
+
 def test_immediate_external_unavailability_assigns_smoke_tested_agent(monkeypatch):
     calls = []
     monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")

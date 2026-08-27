@@ -108,7 +108,7 @@ def require_published_head(branch: str) -> str:
 
 
 def registered_external_states() -> dict[str, str]:
-    records = gh_json(["label", "list", "--limit", "100", "--json", "name"])
+    records = gh_json(["label", "list", "--limit", "1000", "--json", "name"])
     if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
         raise KernelError("reviewer registration labels are unavailable")
     names = {str(item.get("name") or "") for item in records}
