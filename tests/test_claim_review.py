@@ -1,3 +1,4 @@
+import ast
 import sys
 import unittest
 from pathlib import Path
@@ -262,11 +263,43 @@ class RetiredCodingAgentReviewTests(unittest.TestCase):
             self.assertFalse(hasattr(claim_issue, name),
                              f"claim_issue still exposes {name}")
 
-    def test_the_helper_source_writes_no_reviewer_label(self):
-        source = Path(claim_issue.__file__).read_text(encoding="utf-8")
-        self.assertNotIn('"reviewer:', source)
-        self.assertNotIn('"reviewed-by:', source)
-        self.assertNotIn("aru-agent-review", source)
+    def test_the_helper_never_writes_reviewer_labels_but_keeps_read_only_adoption_preflight(self):
+        tree = ast.parse(Path(claim_issue.__file__).read_text(encoding="utf-8"))
+        startswith_reviewer = False
+        reviewer_writes = []
+        retired_literals = []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if (isinstance(func, ast.Attribute)
+                        and func.attr == "startswith"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == "reviewer:"):
+                    startswith_reviewer = True
+                if isinstance(func, ast.Name) and func.id == "ensure_label":
+                    first = node.args[0] if node.args else None
+                    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                        if first.value.startswith("reviewer:"):
+                            reviewer_writes.append((node.lineno, first.value))
+                        if (first.value.startswith("reviewed-by:")
+                                or "aru-agent-review" in first.value):
+                            retired_literals.append((node.lineno, first.value))
+                if isinstance(func, ast.Name) and func.id == "run_cmd" and node.args:
+                    command = node.args[0]
+                    if isinstance(command, ast.List):
+                        strings = [
+                            elt.value for elt in command.elts
+                            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                        ]
+                        if "--add-label" in strings and any(
+                                value.startswith("reviewer:") for value in strings):
+                            reviewer_writes.append((node.lineno, tuple(strings)))
+
+        self.assertTrue(startswith_reviewer)
+        self.assertEqual(reviewer_writes, [])
+        self.assertEqual(retired_literals, [])
 
 
 class MergeClaimTests(unittest.TestCase):

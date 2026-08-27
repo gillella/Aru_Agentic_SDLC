@@ -1,7 +1,7 @@
 # +42 for #472 emergency-agent exact-head authority adversarial coverage.
 # +163 for #472 authorized-login binding and write-access authorization on
 # emergency-agent review evidence.
-# line-ceiling: 7350
+# line-ceiling: 7380
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import inspect
@@ -1156,6 +1156,8 @@ class RefusedMergeIsNonDestructiveTests(unittest.TestCase):
              patch.object(merge_pr, "ensure_pr_head_checkout",
                           return_value=(self.tmp, None)), \
              patch.object(merge_pr, "release_pr_head_checkout"), \
+             patch.object(merge_pr, "save_gate_verdicts", return_value=True), \
+             patch.object(merge_pr, "discard_gate_verdicts"), \
              patch.object(merge_pr, "repository_merge_lock",
                           return_value=nullcontext((True, "serialized"))), \
              patch.object(merge_pr, "_current_base_tip", return_value="base-sha"), \
@@ -4535,9 +4537,12 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "run_closeout", return_value=True)
     @patch.object(merge_pr, "repository_root", return_value="/repo")
     @patch.object(merge_pr, "execute_merge")
+    @patch.object(merge_pr, "validate_gate_verdicts",
+                  return_value=(True, None, "ok"))
+    @patch.object(merge_pr, "load_gate_verdicts", return_value={})
     @patch.object(merge_pr, "fetch_pr", return_value=merged_pr())
     def test_rerun_of_merged_pr_skips_second_merge(
-        self, _fetch, execute, _root, closeout
+        self, _fetch, _load, _validate, execute, _root, closeout
     ):
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
@@ -4567,8 +4572,9 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "fetch_pr")
     @patch.object(merge_pr, "_current_base_tip", return_value="base-sha")
     @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
+    @patch.object(merge_pr, "save_gate_verdicts", return_value=True)
     def test_successful_merge_with_branch_delete_failure_is_resumable(
-        self, _base_tip, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
+        self, _save, _base_tip, fetch, _json, _sync, _threads, execute, _root, _chdir, _prune, _local,
         _remote, _close, _done, _issue_claim, merger_claim,
         sleep, intervention,
     ):
@@ -4628,8 +4634,9 @@ class MergeExecutionRecoveryTests(unittest.TestCase):
     @patch.object(merge_pr, "fetch_pr")
     @patch.object(merge_pr, "_current_base_tip", return_value="base-sha")
     @patch.object(merge_pr, "_behind_by", new=lambda base, head: 0)
+    @patch.object(merge_pr, "save_gate_verdicts", return_value=True)
     def test_default_merge_method_is_merge(
-        self, _base_tip, fetch, _json, _sync, _threads, execute, _root, closeout
+        self, _save, _base_tip, fetch, _json, _sync, _threads, execute, _root, closeout
     ):
         fetch.return_value = {
             "number": 9,
@@ -4722,6 +4729,7 @@ class SerializedMergeExecutionTests(unittest.TestCase):
              patch.object(merge_pr, "_current_base_tip", return_value=live_base), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "save_gate_verdicts", return_value=True), \
              patch.object(merge_pr, "repository_merge_lock",
                           return_value=nullcontext((True, "serialized"))), \
              patch.object(merge_pr, "execute_merge",
@@ -4782,6 +4790,7 @@ class SerializedMergeExecutionTests(unittest.TestCase):
              patch.object(merge_pr, "_current_base_tip", return_value="base-a"), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "save_gate_verdicts", return_value=True), \
              patch.object(merge_pr, "repository_merge_lock",
                           return_value=nullcontext((True, "serialized"))), \
              patch.object(merge_pr, "execute_merge",
@@ -4932,6 +4941,7 @@ class FinalWindowBaseMovementTests(unittest.TestCase):
              patch.object(merge_pr, "_current_base_tip", side_effect=base_reads), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
+             patch.object(merge_pr, "save_gate_verdicts", return_value=True), \
              patch.object(merge_pr, "write_checkpoint_tag",
                           return_value=(True, "checkpoint written")), \
              patch.object(merge_pr, "repository_merge_lock",
@@ -4986,6 +4996,7 @@ class FinalWindowBaseMovementTests(unittest.TestCase):
              patch.object(merge_pr, "evaluate_dod", return_value=(True, [])), \
              patch.object(merge_pr, "_behind_by", new=lambda _base, _head: 0), \
              patch.object(merge_pr, "_current_base_tip", return_value="base-a"), \
+             patch.object(merge_pr, "save_gate_verdicts", return_value=True), \
              patch.object(merge_pr, "repository_merge_lock",
                           return_value=nullcontext((True, "serialized"))):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_ERROR)
@@ -6932,6 +6943,9 @@ class CheckpointCallSiteTests(unittest.TestCase):
              patch.object(merge_pr, "run_closeout", return_value=closeout_ok), \
              patch.object(merge_pr.time, "sleep"), \
              patch.object(merge_pr, "post_human_intervention", return_value=True), \
+             patch.object(merge_pr, "validate_gate_verdicts",
+                          return_value=(True, None, "ok")), \
+             patch.object(merge_pr, "load_gate_verdicts", return_value={}), \
              patch.object(merge_pr, "write_checkpoint_tag",
                           return_value=(True, "written")) as tag:
             code = merge_pr.main()
@@ -6958,6 +6972,9 @@ class CheckpointCallSiteTests(unittest.TestCase):
              patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
+             patch.object(merge_pr, "validate_gate_verdicts",
+                          return_value=(True, None, "ok")), \
+             patch.object(merge_pr, "load_gate_verdicts", return_value={}), \
              patch.object(merge_pr, "write_checkpoint_tag",
                           return_value=(False, "git tag failed")):
             self.assertEqual(merge_pr.main(), merge_pr.EXIT_OK)
@@ -7039,15 +7056,16 @@ class GateVerdictPersistenceTests(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        patcher = patch.object(
-            merge_pr, "run_cmd", return_value=(0, self.dir, "")
-        )
+        patcher = patch.object(merge_pr, "run_cmd", return_value=(0, self.dir, ""))
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def test_verdicts_survive_a_round_trip(self):
-        self.assertTrue(merge_pr.save_gate_verdicts(self.dir, 9, CHECKPOINT_GATES))
-        self.assertEqual(merge_pr.load_gate_verdicts(self.dir, 9), CHECKPOINT_GATES)
+        self.assertTrue(merge_pr.save_gate_verdicts(self.dir, 9, CHECKPOINT_GATES, "gated-sha"))
+        ok, gates, reason = merge_pr.validate_gate_verdicts(merge_pr.load_gate_verdicts(self.dir, 9),
+                                                            9, "gated-sha")
+        self.assertTrue(ok, reason)
+        self.assertEqual(gates, CHECKPOINT_GATES)
 
     def test_absent_verdicts_read_as_none_not_as_an_empty_pass(self):
         """None makes the checkpoint admit the gap; [] would read as 'no gates ran'."""
@@ -7063,11 +7081,9 @@ class GateVerdictPersistenceTests(unittest.TestCase):
         merge_pr.discard_gate_verdicts(self.dir, 404)
 
     def test_discard_removes_the_parked_verdicts(self):
-        merge_pr.save_gate_verdicts(self.dir, 9, CHECKPOINT_GATES)
+        merge_pr.save_gate_verdicts(self.dir, 9, CHECKPOINT_GATES, "gated-sha")
         merge_pr.discard_gate_verdicts(self.dir, 9)
         self.assertIsNone(merge_pr.load_gate_verdicts(self.dir, 9))
-
-
 class CheckpointMergePathCallSiteTests(unittest.TestCase):
     """B4: the resume branch is not the merge branch; both need the guarantees."""
 
@@ -7119,11 +7135,13 @@ class CheckpointMergePathCallSiteTests(unittest.TestCase):
         tag.assert_not_called()
 
     def test_the_resume_path_loads_parked_verdicts_when_they_exist(self):
+        record = {"schema_version": 1, "pr": 9, "gated_head": "gated-sha",
+                  "gates": [{"name": name, "passed": passed, "message": message}
+                            for name, passed, message in CHECKPOINT_GATES]}
         with patch.object(sys, "argv", ["merge_pr.py", "--pr", "9"]), \
              patch.object(merge_pr, "fetch_pr", return_value=checkpoint_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
-             patch.object(merge_pr, "load_gate_verdicts",
-                          return_value=list(CHECKPOINT_GATES)) as load, \
+             patch.object(merge_pr, "load_gate_verdicts", return_value=record) as load, \
              patch.object(merge_pr, "discard_gate_verdicts"), \
              patch.object(merge_pr, "run_closeout", return_value=True), \
              patch.object(merge_pr, "write_checkpoint_tag",

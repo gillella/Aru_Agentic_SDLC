@@ -11,8 +11,7 @@ boundary that keeps the vector from becoming a shell:
 - Commands are parsed as data and executed as argv (`shell=False`).
 - The raw command string is rejected if it contains shell metacharacters.
 - argv[0] must be a bare name on an explicit runner allowlist.
-- `python` / `python3` may only run `-m unittest`, or the explicit verifier
-  `scripts/verify_citations.py`.
+- `python` / `python3` may only run `-m unittest`.
 - Each command is bounded by VERIFY_TIMEOUT_SECONDS; timeouts are failed evidence.
 - No `python -c`, no other `-m` modules, no absolute paths, no `env`/`bash`
   prefixes, no path traversal, no arbitrary `scripts/*.py`.
@@ -42,9 +41,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 from common import VERIFICATION_EVIDENCE_SCHEMA, sanitize_command
 
 ALLOWED_RUNNERS = frozenset({"python3", "python", "pytest", "ruff"})
-ALLOWED_PYTHON_SCRIPTS = frozenset({
-    "scripts/verify_citations.py",
-})
+ALLOWED_PYTHON_SCRIPTS = frozenset()
 PYTHON_UNITTEST_FLAGS = frozenset({"-v", "-q", "-b", "-f"})
 PYTHON_SCRIPT_FLAGS = frozenset({"-q", "-v", "--check"})
 PYTEST_FLAGS = frozenset({"-q", "-v", "--tb=short", "--quiet"})

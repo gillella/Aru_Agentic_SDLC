@@ -34,33 +34,6 @@ issue pickup and in-flight resume. Agents must not remove the label or claim the
 issue to be helpful; only the operator may complete the work or remove the
 label before the ordinary Ready lifecycle begins.
 
-## Delivery Increments (user-facing: Sprints)
-
-A Sprint is represented internally by one durable Delivery Increment. It does
-not replace issue Status and is not assumed to be a two-week Scrum timebox.
-The increment control issue and structured operator-decision comments are the
-GitHub authority record; `~/.aru/delivery-increments.json` is the private,
-lock-protected local materialization used by the control room.
-
-New boards include `Delivery Increment` and `Increment State` fields for the
-control issue. Ordinary stories continue through Backlog → Done unchanged.
-Agents may propose a bounded issue set, but only the configured operator can
-authorize, revise, start, accept, cancel, authorize deployment, or record
-deployment through the project Slack channel. The Slack decision has no local
-effect until its structured GitHub comment succeeds.
-
-An authorized scope is frozen. Adding, removing, or replacing an issue needs a
-new Slack `revise` decision, whose history preserves the prior exact scope.
-One project has at most one active normal increment. Emergency increments are
-separate records and never rewrite normal scope. Grooming remains independent,
-and the release state is separate from the increment lifecycle: acceptance
-does not authorize deployment. A second accepted-but-undeployed increment is
-refused unless the operator explicitly records risk acceptance.
-
-When an increment reaches the `accepted` state, `scripts/increment_release.py` tags the exact accepted default-branch commit (`ckpt/<project_id>/<increment_id>`) with structured metadata (increment ID, project identity, committed issue set, acceptance decision URL, timestamp, and concise message) and publishes a formal release record linking evidence, demo artifacts, and deployment state without triggering production deployment.
-
----
-
 ## 🌳 Git Worktree Isolation Guidelines
 
 1. **Clean Workspace Isolation**:
@@ -315,9 +288,12 @@ python3 "$ARU_SDLC_HOME/scripts/fleet_status.py" [--json]
 
 ### Run Health & Lane Utilization Observability:
 
-In addition to GitHub and Git state, `fleet_status.py` includes a read-only summary from the local `aru.factory_loop_ledger.v1` audit ledger (`scripts/factory_loop_ledger.py`):
-- **Durations**: Median and P90 loop tick execution durations and availability-to-assignment latency.
-- **Outcomes**: Distinct tracking for successful ticks, failures, single-flight skips, missed/late fires, stale recoveries, and explicit pauses.
-- **Lane Utilization & Idle Causes**: Breakdowns of active lanes, avoidable idle (contention, quota), dependency blocks, and review/CI wait times.
-- **Progress Tracking**: Timestamp and PR/merge counts of the last material factory progress.
-- **Observational Boundary**: Local metrics never act as a queue or claim authority; GitHub remains authoritative.
+In addition to GitHub and Git state, `fleet_status.py` reports a read-only
+summary of current holders, PR age, review rounds, CI state, Ready depth, and
+pause state:
+- **Operational snapshot**: one-screen visibility into who holds what and what
+  is waiting.
+- **Review/CI bottlenecks**: aging PRs, pending review, and pending CI remain
+  visible without granting local state merge authority.
+- **Observational boundary**: local metrics never act as a queue or claim
+  authority; GitHub remains authoritative.

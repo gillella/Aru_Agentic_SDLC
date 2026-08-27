@@ -77,7 +77,6 @@ class ReviewAuthoritySkillSurfaceTests(unittest.TestCase):
             "run_fleet.py",
             "spawn_ephemeral_worker.py",
             "launch_fleet.sh",
-            "prompts/fleet-worker.md",
             "skills/research",
             "skills/aru-agentic-sdlc",
         ):

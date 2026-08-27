@@ -21,7 +21,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from common import (
     claimed_by,
@@ -33,7 +33,6 @@ from common import (
 )
 from github_inventory import open_pull_requests as rest_open_pull_requests
 from picker_board_inventory import governed_board_inventory
-from factory_loop_ledger import LedgerError, read_tick_records, summarize_ledger
 
 EXIT_COMPLETE = 0
 EXIT_ERROR = 1
@@ -186,20 +185,6 @@ def _reasons(issues: List[Dict[str, Any]], prs: List[Dict[str, Any]],
     return lines
 
 
-def _ledger_summary(slug: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Read local ledger summary read-only; never writes, mutates, or raises.
-
-    Returns ``(summary, problem)``. ``problem`` carries the reason the local
-    ledger is unreadable so the operator sees it instead of an empty section.
-    """
-    try:
-        return summarize_ledger(read_tick_records(slug)), None
-    except LedgerError as exc:
-        return None, f"Local factory loop ledger is unreadable: {exc}"
-    except Exception as exc:  # observational only: never block status
-        return None, f"Local factory loop ledger read failed: {exc}"
-
-
 def _collect(slug: str) -> Dict[str, Any]:
     """Read the repository the caller has already selected as the cwd."""
     issues = query_open_issues()
@@ -236,10 +221,7 @@ def _collect(slug: str) -> Dict[str, Any]:
     )
     open_work = bool(issue_rows or pr_rows
                      or any(r["issue"] is not None for r in worktree_rows))
-    ledger_summary, ledger_problem = _ledger_summary(slug)
     reasons = _reasons(issue_rows, pr_rows, worktree_rows)
-    if ledger_problem:
-        reasons.append(ledger_problem)
     return {
         "state": "waiting" if open_work else "complete",
         "exit_code": EXIT_WAITING if open_work else EXIT_COMPLETE,
@@ -255,7 +237,6 @@ def _collect(slug: str) -> Dict[str, Any]:
         "ready_count": ready_count,
         "issues": issue_rows, "pull_requests": pr_rows,
         "claims": claims, "worktrees": worktree_rows,
-        "ledger_summary": ledger_summary,
     }
 
 
@@ -299,25 +280,6 @@ def format_status(status: Dict[str, Any]) -> str:
     if status.get("reasons"):
         lines.append("\nDetails:")
         lines.extend(f"  • {reason}" for reason in status["reasons"])
-    ledger_summary = status.get("ledger_summary")
-    if ledger_summary and ledger_summary.get("total_ticks", 0) > 0:
-        lines.append("\nRun Health & Lane Utilization:")
-        lines.append(
-            f"  • Ticks: {ledger_summary['total_ticks']} "
-            f"(median {ledger_summary['median_tick_duration_ms']:.1f}ms, "
-            f"p90 {ledger_summary['p90_tick_duration_ms']:.1f}ms)"
-        )
-        lines.append(
-            f"  • Skipped / Missed: {ledger_summary['skipped_fires']} | "
-            f"Active Lanes: {ledger_summary['active_lanes']}"
-        )
-        lines.append(
-            f"  • Idle: avoidable {ledger_summary['avoidable_idle_count']}, "
-            f"contention {ledger_summary['dependency_contention_count']}, "
-            f"review/CI wait {ledger_summary['review_ci_wait_count']}"
-        )
-        if ledger_summary.get("last_material_progress_at"):
-            lines.append(f"  • Last Progress: {ledger_summary['last_material_progress_at']}")
     return "\n".join(lines)
 
 

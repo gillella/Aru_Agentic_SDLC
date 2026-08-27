@@ -34,13 +34,12 @@ python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
 `--owner` must be the GitHub login (not `@me`). `gh project link` rejects `@me`
 when the repository owner is the login string.
 
-`scripts/init_project.py` also writes the consumer preview pair
-(`scripts/build_preview.py`, `scripts/smoke_preview.py`) plus generated
-`.github` review/touches helpers so GitHub Actions can assemble a static
-artifact. Those are not a second factory. The **demo** repository's `skills/`
-directory stays empty (`.gitkeep` only). Happy-path procedures live in
+`scripts/init_project.py` also writes the consumer governance helpers plus
+generated `.github` review/touches helpers. Those are not a second factory.
+The **demo** repository's `skills/` directory stays empty (`.gitkeep` only).
+Happy-path procedures live in
 `$ARU_SDLC_HOME/skills/`, including `idea-to-prd`, `prd-to-issues`,
-`implement-next-issue`, `code-review`, and `deploy-preview` at the pinned SHA.
+`implement-next-issue`, and `code-review` at the pinned SHA.
 
 ## Happy path
 
@@ -58,23 +57,9 @@ skills under `$ARU_SDLC_HOME`, not the empty demo `skills/` directory.
 4. A **distinct** agent reviews (`$ARU_SDLC_HOME/skills/code-review/SKILL.md`). Authors never
    self-review.
 5. `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`
-6. `python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <40-char-sha> --issue <N>`
-   Skill: `$ARU_SDLC_HOME/skills/deploy-preview/SKILL.md`. The helper records the GitHub Pages
-   URL on the originating issue.
 
-## Runnable surface before Pages
+## Runnable surface
 
-Until a peer review and gated merge land the seed PR, the equivalent surface is
-the assembled preview:
-
-```bash
-cd /path/to/aru-golden-path-demo
-python3 scripts/build_preview.py
-# open dist/index.html
-```
-
-`public/index.html` is the static source `build_preview.py` copies; it is not
-the assembled artifact.
-
-Walk numbers and the live preview URL are recorded on playbook issue #131 as
-comments when each step completes.
+The retained demo walk stops at governed merge. This repository no longer
+claims a bundled preview builder or post-merge deploy helper as part of the
+golden path.

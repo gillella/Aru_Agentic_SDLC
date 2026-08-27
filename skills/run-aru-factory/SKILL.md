@@ -31,8 +31,9 @@ Canonical home: `$ARU_SDLC_HOME`.
 
 ## Identity and the single picker
 
-The picker derives a stable agent id when `--agent` is omitted. `ARU_AGENT_ID`
-may pin a readable id, and `--family` records model-family attribution.
+The picker derives a stable id when `--agent` is omitted. `ARU_AGENT_ID`
+may pin a readable id, and `--family` records model-family attribution; model
+family is optional, but later helper calls still use it when available.
 
 Every `next` or `loop` iteration starts with exactly one selection call:
 
@@ -51,12 +52,13 @@ picker resumes work already held by that id before selecting anything new.
 | `adopt` | bootstrap an ungoverned repository | `init-agent-project` |
 | `status` | report current state without mutation | `scripts/fleet_status.py` |
 | `next` | perform one returned work item, then stop | matching kernel skill/helper |
-| `loop` | keep the current desktop task processing picker results | the `next` routing table |
+| `loop` | keep the current desktop task processing picker results | `prompts/fleet-worker.md` and the `next` routing table |
 | `doctor` | inspect local integration health without mutation | doctor helper |
 
 `please continue`, `continue`, and `keep going` mean `loop`. Default to `next`
-only when the user requests one unit of work without naming a mode. Reject an
-unknown mode rather than guessing.
+only when the user requests one unit of work without naming a mode.
+Unrecognised mode is an error: reject it rather than guessing, and never
+silently fall through.
 
 ### adopt
 
@@ -85,14 +87,14 @@ Call the single picker once and route its one returned item:
 | `merge` | invoke `merge_pr.py` as described under **Merging** |
 | `idle` or `error` | report the returned state and stop |
 
-Feedback and errors carry no new claim. Merge and non-resume issue results may
-perform the needed claim mutation; resume results report work already held.
+Feedback, `idle`, and `error` results are returned without claims. Merge and
+non-resume issue results may perform the needed claim mutations; resume results
+report work already held.
 
 For `review`, require exactly `review:agent`, exactly
 `reviewer:<AGENT_ID>`, and a different non-empty `author:<id>`. The picker only
 recovers this operator-created emergency assignment. It never assigns ordinary
-coding-agent review. If the assignment is malformed, do not inspect the diff;
-release only this agent's own claim and report the problem.
+coding-agent review. This path states explicitly that reassignment is never automatic. If the assignment is malformed, do not inspect the diff; release only this agent's own claim and report the problem.
 
 A claim race ends that iteration, not the session. In loop mode, ask the single
 picker again; never steal another agent's claim.
@@ -103,14 +105,16 @@ Treat the dispatched coding worker's lifecycle as separate from Hermes; Hermes d
 Each Hermes tick starts with **exactly one authoritative picker call**, the `fetch_next_work.py --claim --json` command under **next**; its result is the tick snapshot and the only routine GitHub-bearing entrypoint for that tick.
 Do not preflight or enrich it with `fleet_status.py`, `triage_backlog.py`, direct `gh issue` / `gh pr` views, `check_ci.py`, or `merge_pr.py --dry-run`.
 Pace dynamically: after a successful mutation invalidates the prior snapshot, finish `report`; that report ends the current tick, and exactly one fresh picker call occurs only at the start of the next tick.
-For unchanged, `idle`, a returned `error` work item, Complete, review/CI/dependency wait, rate limit, exhausted credits, or any usable picker result carrying a transient helper/degraded warning, make zero follow-up GitHub reads.
+For unchanged, `idle`, a returned `error` work item, Complete, review/CI/dependency wait, rate limit, exhausted credits, or any usable picker result carrying a transient helper/degraded warning, make zero follow-up GitHub reads, even when a helper exits `1`.
 Build the **Status Card** only from the picker result, mark unavailable fields honestly, and use app-native wait or background primitives with a long fallback heartbeat, not a fixed interval. Enforce same-job single-flight: a later tick recovers durable claims, worktrees, and PR state instead of duplicating dispatch, and creates no repository-local daemon, private task queue, or competing scheduler. Routing preserves test ownership: consumer repositories follow their own `AGENTS.md` testing policy, while Aru's focused-predicate exception remains local to `Aru_Agentic_SDLC`.
 A returned `error` work item is a usable snapshot and transient loop state, not a concrete failure: report its reason, wait, and read nothing further. A picker/helper failure that yields no usable snapshot also ends the routine tick with zero further reads by default. Full diagnostics are a separately declared attempt—replacing, not enriching, a routine tick—for an explicit operator `status` / `doctor` request or that concrete failure. Do not emit a final response for a recoverable state.
 
-Loop mode ends only when the operator stops it or an actual product/security/
-scope decision is required. Record the blocker on the linked issue or PR and
-stop with the exact decision needed. Do not create another notification path,
-task queue, or process to own continuity.
+Loop mode ends only when the operator explicitly stops it or an actual
+product/security/scope decision requires human intervention. Record the blocker
+on the linked issue or PR and stop with the exact decision needed. Recover low
+context after context compaction with the same app-native wake path rather than
+treating compaction as a stop condition. Do not create another notification
+path, task queue, or process to own continuity.
 
 ### doctor
 
@@ -123,8 +127,7 @@ python3 "$ARU_SDLC_HOME/scripts/doctor_local_agent_integrations.py" --json \
 ```
 
 It checks integration links, governance markers, repository identity,
-worktrees, `git`, and `gh auth status` without printing credentials. Exit `0`
-is healthy, `2` degraded, and `1` invalid.
+worktrees, `git`, and `gh auth status` without printing credentials. Exit `0` healthy, `2` degraded, and `1` invalid.
 
 ## Rules that hold in every mode
 
@@ -141,31 +144,34 @@ is healthy, `2` degraded, and `1` invalid.
    lint, syntax, documentation, and build check before pushing.
 6. **Linked PRs.** Every implementation PR contains `Closes #<issue>` and is
    created through `create_pr.py --agent <id> --model-family <family>`.
+   `create_pr.py` requires the stable agent identity; the model family is
+   optional metadata, not a reason to skip the author stamp.
 7. **Degraded coordination stops safely.** Never invent a secondary task queue
    or bypass the merge gate.
 8. **Exactly one ordinary review authority.** `create_pr.py` assigns exactly
    one of `review:coderabbit`, `review:sourcery`, or `review:codeant` using the
-   deterministic least-loaded complete open-PR inventory rule. The assignment
-   is immutable unless an operator records one audited external reassignment.
+   deterministic least-loaded complete open-PR inventory rule. CodeRabbit,
+   Sourcery, and CodeAnt are the only ordinary external authorities. The
+   assignment is immutable unless an operator records one audited external reassignment.
    Only after external exhaustion or an operator-declared excessive wait may
    one independent `review:agent` become the terminal fallback. Authors never
    review their own work.
 
 ## Merging
 
-After the assigned authority supplies completed exact-current-head evidence
-and every Definition-of-Done gate passes, any factory agent may execute:
+After the assigned authority supplies completed exact-current-head evidence and
+every Definition-of-Done gate passes, any factory agent, including the implementation author, may execute:
 
 ```shell
-python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
-  --pr <N> --expected-head <HEAD_SHA>
+python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>
+python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release
 ```
 
-Use the picker-supplied head. Do not add a separate dry-run or claim read. On a
-blocked or head-mismatch result, release only the merger claim through
-`claim_issue.py` and return to the picker. Direct pushes and ad-hoc GitHub
-merges have no authority. A finding closes only through a later fix commit or
-an authorized `Withdrawn:` reply.
+Use the picker-supplied head. Do not add a separate dry-run or claim read.
+`gh pr merge` is forbidden; direct pushes and ad-hoc GitHub merges have no
+authority. On a blocked or head-mismatch result, release only the merger claim
+through `claim_issue.py` and return to the picker. A finding closes only
+through a later fix commit or an authorized `Withdrawn:` reply.
 
 ## References
 

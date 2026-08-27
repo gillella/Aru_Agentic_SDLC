@@ -43,12 +43,50 @@ REMOVED_PATHS = (
     "tests/test_slack_control_room.py",
     "tests/test_slack_notify.py",
     "tests/test_slack_projects.py",
+    "scripts/factory_loop_snapshot.py",
+    "tests/test_factory_loop_snapshot.py",
+    "scripts/factory_loop_ledger.py",
+    "tests/test_factory_loop_ledger.py",
+    "scripts/build_preview.py",
+    "scripts/deploy_preview.py",
+    "scripts/smoke_preview.py",
+    ".github/workflows/deploy-preview.yml",
+    ".github/workflows/promote.yml",
+    "scripts/promote.py",
+    "tests/test_deploy_preview.py",
+    "tests/test_smoke_preview.py",
+    "tests/test_promote.py",
+    "templates/stacks/python/deploy-preview.yml",
+    "templates/stacks/node/deploy-preview.yml",
+    "templates/stacks/go/deploy-preview.yml",
+    "templates/stacks/python/docs/deploy.md",
+    "templates/stacks/node/docs/deploy.md",
+    "templates/stacks/go/docs/deploy.md",
+    "sdlc_flow_visualizer/index.html",
+    "sdlc_flow_visualizer/app.js",
+    "sdlc_flow_visualizer/styles.css",
+    "scripts/verify_citations.py",
+    "docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md",
+    "tests/test_research_skill.py",
+    "scripts/delivery_increments.py",
+    "scripts/increment_release.py",
+    "tests/test_delivery_increments.py",
+    "tests/test_increment_release.py",
+    "scripts/incident_intake.py",
+    "tests/test_incident_intake.py",
+    "templates/cursor/commands/aru-agentic-sdlc.md",
+    "templates/cursor/rules/aru-agentic-sdlc.mdc",
+    "templates/slack/manifest.yaml",
+    "templates/slack/manifest-hermes-war-room.yaml",
 )
 
 REMOVED_MODULES = (
     "run_fleet", "fleet_cycle", "spawn_ephemeral_worker", "factory_metrics",
     "fixtures", "slack_control_room", "slack_notify", "slack_projects", "slack",
-    "slack_sdk", "slack_bolt",
+    "slack_sdk", "slack_bolt", "factory_loop_snapshot", "factory_loop_ledger",
+    "build_preview", "deploy_preview", "smoke_preview", "promote",
+    "verify_citations", "delivery_increments", "increment_release",
+    "incident_intake",
 )
 
 # `scripts/agent_presence.py` outlives this slice. Its three live dependents
@@ -128,7 +166,12 @@ class RemovedSurfaceTests(unittest.TestCase):
                 self.assertFalse((ROOT / rel).exists(), f"{rel} still exists")
 
     def test_removed_package_directories_are_absent(self):
-        for rel in ("scripts/fixtures", "tests/e2e", "tests/fixtures/fleet"):
+        for rel in (
+            "scripts/fixtures",
+            "tests/e2e",
+            "tests/fixtures/fleet",
+            "sdlc_flow_visualizer",
+        ):
             with self.subTest(path=rel):
                 self.assertFalse((ROOT / rel).exists(), f"{rel} still exists")
 

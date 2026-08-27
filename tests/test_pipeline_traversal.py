@@ -186,11 +186,14 @@ def reassigned_evidence(service: str, **overrides) -> dict:
     """
     head = canonical_pr()["headRefOid"]
     base = canonical_pr()["baseRefOid"]
-    evidence = canonical_evidence(reviews=[])
-    evidence.pop("coderabbit_status")
-    evidence["service_threads"] = {
-        service: {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
-    }
+    if service == "coderabbit":
+        evidence = canonical_evidence()
+    else:
+        evidence = canonical_evidence(reviews=[])
+        evidence.pop("coderabbit_status")
+        evidence["service_threads"] = {
+            service: {"unresolved": 0, "unfixed": 0, "outdated_unfixed": 0},
+        }
     if service == "sourcery":
         evidence["sourcery_check_runs"] = [{
             "name": "Sourcery review", "app": {"slug": "sourcery-ai"},
@@ -198,7 +201,7 @@ def reassigned_evidence(service: str, **overrides) -> dict:
             "pull_requests": [{"number": 293, "head": {"sha": head},
                                "base": {"sha": base}}],
         }]
-    else:
+    elif service == "codeant":
         record = {"label": "CodeAnt review", "commit": head,
                   "started": "2026-08-19T00:00:00Z",
                   "finished": "2026-08-19T00:02:00Z", "done": True}
@@ -211,7 +214,7 @@ def reassigned_evidence(service: str, **overrides) -> dict:
     return evidence
 
 
-FALLBACK_SERVICES = ("sourcery", "codeant")
+FALLBACK_SERVICES = ("coderabbit", "sourcery", "codeant")
 
 
 def _issue(number: int, status: str) -> dict:
@@ -329,6 +332,9 @@ class FallbackReviewTraversalTests(unittest.TestCase):
         for service in FALLBACK_SERVICES:
             with self.subTest(service=service):
                 evidence = reassigned_evidence(service)
+                if service == "coderabbit":
+                    evidence["reviews"] = []
+                    evidence.pop("coderabbit_status", None)
                 evidence.pop("sourcery_check_runs", None)
                 evidence["codeant_status_comments"] = []
                 ok, gates = self._dod(reassigned_pr(service), evidence)
@@ -371,24 +377,17 @@ class FallbackReviewTraversalTests(unittest.TestCase):
             merge_pr.check_reviews(pr, reassigned_evidence("sourcery"))[0])
 
 
-class RetiredAgentReviewTraversalTests(unittest.TestCase):
-    """#414: `review:agent` is not a traversal, only a dead end.
+class EmergencyAgentReviewTraversalTests(unittest.TestCase):
+    """`review:agent` is an emergency path with explicit assignment evidence."""
 
-    The emergency coding-agent path used to be a full alternative route to
-    merge. Its removal has to be visible here, in the traversal suite, or a
-    future change could quietly restore a second oracle without any pipeline
-    test noticing.
-    """
-
-    def test_review_agent_is_read_only_to_be_refused_with_a_way_out(self):
+    def test_review_agent_without_assignment_evidence_is_refused(self):
         pr = reassigned_pr("agent")
         ok, message = merge_pr.check_reviews(pr, canonical_evidence())
         self.assertFalse(ok)
-        self.assertIn("retired", message)
-        self.assertIn("review:coderabbit", message)
+        self.assertIn("exactly one author", message)
+        self.assertIn("assigned reviewer", message)
 
-    def test_a_retired_assignment_fails_only_the_review_gate(self):
-        """It must be a dead end at review, not a mysteriously broken PR."""
+    def test_an_unassigned_agent_review_fails_only_the_review_gate(self):
         with patch.object(merge_pr, "check_spec_sync",
                           return_value=(True, "ok")), \
              patch.object(merge_pr, "_behind_by", return_value=0):
@@ -401,13 +400,6 @@ class RetiredAgentReviewTraversalTests(unittest.TestCase):
                          ["review"])
 
     def test_no_external_fallback_service_is_named_agent(self):
-        """Read the production mapping, not the tuple this module declares.
-
-        `reassign_review` can still label a PR `review:agent`, so the claim
-        worth proving is the one the merge gate depends on: the coding agent
-        is not one of the external review authorities, and an assignment to
-        it yields no positive review authority at any head.
-        """
         self.assertNotIn("agent", reassign_review.EXTERNAL_FALLBACK_LABELS)
         self.assertEqual(set(reassign_review.EXTERNAL_FALLBACK_LABELS),
                          set(FALLBACK_SERVICES))

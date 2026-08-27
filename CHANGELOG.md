@@ -23,7 +23,6 @@ Breaking changes (renames, mandatory flags, exit contract changes) force a **MAJ
 - `scripts/install_local_agent_integrations.sh`
 - `scripts/install_agent_integration.sh`
 - `scripts/release.py`
-- `scripts/increment_release.py`
 
 ## Checkpoint History
 

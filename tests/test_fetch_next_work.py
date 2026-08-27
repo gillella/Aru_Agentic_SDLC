@@ -483,8 +483,8 @@ class UnreadableQueueTests(unittest.TestCase):
         self.assertIn("truncated", res["work"]["reason"])
 
 
-class ResearchRoutingTests(unittest.TestCase):
-    def test_skill_for_issue_routes_research_label_and_title(self):
+class IssueRoutingTests(unittest.TestCase):
+    def test_skill_for_issue_always_routes_to_implementation(self):
         labeled = {
             "number": 1,
             "title": "look into X",
@@ -496,11 +496,11 @@ class ResearchRoutingTests(unittest.TestCase):
             "title": "feat: something",
             "labels": [{"name": "type:feat"}],
         }
-        self.assertEqual(fnw.skill_for_issue(labeled), "research")
-        self.assertEqual(fnw.skill_for_issue(titled), "research")
+        self.assertEqual(fnw.skill_for_issue(labeled), "implement-next-issue")
+        self.assertEqual(fnw.skill_for_issue(titled), "implement-next-issue")
         self.assertEqual(fnw.skill_for_issue(feat), "implement-next-issue")
 
-    def test_select_routes_research_candidate(self):
+    def test_select_routes_ready_candidate_to_implementation_skill(self):
         issue = {
             "number": 101,
             "title": "research: citations",
@@ -515,7 +515,7 @@ class ResearchRoutingTests(unittest.TestCase):
              patch.object(fnw, "list_open_issues", return_value=[issue]), \
              patch.object(fnw, "build_candidates", return_value=parts):
             res = fnw.select("agent-2", "openai")
-        self.assertEqual(res["work"]["skill"], "research")
+        self.assertEqual(res["work"]["skill"], "implement-next-issue")
         self.assertEqual(res["work"]["issue"], 101)
 
 

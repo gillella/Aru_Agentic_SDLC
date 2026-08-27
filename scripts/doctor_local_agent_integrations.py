@@ -69,7 +69,6 @@ AGENT_LAYOUT = {
     "cursor": {
         "skill_dirs": [".cursor/skills"],
         "governance": [".cursor/user-rules-aru-agentic-sdlc.md"],
-        "required_files": [".cursor/rules/aru-agentic-sdlc.mdc"],
         "surfaces": [".cursor/commands/run-aru-factory.md"],
     },
     "antigravity": {

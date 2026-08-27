@@ -208,9 +208,6 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         self._link_skills(".agents/skills")
         self._write_governance(".cursor/user-rules-aru-agentic-sdlc.md")
         self._write_surface(".cursor/commands/run-aru-factory.md")
-        rule = self.target_home / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
-        rule.parent.mkdir(parents=True, exist_ok=True)
-        rule.write_text("alwaysApply: true\n")
 
     def _isolated_path(self, extra_bin=None):
         path = extra_bin or str(self.target_home / "bin")
@@ -383,14 +380,14 @@ class DoctorLocalAgentIntegrationsTests(unittest.TestCase):
         ]
         self.assertEqual(stale, [])
 
-    def test_missing_cursor_rule_file_is_degraded(self):
+    def test_missing_cursor_command_surface_is_degraded(self):
         self._install_healthy_cursor()
-        rule = self.target_home / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
-        rule.unlink()
+        command = self.target_home / ".cursor" / "commands" / "run-aru-factory.md"
+        command.unlink()
         payload = json.loads(self.run_doctor("--json").stdout)
         missing = [
             item for item in payload["checks"]
-            if item["id"].startswith("required_file:")
+            if item["id"].startswith("surface:cursor")
         ]
         self.assertTrue(missing)
         self.assertEqual(payload["status"], "degraded")

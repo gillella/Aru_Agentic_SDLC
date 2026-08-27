@@ -33,7 +33,7 @@ actually supported and configured.
    **model family** (`anthropic`, `openai`, `google`, …). All agents
    authenticate as the same GitHub user, so these labels provide durable
    author/remediator routing and audit attribution.
-2. Give every agent its **own clone** (see `scripts/launch_fleet.sh`). Sharing
+2. Give every agent its **own clone**. Sharing
    one `.git` past ~3 agents means constant `index.lock` contention.
 3. Open each isolated clone as a project in its desktop application and start
    this loop manually.
@@ -41,8 +41,8 @@ actually supported and configured.
 
 ### Presence and availability
 
-Register the current desktop (or optional headless) task against **this**
-project only via `scripts/agent_presence.py` / `run_fleet.py` presence hooks.
+Register the current desktop task against **this** project only via
+`scripts/agent_presence.py`.
 Heartbeat locally so peers can see `available` / `busy` / `cooling-down` /
 `temporarily-offline` / `unavailable` / `returned`. Heartbeat expiry never
 releases a GitHub claim. One agent id cannot be rebound to another project while
@@ -265,20 +265,9 @@ merge attempt from an error item.
 #### E. `issue` — follow the picker-selected skill
 
 Read `work.skill` from the claimed picker result.
-
-##### Research issue
-
-When it is `research` (`skill: research`), follow
-`$ARU_SDLC_HOME/skills/research/SKILL.md` to its own close-out, then return to
-the top of the loop. **Do not execute the implementation sequence below.** A
-comment-only research artifact creates no branch, repository write, push, or
-PR.
-
-##### Implementation issue
-
-For every other issue skill, follow
+For every issue skill in the retained kernel, follow
 `$ARU_SDLC_HOME/skills/implement-next-issue/SKILL.md`, then execute Steps 1-9
-below. Never collapse research into this implementation branch.
+below.
 
 1. **Read the issue in full.** `gh issue view <N> --json title,body,labels`.
    Write down its `touches:` list — that is your **write budget**.

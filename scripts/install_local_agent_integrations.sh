@@ -713,19 +713,15 @@ if [[ "${TARGET_CURSOR}" == true ]]; then
   echo "--- Cursor Integration ---"
   CURSOR_SKILLS="${TARGET_HOME}/.cursor/skills"
   CURSOR_COMMANDS="${TARGET_HOME}/.cursor/commands"
-  CURSOR_RULES="${TARGET_HOME}/.cursor/rules"
   for skill in "${SKILLS[@]}"; do
     link_skill "${skill}" "${CURSOR_SKILLS}" || ERRORS=$((ERRORS + 1))
   done
   copy_commands "${CURSOR_COMMANDS}" || ERRORS=$((ERRORS + 1))
   if [[ "${CHECK_ONLY}" == true ]]; then
-    if [[ ! -f "${CURSOR_RULES}/aru-agentic-sdlc.mdc" ]]; then
-      echo "[CHECK FAILED] Missing Cursor rule ${CURSOR_RULES}/aru-agentic-sdlc.mdc"
+    if [[ ! -f "${CURSOR_COMMANDS}/run-aru-factory.md" ]]; then
+      echo "[CHECK FAILED] Missing Cursor command ${CURSOR_COMMANDS}/run-aru-factory.md"
       ERRORS=$((ERRORS + 1))
     fi
-  elif [[ "${DRY_RUN}" == false ]]; then
-    mkdir -p "${CURSOR_RULES}"
-    cp "${SDLC_HOME}/templates/cursor/rules/aru-agentic-sdlc.mdc" "${CURSOR_RULES}/aru-agentic-sdlc.mdc"
   fi
   update_managed_block "${TARGET_HOME}/.cursor/user-rules-aru-agentic-sdlc.md" \
     "${SDLC_HOME}/templates/integrations/cursor/governance.md" || ERRORS=$((ERRORS + 1))

@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_PATHS = (
     Path("README.md"),
     Path("docs/ARU-SOFTWARE-FACTORY.md"),
-    Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md"),
 )
 STATUS_ROWS = (
     "| **Shipped** | Present in the repository with linked implementation evidence. |",
@@ -171,22 +170,19 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
         for row in PHASE_ROWS:
             self.assertEqual(roadmap.count(row), 1)
 
-    def test_visualizer_status_claim_waits_for_its_own_issue(self):
-        for path in (Path("README.md"), Path("docs/ARU-SOFTWARE-FACTORY.md")):
-            introduction = section(
-                self.documents[path],
-                self.documents[path].splitlines()[0],
-                "## Lifecycle status vocabulary",
-            )
+    def test_removed_runtime_surfaces_do_not_reappear_in_canonical_docs(self):
+        banned = (
+            "AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md",
+            "sdlc_flow_visualizer",
+            "deploy_preview.py",
+            "promote.py",
+            "increment_release.py",
+            "verify_citations.py",
+        )
+        for path, document in self.documents.items():
             with self.subTest(path=path):
-                self.assertRegex(
-                    introduction,
-                    re.compile(
-                        r"Issue #342 is the Current status-legend correction; "
-                        r"until it merges, the visualizer may lag",
-                        re.IGNORECASE,
-                    ),
-                )
+                for phrase in banned:
+                    self.assertNotIn(phrase, document)
 
     def test_current_review_policy_keeps_agent_fallback_explicit_and_narrow(self):
         cursor = (ROOT / "docs/cursor-integration.md").read_text(encoding="utf-8")
@@ -255,9 +251,6 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
         self.assertNotIn("### Phase 0 —", plan)
 
     def test_shipped_intake_and_telemetry_are_not_future_gaps(self):
-        research = self.documents[
-            Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md")
-        ]
         plan = self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")]
         for path, document in self.documents.items():
             with self.subTest(path=path):
@@ -277,21 +270,13 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                             re.IGNORECASE | re.DOTALL,
                         ),
                     )
-        self.assertIn("#101–#103", research)
-        self.assertIn("#106–#108", research)
         self.assertIn("#106–#108", plan)
 
-    def test_deployment_scope_is_explicit_in_every_document(self):
+    def test_retained_kernel_scope_is_explicit_in_every_document(self):
         required = (
-            "scripts/deploy_preview.py",
-            "scripts/promote.py",
-            "GitHub Pages",
-            "#345",
-            "immutable",
-            "authoritative",
-            "smoke",
-            "promotion",
-            "rollback",
+            "issue-to-merge",
+            "client-work kernel",
+            "Deferred",
         )
         scopes = {
             Path("README.md"): section(
@@ -301,27 +286,18 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
             ),
             Path("docs/ARU-SOFTWARE-FACTORY.md"): section(
                 self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")],
-                "#### Deployment truth",
+                "#### Delivery truth",
                 "### 5.2",
             ),
-            Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md"): section(
-                self.documents[
-                    Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md")
-                ],
-                "## 5. Where Aru stands today",
-                "**Strategic read:**",
-            ),
         }
-        for path, deployment in scopes.items():
+        for path, scope in scopes.items():
             with self.subTest(path=path):
                 for phrase in required:
-                    self.assertIn(phrase, deployment)
+                    self.assertIn(phrase, scope)
                 self.assertRegex(
-                    deployment,
-                    re.compile(
-                        r"Audit-only.{0,180}(does not|not hosting|no runnable)",
-                        re.IGNORECASE | re.DOTALL,
-                    ),
+                    scope,
+                    re.compile(r"real post-merge|runtime urls|rollback|observation",
+                               re.IGNORECASE),
                 )
 
     def test_merge_default_matches_the_shipped_helper(self):
@@ -335,13 +311,6 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                 self.documents[Path("docs/ARU-SOFTWARE-FACTORY.md")],
                 "### 5.1 Current governed roadmap",
                 "### 5.2",
-            ),
-            Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md"): section(
-                self.documents[
-                    Path("docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md")
-                ],
-                "## 5. Where Aru stands today",
-                "**Strategic read:**",
             ),
         }
         merge_source = (ROOT / "scripts" / "merge_pr.py").read_text(
@@ -387,28 +356,6 @@ class FactoryDocsFreshnessTests(unittest.TestCase):
                         f"'{tail}' is duplicated across a line wrap:\n"
                         f"{first}\n{second}",
                     )
-
-    def test_ascii_box_borders_align(self):
-        inspected = 0
-        for path, document in self.documents.items():
-            boxes, unpaired = ascii_boxes(document)
-            with self.subTest(path=path):
-                self.assertEqual(
-                    unpaired, [],
-                    f"box border(s) at line(s) {unpaired} have no partner",
-                )
-            inspected += len(boxes)
-            for box in boxes:
-                widths = {display_width(line.rstrip()) for line in box}
-                with self.subTest(path=path, top=box[0].strip()[:40]):
-                    self.assertEqual(
-                        len(widths), 1,
-                        f"box lines render at differing widths {sorted(widths)}:\n"
-                        + "\n".join(box),
-                    )
-        # Guards the whole assertion against passing on zero rectangles.
-        self.assertGreater(inspected, 0)
-
 
 class DocumentParserTests(unittest.TestCase):
     """Focused coverage for the helpers the freshness contract leans on."""

@@ -15,7 +15,7 @@ Running `scripts/install_agent_integration.sh` configures the local machine:
 |---|---|---|
 | `ARU_SDLC_HOME` | shell profile (`~/.zshrc` / `~/.bashrc`) | Canonical path to this playbook |
 | Agent skills | per-agent skill dirs + `~/.agents/skills/<skill>/` | Symlinks so each agent discovers SDLC skills in every workspace |
-| Governance blocks | `~/.cursor/rules/`, `~/.claude/CLAUDE.md`, `~/.codex/instructions.md`, `~/.gemini/AGENTS.md` | Managed `# >>> aru` / `# <<< aru` blocks; unmanaged user content is never touched |
+| Governance blocks | `~/.claude/CLAUDE.md`, `~/.codex/instructions.md`, `~/.gemini/AGENTS.md`, `~/.cursor/user-rules-aru-agentic-sdlc.md` | Managed `# >>> aru` / `# <<< aru` blocks or paste source; unmanaged user content is never touched |
 | Native adapters | Cursor commands, Codex thread automation, Antigravity workflow, Claude command | `aru code loop` wake / resume surfaces |
 | User-rules paste file | `~/.cursor/user-rules-aru-agentic-sdlc.md` | Text to paste into **Customize → Rules → User Rules** (Cursor only) |
 
@@ -31,18 +31,18 @@ Running `scripts/install_agent_integration.sh` configures the local machine:
 The installer is idempotent: re-running rewrites only its delimited managed
 blocks and skill symlinks, and never clobbers unmanaged user content.
 
-Project bootstraps (`init_project.py`) also drop `.cursor/rules/aru-agentic-sdlc.mdc`
-into each new repo so project rules mirror the global rule for teammates who
-do not have the global install.
+Project bootstraps no longer drop a repo-local Cursor rule file. The retained
+Cursor surface is the installed command set plus the paste-required user-rules
+source.
 
 ### Cursor user rules are paste-required
 
 Cursor reads user rules from its settings store, **not** from disk. The
 installer writes `~/.cursor/user-rules-aru-agentic-sdlc.md` as a paste source,
 but the text only takes effect once pasted into **Customize → Rules → User
-Rules** (or equivalent). The install output does not overstate this: skills,
-commands, and project rules work without the paste; the global User Rule needs
-the manual step. Finding the UI (Cursor 3.x): Command Palette (`Cmd+Shift+P`) →
+Rules** (or equivalent). The install output does not overstate this: skills and
+commands work without the paste; the global User Rule needs the manual step.
+Finding the UI (Cursor 3.x): Command Palette (`Cmd+Shift+P`) →
 **Cursor Settings** → **Rules**, or gear icon → **Cursor Settings** → **Rules**.
 
 ### Pinning a Version with `ARU_SDLC_REF`
@@ -111,7 +111,6 @@ repo. Point agents at `$ARU_SDLC_HOME` instead.
 
 All four agents auto-discover the symlinked skills. The installer links:
 
-- `aru-agentic-sdlc` (router)
 - `run-aru-factory` (aru code / please continue / work the board)
 - `implement-next-issue`
 - `init-agent-project`
@@ -168,6 +167,5 @@ unless skill directory names change — then re-run the installer.
 ## Opting a project out
 
 If a repo should not use Issue-First governance, remove or rewrite its
-`AGENTS.md` and delete `.cursor/rules/aru-agentic-sdlc.mdc`. Global User
-Rules still apply; soften or remove the User Rule text if you need a
-true exception.
+`AGENTS.md`. Global User Rules still apply; soften or remove the User Rule text
+if you need a true exception.

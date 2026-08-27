@@ -19,8 +19,6 @@ import init_project  # noqa: E402
 from init_project import (  # noqa: E402
     CI_GATE_MARKERS,
     render_ci_workflow,
-    render_deploy_docs,
-    render_deploy_preview_workflow,
     render_gitignore,
     render_release_workflow,
     write_templates,
@@ -33,6 +31,8 @@ class ProjectBootstrapTests(unittest.TestCase):
         self.assertNotIn("ARU CODE FACTORY REPOSITORY RULE", rules)
         self.assertNotIn("focused-only exception", rules)
         self.assertIn("Run `{test_runner}` and confirm all tests pass", rules)
+        self.assertIn("Router: `run-aru-factory/SKILL.md`", rules)
+        self.assertNotIn("aru-agentic-sdlc/SKILL.md", rules)
 
     def test_generated_plan_gate_requires_reuse_audit_with_names_and_locations(self):
         """Generated governance must carry the canonical reuse audit contract."""
@@ -137,25 +137,10 @@ class ProjectBootstrapTests(unittest.TestCase):
             os.makedirs(Path(temp_dir) / ".github" / "ISSUE_TEMPLATE")
             write_templates(temp_dir, "octocat/12")
             feature = (Path(temp_dir) / ".github" / "ISSUE_TEMPLATE" / "feature.yml").read_text()
-            research = (Path(temp_dir) / ".github" / "ISSUE_TEMPLATE" / "research.yml").read_text()
 
         self.assertIn('projects: ["octocat/12"]', feature)
         self.assertIn("        touches:", feature)
-        self.assertIn("type:research", research)
-        self.assertIn("research: ", research)
-        self.assertIn("Repository under docs/research/", research)
-        self.assertIn("Issue comment only", research)
-        self.assertIn("Every factual claim carries a resolvable", research)
-        self.assertIn("Every Findings line is marked", research)
-        self.assertIn("Citation verification exits 0", research)
-        self.assertIn("exact same-date entries", research)
-        self.assertIn("--repo-root <consumer-repo-root> <artifact>", research)
-        self.assertIn("touches: docs/research/**", research)
-        self.assertIn("replace it with issue-comment-only", research)
-
-    def test_governance_labels_include_research(self):
-        names = [name for name, _, _ in init_project.GOVERNANCE_LABELS]
-        self.assertIn("type:research", names)
+        self.assertFalse((Path(temp_dir) / ".github" / "ISSUE_TEMPLATE" / "research.yml").exists())
 
     def test_governance_labels_include_needs_human(self):
         labels = {
@@ -258,31 +243,11 @@ class ProjectBootstrapTests(unittest.TestCase):
 
             check_touches = Path(temp_dir) / ".github" / "scripts" / "check_touches.py"
             check_touches_wf = Path(temp_dir) / ".github" / "workflows" / "check_touches.yml"
-            promote_workflow = Path(temp_dir) / ".github" / "workflows" / "promote.yml"
-            build_preview = Path(temp_dir) / "scripts" / "build_preview.py"
-            smoke_preview = Path(temp_dir) / "scripts" / "smoke_preview.py"
+            release_workflow = Path(temp_dir) / ".github" / "workflows" / "release.yml"
 
             self.assertTrue(check_touches.is_file())
             self.assertTrue(check_touches_wf.is_file())
-            self.assertTrue(promote_workflow.is_file())
-            self.assertEqual(
-                promote_workflow.read_text(),
-                (ROOT / ".github" / "workflows" / "promote.yml").read_text(),
-            )
-            self.assertIn("repository_dispatch", promote_workflow.read_text())
-            self.assertIn("no runnable build movement claimed", promote_workflow.read_text())
-            self.assertTrue(build_preview.is_file())
-            self.assertEqual(
-                build_preview.read_text(),
-                (ROOT / "scripts" / "build_preview.py").read_text(),
-            )
-            self.assertTrue(os.access(build_preview, os.X_OK))
-            self.assertTrue(smoke_preview.is_file())
-            self.assertEqual(
-                smoke_preview.read_text(),
-                (ROOT / "scripts" / "smoke_preview.py").read_text(),
-            )
-            self.assertTrue(os.access(smoke_preview, os.X_OK))
+            self.assertTrue(release_workflow.is_file())
 
             smoke_scenario = Path(temp_dir) / ".github" / "scenarios" / "smoke.json"
             self.assertTrue(smoke_scenario.is_file())
@@ -477,45 +442,10 @@ class CiGateTests(unittest.TestCase):
 
 
 class CursorProjectRuleTests(unittest.TestCase):
-    """The don't-clobber guarantee is the whole point of this function.
-
-    A sibling installer shipped a branch that rm -rf'd a user's own skill
-    directory while claiming not to, so the equivalent path here is pinned by
-    a test rather than by a comment.
-    """
-
-    def test_rule_is_written_into_a_fresh_repo(self):
+    def test_stale_rule_is_not_bootstrapped(self):
         with tempfile.TemporaryDirectory() as target:
-            with patch.dict(os.environ, {"ARU_SDLC_HOME": str(ROOT)}):
-                init_project.create_cursor_project_rule(target)
-
-            rule = Path(target) / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
-            self.assertTrue(rule.is_file())
-            self.assertIn("alwaysApply: true", rule.read_text())
-            self.assertIn("Feature and remediation work", rule.read_text())
-
-    def test_an_existing_rule_is_left_untouched(self):
-        with tempfile.TemporaryDirectory() as target:
-            rule = Path(target) / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
-            rule.parent.mkdir(parents=True)
-            rule.write_text("MY HAND-EDITED RULE")
-
             init_project.create_cursor_project_rule(target)
-
-            self.assertEqual(rule.read_text(), "MY HAND-EDITED RULE")
-
-    def test_fallback_is_written_when_the_template_is_missing(self):
-        with tempfile.TemporaryDirectory() as target, \
-                tempfile.TemporaryDirectory() as empty_home:
-            # A partial checkout has no templates/ tree; the rule must still
-            # land, since a bootstrapped repo with no governance rule is worse
-            # than one with a terse fallback.
-            with patch.dict(os.environ, {"ARU_SDLC_HOME": empty_home}):
-                init_project.create_cursor_project_rule(target)
-
-            rule = Path(target) / ".cursor" / "rules" / "aru-agentic-sdlc.mdc"
-            self.assertTrue(rule.is_file())
-            self.assertIn("Issue-First Law", rule.read_text())
+            self.assertFalse((Path(target) / ".cursor" / "rules").exists())
 
 
 class DogfoodCiParityTests(unittest.TestCase):
@@ -547,12 +477,12 @@ class DogfoodCiParityTests(unittest.TestCase):
         self.assertNotIn("|| true", playbook_ci)
         self.assertNotIn("|| echo", playbook_ci)
 
-    def test_playbook_ci_names_the_three_dogfood_jobs(self):
+    def test_playbook_ci_collapses_pull_request_work_to_one_billable_job(self):
         playbook_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-        for job in ("secret-scan:", "dependency-audit:", "import-boundaries:"):
-            with self.subTest(job=job):
-                self.assertIn(job, playbook_ci)
-
+        self.assertTrue(all(x in playbook_ci for x in ("docs-freshness:", "test-and-lint:")))
+        self.assertIn("if: github.event_name != 'pull_request'", playbook_ci)
+        for removed in ("secret-scan:", "dependency-audit:", "import-boundaries:"):
+            self.assertNotIn(removed, playbook_ci)
     def test_gitleaks_workflow_declares_pull_request_read(self):
         """The action lists PR commits; missing this permission is a 403, not a leak."""
         playbook_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
@@ -667,22 +597,7 @@ class DogfoodCiParityTests(unittest.TestCase):
                 f"stdout={scanned.stdout!r} stderr={scanned.stderr!r}",
             )
 
-    def test_deploy_preview_and_release_workflows_are_stack_aware(self):
-        python_deploy = render_deploy_preview_workflow("python")
-        node_deploy = render_deploy_preview_workflow("typescript")
-        go_deploy = render_deploy_preview_workflow("go")
-
-        # Fail-closed checks on missing deploy credentials
-        for wf in (python_deploy, node_deploy, go_deploy):
-            self.assertIn("Validate deployment credentials", wf)
-            self.assertIn("PREVIEW_DEPLOY_TOKEN", wf)
-            self.assertIn("Deploy credentials absent", wf)
-
-        # Stack-specific runtime setups
-        self.assertIn("actions/setup-python", python_deploy)
-        self.assertIn("actions/setup-node", node_deploy)
-        self.assertIn("actions/setup-go", go_deploy)
-
+    def test_release_workflows_are_stack_aware(self):
         # Release workflows
         python_release = render_release_workflow("python")
         node_release = render_release_workflow("react")
@@ -697,31 +612,15 @@ class DogfoodCiParityTests(unittest.TestCase):
         self.assertIn("npm run build", node_release)
         self.assertIn("go build", go_release)
 
-        # Deploy docs point at governed factory skills
-        docs = render_deploy_docs("python", "demo-app")
-        self.assertIn("deploy-preview", docs)
-        self.assertIn("deploy_preview.py", docs)
-        self.assertIn("promote.py", docs)
-        self.assertIn("Aru_Agentic_SDLC", docs)
-        self.assertIn("PREVIEW_DEPLOY_TOKEN", docs)
-        self.assertIn("Fail-Closed Gate", docs)
-
-    def test_write_governance_scripts_creates_stack_deploy_and_release_workflows(self):
+    def test_write_governance_scripts_creates_release_workflow_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             init_project.scaffold_directory_structure(temp_dir)
             init_project.write_governance_scripts(temp_dir, stack="node", project_name="node-app")
 
-            deploy_wf = Path(temp_dir) / ".github" / "workflows" / "deploy-preview.yml"
             release_wf = Path(temp_dir) / ".github" / "workflows" / "release.yml"
-            deploy_docs = Path(temp_dir) / "docs" / "deploy.md"
 
-            self.assertTrue(deploy_wf.is_file())
             self.assertTrue(release_wf.is_file())
-            self.assertTrue(deploy_docs.is_file())
-
-            self.assertIn("actions/setup-node", deploy_wf.read_text())
             self.assertIn("npm run build", release_wf.read_text())
-            self.assertIn("deploy_preview.py", deploy_docs.read_text())
 
     def test_cli_scaffold_creates_stack_pack_workflows_for_node_and_go(self):
         for stack in ("node", "go"):
@@ -749,19 +648,14 @@ class DogfoodCiParityTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-                deploy_wf = Path(temp_dir) / ".github" / "workflows" / "deploy-preview.yml"
                 release_wf = Path(temp_dir) / ".github" / "workflows" / "release.yml"
-                deploy_docs = Path(temp_dir) / "docs" / "deploy.md"
 
-                self.assertTrue(deploy_wf.is_file())
                 self.assertTrue(release_wf.is_file())
-                self.assertTrue(deploy_docs.is_file())
+                self.assertFalse((Path(temp_dir) / ".github" / "workflows" / "deploy-preview.yml").exists())
 
                 if stack == "node":
-                    self.assertIn("actions/setup-node", deploy_wf.read_text())
                     self.assertIn("npm run build", release_wf.read_text())
                 else:
-                    self.assertIn("actions/setup-go", deploy_wf.read_text())
                     self.assertIn("go build", release_wf.read_text())
 
 
@@ -800,7 +694,7 @@ class LineCeilingBootstrapTests(unittest.TestCase):
 
     def test_a_new_project_passes_its_own_guard_immediately(self):
         # No manual baseline step: any marker the source carries is vendored too,
-        # which is what keeps the 460-line smoke_preview.py from failing day one.
+        # which is what keeps the vendored governance helpers from failing day one.
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
         import check_line_ceilings as guard
         for stack, runner in (("python", "pytest -q"),
@@ -814,6 +708,12 @@ class LineCeilingBootstrapTests(unittest.TestCase):
         parsed = yaml.safe_load(Path(target, ".github/workflows/ci.yml").read_text(encoding="utf-8"))
         names = [s.get("name") for s in parsed["jobs"]["verify"]["steps"]]
         self.assertIn("Enforce file line ceilings", names)
+
+    def test_governance_scripts_status_message_mentions_only_current_outputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch("builtins.print") as printer:
+            init_project.scaffold_directory_structure(temp_dir)
+            init_project.write_governance_scripts(temp_dir)
+        printer.assert_any_call("✅ Governance scripts and release workflow written.")
 
 
 if __name__ == "__main__":

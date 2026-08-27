@@ -7,21 +7,15 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-
 import acceptance_runner  # noqa: E402
 import merge_pr  # noqa: E402
-
-
 class AlwaysPass(unittest.TestCase):
     """Live target for an allowlisted `python3 -m unittest` verify command."""
 
     def test_ok(self):
         self.assertTrue(True)
-
-
 def _issue(criteria: str) -> str:
     return (
         "## Summary\nDo a thing.\n\n"
@@ -29,8 +23,6 @@ def _issue(criteria: str) -> str:
         f"{criteria}\n\n"
         "## Verification\n`python3 -m unittest`\n"
     )
-
-
 class ParseTests(unittest.TestCase):
     def test_backticked_command_is_extracted(self):
         body = _issue("- [ ] Rejects a redirect (verify: `python3 -m unittest tests.test_foo`)")
@@ -64,8 +56,6 @@ class ParseTests(unittest.TestCase):
 
     def test_no_acceptance_section_is_empty(self):
         self.assertEqual(acceptance_runner.parse_criteria("no headings here"), [])
-
-
 class ValidateTests(unittest.TestCase):
     def test_shell_metacharacters_are_rejected(self):
         for command in (
@@ -112,12 +102,10 @@ class ValidateTests(unittest.TestCase):
 
     def test_timeout_is_recorded_as_failure(self):
         body = _issue("- [ ] Slow (verify: `python3 -m unittest tests.ok`)")
-
         def boom(*_args, **_kwargs):
             raise acceptance_runner.subprocess.TimeoutExpired(
                 ["python3"], acceptance_runner.VERIFY_TIMEOUT_SECONDS
             )
-
         with patch.object(
             acceptance_runner.subprocess, "run", side_effect=boom
         ) as run:
@@ -133,7 +121,6 @@ class ValidateTests(unittest.TestCase):
 
     def test_exit_124_cannot_spoof_timeout_message(self):
         body = _issue("- [ ] Fails (verify: `python3 -m unittest tests.ok`)")
-
         def failed(argv, check=False, cwd=None, evidence=None):
             if evidence is not None:
                 evidence.append({
@@ -161,8 +148,6 @@ class ValidateTests(unittest.TestCase):
     def test_path_traversal_is_rejected(self):
         with self.assertRaises(acceptance_runner.CommandRejected):
             acceptance_runner.validate_command("python3 tests/../scripts/merge_pr.py")
-
-
 class RunTests(unittest.TestCase):
     def test_malicious_command_never_executes(self):
         body = _issue("- [ ] Exploit (verify: `python3 -c print(1)`)")
@@ -174,7 +159,6 @@ class RunTests(unittest.TestCase):
 
     def test_pass_records_evidence_without_requiring_a_tick(self):
         body = _issue("- [ ] Unticked but verified (verify: `python3 -m unittest tests.ok`)")
-
         def fake_run(argv, check=False, cwd=None, evidence=None):
             if evidence is not None:
                 evidence.append({
@@ -195,7 +179,6 @@ class RunTests(unittest.TestCase):
 
     def test_fail_is_reported(self):
         body = _issue("- [x] Must pass (verify: `python3 -m unittest tests.missing`)")
-
         def fake_run(argv, check=False, cwd=None, evidence=None):
             if evidence is not None:
                 evidence.append({
@@ -240,12 +223,9 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(merged["commands"]), 2)
         self.assertEqual(merged["status"], "failed")
         self.assertEqual(merged["schema"], "aru.verification.v1")
-
-
 class MergeGateTests(unittest.TestCase):
     def test_verify_pass_does_not_require_tick(self):
         body = _issue("- [ ] Runner works (verify: `python3 -m unittest tests.ok`)")
-
         def fake_run(argv, check=False, cwd=None, evidence=None):
             if evidence is not None:
                 evidence.append({
@@ -264,7 +244,6 @@ class MergeGateTests(unittest.TestCase):
 
     def test_verify_fail_refuses_merge(self):
         body = _issue("- [x] Runner works (verify: `python3 -m unittest tests.ok`)")
-
         def fake_run(argv, check=False, cwd=None, evidence=None):
             if evidence is not None:
                 evidence.append({
@@ -328,7 +307,6 @@ class MergeGateTests(unittest.TestCase):
             "GIT_COMMITTER_NAME": "test",
             "GIT_COMMITTER_EMAIL": "test@example.com",
         }
-
         def git(cwd, *args, capture=False):
             result = subprocess.run(
                 ["git", *args], cwd=cwd, env=env, check=True,
@@ -417,8 +395,20 @@ class MergeGateTests(unittest.TestCase):
             f"```json\n{json.dumps(existing)}\n```\n"
             f"{merge_pr.VERIFICATION_EVIDENCE_END}\n"
         )
-        with patch.object(merge_pr, "_gh_json", return_value={"body": body, "headRefOid": "abc123"}), \
-                patch.object(merge_pr, "run_cmd", return_value=(0, "", "")) as edited:
+        state = {"body": body, "headRefOid": "abc123"}
+
+        def read_pr(*_args, **_kwargs):
+            return dict(state)
+
+        def edit_pr(argv, check=False, cwd=None):
+            self.assertFalse(check)
+            self.assertIsNone(cwd)
+            if len(argv) >= 4 and argv[:3] == ["gh", "pr", "edit"] and "--body" in argv:
+                state["body"] = argv[argv.index("--body") + 1]
+            return 0, "", ""
+
+        with patch.object(merge_pr, "_gh_json", side_effect=read_pr), \
+                patch.object(merge_pr, "run_cmd", side_effect=edit_pr) as edited:
             ok, message = merge_pr.persist_acceptance_evidence(227, pr, records)
         self.assertTrue(ok, message)
         self.assertIn("persisted", message)
@@ -434,14 +424,11 @@ class MergeGateTests(unittest.TestCase):
         ok, message = merge_pr.check_acceptance(7, body)
         self.assertFalse(ok)
         self.assertIn("unticked", message)
-
     def test_live_allowlisted_unittest_passes(self):
         target = "tests.test_acceptance_runner.AlwaysPass"
         body = _issue(f"- [ ] Live runner (verify: `python3 -m unittest {target}`)")
         ok, message = merge_pr.check_acceptance(96, body, cwd=str(ROOT), execute=True)
         self.assertTrue(ok, message)
-
-
 class CliTests(unittest.TestCase):
     def test_json_rejected_command_exits_2(self):
         body = _issue("- [ ] Exploit (verify: `python3 -c print(1)`)")
@@ -457,7 +444,5 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 2)
         finally:
             os.unlink(path)
-
-
 if __name__ == "__main__":
     unittest.main()

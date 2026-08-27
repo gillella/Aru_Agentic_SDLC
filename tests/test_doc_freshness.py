@@ -584,36 +584,33 @@ class WorkflowCredentialBoundaryTests(unittest.TestCase):
         text = self.WORKFLOW.read_text(encoding="utf-8")
         start = text.index("\n  docs-freshness:")
         rest = text[start + 1:]
-        # The job ends at the next job key at the same indent level.
         end = rest.find("\n  test-and-lint:")
         return rest if end == -1 else rest[:end]
 
-    def _steps(self):
-        return self._docs_job().split("\n      - name:")[1:]
+    def _test_job(self) -> str:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        start = text.index("\n  test-and-lint:")
+        return text[start + 1:]
 
-    def _step_running_checker(self, *, on_pull_request: bool) -> str:
-        wanted = "== 'pull_request'" if on_pull_request else "!= 'pull_request'"
-        for step in self._steps():
-            if "check_docs.py" in step and wanted in step:
+    def _step(self, block: str, fragment: str) -> str:
+        for step in block.split("\n      - name:")[1:]:
+            if fragment in step:
                 return step
-        self.fail(
-            f"no docs-freshness step running check_docs.py guarded by {wanted}"
-        )
+        self.fail(f"no workflow step contains {fragment!r}")
 
     def test_pull_request_path_receives_no_token(self):
-        step = self._step_running_checker(on_pull_request=True)
+        step = self._step(self._test_job(), "check_docs.py --offline")
         self.assertNotIn("GH_TOKEN", step)
         self.assertNotIn("GITHUB_TOKEN", step)
         self.assertNotIn("secrets.", step)
 
     def test_pull_request_path_runs_offline(self):
-        # Without a token the issue-state lookup cannot succeed, so the PR
-        # path must skip it explicitly rather than fail the build on every PR.
-        step = self._step_running_checker(on_pull_request=True)
+        step = self._step(self._test_job(), "check_docs.py --offline")
+        self.assertIn("== 'pull_request'", step)
         self.assertIn("--offline", step)
 
     def test_trusted_path_keeps_the_full_check(self):
-        step = self._step_running_checker(on_pull_request=False)
+        step = self._step(self._docs_job(), "check_docs.py")
         self.assertIn("GH_TOKEN", step)
         self.assertNotIn("--offline", step)
 

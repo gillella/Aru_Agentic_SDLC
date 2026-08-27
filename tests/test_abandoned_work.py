@@ -321,13 +321,14 @@ class AdoptedPullRequestReviewTests(unittest.TestCase):
         self.assertEqual(merge_pr.label_values(pr, "family:"), ["anthropic"])
         self.assertEqual(merge_pr.assigned_review_service(pr), "coderabbit")
 
-    def test_no_coding_agent_reviewer_classification_survives(self):
+    def test_retired_reviewer_classification_helpers_are_gone_but_emergency_verdict_remains(self):
         import merge_pr
         for name in ("classify_reviewers", "reviewer_families",
                      "identity_values", "id_collision_message",
-                     "self_review_message", "_agent_review_verdict"):
+                     "self_review_message"):
             self.assertFalse(hasattr(merge_pr, name),
                              f"merge_pr still exposes {name}")
+        self.assertTrue(hasattr(merge_pr, "_agent_review_verdict"))
 
 
 def ago_dt(hours):

@@ -33,21 +33,6 @@ The following scripts constitute the supported consumer-facing CLI surface:
 11. `scripts/enable_main_ruleset.py`
 12. `scripts/install_local_agent_integrations.sh` / `scripts/install_agent_integration.sh`
 13. `scripts/release.py`
-14. `scripts/increment_release.py`
-
----
-
-## 🏷️ Sprint Checkpoint Releases (`ckpt/*`)
-
-Durably accepted Delivery Increments (sprints) are tagged and recorded via:
-
-```bash
-python3 scripts/increment_release.py --increment <increment_id> [--commit <sha>]
-```
-
-- **Deterministic Tagging**: Tagged as `ckpt/<project_id>/<increment_id>` targeting the exact accepted commit on the default branch.
-- **Immutable Evidence**: Includes increment ID, committed issue scope, durable Slack operator decision URL, timestamp, demo artifacts, and known limitations.
-- **Deployment Separation**: Tagging an accepted sprint checkpoint creates an immutable release record but does **not** authorize or trigger production deployment.
 
 ---
 

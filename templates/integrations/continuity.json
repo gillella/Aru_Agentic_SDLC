@@ -13,7 +13,7 @@
     "accessibility clicks",
     "keystroke injection",
     "screen-coordinate GUI control",
-    "replacing a desktop task with run_fleet.py"
+    "replacing a desktop task with another local loop runner"
   ],
   "stop_file": "~/.aru/factory-loop.stop",
   "agents": {

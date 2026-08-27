@@ -121,7 +121,7 @@ You already own a strong **middle factory** (claim → isolate → implement →
 
 | ID | Improvement | Why |
 |---|---|---|
-| **F3.1** | `deploy-preview` skill (Vercel / Cloud Run / your host) gated after merge or on PR | Idea→implementation without deploy is half a factory |
+| **F3.1** | Real post-merge deploy adapter with immutable artifact identity and smoke evidence | Idea→implementation without deploy is half a factory |
 | **F3.2** | Environment promotion skill: preview → staging → prod with explicit issue/PR trail | Keeps Issue-First Law past merge |
 | **F3.3** | Smoke / E2E hook in CI for products that have a runnable surface | Unit green ≠ product works |
 | **F3.4** | `fleet_status.py` one-screen ops: holders, PR age, review rounds, CI fail rate, Ready depth | You cannot improve what you cannot see |

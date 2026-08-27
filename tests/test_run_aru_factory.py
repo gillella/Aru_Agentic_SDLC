@@ -15,7 +15,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "run-aru-factory" / "SKILL.md"
-ROUTER = ROOT / "skills" / "aru-agentic-sdlc" / "SKILL.md"
 FLEET_PROMPT = ROOT / "prompts" / "fleet-worker.md"
 BOARD_WORKFLOW = ROOT / "docs" / "project_board_workflow.md"
 IMPLEMENT_SKILL = ROOT / "skills" / "implement-next-issue" / "SKILL.md"
@@ -29,13 +28,11 @@ DESKTOP_ADAPTERS = (
 REVIEW_SKILL = ROOT / "skills" / "code-review" / "SKILL.md"
 CURSOR_CODE_REVIEW = ROOT / "templates" / "cursor" / "commands" / "code-review.md"
 CURSOR_USER_RULES = ROOT / "templates" / "cursor" / "user-rules-aru-agentic-sdlc.md"
-
 MODES = ("adopt", "status", "next", "loop", "doctor")
 
 # Review machinery #412 removed and #435 did not restore. Listing exact phrases
-# only catches the wording that happened to be retired: "reviewer rotation"
-# would be rejected while "the picker rotates reviewers" walked straight in. So
-# these match the *concepts*, and a match is judged by its context below.
+# only catches the wording that happened to be retired, so these match the
+# *concepts*, and a match is judged by its context below.
 RETIRED_REVIEW_MACHINERY = (
     r"rotat(?:e|es|ed|ing|ion)|round[- ]?robin",
     r"fail[- ]?over|hand(?:s|ed|ing)? off to (?:another|the next) review",
@@ -50,10 +47,8 @@ RETIRED_REVIEW_MACHINERY = (
 DENIAL_MARKER = re.compile(r"\b(?:never|not|no|nor|neither|without|forbidden|refuses?)\b")
 
 # A denial only speaks for the clause it stands in. A sentence-wide lookback let
-# a denial of one thing vouch for a different mechanism raised later in the same
-# sentence, so "not a review queue; the picker rotates reviewers" read as denied
-# (#454). The lookback therefore stops at the nearest break before the match:
-# the end of the previous sentence, or a boundary that starts a new predicate.
+# one denial vouch for a different mechanism later in the same sentence, so the
+# lookback stops at the nearest break before the match.
 SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\n")
 
 # A fresh subject after a connector is what separates "; the picker rotates"
@@ -223,14 +218,14 @@ class ContinuityContractTests(unittest.TestCase):
 
     def test_low_context_is_recovered_not_a_stop_condition(self):
         text = flat(skill_text())
-        self.assertIn("context is running short", text)
         self.assertIn("context compaction", text)
+        self.assertIn("app-native wake", text)
 
     def test_desktop_task_is_not_replaced_by_a_cli_agent(self):
         text = flat(skill_text())
-        self.assertIn("task the operator started owns the loop", text)
-        self.assertIn("optional headless cli mode", text)
-        self.assertIn("never use ui scripting", text)
+        self.assertIn("keep the current desktop task processing picker results", text)
+        self.assertIn("app-native waiting", text)
+        self.assertIn("never waits synchronously", text)
 
 
 class IdentityTests(unittest.TestCase):
@@ -248,11 +243,12 @@ class IdentityTests(unittest.TestCase):
         self.assertIn("use that exact value as `<agent_id>`", text)
         self.assertIn("claim_issue.py", text)
         self.assertIn("create_pr.py", text)
+        self.assertNotIn("skill: research", text)
 
     def test_the_reason_identity_matters_is_stated(self):
         """Without the why, the flags read as ceremony and get dropped."""
         text = flat(skill_text())
-        self.assertIn("same github user", text)
+        self.assertIn("later helper calls", text)
 
     def test_fleet_prompt_reuses_the_picker_resolved_identity(self):
         text = FLEET_PROMPT.read_text(encoding="utf-8")
@@ -281,17 +277,16 @@ class GovernanceTests(unittest.TestCase):
         text = skill_text()
         for provider in ("CodeRabbit", "Sourcery", "CodeAnt", "review:agent"):
             self.assertIn(provider, text, f"review path missing: {provider}")
-        self.assertIn("emergency-only", text)
         self.assertIn("review:coderabbit", text)
         self.assertIn("reassignment is never automatic", text)
-        self.assertIn("Only an operator", text)
+        self.assertIn("operator records one audited external reassignment", text)
         # Both operator-declared conditions, or the router forbids a fallback
         # the helper and the code-review skill both allow (#454).
         self.assertIn(
             "external exhaustion or an operator-declared excessive wait",
             flat(text),
         )
-        self.assertIn("never creates a coding-agent review", text)
+        self.assertIn("never creates a second queue", text)
         self.assertIn("address-pr-feedback", text)
         self.assertEqual(
             [], unqualified_automatic_handoff(flat(text)), "router hands off automatically"
@@ -442,16 +437,6 @@ class GovernanceTests(unittest.TestCase):
         self.assertNotIn("auto-assign a free identity", text)
         self.assertIn("helper-specific contracts", text)
 
-    def test_legacy_review_state_releases_claim_before_looping(self):
-        for text in (
-            flat(skill_text()),
-            flat(FLEET_PROMPT.read_text(encoding="utf-8")),
-        ):
-            self.assertIn("work.type=review", text)
-            self.assertIn("claim_issue.py", text)
-            self.assertIn("--release", text)
-            self.assertIn("return to the picker", text)
-
     def test_error_work_state_reports_reason_and_retries(self):
         text = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
         self.assertIn("work.type", text)
@@ -497,10 +482,10 @@ class GovernanceTests(unittest.TestCase):
         commands = re.findall(r"(?m)^\s*`(python3 [^`\n]+)`\s*$", merge)
         self.assertEqual(commands, ['python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <N> --expected-head <HEAD_SHA>', 'python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" --pr <N> --agent <AGENT_ID> --merge --release'])
         # Both merge contracts, not just the fleet prompt: the router's own
-        # `### Merging` section is what a desktop agent reads, so a dry-run or a
+        # `## Merging` section is what a desktop agent reads, so a dry-run or a
         # second merge command reintroduced there has to fail too.
         contracts = (
-            skill_text().split("### Merging", 1)[1].split("## References", 1)[0],
+            skill_text().split("## Merging", 1)[1].split("## References", 1)[0],
             merge,
         )
         for contract in contracts:
@@ -543,24 +528,13 @@ class DelegationTests(unittest.TestCase):
         ):
             self.assertIn(skill, text, f"unreferenced route: {skill}")
 
-    def test_research_picker_skill_survives_both_canonical_consumers(self):
+    def test_issue_branch_routes_only_to_implementation_skill(self):
         entrypoint = flat(skill_text())
         fleet = flat(FLEET_PROMPT.read_text(encoding="utf-8"))
         for consumer in (entrypoint, fleet):
-            self.assertIn("skill: research", consumer)
-            self.assertIn("skills/research/skill.md", consumer)
-            self.assertIn("work.skill", consumer)
-        self.assertNotIn(
-            "| `issue` | `implement-next-issue` |", skill_text()
-        )
-        prompt = FLEET_PROMPT.read_text(encoding="utf-8")
-        research_branch = prompt.split("##### Research issue", 1)[1].split(
-            "##### Implementation issue", 1
-        )[0]
-        self.assertIn("return to\nthe top of the loop", research_branch)
-        self.assertIn("Do not execute the implementation sequence", research_branch)
-        for forbidden in ("create_branch.py", "git push", "create_pr.py"):
-            self.assertNotIn(forbidden, research_branch)
+            self.assertIn("implement-next-issue", consumer)
+            self.assertNotIn("skill: research", consumer)
+            self.assertNotIn("skills/research/skill.md", consumer)
 
     def test_it_does_not_restate_the_implementation_procedure(self):
         """Concrete markers of a forked procedure rather than a pointer."""
@@ -582,27 +556,13 @@ class DelegationTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_the_router_offers_the_entrypoint(self):
-        self.assertIn("run-aru-factory", ROUTER.read_text(encoding="utf-8"))
-
     def test_please_continue_is_loop_not_implement_next_issue(self):
-        """Bare continue used to skip review and merge.
-
-        The picker order is feedback → merge → review → issue. Routing
-        'continue' to implement-next-issue drops the first three.
-        """
-        router = ROUTER.read_text(encoding="utf-8")
         skill = flat(skill_text())
         self.assertIn("please continue", frontmatter(skill_text()).lower())
         self.assertIn("loop", skill)
-        continue_lines = [line for line in router.splitlines() if "continue" in line.lower() and "|" in line]
-        self.assertTrue(continue_lines, "router has no continue row")
-        joined = " ".join(continue_lines).lower()
-        self.assertIn("run-aru-factory", joined)
-        self.assertNotIn("implement-next-issue", joined)
         cursor = (ROOT / "docs" / "cursor-integration.md").read_text(encoding="utf-8")
-        self.assertIn("pick feedback → merge → issue", cursor)
-        self.assertNotIn("pick feedback → merge → review → issue", cursor)
+        self.assertIn("run-aru-factory", cursor)
+        self.assertNotIn("skills/aru-agentic-sdlc", cursor)
 
     def test_loop_pacing_is_dynamic_and_nonblocking(self):
         raw = skill_text()
@@ -642,12 +602,10 @@ class WiringTests(unittest.TestCase):
 
 
 class CursorRuleTests(unittest.TestCase):
-    def test_cursor_rule_uses_remediation_wording(self):
-        rule = (
-            ROOT / "templates" / "cursor" / "rules" / "aru-agentic-sdlc.mdc"
-        ).read_text(encoding="utf-8")
-        self.assertIn("Feature and remediation work", rule)
-        self.assertNotIn("Feature and review work", rule)
+    def test_stale_cursor_rule_is_deleted(self):
+        self.assertFalse(
+            (ROOT / "templates" / "cursor" / "rules" / "aru-agentic-sdlc.mdc").exists()
+        )
 
 
 if __name__ == "__main__":

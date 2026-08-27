@@ -60,7 +60,7 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         # Verify Cursor
         cursor_skills = self.target_home / ".cursor" / "skills"
         self.assertTrue((cursor_skills / "run-aru-factory").is_symlink())
-        self.assertTrue((self.target_home / ".cursor" / "rules" / "aru-agentic-sdlc.mdc").exists())
+        self.assertTrue((self.target_home / ".cursor" / "commands" / "run-aru-factory.md").exists())
 
         # Verify Antigravity
         ag_skills = self.target_home / ".gemini" / "antigravity" / "skills"
@@ -189,11 +189,10 @@ class InstallLocalAgentIntegrationsTests(unittest.TestCase):
         self.assertTrue(len(backups) > 0, "Backup of pre-existing user command was not created")
         self.assertIn("# User Custom Command", backups[0].read_text())
 
-    def test_check_mode_validates_cursor_rule(self):
+    def test_check_mode_validates_cursor_command_surface(self):
         (self.target_home / ".cursor").mkdir(parents=True)
         self.run_installer("--cursor-only")
-        # Remove cursor rule
-        (self.target_home / ".cursor" / "rules" / "aru-agentic-sdlc.mdc").unlink()
+        (self.target_home / ".cursor" / "commands" / "run-aru-factory.md").unlink()
         res = self.run_installer("--cursor-only", "--check")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("[CHECK FAILED]", res.stdout)

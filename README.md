@@ -28,7 +28,7 @@ Aru_Agentic_SDLC/
 │   └── workflows/
 │       └── ci.yml                   # Built-in GitHub Actions CI pipeline template
 ├── skills/                          # SkillsMP-compliant markdown skills
-│   ├── aru-agentic-sdlc/            # Cursor router skill — pick the right procedure
+│   ├── run-aru-factory/             # Sole runtime router and loop entrypoint
 │   ├── init-agent-project/          # Bootstrap repo, AGENTS.md, CI & Project Board
 │   ├── implement-next-issue/        # Primary: claim → worktree → implement → PR → CI
 │   ├── code-review/                 # PR review in an isolated worktree
@@ -49,26 +49,16 @@ Aru_Agentic_SDLC/
 ├── templates/cursor/                # Cursor User Rules, project rules, slash commands
 └── docs/
     ├── ARU-SOFTWARE-FACTORY.md      # The working build plan — start here
-    ├── AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md  # Evidence and citations; not the roadmap
     ├── PROJECT-BOARD-FOR-AGENTIC-FACTORY.md        # GitHub vs Linear vs Jira for agents
     ├── cursor-integration.md        # Cross-project Cursor setup
     ├── project_board_workflow.md    # Board, dependencies, worktrees
     ├── coding_standards.md          # Commit hygiene & testing standards
-    └── golden-path-demo.md          # Companion demo: idea through preview
+    └── golden-path-demo.md          # Companion demo: idea through merge
 ```
 
 **Where the project is going:** [`docs/ARU-SOFTWARE-FACTORY.md`](docs/ARU-SOFTWARE-FACTORY.md) is the narrative plan. [Roadmap epic #335](https://github.com/gillella/Aru_Agentic_SDLC/issues/335) and the governed GitHub Project Board are the live authority for phases, issue state, and delivery order. Read both before proposing structural changes.
 
-**Strategy & industry research:** [`docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](docs/AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md) maps a classical idea→research→requirements→sprint SDLC onto an agentic software factory (harness engineering, Spec Kit, board-as-orchestrator) and positions Aru against that landscape.
-
 **Which project board?** [`docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](docs/PROJECT-BOARD-FOR-AGENTIC-FACTORY.md) compares GitHub Issues, Linear, Jira, Azure Boards, and others for agentic coding factories — and recommends keeping GitHub as Aru’s coordinator.
-
-**Explore the lifecycle:** open the no-build [interactive SDLC factory flow visualizer](sdlc_flow_visualizer/index.html) locally to inspect claim, worktree, review, merge, and remediation mechanics. Issue #342 is the Current status-legend correction; until it merges, the visualizer may lag this vocabulary, so use roadmap epic #335 and the Project Board for live status.
-
-> **Research authority.** `AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md` is the
-> single research and evidence guide. `ARU-SOFTWARE-FACTORY.md` is the
-> canonical narrative plan; roadmap epic #335 and the Project Board are the
-> live authority for sequencing and implementation status.
 
 ## Lifecycle status vocabulary
 
@@ -86,13 +76,11 @@ guides. A document never infers live issue state from prose; the board wins.
 
 Current delivery truth is deliberately narrower than “idea to production”:
 
-- **Shipped:** governed intake, issue-to-merge execution, telemetry, and the
-  GitHub Pages runnable preview path in `scripts/deploy_preview.py`.
-- **Audit-only:** `scripts/promote.py` records GitHub environment/deployment
-  evidence; it does not move or prove a runnable artifact.
-- **Deferred:** real provider delivery remains issue #345 until an immutable
-  deployment identity, authoritative URLs, smoke evidence, promotion without a
-  rebuild, and rollback are demonstrated.
+- **Shipped:** governed intake, issue-to-merge execution, and the retained
+  client-work kernel helpers, including operator telemetry and observability.
+- **Deferred:** real post-merge runtime URLs, rollback, observation, and other
+  delivery surfaces beyond governed merge remain future work and are not
+  shipped from this repository today.
 
 `scripts/merge_pr.py` defaults to a merge commit. Squash is an explicit opt-in,
 not the shipped default (issue #89).
@@ -134,7 +122,7 @@ GitHub access for the factory is the configured **`gh` CLI** via
 
 ## 🛤️ Golden-path demo
 
-Walk idea → Ready → PR → distinct review → `merge_pr.py` → deploy-preview on
+Walk idea → Ready → PR → distinct review → `merge_pr.py` on
 the public companion repo
 [gillella/aru-golden-path-demo](https://github.com/gillella/aru-golden-path-demo)
 without copying this playbook's `skills/` or factory helpers.

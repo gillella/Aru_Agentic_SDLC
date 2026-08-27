@@ -40,7 +40,6 @@ GOVERNANCE_LABELS = [
     ("type:fix", "d73a4a", "Defect repair"),
     ("type:chore", "cfd3d7", "Tooling, CI, or maintenance"),
     ("type:docs", "0075ca", "Specification or documentation"),
-    ("type:research", "bfd4f2", "Bounded research producing a cited artifact"),
     ("needs-design", "d4c5f9", "Requires an implementation plan before editing"),
     ("needs-human", "b60205", "Operator must complete; factory agents must not claim"),
     ("priority:p0", "b60205", "Blocking; drop everything"),
@@ -140,7 +139,7 @@ governed remediation.
 ## 🎯 Primary Directives for AI Agents
 
 1. **Execute via SkillsMP Skills** (in `$ARU_SDLC_HOME/skills/`):
-   - Router: `aru-agentic-sdlc/SKILL.md`
+   - Router: `run-aru-factory/SKILL.md`
    - Primary Skill: `implement-next-issue/SKILL.md`
    - Issue Creation: `create-github-issue/SKILL.md`
    - Code Review Skill: `code-review/SKILL.md` (only for a preassigned emergency `review:agent` fallback)
@@ -195,6 +194,7 @@ CI_GATE_MARKERS = (
     "requirements-dev.txt",
     "import-linter",
     "lint-imports",
+    "check_docs.py --offline",
 )
 
 # Shared shell body for pip-audit. Kept as one string so the template and the
@@ -248,6 +248,23 @@ permissions:
   pull-requests: read
 
 jobs:
+  docs-freshness:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check documentation against the code it describes (trusted)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/check_docs.py
+
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -260,7 +277,8 @@ jobs:
           fetch-depth: 0
 
       - name: Secret scan
-        uses: gitleaks/gitleaks-action@v2
+        # gitleaks-action v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 """
@@ -284,8 +302,14 @@ PYTHON_CI_STEPS = """
           ruff check .
 
       - name: Enforce module boundaries
+        # Enforce architectural layer contracts via import-linter
         run: |
           """ + PYTHON_IMPORT_LINTER_SCRIPT + """
+
+      - name: Check documentation against the code it describes (untrusted PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 scripts/check_docs.py --offline
 
       - name: Tests
         run: |
@@ -603,204 +627,6 @@ jobs:
           python .github/scripts/check_touches.py
 """
 
-DEPLOY_PREVIEW_WORKFLOW = r"""name: Deploy Preview
-run-name: "Deploy Preview for ${{ inputs.commit_sha }} (${{ inputs.run_token || 'default' }})"
-
-on:
-  workflow_dispatch:
-    inputs:
-      commit_sha:
-        description: 'Exact merged commit SHA to deploy preview for'
-        required: true
-        type: string
-      run_token:
-        description: 'Correlation token for dispatch matching'
-        required: false
-        type: string
-
-permissions:
-  contents: read
-
-concurrency:
-  group: "preview-${{ github.repository }}"
-  cancel-in-progress: false
-
-jobs:
-  build-preview:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      has_preview: ${{ steps.build.outputs.has_preview }}
-      is_library: ${{ steps.build.outputs.is_library }}
-    steps:
-      - name: Checkout trusted control plane
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          path: control-plane
-          fetch-depth: 0
-
-      - name: Validate exact merged target
-        working-directory: control-plane
-        env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          if [[ ! "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "[ERROR] commit_sha must be an exact 40-character SHA." >&2
-            exit 1
-          fi
-          git fetch --no-tags origin "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
-          git cat-file -e "${TARGET_SHA}^{commit}"
-          git merge-base --is-ancestor "${TARGET_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
-          git worktree add --detach ../target "${TARGET_SHA}"
-
-      - name: Validate deployment credentials
-        env:
-          DEPLOY_CREDENTIALS: ${{ secrets.PREVIEW_DEPLOY_TOKEN || secrets.DEPLOY_TOKEN }}
-          ALLOW_ANONYMOUS_PREVIEW: ${{ vars.ALLOW_ANONYMOUS_PREVIEW }}
-        run: |
-          if [ -z "${DEPLOY_CREDENTIALS}" ] && [ "${ALLOW_ANONYMOUS_PREVIEW:-false}" != "true" ]; then
-            echo "[ERROR] Deploy credentials absent. Set PREVIEW_DEPLOY_TOKEN in repository secrets." >&2
-            exit 1
-          fi
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Build with trusted helper
-        id: build
-        run: |
-          python3 control-plane/scripts/build_preview.py --source target --output target/dist --allow-library
-
-      - name: Upload Pages artifact
-        if: steps.build.outputs.has_preview == 'true'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: 'target/dist'
-
-      - name: Record exact-run library skip metadata
-        if: steps.build.outputs.is_library == 'true'
-        env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
-        run: |
-          TARGET_SHA_CANONICAL="$(printf '%s' "${TARGET_SHA}" | tr '[:upper:]' '[:lower:]')"
-          jq -n \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --arg commit_sha "${TARGET_SHA_CANONICAL}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg preview_url "skipped" \
-            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url, is_library: true, status: "skipped"}' \
-            > preview-metadata.json
-
-      - name: Upload exact-run library skip metadata
-        if: steps.build.outputs.is_library == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: preview-metadata
-          path: preview-metadata.json
-          if-no-files-found: error
-          retention-days: 30
-
-  deploy-preview:
-    needs: build-preview
-    if: needs.build-preview.outputs.has_preview == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    outputs:
-      page_url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-      - name: Record exact-run preview metadata
-        env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
-          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
-        run: |
-          TARGET_SHA_CANONICAL="$(printf '%s' "${TARGET_SHA}" | tr '[:upper:]' '[:lower:]')"
-          jq -n \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --arg commit_sha "${TARGET_SHA_CANONICAL}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg preview_url "${PAGE_URL}" \
-            '{run_id: $run_id, commit_sha: $commit_sha, repository: $repository, preview_url: $preview_url}' \
-            > preview-metadata.json
-
-      - name: Upload exact-run preview metadata
-        uses: actions/upload-artifact@v4
-        with:
-          name: preview-metadata
-          path: preview-metadata.json
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Publish preview URL summary
-        env:
-          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
-        run: |
-          echo "Preview URL: ${PAGE_URL}" >> "$GITHUB_STEP_SUMMARY"
-
-  smoke-preview:
-    name: Smoke & E2E Validation
-    needs: [build-preview, deploy-preview]
-    if: always() && !cancelled() && needs.build-preview.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout trusted control plane
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          path: control-plane
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Execute Smoke & E2E Tests
-        env:
-          HAS_PREVIEW: ${{ needs.build-preview.outputs.has_preview }}
-          IS_LIBRARY: ${{ needs.build-preview.outputs.is_library }}
-          PREVIEW_URL: ${{ needs.deploy-preview.outputs.page_url }}
-          COMMIT_SHA: ${{ inputs.commit_sha }}
-        run: |
-          python3 control-plane/scripts/smoke_preview.py \
-            --url "${PREVIEW_URL}" \
-            --has-preview "${HAS_PREVIEW}" \
-            --is-library "${IS_LIBRARY}" \
-            --commit-sha "${COMMIT_SHA}" \
-            --scenarios-file control-plane/.github/scenarios/smoke.json
-"""
-
-STACK_DEPLOY_PREVIEW = {
-    "python": DEPLOY_PREVIEW_WORKFLOW,
-    "node": DEPLOY_PREVIEW_WORKFLOW.replace(
-        "      - name: Set up Python\n        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'",
-        "      - name: Set up Node.js\n        uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n\n      - name: Set up Python for build helper\n        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'",
-    ),
-    "go": DEPLOY_PREVIEW_WORKFLOW.replace(
-        "      - name: Set up Python\n        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'",
-        "      - name: Set up Go\n        uses: actions/setup-go@v5\n        with:\n          go-version: '1.22'\n\n      - name: Set up Python for build helper\n        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'",
-    ),
-}
-
 STACK_RELEASE = {
     "python": """name: Release
 run-name: "Release ${{ inputs.tag_name || github.ref_name }}"
@@ -966,72 +792,6 @@ jobs:
 """,
 }
 
-DEPLOY_DOCS_TEMPLATE = """# Deployment and Promotion Guide
-
-This repository is governed by **Aru_Agentic_SDLC**. Deployments and release promotions are managed through the governed SDLC factory skills rather than ad-hoc scripts or unversioned manual actions.
-
----
-
-## Governed Workflows
-
-### 1. Preview Deployment
-Preview deployments for merged commits are dispatched using the `deploy-preview` skill:
-
-```bash
-python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <COMMIT_SHA> [--issue <ISSUE_NUMBER>]
-```
-
-The preview deployment workflow (`.github/workflows/deploy-preview.yml`) verifies:
-- Merged state and commit ancestry on the default branch.
-- Availability of required deployment credentials (`PREVIEW_DEPLOY_TOKEN`). If credentials are absent, the workflow fails closed.
-- Automatic recording of the preview URL or remediation issue on the Project Board.
-
-### 2. Release and Checkpoints
-Releases and version tags are cut from verified merge checkpoints:
-
-```bash
-python3 "$ARU_SDLC_HOME/scripts/promote.py" \\
-  --commit <MERGED_COMMIT_SHA> \\
-  --checkpoint <ckpt/PR-SHA7> \\
-  --issue <ISSUE_NUMBER> \\
-  --from-environment preview \\
-  --to-environment staging \\
-  --evidence-run <PREVIEW_RUN_ID>
-```
-
-The release workflow (`.github/workflows/release.yml`) builds release artifacts for `{stack}` upon pushing release tags (`v*.*.*`) or explicit dispatch.
-
----
-
-## Required Secrets & Environment Variables
-
-| Secret / Env Var | Purpose | Required For |
-|---|---|---|
-| `PREVIEW_DEPLOY_TOKEN` | Token for hosting/preview infrastructure | `.github/workflows/deploy-preview.yml` |
-| `RELEASE_TOKEN` | Token for publishing releases / package registry | `.github/workflows/release.yml` |
-| `GITHUB_TOKEN` | Repository-scoped token for releases and Pages | Preview & Release |
-
----
-
-## Guardrails
-- **No Direct Deployments**: Never deploy unmerged code or push untracked tags directly to production.
-- **Fail-Closed Gate**: All deployment and release workflows fail closed if required credentials are missing.
-- **Audit Trail**: Every preview and release event is recorded on the corresponding GitHub Issue and Project Board card.
-"""
-
-
-def render_deploy_preview_workflow(stack: str = "python") -> str:
-    """Renders a Deploy Preview workflow tailored to the stack with fail-closed credential checks."""
-    normalized = stack.strip().lower()
-    if normalized in {"node", "nodejs", "typescript", "react"}:
-        family = "node"
-    elif normalized == "go":
-        family = "go"
-    else:
-        family = "python"
-    return STACK_DEPLOY_PREVIEW[family].strip() + "\n"
-
-
 def render_release_workflow(stack: str = "python") -> str:
     """Renders a Release workflow tailored to the stack with fail-closed credential checks."""
     normalized = stack.strip().lower()
@@ -1042,13 +802,6 @@ def render_release_workflow(stack: str = "python") -> str:
     else:
         family = "python"
     return STACK_RELEASE[family].strip() + "\n"
-
-
-def render_deploy_docs(stack: str = "python", project_name: str = "Project") -> str:
-    """Renders docs/deploy.md explaining preview deployment and release promotions."""
-    return DEPLOY_DOCS_TEMPLATE.format(stack=stack, project_name=project_name).strip() + "\n"
-
-
 def scaffold_directory_structure(target_dir: str):
     """Creates standard directory tree with .gitkeep so empty dirs survive git."""
     dirs = [
@@ -1061,7 +814,6 @@ def scaffold_directory_structure(target_dir: str):
         ".github/scripts",
         ".github/scenarios",
         ".github/ISSUE_TEMPLATE",
-        ".cursor/rules",
     ]
     for d in dirs:
         path = os.path.join(target_dir, d)
@@ -1096,7 +848,7 @@ def write_governance_scripts(  # noqa: PLR0915
     stack: str = "python",
     project_name: str = "Project",
 ):
-    """Write governed review, preview, release, and audit-only promotion workflows."""
+    """Write governed check-touches and release workflows."""
     project_scripts_dir = os.path.join(target_dir, "scripts")
     scripts_dir = os.path.join(target_dir, ".github", "scripts")
     workflows_dir = os.path.join(target_dir, ".github", "workflows")
@@ -1105,7 +857,7 @@ def write_governance_scripts(  # noqa: PLR0915
     os.makedirs(workflows_dir, exist_ok=True)
     os.makedirs(project_scripts_dir, exist_ok=True)
 
-    for helper in ("build_preview.py", "smoke_preview.py", "check_line_ceilings.py"):
+    for helper in ("check_line_ceilings.py",):
         _vendor_helper(helper, project_scripts_dir)
 
     scenarios_dir = os.path.join(github_dir, "scenarios")
@@ -1128,62 +880,16 @@ def write_governance_scripts(  # noqa: PLR0915
     with open(check_touches_wf_path, "w", encoding="utf-8") as f:
         f.write(CHECK_TOUCHES_WORKFLOW)
 
-    deploy_preview_wf_path = os.path.join(workflows_dir, "deploy-preview.yml")
-    with open(deploy_preview_wf_path, "w", encoding="utf-8") as f:
-        f.write(render_deploy_preview_workflow(stack))
-
     release_wf_path = os.path.join(workflows_dir, "release.yml")
     with open(release_wf_path, "w", encoding="utf-8") as f:
         f.write(render_release_workflow(stack))
-
-    docs_dir = os.path.join(target_dir, "docs")
-    os.makedirs(docs_dir, exist_ok=True)
-    deploy_docs_path = os.path.join(docs_dir, "deploy.md")
-    if not os.path.exists(deploy_docs_path):
-        with open(deploy_docs_path, "w", encoding="utf-8") as f:
-            f.write(render_deploy_docs(stack, project_name))
-
-    promote_wf_source = os.path.join(
-        os.path.dirname(__file__), "..", ".github", "workflows", "promote.yml"
-    )
-    promote_wf_path = os.path.join(workflows_dir, "promote.yml")
-    with open(promote_wf_source, "r", encoding="utf-8") as source:
-        promote_wf_content = source.read()
-    with open(promote_wf_path, "w", encoding="utf-8") as target:
-        target.write(promote_wf_content)
-
-    print("✅ Governance scripts and trusted preview/promotion workflows written.")
+    print("✅ Governance scripts and release workflow written.")
 
 
 def create_cursor_project_rule(target_dir: str):
-    """Install the always-apply Cursor project rule pointing at $ARU_SDLC_HOME."""
-    sdlc_home = os.environ.get(
-        "ARU_SDLC_HOME",
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
-    )
-    template = os.path.join(
-        sdlc_home, "templates", "cursor", "rules", "aru-agentic-sdlc.mdc"
-    )
-    dest_dir = os.path.join(target_dir, ".cursor", "rules")
-    os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, "aru-agentic-sdlc.mdc")
-    if os.path.exists(dest):
-        print("[INFO] .cursor/rules/aru-agentic-sdlc.mdc already exists; left untouched.")
-        return
-    if os.path.isfile(template):
-        with open(template, "r", encoding="utf-8") as src, open(dest, "w", encoding="utf-8") as out:
-            out.write(src.read())
-    else:
-        # Fallback if templates are missing from a partial checkout.
-        with open(dest, "w", encoding="utf-8") as out:
-            out.write(
-                "---\n"
-                "description: Aru_Agentic_SDLC Issue-First governance for this repository\n"
-                "alwaysApply: true\n"
-                "---\n\n"
-                "Follow `$ARU_SDLC_HOME/skills/` (Issue-First Law, worktrees, Closes #N).\n"
-            )
-    print("✅ Cursor project rule written to .cursor/rules/aru-agentic-sdlc.mdc")
+    """Retained for compatibility; repo-local Cursor rule scaffolding is gone."""
+    _ = target_dir
+    print("[INFO] Repo-local Cursor rule scaffolding has been removed; nothing written.")
 
 
 def create_gitignore(target_dir: str, stack: str = "python"):
@@ -1267,74 +973,6 @@ def render_issue_form(
     return "\n".join(lines) + "\n"
 
 
-def render_research_issue_form(project_ref: Optional[str] = None) -> str:
-    """Renders research intake with its mechanical completion contract."""
-    project_line = f'projects: ["{project_ref}"]' if project_ref else "projects: []"
-    return "\n".join([
-        "name: Research",
-        "description: Bounded research question with a cited findings artifact",
-        "title: 'research: '",
-        'labels: ["type:research", "status:backlog"]',
-        project_line,
-        "body:",
-        "  - type: textarea",
-        "    id: question",
-        "    attributes:",
-        "      label: Research question",
-        "      description: Ask one bounded question.",
-        "    validations:",
-        "      required: true",
-        "  - type: textarea",
-        "    id: scope",
-        "    attributes:",
-        "      label: Scope bounds",
-        "      description: State what is in scope, out of scope, and the stop condition.",
-        "    validations:",
-        "      required: true",
-        "  - type: dropdown",
-        "    id: artifact-location",
-        "    attributes:",
-        "      label: Findings location",
-        "      description: Repository artifacts require an isolated branch and worktree; comment-only artifacts make no repository writes.",
-        "      options:",
-        "        - Repository under docs/research/",
-        "        - Issue comment only",
-        "    validations:",
-        "      required: true",
-        "  - type: textarea",
-        "    id: acceptance",
-        "    attributes:",
-        "      label: Acceptance criteria",
-        "      value: |",
-        "        - [ ] Findings artifact attached to this issue.",
-        "        - [ ] Every factual claim carries a resolvable URL, arXiv ID, or DOI.",
-        "        - [ ] Every Findings line is marked `[external]` or `[repo verified: YYYY-MM-DD]`.",
-        "        - [ ] Citation verification exits 0.",
-        "        - [ ] Repo code findings name source paths with exact same-date entries under the single `Repo code claims` section, or that section records `none`.",
-        "        - [ ] Follow-on issues are proposed when findings warrant them.",
-        "    validations:",
-        "      required: true",
-        "  - type: textarea",
-        "    id: verification",
-        "    attributes:",
-        "      label: Verification",
-        "      value: 'python3 $ARU_SDLC_HOME/scripts/verify_citations.py --repo-root <consumer-repo-root> <artifact>'",
-        "    validations:",
-        "      required: true",
-        "  - type: textarea",
-        "    id: workflow-metadata",
-        "    attributes:",
-        "      label: Workflow metadata",
-        "      description: Keep docs/research/** only for a repository artifact; replace it with issue-comment-only for a comment-only artifact.",
-        "      value: |",
-        "        depends-on:",
-        "        touches: docs/research/**",
-        "        parallel-eligible: true",
-        "    validations:",
-        "      required: true",
-    ]) + "\n"
-
-
 def write_templates(target_dir: str, project_ref: Optional[str] = None):
     """Writes issue forms and a PR template.
 
@@ -1371,7 +1009,6 @@ def write_templates(target_dir: str, project_ref: Optional[str] = None):
              ("gating", "Gating contract"), ("children", "Child issues")],
             project_ref,
         )),
-        ("research.yml", render_research_issue_form(project_ref)),
     ]:
         with open(os.path.join(tpl_dir, filename), "w") as f:
             f.write(body)

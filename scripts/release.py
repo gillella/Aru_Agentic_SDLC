@@ -25,7 +25,6 @@ CONSUMED_CLI_SURFACE = [
     "scripts/install_local_agent_integrations.sh",
     "scripts/install_agent_integration.sh",
     "scripts/release.py",
-    "scripts/increment_release.py",
 ]
 
 
@@ -168,4 +167,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
-

@@ -79,11 +79,11 @@ record must come from that account. Missing, stale, duplicate, self-authored,
 unauthorized, or malformed evidence from those accounts fails closed. A
 marker-shaped comment from anyone else is ignored, so a drive-by comment
 cannot block every later emergency merge.
-Direct pushes to `main` are also blocked server-side by branch protection;
-an ad-hoc merge (`gh pr merge` or the GitHub UI, run outside `merge_pr.py`)
-is not - branch protection requires only a green CI status check, not
-assigned-service review evidence - so that half of the rule is a governance
-requirement agents and humans must follow, not a technical guarantee.
+Active rules block ordinary direct pushes to `main`, but repository admins can
+weaken or disable those rulesets. An ad-hoc merge (`gh pr merge` or the GitHub
+UI, run outside `merge_pr.py`) is not blocked by the review-evidence gate -
+rulesets require only the configured status checks unless an operator changes
+them - so `merge_pr.py` remains mandatory governance for every merge.
 
 Legacy `reviewed-by:<coding-agent>`, `reviewer:<coding-agent>`, and
 `aru-review-head:v1` evidence alone never satisfies the current review gate.
@@ -114,7 +114,7 @@ Perform tasks by following the declarative procedures in `skills/` (or the
 Cursor-installed symlinks of the same names). Prefer `$ARU_SDLC_HOME/skills/`
 when working from another repository.
 
-- **Router**: [`skills/aru-agentic-sdlc/SKILL.md`](skills/aru-agentic-sdlc/SKILL.md)
+- **Router**: [`skills/run-aru-factory/SKILL.md`](skills/run-aru-factory/SKILL.md)
 - **Initialization**: [`skills/init-agent-project/SKILL.md`](skills/init-agent-project/SKILL.md)
 - **Primary execution**: [`skills/implement-next-issue/SKILL.md`](skills/implement-next-issue/SKILL.md)
   - Session recovery → next unblocked issue → worktree → implement → test →

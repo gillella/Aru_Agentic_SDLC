@@ -69,6 +69,19 @@ class PickerContinuationTests(unittest.TestCase):
 
 class MergeContinuationCallSiteTests(unittest.TestCase):
     @staticmethod
+    def parked_gates():
+        return {
+            "schema_version": 1,
+            "pr": 9,
+            "gated_head": "gated-sha",
+            "gates": [
+                {"name": "open", "passed": True, "message": "PR was open at gating time."},
+                {"name": "ci", "passed": True, "message": "All required checks passed."},
+                {"name": "review", "passed": True, "message": "Exact-head review evidence passed."},
+            ],
+        }
+
+    @staticmethod
     def merged_pr():
         return {
             "number": 9,
@@ -88,7 +101,8 @@ class MergeContinuationCallSiteTests(unittest.TestCase):
         with patch.object(sys, "argv", argv), redirect_stdout(output), \
              patch.object(merge_pr, "fetch_pr", return_value=self.merged_pr()), \
              patch.object(merge_pr, "repository_root", return_value="/repo"), \
-             patch.object(merge_pr, "load_gate_verdicts", return_value=None), \
+             patch.object(merge_pr, "load_gate_verdicts",
+                          return_value=self.parked_gates()), \
              patch.object(merge_pr, "run_closeout", return_value=closeout), \
              patch.object(merge_pr.time, "sleep"), \
              patch.object(merge_pr, "post_human_intervention", return_value=True), \

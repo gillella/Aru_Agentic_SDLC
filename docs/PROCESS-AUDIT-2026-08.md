@@ -239,7 +239,7 @@ text competes for the same context budget as the work.
 
 **Fix (low effort, keep both):** keep `$ARU_SDLC_HOME/skills/*/SKILL.md` as source of
 truth, and symlink them into `.claude/skills/` in each governed repo — you already do the
-equivalent for Cursor rules (`.cursor/rules/aru-agentic-sdlc.mdc`). Same source, native
+equivalent for Cursor user-rules source (`.cursor/user-rules-aru-agentic-sdlc.md`). Same source, native
 discovery in Claude Code, no fork.
 
 ### G9 — No feedback loop

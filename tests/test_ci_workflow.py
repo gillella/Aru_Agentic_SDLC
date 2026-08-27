@@ -94,6 +94,14 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(workflow()["jobs"]["test-and-lint"]["name"],
                          "Lint, Verify & Test")
 
+    def test_pull_requests_use_one_required_runner_job(self):
+        jobs = workflow()["jobs"]
+        pr_jobs = {
+            name: job for name, job in jobs.items()
+            if job.get("if") != "github.event_name != 'pull_request'"
+        }
+        self.assertEqual(set(pr_jobs), {"test-and-lint"})
+
     def test_complete_suite_runs_only_on_schedule_or_manual_dispatch(self):
         step = named_step("test-and-lint", "Execute Tests")
         condition = step.get("if", "")
@@ -131,6 +139,25 @@ class WorkflowContractTests(unittest.TestCase):
         install = named_step("test-and-lint", "Install Dependencies")
         self.assertEqual(setup["with"]["python-version"], "3.11")
         self.assertIn("requirements-dev.txt", install["run"])
+
+    def test_required_job_retains_all_pr_gates(self):
+        steps = "\n".join(str(step) for step in job_steps("test-and-lint")).lower()
+        for fragment in (
+            "gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7",
+            "pip-audit",
+            "lint-imports",
+            "check_docs.py --offline",
+            "ruff check .",
+            "check_line_ceilings.py",
+            "py_compile.compile",
+        ):
+            self.assertIn(fragment, steps)
+
+    def test_trusted_docs_job_is_skipped_on_pull_requests(self):
+        self.assertEqual(
+            workflow()["jobs"]["docs-freshness"]["if"],
+            "github.event_name != 'pull_request'",
+        )
 
     def test_workflow_permissions_are_read_only(self):
         for scope, access in workflow()["permissions"].items():

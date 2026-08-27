@@ -63,10 +63,8 @@ def _resolve_identity(args):
 
 
 def skill_for_issue(issue: dict[str, Any]) -> str:
-    """Route type:research / research: titles to the research skill."""
-    title = str(issue.get("title") or "").strip().lower()
-    research = "type:research" in set(issue_label_names(issue)) or title.startswith("research:")
-    return "research" if research else "implement-next-issue"
+    """The trimmed kernel routes every issue through the implementation skill."""
+    return "implement-next-issue"
 
 DEFAULT_REAP_AFTER_HOURS = 4
 _UNSET = object()

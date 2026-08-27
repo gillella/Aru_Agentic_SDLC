@@ -12,4 +12,4 @@ current Antigravity project only.
 3. `/goal` may be used to finish the current task. `/schedule` starts a **new**
    project-scoped agent that must recover from GitHub — it is not this
    conversation.
-4. Never replace this desktop task with `scripts/run_fleet.py`.
+4. Never replace this desktop task with another local loop runner or scheduler.

@@ -157,6 +157,7 @@ class CreatePrWiringTests(unittest.TestCase):
     def _stubs(self):
         return (
             patch.object(create_pr, "get_current_branch", lambda: "my-branch"),
+            patch.object(create_pr, "terminal_merge_lease", lambda _branch: None),
             patch.object(create_pr, "get_issue", lambda _n: {"title": "t"}),
             patch.object(create_pr, "get_current_commit", lambda: "a" * 40),
             patch.object(create_pr, "collect_verification_evidence", lambda *_a, **_k: []),
@@ -176,7 +177,7 @@ class CreatePrWiringTests(unittest.TestCase):
             return 0, "", ""
 
         stubs = self._stubs()
-        with stubs[0], stubs[1], stubs[2], stubs[3], stubs[4], \
+        with stubs[0], stubs[1], stubs[2], stubs[3], stubs[4], stubs[5], \
                 patch.object(create_pr, "run_cmd", run_cmd), \
                 patch.object(create_pr, "apply_identity",
                              lambda ref, *_a: seen.setdefault("ref", ref) or True), \

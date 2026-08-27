@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import acceptance_runner
+import merge_gate_evidence
 from common import (ensure_label, terminal_lease_label, VERIFICATION_EVIDENCE_END,
                     VERIFICATION_EVIDENCE_SCHEMA, VERIFICATION_EVIDENCE_START, get_repo_slug,
                     run_cmd)
@@ -3992,71 +3993,25 @@ def heads_match(live_sha, expected_sha):
 
 
 def gate_verdict_path(repo_root, pr_num):
-    """Where this PR's evaluated verdicts are parked between invocations.
-
-    Lives in the git common directory so every worktree of the repository sees
-    one file, and so it is never mistaken for repository content.
-    """
-    code, out, _ = run_cmd(["git", "rev-parse", "--git-common-dir"], check=False, cwd=repo_root)
-    if code != 0 or not out.strip():
-        return ""
-    common = out.strip()
-    if not os.path.isabs(common):
-        common = os.path.join(repo_root, common)
-    return os.path.join(common, f"aru-gates-{pr_num}.json")
+    return merge_gate_evidence.gate_verdict_path(repo_root, pr_num, run_cmd_fn=run_cmd)
 
 
-def save_gate_verdicts(repo_root, pr_num, gates):
-    """Persists verdicts at evaluation time so a resumed close-out can use them.
-
-    Without this the only invocation that ever tags a hiccuped merge is the
-    resumed one, which never evaluated the gates — so every merge whose
-    close-out stumbled would carry a permanently verdict-less checkpoint.
-    """
-    path = gate_verdict_path(repo_root, pr_num)
-    if not path:
-        return False
-    try:
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump([[n, bool(p), d] for n, p, d in gates], handle)
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
+def save_gate_verdicts(repo_root, pr_num, gates, gated_head):
+    return merge_gate_evidence.save_gate_verdicts(
+        repo_root, pr_num, gates, gated_head, run_cmd_fn=run_cmd
+    )
 
 
 def load_gate_verdicts(repo_root, pr_num):
-    """Reads back parked verdicts. None when absent or malformed.
+    return merge_gate_evidence.load_gate_verdicts(repo_root, pr_num, run_cmd_fn=run_cmd)
 
-    None is the honest answer: the checkpoint then records that the verdicts
-    are not reproducible rather than inventing a set that was never evaluated.
-    """
-    path = gate_verdict_path(repo_root, pr_num)
-    if not path:
-        return None
-    try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, list) or not data:
-        return None
-    gates = []
-    for row in data:
-        if not isinstance(row, list) or len(row) != 3:
-            return None
-        gates.append((row[0], bool(row[1]), row[2]))
-    return gates
+
+def validate_gate_verdicts(record, pr_num, gated_head):
+    return merge_gate_evidence.validate_gate_verdicts(record, pr_num, gated_head)
 
 
 def discard_gate_verdicts(repo_root, pr_num):
-    """Removes the parked verdicts once a checkpoint has recorded them."""
-    path = gate_verdict_path(repo_root, pr_num)
-    if not path:
-        return
-    try:
-        os.remove(path)
-    except OSError:
-        pass
+    merge_gate_evidence.discard_gate_verdicts(repo_root, pr_num, run_cmd_fn=run_cmd)
 
 
 def checkpoint_tag_name(pr_num, merged_sha):
@@ -4199,6 +4154,7 @@ def main():  # noqa: C901, PLR0912, PLR0915
                   "different commit than the one that was claimed.", file=sys.stderr)
             return EXIT_BLOCKED
 
+    root = None
     if is_merged(pr):
         final_pr = pr
         if args.dry_run:
@@ -4211,6 +4167,18 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 print("No mutations performed in --dry-run mode.")
             return EXIT_OK
         print(f"=== Merge execution — PR #{args.pr}: already merged; resuming close-out ===")
+        root = repository_root()
+        if not root:
+            print("[ERROR] Merged PR close-out cannot resume because the repository root "
+                  "could not be resolved.", file=sys.stderr)
+            return EXIT_ERROR
+        ok, resumed_gates, reason = validate_gate_verdicts(
+            load_gate_verdicts(root, args.pr), args.pr, gated_head
+        )
+        if not ok:
+            print(f"[ERROR] Refusing resumed close-out: {reason}", file=sys.stderr)
+            return EXIT_ERROR
+        gates = resumed_gates
     else:
         issue_bodies = {}
         for num in issue_nums:
@@ -4345,12 +4313,22 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 print("[ERROR] Final live base tip could not be read. No merge command was run.",
                       file=sys.stderr)
                 return EXIT_BLOCKED
+            root = repository_root()
+            if not root:
+                print("[ERROR] Repository root could not be resolved. No merge command was run.",
+                      file=sys.stderr)
+                return EXIT_BLOCKED
+            if not save_gate_verdicts(root, args.pr, final_gates, gated_head):
+                print("[ERROR] Final exact-head gate evidence could not be persisted. "
+                      "No merge command was run.", file=sys.stderr)
+                return EXIT_BLOCKED
 
             print(f"  ✅ merge lock          {lock_message}")
             print(f"  ✅ final base check    {rebased_message}")
             print("\n=== Merge execution ===")
             final_pr, outcome = execute_merge(args.pr, pr, args.merge_method, gated_base)
             if not final_pr:
+                discard_gate_verdicts(root, args.pr)
                 print(f"  ❌ not merged          {outcome}", file=sys.stderr)
                 # A refusal taken before the command ran is a gate block, not a
                 # failed merge: nothing was mutated and re-running is the remedy.
@@ -4365,7 +4343,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
     if not audit_ok:
         print("[ERROR] GitHub reported merged but supplied no merge commit SHA.", file=sys.stderr)
 
-    root = repository_root()
     command = intervention_command()
     if not root:
         failure = "repository root: could not resolve the primary worktree"
@@ -4400,12 +4377,6 @@ def main():  # noqa: C901, PLR0912, PLR0915
                 file=sys.stderr,
             )
             return EXIT_ERROR
-
-    # Preserve pre-merge verdicts because closed PRs cannot reproduce them.
-    if gates is not None:
-        save_gate_verdicts(root, args.pr, gates)
-    else:
-        gates = load_gate_verdicts(root, args.pr)
 
     closeout_ok, failed_attempts = run_closeout_with_retries(final_pr, issue_nums, root)
     if not closeout_ok:

@@ -1,14 +1,15 @@
 # Aru Software Factory — Build Plan
 
-> **Current review policy (2026-08-25):** CodeRabbit reviews ordinary PRs by
-> default, and `review:coderabbit` is the only assignment `create_pr.py`
-> creates. An operator may explicitly reassign a stalled PR to Sourcery or
-> CodeAnt after concrete observed unavailability, never as a load balancer.
-> Only after every external reviewer is unavailable, busy, or waiting
-> too long may one independent coding agent be assigned to that exact PR.
-> Legacy coding-agent labels alone remain invalid; emergency review requires
-> exact-head GitHub evidence and merge-gate validation. There is no reviewer
-> rotation, fleet, queue, or second scheduler.
+> **Current review policy (2026-08-27):** `create_pr.py` assigns exactly one of
+> `review:coderabbit`, `review:sourcery`, or `review:codeant` using the
+> deterministic least-loaded pool over the complete paginated open-PR
+> inventory. That reservation is immutable absent one audited external
+> reassignment after concrete observed unavailability. Only after every
+> external reviewer is unavailable, busy, or waiting too long may one
+> independent coding agent be assigned to that exact PR. Legacy coding-agent
+> labels alone remain invalid; emergency review requires exact-head GitHub
+> evidence and merge-gate validation. There is no reviewer rotation, fleet,
+> queue, or second scheduler.
 
 **Goal:** idea → deployed software through an autonomous governed loop, with
 operator visibility and exceptional human intervention only for an unresolved
@@ -18,9 +19,7 @@ severe merge or close-out failure.
 
 **Companion:** [`PROCESS-AUDIT-2026-08.md`](PROCESS-AUDIT-2026-08.md) — the baseline gap analysis.
 
-**Strategy briefing:** [`agentic-software-factory-briefing.html`](agentic-software-factory-briefing.html) is a self-contained, tool-neutral tour of the factory thesis, operating path, maturity, and trust model. [`AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md) provides the supporting industry evidence (OpenAI harness, BCG factory, Spec Kit, Mastra, CodeRabbit). Both explain this plan without creating another roadmap. Board choice: [`PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](PROJECT-BOARD-FOR-AGENTIC-FACTORY.md).
-
-**Interactive flow:** [`../sdlc_flow_visualizer/index.html`](../sdlc_flow_visualizer/index.html) is a no-build explorer of lifecycle and remediation mechanics. Issue #342 is the Current status-legend correction; until it merges, the visualizer may lag this document and must not be used as live status authority.
+**Strategy briefing:** [`agentic-software-factory-briefing.html`](agentic-software-factory-briefing.html) is a self-contained, tool-neutral tour of the factory thesis, operating path, maturity, and trust model. Board choice: [`PROJECT-BOARD-FOR-AGENTIC-FACTORY.md`](PROJECT-BOARD-FOR-AGENTIC-FACTORY.md). Both explain this plan without creating another roadmap.
 
 ---
 
@@ -49,9 +48,10 @@ Carried forward from the source document, verified and agreed:
 - **The board is the orchestrator.** Agents ask `fetch_next_work.py` what to do next. No supervisor process, no MCP lock bus, no `tasks.md`. This survives crashed sessions and reboots in a way in-memory orchestration does not.
 - **Mechanisms over instructions.** A rule that lives only in prose is followed probabilistically.
 - **The middle of the factory is strong.** Claim → isolate → implement → review → merge is genuinely better engineered than most public multi-agent setups.
-- **The base ends now exist, but the proof is incomplete.** Intake capabilities
-  and a GitHub Pages preview are Shipped. Clarification/convergence and real
-  provider delivery/observation remain Deferred behind #335's phase gates.
+- **The retained kernel is intentionally narrower than full delivery.** Intake
+  capabilities, issue-to-merge execution, and operator observability are
+  Shipped. Real provider delivery/observation remains Deferred behind #335's
+  phase gates.
 - **Non-goals stand** (§7 below extends them).
 
 ---
@@ -279,17 +279,13 @@ their presence on the roadmap is not a Shipped claim.
 The Shipped merge contract is unchanged: `merge_pr.py` defaults to a merge
 commit, while squash is an explicit opt-in (#89).
 
-#### Deployment truth
+#### Delivery truth
 
-- **Shipped:** `scripts/deploy_preview.py` can produce a runnable GitHub Pages
-  preview tied to an exact merged commit and smoke evidence.
-- **Audit-only:** `scripts/promote.py` records GitHub Environment/Deployment
-  state. It does not deploy, copy, rebuild, or prove movement of a runnable
-  artifact.
-- **Deferred:** issue #345 must prove the first Vercel adapter with immutable
-  deployment identity, authoritative preview and production URLs, live smoke,
-  promotion without rebuild, and rollback. Phase 4 (#84) generalizes only from
-  that real evidence.
+- **Shipped:** governed intake, issue-to-merge execution, and the retained
+  client-work kernel helpers.
+- **Deferred:** real post-merge deployment adapters, authoritative runtime
+  URLs, live smoke, promotion, rollback, and observation stay outside the
+  retained kernel until Phase 4 (#84) work lands with real provider evidence.
 
 ### 5.2 Historical S-roadmap snapshot — verified 2026-08-15
 
@@ -359,7 +355,7 @@ The binding constraint, per §3.3.
 |---|---|---|
 | **S4.1** | `fleet_status.py` — the §4.2 screen | You cannot steer what you cannot see |
 | **S4.2** | Cost and cycle-time capture per closed issue | The input to every future prioritisation |
-| **S4.3** | `deploy-preview` skill, gated post-merge | Idea→merge is half a factory |
+| **S4.3** | Real post-merge deploy adapter, gated by immutable artifact evidence | Idea→merge is half a factory |
 | **S4.4** | Promotion path preview → staging → prod, with issue/PR trail | Issue-First survives past merge |
 | **S4.5** | Smoke / E2E in CI for products with a runnable surface | Unit green ≠ product works |
 | **S4.6** | Post-merge cleanup automation | Done must mean clean |
@@ -368,7 +364,7 @@ The binding constraint, per §3.3.
 
 | ID | Work |
 |---|---|
-| **S5.1** | Stack packs: **deployment and release templates** per stack. `init_project.py` already accepts `node`/`nodejs`/`typescript`/`react`/`go`, picks the test runner, and renders per-stack CI (`init_project.py:312-337`, covered in `tests/test_init_project.py:148-195`). The gap is after CI, not at init. |
+| **S5.1** | Stack packs: **release templates** per stack. `init_project.py` already accepts `node`/`nodejs`/`typescript`/`react`/`go`, picks the test runner, and renders per-stack CI (`init_project.py:312-337`, covered in `tests/test_init_project.py:148-195`). The gap is after CI, not at init. |
 | **S5.2** | Trust boundary for untrusted issue/PR text (§3.6) — required before any repo accepts external issues |
 | **S5.3** | Degraded-mode decision (§3.7) — document the dependency or mitigate it |
 | **S5.4** | Golden-path demo repo exercising the full loop including deploy. Companion and walk: `docs/golden-path-demo.md`. |

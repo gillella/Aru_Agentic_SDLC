@@ -2,8 +2,8 @@
 
 **Which tracker should orchestrate humans + coding agents in 2026?**
 
-**Date:** 2026-08-11  
-**Companion:** [`AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md`](AGENTIC-SOFTWARE-FACTORY-RESEARCH-GUIDE.md)  
+**Date:** 2026-08-11
+**Companion:** [`ARU-SOFTWARE-FACTORY.md`](ARU-SOFTWARE-FACTORY.md)
 **Issue:** #78
 
 ---
