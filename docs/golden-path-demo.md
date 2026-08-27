@@ -40,7 +40,7 @@ when the repository owner is the login string.
 artifact. Those are not a second factory. The **demo** repository's `skills/`
 directory stays empty (`.gitkeep` only). Happy-path procedures live in
 `$ARU_SDLC_HOME/skills/`, including `idea-to-prd`, `prd-to-issues`,
-`implement-next-issue` and `code-review` at the pinned SHA.
+`implement-next-issue`, `code-review`, and `deploy-preview` at the pinned SHA.
 
 ## Happy path
 
@@ -59,7 +59,8 @@ skills under `$ARU_SDLC_HOME`, not the empty demo `skills/` directory.
    self-review.
 5. `python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --pr <ID>`
 6. `python3 "$ARU_SDLC_HOME/scripts/deploy_preview.py" --commit <40-char-sha> --issue <N>`
-   The helper records the GitHub Pages URL on the originating issue.
+   Skill: `$ARU_SDLC_HOME/skills/deploy-preview/SKILL.md`. The helper records the GitHub Pages
+   URL on the originating issue.
 
 ## Runnable surface before Pages
 
