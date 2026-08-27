@@ -548,18 +548,10 @@ class DogfoodCiParityTests(unittest.TestCase):
         self.assertNotIn("|| echo", playbook_ci)
 
     def test_playbook_ci_runs_the_three_dogfood_gates_in_the_required_job(self):
-        playbook_ci = yaml.safe_load(
-            (ROOT / ".github" / "workflows" / "ci.yml").read_text())
-        jobs = playbook_ci["jobs"]
-        step_names = {
-            step.get("name") for step in jobs["test-and-lint"]["steps"]
-        }
-        for gate in ("Secret scan", "Dependency audit", "Enforce module boundaries"):
-            with self.subTest(gate=gate):
-                self.assertIn(gate, step_names)
-        for removed_job in ("secret-scan", "dependency-audit", "import-boundaries"):
-            with self.subTest(removed_job=removed_job):
-                self.assertNotIn(removed_job, jobs)
+        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
+        names = {step.get("name") for step in jobs["test-and-lint"]["steps"]}
+        self.assertTrue({"Secret scan", "Dependency audit", "Enforce module boundaries"} <= names)
+        self.assertFalse({"secret-scan", "dependency-audit", "import-boundaries"} & set(jobs))
 
     def test_gitleaks_workflow_declares_pull_request_read(self):
         """The action lists PR commits; missing this permission is a 403, not a leak."""

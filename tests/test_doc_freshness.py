@@ -583,16 +583,12 @@ class WorkflowCredentialBoundaryTests(unittest.TestCase):
     def _docs_job(self, *, on_pull_request: bool = False) -> str:
         text = self.WORKFLOW.read_text(encoding="utf-8")
         job_name = "test-and-lint" if on_pull_request else "trusted-docs-freshness"
-        start = text.index(f"\n  {job_name}:")
-        rest = text[start + 1:]
-        # The fast job ends where the trusted-only job begins; the trusted job
-        # is last. This keeps the text assertion bound to one credential scope.
+        rest = text[text.index(f"\n  {job_name}:") + 1:]
         end = rest.find("\n  trusted-docs-freshness:") if on_pull_request else -1
         return rest if end == -1 else rest[:end]
 
     def _steps(self, *, on_pull_request: bool):
-        return self._docs_job(on_pull_request=on_pull_request).split(
-            "\n      - name:")[1:]
+        return self._docs_job(on_pull_request=on_pull_request).split("\n      - name:")[1:]
 
     def _step_running_checker(self, *, on_pull_request: bool) -> str:
         wanted = "(untrusted PR)" if on_pull_request else "(trusted)"
@@ -619,10 +615,7 @@ class WorkflowCredentialBoundaryTests(unittest.TestCase):
         step = self._step_running_checker(on_pull_request=False)
         self.assertIn("GH_TOKEN", step)
         self.assertNotIn("--offline", step)
-        self.assertIn(
-            "if: github.event_name != 'pull_request'",
-            self._docs_job(),
-        )
+        self.assertIn("if: github.event_name != 'pull_request'", self._docs_job())
 
     def _workflow_permissions(self) -> list:
         """Grant lines from the top-level permissions block, comments excluded.
