@@ -202,6 +202,8 @@ class ModeTests(unittest.TestCase):
         text = skill_text()
         self.assertIn("doctor_local_agent_integrations.py", text)
         self.assertIn("Exit `0` healthy", text)
+        self.assertIn("`2` degraded", text)
+        self.assertIn("`1` invalid", text)
         self.assertNotIn("does not exist yet", text)
         self.assertNotIn("not yet diagnosable", text)
 
@@ -289,6 +291,7 @@ class GovernanceTests(unittest.TestCase):
             flat_text,
         )
         self.assertIn("never creates a coding-agent review", flat_text)
+        self.assertIn("self-review, stale heads, labels alone, and malformed or duplicate evidence fail closed", flat_text)
         self.assertIn("address-pr-feedback", text)
         self.assertEqual(
             [], unqualified_automatic_handoff(flat_text), "router hands off automatically"
