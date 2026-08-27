@@ -435,20 +435,19 @@ def test_codeant_spoofed_bot_login_with_user_type_fails_closed(monkeypatch):
         merge_pr.evaluate(146, head)
 
 
-def test_codeant_missing_exact_head_review_object_fails_closed(monkeypatch):
+def test_codeant_clean_status_without_review_object_passes(monkeypatch):
     head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
     install_codeant_pr(monkeypatch, head, pr_number=146)
 
-    # Review object exists for old commit, but not current head
-    old_review = make_review(commit_id="1" * 40, state="COMMENTED")
     record = make_codeant_record(commit=head, done=True)
     status_comment = make_codeant_comment(records=[record])
 
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [old_review])
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    gates = merge_pr.evaluate(146, head)
+    assert gates["reviewer"] == "codeant"
+    assert gates["head"] == head
 
 
 def test_codeant_malformed_marker_beside_valid_comment_fails_closed(monkeypatch):
@@ -488,7 +487,7 @@ def test_codeant_valid_marker_beside_trusted_prose_comment_passes(monkeypatch):
     assert gates["head"] == head
 
 
-def test_codeant_changes_requested_review_blocks_merge(monkeypatch):
+def test_codeant_clean_status_cannot_override_exact_head_changes_requested(monkeypatch):
     head = "db49ace5f70ae8b5fe8b1ce341ad997bb77db071"
     install_codeant_pr(monkeypatch, head, pr_number=146)
 

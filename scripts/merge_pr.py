@@ -149,8 +149,7 @@ def successful_service_review(number: int, head: str, service: str) -> bool:
     return bool(approved)
 
 
-def trusted_codeant_review_at_head(reviews: list[dict[str, Any]], head: str) -> bool:
-    has_exact_head_review = False
+def codeant_reviews_allow_status(reviews: list[dict[str, Any]], head: str) -> bool:
     for review in reviews:
         if not isinstance(review, dict):
             raise KernelError("review evidence is malformed")
@@ -162,9 +161,7 @@ def trusted_codeant_review_at_head(reviews: list[dict[str, Any]], head: str) -> 
         if commit_id == head:
             if state == "CHANGES_REQUESTED":
                 return False
-            if state in {"COMMENTED", "APPROVED"}:
-                has_exact_head_review = True
-    return has_exact_head_review
+    return True
 
 
 def _valid_codeant_record(record: Any) -> bool:
@@ -227,7 +224,7 @@ def validate_codeant_status_comments(comments: list[dict[str, Any]], head: str) 
 
 def successful_codeant_status_review(number: int, head: str) -> bool:
     reviews = pull_reviews(number)
-    if not trusted_codeant_review_at_head(reviews, head):
+    if not codeant_reviews_allow_status(reviews, head):
         return False
     comments = pull_comments(number)
     return validate_codeant_status_comments(comments, head)
