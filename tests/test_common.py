@@ -294,6 +294,26 @@ def test_github_quota_failure_raises_without_retry(monkeypatch, stderr):
     assert "stop and wait" in common.QUOTA_STOP_MESSAGE
 
 
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "GraphQL resource 429 was not found",
+        "issue #429 does not exist",
+    ],
+)
+def test_unrelated_429_error_is_not_classified_as_quota(monkeypatch, stderr):
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(common.subprocess, "run", fake_run)
+
+    with pytest.raises(common.KernelError, match=stderr):
+        common.run(
+            ["gh", "api", "graphql", "-f", "query=query { viewer { login } }"],
+            auth=common.REPOSITORY_AUTH,
+        )
+
+
 def test_graphql_rate_limited_payload_raises_without_retry(monkeypatch):
     calls = []
 

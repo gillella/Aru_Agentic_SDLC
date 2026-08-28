@@ -51,7 +51,7 @@ QUOTA_STOP_MESSAGE = (
     "GitHub GraphQL quota exhausted; stop and wait for the budget to reset"
 )
 _QUOTA_RE = re.compile(
-    r"(?:HTTP\s*429|\b429\b|RATE_LIMITED|rate[_ -]?limit(?:ed|ing)?|"
+    r"(?:HTTP\s*429|RATE_LIMITED|rate[_ -]?limit(?:ed|ing)?|"
     r"secondary rate limit|resource[- ]limits? exceeded|"
     r"MAX_NODE_LIMIT_EXCEEDED|API rate limit exceeded)",
     re.IGNORECASE,
