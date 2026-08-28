@@ -28,7 +28,7 @@ from common import (
     REVIEW_PREFIX,
     KernelError,
     agent_family,
-    coding_reviewer_candidates,
+    canonical_github_actor,
     configured_coding_reviewers,
     ensure_label,
     gh_json,
@@ -38,11 +38,11 @@ from common import (
     json_print,
     label_names,
     normalized_identity,
-    probe_coding_candidate,
     registered_coding_actors,
     review_evidence_unavailable,
     repo_slug,
     run,
+    same_github_actor,
     set_status,
     status_of,
 )
@@ -153,7 +153,7 @@ def probe_coding_reviewer(
     runner: ProbeRunner = _default_probe,
 ) -> tuple[str, str, str] | None:
     author_identity = normalized_identity(author_identity)
-    author_actor = author_actor.lower()
+    author_actor = canonical_github_actor(author_actor)
     actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
     configured = configured_coding_reviewers()
     family_order = [family for family in CODING_REVIEWERS if family != author_family]
@@ -172,7 +172,7 @@ def probe_coding_reviewer(
                     _probe_ok(result)
                     and identity != author_identity
                     and actor
-                    and actor != author_actor
+                    and not same_github_actor(actor, author_actor)
                 ):
                     available.append((identity, actor))
             if available:
@@ -184,7 +184,7 @@ def probe_coding_reviewer(
             continue
         identity, _subscription = candidates[0]
         actor = str(actors.get(identity) or "").lower()
-        if identity == author_identity or not actor or actor == author_actor:
+        if identity == author_identity or not actor or same_github_actor(actor, author_actor):
             continue
         command_names = {
             "openai-codex": "codex",
@@ -215,32 +215,22 @@ def choose_initial_reviewer(
     probe_runner: ProbeRunner = _default_probe,
 ) -> tuple[str, str | None, str | None]:
     states = external_states if external_states is not None else registered_external_states()
-    initial_external(states)
-    external_candidates = [
-        (service, None, None, None)
-        for state in (AVAILABLE, PENDING)
-        for service in EXTERNAL_REVIEWERS
-        if states.get(service) == state
-    ]
+    external = initial_external(states)
+    if external is not None:
+        return external, None, None
     if os.environ.get(REVIEWER_CONFIG_ENV, "").strip() and not author_actor:
         author_actor = current_github_actor()
-    coding_candidates = coding_reviewer_candidates(
-        author_identity=author_identity,
+    coding = probe_coding_reviewer(
+        author_identity=normalized_identity(author_identity),
+        author_family=author_family,
         author_actor=author_actor,
+        rotation_key=number,
         reviewer_actors=reviewer_actors,
+        runner=probe_runner,
     )
-    coding_candidates.sort(key=lambda candidate: candidate[0] == author_family)
-    candidates = [*external_candidates, *coding_candidates]
-    if not candidates:
-        raise KernelError("no external or distinct coding-agent reviewer is available")
-    start = number % len(candidates)
-    rotated = [*candidates[start:], *candidates[:start]]
-    for authority, identity, actor, subscription in rotated:
-        if identity is None:
-            return authority, None, None
-        candidate = (authority, identity, str(actor), subscription)
-        if probe_coding_candidate(candidate, probe_runner):
-            return authority, identity, str(actor)
+    if coding is not None:
+        authority, identity, actor = coding
+        return authority, identity, actor
     raise KernelError("no external or distinct coding-agent reviewer is available")
 
 

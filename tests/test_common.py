@@ -210,6 +210,22 @@ def test_linked_project_explicitly_uses_project_authority(monkeypatch):
     assert calls[0][1] == common.PROJECT_AUTH
 
 
+@pytest.mark.parametrize(
+    ("left", "right", "equal"),
+    [
+        ("app/aru-code-factory-gillella", "aru-code-factory-gillella[bot]", True),
+        ("app/aru-code-factory-gillella", "app/aru-code-factory-gillella", True),
+        ("aru-code-factory-gillella[bot]", "aru-code-factory-gillella[bot]", True),
+        ("octocat", "octocat", True),
+        ("octocat", "OctoCat", True),
+        ("octocat", "octocat[bot]", False),
+        ("app/aru-code-factory-gillella", "app/other-app", False),
+    ],
+)
+def test_canonical_github_actors_preserve_distinct_users(left, right, equal):
+    assert (common.same_github_actor(left, right)) is equal
+
+
 def board_payload(
     *,
     items: list[dict] | None = None,

@@ -106,8 +106,13 @@ def test_distinct_family_exact_head_coding_agent_approval_is_accepted():
             "independent-reviewer",
         ),
         (coding_pr(), payload(submitted_by="author-login"), "author-login"),
+        (
+            coding_pr(author_login="app/aru-code-factory-gillella"),
+            payload(submitted_by="aru-code-factory-gillella[bot]"),
+            "aru-code-factory-gillella[bot]",
+        ),
     ],
-    ids=["author-agent-identity", "author-github-actor"],
+    ids=["author-agent-identity", "author-github-actor", "author-github-app-actor"],
 )
 def test_author_self_review_is_rejected(pr, attestation, actor):
     assert accepted(pr, [review(attestation, actor=actor)]) is False
@@ -152,6 +157,45 @@ def test_request_changes_blocks_merge():
     }
     attestation = payload(verdict="REQUEST_CHANGES", findings=[finding])
     assert accepted(reviews=[review(attestation, state="CHANGES_REQUESTED")]) is False
+
+
+def test_exact_head_request_changes_has_clear_blocking_status(monkeypatch):
+    pr = coding_pr()
+    monkeypatch.setattr(merge_pr, "pull_request", lambda _number: pr)
+    monkeypatch.setattr(
+        merge_pr,
+        "issue",
+        lambda _number: {
+            "body": "## Acceptance Criteria\n\n- [x] policy behavior verified",
+            "labels": [{"name": "status:in-review"}],
+        },
+    )
+    finding = {
+        "severity": "high",
+        "file": "scripts/create_pr.py",
+        "line": 200,
+        "summary": "Capacity failure mutates the authority before a reviewer is selected.",
+        "resolved": False,
+    }
+    attestation = payload(verdict="REQUEST_CHANGES", findings=[finding])
+    monkeypatch.setattr(
+        merge_pr,
+        "pull_reviews",
+        lambda _number: [review(attestation, state="CHANGES_REQUESTED")],
+    )
+    monkeypatch.setattr(
+        merge_pr,
+        "ci_verdict",
+        lambda _number: {"head": HEAD, "state": "success", "checks": ["tests"]},
+    )
+    monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [])
+    monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: ("c" * 40, 0))
+
+    with pytest.raises(
+        merge_pr.KernelError,
+        match="claude-code exact-head authoritative review requested changes",
+    ):
+        merge_pr.evaluate(88, HEAD)
 
 
 def test_unresolved_coding_agent_finding_blocks_merge():

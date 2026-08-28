@@ -546,6 +546,24 @@ def test_all_twelve_binding_labels_fit_github_limit():
     assert all(len(label) <= 50 for label in labels)
 
 
+def test_author_actor_canonicalization_excludes_equivalent_github_app_binding(monkeypatch):
+    monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")
+
+    reviewer = create_pr.probe_coding_reviewer(
+        author_identity="author",
+        author_family="human-or-other",
+        author_actor="app/aru-code-factory-gillella",
+        rotation_key=0,
+        reviewer_actors={
+            "mo": "aru-code-factory-gillella[bot]",
+            "mx": "independent-reviewer",
+        },
+        runner=result,
+    )
+
+    assert reviewer == ("xai-cursor", "mx", "independent-reviewer")
+
+
 def test_refresh_with_no_coding_capacity_preserves_external_authority(monkeypatch):
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=created, state="unavailable")
