@@ -20,6 +20,22 @@ def tracked_paths() -> list[Path]:
     return [ROOT / raw.decode() for raw in result.stdout.split(b"\0") if raw]
 
 
+PRODUCTION_LINE_BUDGET = 6000
+TEST_LINE_BUDGET = 9000
+FILE_LINE_BUDGET = 800
+
+
+def surface_budget_violations(production_total: int, test_total: int, max_file: int) -> list[str]:
+    violations: list[str] = []
+    if production_total > PRODUCTION_LINE_BUDGET:
+        violations.append("production")
+    if test_total > TEST_LINE_BUDGET:
+        violations.append("tests")
+    if max_file > FILE_LINE_BUDGET:
+        violations.append("file")
+    return violations
+
+
 def test_hard_surface_budgets():
     tracked = tracked_paths()
     production = [
@@ -28,9 +44,17 @@ def test_hard_surface_budgets():
         if path.suffix == ".py" and path.parent.name in {"scripts", "hooks"}
     ]
     tests = [path for path in tracked if path.suffix == ".py" and path.parent.name == "tests"]
-    assert sum(lines(path) for path in production) <= 6000
-    assert sum(lines(path) for path in tests) <= 9000
-    assert all(lines(path) <= 800 for path in production + tests)
+    production_lines = [lines(path) for path in production]
+    test_lines = [lines(path) for path in tests]
+    max_file = max(production_lines + test_lines, default=0)
+    assert surface_budget_violations(sum(production_lines), sum(test_lines), max_file) == []
+
+
+def test_hard_surface_budgets_deny_over_limit():
+    assert surface_budget_violations(PRODUCTION_LINE_BUDGET + 1, 0, 0) == ["production"]
+    assert surface_budget_violations(0, TEST_LINE_BUDGET + 1, 0) == ["tests"]
+    assert surface_budget_violations(0, 0, FILE_LINE_BUDGET + 1) == ["file"]
+    assert surface_budget_violations(PRODUCTION_LINE_BUDGET, TEST_LINE_BUDGET, FILE_LINE_BUDGET) == []
 
 
 def test_supported_command_and_skill_budgets():
@@ -51,23 +75,55 @@ def test_supported_command_and_skill_budgets():
     assert len(skills) == 6
 
 
+OPERATING_DOCUMENTS = {
+    "README.md",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "docs/KERNEL-CONTRACT.md",
+    "docs/ENFORCEMENT-REGISTER.md",
+    "docs/OPERATIONS.md",
+    "docs/DEGRADED-MODE.md",
+}
+
+
+def is_non_operating_docs_file(path: Path) -> bool:
+    """Evidence and vision files under docs/ are not operating contracts."""
+    name = path.name
+    return name.startswith("AUDIT-") or name == "NORTH-STAR.md"
+
+
+def counted_operating_documents(paths: list[Path]) -> set[str]:
+    documents: set[str] = set()
+    for path in paths:
+        if path.parent == ROOT and path.name in {"README.md", "AGENTS.md", "CHANGELOG.md"}:
+            documents.add(path.relative_to(ROOT).as_posix())
+        elif path.parent == ROOT / "docs" and not is_non_operating_docs_file(path):
+            documents.add(path.relative_to(ROOT).as_posix())
+    return documents
+
+
 def test_active_documents_are_exactly_the_kernel_set():
-    tracked = tracked_paths()
-    documents = {
-        path.relative_to(ROOT).as_posix()
-        for path in tracked
-        if (path.parent == ROOT and path.name in {"README.md", "AGENTS.md", "CHANGELOG.md"})
-        or path.parent.name == "docs"
+    assert counted_operating_documents(tracked_paths()) == OPERATING_DOCUMENTS
+
+
+def test_nested_docs_are_not_counted_as_operating_documents():
+    nested = ROOT / "examples" / "docs" / "README.md"
+    assert counted_operating_documents([nested]) == set()
+    assert counted_operating_documents([ROOT / "docs" / "NORTH-STAR.md"]) == set()
+    assert counted_operating_documents([ROOT / "docs" / "KERNEL-CONTRACT.md"]) == {
+        "docs/KERNEL-CONTRACT.md"
     }
-    assert documents == {
-        "README.md",
-        "AGENTS.md",
-        "CHANGELOG.md",
-        "docs/KERNEL-CONTRACT.md",
-        "docs/ENFORCEMENT-REGISTER.md",
-        "docs/OPERATIONS.md",
-        "docs/DEGRADED-MODE.md",
-    }
+
+
+def test_north_star_is_vision_not_an_operating_document():
+    north_star = ROOT / "docs" / "NORTH-STAR.md"
+    assert north_star.is_file()
+    assert is_non_operating_docs_file(north_star)
+    assert is_non_operating_docs_file(Path("docs/AUDIT-2026-08-28.md"))
+    assert not is_non_operating_docs_file(Path("docs/KERNEL-CONTRACT.md"))
+    tracked = {path.relative_to(ROOT).as_posix() for path in tracked_paths()}
+    assert "docs/NORTH-STAR.md" in tracked
+    assert "docs/NORTH-STAR.md" not in OPERATING_DOCUMENTS
 
 
 def test_wrong_layer_surfaces_are_absent():
