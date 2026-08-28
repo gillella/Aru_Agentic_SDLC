@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 import claim_issue
@@ -104,6 +106,60 @@ def test_claim_race_rolls_back(monkeypatch):
     with pytest.raises(claim_issue.KernelError, match="race"):
         claim_issue.claim(7, "codex-1")
     assert "--remove-label" in commands[-1]
+
+
+def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys):
+    snapshots = iter(
+        [
+            {"number": 7, "labels": [], "state": "OPEN"},
+            {
+                "number": 7,
+                "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}],
+                "state": "OPEN",
+            },
+        ]
+    )
+    monkeypatch.setattr(claim_issue, "issue", lambda _number: next(snapshots))
+    monkeypatch.setattr(claim_issue, "status_of", lambda _record: "Ready")
+    monkeypatch.setattr(claim_issue, "contract_errors", lambda _record: [])
+    monkeypatch.setattr(claim_issue, "unresolved_dependencies", lambda _record: [])
+    monkeypatch.setattr(claim_issue, "ensure_label", lambda *_args, **_kwargs: None)
+    commands = []
+
+    def quota_on_rollback(argv, **_kwargs):
+        commands.append(argv)
+        if "--remove-label" in argv:
+            raise claim_issue.KernelError(
+                "GitHub GraphQL quota exhausted; stop and wait for the budget to reset"
+            )
+
+    monkeypatch.setattr(claim_issue, "run", quota_on_rollback)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["claim_issue.py", "--issue", "7", "--agent", "codex-1"],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        claim_issue.main()
+
+    assert commands == [
+        ["gh", "issue", "edit", "7", "--add-label", "agent:codex-1", "--add-assignee", "@me"],
+        [
+            "gh",
+            "issue",
+            "edit",
+            "7",
+            "--remove-label",
+            "agent:codex-1",
+            "--remove-assignee",
+            "@me",
+        ],
+    ]
+    assert capsys.readouterr().err.endswith(
+        "claim_issue.py: error: GitHub GraphQL quota exhausted; stop and wait for the budget "
+        "to reset; original claim failure: claim race detected; no exclusive winner\n"
+    )
 
 
 @pytest.mark.parametrize("agent", ["A", "contains space", "x", "../agent"])

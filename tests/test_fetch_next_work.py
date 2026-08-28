@@ -80,6 +80,11 @@ def test_select_preserves_pr_precedence_over_ready_inventory(
         ],
     )
     monkeypatch.setattr(fetch_next_work, "fetch_feedback", lambda _number: feedback)
+    monkeypatch.setattr(
+        fetch_next_work,
+        "has_review_comments",
+        lambda _number: bool(feedback),
+    )
     monkeypatch.setattr(fetch_next_work, "ci_verdict", lambda _number: ci)
     monkeypatch.setattr(fetch_next_work, "evaluate", lambda _number, _head: None)
 
@@ -163,4 +168,75 @@ def test_select_returns_idle_diagnostic_when_only_priority_is_bad(monkeypatch):
         "diagnostics": [
             "Ready issue #22 has contradictory or unsupported priority labels; skipped"
         ],
+    }
+
+
+def test_select_wait_path_does_not_call_review_thread_graphql(monkeypatch):
+    calls = []
+    monkeypatch.setattr(fetch_next_work, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(
+        fetch_next_work,
+        "authored_prs",
+        lambda _agent: [{"number": 500, "labels": []}],
+    )
+
+    def fake_gh_json(args, **_kwargs):
+        calls.append(list(args))
+        joined = " ".join(str(part) for part in args)
+        if "reviewThreads" in joined:
+            raise AssertionError("wait path must not query reviewThreads")
+        if args[:2] == ["api", "repos/owner/repo/pulls/500/comments?per_page=1"]:
+            return []
+        raise AssertionError(f"unexpected GitHub call: {args}")
+
+    monkeypatch.setattr(fetch_next_work, "gh_json", fake_gh_json)
+
+    def unexpected_feedback(_number):
+        raise AssertionError("wait path must not dump reviewThreads")
+
+    monkeypatch.setattr(fetch_next_work, "fetch_feedback", unexpected_feedback)
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ci_verdict",
+        lambda _number: {"state": "pending", "head": "a" * 40, "checks": []},
+    )
+
+    def unexpected_ready_inventory():
+        raise AssertionError("Ready inventory loaded before authored PR work")
+
+    monkeypatch.setattr(
+        fetch_next_work, "ready_issues", unexpected_ready_inventory, raising=False
+    )
+
+    assert fetch_next_work.select("codex-sol56-issue499") == {
+        "type": "wait",
+        "pr": 500,
+        "head": "a" * 40,
+        "ci": "pending",
+    }
+    assert calls == [["api", "repos/owner/repo/pulls/500/comments?per_page=1"]]
+
+
+def test_select_feedback_still_uses_full_review_threads(monkeypatch):
+    monkeypatch.setattr(
+        fetch_next_work,
+        "authored_prs",
+        lambda _agent: [{"number": 500, "labels": []}],
+    )
+    monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _number: True)
+    monkeypatch.setattr(
+        fetch_next_work,
+        "fetch_feedback",
+        lambda _number: [{"kind": "review", "id": 7}],
+    )
+
+    def unexpected_ci(_number):
+        raise AssertionError("CI must not run before returning feedback")
+
+    monkeypatch.setattr(fetch_next_work, "ci_verdict", unexpected_ci)
+
+    assert fetch_next_work.select("codex-sol56-issue499") == {
+        "type": "feedback",
+        "pr": 500,
+        "items": [{"kind": "review", "id": 7}],
     }
