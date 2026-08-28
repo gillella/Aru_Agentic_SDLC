@@ -51,23 +51,43 @@ def test_supported_command_and_skill_budgets():
     assert len(skills) == 6
 
 
+OPERATING_DOCUMENTS = {
+    "README.md",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "docs/KERNEL-CONTRACT.md",
+    "docs/ENFORCEMENT-REGISTER.md",
+    "docs/OPERATIONS.md",
+    "docs/DEGRADED-MODE.md",
+}
+
+
+def is_non_operating_docs_file(path: Path) -> bool:
+    """Evidence and vision files under docs/ are not operating contracts."""
+    name = path.name
+    return name.startswith("AUDIT-") or name == "NORTH-STAR.md"
+
+
 def test_active_documents_are_exactly_the_kernel_set():
     tracked = tracked_paths()
     documents = {
         path.relative_to(ROOT).as_posix()
         for path in tracked
         if (path.parent == ROOT and path.name in {"README.md", "AGENTS.md", "CHANGELOG.md"})
-        or path.parent.name == "docs"
+        or (path.parent.name == "docs" and not is_non_operating_docs_file(path))
     }
-    assert documents == {
-        "README.md",
-        "AGENTS.md",
-        "CHANGELOG.md",
-        "docs/KERNEL-CONTRACT.md",
-        "docs/ENFORCEMENT-REGISTER.md",
-        "docs/OPERATIONS.md",
-        "docs/DEGRADED-MODE.md",
-    }
+    assert documents == OPERATING_DOCUMENTS
+
+
+def test_north_star_is_vision_not_an_operating_document():
+    north_star = ROOT / "docs" / "NORTH-STAR.md"
+    assert north_star.is_file()
+    assert is_non_operating_docs_file(north_star)
+    assert is_non_operating_docs_file(Path("docs/AUDIT-2026-08-28.md"))
+    assert not is_non_operating_docs_file(Path("docs/KERNEL-CONTRACT.md"))
+    tracked = {path.relative_to(ROOT).as_posix() for path in tracked_paths()}
+    assert "docs/NORTH-STAR.md" in tracked
+    assert "docs/NORTH-STAR.md" not in OPERATING_DOCUMENTS
 
 
 def test_wrong_layer_surfaces_are_absent():
