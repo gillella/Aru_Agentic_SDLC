@@ -27,6 +27,7 @@ from common import (
     issue,
     json_print,
     label_names,
+    same_github_actor,
     review_evidence_unavailable,
     repo_slug,
     run,
@@ -433,7 +434,7 @@ def _current_coding_attestation(
         if not isinstance(review, dict):
             raise KernelError("review evidence is malformed")
         actor = review.get("user") or review.get("author") or {}
-        if str(actor.get("login") or "").lower() != reviewer_actor.lower():
+        if not same_github_actor(str(actor.get("login") or ""), reviewer_actor):
             continue
         valid, payload = parse_coding_review(review)
         if not valid:
@@ -448,7 +449,7 @@ def _coding_assignment(pr: dict[str, Any]) -> tuple[str, str, str, str, str] | N
     reviewer_actor = _one_identity_label(pr, REVIEWER_ACTOR_PREFIX)
     author = _one_identity_label(pr, AUTHOR_PREFIX)
     family = _one_identity_label(pr, AUTHOR_FAMILY_PREFIX)
-    github_author = str((pr.get("author") or {}).get("login") or "").lower()
+    github_author = str((pr.get("author") or {}).get("login") or "")
     if not all((reviewer, reviewer_actor, author, family, github_author)) or reviewer == author:
         return None
     return reviewer, reviewer_actor, author, family, github_author
@@ -460,13 +461,13 @@ def _review_submission_matches(
     actor = review.get("user") or review.get("author")
     if not isinstance(actor, dict):
         return False
-    actor_login = str(actor.get("login") or "").lower()
+    actor_login = str(actor.get("login") or "")
     commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
     return bool(
         actor_login
-        and actor_login != github_author
+        and not same_github_actor(actor_login, github_author)
         and commit_id == head
-        and payload["submitted_by"].lower() == actor_login
+        and same_github_actor(payload["submitted_by"], actor_login)
     )
 
 
@@ -497,7 +498,7 @@ def coding_review_verdict(
     if not _review_submission_matches(review, payload, head, github_author):
         return None
     actor = review.get("user") or review.get("author") or {}
-    if str(actor.get("login") or "").lower() != reviewer_actor.lower():
+    if not same_github_actor(str(actor.get("login") or ""), reviewer_actor):
         return None
     if payload["reviewer"] != reviewer_identity or payload["family"] != authority:
         return None

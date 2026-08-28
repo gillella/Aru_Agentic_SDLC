@@ -106,8 +106,13 @@ def test_distinct_family_exact_head_coding_agent_approval_is_accepted():
             "independent-reviewer",
         ),
         (coding_pr(), payload(submitted_by="author-login"), "author-login"),
+        (
+            coding_pr(author_login="app/aru-code-factory-gillella"),
+            payload(submitted_by="aru-code-factory-gillella[bot]"),
+            "aru-code-factory-gillella[bot]",
+        ),
     ],
-    ids=["author-agent-identity", "author-github-actor"],
+    ids=["author-agent-identity", "author-github-actor", "author-github-app-actor"],
 )
 def test_author_self_review_is_rejected(pr, attestation, actor):
     assert accepted(pr, [review(attestation, actor=actor)]) is False

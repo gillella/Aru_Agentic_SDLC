@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import merge_pr
@@ -480,6 +482,58 @@ def test_codeant_status_without_trusted_review_history_fails_closed(monkeypatch)
 
     with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
         merge_pr.evaluate(146, head)
+
+
+def test_canonical_github_app_author_cannot_satisfy_coding_review_submission():
+    pr = base_pr(
+        number=88,
+        body="Closes #508",
+        headRefOid="a" * 40,
+        labels=[
+            {"name": "review:claude-code"},
+            {"name": "reviewer:claude-code-sub-1"},
+            {"name": "reviewer-actor:aru-code-factory-gillella[bot]"},
+            {"name": "author:codex-author"},
+            {"name": "author-family:openai-codex"},
+        ],
+        author={"login": "app/aru-code-factory-gillella"},
+        statusCheckRollup=[],
+    )
+    payload = {
+        "head": "a" * 40,
+        "reviewer": "claude-code-sub-1",
+        "family": "claude-code",
+        "submitted_by": "aru-code-factory-gillella[bot]",
+        "verdict": "APPROVE",
+        "summary": "I reviewed the issue contract, exact diff, surrounding code, and failure paths independently.",
+        "verification": ["pytest tests/test_merge_gate.py -q completed successfully"],
+        "findings": [
+            {
+                "severity": "low",
+                "file": "scripts/merge_pr.py",
+                "line": 300,
+                "summary": "The resolved naming note does not block this exact head.",
+                "resolved": True,
+            }
+        ],
+        "issues": [508],
+        "acceptance_criteria_reviewed": True,
+        "diff_reviewed": True,
+        "surrounding_code_reviewed": True,
+    }
+    review = {
+        "id": 1,
+        "commit_id": "a" * 40,
+        "state": "APPROVED",
+        "body": (
+            "Substantive independent review.\n\n"
+            f"<!-- aru-coding-review:v1 {json.dumps(payload, sort_keys=True)} -->"
+        ),
+        "user": {"login": "aru-code-factory-gillella[bot]", "type": "Bot"},
+    }
+    assert (
+        merge_pr.successful_coding_agent_review(pr, [review], "claude-code", [508]) is False
+    )
 
 
 @pytest.mark.parametrize(

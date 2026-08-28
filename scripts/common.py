@@ -116,6 +116,20 @@ def normalized_identity(value: str) -> str:
     return identity[:80]
 
 
+def canonical_github_actor(value: str) -> str:
+    actor = value.strip().lower()
+    match = re.fullmatch(r"app/([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)", actor)
+    if match:
+        return f"{match.group(1)}[bot]"
+    return actor
+
+
+def same_github_actor(left: str, right: str) -> bool:
+    if not left.strip() or not right.strip():
+        return False
+    return canonical_github_actor(left) == canonical_github_actor(right)
+
+
 def registered_coding_actors() -> dict[str, str]:
     records = gh_json(["label", "list", "--limit", "1000", "--json", "name"])
     if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
@@ -156,14 +170,14 @@ def coding_reviewer_candidates(
             )
         return []
     author_identity = normalized_identity(author_identity)
-    author_actor = author_actor.lower()
+    author_actor = canonical_github_actor(author_actor)
     actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
     configured = configured_coding_reviewers()
     candidates: list[CodingCandidate] = []
     for family in CODING_REVIEWERS:
         for identity, subscription in configured.get(family, ()):
             actor = str(actors.get(identity) or "").lower()
-            if identity == author_identity or not actor or actor == author_actor:
+            if identity == author_identity or not actor or same_github_actor(actor, author_actor):
                 continue
             candidates.append((family, identity, actor, subscription))
     return candidates

@@ -28,6 +28,7 @@ from common import (
     REVIEW_PREFIX,
     KernelError,
     agent_family,
+    canonical_github_actor,
     configured_coding_reviewers,
     ensure_label,
     gh_json,
@@ -41,6 +42,7 @@ from common import (
     review_evidence_unavailable,
     repo_slug,
     run,
+    same_github_actor,
     set_status,
     status_of,
 )
@@ -151,7 +153,7 @@ def probe_coding_reviewer(
     runner: ProbeRunner = _default_probe,
 ) -> tuple[str, str, str] | None:
     author_identity = normalized_identity(author_identity)
-    author_actor = author_actor.lower()
+    author_actor = canonical_github_actor(author_actor)
     actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
     configured = configured_coding_reviewers()
     family_order = [family for family in CODING_REVIEWERS if family != author_family]
@@ -170,7 +172,7 @@ def probe_coding_reviewer(
                     _probe_ok(result)
                     and identity != author_identity
                     and actor
-                    and actor != author_actor
+                    and not same_github_actor(actor, author_actor)
                 ):
                     available.append((identity, actor))
             if available:
@@ -182,7 +184,7 @@ def probe_coding_reviewer(
             continue
         identity, _subscription = candidates[0]
         actor = str(actors.get(identity) or "").lower()
-        if identity == author_identity or not actor or actor == author_actor:
+        if identity == author_identity or not actor or same_github_actor(actor, author_actor):
             continue
         command_names = {
             "openai-codex": "codex",
