@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
 
 import common
+
+
+@pytest.fixture(autouse=True)
+def clear_linked_project_cache():
+    common._LINKED_PROJECT_CACHE.clear()
+    yield
+    common._LINKED_PROJECT_CACHE.clear()
 
 
 def record(body: str, labels: list[str] | None = None, state: str = "OPEN") -> dict:
@@ -208,6 +216,104 @@ def test_linked_project_explicitly_uses_project_authority(monkeypatch):
 
     assert common.linked_project()["number"] == 5
     assert calls[0][1] == common.PROJECT_AUTH
+
+
+def _linked_project_payload(number: int = 5) -> dict:
+    return {
+        "data": {
+            "repository": {
+                "projectsV2": {
+                    "nodes": [{"id": "PVT_1", "number": number, "title": "Delivery"}],
+                    "pageInfo": {"hasNextPage": False},
+                }
+            }
+        }
+    }
+
+
+def test_linked_project_does_not_requery_within_one_process(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    calls = []
+
+    def fake_gh_json(args, *, cwd=None, auth=None):
+        calls.append((args, auth))
+        return _linked_project_payload()
+
+    monkeypatch.setattr(common, "gh_json", fake_gh_json)
+
+    first = common.linked_project()
+    second = common.linked_project()
+
+    assert first == second == {"id": "PVT_1", "number": 5, "title": "Delivery"}
+    assert len(calls) == 1
+    assert calls[0][1] == common.PROJECT_AUTH
+
+
+def test_linked_project_cache_is_scoped_to_project_number(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    calls = []
+
+    def fake_gh_json(args, *, cwd=None, auth=None):
+        calls.append(args)
+        requested = os.environ.get("ARU_PROJECT_NUMBER")
+        return _linked_project_payload(int(requested) if requested else 5)
+
+    monkeypatch.setattr(common, "gh_json", fake_gh_json)
+
+    monkeypatch.delenv("ARU_PROJECT_NUMBER", raising=False)
+    assert common.linked_project()["number"] == 5
+    monkeypatch.setenv("ARU_PROJECT_NUMBER", "9")
+    assert common.linked_project()["number"] == 9
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "gh: HTTP 429",
+        "API rate limit exceeded for user",
+        "You have exceeded a secondary rate limit",
+        "resource-limits exceeded",
+    ],
+)
+def test_github_quota_failure_raises_without_retry(monkeypatch, stderr):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(common.subprocess, "run", fake_run)
+
+    with pytest.raises(common.KernelError, match="quota exhausted"):
+        common.run(
+            ["gh", "api", "graphql", "-f", "query=query { viewer { login } }"],
+            auth=common.REPOSITORY_AUTH,
+        )
+    assert len(calls) == 1
+    assert "stop and wait" in common.QUOTA_STOP_MESSAGE
+
+
+def test_graphql_rate_limited_payload_raises_without_retry(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout='{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(common.subprocess, "run", fake_run)
+
+    with pytest.raises(common.KernelError, match="quota exhausted"):
+        common.gh_json(
+            ["api", "graphql", "-f", "query=query { viewer { login } }"],
+            auth=common.REPOSITORY_AUTH,
+        )
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(

@@ -47,6 +47,16 @@ ZERO_SHA = "0" * 40
 REPOSITORY_AUTH = "repository"
 PROJECT_AUTH = "project"
 GITHUB_APP_RUNNER_ENV = "ARU_GITHUB_APP_RUNNER"
+QUOTA_STOP_MESSAGE = (
+    "GitHub GraphQL quota exhausted; stop and wait for the budget to reset"
+)
+_QUOTA_RE = re.compile(
+    r"(?:HTTP\s*429|\b429\b|RATE_LIMITED|rate[_ -]?limit(?:ed|ing)?|"
+    r"secondary rate limit|resource[- ]limits? exceeded|"
+    r"MAX_NODE_LIMIT_EXCEEDED|API rate limit exceeded)",
+    re.IGNORECASE,
+)
+_LINKED_PROJECT_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _GH_TOKEN_ENV = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -325,10 +335,30 @@ def run(
         _redact_diagnostic(result.stdout or ""),
         _redact_diagnostic(result.stderr or ""),
     )
+    if result.returncode:
+        _raise_if_quota(result.stdout, result.stderr)
     if check and result.returncode:
         detail = (result.stderr or result.stdout or "command failed").strip()
         raise KernelError(f"{command[0]} failed: {detail}")
     return result
+
+
+def _raise_if_quota(*parts: str) -> None:
+    if any(_QUOTA_RE.search(part or "") for part in parts):
+        raise KernelError(QUOTA_STOP_MESSAGE)
+
+
+def _raise_if_graphql_quota(data: Any) -> None:
+    if not isinstance(data, dict) or not isinstance(data.get("errors"), list):
+        return
+    blobs: list[str] = []
+    for error in data["errors"]:
+        if isinstance(error, dict):
+            blobs.append(str(error.get("type") or ""))
+            blobs.append(str(error.get("message") or ""))
+        else:
+            blobs.append(str(error))
+    _raise_if_quota(*blobs)
 
 
 def gh_json(
@@ -339,9 +369,11 @@ def gh_json(
 ) -> Any:
     result = run(["gh", *args], cwd=cwd, auth=auth)
     try:
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise KernelError("GitHub returned malformed JSON") from exc
+    _raise_if_graphql_quota(data)
+    return data
 
 
 def gh_paginated(endpoint: str, *, cwd: str | Path | None = None) -> list[dict[str, Any]]:
@@ -556,6 +588,11 @@ def ensure_label(
 
 def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
     slug = repo_slug(cwd)
+    requested = os.environ.get("ARU_PROJECT_NUMBER") or ""
+    key = (slug, requested)
+    cached = _LINKED_PROJECT_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
     owner, name = slug.split("/", 1)
     query = """
     query($owner:String!,$name:String!){
@@ -579,12 +616,12 @@ def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
     if (connection.get("pageInfo") or {}).get("hasNextPage"):
         raise KernelError("linked Project Board inventory is truncated")
     open_projects = [node for node in nodes if isinstance(node, dict) and not node.get("closed")]
-    requested = os.environ.get("ARU_PROJECT_NUMBER")
     if requested:
         open_projects = [node for node in open_projects if str(node.get("number")) == requested]
     if len(open_projects) != 1:
         raise KernelError("expected exactly one linked open Project Board")
-    return open_projects[0]
+    _LINKED_PROJECT_CACHE[key] = dict(open_projects[0])
+    return dict(open_projects[0])
 
 
 def board_edit(

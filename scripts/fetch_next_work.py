@@ -39,24 +39,39 @@ def ready_issues() -> list[dict]:
     return [record for record in records if "pull_request" not in record]
 
 
-def select(agent: str) -> dict[str, object]:
-    agent = safe_agent(agent)
-    for pr in authored_prs(agent):
-        number = int(pr["number"])
+def has_review_comments(number: int) -> bool:
+    comments = gh_json(
+        ["api", f"repos/{repo_slug()}/pulls/{number}/comments?per_page=1"]
+    )
+    if not isinstance(comments, list):
+        raise KernelError("GitHub returned malformed review comments")
+    return bool(comments)
+
+
+def _open_pr_work(pr: dict) -> dict[str, object]:
+    number = int(pr["number"])
+    if has_review_comments(number):
         feedback = fetch_feedback(number)
         if feedback:
             return {"type": "feedback", "pr": number, "items": feedback}
-        ci = ci_verdict(number)
-        if ci["state"] == "failure":
-            return {"type": "ci", "pr": number, "head": ci["head"], "checks": ci["checks"]}
-        reviews = [name for name in label_names(pr) if name.startswith("review:")]
-        if ci["state"] == "success" and len(reviews) == 1:
-            try:
-                evaluate(number, str(ci["head"]))
-            except KernelError as exc:
-                return {"type": "wait", "pr": number, "head": ci["head"], "reason": str(exc)}
-            return {"type": "merge", "pr": number, "head": ci["head"]}
-        return {"type": "wait", "pr": number, "head": ci["head"], "ci": ci["state"]}
+    ci = ci_verdict(number)
+    if ci["state"] == "failure":
+        return {"type": "ci", "pr": number, "head": ci["head"], "checks": ci["checks"]}
+    reviews = [name for name in label_names(pr) if name.startswith("review:")]
+    if ci["state"] == "success" and len(reviews) == 1:
+        try:
+            evaluate(number, str(ci["head"]))
+        except KernelError as exc:
+            return {"type": "wait", "pr": number, "head": ci["head"], "reason": str(exc)}
+        return {"type": "merge", "pr": number, "head": ci["head"]}
+    return {"type": "wait", "pr": number, "head": ci["head"], "ci": ci["state"]}
+
+
+def select(agent: str) -> dict[str, object]:
+    agent = safe_agent(agent)
+    authored = authored_prs(agent)
+    if authored:
+        return _open_pr_work(authored[0])
 
     priorities = {f"priority:p{value}": value for value in range(4)}
     ready: list[tuple[int, int, dict]] = []
