@@ -476,31 +476,42 @@ def successful_coding_agent_review(
     authority: str,
     issue_numbers: list[int],
 ) -> bool:
+    return coding_review_verdict(pr, reviews, authority, issue_numbers) == "APPROVE"
+
+
+def coding_review_verdict(
+    pr: dict[str, Any],
+    reviews: list[dict[str, Any]],
+    authority: str,
+    issue_numbers: list[int],
+) -> str | None:
     head = str(pr.get("headRefOid") or "")
     assignment = _coding_assignment(pr)
     if assignment is None:
-        return False
+        return None
     reviewer_identity, reviewer_actor, author_identity, _author_family, github_author = assignment
     current = _current_coding_attestation(reviews, head, reviewer_actor)
     if current is None:
-        return False
+        return None
     review, payload = current
     if not _review_submission_matches(review, payload, head, github_author):
-        return False
+        return None
     actor = review.get("user") or review.get("author") or {}
     if str(actor.get("login") or "").lower() != reviewer_actor.lower():
-        return False
+        return None
     if payload["reviewer"] != reviewer_identity or payload["family"] != authority:
-        return False
+        return None
     if payload["reviewer"] == author_identity or payload["issues"] != issue_numbers:
-        return False
+        return None
     state = str(review.get("state") or "").upper()
     expected_state = "APPROVED" if payload["verdict"] == "APPROVE" else "CHANGES_REQUESTED"
-    if state != expected_state or payload["verdict"] != "APPROVE":
-        return False
+    if state != expected_state:
+        return None
+    if payload["verdict"] == "REQUEST_CHANGES":
+        return "REQUEST_CHANGES"
     if any(not finding["resolved"] for finding in payload["findings"]):
-        return False
-    return True
+        return None
+    return "APPROVE"
 
 
 def exact_head_review(
@@ -578,7 +589,13 @@ def evaluate(number: int, expected_head: str) -> dict[str, object]:
     if feedback:
         raise KernelError(f"{len(feedback)} unresolved review thread(s)")
     service = assigned_service(pr)
-    if not exact_head_review(pr, number, service, issues):
+    if service in CODING_REVIEWERS:
+        verdict = coding_review_verdict(pr, pull_reviews(number), service, issues)
+        if verdict == "REQUEST_CHANGES":
+            raise KernelError(f"{service} exact-head authoritative review requested changes")
+        if verdict != "APPROVE":
+            raise KernelError(f"{service} has no successful exact-head verdict")
+    elif not exact_head_review(pr, number, service, issues):
         raise KernelError(f"{service} has no successful exact-head verdict")
     base_sha, behind = base_snapshot(pr)
     if behind:

@@ -28,7 +28,7 @@ def external_states(**overrides):
     return states
 
 
-def test_initial_assignment_rotates_all_eligible_authorities(monkeypatch):
+def test_initial_assignment_strictly_prefers_external_reviewers(monkeypatch):
     monkeypatch.setenv(
         "ARU_CODING_REVIEWERS",
         "claude-code:m1@1,openai-codex:mo",
@@ -55,13 +55,13 @@ def test_initial_assignment_rotates_all_eligible_authorities(monkeypatch):
 
     assert assignments == [
         ("coderabbit", None, None),
-        ("sourcery", None, None),
-        ("claude-code", "m1", "claude-reviewer"),
-        ("openai-codex", "mo", "codex-reviewer"),
+        ("coderabbit", None, None),
+        ("coderabbit", None, None),
+        ("coderabbit", None, None),
     ]
 
 
-def test_initial_coding_assignment_probes_only_selected_candidate():
+def test_initial_coding_assignment_uses_aggregate_capacity_probe():
     calls = []
 
     def probe(argv):
@@ -82,7 +82,7 @@ def test_initial_coding_assignment_probes_only_selected_candidate():
         probe_runner=probe,
     )
     assert reviewer == ("claude-code", "m2", "claude-reviewer-2")
-    assert [call[1] for call in calls] == ["2"]
+    assert [call[1] for call in calls] == ["1", "2", "3"]
     assert all(call[-1] == "Reply exactly OK" for call in calls)
 
 
@@ -121,7 +121,7 @@ def test_initial_assignment_prefers_a_different_author_family(monkeypatch):
     assert reviewer == ("xai-cursor", "mx", "cursor-reviewer")
 
 
-def test_unavailable_rotated_candidate_advances_without_state(monkeypatch):
+def test_available_external_reviewer_short_circuits_coding_probes(monkeypatch):
     monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1")
     calls = []
 
@@ -139,7 +139,7 @@ def test_unavailable_rotated_candidate_advances_without_state(monkeypatch):
         probe_runner=unavailable,
     )
     assert reviewer == ("coderabbit", None, None)
-    assert [call[1] for call in calls] == ["1"]
+    assert calls == []
 
 
 def test_initial_assignment_is_deterministic(monkeypatch):
@@ -157,17 +157,16 @@ def test_initial_assignment_is_deterministic(monkeypatch):
     )
 
 
-def test_registered_coders_cannot_silently_degrade_to_external_only(monkeypatch):
+def test_available_external_does_not_require_local_coding_configuration(monkeypatch):
     monkeypatch.delenv("ARU_CODING_REVIEWERS", raising=False)
-    with pytest.raises(create_pr.KernelError, match="missing while reviewer bindings exist"):
-        create_pr.choose_initial_reviewer(
-            11,
-            "codex-author",
-            "openai-codex",
-            "author-login",
-            external_states=external_states(coderabbit=create_pr.AVAILABLE),
-            reviewer_actors={"m1": "claude-reviewer"},
-        )
+    assert create_pr.choose_initial_reviewer(
+        11,
+        "codex-author",
+        "openai-codex",
+        "author-login",
+        external_states=external_states(coderabbit=create_pr.AVAILABLE),
+        reviewer_actors={"m1": "claude-reviewer"},
+    ) == ("coderabbit", None, None)
 
 
 def test_rate_limited_success_status_is_unavailable():

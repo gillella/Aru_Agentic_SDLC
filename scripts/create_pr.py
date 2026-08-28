@@ -38,7 +38,6 @@ from common import (
     json_print,
     label_names,
     normalized_identity,
-    probe_coding_candidate,
     registered_coding_actors,
     review_evidence_unavailable,
     repo_slug,
@@ -215,32 +214,22 @@ def choose_initial_reviewer(
     probe_runner: ProbeRunner = _default_probe,
 ) -> tuple[str, str | None, str | None]:
     states = external_states if external_states is not None else registered_external_states()
-    initial_external(states)
-    external_candidates = [
-        (service, None, None, None)
-        for state in (AVAILABLE, PENDING)
-        for service in EXTERNAL_REVIEWERS
-        if states.get(service) == state
-    ]
+    external = initial_external(states)
+    if external is not None:
+        return external, None, None
     if os.environ.get(REVIEWER_CONFIG_ENV, "").strip() and not author_actor:
         author_actor = current_github_actor()
-    coding_candidates = coding_reviewer_candidates(
-        author_identity=author_identity,
+    coding = probe_coding_reviewer(
+        author_identity=normalized_identity(author_identity),
+        author_family=author_family,
         author_actor=author_actor,
+        rotation_key=number,
         reviewer_actors=reviewer_actors,
+        runner=probe_runner,
     )
-    coding_candidates.sort(key=lambda candidate: candidate[0] == author_family)
-    candidates = [*external_candidates, *coding_candidates]
-    if not candidates:
-        raise KernelError("no external or distinct coding-agent reviewer is available")
-    start = number % len(candidates)
-    rotated = [*candidates[start:], *candidates[:start]]
-    for authority, identity, actor, subscription in rotated:
-        if identity is None:
-            return authority, None, None
-        candidate = (authority, identity, str(actor), subscription)
-        if probe_coding_candidate(candidate, probe_runner):
-            return authority, identity, str(actor)
+    if coding is not None:
+        authority, identity, actor = coding
+        return authority, identity, actor
     raise KernelError("no external or distinct coding-agent reviewer is available")
 
 
