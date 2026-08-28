@@ -51,11 +51,25 @@ def claim(number: int, agent: str) -> dict[str, object]:
         final = issue(number)
         if status_of(final) != "In Progress" or claim_label not in label_names(final):
             raise KernelError("claim did not settle")
-    except KernelError:
-        run(
-            ["gh", "issue", "edit", str(number), "--remove-label", claim_label, "--remove-assignee", "@me"],
-            check=False,
-        )
+    except KernelError as claim_error:
+        try:
+            run(
+                [
+                    "gh",
+                    "issue",
+                    "edit",
+                    str(number),
+                    "--remove-label",
+                    claim_label,
+                    "--remove-assignee",
+                    "@me",
+                ],
+                check=False,
+            )
+        except KernelError as rollback_error:
+            raise KernelError(
+                f"{rollback_error}; original claim failure: {claim_error}"
+            ) from rollback_error
         raise
     return {"issue": number, "agent": agent, "status": "In Progress"}
 
