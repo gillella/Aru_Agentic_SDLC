@@ -148,6 +148,20 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
   --agent codex-local --claim --json
 ```
 
+When an operator has already verified multiple live coding lanes, repeat
+`--agent` in one JSON invocation to select and claim a bounded batch from one
+open-PR snapshot and one Ready-issue snapshot:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
+  --agent codex-a --agent claude-b --claim --json
+```
+
+The result contains at most one work item per explicit lane. This is a
+single-shot picker call, not a scheduler, daemon, worker handoff or presence
+registry, queue, capacity store, or polling loop; a later invocation reads a
+new authoritative snapshot.
+
 Work only in the worktree reported by `create_branch.py`. After focused local
 verification, publish the branch and open the PR through `create_pr.py`. Merge
 only after exact-head CI and the assigned authoritative review are complete.
