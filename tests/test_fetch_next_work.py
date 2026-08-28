@@ -371,6 +371,67 @@ def test_batch_rejects_ambiguous_pr_authors_before_pr_evaluation(monkeypatch):
         fetch_next_work.select_batch(["agent-a", "agent-b"])
 
 
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param(
+            {"labels": [{"name": "author:agent-a"}]}, id="missing"
+        ),
+        pytest.param(
+            {"number": None, "labels": [{"name": "author:agent-a"}]}, id="null"
+        ),
+        pytest.param(
+            {"number": "500", "labels": [{"name": "author:agent-a"}]},
+            id="string",
+        ),
+        pytest.param(
+            {"number": 1.5, "labels": [{"name": "author:agent-a"}]},
+            id="float",
+        ),
+        pytest.param(
+            {"number": 0, "labels": [{"name": "author:agent-a"}]}, id="zero"
+        ),
+        pytest.param(
+            {"number": -1, "labels": [{"name": "author:agent-a"}]},
+            id="negative",
+        ),
+        pytest.param(
+            {"number": True, "labels": [{"name": "author:agent-a"}]},
+            id="boolean",
+        ),
+    ],
+)
+def test_batch_rejects_malformed_open_pr_numbers(record):
+    with pytest.raises(
+        common.KernelError, match="Open PR number must be a positive integer"
+    ):
+        fetch_next_work._prs_by_batch_author([record], ["agent-a", "agent-b"])
+
+
+@pytest.mark.parametrize(
+    "number",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param("10", id="string"),
+        pytest.param(1.5, id="float"),
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param(True, id="boolean"),
+    ],
+)
+def test_batch_rejects_malformed_ready_issue_numbers(number):
+    record = ready_issue(10)
+    if number is None:
+        del record["number"]
+    else:
+        record["number"] = number
+
+    with pytest.raises(
+        common.KernelError, match="Ready issue number must be a positive integer"
+    ):
+        fetch_next_work._batch_ready_candidates([record])
+
+
 def test_batch_deterministically_fills_lanes_with_path_disjoint_issues(monkeypatch):
     monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
     monkeypatch.setattr(
@@ -404,6 +465,28 @@ def test_batch_exact_paths_only_conflict_when_equal(monkeypatch):
     result = fetch_next_work.select_batch(["agent-a", "agent-b"])
 
     assert [lane["work"].get("issue") for lane in result["lanes"]] == [1, 2]
+
+
+def test_batch_diagnostics_are_ordered_by_numeric_issue_number(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(40, body=""),
+            ready_issue(7, "priority:urgent"),
+            ready_issue(12, body="touches: ../secret"),
+        ],
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert result["diagnostics"] == [
+        "Ready issue #7 has contradictory or unsupported priority labels; skipped",
+        "Ready issue #12 has invalid touches: touches: contains an unsafe path; skipped",
+        "Ready issue #40 has invalid touches: issue must contain exactly one "
+        "touches: declaration; skipped",
+    ]
 
 
 def test_batch_skips_malformed_touches_with_diagnostics(monkeypatch):

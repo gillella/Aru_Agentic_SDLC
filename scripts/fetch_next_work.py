@@ -133,10 +133,19 @@ def _batch_agents(agents: list[str]) -> list[str]:
     return validated
 
 
+def _batch_number(record: dict, kind: str) -> int:
+    number = record.get("number")
+    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        raise KernelError(f"{kind} number must be a positive integer")
+    return number
+
+
 def _prs_by_batch_author(prs: list[dict], agents: list[str]) -> dict[str, list[dict]]:
+    # Batch checks stay isolated: authored_prs() keeps label search; select() skips touches.
     requested = set(agents)
     authored = {agent: [] for agent in agents}
     for pr in prs:
+        number = _batch_number(pr, "Open PR")
         author_labels = [
             name for name in label_names(pr) if name.startswith("author:")
         ]
@@ -145,11 +154,11 @@ def _prs_by_batch_author(prs: list[dict], agents: list[str]) -> dict[str, list[d
             continue
         if len(author_labels) != 1:
             raise KernelError(
-                f"Open PR #{int(pr['number'])} has contradictory author labels"
+                f"Open PR #{number} has contradictory author labels"
             )
         authored[matching[0]].append(pr)
     for agent in agents:
-        authored[agent].sort(key=lambda item: int(item["number"]))
+        authored[agent].sort(key=lambda item: item["number"])
     return authored
 
 
@@ -178,30 +187,35 @@ def _batch_ready_candidates(
 ) -> tuple[list[tuple[int, int, dict, list[str]]], list[str]]:
     priorities = {f"priority:p{value}": value for value in range(4)}
     ready: list[tuple[int, int, dict, list[str]]] = []
-    diagnostics: list[str] = []
+    diagnostics: list[tuple[int, str]] = []
     for record in records:
+        number = _batch_number(record, "Ready issue")
         labels = label_names(record)
         if "needs-human" in labels or "type:epic" in labels:
             continue
-        number = int(record["number"])
         priority_labels = [name for name in labels if name.startswith("priority:")]
         if len(priority_labels) > 1 or any(
             name not in priorities for name in priority_labels
         ):
             diagnostics.append(
-                f"Ready issue #{number} has contradictory or unsupported "
-                "priority labels; skipped"
+                (
+                    number,
+                    f"Ready issue #{number} has contradictory or unsupported "
+                    "priority labels; skipped",
+                )
             )
             continue
         try:
             touches = parse_touches(str(record.get("body") or ""))
         except KernelError as exc:
-            diagnostics.append(f"Ready issue #{number} has invalid touches: {exc}; skipped")
+            diagnostics.append(
+                (number, f"Ready issue #{number} has invalid touches: {exc}; skipped")
+            )
             continue
         priority = priorities[priority_labels[0]] if priority_labels else 2
         ready.append((priority, number, record, touches))
     ready.sort(key=lambda item: (item[0], item[1]))
-    return ready, diagnostics
+    return ready, [message for _number, message in sorted(diagnostics)]
 
 
 def select_batch(agents: list[str]) -> dict[str, object]:
@@ -231,7 +245,7 @@ def select_batch(agents: list[str]) -> dict[str, object]:
                 continue
             lane["work"] = {
                 "type": "issue",
-                "issue": int(record["number"]),
+                "issue": _number,
                 "title": record["title"],
             }
             reserved_paths.append(touches)
