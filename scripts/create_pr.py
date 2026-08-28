@@ -28,7 +28,6 @@ from common import (
     REVIEW_PREFIX,
     KernelError,
     agent_family,
-    coding_reviewer_candidates,
     configured_coding_reviewers,
     ensure_label,
     gh_json,
