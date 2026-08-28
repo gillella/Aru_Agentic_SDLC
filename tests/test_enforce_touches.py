@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -44,3 +45,48 @@ def test_hook_requires_one_claim_and_active_status(monkeypatch):
 def test_explicit_pushed_branch_drives_issue_identity(monkeypatch):
     monkeypatch.setattr(HOOK, "issue_body", lambda number: f"touches: issue-{number}.txt")
     assert HOOK.check(["issue-12.txt"], branch="feat/issue-12-change") == []
+
+
+def test_hook_refuses_out_of_scope_deleted_path(tmp_path, monkeypatch, capsys):
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    deleted = tmp_path / "outside.txt"
+    deleted.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "outside.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    deleted.unlink()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: allowed.txt")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "enforce_touches.py",
+            "--range",
+            "HEAD",
+            "--issue",
+            "520",
+            "--branch",
+            "fix/issue-520-delete",
+        ],
+    )
+
+    assert HOOK.main() == 2
+    assert capsys.readouterr().out == "refused: outside.txt is outside touches:\n"

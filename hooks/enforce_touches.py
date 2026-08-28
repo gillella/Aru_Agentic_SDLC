@@ -90,7 +90,7 @@ def changed_paths(diff_range: str) -> list[str]:
             "core.fsmonitor=false",
             "diff",
             "--name-only",
-            "--diff-filter=ACMR",
+            "--diff-filter=ACDMR",
             diff_range,
             "--",
         ]
