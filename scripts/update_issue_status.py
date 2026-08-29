@@ -39,6 +39,9 @@ def epic_close_policy(body: str) -> str:
     return policies[0]
 
 
+_TRAILER_DECLARATION_RE = re.compile(r"(?i)^epic-close-policy:\s*\S+\s*$|^depends-on:\s*#\d+\s*$")
+
+
 def _parse_child_issue_lines(section: str) -> list[int]:
     numbers: list[int] = []
     trailer_started = False
@@ -51,7 +54,9 @@ def _parse_child_issue_lines(section: str) -> list[int]:
         if trailer_started:
             if stripped.startswith("-"):
                 raise KernelError("## Child Issues contains an interrupted child list")
-            continue
+            if _TRAILER_DECLARATION_RE.match(stripped):
+                continue
+            raise KernelError("## Child Issues contains unexpected trailer content")
         if not stripped.startswith("-"):
             raise KernelError("## Child Issues contains unexpected content")
         child = re.fullmatch(r"-\s*#(\d+)\s*", stripped)
@@ -76,9 +81,7 @@ def parse_child_issues(body: str) -> list[int]:
     if len(numbers) != len(set(numbers)):
         raise KernelError("## Child Issues contains duplicate child references")
     if len(numbers) > MAX_EPIC_CHILDREN:
-        raise KernelError(
-            f"## Child Issues exceeds the bounded child limit ({MAX_EPIC_CHILDREN})"
-        )
+        raise KernelError(f"## Child Issues exceeds the bounded child limit ({MAX_EPIC_CHILDREN})")
     return sorted(numbers)
 
 
@@ -125,9 +128,7 @@ def child_issue_snapshots(
     cwd: str | Path | None = None,
 ) -> dict[int, dict[str, Any]]:
     if not numbers or len(numbers) > MAX_EPIC_CHILDREN:
-        raise KernelError(
-            f"child snapshot exceeds the bounded child limit ({MAX_EPIC_CHILDREN})"
-        )
+        raise KernelError(f"child snapshot exceeds the bounded child limit ({MAX_EPIC_CHILDREN})")
     owner, name = repo_slug(cwd).split("/", 1)
     fields = "\n".join(
         f"i{n}: issue(number: {n}) {{ number state repository {{ nameWithOwner }} "
@@ -356,6 +357,15 @@ def apply_epic_reconciliation(
     # the issue label status, so rollback restores the exact pre-existing
     # value instead of assuming the two were already in agreement.
     before_project_status = project_item_status(number, cwd=cwd)
+    # set_status writes the issue label and Project card together, so rollback
+    # can only restore one shared prior value. If the two are already out of
+    # sync before any mutation, rollback could not tell which value to
+    # restore, so refuse to mutate rather than risk stranding one of them.
+    if before_project_status != before_status:
+        raise KernelError(
+            "epic issue status and linked Project card status disagree before "
+            "reconciliation; refusing to mutate"
+        )
     try:
         set_status(number, "Done", cwd=cwd)
         if before_state != "CLOSED":
@@ -364,11 +374,7 @@ def apply_epic_reconciliation(
         after_status = status_of(final)
         after_state = str(final.get("state") or "")
         after_project_status = project_item_status(number, cwd=cwd)
-        if (
-            after_status != "Done"
-            or after_state != "CLOSED"
-            or after_project_status != "Done"
-        ):
+        if after_status != "Done" or after_state != "CLOSED" or after_project_status != "Done":
             raise KernelError(
                 "epic reconciliation did not settle at Done and closed on the issue "
                 "and linked Project card"
