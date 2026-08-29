@@ -12,6 +12,8 @@ from common import (
     REPOSITORY_AUTH,
     KernelError,
     STATUSES,
+    board_edit,
+    ensure_label,
     gh_json,
     issue,
     json_print,
@@ -20,6 +22,7 @@ from common import (
     repo_slug,
     run,
     set_status,
+    status_label,
     status_of,
     unresolved_dependencies,
 )
@@ -348,40 +351,111 @@ def epic_reconcile_evidence(
     }
 
 
+def _rollback_reopen_if_closed(
+    number: int,
+    record: dict[str, Any] | None,
+    *,
+    cwd: str | Path | None = None,
+    errors: list[KernelError],
+) -> None:
+    if record is not None and str(record.get("state") or "") == "CLOSED":
+        try:
+            run(["gh", "issue", "reopen", str(number)], cwd=cwd)
+        except KernelError as err:
+            errors.append(err)
+
+
+def _rollback_issue_label(
+    number: int,
+    record: dict[str, Any] | None,
+    *,
+    cwd: str | Path | None = None,
+    errors: list[KernelError],
+) -> None:
+    if record is None:
+        return
+    current_status: str | None = None
+    try:
+        current_status = status_of(record)
+    except KernelError as err:
+        errors.append(err)
+    if current_status == "Backlog":
+        return
+    try:
+        target = status_label("Backlog")
+        ensure_label(target, color="1d76db", description="Board status: Backlog", cwd=cwd)
+        args = ["gh", "issue", "edit", str(number), "--add-label", target]
+        for name in label_names(record):
+            if name.startswith("status:") and name != target:
+                args.extend(["--remove-label", name])
+        run(args, cwd=cwd)
+    except KernelError as err:
+        errors.append(err)
+
+
+def _rollback_project_card(
+    number: int,
+    *,
+    cwd: str | Path | None = None,
+    errors: list[KernelError],
+) -> None:
+    current_project_status: str | None = None
+    try:
+        current_project_status = project_item_status(number, cwd=cwd)
+    except KernelError as err:
+        errors.append(err)
+    if current_project_status != "Backlog":
+        try:
+            edit = board_edit(number, "Backlog", cwd=cwd)
+            run(["gh", *edit], cwd=cwd)
+        except KernelError as err:
+            errors.append(err)
+
+
+def _rollback_settled(
+    number: int,
+    *,
+    cwd: str | Path | None = None,
+    errors: list[KernelError],
+) -> bool:
+    try:
+        final_record = issue(number, cwd=cwd)
+        settled_state = str(final_record.get("state") or "")
+        settled_status = status_of(final_record)
+        settled_project_status = project_item_status(number, cwd=cwd)
+        return (
+            settled_state == "OPEN"
+            and settled_status == "Backlog"
+            and settled_project_status == "Backlog"
+        )
+    except KernelError as readback_error:
+        errors.append(readback_error)
+        return False
+
+
 def _rollback_epic_reconciliation(
     number: int,
     *,
     cwd: str | Path | None = None,
     original: KernelError,
 ) -> None:
+    errors: list[KernelError] = []
+    record: dict[str, Any] | None = None
     try:
-        # A raised close command may still have landed remotely (e.g. the
-        # error surfaced after the mutation committed), so decide whether to
-        # reopen from an authoritative read of the current issue state, never
-        # from whether the local close command appeared to succeed.
-        current_state = str(issue(number, cwd=cwd).get("state") or "")
-        if current_state == "CLOSED":
-            run(["gh", "issue", "reopen", str(number)], cwd=cwd)
-        set_status(number, "Backlog", cwd=cwd)
-        # A rollback that "ran" its commands but never settled would silently
-        # strand the epic between states, so read every value back.
         record = issue(number, cwd=cwd)
-        settled_state = str(record.get("state") or "")
-        settled_status = status_of(record)
-        settled_project_status = project_item_status(number, cwd=cwd)
-        if (
-            settled_state != "OPEN"
-            or settled_status != "Backlog"
-            or settled_project_status != "Backlog"
-        ):
-            raise KernelError(
-                "epic reconciliation rollback did not settle at the pre-transaction "
-                "issue state/status and linked Project card status"
-            )
-    except KernelError as rollback_error:
+    except KernelError as err:
+        errors.append(err)
+
+    _rollback_reopen_if_closed(number, record, cwd=cwd, errors=errors)
+    _rollback_issue_label(number, record, cwd=cwd, errors=errors)
+    _rollback_project_card(number, cwd=cwd, errors=errors)
+
+    if not _rollback_settled(number, cwd=cwd, errors=errors):
+        details = f"{'; '.join(str(e) for e in errors)}; " if errors else ""
         raise KernelError(
-            f"{rollback_error}; original reconciliation failure: {original}"
-        ) from rollback_error
+            f"{details}epic reconciliation rollback did not settle at the pre-transaction "
+            f"issue state/status and linked Project card status; original reconciliation failure: {original}"
+        )
 
 
 def apply_epic_reconciliation(
