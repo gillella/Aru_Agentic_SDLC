@@ -18,9 +18,14 @@ def ready_issue(number: int, *labels: str, body: str | None = None) -> dict:
     }
 
 
-def test_ready_inventory_uses_complete_pagination_and_excludes_pull_requests(
-    monkeypatch,
-):
+def ready_counts(total, executable, human=0, epics=0, blocked=0, malformed=0):
+    return dict(
+        total_ready=total, executable_ready=executable, human_gated=human,
+        epics=epics, dependency_blocked=blocked, malformed=malformed,
+    )
+
+
+def test_ready_inventory_uses_complete_pagination_and_excludes_pull_requests(monkeypatch):
     inventory = [ready_issue(number, "priority:p1") for number in range(1, 202)]
     pull_request = {**ready_issue(202, "priority:p0"), "pull_request": {}}
     calls = []
@@ -33,14 +38,8 @@ def test_ready_inventory_uses_complete_pagination_and_excludes_pull_requests(
     )
 
     assert fetch_next_work.ready_issues() == inventory
-    assert calls == [
-        [
-            "api",
-            "--paginate",
-            "--slurp",
-            "repos/owner/repository/issues?state=open&labels=status%3Aready&per_page=100",
-        ]
-    ]
+    url = "repos/owner/repository/issues?state=open&labels=status%3Aready&per_page=100"
+    assert calls == [["api", "--paginate", "--slurp", url]]
 
 
 @pytest.mark.parametrize(
@@ -138,6 +137,21 @@ def test_select_treats_missing_priority_as_p2(monkeypatch):
     }
 
 
+def test_select_preserves_legacy_malformed_touches_behavior(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [ready_issue(21, "priority:p0", body="")],
+    )
+
+    assert fetch_next_work.select("codex-sol56-issue499") == {
+        "type": "issue",
+        "issue": 21,
+        "title": "issue 21",
+    }
+
+
 def test_select_skips_bad_priority_and_returns_scoped_diagnostic(monkeypatch):
     monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
     monkeypatch.setattr(
@@ -169,10 +183,64 @@ def test_select_returns_idle_diagnostic_when_only_priority_is_bad(monkeypatch):
 
     assert fetch_next_work.select("codex-sol56-issue499") == {
         "type": "idle",
+        "ready_classification": ready_counts(1, 0, malformed=1),
         "diagnostics": [
+            "Ready classification: total=1, executable=0, human-gated=0, "
+            "epics=0, dependency-blocked=0, malformed=1",
             "Ready issue #22 has contradictory or unsupported priority labels; skipped"
         ],
     }
+
+
+def test_select_explains_seven_ready_with_zero_executable_from_one_snapshot(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: calls.append("issues")
+        or [
+            *(ready_issue(number, "needs-human") for number in range(1, 6)),
+            ready_issue(6, "type:epic"),
+            ready_issue(7, "type:epic"),
+        ],
+    )
+
+    result = fetch_next_work.select("codex-sol56-issue531")
+
+    assert result["type"] == "idle"
+    assert result["ready_classification"] == ready_counts(7, 0, human=5, epics=2)
+    assert calls == ["issues"]
+
+
+@pytest.mark.parametrize(("state", "work_type"), [("open", "idle"), ("closed", "issue")])
+def test_select_classifies_open_dependency_as_blocked_and_closed_as_executable(
+    monkeypatch, state, work_type
+):
+    calls = []
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: calls.append("issues")
+        or [ready_issue(10, body="depends-on: #90\ntouches: src/a.py")],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "dependency_states",
+        lambda _records: calls.append("dependencies") or {90: state},
+    )
+
+    result = fetch_next_work.select("codex-sol56-issue531")
+
+    assert result["type"] == work_type
+    if state == "open":
+        assert result["ready_classification"] == ready_counts(1, 0, blocked=1)
+    else:
+        assert result == {"type": "issue", "issue": 10, "title": "issue 10"}
+    assert calls == ["issues", "dependencies"]
 
 
 def test_select_wait_path_does_not_call_review_thread_graphql(monkeypatch):
@@ -521,7 +589,10 @@ def test_batch_diagnostics_are_ordered_by_numeric_issue_number(monkeypatch):
 
     result = fetch_next_work.select_batch(["agent-a", "agent-b"])
 
+    assert result["ready_classification"] == ready_counts(3, 0, malformed=3)
     assert result["diagnostics"] == [
+        "Ready classification: total=3, executable=0, human-gated=0, "
+        "epics=0, dependency-blocked=0, malformed=3",
         "Ready issue #7 has contradictory or unsupported priority labels; skipped",
         "Ready issue #12 has invalid touches: touches: contains an unsafe path; skipped",
         "Ready issue #40 has invalid touches: issue must contain exactly one "
@@ -550,13 +621,78 @@ def test_batch_skips_malformed_touches_with_diagnostics(monkeypatch):
         },
         {"agent": "agent-b", "work": {"type": "idle"}},
     ]
+    assert result["ready_classification"] == ready_counts(3, 1, malformed=2)
     assert result["diagnostics"] == [
+        "Ready classification: total=3, executable=1, human-gated=0, "
+        "epics=0, dependency-blocked=0, malformed=2",
         "Ready issue #1 has invalid touches: issue must contain exactly one "
         "touches: declaration; skipped",
         "Ready issue #2 has invalid touches: touches: contains an unsafe path; skipped",
     ]
 
 
+def test_batch_reports_one_aggregate_for_seven_ready_with_zero_executable(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        fetch_next_work, "open_prs", lambda: calls.append("prs") or []
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: calls.append("issues")
+        or [
+            *(ready_issue(number, "needs-human") for number in range(1, 6)),
+            ready_issue(6, "type:epic"),
+            ready_issue(7, "type:epic"),
+        ],
+    )
+
+    result = fetch_next_work.select_batch(
+        ["agent-a", "agent-b", "agent-c", "agent-d"]
+    )
+
+    assert [lane["work"]["type"] for lane in result["lanes"]] == ["idle"] * 4
+    assert result["ready_classification"] == ready_counts(7, 0, human=5, epics=2)
+    assert result["diagnostics"] == [
+        "Ready classification: total=7, executable=0, human-gated=5, "
+        "epics=2, dependency-blocked=0, malformed=0"
+    ]
+    assert calls == ["prs", "issues"]
+
+
+def test_batch_classification_is_deterministic_for_mixed_ready_cards(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(5, "priority:urgent"),
+            ready_issue(4, body="depends-on: #90\ntouches: ../unsafe"),
+            ready_issue(3, "type:epic", body="depends-on: #90"),
+            ready_issue(2, "needs-human", "type:epic", body="depends-on: #90"),
+            ready_issue(1, "priority:p0", body="depends-on: #91\ntouches: safe.py"),
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "dependency_states",
+        lambda _records: {90: "open", 91: "closed"},
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert result["lanes"] == [
+        {
+            "agent": "agent-a",
+            "work": {"type": "issue", "issue": 1, "title": "issue 1"},
+        },
+        {"agent": "agent-b", "work": {"type": "idle"}},
+    ]
+    classification = result["ready_classification"]
+    assert classification == ready_counts(5, 1, 1, 1, 1, 1)
+    assert sum(classification.values()) == 2 * classification["total_ready"]
 def test_batch_claim_stops_after_first_failure_and_prints_partial_json(
     monkeypatch, capsys
 ):

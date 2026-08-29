@@ -162,6 +162,32 @@ single-shot picker call, not a scheduler, daemon, worker handoff or presence
 registry, queue, capacity store, or polling loop; a later invocation reads a
 new authoritative snapshot.
 
+Board Ready count is lifecycle state, not executable capacity. One activation
+snapshot comprises the complete paginated open-Ready inventory and, when that
+inventory contains dependency references, one capped bulk GraphQL read for all
+deduplicated dependency states. The bulk read permits at most 100 references,
+fails closed above that bound, and is shared by every lane; the picker never
+queries dependencies per card or per lane. It deterministically classifies
+each Ready card under this precedence: `human_gated`, `epics`,
+`dependency_blocked`, `malformed`, then `executable_ready`. The categories
+therefore partition `total_ready`, even when a card matches more than one.
+
+When Ready cards are excluded, the activation-level `ready_classification`
+object has exactly these machine-readable keys: `total_ready`,
+`executable_ready`, `human_gated`, `epics`, `dependency_blocked`, and
+`malformed`. A consumer can render, for example,
+`7 Ready / 0 executable / 5 human-gated / 2 epics` without parsing prose.
+Batch output includes the object and one aggregate `Ready classification:`
+diagnostic only once, never in individual lanes. A legacy single-agent call
+adds them only when exclusion leaves the result idle. Batch classification
+retains its stricter issue-number and `touches:` validation; single-agent
+selection retains its legacy field handling. Per-card malformed metadata
+diagnostics remain ordered by issue number.
+
+An idle result is terminal for that event-driven activation. Its diagnostics
+explain why visible Ready cards may not be executable; they do not authorize
+automatic triage, board repair, or another picker tick.
+
 Work only in the worktree reported by `create_branch.py`. After focused local
 verification, publish the branch and open the PR through `create_pr.py`. Merge
 only after exact-head CI and the assigned authoritative review are complete.

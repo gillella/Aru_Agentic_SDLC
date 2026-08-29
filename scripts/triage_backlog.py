@@ -18,9 +18,14 @@ from common import (
 
 def evaluate(record: dict) -> list[str]:
     errors = contract_errors(record)
+    labels = label_names(record)
+    if "needs-human" in labels:
+        errors.append("needs-human issues cannot enter Ready")
+    if "type:epic" in labels:
+        errors.append("type:epic issues cannot enter Ready")
     priorities = {f"priority:p{value}" for value in range(4)}
     priority_labels = [
-        name for name in label_names(record) if name.startswith("priority:")
+        name for name in labels if name.startswith("priority:")
     ]
     if len(priority_labels) > 1 or any(
         name not in priorities for name in priority_labels
