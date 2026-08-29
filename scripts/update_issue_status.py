@@ -70,6 +70,43 @@ def parse_child_issues(body: str) -> list[int]:
     return sorted(numbers)
 
 
+def _child_snapshot_labels(number: int, node: dict[str, Any]) -> list[dict[str, str]]:
+    labels_connection = node.get("labels")
+    if not isinstance(labels_connection, dict):
+        raise KernelError(f"child #{number} label inventory is malformed")
+    page_info = labels_connection.get("pageInfo")
+    if not isinstance(page_info, dict) or page_info.get("hasNextPage") is not False:
+        raise KernelError(f"child #{number} label inventory is truncated")
+    label_nodes = labels_connection.get("nodes")
+    if not isinstance(label_nodes, list):
+        raise KernelError(f"child #{number} label inventory is malformed")
+    labels: list[dict[str, str]] = []
+    for item in label_nodes:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise KernelError(f"child #{number} label inventory is malformed")
+        labels.append({"name": item["name"]})
+    return labels
+
+
+def _child_snapshot_from_node(number: int, node: Any) -> dict[str, Any] | None:
+    if node is None:
+        return None
+    if not isinstance(node, dict):
+        raise KernelError(f"child #{number} snapshot is malformed")
+    if node.get("number") != number:
+        raise KernelError(f"child #{number} snapshot number does not match the request")
+    state = node.get("state")
+    if state not in ("OPEN", "CLOSED"):
+        raise KernelError(f"child #{number} has an unsupported state")
+    repo = node.get("repository") if isinstance(node.get("repository"), dict) else {}
+    return {
+        "number": number,
+        "state": state,
+        "labels": _child_snapshot_labels(number, node),
+        "repository": repo.get("nameWithOwner"),
+    }
+
+
 def child_issue_snapshots(
     numbers: list[int],
     *,
@@ -103,33 +140,19 @@ def child_issue_snapshots(
         cwd=cwd,
         auth=REPOSITORY_AUTH,
     )
-    repository = ((data.get("data") or {}).get("repository") or {})
-    if not isinstance(repository, dict):
+    if not isinstance(data, dict) or data.get("errors"):
+        raise KernelError("child issue snapshot returned a GraphQL error")
+    root = data.get("data")
+    if not isinstance(root, dict) or "repository" not in root:
         raise KernelError("child issue snapshot is unavailable")
+    repository = root.get("repository")
+    if not isinstance(repository, dict):
+        raise KernelError("child issue snapshot repository is unavailable")
     snapshots: dict[int, dict[str, Any]] = {}
     for number in numbers:
-        node = repository.get(f"i{number}")
-        if not isinstance(node, dict):
-            continue
-        labels_connection = node.get("labels") or {}
-        page_info = labels_connection.get("pageInfo") if isinstance(labels_connection, dict) else None
-        if isinstance(page_info, dict) and page_info.get("hasNextPage"):
-            raise KernelError(f"child #{number} label inventory is truncated")
-        label_nodes = labels_connection.get("nodes") if isinstance(labels_connection, dict) else None
-        if not isinstance(label_nodes, list):
-            raise KernelError(f"child #{number} label inventory is malformed")
-        labels = [
-            {"name": str(item.get("name"))}
-            for item in label_nodes
-            if isinstance(item, dict) and isinstance(item.get("name"), str)
-        ]
-        repo = node.get("repository") if isinstance(node.get("repository"), dict) else {}
-        snapshots[number] = {
-            "number": number,
-            "state": node.get("state"),
-            "labels": labels,
-            "repository": repo.get("nameWithOwner"),
-        }
+        snapshot = _child_snapshot_from_node(number, repository.get(f"i{number}"))
+        if snapshot is not None:
+            snapshots[number] = snapshot
     return snapshots
 
 
@@ -264,7 +287,7 @@ def _rollback_epic_reconciliation(
 ) -> None:
     try:
         if closed_issue and before_state != "CLOSED":
-            run(["gh", "issue", "reopen", str(number)], cwd=cwd, check=False)
+            run(["gh", "issue", "reopen", str(number)], cwd=cwd)
         if before_status != "Done":
             if before_status:
                 set_status(number, before_status, cwd=cwd)
@@ -279,8 +302,22 @@ def _rollback_epic_reconciliation(
                         status_label("Done"),
                     ],
                     cwd=cwd,
-                    check=False,
                 )
+        # A rollback that "ran" its commands but never settled would silently
+        # strand the epic between states, so read every value back.
+        record = issue(number, cwd=cwd)
+        settled_state = str(record.get("state") or "")
+        settled_status = status_of(record)
+        settled_project_status = project_item_status(number, cwd=cwd)
+        if (
+            settled_state != before_state
+            or settled_status != before_status
+            or settled_project_status != before_status
+        ):
+            raise KernelError(
+                "epic reconciliation rollback did not settle at the pre-transaction "
+                "issue state/status and linked Project card status"
+            )
     except KernelError as rollback_error:
         raise KernelError(
             f"{rollback_error}; original reconciliation failure: {original}"

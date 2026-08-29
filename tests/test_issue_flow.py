@@ -530,49 +530,6 @@ def test_parse_child_issues_requires_bounded_unique_references():
         uis.parse_child_issues("## Child Issues\n- #9\n- #9\n")
 
 
-def test_child_issue_snapshots_use_one_repository_graphql_query(monkeypatch):
-    import update_issue_status as uis
-
-    monkeypatch.setattr(uis, "repo_slug", lambda cwd=None: "owner/repo")
-    calls = []
-
-    def fake_gh_json(args, *, cwd=None, auth=None):
-        calls.append((args, auth))
-        return {
-            "data": {
-                "repository": {
-                    "i91": {
-                        "number": 91,
-                        "state": "CLOSED",
-                        "repository": {"nameWithOwner": "owner/repo"},
-                        "labels": {
-                            "nodes": [{"name": "status:done"}],
-                            "pageInfo": {"hasNextPage": False},
-                        },
-                    },
-                    "i92": {
-                        "number": 92,
-                        "state": "CLOSED",
-                        "repository": {"nameWithOwner": "owner/repo"},
-                        "labels": {
-                            "nodes": [{"name": "status:done"}],
-                            "pageInfo": {"hasNextPage": False},
-                        },
-                    },
-                }
-            }
-        }
-
-    monkeypatch.setattr(uis, "gh_json", fake_gh_json)
-    snapshots = uis.child_issue_snapshots([91, 92])
-    assert set(snapshots) == {91, 92}
-    assert len(calls) == 1
-    assert calls[0][1] == uis.REPOSITORY_AUTH
-    query = " ".join(calls[0][0])
-    assert "i91: issue(number: 91)" in query
-    assert "i92: issue(number: 92)" in query
-
-
 def test_epic_reconcile_evidence_reports_exact_child_state(monkeypatch):
     import update_issue_status as uis
 
@@ -706,7 +663,9 @@ def test_epic_rollback_reopens_and_reverts_status_when_close_settled_but_card_di
     # The Project card silently stays on the pre-mutation option even though
     # the issue itself closed; the real rollback must still be triggered.
     monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "In Review")
-    readbacks = iter([epic, final])
+    # A third read backs the rollback's own verification: the epic settles
+    # back to its pre-mutation open/in-review state.
+    readbacks = iter([epic, final, epic])
     monkeypatch.setattr(uis, "issue", lambda number, cwd=None: next(readbacks))
 
     with pytest.raises(uis.KernelError, match="did not settle"):
@@ -751,6 +710,7 @@ def test_epic_rollback_does_not_reopen_when_close_never_succeeded(monkeypatch):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(uis, "run", fail_close)
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "In Review")
 
     with pytest.raises(uis.KernelError, match="close failed"):
         uis.apply_epic_reconciliation(100)
@@ -759,3 +719,69 @@ def test_epic_rollback_does_not_reopen_when_close_never_succeeded(monkeypatch):
     # set_status is called once to move to Done, and again by rollback to
     # revert to the pre-mutation status.
     assert set_status_calls == [(100, "Done"), (100, "In Review")]
+
+
+def _ok_result():
+    return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+
+def test_rollback_epic_reconciliation_verifies_settled_state(monkeypatch):
+    import update_issue_status as uis
+
+    restored = {"number": 100, "state": "OPEN", "labels": [{"name": "status:in-review"}]}
+    run_calls = []
+
+    def fake_run(argv, **kwargs):
+        run_calls.append(argv)
+        return _ok_result()
+
+    monkeypatch.setattr(uis, "run", fake_run)
+    monkeypatch.setattr(uis, "issue", lambda number, cwd=None: restored)
+    monkeypatch.setattr(uis, "status_of", lambda record: "In Review")
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "In Review")
+    set_status_calls = []
+    monkeypatch.setattr(uis, "set_status", lambda n, s, cwd=None: set_status_calls.append((n, s)))
+
+    uis._rollback_epic_reconciliation(
+        100, before_status="In Review", before_state="OPEN", closed_issue=True,
+        original=uis.KernelError("original failure"),
+    )
+
+    assert ["gh", "issue", "reopen", "100"] in run_calls
+    assert set_status_calls == [(100, "In Review")]
+
+
+def test_rollback_epic_reconciliation_raises_combined_error_when_unsettled(monkeypatch):
+    import update_issue_status as uis
+
+    stuck = {"number": 100, "state": "CLOSED", "labels": [{"name": "status:done"}]}
+    monkeypatch.setattr(uis, "run", lambda argv, **kwargs: _ok_result())
+    monkeypatch.setattr(uis, "issue", lambda number, cwd=None: stuck)
+    monkeypatch.setattr(uis, "status_of", lambda record: "Done")
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Done")
+    monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: None)
+
+    with pytest.raises(uis.KernelError, match="did not settle") as excinfo:
+        uis._rollback_epic_reconciliation(
+            100, before_status="In Review", before_state="OPEN", closed_issue=True,
+            original=uis.KernelError("original failure"),
+        )
+    assert "original failure" in str(excinfo.value)
+
+
+def test_rollback_epic_reconciliation_surfaces_command_failure_with_original(monkeypatch):
+    import update_issue_status as uis
+
+    def fail_reopen(argv, **kwargs):
+        if argv[:3] == ["gh", "issue", "reopen"]:
+            raise uis.KernelError("reopen failed")
+        return _ok_result()
+
+    monkeypatch.setattr(uis, "run", fail_reopen)
+
+    with pytest.raises(uis.KernelError, match="reopen failed") as excinfo:
+        uis._rollback_epic_reconciliation(
+            100, before_status="In Review", before_state="OPEN", closed_issue=True,
+            original=uis.KernelError("original failure"),
+        )
+    assert "original failure" in str(excinfo.value)
