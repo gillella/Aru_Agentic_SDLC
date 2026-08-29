@@ -733,4 +733,3 @@ def test_set_status_rollback_failure_preserves_messages_and_quota(
     for pattern in match_patterns:
         assert pattern in str(exc_info.value)
     assert len(commands) == 3
-

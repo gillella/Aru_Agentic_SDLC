@@ -766,4 +766,3 @@ def set_status(
 
 def json_print(data: Any) -> None:
     print(json.dumps(data, sort_keys=True))
-
