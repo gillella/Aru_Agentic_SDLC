@@ -371,6 +371,26 @@ def test_batch_rejects_ambiguous_pr_authors_before_pr_evaluation(monkeypatch):
         fetch_next_work.select_batch(["agent-a", "agent-b"])
 
 
+def test_batch_rejects_ambiguous_unrequested_pr_authors(monkeypatch):
+    monkeypatch.setattr(
+        fetch_next_work,
+        "open_prs",
+        lambda: [
+            {
+                "number": 500,
+                "labels": [
+                    {"name": "author:agent-c"},
+                    {"name": "author:agent-d"},
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+
+    with pytest.raises(common.KernelError, match="contradictory author labels"):
+        fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+
 @pytest.mark.parametrize(
     "record",
     [

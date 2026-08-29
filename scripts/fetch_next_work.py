@@ -149,13 +149,13 @@ def _prs_by_batch_author(prs: list[dict], agents: list[str]) -> dict[str, list[d
         author_labels = [
             name for name in label_names(pr) if name.startswith("author:")
         ]
-        matching = [name[7:] for name in author_labels if name[7:] in requested]
-        if not matching:
-            continue
         if len(author_labels) != 1:
             raise KernelError(
                 f"Open PR #{number} has contradictory author labels"
             )
+        matching = [name[7:] for name in author_labels if name[7:] in requested]
+        if not matching:
+            continue
         authored[matching[0]].append(pr)
     for agent in agents:
         authored[agent].sort(key=lambda item: item["number"])
