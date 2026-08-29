@@ -162,17 +162,27 @@ single-shot picker call, not a scheduler, daemon, worker handoff or presence
 registry, queue, capacity store, or polling loop; a later invocation reads a
 new authoritative snapshot.
 
-Board Ready count is lifecycle state, not executable capacity. From the same
-Ready snapshot used for selection, the picker deterministically classifies each
-card as executable, human-gated, epic, or malformed/unsupported. When cards are
-excluded, batch JSON reports one aggregate `Ready classification:` diagnostic
-for the whole activation; it is not copied into individual lanes. A legacy
-single-agent call adds that aggregate only when exclusion leaves the result
-idle. Batch classification retains its stricter issue-number and `touches:`
-validation; single-agent selection retains its legacy field handling. Per-card
-malformed metadata diagnostics remain ordered by issue number.
-If a card is both `needs-human` and `type:epic`, human-gated takes precedence so
-the aggregate counts remain a partition of the snapshot.
+Board Ready count is lifecycle state, not executable capacity. One activation
+snapshot comprises the complete paginated open-Ready inventory and, when that
+inventory contains dependency references, one capped bulk GraphQL read for all
+deduplicated dependency states. The bulk read permits at most 100 references,
+fails closed above that bound, and is shared by every lane; the picker never
+queries dependencies per card or per lane. It deterministically classifies
+each Ready card under this precedence: `human_gated`, `epics`,
+`dependency_blocked`, `malformed`, then `executable_ready`. The categories
+therefore partition `total_ready`, even when a card matches more than one.
+
+When Ready cards are excluded, the activation-level `ready_classification`
+object has exactly these machine-readable keys: `total_ready`,
+`executable_ready`, `human_gated`, `epics`, `dependency_blocked`, and
+`malformed`. A consumer can render, for example,
+`7 Ready / 0 executable / 5 human-gated / 2 epics` without parsing prose.
+Batch output includes the object and one aggregate `Ready classification:`
+diagnostic only once, never in individual lanes. A legacy single-agent call
+adds them only when exclusion leaves the result idle. Batch classification
+retains its stricter issue-number and `touches:` validation; single-agent
+selection retains its legacy field handling. Per-card malformed metadata
+diagnostics remain ordered by issue number.
 
 An idle result is terminal for that event-driven activation. Its diagnostics
 explain why visible Ready cards may not be executable; they do not authorize

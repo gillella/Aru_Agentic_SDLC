@@ -9,7 +9,9 @@ from pathlib import PurePosixPath
 from check_ci import ci_verdict
 from claim_issue import claim, safe_agent
 from common import (
+    REPOSITORY_AUTH,
     KernelError,
+    dependencies,
     gh_json,
     gh_paginated,
     json_print,
@@ -19,6 +21,8 @@ from common import (
 )
 from fetch_pr_feedback import fetch_feedback
 from merge_pr import evaluate
+
+MAX_DEPENDENCY_REFERENCES = 100
 
 
 def authored_prs(agent: str) -> list[dict]:
@@ -50,6 +54,77 @@ def ready_issues() -> list[dict]:
         f"repos/{repo_slug()}/issues?state=open&labels=status%3Aready&per_page=100"
     )
     return [record for record in records if "pull_request" not in record]
+
+
+def _pre_dependency_category(labels: list[str]) -> str | None:
+    if "needs-human" in labels:
+        return "human_gated"
+    if "type:epic" in labels:
+        return "epics"
+    return None
+
+
+def dependency_states(records: list[dict]) -> dict[int, str]:
+    numbers = sorted(
+        {
+            number
+            for record in records
+            if _pre_dependency_category(label_names(record)) is None
+            for number in dependencies(str(record.get("body") or ""))
+        }
+    )
+    if len(numbers) > MAX_DEPENDENCY_REFERENCES:
+        raise KernelError(
+            f"Ready dependency inventory exceeds {MAX_DEPENDENCY_REFERENCES} references"
+        )
+    if not numbers:
+        return {}
+
+    owner, name = repo_slug().split("/", 1)
+    fields = " ".join(
+        f"issue_{number}:issue(number:{number}){{number state}}"
+        for number in numbers
+    )
+    query = (
+        "query($owner:String!,$name:String!){"
+        f"repository(owner:$owner,name:$name){{{fields}}}"
+        "}"
+    )
+    data = gh_json(
+        [
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+        ],
+        auth=REPOSITORY_AUTH,
+    )
+    if not isinstance(data, dict) or data.get("errors"):
+        raise KernelError("Ready dependency inventory is incomplete")
+    root = data.get("data")
+    repository = root.get("repository") if isinstance(root, dict) else None
+    if not isinstance(repository, dict):
+        raise KernelError("Ready dependency inventory is incomplete")
+
+    states: dict[int, str] = {}
+    for number in numbers:
+        alias = f"issue_{number}"
+        if alias not in repository:
+            raise KernelError("Ready dependency inventory is incomplete")
+        record = repository[alias]
+        if record is None:
+            continue
+        if not isinstance(record, dict):
+            raise KernelError("Ready dependency inventory is malformed")
+        state = record.get("state")
+        if record.get("number") != number or state not in {"OPEN", "CLOSED"}:
+            raise KernelError("Ready dependency inventory is malformed")
+        states[number] = state.lower()
+    return states
 
 
 def has_review_comments(number: int) -> bool:
@@ -86,7 +161,11 @@ def select(agent: str) -> dict[str, object]:
     if authored:
         return _open_pr_work(authored[0])
 
-    candidates, diagnostics, summary = _ready_candidates(ready_issues())
+    issues_snapshot = ready_issues()
+    candidates, diagnostics, classification = _ready_candidates(
+        issues_snapshot,
+        dependency_states(issues_snapshot),
+    )
     if candidates:
         record = candidates[0][2]
         result: dict[str, object] = {
@@ -96,7 +175,9 @@ def select(agent: str) -> dict[str, object]:
         }
     else:
         result = {"type": "idle"}
+        summary = _classification_summary(classification)
         if summary:
+            result["ready_classification"] = classification
             diagnostics.insert(0, summary)
     if diagnostics:
         result["diagnostics"] = diagnostics
@@ -165,21 +246,24 @@ def _touches_overlap(left: list[str], right: list[str]) -> bool:
 
 def _ready_candidates(
     records: list[dict],
+    issue_states: dict[int, str],
     *,
     batch: bool = False,
 ) -> tuple[
     list[tuple[int, int, dict, list[str]]],
     list[str],
-    str | None,
+    dict[str, int],
 ]:
     priorities = {f"priority:p{value}": value for value in range(4)}
     ready: list[tuple[int, int, dict, list[str]]] = []
     diagnostics: list[tuple[int, str]] = []
-    counts = {
-        "executable": 0,
-        "human-gated": 0,
-        "epic": 0,
-        "malformed/unsupported": 0,
+    classification = {
+        "total_ready": len(records),
+        "executable_ready": 0,
+        "human_gated": 0,
+        "epics": 0,
+        "dependency_blocked": 0,
+        "malformed": 0,
     }
     for record in records:
         number = (
@@ -188,17 +272,19 @@ def _ready_candidates(
             else int(record["number"])
         )
         labels = label_names(record)
-        if "needs-human" in labels:
-            counts["human-gated"] += 1
+        category = _pre_dependency_category(labels)
+        if category:
+            classification[category] += 1
             continue
-        if "type:epic" in labels:
-            counts["epic"] += 1
+        dependency_numbers = dependencies(str(record.get("body") or ""))
+        if any(issue_states.get(value) != "closed" for value in dependency_numbers):
+            classification["dependency_blocked"] += 1
             continue
         priority_labels = [name for name in labels if name.startswith("priority:")]
         if len(priority_labels) > 1 or any(
             name not in priorities for name in priority_labels
         ):
-            counts["malformed/unsupported"] += 1
+            classification["malformed"] += 1
             diagnostics.append(
                 (
                     number,
@@ -212,7 +298,7 @@ def _ready_candidates(
             try:
                 touches = parse_touches(str(record.get("body") or ""))
             except KernelError as exc:
-                counts["malformed/unsupported"] += 1
+                classification["malformed"] += 1
                 diagnostics.append(
                     (
                         number,
@@ -222,32 +308,45 @@ def _ready_candidates(
                 continue
         priority = priorities[priority_labels[0]] if priority_labels else 2
         ready.append((priority, number, record, touches))
-        counts["executable"] += 1
+        classification["executable_ready"] += 1
     ready.sort(key=lambda item: (item[0], item[1]))
-    excluded = len(records) - counts["executable"]
-    summary = None
-    if excluded:
-        summary = (
-            f"Ready classification: total={len(records)}, "
-            f"executable={counts['executable']}, "
-            f"human-gated={counts['human-gated']}, "
-            f"epic={counts['epic']}, "
-            f"malformed/unsupported={counts['malformed/unsupported']}"
-        )
     return (
         ready,
         [message for _number, message in sorted(diagnostics)],
-        summary,
+        classification,
+    )
+
+
+def _classification_summary(classification: dict[str, int]) -> str | None:
+    if classification["total_ready"] == classification["executable_ready"]:
+        return None
+    return (
+        f"Ready classification: total={classification['total_ready']}, "
+        f"executable={classification['executable_ready']}, "
+        f"human-gated={classification['human_gated']}, "
+        f"epics={classification['epics']}, "
+        f"dependency-blocked={classification['dependency_blocked']}, "
+        f"malformed={classification['malformed']}"
     )
 
 
 def _batch_ready_candidates(
     records: list[dict],
-) -> tuple[list[tuple[int, int, dict, list[str]]], list[str]]:
-    ready, diagnostics, summary = _ready_candidates(records, batch=True)
+    issue_states: dict[int, str] | None = None,
+) -> tuple[
+    list[tuple[int, int, dict, list[str]]],
+    list[str],
+    dict[str, int],
+]:
+    ready, diagnostics, classification = _ready_candidates(
+        records,
+        dependency_states(records) if issue_states is None else issue_states,
+        batch=True,
+    )
+    summary = _classification_summary(classification)
     if summary:
         diagnostics.insert(0, summary)
-    return ready, diagnostics
+    return ready, diagnostics, classification
 
 
 def select_batch(agents: list[str]) -> dict[str, object]:
@@ -266,7 +365,10 @@ def select_batch(agents: list[str]) -> dict[str, object]:
             free_lanes.append(lane)
         lanes.append(lane)
 
-    candidates, diagnostics = _batch_ready_candidates(issues_snapshot)
+    candidates, diagnostics, classification = _batch_ready_candidates(
+        issues_snapshot,
+        dependency_states(issues_snapshot),
+    )
     reserved_paths: list[list[str]] = []
     candidate_index = 0
     for lane in free_lanes:
@@ -285,12 +387,15 @@ def select_batch(agents: list[str]) -> dict[str, object]:
         else:
             lane["work"] = {"type": "idle"}
 
-    return {
+    result: dict[str, object] = {
         "schema": "aru.fetch-next-work.batch/v1",
         "lanes": lanes,
         "diagnostics": diagnostics,
         "claim_status": "not-requested",
     }
+    if _classification_summary(classification):
+        result["ready_classification"] = classification
+    return result
 
 
 def _claim_batch(result: dict[str, object]) -> int:
