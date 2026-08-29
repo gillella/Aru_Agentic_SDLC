@@ -504,6 +504,119 @@ def test_board_edit_rejects_missing_or_non_issue_project_identity(
         common.board_edit(7, "Done")
 
 
+def project_status_payload(
+    *,
+    items: list[dict] | None = None,
+    has_next_page: bool = False,
+) -> dict:
+    return {
+        "data": {
+            "issueNode": {
+                "projectItems": {
+                    "nodes": items
+                    if items is not None
+                    else [
+                        {
+                            "id": "PVTI_7",
+                            "project": {"id": "PVT_1"},
+                            "fieldValueByName": {"name": "Done"},
+                        }
+                    ],
+                    "pageInfo": {"hasNextPage": has_next_page},
+                }
+            }
+        }
+    }
+
+
+def test_project_item_status_reads_back_the_settled_option(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(
+        common,
+        "linked_project",
+        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
+    )
+    calls = []
+
+    def fake_gh_json(args, *, cwd=None, auth=None):
+        calls.append((args, auth))
+        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
+            return {"number": 7, "node_id": "I_7"}
+        return project_status_payload()
+
+    monkeypatch.setattr(common, "gh_json", fake_gh_json)
+
+    assert common.project_item_status(7) == "Done"
+    assert calls[0][1] is None
+    assert calls[1][1] == common.PROJECT_AUTH
+    query = " ".join(calls[1][0])
+    assert "projectItems(first:20)" in query
+    assert 'fieldValueByName(name:"Status")' in query
+
+
+def test_project_item_status_returns_none_without_a_status_value(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(
+        common,
+        "linked_project",
+        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
+    )
+
+    def fake_gh_json(args, *, cwd=None, auth=None):
+        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
+            return {"number": 7, "node_id": "I_7"}
+        return project_status_payload(
+            items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": None}]
+        )
+
+    monkeypatch.setattr(common, "gh_json", fake_gh_json)
+
+    assert common.project_item_status(7) is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (project_status_payload(has_next_page=True), "truncated"),
+        (project_status_payload(items=[]), "ambiguous"),
+        (
+            project_status_payload(
+                items=[
+                    {"id": "PVTI_7a", "project": {"id": "PVT_1"}, "fieldValueByName": None},
+                    {"id": "PVTI_7b", "project": {"id": "PVT_1"}, "fieldValueByName": None},
+                ]
+            ),
+            "ambiguous",
+        ),
+        (
+            project_status_payload(
+                items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {}}]
+            ),
+            "malformed",
+        ),
+    ],
+)
+def test_project_item_status_fails_closed_on_incomplete_evidence(
+    monkeypatch, payload, message
+):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(
+        common,
+        "linked_project",
+        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
+    )
+
+    def fake_gh_json(args, *, cwd=None, auth=None):
+        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
+            return {"number": 7, "node_id": "I_7"}
+        return payload
+
+    monkeypatch.setattr(common, "gh_json", fake_gh_json)
+
+    with pytest.raises(common.KernelError, match=message):
+        common.project_item_status(7)
+
+
 def test_subprocess_error_redacts_token_values(monkeypatch):
     secret = "ghs_this-must-never-appear"
     monkeypatch.setenv("GH_TOKEN", secret)

@@ -624,21 +624,13 @@ def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
     return dict(open_projects[0])
 
 
-def board_edit(
-    number: int,
-    status: str,
-    *,
-    cwd: str | Path | None = None,
-) -> list[str]:
+def _project_card_identity(number: int, *, cwd: str | Path | None = None) -> tuple[str, str]:
     project = linked_project(cwd=cwd)
     project_id = project.get("id")
     if not isinstance(project_id, str) or not project_id:
         raise KernelError("linked Project Board identity is unavailable")
     slug = repo_slug(cwd)
-    issue_record = gh_json(
-        ["api", f"repos/{slug}/issues/{number}"],
-        cwd=cwd,
-    )
+    issue_record = gh_json(["api", f"repos/{slug}/issues/{number}"], cwd=cwd)
     if (
         not isinstance(issue_record, dict)
         or issue_record.get("number") != number
@@ -647,45 +639,39 @@ def board_edit(
         or not issue_record["node_id"]
     ):
         raise KernelError(f"issue #{number} Project identity is unavailable")
+    return project_id, issue_record["node_id"]
 
-    query = """
-    query($issue:ID!,$project:ID!){
-      issueNode:node(id:$issue){
-        ... on Issue{
-          projectItems(first:20){
-            nodes{id project{id}}
-            pageInfo{hasNextPage}
-          }
-        }
-      }
-      projectNode:node(id:$project){
-        ... on ProjectV2{
-          field(name:"Status"){
-            ... on ProjectV2SingleSelectField{
-              id
-              name
-              options{id name}
-            }
-          }
-        }
-      }
-    }
-    """
+
+_PROJECT_CARD_QUERY = """
+query($issue:ID!,$project:ID!){
+  issueNode:node(id:$issue){ ... on Issue{ projectItems(first:20){
+    nodes{ id project{id} fieldValueByName(name:"Status"){
+      ... on ProjectV2ItemFieldSingleSelectValue{name} } }
+    pageInfo{hasNextPage} } } }
+  projectNode:node(id:$project){ ... on ProjectV2{ field(name:"Status"){
+    ... on ProjectV2SingleSelectField{ id name options{id name} } } } }
+}
+"""
+
+
+def _project_card_snapshot(
+    number: int, *, cwd: str | Path | None = None
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    project_id, node_id = _project_card_identity(number, cwd=cwd)
     data = gh_json(
         [
             "api",
             "graphql",
             "-f",
-            f"query={query}",
+            f"query={_PROJECT_CARD_QUERY}",
             "-F",
-            f"issue={issue_record['node_id']}",
+            f"issue={node_id}",
             "-F",
             f"project={project_id}",
         ],
         cwd=cwd,
         auth=PROJECT_AUTH,
     )
-
     root = data.get("data") if isinstance(data, dict) else None
     issue_node = root.get("issueNode") if isinstance(root, dict) else None
     project_node = root.get("projectNode") if isinstance(root, dict) else None
@@ -697,7 +683,7 @@ def board_edit(
     if page_info.get("hasNextPage") is not False:
         raise KernelError("Project Board item inventory is truncated")
 
-    issue_items: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
     for item in nodes:
         item_project = item.get("project") if isinstance(item, dict) else None
         if (
@@ -710,12 +696,33 @@ def board_edit(
         ):
             raise KernelError("Project Board item inventory is malformed")
         if item_project["id"] == project_id:
-            issue_items.append(item)
+            matches.append(item)
+    if len(matches) != 1:
+        raise KernelError(f"issue #{number} Project Board card is ambiguous")
 
     status_field = project_node.get("field") if isinstance(project_node, dict) else None
+    return project_id, matches[0], status_field if isinstance(status_field, dict) else None
+
+
+def project_item_status(number: int, *, cwd: str | Path | None = None) -> str | None:
+    _project_id, item, _status_field = _project_card_snapshot(number, cwd=cwd)
+    field_value = item.get("fieldValueByName")
+    if field_value is None:
+        return None
+    if not isinstance(field_value, dict) or not isinstance(field_value.get("name"), str):
+        raise KernelError("Project Board Status field value is malformed")
+    return field_value["name"]
+
+
+def board_edit(
+    number: int,
+    status: str,
+    *,
+    cwd: str | Path | None = None,
+) -> list[str]:
+    project_id, item, status_field = _project_card_snapshot(number, cwd=cwd)
     if (
-        len(issue_items) != 1
-        or not isinstance(status_field, dict)
+        not isinstance(status_field, dict)
         or status_field.get("name") != "Status"
         or not isinstance(status_field.get("id"), str)
         or not status_field["id"]
@@ -737,7 +744,7 @@ def board_edit(
         "project",
         "item-edit",
         "--id",
-        str(issue_items[0]["id"]),
+        str(item["id"]),
         "--project-id",
         project_id,
         "--field-id",
