@@ -22,12 +22,7 @@ REVIEW_BINDING_PREFIX = "reviewer-binding:"
 AUTHOR_PREFIX = "author:"
 AUTHOR_FAMILY_PREFIX = "author-family:"
 EXTERNAL_REVIEWERS = ("coderabbit", "sourcery", "codeant")
-CODING_REVIEWERS = (
-    "claude-code",
-    "openai-codex",
-    "xai-cursor",
-    "google-antigravity",
-)
+CODING_REVIEWERS = ("claude-code", "openai-codex", "xai-cursor", "google-antigravity")
 REVIEWER_CONFIG_ENV = "ARU_CODING_REVIEWERS"
 REVIEW_AUTHORITIES = EXTERNAL_REVIEWERS + CODING_REVIEWERS
 PROBE_PROMPT = "Reply exactly OK"
@@ -47,9 +42,7 @@ ZERO_SHA = "0" * 40
 REPOSITORY_AUTH = "repository"
 PROJECT_AUTH = "project"
 GITHUB_APP_RUNNER_ENV = "ARU_GITHUB_APP_RUNNER"
-QUOTA_STOP_MESSAGE = (
-    "GitHub GraphQL quota exhausted; stop and wait for the budget to reset"
-)
+QUOTA_STOP_MESSAGE = "GitHub GraphQL quota exhausted; stop and wait for the budget to reset"
 _QUOTA_RE = re.compile(
     r"(?:HTTP\s*429|RATE_LIMITED|rate[_ -]?limit(?:ed|ing)?|"
     r"secondary rate limit|resource[- ]limits? exceeded|"
@@ -57,12 +50,7 @@ _QUOTA_RE = re.compile(
     re.IGNORECASE,
 )
 _LINKED_PROJECT_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
-_GH_TOKEN_ENV = (
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    "GH_ENTERPRISE_TOKEN",
-    "GITHUB_ENTERPRISE_TOKEN",
-)
+_GH_TOKEN_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 _REPOSITORY_COMMANDS = {"api", "issue", "label", "pr", "repo"}
 
 
@@ -70,11 +58,12 @@ class KernelError(RuntimeError):
     """A fail-closed authority or command error."""
 
 
+class StatusPreconditionError(KernelError):
+    """A fail-closed precondition error before issue or card mutation has begun."""
+
+
 def review_evidence_unavailable(record: dict[str, Any]) -> bool:
-    text = "\n".join(
-        str(record.get(key) or "")
-        for key in ("body", "description", "name", "context")
-    )
+    text = "\n".join(str(record.get(k) or "") for k in ("body", "description", "name", "context"))
     return bool(REVIEW_UNAVAILABLE_RE.search(text))
 
 
@@ -91,8 +80,7 @@ def configured_coding_reviewers(
         family, separator, candidate = entry.strip().partition(":")
         identity, marker, subscription = candidate.partition("@")
         if (
-            not separator
-            or family not in CODING_REVIEWERS
+            not separator or family not in CODING_REVIEWERS
             or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", identity)
             or identity in identities
         ):
@@ -155,10 +143,7 @@ def registered_coding_actors() -> dict[str, str]:
         identity, actor = values[0].lower(), values[1].lower()
         if (
             not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", identity)
-            or not re.fullmatch(
-                r"[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?(?:\[bot\])?",
-                actor,
-            )
+            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?(?:\[bot\])?", actor)
             or identity in bindings
         ):
             raise KernelError("coding reviewer identity binding is malformed or ambiguous")
@@ -175,9 +160,7 @@ def coding_reviewer_candidates(
     if not os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
         actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
         if actors:
-            raise KernelError(
-                f"{REVIEWER_CONFIG_ENV} is missing while reviewer bindings exist"
-            )
+            raise KernelError(f"{REVIEWER_CONFIG_ENV} is missing while reviewer bindings exist")
         return []
     author_identity = normalized_identity(author_identity)
     author_actor = canonical_github_actor(author_actor)
@@ -206,20 +189,16 @@ def probe_coding_candidate(candidate: CodingCandidate, runner: ProbeRunner) -> b
     if family == "claude-code":
         executable = str(Path.home() / ".local" / "bin" / "claude-sub")
         return _probe_ok(runner([executable, str(subscription), "-p", PROBE_PROMPT]))
-    command_names = {
-        "openai-codex": "codex",
-        "xai-cursor": "cursor-agent",
-        "google-antigravity": "agy",
+    command_map = {
+        "openai-codex": ("codex", ["exec", "--skip-git-repo-check", PROBE_PROMPT]),
+        "xai-cursor": ("cursor-agent", ["-p", PROBE_PROMPT]),
+        "google-antigravity": ("agy", ["-p", PROBE_PROMPT]),
     }
-    executable = _reviewer_command(command_names[family])
+    cmd_name, args = command_map[family]
+    executable = _reviewer_command(cmd_name)
     if executable is None:
         return False
-    arguments = {
-        "openai-codex": [executable, "exec", "--skip-git-repo-check", PROBE_PROMPT],
-        "xai-cursor": [executable, "-p", PROBE_PROMPT],
-        "google-antigravity": [executable, "-p", PROBE_PROMPT],
-    }[family]
-    return _probe_ok(runner(arguments))
+    return _probe_ok(runner([executable, *args]))
 
 
 def agent_family(identity: str) -> str:
@@ -321,19 +300,10 @@ def run(
     elif auth is not None:
         raise KernelError("GitHub authority was provided for a non-GitHub command")
     result = subprocess.run(
-        command,
-        cwd=cwd,
-        env=environment,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=False,
+        command, cwd=cwd, env=environment, input=input_text, text=True, capture_output=True, check=False
     )
     result = subprocess.CompletedProcess(
-        result.args,
-        result.returncode,
-        _redact_diagnostic(result.stdout or ""),
-        _redact_diagnostic(result.stderr or ""),
+        result.args, result.returncode, _redact_diagnostic(result.stdout or ""), _redact_diagnostic(result.stderr or "")
     )
     if result.returncode:
         _raise_if_quota(result.stdout, result.stderr)
@@ -427,16 +397,8 @@ def label_names(record: dict[str, Any]) -> list[str]:
 
 
 def issue(number: int, *, cwd: str | Path | None = None) -> dict[str, Any]:
-    data = gh_json(
-        [
-            "issue",
-            "view",
-            str(number),
-            "--json",
-            "number,title,body,state,labels,assignees,url",
-        ],
-        cwd=cwd,
-    )
+    args = ["issue", "view", str(number), "--json", "number,title,body,state,labels,assignees,url"]
+    data = gh_json(args, cwd=cwd)
     if not isinstance(data, dict) or data.get("number") != number:
         raise KernelError(f"issue #{number} is unavailable")
     return data
@@ -448,16 +410,7 @@ def list_issues(
     label: str | None = None,
     cwd: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    args = [
-        "issue",
-        "list",
-        "--state",
-        state,
-        "--limit",
-        "200",
-        "--json",
-        "number,title,body,state,labels,assignees,url",
-    ]
+    args = ["issue", "list", "--state", state, "--limit", "200", "--json", "number,title,body,state,labels,assignees,url"]
     if label:
         args.extend(["--label", label])
     data = gh_json(args, cwd=cwd)
@@ -487,10 +440,7 @@ def status_label(status: str) -> str:
 
 def parse_touches(body: str) -> list[str]:
     inline = re.findall(r"(?im)^\s*touches:\s*(.+?)\s*$", body or "")
-    sections = re.findall(
-        r"(?ims)^###\s+touches:\s*$\n(.*?)(?=^#{1,3}\s+|\Z)",
-        body or "",
-    )
+    sections = re.findall(r"(?ims)^###\s+touches:\s*$\n(.*?)(?=^#{1,3}\s+|\Z)", body or "")
     declarations = [*inline, *(section.strip() for section in sections)]
     if len(declarations) != 1:
         raise KernelError("issue must contain exactly one touches: declaration")
@@ -570,20 +520,7 @@ def ensure_label(
     description: str = "",
     cwd: str | Path | None = None,
 ) -> None:
-    run(
-        [
-            "gh",
-            "label",
-            "create",
-            name,
-            "--color",
-            color,
-            "--description",
-            description,
-            "--force",
-        ],
-        cwd=cwd,
-    )
+    run(["gh", "label", "create", name, "--color", color, "--description", description, "--force"], cwd=cwd)
 
 
 def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
@@ -594,51 +531,51 @@ def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
     if cached is not None:
         return dict(cached)
     owner, name = slug.split("/", 1)
-    query = """
-    query($owner:String!,$name:String!){
-      repository(owner:$owner,name:$name){
-        projectsV2(first:20){
-          nodes{id number title closed}
-          pageInfo{hasNextPage}
-        }
-      }
-    }
-    """
+    query = (
+        "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ "
+        "projectsV2(first:20){ nodes{id number title closed} pageInfo{hasNextPage} } } }"
+    )
     data = gh_json(
         ["api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}", "-F", f"name={name}"],
         cwd=cwd,
         auth=PROJECT_AUTH,
     )
-    connection = ((data.get("data") or {}).get("repository") or {}).get("projectsV2") or {}
-    nodes = connection.get("nodes")
-    if not isinstance(nodes, list):
+    if not isinstance(data, dict) or data.get("errors"):
+        raise KernelError("linked Project Board query returned a GraphQL error")
+    root = data.get("data")
+    repository = root.get("repository") if isinstance(root, dict) else None
+    connection = repository.get("projectsV2") if isinstance(repository, dict) else None
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+    if not isinstance(nodes, list) or not isinstance(page_info, dict):
         raise KernelError("linked Project Board is unavailable")
-    if (connection.get("pageInfo") or {}).get("hasNextPage"):
+    if page_info.get("hasNextPage") is not False:
         raise KernelError("linked Project Board inventory is truncated")
-    open_projects = [node for node in nodes if isinstance(node, dict) and not node.get("closed")]
+    for node in nodes:
+        if (
+            not isinstance(node, dict)
+            or not isinstance(node.get("id"), str) or not node["id"]
+            or type(node.get("number")) is not int or node["number"] <= 0
+            or not isinstance(node.get("title"), str) or not node["title"]
+            or type(node.get("closed")) is not bool
+        ):
+            raise KernelError("linked Project Board inventory is malformed")
+    open_projects = [node for node in nodes if not node["closed"]]
     if requested:
-        open_projects = [node for node in open_projects if str(node.get("number")) == requested]
+        open_projects = [node for node in open_projects if str(node["number"]) == requested]
     if len(open_projects) != 1:
         raise KernelError("expected exactly one linked open Project Board")
     _LINKED_PROJECT_CACHE[key] = dict(open_projects[0])
     return dict(open_projects[0])
 
 
-def board_edit(
-    number: int,
-    status: str,
-    *,
-    cwd: str | Path | None = None,
-) -> list[str]:
+def _project_card_identity(number: int, *, cwd: str | Path | None = None) -> tuple[str, str]:
     project = linked_project(cwd=cwd)
     project_id = project.get("id")
     if not isinstance(project_id, str) or not project_id:
         raise KernelError("linked Project Board identity is unavailable")
     slug = repo_slug(cwd)
-    issue_record = gh_json(
-        ["api", f"repos/{slug}/issues/{number}"],
-        cwd=cwd,
-    )
+    issue_record = gh_json(["api", f"repos/{slug}/issues/{number}"], cwd=cwd)
     if (
         not isinstance(issue_record, dict)
         or issue_record.get("number") != number
@@ -647,46 +584,30 @@ def board_edit(
         or not issue_record["node_id"]
     ):
         raise KernelError(f"issue #{number} Project identity is unavailable")
+    return project_id, issue_record["node_id"]
 
-    query = """
-    query($issue:ID!,$project:ID!){
-      issueNode:node(id:$issue){
-        ... on Issue{
-          projectItems(first:20){
-            nodes{id project{id}}
-            pageInfo{hasNextPage}
-          }
-        }
-      }
-      projectNode:node(id:$project){
-        ... on ProjectV2{
-          field(name:"Status"){
-            ... on ProjectV2SingleSelectField{
-              id
-              name
-              options{id name}
-            }
-          }
-        }
-      }
-    }
-    """
+
+_PROJECT_CARD_QUERY = (
+    "query($issue:ID!,$project:ID!){ issueNode:node(id:$issue){ ... on Issue{ "
+    "projectItems(first:20){ nodes{ id project{id} fieldValueByName(name:\"Status\"){ "
+    "... on ProjectV2ItemFieldSingleSelectValue{name} } } pageInfo{hasNextPage} } } } "
+    "projectNode:node(id:$project){ ... on ProjectV2{ field(name:\"Status\"){ "
+    "... on ProjectV2SingleSelectField{ id name options{id name} } } } } }"
+)
+
+
+def _project_card_snapshot(
+    number: int, *, cwd: str | Path | None = None
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    project_id, node_id = _project_card_identity(number, cwd=cwd)
     data = gh_json(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-F",
-            f"issue={issue_record['node_id']}",
-            "-F",
-            f"project={project_id}",
-        ],
+        ["api", "graphql", "-f", f"query={_PROJECT_CARD_QUERY}", "-F", f"issue={node_id}", "-F", f"project={project_id}"],
         cwd=cwd,
         auth=PROJECT_AUTH,
     )
-
-    root = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or data.get("errors"):
+        raise KernelError("Project Board card snapshot returned a GraphQL error")
+    root = data.get("data")
     issue_node = root.get("issueNode") if isinstance(root, dict) else None
     project_node = root.get("projectNode") if isinstance(root, dict) else None
     connection = issue_node.get("projectItems") if isinstance(issue_node, dict) else None
@@ -697,75 +618,177 @@ def board_edit(
     if page_info.get("hasNextPage") is not False:
         raise KernelError("Project Board item inventory is truncated")
 
-    issue_items: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
     for item in nodes:
         item_project = item.get("project") if isinstance(item, dict) else None
         if (
             not isinstance(item, dict)
-            or not isinstance(item.get("id"), str)
-            or not item["id"]
+            or not isinstance(item.get("id"), str) or not item["id"]
             or not isinstance(item_project, dict)
-            or not isinstance(item_project.get("id"), str)
-            or not item_project["id"]
+            or not isinstance(item_project.get("id"), str) or not item_project["id"]
         ):
             raise KernelError("Project Board item inventory is malformed")
         if item_project["id"] == project_id:
-            issue_items.append(item)
+            matches.append(item)
+    if len(matches) != 1:
+        raise KernelError(f"issue #{number} Project Board card is ambiguous")
 
     status_field = project_node.get("field") if isinstance(project_node, dict) else None
+    return project_id, matches[0], status_field if isinstance(status_field, dict) else None
+
+
+def _validated_status_field(status_field: Any) -> dict[str, Any]:
     if (
-        len(issue_items) != 1
-        or not isinstance(status_field, dict)
+        not isinstance(status_field, dict)
         or status_field.get("name") != "Status"
         or not isinstance(status_field.get("id"), str)
         or not status_field["id"]
         or not isinstance(status_field.get("options"), list)
     ):
         raise KernelError("issue or Status field is ambiguous on the linked Project Board")
+    options = status_field["options"]
     if any(
-        not isinstance(option, dict)
-        or not isinstance(option.get("id"), str)
-        or not option["id"]
-        or not isinstance(option.get("name"), str)
-        for option in status_field["options"]
+        not isinstance(opt, dict)
+        or not isinstance(opt.get("id"), str)
+        or not opt["id"]
+        or not isinstance(opt.get("name"), str)
+        for opt in options
     ):
         raise KernelError("Project Board Status options are malformed")
-    options = [option for option in status_field["options"] if option["name"] == status]
-    if len(options) != 1:
-        raise KernelError(f"Project Board has no unique {status!r} option")
+    option_ids = [opt["id"] for opt in options]
+    option_names = [opt["name"] for opt in options]
+    if len(option_ids) != len(set(option_ids)) or len(option_names) != len(set(option_names)):
+        raise KernelError("Project Board Status options are malformed")
+    return status_field
+
+
+def _item_status(item: dict[str, Any], status_field: Any) -> str | None:
+    valid_field = _validated_status_field(status_field)
+    field_value = item.get("fieldValueByName")
+    if field_value is None:
+        return None
+    if not isinstance(field_value, dict) or not isinstance(field_value.get("name"), str):
+        raise KernelError("Project Board Status field value is malformed")
+    name = field_value["name"]
+    matches = [opt for opt in valid_field["options"] if opt["name"] == name]
+    if len(matches) != 1:
+        raise KernelError("Project Board Status field value is malformed")
+    return name
+
+
+def project_item_status(number: int, *, cwd: str | Path | None = None) -> str | None:
+    _project_id, item, status_field = _project_card_snapshot(number, cwd=cwd)
+    return _item_status(item, status_field)
+
+
+def board_edit(
+    number: int,
+    status: str,
+    *,
+    expected_current: str | None = None,
+    cwd: str | Path | None = None,
+) -> list[str]:
+    try:
+        project_id, item, status_field = _project_card_snapshot(number, cwd=cwd)
+        valid_field = _validated_status_field(status_field)
+        if expected_current is not None:
+            current_status = _item_status(item, valid_field)
+            if current_status != expected_current:
+                raise StatusPreconditionError(
+                    f"issue #{number} Project card status ({current_status!r}) "
+                    f"does not equal expected {expected_current!r}"
+                )
+        options = [option for option in valid_field["options"] if option["name"] == status]
+        if len(options) != 1:
+            raise KernelError(f"Project Board has no unique {status!r} option")
+    except StatusPreconditionError:
+        raise
+    except KernelError as exc:
+        if expected_current is not None:
+            raise StatusPreconditionError(str(exc)) from exc
+        raise
     return [
-        "project",
-        "item-edit",
-        "--id",
-        str(issue_items[0]["id"]),
-        "--project-id",
-        project_id,
-        "--field-id",
-        str(status_field["id"]),
-        "--single-select-option-id",
-        str(options[0]["id"]),
+        "project", "item-edit",
+        "--id", str(item["id"]),
+        "--project-id", project_id,
+        "--field-id", str(valid_field["id"]),
+        "--single-select-option-id", str(options[0]["id"]),
     ]
 
 
-def set_status(number: int, status: str, *, cwd: str | Path | None = None) -> None:
-    record = issue(number, cwd=cwd)
-    current = status_of(record)
-    if current == status:
+def _preflight_status_transition(
+    number: int,
+    status: str,
+    expected_current: str | None,
+    cwd: str | Path | None,
+) -> tuple[str | None, list[str] | None]:
+    try:
+        record = issue(number, cwd=cwd)
+        current = status_of(record)
+        if expected_current is not None:
+            project_status = project_item_status(number, cwd=cwd)
+            if current != expected_current or project_status != expected_current:
+                raise StatusPreconditionError(
+                    f"issue #{number} status ({current!r}) and Project card status "
+                    f"({project_status!r}) must both equal expected {expected_current!r}"
+                )
+        if current == status:
+            return current, None
+        edit = board_edit(number, status, expected_current=expected_current, cwd=cwd)
+        final_current = status_of(issue(number, cwd=cwd))
+        if expected_current is not None and final_current != expected_current:
+            raise StatusPreconditionError(
+                f"issue #{number} status ({final_current!r}) does not equal expected {expected_current!r}"
+            )
+        if final_current == status:
+            return final_current, None
+        return final_current, edit
+    except StatusPreconditionError:
+        raise
+    except KernelError as exc:
+        if expected_current is not None:
+            raise StatusPreconditionError(str(exc)) from exc
+        raise
+
+
+def set_status(
+    number: int,
+    status: str,
+    *,
+    expected_current: str | None = None,
+    pre_mutation_check: Callable[[], None] | None = None,
+    cwd: str | Path | None = None,
+) -> None:
+    current, edit = _preflight_status_transition(number, status, expected_current, cwd)
+    if edit is None:
         return
-    edit = board_edit(number, status, cwd=cwd)
+    if pre_mutation_check is not None:
+        pre_mutation_check()
     target = status_label(status)
-    ensure_label(target, color="1d76db", description=f"Board status: {status}", cwd=cwd)
+    # Create the target label only after pre_mutation_check clears; under
+    # expected_current a label failure stays a precondition failure (zero-rollback).
+    try:
+        ensure_label(target, color="1d76db", description=f"Board status: {status}", cwd=cwd)
+    except KernelError as exc:
+        if not isinstance(exc, StatusPreconditionError) and expected_current is not None:
+            raise StatusPreconditionError(str(exc)) from exc
+        raise
     args = ["gh", "issue", "edit", str(number), "--add-label", target]
     if current:
         args.extend(["--remove-label", status_label(current)])
     run(args, cwd=cwd)
     try:
         run(["gh", *edit], cwd=cwd)
-    except KernelError:
+    except KernelError as item_error:
         rollback = ["gh", "issue", "edit", str(number), "--remove-label", target]
         if current:
             rollback.extend(["--add-label", status_label(current)])
-        run(rollback, cwd=cwd, check=False)
+        try:
+            run(rollback, cwd=cwd)
+        except KernelError as rollback_error:
+            raise KernelError(
+                f"{rollback_error}; original item-edit failure: {item_error}"
+            ) from rollback_error
         raise
 
 

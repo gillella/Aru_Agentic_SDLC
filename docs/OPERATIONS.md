@@ -530,6 +530,30 @@ touches:
 Keep the boundary as narrow as the acceptance criteria allow. If the work later
 needs another path, update the issue transparently before editing that path.
 
+### Epic container issues
+
+Epics coordinate child work but are not executable coding units. Label the parent
+`type:epic` and keep it in `Backlog` while children execute through the normal
+claim → PR → merge lifecycle. Epics with deployment, operator, production, or
+other non-child evidence must use `epic-close-policy: manual` or omit the policy
+entirely; mechanical closure is fail-closed in those cases.
+
+An epic that opts into child-only closure declares a bounded `## Child Issues`
+section and exactly one `epic-close-policy: children-only` line:
+
+```markdown
+## Child Issues
+- #91
+- #92
+
+epic-close-policy: children-only
+```
+
+Each child must exist in the same repository, be closed, and carry exactly
+`status:done`. Open `depends-on:` entries, `needs-human`, duplicate or malformed
+child references, missing children, or ambiguous policy block reconciliation and
+report the exact blocker.
+
 ## 10. Run the complete lifecycle
 
 ### Overview
@@ -555,6 +579,25 @@ sequenceDiagram
     M->>GH: Recheck gates, merge, mark Done
     A->>WT: Remove only safe closed worktree
 ```
+
+Epic parents follow a separate, explicit convergence path. Children complete
+independently through merge; when a child reaches Done, an operator or Project
+Driver invokes epic reconciliation for the identified parent only. The helper
+never scans the full board, polls for work, or treats the epic as coding-agent
+work.
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/update_issue_status.py" \
+  --issue 120 \
+  --reconcile-epic \
+  --check \
+  --json
+```
+
+`--check` reports `closable`, `blocked`, child evidence, and exact blockers
+without mutation. Omit `--check` to apply: the command moves the epic to Done,
+closes the GitHub issue, reads back the settled state, and rolls back on partial
+failure.
 
 ### Step 1: file and add the issue
 
@@ -746,7 +789,7 @@ create a scheduler, autonomous loop, or second work queue.
 | Command | Purpose | Key safety behavior |
 | --- | --- | --- |
 | `init_project.py` | Generate a minimal consumer scaffold | Refuses conflicting overwrites |
-| `update_issue_status.py` | Move one issue between the five states | Updates status label and Project field together |
+| `update_issue_status.py` | Move one issue between the five states or reconcile one epic | Updates status label and Project field together; epic mode checks or applies bounded child-only closure |
 | `triage_backlog.py` | Validate and promote Backlog issues | Rejects incomplete contracts and open dependencies |
 | `fetch_next_work.py` | Resume or select one unit of work | Prioritizes authored PR state before a new issue |
 | `claim_issue.py` | Acquire or release exclusive ownership | Re-reads state and fails on claim races |
