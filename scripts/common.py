@@ -742,7 +742,6 @@ def _preflight_status_transition(
             )
         if final_current == status:
             return final_current, None
-        ensure_label(status_label(status), color="1d76db", description=f"Board status: {status}", cwd=cwd)
         return final_current, edit
     except StatusPreconditionError:
         raise
@@ -766,6 +765,14 @@ def set_status(
     if pre_mutation_check is not None:
         pre_mutation_check()
     target = status_label(status)
+    # Create the target label only after pre_mutation_check clears; under
+    # expected_current a label failure stays a precondition failure (zero-rollback).
+    try:
+        ensure_label(target, color="1d76db", description=f"Board status: {status}", cwd=cwd)
+    except KernelError as exc:
+        if not isinstance(exc, StatusPreconditionError) and expected_current is not None:
+            raise StatusPreconditionError(str(exc)) from exc
+        raise
     args = ["gh", "issue", "edit", str(number), "--add-label", target]
     if current:
         args.extend(["--remove-label", status_label(current)])

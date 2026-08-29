@@ -14,6 +14,7 @@ from common import (
     STATUSES,
     StatusPreconditionError,
     board_edit,
+    dependencies,
     ensure_label,
     gh_json,
     issue,
@@ -424,6 +425,7 @@ def epic_reconcile_evidence(
     if record.get("state") != "OPEN":
         blockers.append("epic is not open")
 
+    dependency_roster = dependencies(body)
     for dependency in unresolved_dependencies(record, cwd=cwd):
         blockers.append(f"open depends-on: #{dependency}")
 
@@ -448,6 +450,7 @@ def epic_reconcile_evidence(
         "blocked": bool(blockers),
         "blockers": blockers,
         "children": children,
+        "dependencies": dependency_roster,
         "status": epic_status,
         "project_status": epic_project_status,
         "state": record.get("state"),
@@ -594,6 +597,9 @@ def _closure_invariant_drift(
         drift.extend(_child_state_drift(expected_numbers, expected_children, cwd=cwd))
     if unchecked_acceptance_criteria(body):
         drift.append("## Acceptance Criteria gained an unchecked item after settlement")
+    expected_dependencies = list(evidence.get("dependencies") or [])
+    if dependencies(body) != expected_dependencies:
+        drift.append("depends-on roster changed after settlement")
     if unresolved_dependencies(record, cwd=cwd):
         drift.append("new open depends-on discovered")
     return drift

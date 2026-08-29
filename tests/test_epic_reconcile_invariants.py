@@ -363,6 +363,115 @@ def test_epic_reconcile_child_reopens_after_settlement_triggers_authoritative_ro
     assert ["gh", "issue", "reopen", "100"] in run_calls
 
 
+def test_epic_evidence_records_full_sorted_dependency_roster(monkeypatch):
+    """Machine evidence must carry the complete sorted depends-on roster, not
+    only the unresolved entries, so a closed->closed swap is still visible."""
+    mock_epic_context(
+        monkeypatch,
+        epic=epic_record(depends_on=[7, 5]),
+        snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
+        status="Backlog",
+        project_status="Backlog",
+        depends=[],
+    )
+    evidence = uis.epic_reconcile_evidence(100)
+    assert evidence["dependencies"] == [5, 7]
+    assert evidence["closable"] is True
+
+
+def test_epic_pre_mutation_drift_detects_dependency_swap_when_both_closed(monkeypatch):
+    """#5 -> #6 in the depends-on roster (both CLOSED) must abort in the
+    pre-mutation recollection with zero mutations even though nothing is open."""
+    commands: list[list[str]] = []
+    state = {"deps": [5]}
+
+    def swap_then_board(number, status, *a, **kw):
+        state["deps"] = [6]  # roster rewritten after evidence + preflight, before pre-mutation recheck
+        return ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"]
+
+    mock_epic_context(
+        monkeypatch,
+        issue_fn=lambda number, cwd=None: {
+            "number": number, "state": "OPEN", "body": epic_body(depends_on=state["deps"]),
+            "labels": [{"name": "type:epic"}, {"name": "status:backlog"}],
+        },
+        snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
+        status="Backlog",
+        project_status="Backlog",
+        depends=[],
+    )
+    _mock_mutation_pipeline(monkeypatch, commands, board_edit_fn=swap_then_board)
+
+    with pytest.raises(uis.StatusPreconditionError, match="evidence drifted before apply"):
+        uis.apply_epic_reconciliation(100)
+
+    assert commands == []
+
+
+def test_epic_dependency_roster_change_after_settlement_rolls_back(monkeypatch):
+    """The depends-on roster is rewritten mid-transaction (#5 -> #6, both CLOSED);
+    the post-settlement closure invariant must force an authoritative rollback."""
+    state = {
+        "epic_state": "OPEN", "epic_labels": ["type:epic", "status:backlog"],
+        "project_status": "Backlog", "deps": [5],
+    }
+    run_calls: list[list[str]] = []
+
+    def body() -> str:
+        return epic_body(depends_on=state["deps"])
+
+    def fake_run(argv, **kw):
+        run_calls.append(argv)
+        if argv[:3] == ["gh", "issue", "close"]:
+            state["epic_state"] = "CLOSED"
+            state["deps"] = [6]
+        elif argv[:3] == ["gh", "issue", "reopen"]:
+            state["epic_state"] = "OPEN"
+        elif argv[:3] == ["gh", "issue", "edit"]:
+            labels = list(state["epic_labels"])
+            if "--remove-label" in argv:
+                labels = [name for name in labels if name != argv[argv.index("--remove-label") + 1]]
+            if "--add-label" in argv:
+                labels.append(argv[argv.index("--add-label") + 1])
+            state["epic_labels"] = labels
+        elif argv[:3] == ["gh", "project", "item-edit"]:
+            state["project_status"] = "Done" if "opt_done" in argv else "Backlog"
+        return _ok_result()
+
+    def fake_set_status(number, status, *, expected_current=None, pre_mutation_check=None, cwd=None):
+        if pre_mutation_check is not None:
+            pre_mutation_check()
+        state["epic_labels"] = ["type:epic", "status:done"]
+        state["project_status"] = "Done"
+
+    mock_epic_context(
+        monkeypatch,
+        issue_fn=lambda number, cwd=None: {
+            "number": number, "body": body(), "state": state["epic_state"],
+            "labels": [{"name": name} for name in state["epic_labels"]],
+        },
+        snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
+        status_fn=lambda record: (
+            "Done" if any(lbl.get("name") == "status:done" for lbl in record.get("labels", []))
+            else "Backlog"
+        ),
+        project_status_fn=lambda number, cwd=None: state["project_status"],
+        depends=[],
+    )
+    _mock_mutation_pipeline(monkeypatch)
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "run", fake_run)
+        monkeypatch.setattr(mod, "set_status", fake_set_status)
+
+    with pytest.raises(uis.KernelError, match="depends-on roster changed after settlement"):
+        uis.apply_epic_reconciliation(100)
+
+    assert state["epic_state"] == "OPEN"
+    assert "status:backlog" in state["epic_labels"] and "status:done" not in state["epic_labels"]
+    assert state["project_status"] == "Backlog"
+    assert ["gh", "issue", "reopen", "100"] in run_calls
+
+
 def test_epic_reconcile_child_status_loss_after_settlement_rolls_back(monkeypatch):
     """A child stays CLOSED but silently loses status:done during the transaction;
     the exact child-evidence comparison must still force an authoritative rollback."""
