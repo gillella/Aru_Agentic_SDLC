@@ -674,8 +674,7 @@ def _project_card_snapshot(
     return project_id, matches[0], status_field if isinstance(status_field, dict) else None
 
 
-def project_item_status(number: int, *, cwd: str | Path | None = None) -> str | None:
-    _project_id, item, _status_field = _project_card_snapshot(number, cwd=cwd)
+def _item_status(item: dict[str, Any]) -> str | None:
     field_value = item.get("fieldValueByName")
     if field_value is None:
         return None
@@ -684,13 +683,26 @@ def project_item_status(number: int, *, cwd: str | Path | None = None) -> str | 
     return field_value["name"]
 
 
+def project_item_status(number: int, *, cwd: str | Path | None = None) -> str | None:
+    _project_id, item, _status_field = _project_card_snapshot(number, cwd=cwd)
+    return _item_status(item)
+
+
 def board_edit(
     number: int,
     status: str,
     *,
+    expected_current: str | None = None,
     cwd: str | Path | None = None,
 ) -> list[str]:
     project_id, item, status_field = _project_card_snapshot(number, cwd=cwd)
+    if expected_current is not None:
+        current_status = _item_status(item)
+        if current_status != expected_current:
+            raise KernelError(
+                f"issue #{number} Project card status ({current_status!r}) "
+                f"does not equal expected {expected_current!r}"
+            )
     if (
         not isinstance(status_field, dict)
         or status_field.get("name") != "Status"
@@ -742,7 +754,7 @@ def set_status(
             )
     if current == status:
         return
-    edit = board_edit(number, status, cwd=cwd)
+    edit = board_edit(number, status, expected_current=expected_current, cwd=cwd)
     target = status_label(status)
     ensure_label(target, color="1d76db", description=f"Board status: {status}", cwd=cwd)
     args = ["gh", "issue", "edit", str(number), "--add-label", target]

@@ -451,20 +451,41 @@ def test_board_edit_rejects_missing_or_non_issue_project_identity(
         common.board_edit(7, "Done")
 
 
-def project_status_payload(
-    *,
-    items: list[dict] | None = None,
-    has_next_page: bool = False,
-) -> dict:
+@pytest.mark.parametrize(
+    ("items", "expected_current", "match"),
+    [
+        ([{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Backlog"}}], "Backlog", None),
+        ([{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Ready"}}], "Backlog", r"Project card status \('Ready'\) does not equal expected 'Backlog'"),
+        ([{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": None}], "Backlog", r"Project card status \(None\) does not equal expected 'Backlog'"),
+        ([{"id": "PVTI_7", "project": {"id": "PVT_1"}}], "Backlog", r"Project card status \(None\) does not equal expected 'Backlog'"),
+        ([{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {}}], "Backlog", "Project Board Status field value is malformed"),
+        ([{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": 123}}], "Backlog", "Project Board Status field value is malformed"),
+    ],
+)
+def test_board_edit_expected_current_contract(monkeypatch, items, expected_current, match):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
+    monkeypatch.setattr(
+        common,
+        "gh_json",
+        lambda args, *, cwd=None, auth=None: {"number": 7, "node_id": "I_7"}
+        if args[:2] == ["api", "repos/owner/repo/issues/7"]
+        else board_payload(items=items),
+    )
+    if match is not None:
+        with pytest.raises(common.KernelError, match=match):
+            common.board_edit(7, "Done", expected_current=expected_current)
+    else:
+        assert common.board_edit(7, "Done", expected_current=expected_current) == [
+            "project", "item-edit", "--id", "PVTI_7", "--project-id", "PVT_1",
+            "--field-id", "PVTSSF_status", "--single-select-option-id", "done-option",
+        ]
+
+
+def project_status_payload(*, items: list[dict] | None = None, has_next_page: bool = False) -> dict:
     if items is None:
         items = [{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}]
-    return {
-        "data": {
-            "issueNode": {
-                "projectItems": {"nodes": items, "pageInfo": {"hasNextPage": has_next_page}}
-            }
-        }
-    }
+    return board_payload(items=items, has_next_page=has_next_page)
 
 
 def test_project_item_status_reads_back_the_settled_option(monkeypatch):
@@ -681,7 +702,7 @@ def test_set_status_expected_current_contract(
     monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
     monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: project_status)
     monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
-    monkeypatch.setattr(common, "board_edit", lambda number, status, cwd=None: ["project", "item-edit", "--id", "1"])
+    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
     monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
 
     if should_fail:
@@ -715,7 +736,7 @@ def test_set_status_rollback_failure_preserves_messages_and_quota(
     monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
     monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: "Backlog")
     monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
-    monkeypatch.setattr(common, "board_edit", lambda number, status, cwd=None: ["project", "item-edit", "--id", "1"])
+    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
 
     def fake_run(argv, **kw):
         commands.append(argv)
@@ -733,3 +754,35 @@ def test_set_status_rollback_failure_preserves_messages_and_quota(
     for pattern in match_patterns:
         assert pattern in str(exc_info.value)
     assert len(commands) == 3
+
+
+def test_set_status_adversarial_board_drift_blocks_before_issue_edit(monkeypatch):
+    """When project status drifts between initial precheck and board_edit snapshot,
+    set_status fails closed with zero issue or project Done commands."""
+    commands = []
+    issue_rec = {"number": 7, "state": "OPEN", "labels": [{"name": "status:backlog"}]}
+    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
+    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: commands.append(["ensure_label", *a]))
+    monkeypatch.setattr(
+        common,
+        "run",
+        lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+    )
+    snapshots = [
+        board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Backlog"}}]),
+        board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Ready"}}]),
+    ]
+
+    def fake_gh_json(args, *, cwd=None, auth=None):
+        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
+            return {"number": 7, "node_id": "I_7"}
+        return snapshots.pop(0)
+
+    monkeypatch.setattr(common, "gh_json", fake_gh_json)
+
+    with pytest.raises(common.KernelError, match=r"Project card status \('Ready'\) does not equal expected 'Backlog'"):
+        common.set_status(7, "Done", expected_current="Backlog")
+
+    assert commands == []

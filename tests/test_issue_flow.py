@@ -330,12 +330,12 @@ def test_epic_reconcile_adversarial_prestate_race_blocks_with_zero_close_or_done
     monkeypatch.setattr(
         uis,
         "board_edit",
-        lambda number, status, cwd=None: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"],
+        lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"],
     )
     monkeypatch.setattr(
         common,
         "board_edit",
-        lambda number, status, cwd=None: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"],
+        lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"],
     )
 
     with pytest.raises(uis.KernelError, match="must both equal expected 'Backlog'"):
@@ -627,7 +627,7 @@ def test_rollback_epic_reconciliation_verifies_settled_state(monkeypatch):
 )
 def test_rollback_epic_reconciliation_surfaces_combined_error(monkeypatch, fail_mode, expected_match):
     monkeypatch.setattr(uis, "ensure_label", lambda *args, **kwargs: None)
-    monkeypatch.setattr(uis, "board_edit", lambda number, status, cwd=None: ["project", "item-edit", "--id", "1"])
+    monkeypatch.setattr(uis, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
 
     if fail_mode == "unsettled":
         monkeypatch.setattr(uis, "run", lambda argv, **kwargs: _ok_result())
@@ -691,8 +691,8 @@ def test_epic_rollback_detects_project_done_after_ambiguous_set_status_item_edit
     )
     monkeypatch.setattr(uis, "run", fake_run)
     monkeypatch.setattr(common, "run", fake_run)
-    monkeypatch.setattr(uis, "board_edit", lambda number, status, cwd=None: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
-    monkeypatch.setattr(common, "board_edit", lambda number, status, cwd=None: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
+    monkeypatch.setattr(uis, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
+    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
     monkeypatch.setattr(uis, "ensure_label", lambda *a, **kw: None)
     monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
 
@@ -730,8 +730,8 @@ def test_epic_rollback_ambiguous_repair_command_lands_then_raises_settles_on_rea
     monkeypatch.setattr(common, "issue", lambda number, cwd=None: {"number": number, "state": state["issue_state"], "labels": [{"name": name} for name in state["issue_labels"]]})
     monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: state["project_status"])
     monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: state["project_status"])
-    monkeypatch.setattr(uis, "board_edit", lambda number, status, cwd=None: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
-    monkeypatch.setattr(common, "board_edit", lambda number, status, cwd=None: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
+    monkeypatch.setattr(uis, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
+    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
     monkeypatch.setattr(uis, "ensure_label", lambda *a, **kw: None)
     monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
 
