@@ -346,6 +346,26 @@ def test_batch_reads_each_inventory_once_and_preserves_lane_pr_precedence(monkey
     assert calls == ["prs", "issues"]
 
 
+def test_batch_ignores_unrelated_pr_without_author_label(monkeypatch):
+    monkeypatch.setattr(
+        fetch_next_work,
+        "open_prs",
+        lambda: [{"number": 500, "labels": [{"name": "review:sourcery"}]}],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(10, body="touches: src/a.py"),
+            ready_issue(11, body="touches: src/b.py"),
+        ],
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert [lane["work"].get("issue") for lane in result["lanes"]] == [10, 11]
+
+
 def test_batch_rejects_ambiguous_pr_authors_before_pr_evaluation(monkeypatch):
     monkeypatch.setattr(
         fetch_next_work,

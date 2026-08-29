@@ -149,7 +149,9 @@ def _prs_by_batch_author(prs: list[dict], agents: list[str]) -> dict[str, list[d
         author_labels = [
             name for name in label_names(pr) if name.startswith("author:")
         ]
-        if len(author_labels) != 1:
+        if not author_labels:
+            continue
+        if len(author_labels) > 1:
             raise KernelError(
                 f"Open PR #{number} has contradictory author labels"
             )
