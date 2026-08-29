@@ -12,6 +12,7 @@ from common import (
     REPOSITORY_AUTH,
     KernelError,
     STATUSES,
+    StatusPreconditionError,
     board_edit,
     ensure_label,
     gh_json,
@@ -479,6 +480,8 @@ def apply_epic_reconciliation(
                 "epic reconciliation did not settle at Done and closed on the issue "
                 "and linked Project card"
             )
+    except StatusPreconditionError:
+        raise
     except KernelError as error:
         _rollback_epic_reconciliation(
             number,

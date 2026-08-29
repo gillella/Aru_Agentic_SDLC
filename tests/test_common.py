@@ -359,40 +359,22 @@ def board_payload(
 
 def test_board_edit_reads_only_target_issue_item_and_status_field(monkeypatch):
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
-    monkeypatch.setattr(
-        common,
-        "linked_project",
-        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
-    )
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
     calls = []
 
     def fake_gh_json(args, *, cwd=None, auth=None):
         calls.append((args, auth))
-        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
-            return {"number": 7, "node_id": "I_7"}
-        return board_payload()
+        return {"number": 7, "node_id": "I_7"} if args[:2] == ["api", "repos/owner/repo/issues/7"] else board_payload()
 
     monkeypatch.setattr(common, "gh_json", fake_gh_json)
-
     assert common.board_edit(7, "Done") == [
-        "project",
-        "item-edit",
-        "--id",
-        "PVTI_7",
-        "--project-id",
-        "PVT_1",
-        "--field-id",
-        "PVTSSF_status",
-        "--single-select-option-id",
-        "done-option",
+        "project", "item-edit", "--id", "PVTI_7", "--project-id", "PVT_1",
+        "--field-id", "PVTSSF_status", "--single-select-option-id", "done-option",
     ]
-    assert calls[0][1] is None
-    assert calls[1][1] == common.PROJECT_AUTH
+    assert calls[0][1] is None and calls[1][1] == common.PROJECT_AUTH
     query = " ".join(calls[1][0])
-    assert "projectItems(first:20)" in query
-    assert 'field(name:"Status")' in query
-    assert "item-list" not in query
-    assert "field-list" not in query
+    assert "projectItems(first:20)" in query and 'field(name:"Status")' in query
+    assert "item-list" not in query and "field-list" not in query
 
 
 @pytest.mark.parametrize(
@@ -406,47 +388,19 @@ def test_board_edit_reads_only_target_issue_item_and_status_field(monkeypatch):
         (board_payload(field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "", "name": "Done"}]}), "options are malformed"),
     ],
 )
-def test_board_edit_fails_closed_on_incomplete_targeted_evidence(
-    monkeypatch, payload, message
-):
+def test_board_edit_fails_closed_on_incomplete_targeted_evidence(monkeypatch, payload, message):
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
-    monkeypatch.setattr(
-        common,
-        "linked_project",
-        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
-    )
-
-    def fake_gh_json(args, *, cwd=None, auth=None):
-        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
-            return {"number": 7, "node_id": "I_7"}
-        return payload
-
-    monkeypatch.setattr(common, "gh_json", fake_gh_json)
-
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
+    monkeypatch.setattr(common, "gh_json", lambda args, *, cwd=None, auth=None: {"number": 7, "node_id": "I_7"} if args[:2] == ["api", "repos/owner/repo/issues/7"] else payload)
     with pytest.raises(common.KernelError, match=message):
         common.board_edit(7, "Done")
 
 
-@pytest.mark.parametrize(
-    "issue_record",
-    [
-        {},
-        {"number": 8, "node_id": "I_7"},
-        {"number": 7, "node_id": ""},
-        {"number": 7, "node_id": "I_7", "pull_request": {}},
-    ],
-)
-def test_board_edit_rejects_missing_or_non_issue_project_identity(
-    monkeypatch, issue_record
-):
+@pytest.mark.parametrize("issue_record", [{}, {"number": 8, "node_id": "I_7"}, {"number": 7, "node_id": ""}, {"number": 7, "node_id": "I_7", "pull_request": {}}])
+def test_board_edit_rejects_missing_or_non_issue_project_identity(monkeypatch, issue_record):
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
-    monkeypatch.setattr(
-        common,
-        "linked_project",
-        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
-    )
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
     monkeypatch.setattr(common, "gh_json", lambda *args, **kwargs: issue_record)
-
     with pytest.raises(common.KernelError, match="Project identity is unavailable"):
         common.board_edit(7, "Done")
 
@@ -473,7 +427,7 @@ def test_board_edit_expected_current_contract(monkeypatch, items, expected_curre
         else board_payload(items=items),
     )
     if match is not None:
-        with pytest.raises(common.KernelError, match=match):
+        with pytest.raises(common.StatusPreconditionError, match=match):
             common.board_edit(7, "Done", expected_current=expected_current)
     else:
         assert common.board_edit(7, "Done", expected_current=expected_current) == [
@@ -490,46 +444,30 @@ def project_status_payload(*, items: list[dict] | None = None, has_next_page: bo
 
 def test_project_item_status_reads_back_the_settled_option(monkeypatch):
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
-    monkeypatch.setattr(
-        common,
-        "linked_project",
-        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
-    )
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
     calls = []
 
     def fake_gh_json(args, *, cwd=None, auth=None):
         calls.append((args, auth))
-        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
-            return {"number": 7, "node_id": "I_7"}
-        return project_status_payload()
+        return {"number": 7, "node_id": "I_7"} if args[:2] == ["api", "repos/owner/repo/issues/7"] else project_status_payload()
 
     monkeypatch.setattr(common, "gh_json", fake_gh_json)
-
     assert common.project_item_status(7) == "Done"
-    assert calls[0][1] is None
-    assert calls[1][1] == common.PROJECT_AUTH
+    assert calls[0][1] is None and calls[1][1] == common.PROJECT_AUTH
     query = " ".join(calls[1][0])
-    assert "projectItems(first:20)" in query
-    assert 'fieldValueByName(name:"Status")' in query
+    assert "projectItems(first:20)" in query and 'fieldValueByName(name:"Status")' in query
 
 
 def test_project_item_status_returns_none_without_a_status_value(monkeypatch):
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
     monkeypatch.setattr(
         common,
-        "linked_project",
-        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
+        "gh_json",
+        lambda args, *, cwd=None, auth=None: {"number": 7, "node_id": "I_7"}
+        if args[:2] == ["api", "repos/owner/repo/issues/7"]
+        else project_status_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": None}]),
     )
-
-    def fake_gh_json(args, *, cwd=None, auth=None):
-        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
-            return {"number": 7, "node_id": "I_7"}
-        return project_status_payload(
-            items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": None}]
-        )
-
-    monkeypatch.setattr(common, "gh_json", fake_gh_json)
-
     assert common.project_item_status(7) is None
 
 
@@ -542,42 +480,30 @@ def test_project_item_status_returns_none_without_a_status_value(monkeypatch):
         (project_status_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {}}]), "malformed"),
     ],
 )
-def test_project_item_status_fails_closed_on_incomplete_evidence(
-    monkeypatch, payload, message
-):
+def test_project_item_status_fails_closed_on_incomplete_evidence(monkeypatch, payload, message):
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
     monkeypatch.setattr(
         common,
-        "linked_project",
-        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
+        "gh_json",
+        lambda args, *, cwd=None, auth=None: {"number": 7, "node_id": "I_7"}
+        if args[:2] == ["api", "repos/owner/repo/issues/7"]
+        else payload,
     )
-
-    def fake_gh_json(args, *, cwd=None, auth=None):
-        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
-            return {"number": 7, "node_id": "I_7"}
-        return payload
-
-    monkeypatch.setattr(common, "gh_json", fake_gh_json)
-
     with pytest.raises(common.KernelError, match=message):
         common.project_item_status(7)
 
 
 def test_project_item_status_fails_closed_on_top_level_graphql_errors(monkeypatch):
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
     monkeypatch.setattr(
         common,
-        "linked_project",
-        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
+        "gh_json",
+        lambda args, *, cwd=None, auth=None: {"number": 7, "node_id": "I_7"}
+        if args[:2] == ["api", "repos/owner/repo/issues/7"]
+        else {"errors": [{"message": "boom"}], "data": {"issueNode": None}},
     )
-
-    def fake_gh_json(args, *, cwd=None, auth=None):
-        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
-            return {"number": 7, "node_id": "I_7"}
-        return {"errors": [{"message": "boom"}], "data": {"issueNode": None}}
-
-    monkeypatch.setattr(common, "gh_json", fake_gh_json)
-
     with pytest.raises(common.KernelError, match="GraphQL error"):
         common.project_item_status(7)
 
@@ -706,7 +632,7 @@ def test_set_status_expected_current_contract(
     monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
 
     if should_fail:
-        with pytest.raises(common.KernelError, match=f"must both equal expected {expected!r}"):
+        with pytest.raises(common.StatusPreconditionError, match=f"must both equal expected {expected!r}"):
             common.set_status(7, "Done", expected_current=expected)
         assert commands == []
     else:
@@ -718,19 +644,11 @@ def test_set_status_expected_current_contract(
 @pytest.mark.parametrize(
     ("rollback_error", "match_patterns"),
     [
-        (
-            common.KernelError("gh failed: issue edit failed: 502 Bad Gateway"),
-            ["issue edit failed: 502 Bad Gateway", "project item-edit network error: 500"],
-        ),
-        (
-            common.KernelError(common.QUOTA_STOP_MESSAGE),
-            ["quota exhausted", "stop and wait", "project item-edit network error: 500"],
-        ),
+        (common.KernelError("gh failed: issue edit failed: 502 Bad Gateway"), ["issue edit failed: 502 Bad Gateway", "project item-edit network error: 500"]),
+        (common.KernelError(common.QUOTA_STOP_MESSAGE), ["quota exhausted", "stop and wait", "project item-edit network error: 500"]),
     ],
 )
-def test_set_status_rollback_failure_preserves_messages_and_quota(
-    monkeypatch, rollback_error, match_patterns
-):
+def test_set_status_rollback_failure_preserves_messages_and_quota(monkeypatch, rollback_error, match_patterns):
     commands = []
     issue_rec = {"number": 7, "state": "OPEN", "labels": [{"name": "status:backlog"}]}
     monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
@@ -747,10 +665,8 @@ def test_set_status_rollback_failure_preserves_messages_and_quota(
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(common, "run", fake_run)
-
     with pytest.raises(common.KernelError) as exc_info:
         common.set_status(7, "Done")
-
     for pattern in match_patterns:
         assert pattern in str(exc_info.value)
     assert len(commands) == 3
@@ -765,11 +681,7 @@ def test_set_status_adversarial_board_drift_blocks_before_issue_edit(monkeypatch
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
     monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
     monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: commands.append(["ensure_label", *a]))
-    monkeypatch.setattr(
-        common,
-        "run",
-        lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
-    )
+    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
     snapshots = [
         board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Backlog"}}]),
         board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Ready"}}]),
@@ -781,8 +693,40 @@ def test_set_status_adversarial_board_drift_blocks_before_issue_edit(monkeypatch
         return snapshots.pop(0)
 
     monkeypatch.setattr(common, "gh_json", fake_gh_json)
+    with pytest.raises(common.StatusPreconditionError, match=r"Project card status \('Ready'\) does not equal expected 'Backlog'"):
+        common.set_status(7, "Done", expected_current="Backlog")
+    assert commands == []
 
-    with pytest.raises(common.KernelError, match=r"Project card status \('Ready'\) does not equal expected 'Backlog'"):
+
+def test_set_status_adversarial_issue_drift_before_mutation_blocks_on_final_reread(monkeypatch):
+    """When issue status drifts to Ready during board_edit, final issue reread blocks with zero mutations."""
+    commands = []
+    issue_reads = [
+        {"number": 7, "state": "OPEN", "labels": [{"name": "status:backlog"}]},
+        {"number": 7, "state": "OPEN", "labels": [{"name": "status:ready"}]},
+    ]
+    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_reads.pop(0))
+    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: "Backlog")
+    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
+    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: commands.append(["ensure_label", *a]))
+    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+
+    with pytest.raises(common.StatusPreconditionError, match=r"issue #7 status \('Ready'\) does not equal expected 'Backlog'"):
+        common.set_status(7, "Done", expected_current="Backlog")
+    assert commands == []
+
+
+def test_set_status_ensure_label_failure_precondition_distinction(monkeypatch):
+    """ensure_label failure raises StatusPreconditionError under expected_current, but generic KernelError without."""
+    issue_rec = {"number": 7, "state": "OPEN", "labels": [{"name": "status:backlog"}]}
+    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
+    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: "Backlog")
+    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
+    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: (_ for _ in ()).throw(common.KernelError("gh label create failed: network timeout")))
+
+    with pytest.raises(common.StatusPreconditionError, match="gh label create failed: network timeout"):
         common.set_status(7, "Done", expected_current="Backlog")
 
-    assert commands == []
+    with pytest.raises(common.KernelError, match="gh label create failed: network timeout") as excinfo:
+        common.set_status(7, "Done")
+    assert not isinstance(excinfo.value, common.StatusPreconditionError)
