@@ -39,6 +39,28 @@ def epic_close_policy(body: str) -> str:
     return policies[0]
 
 
+def _parse_child_issue_lines(section: str) -> list[int]:
+    numbers: list[int] = []
+    trailer_started = False
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if numbers:
+                trailer_started = True
+            continue
+        if trailer_started:
+            if stripped.startswith("-"):
+                raise KernelError("## Child Issues contains an interrupted child list")
+            continue
+        if not stripped.startswith("-"):
+            raise KernelError("## Child Issues contains unexpected content")
+        child = re.fullmatch(r"-\s*#(\d+)\s*", stripped)
+        if not child:
+            raise KernelError("## Child Issues contains a malformed child reference")
+        numbers.append(int(child.group(1)))
+    return numbers
+
+
 def parse_child_issues(body: str) -> list[int]:
     sections = re.findall(
         r"(?ims)^##\s+Child Issues\s*$\n(.*?)(?=^##\s+|\Z)",
@@ -48,17 +70,7 @@ def parse_child_issues(body: str) -> list[int]:
         raise KernelError("epic must contain a ## Child Issues section")
     if len(sections) > 1:
         raise KernelError("epic contains more than one ## Child Issues section")
-    numbers: list[int] = []
-    for line in sections[0].splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if not stripped.startswith("-"):
-            break
-        child = re.fullmatch(r"-\s*#(\d+)\s*", stripped)
-        if not child:
-            raise KernelError("## Child Issues contains a malformed child reference")
-        numbers.append(int(child.group(1)))
+    numbers = _parse_child_issue_lines(sections[0])
     if not numbers:
         raise KernelError("## Child Issues must list at least one child issue")
     if len(numbers) != len(set(numbers)):
@@ -232,8 +244,8 @@ def epic_reconcile_evidence(
         blockers.append("issue is not type:epic")
     if "needs-human" in labels:
         blockers.append("needs-human prevents mechanical epic closure")
-    if record.get("state") == "CLOSED":
-        blockers.append("epic is already closed")
+    if record.get("state") != "OPEN":
+        blockers.append("epic is not open")
 
     for dependency in unresolved_dependencies(record, cwd=cwd):
         blockers.append(f"open depends-on: #{dependency}")
@@ -281,12 +293,17 @@ def _rollback_epic_reconciliation(
     *,
     before_status: str | None,
     before_state: str,
-    closed_issue: bool,
+    before_project_status: str | None,
     cwd: str | Path | None = None,
     original: KernelError,
 ) -> None:
     try:
-        if closed_issue and before_state != "CLOSED":
+        # A raised close command may still have landed remotely (e.g. the
+        # error surfaced after the mutation committed), so decide whether to
+        # reopen from an authoritative read of the current issue state, never
+        # from whether the local close command appeared to succeed.
+        current_state = str(issue(number, cwd=cwd).get("state") or "")
+        if before_state != "CLOSED" and current_state == "CLOSED":
             run(["gh", "issue", "reopen", str(number)], cwd=cwd)
         if before_status != "Done":
             if before_status:
@@ -312,7 +329,7 @@ def _rollback_epic_reconciliation(
         if (
             settled_state != before_state
             or settled_status != before_status
-            or settled_project_status != before_status
+            or settled_project_status != before_project_status
         ):
             raise KernelError(
                 "epic reconciliation rollback did not settle at the pre-transaction "
@@ -335,12 +352,14 @@ def apply_epic_reconciliation(
 
     before_status = evidence["status"]
     before_state = str(evidence["state"] or "")
-    closed_issue = False
+    # Capture the Project card status before any mutation, independently of
+    # the issue label status, so rollback restores the exact pre-existing
+    # value instead of assuming the two were already in agreement.
+    before_project_status = project_item_status(number, cwd=cwd)
     try:
         set_status(number, "Done", cwd=cwd)
         if before_state != "CLOSED":
             run(["gh", "issue", "close", str(number), "--reason", "completed"], cwd=cwd)
-            closed_issue = True
         final = issue(number, cwd=cwd)
         after_status = status_of(final)
         after_state = str(final.get("state") or "")
@@ -359,7 +378,7 @@ def apply_epic_reconciliation(
             number,
             before_status=before_status,
             before_state=before_state,
-            closed_issue=closed_issue,
+            before_project_status=before_project_status,
             cwd=cwd,
             original=error,
         )

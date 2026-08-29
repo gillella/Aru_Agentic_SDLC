@@ -672,7 +672,9 @@ def _project_card_snapshot(
         cwd=cwd,
         auth=PROJECT_AUTH,
     )
-    root = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or data.get("errors"):
+        raise KernelError("Project Board card snapshot returned a GraphQL error")
+    root = data.get("data")
     issue_node = root.get("issueNode") if isinstance(root, dict) else None
     project_node = root.get("projectNode") if isinstance(root, dict) else None
     connection = issue_node.get("projectItems") if isinstance(issue_node, dict) else None

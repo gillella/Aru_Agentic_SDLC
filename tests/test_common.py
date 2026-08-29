@@ -617,6 +617,27 @@ def test_project_item_status_fails_closed_on_incomplete_evidence(
         common.project_item_status(7)
 
 
+def test_project_item_status_fails_closed_on_top_level_graphql_errors(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(
+        common,
+        "linked_project",
+        lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"},
+    )
+
+    def fake_gh_json(args, *, cwd=None, auth=None):
+        if args[:2] == ["api", "repos/owner/repo/issues/7"]:
+            return {"number": 7, "node_id": "I_7"}
+        # A partial response: an error is present alongside a data envelope,
+        # which must not be trusted as complete evidence.
+        return {"errors": [{"message": "boom"}], "data": {"issueNode": None}}
+
+    monkeypatch.setattr(common, "gh_json", fake_gh_json)
+
+    with pytest.raises(common.KernelError, match="GraphQL error"):
+        common.project_item_status(7)
+
+
 def test_subprocess_error_redacts_token_values(monkeypatch):
     secret = "ghs_this-must-never-appear"
     monkeypatch.setenv("GH_TOKEN", secret)
