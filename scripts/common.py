@@ -608,16 +608,21 @@ def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
         raise KernelError("linked Project Board is unavailable")
     if page_info.get("hasNextPage") is not False:
         raise KernelError("linked Project Board inventory is truncated")
-    open_projects = [
-        node
-        for node in nodes
-        if isinstance(node, dict)
-        and isinstance(node.get("id"), str)
-        and node.get("id")
-        and not node.get("closed")
-    ]
+    for node in nodes:
+        if (
+            not isinstance(node, dict)
+            or not isinstance(node.get("id"), str)
+            or not node["id"]
+            or type(node.get("number")) is not int
+            or node["number"] <= 0
+            or not isinstance(node.get("title"), str)
+            or not node["title"]
+            or type(node.get("closed")) is not bool
+        ):
+            raise KernelError("linked Project Board inventory is malformed")
+    open_projects = [node for node in nodes if not node["closed"]]
     if requested:
-        open_projects = [node for node in open_projects if str(node.get("number")) == requested]
+        open_projects = [node for node in open_projects if str(node["number"]) == requested]
     if len(open_projects) != 1:
         raise KernelError("expected exactly one linked open Project Board")
     _LINKED_PROJECT_CACHE[key] = dict(open_projects[0])

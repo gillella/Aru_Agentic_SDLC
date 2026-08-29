@@ -413,6 +413,10 @@ def test_epic_reconcile_check_reports_closable_without_mutation(monkeypatch):
     assert evidence["blocked"] is False
     assert evidence["status"] == "Backlog"
     assert evidence["project_status"] == "Backlog"
+    assert evidence["children"] == {
+        "91": {"number": 91, "state": "CLOSED", "status": "Done", "repository": "owner/repo"},
+        "92": {"number": 92, "state": "CLOSED", "status": "Done", "repository": "owner/repo"},
+    }
     assert mutations == []
 
 
@@ -420,6 +424,7 @@ def test_epic_reconcile_check_reports_closable_without_mutation(monkeypatch):
     ("body", "match"),
     [
         ("## Child Issues\n- not-a-ref\n", "malformed"),
+        ("## Child Issues\n- other/repo#9\n", "malformed"),
         ("## Child Issues\n- #1\n- #1\n", "duplicate"),
         ("## Child Issues\n- #1\nprose\n- #2\n", "unexpected content"),
         ("## Child Issues\n- #1\n\narbitrary trailing prose\n", "unexpected trailer content"),
@@ -434,9 +439,10 @@ def test_parse_child_issues_rejects_malformed_sections(body, match):
         uis.parse_child_issues(body)
 
 
-def test_parse_child_issues_accepts_valid_trailer_declarations():
+def test_parse_child_issues_ordering_and_trailers():
     import update_issue_status as uis
 
+    assert uis.parse_child_issues("## Child Issues\n- #9\n- #2\n") == [2, 9]
     body = "## Child Issues\n- #91\n\nepic-close-policy: children-only\ndepends-on: #5\n"
     assert uis.parse_child_issues(body) == [91]
 

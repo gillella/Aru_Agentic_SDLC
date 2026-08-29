@@ -104,25 +104,32 @@ def test_dependencies_are_unique_and_ordered():
     assert common.dependencies(body) == [2, 9]
 
 
-@pytest.mark.parametrize("use_runner", [True, False])
-def test_repository_command_runner_resolution(monkeypatch, tmp_path, use_runner):
+@pytest.mark.parametrize(
+    ("command", "use_runner"),
+    [
+        (["gh", "issue", "view", "7"], True),
+        (["gh", "issue", "view", "7"], False),
+        (["gh", "pr", "view", "7"], False),
+    ],
+)
+def test_repository_command_runner_resolution(monkeypatch, tmp_path, command, use_runner):
     calls = []
     if use_runner:
         runner = tmp_path / "app-run"
         runner.write_text("#!/bin/sh\n", encoding="utf-8")
         runner.chmod(0o755)
         monkeypatch.setenv("ARU_GITHUB_APP_RUNNER", str(runner))
-        expected_argv = [str(runner), "--", "gh", "issue", "view", "7"]
+        expected_argv = [str(runner), "--", *command]
     else:
         monkeypatch.delenv("ARU_GITHUB_APP_RUNNER", raising=False)
-        expected_argv = ["gh", "issue", "view", "7"]
+        expected_argv = list(command)
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
         return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
 
     monkeypatch.setattr(common.subprocess, "run", fake_run)
-    common.run(["gh", "issue", "view", "7"])
+    common.run(command)
     assert calls[0][0] == expected_argv
 
 
@@ -177,7 +184,7 @@ def test_linked_project_explicitly_uses_project_authority(monkeypatch):
             "data": {
                 "repository": {
                     "projectsV2": {
-                        "nodes": [{"id": "PVT_1", "number": 5, "title": "Delivery"}],
+                        "nodes": [{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}],
                         "pageInfo": {"hasNextPage": False},
                     }
                 }
@@ -195,7 +202,7 @@ def _linked_project_payload(number: int = 5) -> dict:
         "data": {
             "repository": {
                 "projectsV2": {
-                    "nodes": [{"id": "PVT_1", "number": number, "title": "Delivery"}],
+                    "nodes": [{"id": "PVT_1", "number": number, "title": "Delivery", "closed": False}],
                     "pageInfo": {"hasNextPage": False},
                 }
             }
@@ -216,7 +223,7 @@ def test_linked_project_does_not_requery_within_one_process(monkeypatch):
     first = common.linked_project()
     second = common.linked_project()
 
-    assert first == second == {"id": "PVT_1", "number": 5, "title": "Delivery"}
+    assert first == second == {"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}
     assert len(calls) == 1
     assert calls[0][1] == common.PROJECT_AUTH
 
@@ -234,7 +241,7 @@ def test_linked_project_rejects_graphql_errors_without_caching(monkeypatch):
                 "data": {
                     "repository": {
                         "projectsV2": {
-                            "nodes": [{"id": "PVT_BAD", "number": 5, "title": "Bad"}],
+                            "nodes": [{"id": "PVT_BAD", "number": 5, "title": "Bad", "closed": False}],
                             "pageInfo": {"hasNextPage": False},
                         }
                     }
@@ -245,6 +252,51 @@ def test_linked_project_rejects_graphql_errors_without_caching(monkeypatch):
     monkeypatch.setattr(common, "gh_json", fake_gh_json)
 
     with pytest.raises(common.KernelError, match="GraphQL error"):
+        common.linked_project()
+
+    assert ("owner/repo", "") not in common._LINKED_PROJECT_CACHE
+
+    project = common.linked_project()
+    assert project["id"] == "PVT_1"
+    assert project["number"] == 5
+    assert len(calls) == 2
+    assert common._LINKED_PROJECT_CACHE[("owner/repo", "")] == project
+
+
+@pytest.mark.parametrize(
+    ("nodes", "page_info", "message"),
+    [
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}, {"id": "PVT_2", "number": -1, "title": "Inv", "closed": False}], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}, "not-a-dict"], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}, {"id": "", "number": 6, "title": "Inv", "closed": False}], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}, {"id": "PVT_2", "number": True, "title": "Inv", "closed": False}], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}, {"id": "PVT_2", "number": 6, "title": "", "closed": False}], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery"}], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}, {"id": "PVT_2", "number": 6, "title": "Other"}], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": "false"}], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": 0}], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": None}], {"hasNextPage": False}, "malformed"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}], {"hasNextPage": True}, "truncated"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}], {"hasNextPage": None}, "truncated"),
+        ([{"id": "PVT_1", "number": 5, "title": "Delivery", "closed": False}], "not-a-dict", "unavailable"),
+    ],
+)
+def test_linked_project_fails_closed_on_malformed_inventory_without_caching(
+    monkeypatch, nodes, page_info, message
+):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    common._LINKED_PROJECT_CACHE.clear()
+    calls = []
+
+    def fake_gh_json(args, *, cwd=None, auth=None):
+        calls.append(args)
+        if len(calls) == 1:
+            return {"data": {"repository": {"projectsV2": {"nodes": nodes, "pageInfo": page_info}}}}
+        return _linked_project_payload(5)
+
+    monkeypatch.setattr(common, "gh_json", fake_gh_json)
+
+    with pytest.raises(common.KernelError, match=message):
         common.linked_project()
 
     assert ("owner/repo", "") not in common._LINKED_PROJECT_CACHE
@@ -365,28 +417,18 @@ def board_payload(
     has_next_page: bool = False,
     field: dict | None = None,
 ) -> dict:
+    if items is None:
+        items = [{"id": "PVTI_7", "project": {"id": "PVT_1"}}]
+    if field is None:
+        field = {
+            "id": "PVTSSF_status",
+            "name": "Status",
+            "options": [{"id": "ready-option", "name": "Ready"}, {"id": "done-option", "name": "Done"}],
+        }
     return {
         "data": {
-            "issueNode": {
-                "projectItems": {
-                    "nodes": items
-                    if items is not None
-                    else [{"id": "PVTI_7", "project": {"id": "PVT_1"}}],
-                    "pageInfo": {"hasNextPage": has_next_page},
-                }
-            },
-            "projectNode": {
-                "field": field
-                if field is not None
-                else {
-                    "id": "PVTSSF_status",
-                    "name": "Status",
-                    "options": [
-                        {"id": "ready-option", "name": "Ready"},
-                        {"id": "done-option", "name": "Done"},
-                    ],
-                }
-            },
+            "issueNode": {"projectItems": {"nodes": items, "pageInfo": {"hasNextPage": has_next_page}}},
+            "projectNode": {"field": field},
         }
     }
 
@@ -434,36 +476,10 @@ def test_board_edit_reads_only_target_issue_item_and_status_field(monkeypatch):
     [
         (board_payload(has_next_page=True), "truncated"),
         (board_payload(items=[]), "ambiguous"),
-        (
-            board_payload(
-                items=[
-                    {"id": "PVTI_7a", "project": {"id": "PVT_1"}},
-                    {"id": "PVTI_7b", "project": {"id": "PVT_1"}},
-                ]
-            ),
-            "ambiguous",
-        ),
+        (board_payload(items=[{"id": "PVTI_7a", "project": {"id": "PVT_1"}}, {"id": "PVTI_7b", "project": {"id": "PVT_1"}}]), "ambiguous"),
         (board_payload(items=[{"id": "PVTI_7", "project": {}}]), "malformed"),
-        (
-            board_payload(
-                field={
-                    "id": "PVTSSF_status",
-                    "name": "Status",
-                    "options": [{"id": "ready-option", "name": "Ready"}],
-                }
-            ),
-            "no unique 'Done' option",
-        ),
-        (
-            board_payload(
-                field={
-                    "id": "PVTSSF_status",
-                    "name": "Status",
-                    "options": [{"id": "", "name": "Done"}],
-                }
-            ),
-            "options are malformed",
-        ),
+        (board_payload(field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "ready-option", "name": "Ready"}]}), "no unique 'Done' option"),
+        (board_payload(field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "", "name": "Done"}]}), "options are malformed"),
     ],
 )
 def test_board_edit_fails_closed_on_incomplete_targeted_evidence(
@@ -516,21 +532,12 @@ def project_status_payload(
     items: list[dict] | None = None,
     has_next_page: bool = False,
 ) -> dict:
+    if items is None:
+        items = [{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}]
     return {
         "data": {
             "issueNode": {
-                "projectItems": {
-                    "nodes": items
-                    if items is not None
-                    else [
-                        {
-                            "id": "PVTI_7",
-                            "project": {"id": "PVT_1"},
-                            "fieldValueByName": {"name": "Done"},
-                        }
-                    ],
-                    "pageInfo": {"hasNextPage": has_next_page},
-                }
+                "projectItems": {"nodes": items, "pageInfo": {"hasNextPage": has_next_page}}
             }
         }
     }
@@ -586,21 +593,8 @@ def test_project_item_status_returns_none_without_a_status_value(monkeypatch):
     [
         (project_status_payload(has_next_page=True), "truncated"),
         (project_status_payload(items=[]), "ambiguous"),
-        (
-            project_status_payload(
-                items=[
-                    {"id": "PVTI_7a", "project": {"id": "PVT_1"}, "fieldValueByName": None},
-                    {"id": "PVTI_7b", "project": {"id": "PVT_1"}, "fieldValueByName": None},
-                ]
-            ),
-            "ambiguous",
-        ),
-        (
-            project_status_payload(
-                items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {}}]
-            ),
-            "malformed",
-        ),
+        (project_status_payload(items=[{"id": "PVTI_7a", "project": {"id": "PVT_1"}, "fieldValueByName": None}, {"id": "PVTI_7b", "project": {"id": "PVT_1"}, "fieldValueByName": None}]), "ambiguous"),
+        (project_status_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {}}]), "malformed"),
     ],
 )
 def test_project_item_status_fails_closed_on_incomplete_evidence(
@@ -635,8 +629,6 @@ def test_project_item_status_fails_closed_on_top_level_graphql_errors(monkeypatc
     def fake_gh_json(args, *, cwd=None, auth=None):
         if args[:2] == ["api", "repos/owner/repo/issues/7"]:
             return {"number": 7, "node_id": "I_7"}
-        # A partial response: an error is present alongside a data envelope,
-        # which must not be trusted as complete evidence.
         return {"errors": [{"message": "boom"}], "data": {"issueNode": None}}
 
     monkeypatch.setattr(common, "gh_json", fake_gh_json)
@@ -677,7 +669,8 @@ def test_subprocess_redacts_token_values(
         result = common.run(["gh", "api", "repos/owner/repo"], check=check)
         assert secret not in result.stdout
         assert secret not in result.stderr
-        assert "[REDACTED]" in result.stdout or "[REDACTED]" in result.stderr
+        assert "[REDACTED]" in result.stdout
+        assert "[REDACTED]" in result.stderr
 
 
 def test_child_issue_snapshots_use_one_repository_graphql_query(monkeypatch):
@@ -691,24 +684,8 @@ def test_child_issue_snapshots_use_one_repository_graphql_query(monkeypatch):
         return {
             "data": {
                 "repository": {
-                    "i91": {
-                        "number": 91,
-                        "state": "CLOSED",
-                        "repository": {"nameWithOwner": "owner/repo"},
-                        "labels": {
-                            "nodes": [{"name": "status:done"}],
-                            "pageInfo": {"hasNextPage": False},
-                        },
-                    },
-                    "i92": {
-                        "number": 92,
-                        "state": "CLOSED",
-                        "repository": {"nameWithOwner": "owner/repo"},
-                        "labels": {
-                            "nodes": [{"name": "status:done"}],
-                            "pageInfo": {"hasNextPage": False},
-                        },
-                    },
+                    "i91": {"number": 91, "state": "CLOSED", "repository": {"nameWithOwner": "owner/repo"}, "labels": {"nodes": [{"name": "status:done"}], "pageInfo": {"hasNextPage": False}}},
+                    "i92": {"number": 92, "state": "CLOSED", "repository": {"nameWithOwner": "owner/repo"}, "labels": {"nodes": [{"name": "status:done"}], "pageInfo": {"hasNextPage": False}}},
                 }
             }
         }
@@ -747,22 +724,9 @@ def _child_payload(node: dict) -> dict:
         ({"data": {"repository": "not-a-dict"}}, "unavailable"),
         (_child_payload(_raw_child_node(number=92)), "does not match the request"),
         (_child_payload(_raw_child_node(state="MERGED")), "unsupported state"),
-        (
-            _child_payload(
-                _raw_child_node(
-                    labels={"nodes": [{"missing": "name"}], "pageInfo": {"hasNextPage": False}}
-                )
-            ),
-            "malformed",
-        ),
-        (
-            _child_payload(_raw_child_node(labels={"nodes": ["bad"], "pageInfo": {"hasNextPage": False}})),
-            "malformed",
-        ),
-        (
-            _child_payload(_raw_child_node(labels={"nodes": [{"name": "status:done"}], "pageInfo": {"hasNextPage": True}})),
-            "truncated",
-        ),
+        (_child_payload(_raw_child_node(labels={"nodes": [{"missing": "name"}], "pageInfo": {"hasNextPage": False}})), "malformed"),
+        (_child_payload(_raw_child_node(labels={"nodes": ["bad"], "pageInfo": {"hasNextPage": False}})), "malformed"),
+        (_child_payload(_raw_child_node(labels={"nodes": [{"name": "status:done"}], "pageInfo": {"hasNextPage": True}})), "truncated"),
         (_child_payload(_raw_child_node(labels={"nodes": [{"name": "status:done"}]})), "truncated"),
     ],
 )
