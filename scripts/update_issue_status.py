@@ -468,7 +468,7 @@ def apply_epic_reconciliation(
         raise KernelError("; ".join(evidence["blockers"]))
 
     try:
-        set_status(number, "Done", cwd=cwd)
+        set_status(number, "Done", expected_current="Backlog", cwd=cwd)
         run(["gh", "issue", "close", str(number), "--reason", "completed"], cwd=cwd)
         final = issue(number, cwd=cwd)
         after_status = status_of(final)

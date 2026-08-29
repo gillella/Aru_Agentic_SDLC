@@ -42,17 +42,7 @@ def test_issue_contract_accepts_valid_bodies(body):
 
 
 def test_issue_contract_rejects_mixed_inline_and_issue_form_touches():
-    body = """
-## Acceptance Criteria
-
-- [ ] behavior is observable
-
-touches: scripts/a.py
-
-### touches:
-
-docs/**
-"""
+    body = "\n## Acceptance Criteria\n\n- [ ] behavior is observable\n\ntouches: scripts/a.py\n\n### touches:\n\ndocs/**\n"
     with pytest.raises(common.KernelError, match="exactly one touches"):
         common.parse_touches(body)
 
@@ -87,10 +77,8 @@ def test_issue_contract_rejects_unsafe_budgets(declaration):
 
 def test_path_budget_is_exact_or_recursive():
     declared = ["scripts/a.py", "docs/**"]
-    assert common.path_allowed("scripts/a.py", declared)
-    assert common.path_allowed("docs/guide/one.md", declared)
-    assert not common.path_allowed("scripts/b.py", declared)
-    assert not common.path_allowed("../docs/guide.md", declared)
+    assert common.path_allowed("scripts/a.py", declared) and common.path_allowed("docs/guide/one.md", declared)
+    assert not common.path_allowed("scripts/b.py", declared) and not common.path_allowed("../docs/guide.md", declared)
 
 
 def test_status_fails_closed_on_contradiction():
@@ -106,11 +94,7 @@ def test_dependencies_are_unique_and_ordered():
 
 @pytest.mark.parametrize(
     ("command", "use_runner"),
-    [
-        (["gh", "issue", "view", "7"], True),
-        (["gh", "issue", "view", "7"], False),
-        (["gh", "pr", "view", "7"], False),
-    ],
+    [(["gh", "issue", "view", "7"], True), (["gh", "issue", "view", "7"], False), (["gh", "pr", "view", "7"], False)],
 )
 def test_repository_command_runner_resolution(monkeypatch, tmp_path, command, use_runner):
     calls = []
@@ -124,11 +108,7 @@ def test_repository_command_runner_resolution(monkeypatch, tmp_path, command, us
         monkeypatch.delenv("ARU_GITHUB_APP_RUNNER", raising=False)
         expected_argv = list(command)
 
-    def fake_run(argv, **kwargs):
-        calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
-
-    monkeypatch.setattr(common.subprocess, "run", fake_run)
+    monkeypatch.setattr(common.subprocess, "run", lambda argv, **kw: calls.append((argv, kw)) or subprocess.CompletedProcess(argv, 0, stdout="{}", stderr=""))
     common.run(command)
     assert calls[0][0] == expected_argv
 
@@ -136,7 +116,6 @@ def test_repository_command_runner_resolution(monkeypatch, tmp_path, command, us
 def test_configured_app_runner_must_be_executable(monkeypatch, tmp_path):
     runner = tmp_path / "missing-app-run"
     monkeypatch.setenv("ARU_GITHUB_APP_RUNNER", str(runner))
-
     with pytest.raises(common.KernelError, match="not executable"):
         common.run(["gh", "issue", "view", "7"])
 
@@ -146,18 +125,11 @@ def test_project_command_uses_stored_pat_without_token_overrides(monkeypatch):
     monkeypatch.setenv("GH_TOKEN", "app-token-must-not-reach-projects")
     monkeypatch.setenv("GITHUB_TOKEN", "also-not-for-projects")
     calls = []
-
-    def fake_run(argv, **kwargs):
-        calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
-
-    monkeypatch.setattr(common.subprocess, "run", fake_run)
+    monkeypatch.setattr(common.subprocess, "run", lambda argv, **kw: calls.append((argv, kw)) or subprocess.CompletedProcess(argv, 0, stdout="{}", stderr=""))
     common.run(["gh", "project", "item-list", "5"])
-
     argv, kwargs = calls[0]
     assert argv == ["gh", "project", "item-list", "5"]
-    assert "GH_TOKEN" not in kwargs["env"]
-    assert "GITHUB_TOKEN" not in kwargs["env"]
+    assert "GH_TOKEN" not in kwargs["env"] and "GITHUB_TOKEN" not in kwargs["env"]
 
 
 def test_graphql_requires_an_explicit_authority():
@@ -168,10 +140,7 @@ def test_graphql_requires_an_explicit_authority():
 def test_mixed_graphql_fails_closed_even_with_explicit_authority():
     query = "query { repository(owner: \"o\", name: \"r\") { pullRequest(number: 1) { id } projectsV2(first: 1) { nodes { id } } } }"
     with pytest.raises(common.KernelError, match="mixes repository and Project V2"):
-        common.gh_json(
-            ["api", "graphql", "-f", f"query={query}"],
-            auth=common.PROJECT_AUTH,
-        )
+        common.gh_json(["api", "graphql", "-f", f"query={query}"], auth=common.PROJECT_AUTH)
 
 
 def test_linked_project_explicitly_uses_project_authority(monkeypatch):
@@ -326,72 +295,27 @@ def test_linked_project_cache_is_scoped_to_project_number(monkeypatch):
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize(
-    "stderr",
-    [
-        "gh: HTTP 429",
-        "API rate limit exceeded for user",
-        "You have exceeded a secondary rate limit",
-        "resource-limits exceeded",
-    ],
-)
+@pytest.mark.parametrize("stderr", ["gh: HTTP 429", "API rate limit exceeded for user", "You have exceeded a secondary rate limit", "resource-limits exceeded"])
 def test_github_quota_failure_raises_without_retry(monkeypatch, stderr):
     calls = []
-
-    def fake_run(argv, **kwargs):
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=stderr)
-
-    monkeypatch.setattr(common.subprocess, "run", fake_run)
-
+    monkeypatch.setattr(common.subprocess, "run", lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 1, stdout="", stderr=stderr))
     with pytest.raises(common.KernelError, match="quota exhausted"):
-        common.run(
-            ["gh", "api", "graphql", "-f", "query=query { viewer { login } }"],
-            auth=common.REPOSITORY_AUTH,
-        )
-    assert len(calls) == 1
-    assert "stop and wait" in common.QUOTA_STOP_MESSAGE
+        common.run(["gh", "api", "graphql", "-f", "query=query { viewer { login } }"], auth=common.REPOSITORY_AUTH)
+    assert len(calls) == 1 and "stop and wait" in common.QUOTA_STOP_MESSAGE
 
 
-@pytest.mark.parametrize(
-    "stderr",
-    [
-        "GraphQL resource 429 was not found",
-        "issue #429 does not exist",
-    ],
-)
+@pytest.mark.parametrize("stderr", ["GraphQL resource 429 was not found", "issue #429 does not exist"])
 def test_unrelated_429_error_is_not_classified_as_quota(monkeypatch, stderr):
-    def fake_run(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=stderr)
-
-    monkeypatch.setattr(common.subprocess, "run", fake_run)
-
+    monkeypatch.setattr(common.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 1, stdout="", stderr=stderr))
     with pytest.raises(common.KernelError, match=stderr):
-        common.run(
-            ["gh", "api", "graphql", "-f", "query=query { viewer { login } }"],
-            auth=common.REPOSITORY_AUTH,
-        )
+        common.run(["gh", "api", "graphql", "-f", "query=query { viewer { login } }"], auth=common.REPOSITORY_AUTH)
 
 
 def test_graphql_rate_limited_payload_raises_without_retry(monkeypatch):
     calls = []
-
-    def fake_run(argv, **kwargs):
-        calls.append(argv)
-        return subprocess.CompletedProcess(
-            argv,
-            0,
-            stdout='{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}',
-            stderr="",
-        )
-
-    monkeypatch.setattr(common.subprocess, "run", fake_run)
-
+    monkeypatch.setattr(common.subprocess, "run", lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, stdout='{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}', stderr=""))
     with pytest.raises(common.KernelError, match="quota exhausted"):
-        common.gh_json(
-            ["api", "graphql", "-f", "query=query { viewer { login } }"],
-            auth=common.REPOSITORY_AUTH,
-        )
+        common.gh_json(["api", "graphql", "-f", "query=query { viewer { login } }"], auth=common.REPOSITORY_AUTH)
     assert len(calls) == 1
 
 
@@ -738,3 +662,75 @@ def test_child_issue_snapshots_fails_closed_on_malformed_graphql(monkeypatch, pa
 
     with pytest.raises(uis.KernelError, match=message):
         uis.child_issue_snapshots([91])
+
+
+@pytest.mark.parametrize(
+    ("issue_status", "project_status", "expected", "should_fail"),
+    [
+        ("Backlog", "Backlog", "Backlog", False),
+        ("Ready", "Backlog", "Backlog", True),
+        ("Backlog", "Ready", "Backlog", True),
+        ("Ready", "Ready", "Backlog", True),
+    ],
+)
+def test_set_status_expected_current_contract(
+    monkeypatch, issue_status, project_status, expected, should_fail
+):
+    commands = []
+    issue_rec = {"number": 7, "state": "OPEN", "labels": [{"name": f"status:{issue_status.lower()}"}]}
+    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
+    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: project_status)
+    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
+    monkeypatch.setattr(common, "board_edit", lambda number, status, cwd=None: ["project", "item-edit", "--id", "1"])
+    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+
+    if should_fail:
+        with pytest.raises(common.KernelError, match=f"must both equal expected {expected!r}"):
+            common.set_status(7, "Done", expected_current=expected)
+        assert commands == []
+    else:
+        common.set_status(7, "Done", expected_current=expected)
+        assert any(cmd[:3] == ["gh", "issue", "edit"] and "--add-label" in cmd for cmd in commands)
+        assert any(cmd[:3] == ["gh", "project", "item-edit"] for cmd in commands)
+
+
+@pytest.mark.parametrize(
+    ("rollback_error", "match_patterns"),
+    [
+        (
+            common.KernelError("gh failed: issue edit failed: 502 Bad Gateway"),
+            ["issue edit failed: 502 Bad Gateway", "project item-edit network error: 500"],
+        ),
+        (
+            common.KernelError(common.QUOTA_STOP_MESSAGE),
+            ["quota exhausted", "stop and wait", "project item-edit network error: 500"],
+        ),
+    ],
+)
+def test_set_status_rollback_failure_preserves_messages_and_quota(
+    monkeypatch, rollback_error, match_patterns
+):
+    commands = []
+    issue_rec = {"number": 7, "state": "OPEN", "labels": [{"name": "status:backlog"}]}
+    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
+    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: "Backlog")
+    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
+    monkeypatch.setattr(common, "board_edit", lambda number, status, cwd=None: ["project", "item-edit", "--id", "1"])
+
+    def fake_run(argv, **kw):
+        commands.append(argv)
+        if argv[:3] == ["gh", "project", "item-edit"]:
+            raise common.KernelError("gh failed: project item-edit network error: 500")
+        if argv[:3] == ["gh", "issue", "edit"] and "--remove-label" in argv and argv[argv.index("--remove-label") + 1] == "status:done":
+            raise rollback_error
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(common, "run", fake_run)
+
+    with pytest.raises(common.KernelError) as exc_info:
+        common.set_status(7, "Done")
+
+    for pattern in match_patterns:
+        assert pattern in str(exc_info.value)
+    assert len(commands) == 3
+

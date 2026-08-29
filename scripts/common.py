@@ -194,20 +194,16 @@ def probe_coding_candidate(candidate: CodingCandidate, runner: ProbeRunner) -> b
     if family == "claude-code":
         executable = str(Path.home() / ".local" / "bin" / "claude-sub")
         return _probe_ok(runner([executable, str(subscription), "-p", PROBE_PROMPT]))
-    command_names = {
-        "openai-codex": "codex",
-        "xai-cursor": "cursor-agent",
-        "google-antigravity": "agy",
+    command_map = {
+        "openai-codex": ("codex", ["exec", "--skip-git-repo-check", PROBE_PROMPT]),
+        "xai-cursor": ("cursor-agent", ["-p", PROBE_PROMPT]),
+        "google-antigravity": ("agy", ["-p", PROBE_PROMPT]),
     }
-    executable = _reviewer_command(command_names[family])
+    cmd_name, args = command_map[family]
+    executable = _reviewer_command(cmd_name)
     if executable is None:
         return False
-    arguments = {
-        "openai-codex": [executable, "exec", "--skip-git-repo-check", PROBE_PROMPT],
-        "xai-cursor": [executable, "-p", PROBE_PROMPT],
-        "google-antigravity": [executable, "-p", PROBE_PROMPT],
-    }[family]
-    return _probe_ok(runner(arguments))
+    return _probe_ok(runner([executable, *args]))
 
 
 def agent_family(identity: str) -> str:
@@ -415,16 +411,8 @@ def label_names(record: dict[str, Any]) -> list[str]:
 
 
 def issue(number: int, *, cwd: str | Path | None = None) -> dict[str, Any]:
-    data = gh_json(
-        [
-            "issue",
-            "view",
-            str(number),
-            "--json",
-            "number,title,body,state,labels,assignees,url",
-        ],
-        cwd=cwd,
-    )
+    args = ["issue", "view", str(number), "--json", "number,title,body,state,labels,assignees,url"]
+    data = gh_json(args, cwd=cwd)
     if not isinstance(data, dict) or data.get("number") != number:
         raise KernelError(f"issue #{number} is unavailable")
     return data
@@ -436,16 +424,7 @@ def list_issues(
     label: str | None = None,
     cwd: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    args = [
-        "issue",
-        "list",
-        "--state",
-        state,
-        "--limit",
-        "200",
-        "--json",
-        "number,title,body,state,labels,assignees,url",
-    ]
+    args = ["issue", "list", "--state", state, "--limit", "200", "--json", "number,title,body,state,labels,assignees,url"]
     if label:
         args.extend(["--label", label])
     data = gh_json(args, cwd=cwd)
@@ -559,17 +538,7 @@ def ensure_label(
     cwd: str | Path | None = None,
 ) -> None:
     run(
-        [
-            "gh",
-            "label",
-            "create",
-            name,
-            "--color",
-            color,
-            "--description",
-            description,
-            "--force",
-        ],
+        ["gh", "label", "create", name, "--color", color, "--description", description, "--force"],
         cwd=cwd,
     )
 
@@ -582,16 +551,11 @@ def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
     if cached is not None:
         return dict(cached)
     owner, name = slug.split("/", 1)
-    query = """
-    query($owner:String!,$name:String!){
-      repository(owner:$owner,name:$name){
-        projectsV2(first:20){
-          nodes{id number title closed}
-          pageInfo{hasNextPage}
-        }
-      }
-    }
-    """
+    query = (
+        "query($owner:String!,$name:String!){ "
+        "repository(owner:$owner,name:$name){ projectsV2(first:20){ "
+        "nodes{id number title closed} pageInfo{hasNextPage} } } }"
+    )
     data = gh_json(
         ["api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}", "-F", f"name={name}"],
         cwd=cwd,
@@ -647,16 +611,15 @@ def _project_card_identity(number: int, *, cwd: str | Path | None = None) -> tup
     return project_id, issue_record["node_id"]
 
 
-_PROJECT_CARD_QUERY = """
-query($issue:ID!,$project:ID!){
-  issueNode:node(id:$issue){ ... on Issue{ projectItems(first:20){
-    nodes{ id project{id} fieldValueByName(name:"Status"){
-      ... on ProjectV2ItemFieldSingleSelectValue{name} } }
-    pageInfo{hasNextPage} } } }
-  projectNode:node(id:$project){ ... on ProjectV2{ field(name:"Status"){
-    ... on ProjectV2SingleSelectField{ id name options{id name} } } } }
-}
-"""
+_PROJECT_CARD_QUERY = (
+    "query($issue:ID!,$project:ID!){ "
+    "issueNode:node(id:$issue){ ... on Issue{ projectItems(first:20){ "
+    "nodes{ id project{id} fieldValueByName(name:\"Status\"){ "
+    "... on ProjectV2ItemFieldSingleSelectValue{name} } } "
+    "pageInfo{hasNextPage} } } } "
+    "projectNode:node(id:$project){ ... on ProjectV2{ field(name:\"Status\"){ "
+    "... on ProjectV2SingleSelectField{ id name options{id name} } } } } }"
+)
 
 
 def _project_card_snapshot(
@@ -737,11 +700,11 @@ def board_edit(
     ):
         raise KernelError("issue or Status field is ambiguous on the linked Project Board")
     if any(
-        not isinstance(option, dict)
-        or not isinstance(option.get("id"), str)
-        or not option["id"]
-        or not isinstance(option.get("name"), str)
-        for option in status_field["options"]
+        not isinstance(opt, dict)
+        or not isinstance(opt.get("id"), str)
+        or not opt["id"]
+        or not isinstance(opt.get("name"), str)
+        for opt in status_field["options"]
     ):
         raise KernelError("Project Board Status options are malformed")
     options = [option for option in status_field["options"] if option["name"] == status]
@@ -761,9 +724,22 @@ def board_edit(
     ]
 
 
-def set_status(number: int, status: str, *, cwd: str | Path | None = None) -> None:
+def set_status(
+    number: int,
+    status: str,
+    *,
+    expected_current: str | None = None,
+    cwd: str | Path | None = None,
+) -> None:
     record = issue(number, cwd=cwd)
     current = status_of(record)
+    if expected_current is not None:
+        project_status = project_item_status(number, cwd=cwd)
+        if current != expected_current or project_status != expected_current:
+            raise KernelError(
+                f"issue #{number} status ({current!r}) and Project card status "
+                f"({project_status!r}) must both equal expected {expected_current!r}"
+            )
     if current == status:
         return
     edit = board_edit(number, status, cwd=cwd)
@@ -775,13 +751,19 @@ def set_status(number: int, status: str, *, cwd: str | Path | None = None) -> No
     run(args, cwd=cwd)
     try:
         run(["gh", *edit], cwd=cwd)
-    except KernelError:
+    except KernelError as item_error:
         rollback = ["gh", "issue", "edit", str(number), "--remove-label", target]
         if current:
             rollback.extend(["--add-label", status_label(current)])
-        run(rollback, cwd=cwd, check=False)
+        try:
+            run(rollback, cwd=cwd)
+        except KernelError as rollback_error:
+            raise KernelError(
+                f"{rollback_error}; original item-edit failure: {item_error}"
+            ) from rollback_error
         raise
 
 
 def json_print(data: Any) -> None:
     print(json.dumps(data, sort_keys=True))
+
