@@ -86,32 +86,9 @@ def select(agent: str) -> dict[str, object]:
     if authored:
         return _open_pr_work(authored[0])
 
-    priorities = {f"priority:p{value}": value for value in range(4)}
-    ready: list[tuple[int, int, dict]] = []
-    diagnostics: list[str] = []
-    for record in ready_issues():
-        labels = label_names(record)
-        if "needs-human" in labels or "type:epic" in labels:
-            continue
-        number = int(record["number"])
-        priority_labels = [name for name in labels if name.startswith("priority:")]
-        if len(priority_labels) > 1 or any(
-            name not in priorities for name in priority_labels
-        ):
-            diagnostics.append(
-                f"Ready issue #{number} has contradictory or unsupported "
-                "priority labels; skipped"
-            )
-            continue
-        priority = (
-            priorities[priority_labels[0]]
-            if priority_labels
-            else priorities["priority:p2"]
-        )
-        ready.append((priority, number, record))
-    ready.sort(key=lambda item: (item[0], item[1]))
-    if ready:
-        record = ready[0][2]
+    candidates, diagnostics, summary = _ready_candidates(ready_issues())
+    if candidates:
+        record = candidates[0][2]
         result: dict[str, object] = {
             "type": "issue",
             "issue": int(record["number"]),
@@ -119,6 +96,8 @@ def select(agent: str) -> dict[str, object]:
         }
     else:
         result = {"type": "idle"}
+        if summary:
+            diagnostics.insert(0, summary)
     if diagnostics:
         result["diagnostics"] = diagnostics
     return result
@@ -184,21 +163,42 @@ def _touches_overlap(left: list[str], right: list[str]) -> bool:
     return False
 
 
-def _batch_ready_candidates(
+def _ready_candidates(
     records: list[dict],
-) -> tuple[list[tuple[int, int, dict, list[str]]], list[str]]:
+    *,
+    batch: bool = False,
+) -> tuple[
+    list[tuple[int, int, dict, list[str]]],
+    list[str],
+    str | None,
+]:
     priorities = {f"priority:p{value}": value for value in range(4)}
     ready: list[tuple[int, int, dict, list[str]]] = []
     diagnostics: list[tuple[int, str]] = []
+    counts = {
+        "executable": 0,
+        "human-gated": 0,
+        "epic": 0,
+        "malformed/unsupported": 0,
+    }
     for record in records:
-        number = _batch_number(record, "Ready issue")
+        number = (
+            _batch_number(record, "Ready issue")
+            if batch
+            else int(record["number"])
+        )
         labels = label_names(record)
-        if "needs-human" in labels or "type:epic" in labels:
+        if "needs-human" in labels:
+            counts["human-gated"] += 1
+            continue
+        if "type:epic" in labels:
+            counts["epic"] += 1
             continue
         priority_labels = [name for name in labels if name.startswith("priority:")]
         if len(priority_labels) > 1 or any(
             name not in priorities for name in priority_labels
         ):
+            counts["malformed/unsupported"] += 1
             diagnostics.append(
                 (
                     number,
@@ -207,17 +207,47 @@ def _batch_ready_candidates(
                 )
             )
             continue
-        try:
-            touches = parse_touches(str(record.get("body") or ""))
-        except KernelError as exc:
-            diagnostics.append(
-                (number, f"Ready issue #{number} has invalid touches: {exc}; skipped")
-            )
-            continue
+        touches: list[str] = []
+        if batch:
+            try:
+                touches = parse_touches(str(record.get("body") or ""))
+            except KernelError as exc:
+                counts["malformed/unsupported"] += 1
+                diagnostics.append(
+                    (
+                        number,
+                        f"Ready issue #{number} has invalid touches: {exc}; skipped",
+                    )
+                )
+                continue
         priority = priorities[priority_labels[0]] if priority_labels else 2
         ready.append((priority, number, record, touches))
+        counts["executable"] += 1
     ready.sort(key=lambda item: (item[0], item[1]))
-    return ready, [message for _number, message in sorted(diagnostics)]
+    excluded = len(records) - counts["executable"]
+    summary = None
+    if excluded:
+        summary = (
+            f"Ready classification: total={len(records)}, "
+            f"executable={counts['executable']}, "
+            f"human-gated={counts['human-gated']}, "
+            f"epic={counts['epic']}, "
+            f"malformed/unsupported={counts['malformed/unsupported']}"
+        )
+    return (
+        ready,
+        [message for _number, message in sorted(diagnostics)],
+        summary,
+    )
+
+
+def _batch_ready_candidates(
+    records: list[dict],
+) -> tuple[list[tuple[int, int, dict, list[str]]], list[str]]:
+    ready, diagnostics, summary = _ready_candidates(records, batch=True)
+    if summary:
+        diagnostics.insert(0, summary)
+    return ready, diagnostics
 
 
 def select_batch(agents: list[str]) -> dict[str, object]:

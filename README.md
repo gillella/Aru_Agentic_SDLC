@@ -162,6 +162,22 @@ single-shot picker call, not a scheduler, daemon, worker handoff or presence
 registry, queue, capacity store, or polling loop; a later invocation reads a
 new authoritative snapshot.
 
+Board Ready count is lifecycle state, not executable capacity. From the same
+Ready snapshot used for selection, the picker deterministically classifies each
+card as executable, human-gated, epic, or malformed/unsupported. When cards are
+excluded, batch JSON reports one aggregate `Ready classification:` diagnostic
+for the whole activation; it is not copied into individual lanes. A legacy
+single-agent call adds that aggregate only when exclusion leaves the result
+idle. Batch classification retains its stricter issue-number and `touches:`
+validation; single-agent selection retains its legacy field handling. Per-card
+malformed metadata diagnostics remain ordered by issue number.
+If a card is both `needs-human` and `type:epic`, human-gated takes precedence so
+the aggregate counts remain a partition of the snapshot.
+
+An idle result is terminal for that event-driven activation. Its diagnostics
+explain why visible Ready cards may not be executable; they do not authorize
+automatic triage, board repair, or another picker tick.
+
 Work only in the worktree reported by `create_branch.py`. After focused local
 verification, publish the branch and open the PR through `create_pr.py`. Merge
 only after exact-head CI and the assigned authoritative review are complete.

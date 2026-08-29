@@ -40,6 +40,38 @@ def test_triage_rejects_ambiguous_or_unsupported_priority(labels, diagnostic):
     assert triage_backlog.evaluate(backlog_issue(*labels)) == [diagnostic]
 
 
+@pytest.mark.parametrize(
+    ("label", "diagnostic"),
+    [
+        ("needs-human", "needs-human issues cannot enter Ready"),
+        ("type:epic", "type:epic issues cannot enter Ready"),
+    ],
+)
+def test_triage_rejects_non_executable_work(label, diagnostic):
+    assert triage_backlog.evaluate(backlog_issue(label)) == [diagnostic]
+
+
+def test_triage_does_not_promote_human_gated_or_epic_issues(monkeypatch):
+    records = [
+        {**backlog_issue("type:epic"), "number": 4},
+        {**backlog_issue("needs-human"), "number": 3},
+    ]
+    monkeypatch.setattr(triage_backlog, "list_issues", lambda **_: records)
+
+    def unexpected_promotion(_number, _status):
+        raise AssertionError("non-executable work must not enter Ready")
+
+    monkeypatch.setattr(triage_backlog, "set_status", unexpected_promotion)
+
+    assert triage_backlog.triage(promote_all=True) == {
+        "promoted": [],
+        "rejected": {
+            3: ["needs-human issues cannot enter Ready"],
+            4: ["type:epic issues cannot enter Ready"],
+        },
+    }
+
+
 def test_triage_promotes_one_complete_issue(monkeypatch):
     records = [
         {"number": 2, "title": "blocked"},

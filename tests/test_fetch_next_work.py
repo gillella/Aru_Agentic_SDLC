@@ -138,6 +138,21 @@ def test_select_treats_missing_priority_as_p2(monkeypatch):
     }
 
 
+def test_select_preserves_legacy_malformed_touches_behavior(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [ready_issue(21, "priority:p0", body="")],
+    )
+
+    assert fetch_next_work.select("codex-sol56-issue499") == {
+        "type": "issue",
+        "issue": 21,
+        "title": "issue 21",
+    }
+
+
 def test_select_skips_bad_priority_and_returns_scoped_diagnostic(monkeypatch):
     monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
     monkeypatch.setattr(
@@ -170,9 +185,37 @@ def test_select_returns_idle_diagnostic_when_only_priority_is_bad(monkeypatch):
     assert fetch_next_work.select("codex-sol56-issue499") == {
         "type": "idle",
         "diagnostics": [
+            "Ready classification: total=1, executable=0, human-gated=0, "
+            "epic=0, malformed/unsupported=1",
             "Ready issue #22 has contradictory or unsupported priority labels; skipped"
         ],
     }
+
+
+def test_select_explains_seven_ready_with_zero_executable_from_one_snapshot(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: calls.append("issues")
+        or [
+            *(ready_issue(number, "needs-human") for number in range(1, 6)),
+            ready_issue(6, "type:epic"),
+            ready_issue(7, "type:epic"),
+        ],
+    )
+
+    assert fetch_next_work.select("codex-sol56-issue531") == {
+        "type": "idle",
+        "diagnostics": [
+            "Ready classification: total=7, executable=0, human-gated=5, "
+            "epic=2, malformed/unsupported=0"
+        ],
+    }
+    assert calls == ["issues"]
 
 
 def test_select_wait_path_does_not_call_review_thread_graphql(monkeypatch):
@@ -522,6 +565,8 @@ def test_batch_diagnostics_are_ordered_by_numeric_issue_number(monkeypatch):
     result = fetch_next_work.select_batch(["agent-a", "agent-b"])
 
     assert result["diagnostics"] == [
+        "Ready classification: total=3, executable=0, human-gated=0, "
+        "epic=0, malformed/unsupported=3",
         "Ready issue #7 has contradictory or unsupported priority labels; skipped",
         "Ready issue #12 has invalid touches: touches: contains an unsafe path; skipped",
         "Ready issue #40 has invalid touches: issue must contain exactly one "
@@ -551,9 +596,76 @@ def test_batch_skips_malformed_touches_with_diagnostics(monkeypatch):
         {"agent": "agent-b", "work": {"type": "idle"}},
     ]
     assert result["diagnostics"] == [
+        "Ready classification: total=3, executable=1, human-gated=0, "
+        "epic=0, malformed/unsupported=2",
         "Ready issue #1 has invalid touches: issue must contain exactly one "
         "touches: declaration; skipped",
         "Ready issue #2 has invalid touches: touches: contains an unsafe path; skipped",
+    ]
+
+
+def test_batch_reports_one_aggregate_for_seven_ready_with_zero_executable(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        fetch_next_work, "open_prs", lambda: calls.append("prs") or []
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: calls.append("issues")
+        or [
+            *(ready_issue(number, "needs-human") for number in range(1, 6)),
+            ready_issue(6, "type:epic"),
+            ready_issue(7, "type:epic"),
+        ],
+    )
+
+    result = fetch_next_work.select_batch(
+        ["agent-a", "agent-b", "agent-c", "agent-d"]
+    )
+
+    assert result["lanes"] == [
+        {"agent": agent, "work": {"type": "idle"}}
+        for agent in ("agent-a", "agent-b", "agent-c", "agent-d")
+    ]
+    assert result["diagnostics"] == [
+        "Ready classification: total=7, executable=0, human-gated=5, "
+        "epic=2, malformed/unsupported=0"
+    ]
+    assert calls == ["prs", "issues"]
+
+
+def test_batch_classification_is_deterministic_for_mixed_ready_cards(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(5, "priority:urgent"),
+            ready_issue(4, body=""),
+            ready_issue(3, "type:epic"),
+            ready_issue(2, "needs-human", "type:epic"),
+            ready_issue(1, "priority:p0", body="touches: safe.py"),
+        ],
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert result["lanes"] == [
+        {
+            "agent": "agent-a",
+            "work": {"type": "issue", "issue": 1, "title": "issue 1"},
+        },
+        {"agent": "agent-b", "work": {"type": "idle"}},
+    ]
+    assert result["diagnostics"] == [
+        "Ready classification: total=5, executable=1, human-gated=1, "
+        "epic=1, malformed/unsupported=2",
+        "Ready issue #4 has invalid touches: issue must contain exactly one "
+        "touches: declaration; skipped",
+        "Ready issue #5 has contradictory or unsupported priority labels; skipped",
     ]
 
 
