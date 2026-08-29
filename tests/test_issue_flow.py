@@ -17,62 +17,37 @@ def _ok_result():
 
 def backlog_issue(*labels: str) -> dict[str, Any]:
     return {
-        "number": 3,
-        "title": "ready",
+        "number": 3, "title": "ready", "state": "OPEN",
         "body": "## Acceptance Criteria\n\n- [ ] Complete the fix.\n\ntouches: scripts/example.py",
-        "state": "OPEN",
         "labels": [{"name": label} for label in labels],
     }
 
 
-def epic_body(
-    *,
-    children: list[int] | None = None,
-    policy: str | None = "children-only",
-    depends_on: list[int] | None = None,
-) -> str:
-    lines = ["## Child Issues"]
-    for number in children or [91, 92]:
-        lines.append(f"- #{number}")
+def epic_body(*, children: list[int] | None = None, policy: str | None = "children-only", depends_on: list[int] | None = None) -> str:
+    lines = ["## Child Issues"] + [f"- #{n}" for n in (children or [91, 92])]
     if policy is not None:
         lines.extend(["", f"epic-close-policy: {policy}"])
     if depends_on:
-        lines.extend(f"depends-on: #{number}" for number in depends_on)
+        lines.extend(f"depends-on: #{n}" for n in depends_on)
     return "\n".join(lines) + "\n"
 
 
 def epic_record(
-    *,
-    number: int = 100,
-    children: list[int] | None = None,
-    policy: str | None = "children-only",
-    depends_on: list[int] | None = None,
-    labels: list[str] | None = None,
-    state: str = "OPEN",
+    *, number: int = 100, children: list[int] | None = None, policy: str | None = "children-only",
+    depends_on: list[int] | None = None, labels: list[str] | None = None, state: str = "OPEN",
 ) -> dict[str, Any]:
     return {
-        "number": number,
+        "number": number, "state": state,
         "body": epic_body(children=children, policy=policy, depends_on=depends_on),
-        "state": state,
         "labels": [{"name": name} for name in (labels if labels is not None else ["type:epic", "status:backlog"])],
     }
 
 
-def child_snapshot(
-    number: int,
-    *,
-    state: str = "CLOSED",
-    status: str = "done",
-    repository: str = "owner/repo",
-) -> dict[str, Any]:
-    return {
-        "number": number,
-        "state": state,
-        "repository": repository,
-        "labels": [{"name": f"status:{status}"}],
-    }
+def child_snapshot(number: int, *, state: str = "CLOSED", status: str = "done", repository: str = "owner/repo") -> dict[str, Any]:
+    return {"number": number, "state": state, "repository": repository, "labels": [{"name": f"status:{status}"}]}
 
 
+_real_status_of = common.status_of
 _UNSET = object()
 
 
@@ -99,13 +74,34 @@ def mock_epic_context(
         monkeypatch.setattr(uis, "issue", fn)
         monkeypatch.setattr(common, "issue", fn)
     if status_fn is not None or status is not _UNSET:
-        sfn = status_fn if status_fn is not None else (lambda record: status)
-        monkeypatch.setattr(uis, "status_of", sfn)
-        monkeypatch.setattr(common, "status_of", sfn)
+        def default_sfn(record):
+            if status_fn is not None:
+                return status_fn(record)
+            st = _real_status_of(record)
+            if st is not None:
+                return st
+            if status is not _UNSET:
+                return status
+            return "Done"
+        monkeypatch.setattr(uis, "status_of", default_sfn)
+        monkeypatch.setattr(common, "status_of", default_sfn)
     if project_status_fn is not None or project_status is not _UNSET:
         pfn = project_status_fn if project_status_fn is not None else (lambda number, cwd=None: project_status)
         monkeypatch.setattr(uis, "project_item_status", pfn)
         monkeypatch.setattr(common, "project_item_status", pfn)
+
+
+def _mock_mutation_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    commands: list[Any] | None = None,
+    board_edit_fn: Any = None,
+) -> None:
+    run_fn = (lambda argv, **kw: commands.append(argv) or _ok_result()) if commands is not None else (lambda *a, **kw: _ok_result())
+    b_edit = board_edit_fn if board_edit_fn is not None else (lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "run", run_fn)
+        monkeypatch.setattr(mod, "ensure_label", lambda *a, **kw: None)
+        monkeypatch.setattr(mod, "board_edit", b_edit)
 
 
 @pytest.mark.parametrize(
@@ -149,19 +145,24 @@ def test_triage_promotes_one_complete_issue(monkeypatch):
     assert result["rejected"] == {2: ["missing"]}
 
 
+def _mock_claim_context(monkeypatch, snapshots, status="Ready"):
+    snap_iter = iter(snapshots) if isinstance(snapshots, (list, tuple)) else snapshots
+    status_iter = iter(status) if isinstance(status, (list, tuple)) else None
+    monkeypatch.setattr(claim_issue, "issue", lambda _num: next(snap_iter))
+    monkeypatch.setattr(claim_issue, "status_of", lambda _rec: next(status_iter) if status_iter else status)
+    monkeypatch.setattr(claim_issue, "contract_errors", lambda _rec: [])
+    monkeypatch.setattr(claim_issue, "unresolved_dependencies", lambda _rec: [])
+    monkeypatch.setattr(claim_issue, "ensure_label", lambda *_a, **_kw: None)
+
+
 @pytest.mark.parametrize("race", [False, True])
 def test_claim_settlement_and_race_rollback(monkeypatch, race):
-    snapshots = iter([
+    snapshots = [
         {"number": 7, "labels": [], "state": "OPEN"},
         {"number": 7, "labels": [{"name": "agent:codex-1"}] + ([{"name": "agent:codex-2"}] if race else []), "state": "OPEN"},
         {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"},
-    ])
-    monkeypatch.setattr(claim_issue, "issue", lambda _number: next(snapshots))
-    statuses_seen = iter(["Ready", "In Progress"])
-    monkeypatch.setattr(claim_issue, "status_of", lambda _record: next(statuses_seen))
-    monkeypatch.setattr(claim_issue, "contract_errors", lambda _record: [])
-    monkeypatch.setattr(claim_issue, "unresolved_dependencies", lambda _record: [])
-    monkeypatch.setattr(claim_issue, "ensure_label", lambda *_args, **_kwargs: None)
+    ]
+    _mock_claim_context(monkeypatch, snapshots, status=["Ready", "In Progress"])
     commands, statuses = [], []
     monkeypatch.setattr(claim_issue, "run", lambda argv, **_kwargs: commands.append(argv))
     monkeypatch.setattr(claim_issue, "set_status", lambda number, status: statuses.append((number, status)))
@@ -178,15 +179,11 @@ def test_claim_settlement_and_race_rollback(monkeypatch, race):
 
 
 def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys):
-    snapshots = iter([
+    snapshots = [
         {"number": 7, "labels": [], "state": "OPEN"},
         {"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"},
-    ])
-    monkeypatch.setattr(claim_issue, "issue", lambda _number: next(snapshots))
-    monkeypatch.setattr(claim_issue, "status_of", lambda _record: "Ready")
-    monkeypatch.setattr(claim_issue, "contract_errors", lambda _record: [])
-    monkeypatch.setattr(claim_issue, "unresolved_dependencies", lambda _record: [])
-    monkeypatch.setattr(claim_issue, "ensure_label", lambda *_args, **_kwargs: None)
+    ]
+    _mock_claim_context(monkeypatch, snapshots, status="Ready")
     commands = []
 
     def quota_on_rollback(argv, **_kwargs):
@@ -217,28 +214,20 @@ def test_agent_ids_are_bounded(agent):
 def test_epic_reconcile_success(monkeypatch):
     epic = epic_record()
     settled = {**epic, "state": "CLOSED", "labels": [{"name": "type:epic"}, {"name": "status:done"}]}
-    reads = iter([epic, settled])
+    reads = iter([epic, epic, settled])
+    project_statuses = iter(["Backlog", "Backlog", "Done"])
     calls = {"close": 0, "set_status": 0}
     mock_epic_context(
         monkeypatch,
         issue_fn=lambda number, cwd=None: next(reads),
         snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
         status_fn=lambda record: "Backlog" if record.get("state") == "OPEN" else "Done",
-        project_status_fn=lambda number, cwd=None: next(iter(["Backlog", "Done"])),
+        project_status_fn=lambda number, cwd=None: next(project_statuses),
     )
-    project_statuses = iter(["Backlog", "Done"])
-    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: next(project_statuses))
-    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: next(project_statuses))
-    monkeypatch.setattr(uis, "set_status", lambda number, status, **kwargs: calls.__setitem__("set_status", calls["set_status"] + 1))
-    monkeypatch.setattr(common, "set_status", lambda number, status, **kwargs: calls.__setitem__("set_status", calls["set_status"] + 1))
-
-    def fake_run(argv, **kwargs):
-        if argv[:3] == ["gh", "issue", "close"]:
-            calls["close"] += 1
-        return _ok_result()
-
-    monkeypatch.setattr(uis, "run", fake_run)
-    monkeypatch.setattr(common, "run", fake_run)
+    _mock_mutation_pipeline(monkeypatch)
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "set_status", lambda number, status, **kw: calls.__setitem__("set_status", calls["set_status"] + 1))
+        monkeypatch.setattr(mod, "run", lambda argv, **kw: (calls.__setitem__("close", calls["close"] + 1) if argv[:3] == ["gh", "issue", "close"] else None) or _ok_result())
     result = uis.apply_epic_reconciliation(100)
     assert result["applied"] is True and result["after"] == "Done" and result["state"] == "CLOSED"
     assert result["project_status"] == "Done" and calls == {"close": 1, "set_status": 1}
@@ -263,8 +252,7 @@ def test_epic_reconcile_adversarial_prestate_blocks_with_zero_mutations(monkeypa
         status=issue_status,
         project_status=project_status,
     )
-    monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no mutate")))
-    monkeypatch.setattr(uis, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no mutate")))
+    _mock_mutation_pipeline(monkeypatch)
 
     evidence = uis.epic_reconcile_evidence(100)
     assert evidence["blocked"] is True and evidence["closable"] is False
@@ -307,12 +295,7 @@ def test_epic_reconcile_adversarial_prestate_race_blocks_with_zero_close_or_done
         project_status_fn=lambda number, cwd=None: state["project_status"],
     )
     monkeypatch.setattr(uis, "epic_reconcile_evidence", fake_evidence)
-    monkeypatch.setattr(uis, "run", lambda argv, **kw: commands.append(argv) or _ok_result())
-    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or _ok_result())
-    monkeypatch.setattr(uis, "ensure_label", lambda *a, **kw: None)
-    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
-    monkeypatch.setattr(uis, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
-    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
+    _mock_mutation_pipeline(monkeypatch, commands)
 
     with pytest.raises(uis.StatusPreconditionError, match="must both equal expected 'Backlog'"):
         uis.apply_epic_reconciliation(100)
@@ -327,19 +310,13 @@ def test_epic_reconcile_adversarial_board_drift_blocks_with_zero_rollback(monkey
         monkeypatch,
         epic=epic_record(),
         snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
-        status_fn=lambda record: "Backlog" if record.get("number") == 100 or "type:epic" in [lbl.get("name") for lbl in record.get("labels", [])] else "Done",
-        project_status_fn=lambda number, cwd=None: "Backlog",
+        status="Backlog",
+        project_status="Backlog",
     )
-    monkeypatch.setattr(uis, "run", lambda argv, **kw: commands.append(argv) or _ok_result())
-    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or _ok_result())
-    monkeypatch.setattr(uis, "ensure_label", lambda *a, **kw: None)
-    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
-
-    def fake_board_edit(number, status, *a, **kw):
+    def fake_board(number, status, *a, **kw):
         raise common.StatusPreconditionError("issue #100 Project card status ('Ready') does not equal expected 'Backlog'")
 
-    monkeypatch.setattr(uis, "board_edit", fake_board_edit)
-    monkeypatch.setattr(common, "board_edit", fake_board_edit)
+    _mock_mutation_pipeline(monkeypatch, commands, board_edit_fn=fake_board)
 
     with pytest.raises(uis.StatusPreconditionError, match=r"Project card status \('Ready'\) does not equal expected 'Backlog'"):
         uis.apply_epic_reconciliation(100)
@@ -353,21 +330,17 @@ def test_epic_reconcile_issue_changes_to_ready_during_board_edit_blocks_on_final
     issue_reads = [
         epic_record(labels=["type:epic", "status:backlog"]),
         epic_record(labels=["type:epic", "status:backlog"]),
+        epic_record(labels=["type:epic", "status:backlog"]),
         epic_record(labels=["type:epic", "status:ready"]),
     ]
     mock_epic_context(
         monkeypatch,
         issue_fn=lambda number, cwd=None: issue_reads.pop(0) if issue_reads else epic_record(labels=["type:epic", "status:ready"]),
         snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
-        status_fn=lambda record: "Ready" if any(lbl.get("name") == "status:ready" for lbl in record.get("labels", [])) else ("Backlog" if record.get("number") == 100 or "type:epic" in [lbl.get("name") for lbl in record.get("labels", [])] else "Done"),
+        status="Backlog",
         project_status="Backlog",
     )
-    monkeypatch.setattr(uis, "run", lambda argv, **kw: commands.append(argv) or _ok_result())
-    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or _ok_result())
-    monkeypatch.setattr(uis, "ensure_label", lambda *a, **kw: None)
-    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
-    monkeypatch.setattr(uis, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
-    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
+    _mock_mutation_pipeline(monkeypatch, commands)
 
     with pytest.raises(uis.StatusPreconditionError, match=r"issue #100 status \('Ready'\) does not equal expected 'Backlog'"):
         uis.apply_epic_reconciliation(100)
@@ -382,15 +355,12 @@ def test_epic_reconcile_ensure_label_failure_does_not_invoke_rollback(monkeypatc
         monkeypatch,
         epic=epic_record(),
         snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
-        status_fn=lambda record: "Backlog" if record.get("number") == 100 or "type:epic" in [lbl.get("name") for lbl in record.get("labels", [])] else "Done",
+        status="Backlog",
         project_status="Backlog",
     )
-    monkeypatch.setattr(uis, "run", lambda argv, **kw: commands.append(argv) or _ok_result())
-    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or _ok_result())
-    monkeypatch.setattr(uis, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
-    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
-    monkeypatch.setattr(uis, "ensure_label", lambda *a, **kw: (_ for _ in ()).throw(common.KernelError("gh label create failed: network timeout")))
-    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: (_ for _ in ()).throw(common.KernelError("gh label create failed: network timeout")))
+    _mock_mutation_pipeline(monkeypatch, commands)
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "ensure_label", lambda *a, **kw: (_ for _ in ()).throw(common.KernelError("gh label create failed: network timeout")))
 
     with pytest.raises(uis.StatusPreconditionError, match="gh label create failed: network timeout"):
         uis.apply_epic_reconciliation(100)
@@ -408,8 +378,7 @@ def test_epic_reconcile_malformed_project_evidence_blocks_with_zero_mutations(mo
             uis.KernelError("Project Board card snapshot returned a GraphQL error")
         ),
     )
-    monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no mutate")))
-    monkeypatch.setattr(uis, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no mutate")))
+    _mock_mutation_pipeline(monkeypatch)
 
     evidence = uis.epic_reconcile_evidence(100)
     assert evidence["blocked"] is True
@@ -456,8 +425,7 @@ def test_epic_reconcile_check_reports_closable_without_mutation(monkeypatch):
         monkeypatch, epic=epic, snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
         status_fn=lambda record: "Backlog" if record is epic else "Done", project_status="Backlog",
     )
-    monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: mutations.append(("set_status", args)))
-    monkeypatch.setattr(uis, "run", lambda *args, **kwargs: mutations.append(("run", args)))
+    _mock_mutation_pipeline(monkeypatch, mutations)
 
     evidence = uis.epic_reconcile_evidence(100)
     assert evidence["closable"] is True and evidence["blocked"] is False
@@ -527,7 +495,7 @@ def test_epic_reconcile_mutation_failure_rolls_back(monkeypatch):
         status_fn=lambda record: "Backlog" if record.get("state") == "OPEN" else "Done",
         project_status="Backlog",
     )
-    monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: None)
+    _mock_mutation_pipeline(monkeypatch)
 
     def fail_close(argv, **kwargs):
         commands.append(argv)
@@ -545,28 +513,66 @@ def test_epic_reconcile_mutation_failure_rolls_back(monkeypatch):
     assert ["rollback"] in commands
 
 
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("## Child Issues\n- #1\n", "missing"),
+        ("epic-close-policy: children-only\n## Child Issues\n- #1\n", "missing"),
+        ("## Description\n```\nepic-close-policy: children-only\n```\n## Child Issues\n- #1\n", "missing"),
+        ("> epic-close-policy: children-only\n## Child Issues\n- #1\n", "missing"),
+        ("## Child Issues\n- #1\n\n> epic-close-policy: children-only\n", "unexpected trailer content"),
+        ("## Child Issues\n- #1\n\n```\nepic-close-policy: children-only\n```\n", "unexpected trailer content"),
+        ("## Child Issues\nepic-close-policy: children-only\n- #1\n", "unexpected content"),
+        ("## Child Issues\n- #1\n\nepic-close-policy: children-only\nepic-close-policy: manual\n", "ambiguous"),
+        ("## Child Issues\n- #1\n\n## Child Issues\n- #2\n", "more than one ## Child Issues section"),
+    ],
+)
+def test_epic_close_policy_adversarial_binding(body, message):
+    with pytest.raises(uis.KernelError, match=message):
+        uis.epic_close_policy(body)
+
+
 def test_epic_close_policy_requires_one_declaration():
     assert uis.epic_close_policy("## Child Issues\n- #1\n\nepic-close-policy: children-only\n") == "children-only"
-    with pytest.raises(uis.KernelError, match="missing"):
-        uis.epic_close_policy("## Child Issues\n- #1\n")
-    with pytest.raises(uis.KernelError, match="ambiguous"):
-        uis.epic_close_policy("epic-close-policy: children-only\nepic-close-policy: manual\n")
+
+
+@pytest.mark.parametrize(
+    ("drifted_snapshot", "match"),
+    [
+        (child_snapshot(91, state="OPEN", status="done"), "child #91 is not closed"),
+        (child_snapshot(91, state="CLOSED", status="ready"), "child #91 is not status:done"),
+    ],
+)
+def test_epic_reconcile_adversarial_child_drift_blocks_with_zero_mutations(monkeypatch, drifted_snapshot, match):
+    """When a child reopens or loses status:done before apply, fresh evidence blocks with StatusPreconditionError and zero mutations."""
+    commands = []
+    snapshots_seq = [
+        {91: child_snapshot(91, state="CLOSED", status="done")},
+        {91: drifted_snapshot},
+    ]
+    mock_epic_context(monkeypatch, epic=epic_record(children=[91]), status="Backlog", project_status="Backlog")
+    monkeypatch.setattr(uis, "child_issue_snapshots", lambda numbers, cwd=None: snapshots_seq.pop(0))
+    _mock_mutation_pipeline(monkeypatch, commands)
+    with pytest.raises(uis.StatusPreconditionError, match=match):
+        uis.apply_epic_reconciliation(100)
+    assert commands == []
 
 
 def test_apply_epic_reconciliation_read_back_fails_closed(monkeypatch):
     epic = epic_record()
     final = {**epic, "state": "OPEN", "labels": [{"name": "type:epic"}, {"name": "status:done"}]}
-    readbacks = iter([epic, final])
+    readbacks = iter([epic, epic, final])
     rollback = []
     mock_epic_context(
         monkeypatch,
         issue_fn=lambda number, cwd=None: next(readbacks),
         snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
-        status_fn=lambda record: "Backlog" if record.get("state") == "OPEN" else "Done",
+        status="Backlog",
     )
-    monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(uis, "run", lambda *args, **kwargs: None)
-    project_statuses = iter(["Backlog", "Done"])
+    _mock_mutation_pipeline(monkeypatch)
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "set_status", lambda *a, **kw: None)
+    project_statuses = iter(["Backlog", "Backlog", "Done"])
     monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: next(project_statuses))
     monkeypatch.setattr(uis, "_rollback_epic_reconciliation", lambda *args, **kwargs: rollback.append(kwargs))
 
@@ -580,7 +586,7 @@ def test_epic_rollback_reopens_and_reverts_status_when_close_settled_but_card_di
     """Exercise the real rollback function end-to-end, restoring exact Backlog."""
     epic = epic_record()
     final = {**epic, "state": "CLOSED", "labels": [{"name": "type:epic"}, {"name": "status:done"}]}
-    reads = iter([epic, final, final, epic])
+    reads = iter([epic, epic, final, final, epic])
     run_calls = []
     mock_epic_context(
         monkeypatch,
@@ -589,11 +595,9 @@ def test_epic_rollback_reopens_and_reverts_status_when_close_settled_but_card_di
         status_fn=lambda record: "Done" if any(lbl.get("name") == "status:done" for lbl in record.get("labels", [])) else "Backlog",
         project_status="Backlog",
     )
-    monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(uis, "ensure_label", lambda *args, **kwargs: None)
-    monkeypatch.setattr(common, "ensure_label", lambda *args, **kwargs: None)
-    monkeypatch.setattr(uis, "run", lambda argv, **kwargs: run_calls.append(argv) or _ok_result())
-    monkeypatch.setattr(common, "run", lambda argv, **kwargs: run_calls.append(argv) or _ok_result())
+    _mock_mutation_pipeline(monkeypatch, run_calls)
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "set_status", lambda *a, **kw: None)
 
     with pytest.raises(uis.KernelError, match="did not settle"):
         uis.apply_epic_reconciliation(100)
@@ -613,7 +617,7 @@ def test_epic_rollback_reopen_decision_is_authoritative_not_a_local_flag(
     based on a fresh authoritative read, never a local success flag."""
     epic = epic_record()
     final = {**epic, "state": remote_state_after_raise, "labels": [{"name": "type:epic"}, {"name": "status:done"}]}
-    reads = iter([epic, final, final, epic])
+    reads = iter([epic, epic, final, final, epic])
     run_calls = []
     mock_epic_context(
         monkeypatch,
@@ -622,9 +626,9 @@ def test_epic_rollback_reopen_decision_is_authoritative_not_a_local_flag(
         status_fn=lambda record: "Done" if any(lbl.get("name") == "status:done" for lbl in record.get("labels", [])) else "Backlog",
         project_status="Backlog",
     )
-    monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(uis, "ensure_label", lambda *args, **kwargs: None)
-    monkeypatch.setattr(common, "ensure_label", lambda *args, **kwargs: None)
+    _mock_mutation_pipeline(monkeypatch, run_calls)
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "set_status", lambda *a, **kw: None)
 
     def fail_close(argv, **kwargs):
         run_calls.append(argv)
@@ -632,8 +636,8 @@ def test_epic_rollback_reopen_decision_is_authoritative_not_a_local_flag(
             raise uis.KernelError("close failed")
         return _ok_result()
 
-    monkeypatch.setattr(uis, "run", fail_close)
-    monkeypatch.setattr(common, "run", fail_close)
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "run", fail_close)
     with pytest.raises(uis.KernelError, match="close failed"):
         uis.apply_epic_reconciliation(100)
 
@@ -717,12 +721,9 @@ def test_epic_rollback_detects_project_done_after_ambiguous_set_status_item_edit
         snapshots={91: child_snapshot(91), 92: child_snapshot(92)},
         project_status_fn=lambda number, cwd=None: state["project_status"],
     )
-    monkeypatch.setattr(uis, "run", fake_run)
-    monkeypatch.setattr(common, "run", fake_run)
-    monkeypatch.setattr(uis, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
-    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
-    monkeypatch.setattr(uis, "ensure_label", lambda *a, **kw: None)
-    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
+    _mock_mutation_pipeline(monkeypatch)
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "run", fake_run)
 
     with pytest.raises(uis.KernelError, match="project item-edit network error after commit"):
         uis.apply_epic_reconciliation(100)
@@ -750,16 +751,11 @@ def test_epic_rollback_ambiguous_repair_command_lands_then_raises_settles_on_rea
                 raise uis.KernelError("rollback item-edit connection reset after commit")
         return _ok_result()
 
-    monkeypatch.setattr(uis, "run", fake_run)
-    monkeypatch.setattr(common, "run", fake_run)
-    monkeypatch.setattr(uis, "issue", lambda number, cwd=None: {"number": number, "state": state["issue_state"], "labels": [{"name": name} for name in state["issue_labels"]]})
-    monkeypatch.setattr(common, "issue", lambda number, cwd=None: {"number": number, "state": state["issue_state"], "labels": [{"name": name} for name in state["issue_labels"]]})
-    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: state["project_status"])
-    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: state["project_status"])
-    monkeypatch.setattr(uis, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
-    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "i1", "--single-select-option-id", f"opt_{status.lower()}"])
-    monkeypatch.setattr(uis, "ensure_label", lambda *a, **kw: None)
-    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
+    _mock_mutation_pipeline(monkeypatch)
+    for mod in (uis, common):
+        monkeypatch.setattr(mod, "run", fake_run)
+        monkeypatch.setattr(mod, "issue", lambda number, cwd=None: {"number": number, "state": state["issue_state"], "labels": [{"name": name} for name in state["issue_labels"]]})
+        monkeypatch.setattr(mod, "project_item_status", lambda number, cwd=None: state["project_status"])
 
     uis._rollback_epic_reconciliation(100, original=uis.KernelError("original failure"))
 

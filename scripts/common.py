@@ -601,16 +601,7 @@ def _project_card_snapshot(
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
     project_id, node_id = _project_card_identity(number, cwd=cwd)
     data = gh_json(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={_PROJECT_CARD_QUERY}",
-            "-F",
-            f"issue={node_id}",
-            "-F",
-            f"project={project_id}",
-        ],
+        ["api", "graphql", "-f", f"query={_PROJECT_CARD_QUERY}", "-F", f"issue={node_id}", "-F", f"project={project_id}"],
         cwd=cwd,
         auth=PROJECT_AUTH,
     )
@@ -646,18 +637,42 @@ def _project_card_snapshot(
     return project_id, matches[0], status_field if isinstance(status_field, dict) else None
 
 
-def _item_status(item: dict[str, Any]) -> str | None:
+def _validated_status_field(status_field: Any) -> dict[str, Any]:
+    if (
+        not isinstance(status_field, dict)
+        or status_field.get("name") != "Status"
+        or not isinstance(status_field.get("id"), str)
+        or not status_field["id"]
+        or not isinstance(status_field.get("options"), list)
+    ):
+        raise KernelError("issue or Status field is ambiguous on the linked Project Board")
+    if any(
+        not isinstance(opt, dict)
+        or not isinstance(opt.get("id"), str)
+        or not opt["id"]
+        or not isinstance(opt.get("name"), str)
+        for opt in status_field["options"]
+    ):
+        raise KernelError("Project Board Status options are malformed")
+    return status_field
+
+
+def _item_status(item: dict[str, Any], status_field: Any) -> str | None:
+    valid_field = _validated_status_field(status_field)
     field_value = item.get("fieldValueByName")
     if field_value is None:
         return None
     if not isinstance(field_value, dict) or not isinstance(field_value.get("name"), str):
         raise KernelError("Project Board Status field value is malformed")
-    return field_value["name"]
+    name = field_value["name"]
+    if not any(opt["name"] == name for opt in valid_field["options"]):
+        raise KernelError("Project Board Status field value is malformed")
+    return name
 
 
 def project_item_status(number: int, *, cwd: str | Path | None = None) -> str | None:
-    _project_id, item, _status_field = _project_card_snapshot(number, cwd=cwd)
-    return _item_status(item)
+    _project_id, item, status_field = _project_card_snapshot(number, cwd=cwd)
+    return _item_status(item, status_field)
 
 
 def board_edit(
@@ -669,26 +684,15 @@ def board_edit(
 ) -> list[str]:
     try:
         project_id, item, status_field = _project_card_snapshot(number, cwd=cwd)
+        valid_field = _validated_status_field(status_field)
         if expected_current is not None:
-            current_status = _item_status(item)
+            current_status = _item_status(item, valid_field)
             if current_status != expected_current:
                 raise StatusPreconditionError(
                     f"issue #{number} Project card status ({current_status!r}) "
                     f"does not equal expected {expected_current!r}"
                 )
-        if (
-            not isinstance(status_field, dict) or status_field.get("name") != "Status"
-            or not isinstance(status_field.get("id"), str) or not status_field["id"]
-            or not isinstance(status_field.get("options"), list)
-        ):
-            raise KernelError("issue or Status field is ambiguous on the linked Project Board")
-        if any(
-            not isinstance(opt, dict) or not isinstance(opt.get("id"), str)
-            or not opt["id"] or not isinstance(opt.get("name"), str)
-            for opt in status_field["options"]
-        ):
-            raise KernelError("Project Board Status options are malformed")
-        options = [option for option in status_field["options"] if option["name"] == status]
+        options = [option for option in valid_field["options"] if option["name"] == status]
         if len(options) != 1:
             raise KernelError(f"Project Board has no unique {status!r} option")
     except StatusPreconditionError:
@@ -698,16 +702,11 @@ def board_edit(
             raise StatusPreconditionError(str(exc)) from exc
         raise
     return [
-        "project",
-        "item-edit",
-        "--id",
-        str(item["id"]),
-        "--project-id",
-        project_id,
-        "--field-id",
-        str(status_field["id"]),
-        "--single-select-option-id",
-        str(options[0]["id"]),
+        "project", "item-edit",
+        "--id", str(item["id"]),
+        "--project-id", project_id,
+        "--field-id", str(valid_field["id"]),
+        "--single-select-option-id", str(options[0]["id"]),
     ]
 
 

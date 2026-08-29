@@ -347,7 +347,11 @@ def board_payload(
         field = {
             "id": "PVTSSF_status",
             "name": "Status",
-            "options": [{"id": "ready-option", "name": "Ready"}, {"id": "done-option", "name": "Done"}],
+            "options": [
+                {"id": "backlog-option", "name": "Backlog"},
+                {"id": "ready-option", "name": "Ready"},
+                {"id": "done-option", "name": "Done"},
+            ],
         }
     return {
         "data": {
@@ -478,6 +482,9 @@ def test_project_item_status_returns_none_without_a_status_value(monkeypatch):
         (project_status_payload(items=[]), "ambiguous"),
         (project_status_payload(items=[{"id": "PVTI_7a", "project": {"id": "PVT_1"}, "fieldValueByName": None}, {"id": "PVTI_7b", "project": {"id": "PVT_1"}, "fieldValueByName": None}]), "ambiguous"),
         (project_status_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {}}]), "malformed"),
+        (board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}], field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "", "name": "Done"}]}), "options are malformed"),
+        (board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "UnknownOption"}}]), "malformed"),
+        ({"data": {"issueNode": {"projectItems": {"nodes": [{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}], "pageInfo": {"hasNextPage": False}}}, "projectNode": {"field": None}}}, "ambiguous"),
     ],
 )
 def test_project_item_status_fails_closed_on_incomplete_evidence(monkeypatch, payload, message):

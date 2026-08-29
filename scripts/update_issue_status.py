@@ -33,20 +33,26 @@ EPIC_CLOSE_POLICY_MANUAL = "manual"
 EPIC_CLOSE_POLICY_CHILDREN_ONLY = "children-only"
 
 
-def epic_close_policy(body: str) -> str:
-    policies = re.findall(r"(?im)^\s*epic-close-policy:\s*(\S+)\s*$", body or "")
-    if not policies:
-        raise KernelError("epic-close-policy is missing")
-    if len(policies) > 1:
-        raise KernelError("epic-close-policy is ambiguous")
-    return policies[0]
+_EPIC_POLICY_LINE_RE = re.compile(r"(?i)^epic-close-policy:\s*(\S+)\s*$")
+_DEPENDS_ON_LINE_RE = re.compile(r"(?i)^depends-on:\s*#\d+\s*$")
+_CHILD_LINE_RE = re.compile(r"^-\s*#(\d+)\s*$")
 
 
-_TRAILER_DECLARATION_RE = re.compile(r"(?i)^epic-close-policy:\s*\S+\s*$|^depends-on:\s*#\d+\s*$")
+def _child_issues_section(body: str) -> str:
+    sections = re.findall(
+        r"(?ims)^##\s+Child Issues\s*$\n(.*?)(?=^##\s+|\Z)",
+        body or "",
+    )
+    if not sections:
+        raise KernelError("epic must contain a ## Child Issues section")
+    if len(sections) > 1:
+        raise KernelError("epic contains more than one ## Child Issues section")
+    return sections[0]
 
 
-def _parse_child_issue_lines(section: str) -> list[int]:
+def _parse_child_section_elements(section: str) -> tuple[list[int], list[str]]:
     numbers: list[int] = []
+    policies: list[str] = []
     trailer_started = False
     for line in section.splitlines():
         stripped = line.strip()
@@ -57,28 +63,35 @@ def _parse_child_issue_lines(section: str) -> list[int]:
         if trailer_started:
             if stripped.startswith("-"):
                 raise KernelError("## Child Issues contains an interrupted child list")
-            if _TRAILER_DECLARATION_RE.match(stripped):
+            policy_match = _EPIC_POLICY_LINE_RE.fullmatch(stripped)
+            if policy_match:
+                policies.append(policy_match.group(1))
+                continue
+            if _DEPENDS_ON_LINE_RE.fullmatch(stripped):
                 continue
             raise KernelError("## Child Issues contains unexpected trailer content")
         if not stripped.startswith("-"):
             raise KernelError("## Child Issues contains unexpected content")
-        child = re.fullmatch(r"-\s*#(\d+)\s*", stripped)
-        if not child:
+        child_match = _CHILD_LINE_RE.fullmatch(stripped)
+        if not child_match:
             raise KernelError("## Child Issues contains a malformed child reference")
-        numbers.append(int(child.group(1)))
-    return numbers
+        numbers.append(int(child_match.group(1)))
+    return numbers, policies
+
+
+def epic_close_policy(body: str) -> str:
+    section = _child_issues_section(body)
+    _numbers, policies = _parse_child_section_elements(section)
+    if not policies:
+        raise KernelError("epic-close-policy is missing")
+    if len(policies) > 1:
+        raise KernelError("epic-close-policy is ambiguous")
+    return policies[0]
 
 
 def parse_child_issues(body: str) -> list[int]:
-    sections = re.findall(
-        r"(?ims)^##\s+Child Issues\s*$\n(.*?)(?=^##\s+|\Z)",
-        body or "",
-    )
-    if not sections:
-        raise KernelError("epic must contain a ## Child Issues section")
-    if len(sections) > 1:
-        raise KernelError("epic contains more than one ## Child Issues section")
-    numbers = _parse_child_issue_lines(sections[0])
+    section = _child_issues_section(body)
+    numbers, _policies = _parse_child_section_elements(section)
     if not numbers:
         raise KernelError("## Child Issues must list at least one child issue")
     if len(numbers) != len(set(numbers)):
@@ -468,6 +481,13 @@ def apply_epic_reconciliation(
     if evidence["blocked"]:
         raise KernelError("; ".join(evidence["blockers"]))
 
+    fresh = epic_reconcile_evidence(number, cwd=cwd)
+    if not fresh["closable"] or fresh != evidence:
+        reasons = fresh["blockers"] or ["epic evidence changed before apply"]
+        raise StatusPreconditionError(
+            f"epic #{number} evidence drifted before apply: {'; '.join(reasons)}"
+        )
+
     try:
         set_status(number, "Done", expected_current="Backlog", cwd=cwd)
         run(["gh", "issue", "close", str(number), "--reason", "completed"], cwd=cwd)
@@ -496,7 +516,7 @@ def apply_epic_reconciliation(
         "after": after_status,
         "state": after_state,
         "project_status": after_project_status,
-        "children": evidence["children"],
+        "children": fresh["children"],
     }
 
 
