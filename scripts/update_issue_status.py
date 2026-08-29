@@ -38,20 +38,31 @@ _DEPENDS_ON_LINE_RE = re.compile(r"(?i)^depends-on:\s*#\d+\s*$")
 _CHILD_LINE_RE = re.compile(r"^-\s*#(\d+)\s*$")
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 _ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$")
+_UNCHECKED_TASK_RE = re.compile(r"^-\s*\[\s\]\s*\S")
 
 
 def _is_indented_code(raw: str) -> bool:
     return raw[:4] == "    " or raw[:1] == "\t"
 
 
-def _scan_child_issue_sections(body: str) -> list[list[str]]:
-    """Collect the body lines under each top-level ``## Child Issues`` heading.
+def _fence_closes(fence: str, stripped: str, fence_hit: re.Match[str] | None) -> bool:
+    return (
+        fence_hit is not None
+        and stripped == fence_hit.group(1)
+        and fence_hit.group(1)[0] == fence[0]
+        and len(fence_hit.group(1)) >= len(fence)
+    )
+
+
+def _scan_h2_sections(body: str, title: str) -> list[list[str]]:
+    """Collect the body lines under each top-level ``## <title>`` heading.
 
     Fenced code (``` / ~~~, including never-closed fences), blockquotes, and
-    indented code can neither open a section nor contribute lines to one, so a
-    ``## Child Issues`` example embedded in prose can never authorise mechanical
+    indented code can neither open a section nor contribute a heading, so a
+    ``## <title>`` example embedded in prose can never authorise mechanical
     closure.
     """
+    want = title.strip().lower()
     sections: list[list[str]] = []
     current: list[str] | None = None
     fence: str | None = None
@@ -61,12 +72,7 @@ def _scan_child_issue_sections(body: str) -> list[list[str]]:
         if fence is not None:
             if current is not None:
                 current.append(raw)
-            if (
-                fence_hit is not None
-                and stripped == fence_hit.group(1)
-                and fence_hit.group(1)[0] == fence[0]
-                and len(fence_hit.group(1)) >= len(fence)
-            ):
+            if _fence_closes(fence, stripped, fence_hit):
                 fence = None
             continue
         if fence_hit is not None:
@@ -80,7 +86,7 @@ def _scan_child_issue_sections(body: str) -> list[list[str]]:
             else _ATX_HEADING_RE.match(raw)
         )
         if heading is not None and len(heading.group(1)) == 2:
-            if heading.group(2).strip().lower() == "child issues":
+            if heading.group(2).strip().lower() == want:
                 current = []
                 sections.append(current)
             else:
@@ -90,8 +96,35 @@ def _scan_child_issue_sections(body: str) -> list[list[str]]:
     return sections
 
 
+def unchecked_acceptance_criteria(body: str) -> list[str]:
+    """Real, unchecked ``- [ ]`` items under a top-level ``## Acceptance Criteria``.
+
+    Fenced code, blockquotes, and indented code inside the section are skipped so
+    a checklist *example* never blocks mechanical epic closure, while a genuine
+    unchecked criterion (checked items and code examples excepted) does.
+    """
+    unchecked: list[str] = []
+    for section in _scan_h2_sections(body or "", "acceptance criteria"):
+        fence: str | None = None
+        for raw in section:
+            stripped = raw.strip()
+            fence_hit = _FENCE_RE.match(stripped)
+            if fence is not None:
+                if _fence_closes(fence, stripped, fence_hit):
+                    fence = None
+                continue
+            if fence_hit is not None:
+                fence = fence_hit.group(1)
+                continue
+            if stripped.startswith(">") or _is_indented_code(raw):
+                continue
+            if _UNCHECKED_TASK_RE.match(stripped):
+                unchecked.append(stripped)
+    return unchecked
+
+
 def _child_issues_section(body: str) -> str:
-    sections = _scan_child_issue_sections(body or "")
+    sections = _scan_h2_sections(body or "", "child issues")
     if not sections:
         raise KernelError("epic must contain a ## Child Issues section")
     if len(sections) > 1:
@@ -394,6 +427,13 @@ def epic_reconcile_evidence(
     for dependency in unresolved_dependencies(record, cwd=cwd):
         blockers.append(f"open depends-on: #{dependency}")
 
+    unchecked = unchecked_acceptance_criteria(body)
+    if unchecked:
+        blockers.append(
+            f"## Acceptance Criteria has {len(unchecked)} unchecked item(s): "
+            + "; ".join(unchecked[:5])
+        )
+
     children, policy_blockers = _epic_policy_and_children(body, cwd=cwd)
     blockers.extend(policy_blockers)
 
@@ -539,15 +579,42 @@ def _closure_invariant_drift(
             drift.append("epic-close-policy changed from children-only")
     except KernelError as exc:
         drift.append(f"epic-close-policy drift: {exc}")
+    expected_children: dict[str, Any] = evidence.get("children") or {}
     try:
-        expected_children = sorted(int(key) for key in evidence["children"])
-        if parse_child_issues(body) != expected_children:
+        expected_numbers = sorted(int(key) for key in expected_children)
+    except (TypeError, ValueError):
+        expected_numbers = []
+        drift.append("pre-mutation child evidence is unreadable")
+    try:
+        if parse_child_issues(body) != expected_numbers:
             drift.append("## Child Issues roster changed")
     except KernelError as exc:
         drift.append(f"## Child Issues drift: {exc}")
+    if expected_numbers:
+        drift.extend(_child_state_drift(expected_numbers, expected_children, cwd=cwd))
+    if unchecked_acceptance_criteria(body):
+        drift.append("## Acceptance Criteria gained an unchecked item after settlement")
     if unresolved_dependencies(record, cwd=cwd):
         drift.append("new open depends-on discovered")
     return drift
+
+
+def _child_state_drift(
+    child_numbers: list[int],
+    pre_mutation: dict[str, Any],
+    *,
+    cwd: str | Path | None = None,
+) -> list[str]:
+    """Reread the declared children once after settlement and require their exact
+    state/status evidence to equal the pre-mutation evidence; a child reopen or
+    status loss during the transaction is drift the caller must roll back."""
+    after, blockers = _child_reconcile_evidence(child_numbers, cwd=cwd)
+    if blockers:
+        return ["child issue evidence regressed after settlement: " + "; ".join(blockers)]
+    changed = sorted(key for key in pre_mutation if after.get(key) != pre_mutation.get(key))
+    if changed:
+        return ["child issue state/status changed after settlement for #" + ", #".join(changed)]
+    return []
 
 
 def _verify_closure_invariants(
@@ -560,8 +627,10 @@ def _verify_closure_invariants(
 
     The parent is now expected CLOSED / Done on both the issue and the linked
     Project card, but the close-policy, ``type:epic`` label, human gate,
-    dependency set, and child roster must be unchanged from the pre-mutation
-    evidence. Any drift is surfaced so the caller can run authoritative rollback.
+    dependency set, child roster, the declared children's exact state/status
+    evidence (one bounded reread), and the ``## Acceptance Criteria`` checklist
+    must be unchanged from the pre-mutation evidence. Any drift is surfaced so
+    the caller can run authoritative rollback.
     """
     record = issue(number, cwd=cwd)
     after_state = str(record.get("state") or "")
