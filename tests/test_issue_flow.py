@@ -91,6 +91,15 @@ def mock_epic_context(
         monkeypatch.setattr(common, "project_item_status", pfn)
 
 
+def _tripwire_no_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail loudly (not with a caught KernelError) if any mutation is attempted."""
+    def _boom(*_a: Any, **_kw: Any) -> Any:
+        raise AssertionError("blocked epic reconciliation must not mutate")
+    for mod in (uis, common):
+        for name in ("run", "set_status", "board_edit", "ensure_label"):
+            monkeypatch.setattr(mod, name, _boom)
+
+
 def _mock_mutation_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     commands: list[Any] | None = None,
@@ -214,8 +223,8 @@ def test_agent_ids_are_bounded(agent):
 def test_epic_reconcile_success(monkeypatch):
     epic = epic_record()
     settled = {**epic, "state": "CLOSED", "labels": [{"name": "type:epic"}, {"name": "status:done"}]}
-    reads = iter([epic, epic, settled])
-    project_statuses = iter(["Backlog", "Backlog", "Done"])
+    reads = iter([epic, settled])
+    project_statuses = iter(["Backlog", "Done"])
     calls = {"close": 0, "set_status": 0}
     mock_epic_context(
         monkeypatch,
@@ -252,7 +261,7 @@ def test_epic_reconcile_adversarial_prestate_blocks_with_zero_mutations(monkeypa
         status=issue_status,
         project_status=project_status,
     )
-    _mock_mutation_pipeline(monkeypatch)
+    _tripwire_no_mutation(monkeypatch)
 
     evidence = uis.epic_reconcile_evidence(100)
     assert evidence["blocked"] is True and evidence["closable"] is False
@@ -324,8 +333,9 @@ def test_epic_reconcile_adversarial_board_drift_blocks_with_zero_rollback(monkey
     assert commands == []
 
 
-def test_epic_reconcile_issue_changes_to_ready_during_board_edit_blocks_on_final_reread(monkeypatch):
-    """When issue status drifts to Ready during board_edit, final issue reread blocks with zero rollback."""
+def test_epic_reconcile_issue_drifts_to_ready_blocks_in_pre_mutation_check_with_zero_mutations(monkeypatch):
+    """When the issue status drifts to Ready after evidence collection, the pre-mutation
+    recollection inside set_status fails closed before any issue or card mutation."""
     commands = []
     issue_reads = [
         epic_record(labels=["type:epic", "status:backlog"]),
@@ -342,7 +352,7 @@ def test_epic_reconcile_issue_changes_to_ready_during_board_edit_blocks_on_final
     )
     _mock_mutation_pipeline(monkeypatch, commands)
 
-    with pytest.raises(uis.StatusPreconditionError, match=r"issue #100 status \('Ready'\) does not equal expected 'Backlog'"):
+    with pytest.raises(uis.StatusPreconditionError, match=r"epic #100 evidence drifted before apply"):
         uis.apply_epic_reconciliation(100)
 
     assert commands == []
@@ -378,7 +388,7 @@ def test_epic_reconcile_malformed_project_evidence_blocks_with_zero_mutations(mo
             uis.KernelError("Project Board card snapshot returned a GraphQL error")
         ),
     )
-    _mock_mutation_pipeline(monkeypatch)
+    _tripwire_no_mutation(monkeypatch)
 
     evidence = uis.epic_reconcile_evidence(100)
     assert evidence["blocked"] is True
@@ -525,6 +535,10 @@ def test_epic_reconcile_mutation_failure_rolls_back(monkeypatch):
         ("## Child Issues\nepic-close-policy: children-only\n- #1\n", "unexpected content"),
         ("## Child Issues\n- #1\n\nepic-close-policy: children-only\nepic-close-policy: manual\n", "ambiguous"),
         ("## Child Issues\n- #1\n\n## Child Issues\n- #2\n", "more than one ## Child Issues section"),
+        ("## Example\n~~~\n## Child Issues\n- #1\n\nepic-close-policy: children-only\n~~~\n", "must contain a ## Child Issues section"),
+        ("```\n## Child Issues\n- #1\n\nepic-close-policy: children-only\n", "must contain a ## Child Issues section"),
+        ("    ## Child Issues\n    - #1\n\n    epic-close-policy: children-only\n", "must contain a ## Child Issues section"),
+        ("> ## Child Issues\n> - #1\n>\n> epic-close-policy: children-only\n", "must contain a ## Child Issues section"),
     ],
 )
 def test_epic_close_policy_adversarial_binding(body, message):
@@ -534,6 +548,14 @@ def test_epic_close_policy_adversarial_binding(body, message):
 
 def test_epic_close_policy_requires_one_declaration():
     assert uis.epic_close_policy("## Child Issues\n- #1\n\nepic-close-policy: children-only\n") == "children-only"
+
+
+def test_child_issues_section_ignores_fenced_and_quoted_examples():
+    body = (
+        "## Overview\n\n```\n## Child Issues\n- #999\n\nepic-close-policy: manual\n```\n\n"
+        "> ## Child Issues\n> - #888\n\n## Child Issues\n- #2\n- #1\n\nepic-close-policy: children-only\n"
+    )
+    assert uis.parse_child_issues(body) == [1, 2] and uis.epic_close_policy(body) == "children-only"
 
 
 @pytest.mark.parametrize(
@@ -617,7 +639,7 @@ def test_epic_rollback_reopen_decision_is_authoritative_not_a_local_flag(
     based on a fresh authoritative read, never a local success flag."""
     epic = epic_record()
     final = {**epic, "state": remote_state_after_raise, "labels": [{"name": "type:epic"}, {"name": "status:done"}]}
-    reads = iter([epic, epic, final, final, epic])
+    reads = iter([epic, final, final, epic])
     run_calls = []
     mock_epic_context(
         monkeypatch,

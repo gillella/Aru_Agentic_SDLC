@@ -36,18 +36,67 @@ EPIC_CLOSE_POLICY_CHILDREN_ONLY = "children-only"
 _EPIC_POLICY_LINE_RE = re.compile(r"(?i)^epic-close-policy:\s*(\S+)\s*$")
 _DEPENDS_ON_LINE_RE = re.compile(r"(?i)^depends-on:\s*#\d+\s*$")
 _CHILD_LINE_RE = re.compile(r"^-\s*#(\d+)\s*$")
+_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+_ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$")
+
+
+def _is_indented_code(raw: str) -> bool:
+    return raw[:4] == "    " or raw[:1] == "\t"
+
+
+def _scan_child_issue_sections(body: str) -> list[list[str]]:
+    """Collect the body lines under each top-level ``## Child Issues`` heading.
+
+    Fenced code (``` / ~~~, including never-closed fences), blockquotes, and
+    indented code can neither open a section nor contribute lines to one, so a
+    ``## Child Issues`` example embedded in prose can never authorise mechanical
+    closure.
+    """
+    sections: list[list[str]] = []
+    current: list[str] | None = None
+    fence: str | None = None
+    for raw in body.splitlines():
+        stripped = raw.strip()
+        fence_hit = _FENCE_RE.match(stripped)
+        if fence is not None:
+            if current is not None:
+                current.append(raw)
+            if (
+                fence_hit is not None
+                and stripped == fence_hit.group(1)
+                and fence_hit.group(1)[0] == fence[0]
+                and len(fence_hit.group(1)) >= len(fence)
+            ):
+                fence = None
+            continue
+        if fence_hit is not None:
+            fence = fence_hit.group(1)
+            if current is not None:
+                current.append(raw)
+            continue
+        heading = (
+            None
+            if stripped.startswith(">") or _is_indented_code(raw)
+            else _ATX_HEADING_RE.match(raw)
+        )
+        if heading is not None and len(heading.group(1)) == 2:
+            if heading.group(2).strip().lower() == "child issues":
+                current = []
+                sections.append(current)
+            else:
+                current = None
+        elif current is not None:
+            current.append(raw)
+    return sections
 
 
 def _child_issues_section(body: str) -> str:
-    sections = re.findall(
-        r"(?ims)^##\s+Child Issues\s*$\n(.*?)(?=^##\s+|\Z)",
-        body or "",
-    )
+    sections = _scan_child_issue_sections(body or "")
     if not sections:
         raise KernelError("epic must contain a ## Child Issues section")
     if len(sections) > 1:
         raise KernelError("epic contains more than one ## Child Issues section")
-    return sections[0]
+    return "\n".join(sections[0])
 
 
 def _parse_child_section_elements(section: str) -> tuple[list[int], list[str]]:
@@ -472,6 +521,66 @@ def _rollback_epic_reconciliation(
         )
 
 
+def _closure_invariant_drift(
+    record: dict[str, Any],
+    evidence: dict[str, Any],
+    *,
+    cwd: str | Path | None = None,
+) -> list[str]:
+    labels = label_names(record)
+    body = str(record.get("body") or "")
+    drift: list[str] = []
+    if "type:epic" not in labels:
+        drift.append("issue is no longer type:epic")
+    if "needs-human" in labels:
+        drift.append("needs-human was added during reconciliation")
+    try:
+        if epic_close_policy(body) != EPIC_CLOSE_POLICY_CHILDREN_ONLY:
+            drift.append("epic-close-policy changed from children-only")
+    except KernelError as exc:
+        drift.append(f"epic-close-policy drift: {exc}")
+    try:
+        expected_children = sorted(int(key) for key in evidence["children"])
+        if parse_child_issues(body) != expected_children:
+            drift.append("## Child Issues roster changed")
+    except KernelError as exc:
+        drift.append(f"## Child Issues drift: {exc}")
+    if unresolved_dependencies(record, cwd=cwd):
+        drift.append("new open depends-on discovered")
+    return drift
+
+
+def _verify_closure_invariants(
+    number: int,
+    evidence: dict[str, Any],
+    *,
+    cwd: str | Path | None = None,
+) -> tuple[str | None, str, str | None]:
+    """Recollect the epic closure invariants after status+close.
+
+    The parent is now expected CLOSED / Done on both the issue and the linked
+    Project card, but the close-policy, ``type:epic`` label, human gate,
+    dependency set, and child roster must be unchanged from the pre-mutation
+    evidence. Any drift is surfaced so the caller can run authoritative rollback.
+    """
+    record = issue(number, cwd=cwd)
+    after_state = str(record.get("state") or "")
+    after_status = status_of(record)
+    after_project_status = project_item_status(number, cwd=cwd)
+    if after_state != "CLOSED" or after_status != "Done" or after_project_status != "Done":
+        raise KernelError(
+            "epic reconciliation did not settle at Done and closed on the issue "
+            "and linked Project card "
+            f"({after_state}/{after_status}/{after_project_status})"
+        )
+    drift = _closure_invariant_drift(record, evidence, cwd=cwd)
+    if drift:
+        raise KernelError(
+            "epic reconciliation evidence drifted after settlement: " + "; ".join(drift)
+        )
+    return after_status, after_state, after_project_status
+
+
 def apply_epic_reconciliation(
     number: int,
     *,
@@ -481,25 +590,27 @@ def apply_epic_reconciliation(
     if evidence["blocked"]:
         raise KernelError("; ".join(evidence["blockers"]))
 
-    fresh = epic_reconcile_evidence(number, cwd=cwd)
-    if not fresh["closable"] or fresh != evidence:
-        reasons = fresh["blockers"] or ["epic evidence changed before apply"]
-        raise StatusPreconditionError(
-            f"epic #{number} evidence drifted before apply: {'; '.join(reasons)}"
-        )
+    def _pre_mutation() -> None:
+        """Recollect the bounded evidence immediately before the first mutation."""
+        fresh = epic_reconcile_evidence(number, cwd=cwd)
+        if not fresh["closable"] or fresh != evidence:
+            reasons = fresh["blockers"] or ["epic evidence changed before apply"]
+            raise StatusPreconditionError(
+                f"epic #{number} evidence drifted before apply: {'; '.join(reasons)}"
+            )
 
     try:
-        set_status(number, "Done", expected_current="Backlog", cwd=cwd)
+        set_status(
+            number,
+            "Done",
+            expected_current="Backlog",
+            pre_mutation_check=_pre_mutation,
+            cwd=cwd,
+        )
         run(["gh", "issue", "close", str(number), "--reason", "completed"], cwd=cwd)
-        final = issue(number, cwd=cwd)
-        after_status = status_of(final)
-        after_state = str(final.get("state") or "")
-        after_project_status = project_item_status(number, cwd=cwd)
-        if after_status != "Done" or after_state != "CLOSED" or after_project_status != "Done":
-            raise KernelError(
-                "epic reconciliation did not settle at Done and closed on the issue "
-                "and linked Project card"
-            )
+        after_status, after_state, after_project_status = _verify_closure_invariants(
+            number, evidence, cwd=cwd
+        )
     except StatusPreconditionError:
         raise
     except KernelError as error:
@@ -516,7 +627,7 @@ def apply_epic_reconciliation(
         "after": after_status,
         "state": after_state,
         "project_status": after_project_status,
-        "children": fresh["children"],
+        "children": evidence["children"],
     }
 
 

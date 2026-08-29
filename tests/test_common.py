@@ -390,6 +390,8 @@ def test_board_edit_reads_only_target_issue_item_and_status_field(monkeypatch):
         (board_payload(items=[{"id": "PVTI_7", "project": {}}]), "malformed"),
         (board_payload(field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "ready-option", "name": "Ready"}]}), "no unique 'Done' option"),
         (board_payload(field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "", "name": "Done"}]}), "options are malformed"),
+        (board_payload(field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "opt1", "name": "Done"}, {"id": "opt2", "name": "Done"}]}), "options are malformed"),
+        (board_payload(field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "opt1", "name": "Done"}, {"id": "opt1", "name": "Ready"}]}), "options are malformed"),
     ],
 )
 def test_board_edit_fails_closed_on_incomplete_targeted_evidence(monkeypatch, payload, message):
@@ -483,6 +485,8 @@ def test_project_item_status_returns_none_without_a_status_value(monkeypatch):
         (project_status_payload(items=[{"id": "PVTI_7a", "project": {"id": "PVT_1"}, "fieldValueByName": None}, {"id": "PVTI_7b", "project": {"id": "PVT_1"}, "fieldValueByName": None}]), "ambiguous"),
         (project_status_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {}}]), "malformed"),
         (board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}], field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "", "name": "Done"}]}), "options are malformed"),
+        (board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}], field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "opt1", "name": "Done"}, {"id": "opt2", "name": "Done"}]}), "options are malformed"),
+        (board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}], field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "opt1", "name": "Done"}, {"id": "opt1", "name": "Ready"}]}), "options are malformed"),
         (board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "UnknownOption"}}]), "malformed"),
         ({"data": {"issueNode": {"projectItems": {"nodes": [{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}], "pageInfo": {"hasNextPage": False}}}, "projectNode": {"field": None}}}, "ambiguous"),
     ],
@@ -499,6 +503,25 @@ def test_project_item_status_fails_closed_on_incomplete_evidence(monkeypatch, pa
     )
     with pytest.raises(common.KernelError, match=message):
         common.project_item_status(7)
+
+
+def test_project_status_rejects_duplicate_options_on_item_status_and_board_edit(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
+    dup_name_payload = board_payload(
+        items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}],
+        field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "opt1", "name": "Done"}, {"id": "opt2", "name": "Done"}]},
+    )
+    dup_id_payload = board_payload(
+        items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}],
+        field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "opt1", "name": "Done"}, {"id": "opt1", "name": "Ready"}]},
+    )
+    for p in (dup_name_payload, dup_id_payload):
+        monkeypatch.setattr(common, "gh_json", lambda args, *, cwd=None, auth=None: {"number": 7, "node_id": "I_7"} if args[:2] == ["api", "repos/owner/repo/issues/7"] else p)
+        with pytest.raises(common.KernelError, match="options are malformed"):
+            common.project_item_status(7)
+        with pytest.raises(common.KernelError, match="options are malformed"):
+            common.board_edit(7, "Done")
 
 
 def test_project_item_status_fails_closed_on_top_level_graphql_errors(monkeypatch):
@@ -737,3 +760,31 @@ def test_set_status_ensure_label_failure_precondition_distinction(monkeypatch):
     with pytest.raises(common.KernelError, match="gh label create failed: network timeout") as excinfo:
         common.set_status(7, "Done")
     assert not isinstance(excinfo.value, common.StatusPreconditionError)
+
+
+def test_set_status_pre_mutation_check_runs_after_preflight_before_first_mutation(monkeypatch):
+    """The optional pre_mutation_check fires once the transition is authorised but
+    before any issue/card mutation; raising from it leaves zero commands."""
+    commands = []
+    issue_rec = {"number": 7, "state": "OPEN", "labels": [{"name": "status:backlog"}]}
+    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
+    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: "Backlog")
+    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
+    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
+    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+
+    def _raise() -> None:
+        raise common.StatusPreconditionError("child evidence drifted before apply")
+
+    with pytest.raises(common.StatusPreconditionError, match="child evidence drifted before apply"):
+        common.set_status(7, "Done", expected_current="Backlog", pre_mutation_check=_raise)
+    assert commands == []
+
+    observed = []
+    common.set_status(
+        7, "Done", expected_current="Backlog",
+        pre_mutation_check=lambda: observed.append(list(commands)),
+    )
+    assert observed == [[]]
+    assert any(cmd[:3] == ["gh", "issue", "edit"] for cmd in commands)
+    assert any(cmd[:3] == ["gh", "project", "item-edit"] for cmd in commands)

@@ -646,13 +646,18 @@ def _validated_status_field(status_field: Any) -> dict[str, Any]:
         or not isinstance(status_field.get("options"), list)
     ):
         raise KernelError("issue or Status field is ambiguous on the linked Project Board")
+    options = status_field["options"]
     if any(
         not isinstance(opt, dict)
         or not isinstance(opt.get("id"), str)
         or not opt["id"]
         or not isinstance(opt.get("name"), str)
-        for opt in status_field["options"]
+        for opt in options
     ):
+        raise KernelError("Project Board Status options are malformed")
+    option_ids = [opt["id"] for opt in options]
+    option_names = [opt["name"] for opt in options]
+    if len(option_ids) != len(set(option_ids)) or len(option_names) != len(set(option_names)):
         raise KernelError("Project Board Status options are malformed")
     return status_field
 
@@ -665,7 +670,8 @@ def _item_status(item: dict[str, Any], status_field: Any) -> str | None:
     if not isinstance(field_value, dict) or not isinstance(field_value.get("name"), str):
         raise KernelError("Project Board Status field value is malformed")
     name = field_value["name"]
-    if not any(opt["name"] == name for opt in valid_field["options"]):
+    matches = [opt for opt in valid_field["options"] if opt["name"] == name]
+    if len(matches) != 1:
         raise KernelError("Project Board Status field value is malformed")
     return name
 
@@ -751,11 +757,14 @@ def set_status(
     status: str,
     *,
     expected_current: str | None = None,
+    pre_mutation_check: Callable[[], None] | None = None,
     cwd: str | Path | None = None,
 ) -> None:
     current, edit = _preflight_status_transition(number, status, expected_current, cwd)
     if edit is None:
         return
+    if pre_mutation_check is not None:
+        pre_mutation_check()
     target = status_label(status)
     args = ["gh", "issue", "edit", str(number), "--add-label", target]
     if current:
