@@ -22,12 +22,7 @@ REVIEW_BINDING_PREFIX = "reviewer-binding:"
 AUTHOR_PREFIX = "author:"
 AUTHOR_FAMILY_PREFIX = "author-family:"
 EXTERNAL_REVIEWERS = ("coderabbit", "sourcery", "codeant")
-CODING_REVIEWERS = (
-    "claude-code",
-    "openai-codex",
-    "xai-cursor",
-    "google-antigravity",
-)
+CODING_REVIEWERS = ("claude-code", "openai-codex", "xai-cursor", "google-antigravity")
 REVIEWER_CONFIG_ENV = "ARU_CODING_REVIEWERS"
 REVIEW_AUTHORITIES = EXTERNAL_REVIEWERS + CODING_REVIEWERS
 PROBE_PROMPT = "Reply exactly OK"
@@ -47,9 +42,7 @@ ZERO_SHA = "0" * 40
 REPOSITORY_AUTH = "repository"
 PROJECT_AUTH = "project"
 GITHUB_APP_RUNNER_ENV = "ARU_GITHUB_APP_RUNNER"
-QUOTA_STOP_MESSAGE = (
-    "GitHub GraphQL quota exhausted; stop and wait for the budget to reset"
-)
+QUOTA_STOP_MESSAGE = "GitHub GraphQL quota exhausted; stop and wait for the budget to reset"
 _QUOTA_RE = re.compile(
     r"(?:HTTP\s*429|RATE_LIMITED|rate[_ -]?limit(?:ed|ing)?|"
     r"secondary rate limit|resource[- ]limits? exceeded|"
@@ -57,12 +50,7 @@ _QUOTA_RE = re.compile(
     re.IGNORECASE,
 )
 _LINKED_PROJECT_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
-_GH_TOKEN_ENV = (
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    "GH_ENTERPRISE_TOKEN",
-    "GITHUB_ENTERPRISE_TOKEN",
-)
+_GH_TOKEN_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 _REPOSITORY_COMMANDS = {"api", "issue", "label", "pr", "repo"}
 
 
@@ -609,13 +597,25 @@ def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
         cwd=cwd,
         auth=PROJECT_AUTH,
     )
-    connection = ((data.get("data") or {}).get("repository") or {}).get("projectsV2") or {}
-    nodes = connection.get("nodes")
-    if not isinstance(nodes, list):
+    if not isinstance(data, dict) or data.get("errors"):
+        raise KernelError("linked Project Board query returned a GraphQL error")
+    root = data.get("data")
+    repository = root.get("repository") if isinstance(root, dict) else None
+    connection = repository.get("projectsV2") if isinstance(repository, dict) else None
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+    if not isinstance(nodes, list) or not isinstance(page_info, dict):
         raise KernelError("linked Project Board is unavailable")
-    if (connection.get("pageInfo") or {}).get("hasNextPage"):
+    if page_info.get("hasNextPage") is not False:
         raise KernelError("linked Project Board inventory is truncated")
-    open_projects = [node for node in nodes if isinstance(node, dict) and not node.get("closed")]
+    open_projects = [
+        node
+        for node in nodes
+        if isinstance(node, dict)
+        and isinstance(node.get("id"), str)
+        and node.get("id")
+        and not node.get("closed")
+    ]
     if requested:
         open_projects = [node for node in open_projects if str(node.get("number")) == requested]
     if len(open_projects) != 1:

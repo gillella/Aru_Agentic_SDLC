@@ -20,7 +20,6 @@ from common import (
     repo_slug,
     run,
     set_status,
-    status_label,
     status_of,
     unresolved_dependencies,
 )
@@ -230,27 +229,13 @@ def _child_reconcile_evidence(
     return children, blockers
 
 
-def epic_reconcile_evidence(
-    number: int,
+def _epic_policy_and_children(
+    body: str,
     *,
     cwd: str | Path | None = None,
-) -> dict[str, Any]:
-    record = issue(number, cwd=cwd)
-    labels = label_names(record)
-    body = str(record.get("body") or "")
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
     blockers: list[str] = []
     children: dict[str, dict[str, Any]] = {}
-
-    if "type:epic" not in labels:
-        blockers.append("issue is not type:epic")
-    if "needs-human" in labels:
-        blockers.append("needs-human prevents mechanical epic closure")
-    if record.get("state") != "OPEN":
-        blockers.append("epic is not open")
-
-    for dependency in unresolved_dependencies(record, cwd=cwd):
-        blockers.append(f"open depends-on: #{dependency}")
-
     policy: str | None = None
     try:
         policy = epic_close_policy(body)
@@ -271,12 +256,85 @@ def epic_reconcile_evidence(
     if child_numbers and policy == EPIC_CLOSE_POLICY_CHILDREN_ONLY:
         children, child_blockers = _child_reconcile_evidence(child_numbers, cwd=cwd)
         blockers.extend(child_blockers)
+    return children, blockers
 
+
+def _epic_status_evidence(
+    number: int,
+    record: dict[str, Any],
+    *,
+    cwd: str | Path | None = None,
+) -> tuple[str | None, str | None, list[str]]:
+    blockers: list[str] = []
+    epic_status = None
     try:
         epic_status = status_of(record)
     except KernelError as exc:
         blockers.append(str(exc))
-        epic_status = None
+
+    epic_project_status = None
+    try:
+        epic_project_status = project_item_status(number, cwd=cwd)
+    except KernelError as exc:
+        blockers.append(str(exc))
+
+    if epic_status is None:
+        if not any(
+            "contradictory status labels" in b or "unsupported status label" in b
+            for b in blockers
+        ):
+            blockers.append("epic status label is missing")
+    elif epic_status != "Backlog":
+        blockers.append(f"epic status label is not Backlog ({epic_status})")
+
+    if epic_project_status is None:
+        if not any(
+            "Project Board" in b or "GraphQL error" in b or "Project identity" in b
+            for b in blockers
+        ):
+            blockers.append("epic linked Project card Status is unset")
+    elif epic_project_status != "Backlog":
+        blockers.append(f"epic linked Project card status is not Backlog ({epic_project_status})")
+
+    if (
+        epic_status is not None
+        and epic_project_status is not None
+        and epic_status != epic_project_status
+    ):
+        blockers.append(
+            f"epic issue status ({epic_status}) and linked Project card status "
+            f"({epic_project_status}) disagree"
+        )
+    return epic_status, epic_project_status, blockers
+
+
+def epic_reconcile_evidence(
+    number: int,
+    *,
+    cwd: str | Path | None = None,
+) -> dict[str, Any]:
+    record = issue(number, cwd=cwd)
+    labels = label_names(record)
+    body = str(record.get("body") or "")
+    blockers: list[str] = []
+
+    if "type:epic" not in labels:
+        blockers.append("issue is not type:epic")
+    if "needs-human" in labels:
+        blockers.append("needs-human prevents mechanical epic closure")
+    if record.get("state") != "OPEN":
+        blockers.append("epic is not open")
+
+    for dependency in unresolved_dependencies(record, cwd=cwd):
+        blockers.append(f"open depends-on: #{dependency}")
+
+    children, policy_blockers = _epic_policy_and_children(body, cwd=cwd)
+    blockers.extend(policy_blockers)
+
+    epic_status, epic_project_status, status_blockers = _epic_status_evidence(
+        number, record, cwd=cwd
+    )
+    blockers.extend(status_blockers)
 
     return {
         "issue": number,
@@ -285,6 +343,7 @@ def epic_reconcile_evidence(
         "blockers": blockers,
         "children": children,
         "status": epic_status,
+        "project_status": epic_project_status,
         "state": record.get("state"),
     }
 
@@ -292,9 +351,6 @@ def epic_reconcile_evidence(
 def _rollback_epic_reconciliation(
     number: int,
     *,
-    before_status: str | None,
-    before_state: str,
-    before_project_status: str | None,
     cwd: str | Path | None = None,
     original: KernelError,
 ) -> None:
@@ -304,23 +360,9 @@ def _rollback_epic_reconciliation(
         # reopen from an authoritative read of the current issue state, never
         # from whether the local close command appeared to succeed.
         current_state = str(issue(number, cwd=cwd).get("state") or "")
-        if before_state != "CLOSED" and current_state == "CLOSED":
+        if current_state == "CLOSED":
             run(["gh", "issue", "reopen", str(number)], cwd=cwd)
-        if before_status != "Done":
-            if before_status:
-                set_status(number, before_status, cwd=cwd)
-            else:
-                run(
-                    [
-                        "gh",
-                        "issue",
-                        "edit",
-                        str(number),
-                        "--remove-label",
-                        status_label("Done"),
-                    ],
-                    cwd=cwd,
-                )
+        set_status(number, "Backlog", cwd=cwd)
         # A rollback that "ran" its commands but never settled would silently
         # strand the epic between states, so read every value back.
         record = issue(number, cwd=cwd)
@@ -328,9 +370,9 @@ def _rollback_epic_reconciliation(
         settled_status = status_of(record)
         settled_project_status = project_item_status(number, cwd=cwd)
         if (
-            settled_state != before_state
-            or settled_status != before_status
-            or settled_project_status != before_project_status
+            settled_state != "OPEN"
+            or settled_status != "Backlog"
+            or settled_project_status != "Backlog"
         ):
             raise KernelError(
                 "epic reconciliation rollback did not settle at the pre-transaction "
@@ -351,25 +393,9 @@ def apply_epic_reconciliation(
     if evidence["blocked"]:
         raise KernelError("; ".join(evidence["blockers"]))
 
-    before_status = evidence["status"]
-    before_state = str(evidence["state"] or "")
-    # Capture the Project card status before any mutation, independently of
-    # the issue label status, so rollback restores the exact pre-existing
-    # value instead of assuming the two were already in agreement.
-    before_project_status = project_item_status(number, cwd=cwd)
-    # set_status writes the issue label and Project card together, so rollback
-    # can only restore one shared prior value. If the two are already out of
-    # sync before any mutation, rollback could not tell which value to
-    # restore, so refuse to mutate rather than risk stranding one of them.
-    if before_project_status != before_status:
-        raise KernelError(
-            "epic issue status and linked Project card status disagree before "
-            "reconciliation; refusing to mutate"
-        )
     try:
         set_status(number, "Done", cwd=cwd)
-        if before_state != "CLOSED":
-            run(["gh", "issue", "close", str(number), "--reason", "completed"], cwd=cwd)
+        run(["gh", "issue", "close", str(number), "--reason", "completed"], cwd=cwd)
         final = issue(number, cwd=cwd)
         after_status = status_of(final)
         after_state = str(final.get("state") or "")
@@ -382,9 +408,6 @@ def apply_epic_reconciliation(
     except KernelError as error:
         _rollback_epic_reconciliation(
             number,
-            before_status=before_status,
-            before_state=before_state,
-            before_project_status=before_project_status,
             cwd=cwd,
             original=error,
         )
@@ -392,7 +415,7 @@ def apply_epic_reconciliation(
     return {
         "issue": number,
         "applied": True,
-        "before": before_status,
+        "before": evidence["status"],
         "after": after_status,
         "state": after_state,
         "project_status": after_project_status,

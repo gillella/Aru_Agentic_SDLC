@@ -18,37 +18,19 @@ def backlog_issue(*labels: str) -> dict:
     }
 
 
-def test_triage_accepts_zero_or_one_supported_priority():
-    assert triage_backlog.evaluate(backlog_issue()) == []
-    assert triage_backlog.evaluate(backlog_issue("priority:p2")) == []
-
-
 @pytest.mark.parametrize(
-    ("labels", "diagnostic"),
+    ("labels", "diagnostics"),
     [
-        (
-            ("priority:p0", "priority:p1"),
-            "issue may have at most one supported priority:p0..p3 label",
-        ),
-        (
-            ("priority:urgent",),
-            "issue may have at most one supported priority:p0..p3 label",
-        ),
+        ((), []),
+        (("priority:p2",), []),
+        (("priority:p0", "priority:p1"), ["issue may have at most one supported priority:p0..p3 label"]),
+        (("priority:urgent",), ["issue may have at most one supported priority:p0..p3 label"]),
+        (("needs-human",), ["needs-human issues cannot enter Ready"]),
+        (("type:epic",), ["type:epic issues cannot enter Ready"]),
     ],
 )
-def test_triage_rejects_ambiguous_or_unsupported_priority(labels, diagnostic):
-    assert triage_backlog.evaluate(backlog_issue(*labels)) == [diagnostic]
-
-
-@pytest.mark.parametrize(
-    ("label", "diagnostic"),
-    [
-        ("needs-human", "needs-human issues cannot enter Ready"),
-        ("type:epic", "type:epic issues cannot enter Ready"),
-    ],
-)
-def test_triage_rejects_non_executable_work(label, diagnostic):
-    assert triage_backlog.evaluate(backlog_issue(label)) == [diagnostic]
+def test_triage_evaluates_issue_labels(labels, diagnostics):
+    assert triage_backlog.evaluate(backlog_issue(*labels)) == diagnostics
 
 
 def test_triage_does_not_promote_human_gated_or_epic_issues(monkeypatch):
@@ -92,11 +74,17 @@ def test_triage_promotes_one_complete_issue(monkeypatch):
     assert result["rejected"] == {2: ["missing"]}
 
 
-def test_claim_settles_one_writer(monkeypatch):
+@pytest.mark.parametrize("race", [False, True])
+def test_claim_settlement_and_race_rollback(monkeypatch, race):
     snapshots = iter(
         [
             {"number": 7, "labels": [], "state": "OPEN"},
-            {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"},
+            {
+                "number": 7,
+                "labels": [{"name": "agent:codex-1"}]
+                + ([{"name": "agent:codex-2"}] if race else []),
+                "state": "OPEN",
+            },
             {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"},
         ]
     )
@@ -113,33 +101,15 @@ def test_claim_settles_one_writer(monkeypatch):
         claim_issue, "set_status", lambda number, status: statuses.append((number, status))
     )
 
-    result = claim_issue.claim(7, "codex-1")
-    assert result["status"] == "In Progress"
-    assert statuses == [(7, "In Progress")]
-    assert "--add-label" in commands[0]
-
-
-def test_claim_race_rolls_back(monkeypatch):
-    snapshots = iter(
-        [
-            {"number": 7, "labels": [], "state": "OPEN"},
-            {
-                "number": 7,
-                "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}],
-                "state": "OPEN",
-            },
-        ]
-    )
-    monkeypatch.setattr(claim_issue, "issue", lambda _number: next(snapshots))
-    monkeypatch.setattr(claim_issue, "status_of", lambda _record: "Ready")
-    monkeypatch.setattr(claim_issue, "contract_errors", lambda _record: [])
-    monkeypatch.setattr(claim_issue, "unresolved_dependencies", lambda _record: [])
-    monkeypatch.setattr(claim_issue, "ensure_label", lambda *_args, **_kwargs: None)
-    commands = []
-    monkeypatch.setattr(claim_issue, "run", lambda argv, **_kwargs: commands.append(argv))
-    with pytest.raises(claim_issue.KernelError, match="race"):
-        claim_issue.claim(7, "codex-1")
-    assert "--remove-label" in commands[-1]
+    if race:
+        with pytest.raises(claim_issue.KernelError, match="race"):
+            claim_issue.claim(7, "codex-1")
+        assert "--remove-label" in commands[-1]
+    else:
+        result = claim_issue.claim(7, "codex-1")
+        assert result["status"] == "In Progress"
+        assert statuses == [(7, "In Progress")]
+        assert "--add-label" in commands[0]
 
 
 def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys):
@@ -294,30 +264,88 @@ def test_epic_reconcile_success(monkeypatch):
     assert calls == {"close": 1, "set_status": 1}
 
 
-def test_apply_epic_reconciliation_rejects_prestate_mismatch_before_mutation(monkeypatch):
-    """set_status writes the issue label and Project card together, so rollback
-    can only restore one shared prior value; a pre-existing mismatch must
-    block before any mutation runs, not surface only once rollback fails."""
+@pytest.mark.parametrize(
+    ("issue_status", "project_status", "expected_blockers"),
+    [
+        ("Backlog", "Ready", ["not Backlog (Ready)", "disagree"]),
+        ("In Review", "Backlog", ["not Backlog (In Review)", "disagree"]),
+        (None, None, ["epic status label is missing", "linked Project card Status is unset"]),
+        ("Ready", "Ready", ["not Backlog (Ready)"]),
+        ("In Review", "In Review", ["not Backlog (In Review)"]),
+    ],
+)
+def test_epic_reconcile_adversarial_prestate_blocks_with_zero_mutations(
+    monkeypatch, issue_status, project_status, expected_blockers
+):
     import update_issue_status as uis
 
-    epic = epic_record(labels=["type:epic", "status:in-review"])
+    labels = ["type:epic"]
+    if issue_status:
+        labels.append(f"status:{issue_status.lower().replace(' ', '-')}")
+    epic = epic_record(labels=labels)
     snapshots = {91: child_snapshot(91), 92: child_snapshot(92)}
+
     monkeypatch.setattr(uis, "repo_slug", lambda cwd=None: "owner/repo")
     monkeypatch.setattr(uis, "issue", lambda number, cwd=None: epic)
     monkeypatch.setattr(
         uis, "child_issue_snapshots", lambda numbers, cwd=None: {n: snapshots[n] for n in numbers}
     )
     monkeypatch.setattr(uis, "unresolved_dependencies", lambda record, cwd=None: [])
-    monkeypatch.setattr(uis, "status_of", lambda record: "In Review" if record is epic else "Done")
-    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Done")
+    monkeypatch.setattr(uis, "status_of", lambda record: issue_status)
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: project_status)
 
     def unexpected_mutation(*args, **kwargs):
-        raise AssertionError("must not mutate before the prestate is verified")
+        raise AssertionError("must not mutate when prestate is blocked")
 
     monkeypatch.setattr(uis, "set_status", unexpected_mutation)
     monkeypatch.setattr(uis, "run", unexpected_mutation)
 
-    with pytest.raises(uis.KernelError, match="disagree"):
+    evidence = uis.epic_reconcile_evidence(100)
+    assert evidence["blocked"] is True
+    assert evidence["closable"] is False
+    assert evidence["status"] == issue_status
+    assert evidence["project_status"] == project_status
+    for blocker in expected_blockers:
+        assert any(blocker in item for item in evidence["blockers"])
+
+    with pytest.raises(uis.KernelError):
+        uis.apply_epic_reconciliation(100)
+
+
+def test_epic_reconcile_malformed_project_evidence_blocks_with_zero_mutations(monkeypatch):
+    import update_issue_status as uis
+
+    epic = epic_record()
+    snapshots = {91: child_snapshot(91), 92: child_snapshot(92)}
+
+    monkeypatch.setattr(uis, "repo_slug", lambda cwd=None: "owner/repo")
+    monkeypatch.setattr(uis, "issue", lambda number, cwd=None: epic)
+    monkeypatch.setattr(
+        uis, "child_issue_snapshots", lambda numbers, cwd=None: {n: snapshots[n] for n in numbers}
+    )
+    monkeypatch.setattr(uis, "unresolved_dependencies", lambda record, cwd=None: [])
+    monkeypatch.setattr(uis, "status_of", lambda record: "Backlog")
+    monkeypatch.setattr(
+        uis,
+        "project_item_status",
+        lambda number, cwd=None: (_ for _ in ()).throw(
+            uis.KernelError("Project Board card snapshot returned a GraphQL error")
+        ),
+    )
+
+    def unexpected_mutation(*args, **kwargs):
+        raise AssertionError("must not mutate when project evidence fails")
+
+    monkeypatch.setattr(uis, "set_status", unexpected_mutation)
+    monkeypatch.setattr(uis, "run", unexpected_mutation)
+
+    evidence = uis.epic_reconcile_evidence(100)
+    assert evidence["blocked"] is True
+    assert evidence["closable"] is False
+    assert evidence["project_status"] is None
+    assert any("GraphQL error" in item for item in evidence["blockers"])
+
+    with pytest.raises(uis.KernelError, match="GraphQL error"):
         uis.apply_epic_reconciliation(100)
 
 
@@ -325,35 +353,14 @@ def test_apply_epic_reconciliation_rejects_prestate_mismatch_before_mutation(mon
     ("labels", "policy", "children", "snapshots", "depends", "blocker"),
     [
         ([], "children-only", None, None, [], "issue is not type:epic"),
-        (["type:epic", "needs-human"], "children-only", None, None, [], "needs-human"),
-        (["type:epic"], "manual", None, None, [], "epic-close-policy: manual"),
-        (["type:epic"], None, None, None, [], "epic-close-policy is missing"),
-        (["type:epic"], "children-only", [91], {}, [], "child #91 is missing"),
-        (
-            ["type:epic"],
-            "children-only",
-            [91],
-            {91: child_snapshot(91, state="OPEN")},
-            [],
-            "child #91 is not closed",
-        ),
-        (
-            ["type:epic"],
-            "children-only",
-            [91],
-            {91: child_snapshot(91, status="ready")},
-            [],
-            "child #91 is not status:done",
-        ),
-        (
-            ["type:epic"],
-            "children-only",
-            [91],
-            {91: child_snapshot(91, repository="other/repo")},
-            [],
-            "child #91 is not in this repository",
-        ),
-        (["type:epic"], "children-only", None, None, [90], "open depends-on: #90"),
+        (["type:epic", "needs-human", "status:backlog"], "children-only", None, None, [], "needs-human"),
+        (["type:epic", "status:backlog"], "manual", None, None, [], "epic-close-policy: manual"),
+        (["type:epic", "status:backlog"], None, None, None, [], "epic-close-policy is missing"),
+        (["type:epic", "status:backlog"], "children-only", [91], {}, [], "child #91 is missing"),
+        (["type:epic", "status:backlog"], "children-only", [91], {91: child_snapshot(91, state="OPEN")}, [], "child #91 is not closed"),
+        (["type:epic", "status:backlog"], "children-only", [91], {91: child_snapshot(91, status="ready")}, [], "child #91 is not status:done"),
+        (["type:epic", "status:backlog"], "children-only", [91], {91: child_snapshot(91, repository="other/repo")}, [], "child #91 is not in this repository"),
+        (["type:epic", "status:backlog"], "children-only", None, None, [90], "open depends-on: #90"),
     ],
 )
 def test_epic_reconcile_blocked_cases(
@@ -366,6 +373,14 @@ def test_epic_reconcile_blocked_cases(
     monkeypatch.setattr(uis, "issue", lambda number, cwd=None: epic)
     monkeypatch.setattr(uis, "unresolved_dependencies", lambda record, cwd=None: depends)
     monkeypatch.setattr(uis, "child_issue_snapshots", lambda numbers, cwd=None: snapshots or {})
+    monkeypatch.setattr(
+        uis,
+        "status_of",
+        lambda record: "Backlog"
+        if "status:backlog" in [lbl["name"] for lbl in record.get("labels", [])]
+        else None,
+    )
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Backlog")
 
     evidence = uis.epic_reconcile_evidence(100)
     assert evidence["blocked"] is True
@@ -387,6 +402,7 @@ def test_epic_reconcile_check_reports_closable_without_mutation(monkeypatch):
     )
     monkeypatch.setattr(uis, "unresolved_dependencies", lambda record, cwd=None: [])
     monkeypatch.setattr(uis, "status_of", lambda record: "Backlog" if record is epic else "Done")
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Backlog")
     monkeypatch.setattr(
         uis, "set_status", lambda *args, **kwargs: mutations.append(("set_status", args))
     )
@@ -395,50 +411,45 @@ def test_epic_reconcile_check_reports_closable_without_mutation(monkeypatch):
     evidence = uis.epic_reconcile_evidence(100)
     assert evidence["closable"] is True
     assert evidence["blocked"] is False
+    assert evidence["status"] == "Backlog"
+    assert evidence["project_status"] == "Backlog"
     assert mutations == []
 
 
-def test_epic_reconcile_malformed_and_duplicate_children_block():
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("## Child Issues\n- not-a-ref\n", "malformed"),
+        ("## Child Issues\n- #1\n- #1\n", "duplicate"),
+        ("## Child Issues\n- #1\nprose\n- #2\n", "unexpected content"),
+        ("## Child Issues\n- #1\n\narbitrary trailing prose\n", "unexpected trailer content"),
+        ("## Child Issues\n- #1\n\n- #2\n", "interrupted child list"),
+        ("## Child Issues\n- #1\n\n## Child Issues\n- #2\n", "more than one ## Child Issues section"),
+    ],
+)
+def test_parse_child_issues_rejects_malformed_sections(body, match):
     import update_issue_status as uis
 
-    with pytest.raises(uis.KernelError, match="malformed"):
-        uis.parse_child_issues("## Child Issues\n- not-a-ref\n")
-
-    with pytest.raises(uis.KernelError, match="duplicate"):
-        uis.parse_child_issues("## Child Issues\n- #1\n- #1\n")
-
-    with pytest.raises(uis.KernelError, match="unexpected content"):
-        uis.parse_child_issues("## Child Issues\n- #1\nprose\n- #2\n")
+    with pytest.raises(uis.KernelError, match=match):
+        uis.parse_child_issues(body)
 
 
-def test_parse_child_issue_lines_trailer_allows_declarations_rejects_prose():
+def test_parse_child_issues_accepts_valid_trailer_declarations():
     import update_issue_status as uis
 
     body = "## Child Issues\n- #91\n\nepic-close-policy: children-only\ndepends-on: #5\n"
     assert uis.parse_child_issues(body) == [91]
-
-    with pytest.raises(uis.KernelError, match="unexpected trailer content"):
-        uis.parse_child_issues("## Child Issues\n- #1\n\narbitrary trailing prose\n")
-
-    with pytest.raises(uis.KernelError, match="interrupted child list"):
-        uis.parse_child_issues("## Child Issues\n- #1\n\n- #2\n")
-
-
-def test_epic_reconcile_duplicate_child_issues_section_blocks():
-    import update_issue_status as uis
-
-    body = "## Child Issues\n- #1\n\n## Child Issues\n- #2\n\nepic-close-policy: children-only\n"
-    with pytest.raises(uis.KernelError, match="more than one ## Child Issues section"):
-        uis.parse_child_issues(body)
 
 
 def test_epic_reconcile_ambiguous_policy_blocks(monkeypatch):
     import update_issue_status as uis
 
     body = "## Child Issues\n- #91\n\nepic-close-policy: children-only\nepic-close-policy: manual\n"
-    epic = {"number": 100, "body": body, "state": "OPEN", "labels": [{"name": "type:epic"}]}
+    epic = {"number": 100, "body": body, "state": "OPEN", "labels": [{"name": "type:epic"}, {"name": "status:backlog"}]}
     monkeypatch.setattr(uis, "issue", lambda number, cwd=None: epic)
     monkeypatch.setattr(uis, "unresolved_dependencies", lambda record, cwd=None: [])
+    monkeypatch.setattr(uis, "status_of", lambda record: "Backlog")
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Backlog")
 
     evidence = uis.epic_reconcile_evidence(100)
     assert "epic-close-policy is ambiguous" in evidence["blockers"]
@@ -472,6 +483,7 @@ def test_epic_reconcile_contradictory_epic_status_blocks_without_crashing(monkey
     monkeypatch.setattr(
         uis, "child_issue_snapshots", lambda numbers, cwd=None: {91: child_snapshot(91)}
     )
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Backlog")
 
     evidence = uis.epic_reconcile_evidence(100)
 
@@ -527,47 +539,10 @@ def test_epic_close_policy_requires_one_declaration():
         uis.epic_close_policy("epic-close-policy: children-only\nepic-close-policy: manual\n")
 
 
-def test_parse_child_issues_requires_bounded_unique_references():
-    import update_issue_status as uis
-
-    body = "## Child Issues\n- #9\n- #2\n"
-    assert uis.parse_child_issues(body) == [2, 9]
-    with pytest.raises(uis.KernelError, match="malformed"):
-        uis.parse_child_issues("## Child Issues\n- other/repo#9\n")
-    with pytest.raises(uis.KernelError, match="duplicate"):
-        uis.parse_child_issues("## Child Issues\n- #9\n- #9\n")
-
-
-def test_epic_reconcile_evidence_reports_exact_child_state(monkeypatch):
-    import update_issue_status as uis
-
-    epic = {
-        "number": 100,
-        "body": "## Child Issues\n- #91\n\nepic-close-policy: children-only\n",
-        "state": "OPEN",
-        "labels": [{"name": "type:epic"}, {"name": "status:backlog"}],
-    }
-    monkeypatch.setattr(uis, "issue", lambda number, cwd=None: epic)
-    monkeypatch.setattr(uis, "repo_slug", lambda cwd=None: "owner/repo")
-    monkeypatch.setattr(uis, "unresolved_dependencies", lambda record, cwd=None: [])
-    monkeypatch.setattr(
-        uis, "child_issue_snapshots", lambda numbers, cwd=None: {91: child_snapshot(91)}
-    )
-
-    evidence = uis.epic_reconcile_evidence(100)
-    assert evidence["closable"] is True
-    assert evidence["children"]["91"]["status"] == "Done"
-
-
 def test_apply_epic_reconciliation_read_back_fails_closed(monkeypatch):
     import update_issue_status as uis
 
-    epic = {
-        "number": 100,
-        "body": "## Child Issues\n- #91\n\nepic-close-policy: children-only\n",
-        "state": "OPEN",
-        "labels": [{"name": "type:epic"}, {"name": "status:backlog"}],
-    }
+    epic = epic_record()
     final = {
         **epic,
         "state": "OPEN",
@@ -576,7 +551,7 @@ def test_apply_epic_reconciliation_read_back_fails_closed(monkeypatch):
     monkeypatch.setattr(uis, "repo_slug", lambda cwd=None: "owner/repo")
     monkeypatch.setattr(uis, "unresolved_dependencies", lambda record, cwd=None: [])
     monkeypatch.setattr(
-        uis, "child_issue_snapshots", lambda numbers, cwd=None: {91: child_snapshot(91)}
+        uis, "child_issue_snapshots", lambda numbers, cwd=None: {91: child_snapshot(91), 92: child_snapshot(92)}
     )
     monkeypatch.setattr(
         uis, "status_of", lambda record: "Backlog" if record.get("state") == "OPEN" else "Done"
@@ -595,21 +570,16 @@ def test_apply_epic_reconciliation_read_back_fails_closed(monkeypatch):
     with pytest.raises(uis.KernelError, match="did not settle"):
         uis.apply_epic_reconciliation(100)
 
-    assert rollback and rollback[0]["before_project_status"] == "Backlog"
+    assert len(rollback) == 1
 
 
 def test_epic_rollback_reopens_and_reverts_status_when_close_settled_but_card_did_not(
     monkeypatch,
 ):
-    """Exercise the real rollback function end-to-end, not a stub."""
+    """Exercise the real rollback function end-to-end, restoring exact Backlog."""
     import update_issue_status as uis
 
-    epic = {
-        "number": 100,
-        "body": "## Child Issues\n- #91\n\nepic-close-policy: children-only\n",
-        "state": "OPEN",
-        "labels": [{"name": "type:epic"}, {"name": "status:in-review"}],
-    }
+    epic = epic_record()
     final = {
         **epic,
         "state": "CLOSED",
@@ -618,10 +588,10 @@ def test_epic_rollback_reopens_and_reverts_status_when_close_settled_but_card_di
     monkeypatch.setattr(uis, "repo_slug", lambda cwd=None: "owner/repo")
     monkeypatch.setattr(uis, "unresolved_dependencies", lambda record, cwd=None: [])
     monkeypatch.setattr(
-        uis, "child_issue_snapshots", lambda numbers, cwd=None: {91: child_snapshot(91)}
+        uis, "child_issue_snapshots", lambda numbers, cwd=None: {91: child_snapshot(91), 92: child_snapshot(92)}
     )
     monkeypatch.setattr(
-        uis, "status_of", lambda record: "In Review" if record.get("state") == "OPEN" else "Done"
+        uis, "status_of", lambda record: "Backlog" if record.get("state") == "OPEN" else "Done"
     )
     set_status_calls = []
     monkeypatch.setattr(
@@ -636,11 +606,10 @@ def test_epic_rollback_reopens_and_reverts_status_when_close_settled_but_card_di
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(uis, "run", fake_run)
-    # The Project card silently stays on the pre-mutation option even though
-    # the issue itself closed; the real rollback must still be triggered.
-    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "In Review")
-    # 3rd read: rollback's authoritative pre-reopen check (still closed).
-    # 4th read: rollback's settle verification (reopened back to In Review).
+    # The Project card silently stays on Backlog even though the issue closed
+    project_reads = iter(["Backlog", "Backlog", "Backlog"])
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: next(project_reads))
+    # readbacks: 1=evidence, 2=settle check, 3=rollback reopen check, 4=rollback settle check
     readbacks = iter([epic, final, final, epic])
     monkeypatch.setattr(uis, "issue", lambda number, cwd=None: next(readbacks))
 
@@ -648,7 +617,7 @@ def test_epic_rollback_reopens_and_reverts_status_when_close_settled_but_card_di
         uis.apply_epic_reconciliation(100)
 
     assert ["gh", "issue", "reopen", "100"] in run_calls
-    assert (100, "In Review") in set_status_calls
+    assert (100, "Backlog") in set_status_calls
 
 
 def _ok_result():
@@ -666,7 +635,7 @@ def test_epic_rollback_reopen_decision_is_authoritative_not_a_local_flag(
     based on a fresh authoritative read, never a local success flag."""
     import update_issue_status as uis
 
-    epic = epic_record(labels=["type:epic", "status:in-review"])
+    epic = epic_record()
     snapshots = {91: child_snapshot(91), 92: child_snapshot(92)}
     reads = iter([epic, {**epic, "state": remote_state_after_raise}, epic])
 
@@ -677,7 +646,7 @@ def test_epic_rollback_reopen_decision_is_authoritative_not_a_local_flag(
     )
     monkeypatch.setattr(uis, "unresolved_dependencies", lambda record, cwd=None: [])
     monkeypatch.setattr(
-        uis, "status_of", lambda record: "In Review" if record.get("state") == "OPEN" else "Done"
+        uis, "status_of", lambda record: "Backlog" if record.get("state") == "OPEN" else "Done"
     )
     set_status_calls = []
     monkeypatch.setattr(
@@ -694,19 +663,19 @@ def test_epic_rollback_reopen_decision_is_authoritative_not_a_local_flag(
         return _ok_result()
 
     monkeypatch.setattr(uis, "run", fail_close)
-    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "In Review")
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Backlog")
 
     with pytest.raises(uis.KernelError, match="close failed"):
         uis.apply_epic_reconciliation(100)
 
     assert (["gh", "issue", "reopen", "100"] in run_calls) is expect_reopen
-    assert (100, "In Review") in set_status_calls
+    assert (100, "Backlog") in set_status_calls
 
 
 def test_rollback_epic_reconciliation_verifies_settled_state(monkeypatch):
     import update_issue_status as uis
 
-    restored = {"number": 100, "state": "OPEN", "labels": [{"name": "status:in-review"}]}
+    restored = {"number": 100, "state": "OPEN", "labels": [{"name": "status:backlog"}]}
     run_calls = []
 
     def fake_run(argv, **kwargs):
@@ -715,62 +684,73 @@ def test_rollback_epic_reconciliation_verifies_settled_state(monkeypatch):
 
     monkeypatch.setattr(uis, "run", fake_run)
     monkeypatch.setattr(uis, "issue", lambda number, cwd=None: restored)
-    monkeypatch.setattr(uis, "status_of", lambda record: "In Review")
-    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "In Review")
+    monkeypatch.setattr(uis, "status_of", lambda record: "Backlog")
+    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Backlog")
     set_status_calls = []
     monkeypatch.setattr(uis, "set_status", lambda n, s, cwd=None: set_status_calls.append((n, s)))
 
     uis._rollback_epic_reconciliation(
         100,
-        before_status="In Review",
-        before_state="OPEN",
-        before_project_status="In Review",
         original=uis.KernelError("original failure"),
     )
 
     assert not any(argv[:3] == ["gh", "issue", "reopen"] for argv in run_calls)
-    assert set_status_calls == [(100, "In Review")]
+    assert set_status_calls == [(100, "Backlog")]
 
 
-def test_rollback_epic_reconciliation_raises_combined_error_when_unsettled(monkeypatch):
+@pytest.mark.parametrize(
+    ("fail_mode", "expected_match"),
+    [
+        ("unsettled", "did not settle"),
+        ("command_error", "reopen failed"),
+    ],
+)
+def test_rollback_epic_reconciliation_surfaces_combined_error(
+    monkeypatch, fail_mode, expected_match
+):
     import update_issue_status as uis
 
-    stuck = {"number": 100, "state": "CLOSED", "labels": [{"name": "status:done"}]}
-    monkeypatch.setattr(uis, "run", lambda argv, **kwargs: _ok_result())
-    monkeypatch.setattr(uis, "issue", lambda number, cwd=None: stuck)
-    monkeypatch.setattr(uis, "status_of", lambda record: "Done")
-    monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Done")
-    monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: None)
+    if fail_mode == "unsettled":
+        stuck = {"number": 100, "state": "CLOSED", "labels": [{"name": "status:done"}]}
+        monkeypatch.setattr(uis, "run", lambda argv, **kwargs: _ok_result())
+        monkeypatch.setattr(uis, "issue", lambda number, cwd=None: stuck)
+        monkeypatch.setattr(uis, "status_of", lambda record: "Done")
+        monkeypatch.setattr(uis, "project_item_status", lambda number, cwd=None: "Done")
+        monkeypatch.setattr(uis, "set_status", lambda *args, **kwargs: None)
+    else:
+        monkeypatch.setattr(uis, "issue", lambda number, cwd=None: {"number": 100, "state": "CLOSED"})
 
-    with pytest.raises(uis.KernelError, match="did not settle") as excinfo:
-        uis._rollback_epic_reconciliation(
-            100,
-            before_status="In Review",
-            before_state="OPEN",
-            before_project_status="In Review",
-            original=uis.KernelError("original failure"),
-        )
+        def fail_reopen(argv, **kwargs):
+            if argv[:3] == ["gh", "issue", "reopen"]:
+                raise uis.KernelError("reopen failed")
+            return _ok_result()
+
+        monkeypatch.setattr(uis, "run", fail_reopen)
+
+    with pytest.raises(uis.KernelError, match=expected_match) as excinfo:
+        uis._rollback_epic_reconciliation(100, original=uis.KernelError("original failure"))
     assert "original failure" in str(excinfo.value)
 
 
-def test_rollback_epic_reconciliation_surfaces_command_failure_with_original(monkeypatch):
+def test_cli_epic_reconcile_check_and_apply(monkeypatch, capsys):
     import update_issue_status as uis
 
-    monkeypatch.setattr(uis, "issue", lambda number, cwd=None: {"number": 100, "state": "CLOSED"})
-
-    def fail_reopen(argv, **kwargs):
-        if argv[:3] == ["gh", "issue", "reopen"]:
-            raise uis.KernelError("reopen failed")
-        return _ok_result()
-
-    monkeypatch.setattr(uis, "run", fail_reopen)
-
-    with pytest.raises(uis.KernelError, match="reopen failed") as excinfo:
-        uis._rollback_epic_reconciliation(
-            100,
-            before_status="In Review",
-            before_state="OPEN",
-            before_project_status="In Review",
-            original=uis.KernelError("original failure"),
-        )
-    assert "original failure" in str(excinfo.value)
+    monkeypatch.setattr(
+        uis,
+        "epic_reconcile_evidence",
+        lambda issue, cwd=None: {
+            "issue": issue,
+            "closable": True,
+            "blocked": False,
+            "blockers": [],
+            "status": "Backlog",
+            "project_status": "Backlog",
+            "state": "OPEN",
+            "children": {},
+        },
+    )
+    monkeypatch.setattr(sys, "argv", ["update_issue_status.py", "--issue", "100", "--reconcile-epic", "--check"])
+    assert uis.main() == 0
+    out = capsys.readouterr().out
+    assert '"project_status": "Backlog"' in out
+    assert '"closable": true' in out

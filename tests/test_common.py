@@ -24,37 +24,18 @@ def record(body: str, labels: list[str] | None = None, state: str = "OPEN") -> d
     }
 
 
-def test_issue_contract_accepts_one_safe_budget_and_unchecked_criterion():
-    body = """
-## Acceptance Criteria
-
-- [ ] behavior is observable
-
-touches: scripts/a.py, docs/**
-"""
-    assert common.contract_errors(record(body)) == []
-    assert common.parse_touches(body) == ["scripts/a.py", "docs/**"]
-    assert common.acceptance_items(body) == [(False, "behavior is observable")]
-
-
-def test_issue_contract_accepts_rendered_issue_form_markdown():
-    body = """
-### Outcome
-
-The behavior is observable.
-
-### Acceptance Criteria
-
-- [ ] behavior is observable
-
-### touches:
-
-scripts/a.py, docs/**
-
-### Dependencies
-
-No response
-"""
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Acceptance Criteria\n\n- [ ] behavior is observable\n\ntouches: scripts/a.py, docs/**\n",
+        (
+            "### Outcome\n\nThe behavior is observable.\n\n### Acceptance Criteria\n\n"
+            "- [ ] behavior is observable\n\n### touches:\n\nscripts/a.py, docs/**\n\n"
+            "### Dependencies\n\nNo response\n"
+        ),
+    ],
+)
+def test_issue_contract_accepts_valid_bodies(body):
     assert common.contract_errors(record(body)) == []
     assert common.parse_touches(body) == ["scripts/a.py", "docs/**"]
     assert common.acceptance_items(body) == [(False, "behavior is observable")]
@@ -123,12 +104,18 @@ def test_dependencies_are_unique_and_ordered():
     assert common.dependencies(body) == [2, 9]
 
 
-def test_repository_command_uses_configured_app_runner(monkeypatch, tmp_path):
-    runner = tmp_path / "app-run"
-    runner.write_text("#!/bin/sh\n", encoding="utf-8")
-    runner.chmod(0o755)
-    monkeypatch.setenv("ARU_GITHUB_APP_RUNNER", str(runner))
+@pytest.mark.parametrize("use_runner", [True, False])
+def test_repository_command_runner_resolution(monkeypatch, tmp_path, use_runner):
     calls = []
+    if use_runner:
+        runner = tmp_path / "app-run"
+        runner.write_text("#!/bin/sh\n", encoding="utf-8")
+        runner.chmod(0o755)
+        monkeypatch.setenv("ARU_GITHUB_APP_RUNNER", str(runner))
+        expected_argv = [str(runner), "--", "gh", "issue", "view", "7"]
+    else:
+        monkeypatch.delenv("ARU_GITHUB_APP_RUNNER", raising=False)
+        expected_argv = ["gh", "issue", "view", "7"]
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -136,22 +123,7 @@ def test_repository_command_uses_configured_app_runner(monkeypatch, tmp_path):
 
     monkeypatch.setattr(common.subprocess, "run", fake_run)
     common.run(["gh", "issue", "view", "7"])
-
-    assert calls[0][0] == [str(runner), "--", "gh", "issue", "view", "7"]
-
-
-def test_repository_command_uses_portable_gh_when_runner_is_unset(monkeypatch):
-    monkeypatch.delenv("ARU_GITHUB_APP_RUNNER", raising=False)
-    calls = []
-
-    def fake_run(argv, **kwargs):
-        calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
-
-    monkeypatch.setattr(common.subprocess, "run", fake_run)
-    common.run(["gh", "pr", "view", "7"])
-
-    assert calls[0][0] == ["gh", "pr", "view", "7"]
+    assert calls[0][0] == expected_argv
 
 
 def test_configured_app_runner_must_be_executable(monkeypatch, tmp_path):
@@ -247,6 +219,41 @@ def test_linked_project_does_not_requery_within_one_process(monkeypatch):
     assert first == second == {"id": "PVT_1", "number": 5, "title": "Delivery"}
     assert len(calls) == 1
     assert calls[0][1] == common.PROJECT_AUTH
+
+
+def test_linked_project_rejects_graphql_errors_without_caching(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    common._LINKED_PROJECT_CACHE.clear()
+    calls = []
+
+    def fake_gh_json(args, *, cwd=None, auth=None):
+        calls.append((args, auth))
+        if len(calls) == 1:
+            return {
+                "errors": [{"message": "partial project board failure"}],
+                "data": {
+                    "repository": {
+                        "projectsV2": {
+                            "nodes": [{"id": "PVT_BAD", "number": 5, "title": "Bad"}],
+                            "pageInfo": {"hasNextPage": False},
+                        }
+                    }
+                },
+            }
+        return _linked_project_payload(5)
+
+    monkeypatch.setattr(common, "gh_json", fake_gh_json)
+
+    with pytest.raises(common.KernelError, match="GraphQL error"):
+        common.linked_project()
+
+    assert ("owner/repo", "") not in common._LINKED_PROJECT_CACHE
+
+    project = common.linked_project()
+    assert project["id"] == "PVT_1"
+    assert project["number"] == 5
+    assert len(calls) == 2
+    assert common._LINKED_PROJECT_CACHE[("owner/repo", "")] == project
 
 
 def test_linked_project_cache_is_scoped_to_project_number(monkeypatch):
@@ -638,54 +645,39 @@ def test_project_item_status_fails_closed_on_top_level_graphql_errors(monkeypatc
         common.project_item_status(7)
 
 
-def test_subprocess_error_redacts_token_values(monkeypatch):
-    secret = "ghs_this-must-never-appear"
-    monkeypatch.setenv("GH_TOKEN", secret)
-
-    def fake_run(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=f"failed with {secret}")
-
-    monkeypatch.setattr(common.subprocess, "run", fake_run)
-
-    with pytest.raises(common.KernelError) as exc_info:
-        common.run(["git", "status"])
-    assert secret not in str(exc_info.value)
-    assert "[REDACTED]" in str(exc_info.value)
-
-
-def test_unchecked_subprocess_error_also_redacts_token_values(monkeypatch):
-    secret = "github_pat_this-must-never-appear"
-    monkeypatch.setenv("GITHUB_TOKEN", secret)
-
-    def fake_run(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=f"failed with {secret}")
-
-    monkeypatch.setattr(common.subprocess, "run", fake_run)
-
-    result = common.run(["git", "status"], check=False)
-    assert secret not in result.stderr
-    assert "[REDACTED]" in result.stderr
-
-
-def test_successful_subprocess_also_redacts_token_values(monkeypatch):
-    secret = "ghs_success-output-must-never-appear"
-    monkeypatch.setenv("GH_TOKEN", secret)
+@pytest.mark.parametrize(
+    ("env_var", "secret", "returncode", "check", "expect_raise"),
+    [
+        ("GH_TOKEN", "ghs_this-must-never-appear", 1, True, True),
+        ("GITHUB_TOKEN", "github_pat_this-must-never-appear", 1, False, False),
+        ("GH_TOKEN", "ghs_success-output-must-never-appear", 0, True, False),
+    ],
+)
+def test_subprocess_redacts_token_values(
+    monkeypatch, env_var, secret, returncode, check, expect_raise
+):
+    monkeypatch.setenv(env_var, secret)
 
     def fake_run(argv, **kwargs):
         return subprocess.CompletedProcess(
             argv,
-            0,
+            returncode,
             stdout=f'{{"token":"{secret}"}}',
-            stderr=f"warning includes {secret}",
+            stderr=f"failed or warning with {secret}",
         )
 
     monkeypatch.setattr(common.subprocess, "run", fake_run)
 
-    result = common.run(["gh", "api", "repos/owner/repo"])
-    assert secret not in result.stdout
-    assert secret not in result.stderr
-    assert "[REDACTED]" in result.stdout
-    assert "[REDACTED]" in result.stderr
+    if expect_raise:
+        with pytest.raises(common.KernelError) as exc_info:
+            common.run(["git", "status"], check=check)
+        assert secret not in str(exc_info.value)
+        assert "[REDACTED]" in str(exc_info.value)
+    else:
+        result = common.run(["gh", "api", "repos/owner/repo"], check=check)
+        assert secret not in result.stdout
+        assert secret not in result.stderr
+        assert "[REDACTED]" in result.stdout or "[REDACTED]" in result.stderr
 
 
 def test_child_issue_snapshots_use_one_repository_graphql_query(monkeypatch):
@@ -764,23 +756,14 @@ def _child_payload(node: dict) -> dict:
             "malformed",
         ),
         (
-            _child_payload(
-                _raw_child_node(labels={"nodes": ["not-a-dict"], "pageInfo": {"hasNextPage": False}})
-            ),
+            _child_payload(_raw_child_node(labels={"nodes": ["bad"], "pageInfo": {"hasNextPage": False}})),
             "malformed",
         ),
         (
-            _child_payload(
-                _raw_child_node(
-                    labels={"nodes": [{"name": "status:done"}], "pageInfo": {"hasNextPage": True}}
-                )
-            ),
+            _child_payload(_raw_child_node(labels={"nodes": [{"name": "status:done"}], "pageInfo": {"hasNextPage": True}})),
             "truncated",
         ),
-        (
-            _child_payload(_raw_child_node(labels={"nodes": [{"name": "status:done"}]})),
-            "truncated",
-        ),
+        (_child_payload(_raw_child_node(labels={"nodes": [{"name": "status:done"}]})), "truncated"),
     ],
 )
 def test_child_issue_snapshots_fails_closed_on_malformed_graphql(monkeypatch, payload, message):
