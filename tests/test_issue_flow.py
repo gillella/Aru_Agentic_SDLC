@@ -202,7 +202,10 @@ def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys):
         ["gh", "issue", "edit", "7", "--add-label", "agent:codex-1", "--add-assignee", "@me"],
         ["gh", "issue", "edit", "7", "--remove-label", "agent:codex-1", "--remove-assignee", "@me"],
     ]
-    assert "claim race detected; no exclusive winner" in capsys.readouterr().err
+    assert capsys.readouterr().err.endswith(
+        "claim_issue.py: error: GitHub GraphQL quota exhausted; stop and wait for the budget "
+        "to reset; original claim failure: claim race detected; no exclusive winner\n"
+    )
 
 
 @pytest.mark.parametrize("agent", ["A", "contains space", "x", "../agent"])
