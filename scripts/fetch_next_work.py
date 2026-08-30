@@ -13,6 +13,7 @@ from common import (
     AGENT_PREFIX,
     REPOSITORY_AUTH,
     KernelError,
+    contract_errors,
     dependencies,
     gh_json,
     gh_paginated,
@@ -78,6 +79,8 @@ def backlog_issues() -> list[dict]:
         or not isinstance(record.get("number"), int)
         or isinstance(record.get("number"), bool)
         or int(record["number"]) <= 0
+        or not isinstance(record.get("title"), str)
+        or not record["title"]
         for record in records
     ):
         raise KernelError("GitHub returned malformed Backlog issue inventory")
@@ -236,11 +239,33 @@ def _extra_backlog_errors(record: dict) -> list[str]:
     return []
 
 
+def _backlog_pre_dependency_errors(record: dict) -> list[str]:
+    errors = contract_errors(record)
+    labels = label_names(record)
+    if "needs-human" in labels:
+        errors.append("needs-human issues cannot enter Ready")
+    if "type:epic" in labels:
+        errors.append("type:epic issues cannot enter Ready")
+    priority_labels = [name for name in labels if name.startswith("priority:")]
+    priorities = {f"priority:p{value}" for value in range(4)}
+    if len(priority_labels) > 1 or any(name not in priorities for name in priority_labels):
+        errors.append("issue may have at most one supported priority:p0..p3 label")
+    return errors
+
+
+def _backlog_dependency_records(records: list[dict]) -> list[dict]:
+    return [
+        record
+        for record in records
+        if not _backlog_pre_dependency_errors(record) and not _extra_backlog_errors(record)
+    ]
+
+
 def _recoverable_backlog(records: list[dict]) -> tuple[list[tuple[int, dict]], dict[int, list[str]]]:
     return triage_backlog.backlog_candidates(
         records,
         extra_errors=_extra_backlog_errors,
-        issue_states=backlog_dependency_states(records),
+        issue_states=backlog_dependency_states(_backlog_dependency_records(records)),
     )
 
 

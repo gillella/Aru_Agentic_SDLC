@@ -207,6 +207,45 @@ def test_select_ready_fast_path_never_reads_or_mutates_backlog(monkeypatch):
     assert calls == ["ready"]
 
 
+def test_select_idle_recovery_prefilters_claimed_backlog_before_dependency_inventory(
+    monkeypatch,
+):
+    claimed_body = (
+        "## Acceptance Criteria\n"
+        "- [ ] Already claimed elsewhere\n\n"
+        + "\n".join(f"depends-on: #{number}" for number in range(1, 102))
+        + "\n"
+        + "touches: src/40.py"
+    )
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [
+            backlog_issue(40, "agent:other-worker", body=claimed_body),
+            backlog_issue(41, "priority:p0"),
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "gh_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("prefiltered claimed issue should not trigger dependency query")
+        ),
+    )
+    monkeypatch.setattr(fetch_next_work.triage_backlog, "promote_issue", lambda *_a, **_k: None)
+
+    result = fetch_next_work.select("codex-sol56-issue535")
+
+    assert result["type"] == "issue"
+    assert result["issue"] == 41
+    assert result["title"] == "issue 41"
+    assert result["diagnostics"][0] == "Ready idle; evaluated Backlog once"
+    assert "Backlog issue #40 issue is already claimed; skipped" in result["diagnostics"]
+    assert result["diagnostics"][-1] == "Promoted Backlog issue #41 to Ready"
+
+
 def test_select_idle_recovery_runs_one_backlog_pass_without_ready_refresh(monkeypatch):
     calls = []
     monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
@@ -240,7 +279,7 @@ def test_select_idle_recovery_runs_one_backlog_pass_without_ready_refresh(monkey
     assert calls == ["ready", "backlog", ("promote", 41)]
 
 
-@pytest.mark.parametrize("payload", [{}, [None], [{"number": "7"}]])
+@pytest.mark.parametrize("payload", [{}, [None], [{"number": "7"}], [{"number": 7}]])
 def test_backlog_issues_rejects_malformed_inventory(monkeypatch, payload):
     monkeypatch.setattr(fetch_next_work, "gh_json", lambda *_args, **_kwargs: payload)
 
