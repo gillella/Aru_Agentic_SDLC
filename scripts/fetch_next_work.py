@@ -23,6 +23,7 @@ from common import (
     json_print,
     label_names,
     parse_touches,
+    project_item_status,
     repo_slug,
 )
 from fetch_pr_feedback import fetch_feedback
@@ -244,9 +245,12 @@ def _select_ready_issue(records: list[dict]) -> dict[str, object]:
 
 def _extra_backlog_errors(record: dict) -> list[str]:
     labels = label_names(record)
+    errors: list[str] = []
+    if [name for name in labels if name.startswith("status:")] != ["status:backlog"]:
+        errors.append("issue must have exactly one status:backlog label")
     if any(name.startswith(AGENT_PREFIX) for name in labels):
-        return ["issue is already claimed"]
-    return []
+        errors.append("issue is already claimed")
+    return errors
 
 
 def _backlog_pre_dependency_errors(record: dict) -> list[str]:
@@ -272,11 +276,27 @@ def _backlog_dependency_records(records: list[dict]) -> list[dict]:
 
 
 def _recoverable_backlog(records: list[dict]) -> tuple[list[tuple[int, dict]], dict[int, list[str]]]:
-    return triage_backlog.backlog_candidates(
+    candidates, rejected = triage_backlog.backlog_candidates(
         records,
         extra_errors=_extra_backlog_errors,
         issue_states=backlog_dependency_states(_backlog_dependency_records(records)),
     )
+    authoritative: list[tuple[int, dict]] = []
+    for priority, record in candidates:
+        number = int(record["number"])
+        try:
+            project_status = project_item_status(number)
+        except KernelError as exc:
+            if str(exc) != f"issue #{number} is not a member of the linked Project Board":
+                raise
+            rejected[number] = ["issue is not a member of the linked Project Board"]
+            continue
+        if project_status != "Backlog":
+            detail = "is unset" if project_status is None else f"is {project_status!r}, expected 'Backlog'"
+            rejected[number] = [f"Project card status {detail}"]
+            continue
+        authoritative.append((priority, record))
+    return authoritative, rejected
 
 
 def _recovery_issue_record(number: int) -> dict:
@@ -352,25 +372,24 @@ def _recover_single_issue() -> dict[str, object] | None:
     diagnostics = ["Ready idle; evaluated Backlog once"]
     if rejected:
         diagnostics.extend(_backlog_diagnostics(rejected))
-    if not candidates:
-        return {"type": "idle", "diagnostics": diagnostics}
-    record = candidates[0][1]
-    number = int(record["number"])
-    try:
-        live_record, _live_touches = _promote_recovery_candidate(record)
-    except _RecoveryDriftError as exc:
-        diagnostics.extend(
-            f"Backlog issue #{number} {error}; skipped"
-            for error in str(exc).split("; ")
-        )
-        return {"type": "idle", "diagnostics": diagnostics}
-    diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
-    return {
-        "type": "issue",
-        "issue": number,
-        "title": str(live_record["title"]),
-        "diagnostics": diagnostics,
-    }
+    for _priority, record in candidates:
+        number = int(record["number"])
+        try:
+            live_record, _live_touches = _promote_recovery_candidate(record)
+        except _RecoveryDriftError as exc:
+            diagnostics.extend(
+                f"Backlog issue #{number} {error}; skipped"
+                for error in str(exc).split("; ")
+            )
+            continue
+        diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
+        return {
+            "type": "issue",
+            "issue": number,
+            "title": str(live_record["title"]),
+            "diagnostics": diagnostics,
+        }
+    return {"type": "idle", "diagnostics": diagnostics}
 
 
 def _backlog_diagnostics(rejected: dict[int, list[str]]) -> list[str]:
@@ -639,14 +658,28 @@ def _recover_batch_candidates(
             "dependency_blocked": 0,
             "malformed": 0,
         }
-    priority, record = candidates[0]
-    number = int(record["number"])
-    touches = parse_touches(str(record.get("body") or ""))
-    if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
-        diagnostics.append(
-            f"Backlog issue #{number} touches conflict with active lane work; skipped"
-        )
-        return [], diagnostics, {
+    for priority, record in candidates:
+        number = int(record["number"])
+        touches = parse_touches(str(record.get("body") or ""))
+        if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
+            diagnostics.append(
+                f"Backlog issue #{number} touches conflict with active lane work; skipped"
+            )
+            continue
+        try:
+            live_record, live_touches = _promote_recovery_candidate(
+                record,
+                reserved_paths=reserved_paths,
+            )
+        except _RecoveryDriftError as exc:
+            diagnostics.extend(
+                f"Backlog issue #{number} {error}; skipped"
+                for error in str(exc).split("; ")
+            )
+            continue
+        diagnostics.append("Ready snapshot empty; recovered 1 Backlog candidate")
+        diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
+        return [(priority, number, live_record, live_touches)], diagnostics, {
             "total_ready": 0,
             "executable_ready": 0,
             "human_gated": 0,
@@ -654,32 +687,7 @@ def _recover_batch_candidates(
             "dependency_blocked": 0,
             "malformed": 0,
         }
-    try:
-        live_record, live_touches = _promote_recovery_candidate(
-            record,
-            reserved_paths=reserved_paths,
-        )
-    except _RecoveryDriftError as exc:
-        diagnostics.extend(
-            f"Backlog issue #{number} {error}; skipped"
-            for error in str(exc).split("; ")
-        )
-        return [], diagnostics, {
-            "total_ready": 0,
-            "executable_ready": 0,
-            "human_gated": 0,
-            "epics": 0,
-            "dependency_blocked": 0,
-            "malformed": 0,
-        }
-    diagnostics.append("Ready snapshot empty; recovered 1 Backlog candidate")
-    diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
-    return [(
-        priority,
-        number,
-        live_record,
-        live_touches,
-    )], diagnostics, {
+    return [], diagnostics, {
         "total_ready": 0,
         "executable_ready": 0,
         "human_gated": 0,

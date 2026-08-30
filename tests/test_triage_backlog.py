@@ -85,6 +85,31 @@ def test_backlog_candidates_reject_open_dependencies(monkeypatch):
     assert rejected == {9: ["open dependencies: #90"]}
 
 
+def test_backlog_candidates_reject_malformed_dependencies_and_keep_later_candidate(
+    monkeypatch,
+):
+    malformed = backlog_issue(
+        9,
+        "priority:p0",
+        body=(
+            "## Acceptance Criteria\n"
+            "- [ ] Reject malformed dependency syntax\n\n"
+            "depends-on: #90, #91\n"
+            "touches: src/9.py"
+        ),
+    )
+    valid = backlog_issue(10, "priority:p1")
+
+    candidates, rejected = triage_backlog.backlog_candidates(
+        [malformed, valid], issue_states={}
+    )
+
+    assert [record["number"] for _priority, record in candidates] == [10]
+    assert rejected == {
+        9: ["depends-on declarations must each match 'depends-on: #N'"]
+    }
+
+
 def test_backlog_candidates_preserve_legacy_evaluate_seam(monkeypatch):
     records = [
         {"number": 2, "title": "blocked"},

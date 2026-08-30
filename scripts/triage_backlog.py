@@ -49,7 +49,10 @@ def evaluate_with_states(
         _priority(record)
     except KernelError as exc:
         errors.append(str(exc))
-    blocked = (
+    dependency_syntax_invalid = any(
+        error.startswith("depends-on declarations ") for error in errors
+    )
+    blocked = [] if dependency_syntax_invalid else (
         [
             number
             for number in unresolved_dependencies(record)

@@ -9,6 +9,16 @@ import common
 import fetch_next_work
 
 
+@pytest.fixture(autouse=True)
+def authoritative_backlog_project_status(monkeypatch):
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _number: "Backlog",
+        raising=False,
+    )
+
+
 def ready_issue(number: int, *labels: str, body: str | None = None) -> dict:
     return {
         "number": number,
@@ -178,6 +188,22 @@ def test_select_idle_recovery_stops_on_partial_backlog_dependency_inventory(monk
         fetch_next_work.select("codex-sol56-issue535")
 
 
+def test_select_idle_recovery_keeps_project_evidence_failures_terminal(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(fetch_next_work, "backlog_issues", lambda: [backlog_issue(11)])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _number: (_ for _ in ()).throw(
+            common.KernelError("Project Board item inventory is truncated")
+        ),
+    )
+
+    with pytest.raises(common.KernelError, match="Project Board item inventory is truncated"):
+        fetch_next_work.select("codex-sol56-issue537")
+
+
 def test_select_ready_fast_path_never_reads_or_mutates_backlog(monkeypatch):
     calls = []
     monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
@@ -190,6 +216,13 @@ def test_select_ready_fast_path_never_reads_or_mutates_backlog(monkeypatch):
         fetch_next_work,
         "backlog_issues",
         lambda: (_ for _ in ()).throw(AssertionError("Backlog inventory should not load")),
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _number: (_ for _ in ()).throw(
+            AssertionError("Project recovery evidence should not load")
+        ),
     )
     monkeypatch.setattr(
         fetch_next_work.triage_backlog,

@@ -93,6 +93,39 @@ def test_dependencies_are_unique_and_ordered():
 
 
 @pytest.mark.parametrize(
+    "declaration",
+    [
+        "depends-on: #9, #10",
+        "depends-on: none",
+        "depends-on:",
+        "depends-on: 9",
+        "depends-on: #09",
+        "Depends-On: #9",
+        " depends-on: #9",
+        "depends-on: #9 trailing",
+    ],
+)
+def test_dependencies_reject_noncanonical_declarations(declaration):
+    with pytest.raises(
+        common.KernelError,
+        match=r"depends-on declarations must each match 'depends-on: #N'",
+    ):
+        common.dependencies(declaration)
+
+
+def test_issue_contract_reports_malformed_dependency_declaration():
+    body = (
+        "## Acceptance Criteria\n\n- [ ] behavior is observable\n\n"
+        "depends-on: #8, #9\n"
+        "touches: scripts/a.py\n"
+    )
+
+    assert common.contract_errors(record(body)) == [
+        "depends-on declarations must each match 'depends-on: #N'"
+    ]
+
+
+@pytest.mark.parametrize(
     ("command", "use_runner"),
     [(["gh", "issue", "view", "7"], True), (["gh", "issue", "view", "7"], False), (["gh", "pr", "view", "7"], False)],
 )
@@ -385,7 +418,7 @@ def test_board_edit_reads_only_target_issue_item_and_status_field(monkeypatch):
     ("payload", "message"),
     [
         (board_payload(has_next_page=True), "truncated"),
-        (board_payload(items=[]), "ambiguous"),
+        (board_payload(items=[]), "not a member"),
         (board_payload(items=[{"id": "PVTI_7a", "project": {"id": "PVT_1"}}, {"id": "PVTI_7b", "project": {"id": "PVT_1"}}]), "ambiguous"),
         (board_payload(items=[{"id": "PVTI_7", "project": {}}]), "malformed"),
         (board_payload(field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "ready-option", "name": "Ready"}]}), "no unique 'Done' option"),
@@ -481,7 +514,7 @@ def test_project_item_status_returns_none_without_a_status_value(monkeypatch):
     ("payload", "message"),
     [
         (project_status_payload(has_next_page=True), "truncated"),
-        (project_status_payload(items=[]), "ambiguous"),
+        (project_status_payload(items=[]), "not a member"),
         (project_status_payload(items=[{"id": "PVTI_7a", "project": {"id": "PVT_1"}, "fieldValueByName": None}, {"id": "PVTI_7b", "project": {"id": "PVT_1"}, "fieldValueByName": None}]), "ambiguous"),
         (project_status_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {}}]), "malformed"),
         (board_payload(items=[{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}], field={"id": "PVTSSF_status", "name": "Status", "options": [{"id": "", "name": "Done"}]}), "options are malformed"),
