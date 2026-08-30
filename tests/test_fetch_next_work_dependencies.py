@@ -317,6 +317,35 @@ def test_select_idle_recovery_rereads_chosen_issue_and_rejects_new_claim(monkeyp
     assert promoted == []
 
 
+@pytest.mark.parametrize("payload", [None, [], {}, {"number": 41, "title": "", "body": "", "state": "OPEN"}])
+def test_select_idle_recovery_treats_malformed_chosen_issue_reread_as_terminal(
+    monkeypatch, payload
+):
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [backlog_issue(41, "priority:p0")],
+    )
+    monkeypatch.setattr(fetch_next_work, "repo_slug", lambda: "owner/repository")
+    monkeypatch.setattr(
+        fetch_next_work,
+        "gh_json",
+        lambda args, **_kwargs: payload
+        if args == ["api", "repos/owner/repository/issues/41"]
+        else (_ for _ in ()).throw(AssertionError(args)),
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda _number, pre_mutation_check=None, **_kwargs: pre_mutation_check(),
+    )
+
+    with pytest.raises(common.KernelError, match="malformed recovery issue reread"):
+        fetch_next_work.select("codex-sol56-issue535")
+
+
 def test_select_idle_recovery_rereads_dependency_state_before_promotion(monkeypatch):
     dependency_states = iter([{90: "closed"}, {90: "open"}])
     promoted = []
@@ -634,3 +663,84 @@ def test_batch_idle_recovery_rejects_candidate_that_conflicts_with_open_lane_wor
         "Backlog issue #12 touches conflict with active lane work; skipped",
     ]
     assert promoted == []
+
+
+def test_batch_idle_recovery_leaves_lane_idle_when_chosen_issue_drifted_before_promotion(
+    monkeypatch,
+):
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [backlog_issue(12, "priority:p0")],
+    )
+    monkeypatch.setattr(fetch_next_work, "repo_slug", lambda: "owner/repository")
+    monkeypatch.setattr(
+        fetch_next_work,
+        "gh_json",
+        lambda args, **_kwargs: backlog_issue(12, "priority:p0", "agent:other-worker")
+        if args == ["api", "repos/owner/repository/issues/12"]
+        else (_ for _ in ()).throw(AssertionError(args)),
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda _number, pre_mutation_check=None, **_kwargs: pre_mutation_check(),
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert result["lanes"] == [
+        {"agent": "agent-a", "work": {"type": "idle"}},
+        {"agent": "agent-b", "work": {"type": "idle"}},
+    ]
+    assert result["diagnostics"] == [
+        "Ready idle; evaluated Backlog once",
+        "Backlog issue #12 issue is already claimed; skipped",
+    ]
+    assert "ready_classification" not in result
+
+
+def test_batch_idle_recovery_keeps_terminal_reread_failures_terminal(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [backlog_issue(12, "priority:p0")],
+    )
+    monkeypatch.setattr(fetch_next_work, "repo_slug", lambda: "owner/repository")
+    monkeypatch.setattr(
+        fetch_next_work,
+        "gh_json",
+        lambda args, **_kwargs: None
+        if args == ["api", "repos/owner/repository/issues/12"]
+        else (_ for _ in ()).throw(AssertionError(args)),
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda _number, pre_mutation_check=None, **_kwargs: pre_mutation_check(),
+    )
+
+    with pytest.raises(common.KernelError, match="malformed recovery issue reread"):
+        fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+
+def test_batch_idle_recovery_keeps_terminal_promotion_failures_terminal(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [backlog_issue(12, "priority:p0")],
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda _number, **_kwargs: (_ for _ in ()).throw(common.KernelError("GitHub API rate limit exceeded")),
+    )
+
+    with pytest.raises(common.KernelError, match="GitHub API rate limit exceeded"):
+        fetch_next_work.select_batch(["agent-a", "agent-b"])

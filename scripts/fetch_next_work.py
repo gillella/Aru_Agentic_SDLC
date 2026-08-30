@@ -14,6 +14,7 @@ from common import (
     AGENT_PREFIX,
     REPOSITORY_AUTH,
     KernelError,
+    StatusPreconditionError,
     contract_errors,
     dependencies,
     gh_json,
@@ -31,6 +32,10 @@ MAX_DEPENDENCY_REFERENCES = 100
 _RECOVERY_CANDIDATE_PATTERN = (
     r"(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\s*$"
 )
+
+
+class _RecoveryDriftError(KernelError):
+    pass
 
 
 def authored_prs(agent: str) -> list[dict]:
@@ -276,17 +281,18 @@ def _recoverable_backlog(records: list[dict]) -> tuple[list[tuple[int, dict]], d
 
 def _recovery_issue_record(number: int) -> dict:
     record = gh_json(["api", f"repos/{repo_slug()}/issues/{number}"])
+    if not isinstance(record, dict):
+        raise KernelError(f"GitHub returned malformed recovery issue reread for #{number}")
     state = str(record.get("state") or "")
     if (
-        not isinstance(record, dict)
-        or record.get("number") != number
+        record.get("number") != number
         or not isinstance(record.get("title"), str)
         or not record["title"]
         or not isinstance(record.get("body"), str)
         or "pull_request" in record
         or state.upper() not in {"OPEN", "CLOSED"}
     ):
-        raise KernelError(f"issue #{number} is unavailable")
+        raise KernelError(f"GitHub returned malformed recovery issue reread for #{number}")
     return record
 
 
@@ -307,20 +313,19 @@ def _live_recovery_errors(record: dict) -> list[str]:
 def _promote_recovery_candidate(record: dict) -> dict:
     number = int(record["number"])
     live_record = record
-    live_errors: list[str] = []
 
     def _pre_mutation_check() -> None:
-        nonlocal live_record, live_errors
+        nonlocal live_record
         live_record = _recovery_issue_record(number)
         live_errors = _live_recovery_errors(live_record)
         if live_errors:
-            raise KernelError("; ".join(live_errors))
+            raise _RecoveryDriftError("; ".join(live_errors))
 
     try:
         triage_backlog.promote_issue(number, pre_mutation_check=_pre_mutation_check)
-    except KernelError:
-        if live_errors:
-            raise KernelError("; ".join(live_errors))
+    except StatusPreconditionError as exc:
+        if "expected 'Backlog'" in str(exc):
+            raise _RecoveryDriftError(str(exc)) from exc
         raise
     return live_record
 
@@ -336,7 +341,7 @@ def _recover_single_issue() -> dict[str, object] | None:
     number = int(record["number"])
     try:
         live_record = _promote_recovery_candidate(record)
-    except KernelError as exc:
+    except _RecoveryDriftError as exc:
         diagnostics.extend(
             f"Backlog issue #{number} {error}; skipped"
             for error in str(exc).split("; ")
@@ -632,7 +637,21 @@ def _recover_batch_candidates(
             "dependency_blocked": 0,
             "malformed": 0,
         }
-    live_record = _promote_recovery_candidate(record)
+    try:
+        live_record = _promote_recovery_candidate(record)
+    except _RecoveryDriftError as exc:
+        diagnostics.extend(
+            f"Backlog issue #{number} {error}; skipped"
+            for error in str(exc).split("; ")
+        )
+        return [], diagnostics, {
+            "total_ready": 0,
+            "executable_ready": 0,
+            "human_gated": 0,
+            "epics": 0,
+            "dependency_blocked": 0,
+            "malformed": 0,
+        }
     diagnostics.append("Ready snapshot empty; recovered 1 Backlog candidate")
     diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
     return [(
