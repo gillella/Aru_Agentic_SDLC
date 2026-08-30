@@ -51,10 +51,22 @@ def test_triage_promotes_one_complete_issue(monkeypatch):
     monkeypatch.setattr(triage_backlog, "list_issues", lambda **_: records)
     monkeypatch.setattr(triage_backlog, "evaluate", lambda item: ["missing"] if item["number"] == 2 else [])
     promoted = []
-    monkeypatch.setattr(triage_backlog, "set_status", lambda number, status: promoted.append((number, status)))
+
+    def transactional_set_status(
+        number,
+        status,
+        *,
+        expected_current=None,
+        pre_mutation_check=None,
+    ):
+        assert expected_current == "Backlog"
+        assert pre_mutation_check is None
+        promoted.append((number, status, expected_current))
+
+    monkeypatch.setattr(triage_backlog, "set_status", transactional_set_status)
     result = triage_backlog.triage()
     assert result["promoted"] == [3]
-    assert promoted == [(3, "Ready")]
+    assert promoted == [(3, "Ready", "Backlog")]
     assert result["rejected"] == {2: ["missing"]}
 
 

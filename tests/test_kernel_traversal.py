@@ -32,7 +32,26 @@ def traverse(monkeypatch, number: int) -> dict:
     def current_issue(_number):
         return copy.deepcopy(state["issue"])
 
-    def move_status(_number, status):
+    pre_mutation_observations: list[tuple[int, str, str | None]] = []
+
+    def move_status(
+        _number,
+        status,
+        *,
+        expected_current=None,
+        pre_mutation_check=None,
+    ):
+        current_statuses = [
+            label["name"][len("status:"):]
+            for label in state["issue"]["labels"]
+            if label["name"].startswith("status:")
+        ]
+        current_status = current_statuses[-1].replace("-", " ").title() if current_statuses else None
+        if expected_current is not None:
+            assert current_status == expected_current
+        if pre_mutation_check is not None:
+            pre_mutation_check()
+        pre_mutation_observations.append((_number, status, expected_current))
         labels = [
             label
             for label in state["issue"]["labels"]
@@ -45,6 +64,7 @@ def traverse(monkeypatch, number: int) -> dict:
     monkeypatch.setattr(triage_backlog, "unresolved_dependencies", lambda _record: [])
     monkeypatch.setattr(triage_backlog, "set_status", move_status)
     assert triage_backlog.triage()["promoted"] == [number]
+    assert pre_mutation_observations == [(number, "Ready", "Backlog")]
 
     monkeypatch.setattr(claim_issue, "issue", current_issue)
     monkeypatch.setattr(claim_issue, "unresolved_dependencies", lambda _record: [])

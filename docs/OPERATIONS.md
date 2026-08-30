@@ -637,6 +637,30 @@ priority. Missing priority defaults to `P2`. An issue with contradictory or
 unsupported priority metadata is skipped with a diagnostic, so it cannot block
 other valid Ready work.
 
+If that Ready snapshot is empty, the same invocation may perform one bounded
+idle-recovery pass: fetch one Backlog snapshot, evaluate mechanical eligibility
+once, then narrow its pre-promotion recheck to the one chosen Backlog issue and
+its declared dependencies before promoting at most one highest-priority
+eligible issue. Promotion requires the transactional `set_status(...,
+expected_current="Backlog")` API and fails closed on any drift. Batch mode
+preserves its lane schema but also fails closed by promoting at most one issue
+per invocation, leaving remaining lanes idle rather than risking overlapping or
+partial promotions; if the chosen recovery issue's `touches:` overlap active
+lane work that the current open PR state can prove, recovery rejects that issue
+instead of promoting it. This recovery path does not run when Ready is
+non-empty, even if every visible Ready card is human-gated, epic, malformed,
+or dependency-blocked. It never polls, retries, loops over the whole board
+again, refreshes a second Backlog snapshot, or persists state. GraphQL
+partials, quota errors, status drift, eligibility drift, and promotion write
+failures remain terminal.
+
+When idle recovery runs, diagnostics add deterministic `Backlog issue #N ...;
+skipped` messages for rejected Backlog cards and `Promoted Backlog issue #N to
+Ready` for each successful promotion. Batch recovery keeps `ready_classification`
+bound to the original Ready snapshot and reports any recovered Backlog work only
+through additive diagnostics. If no Backlog issue is mechanically eligible, the
+invocation returns idle after that one bounded pass.
+
 You may claim a known issue explicitly:
 
 ```bash
@@ -791,7 +815,7 @@ create a scheduler, autonomous loop, or second work queue.
 | `init_project.py` | Generate a minimal consumer scaffold | Refuses conflicting overwrites |
 | `update_issue_status.py` | Move one issue between the five states or reconcile one epic | Updates status label and Project field together; epic mode checks or applies bounded child-only closure |
 | `triage_backlog.py` | Validate and promote Backlog issues | Rejects incomplete contracts and open dependencies |
-| `fetch_next_work.py` | Resume or select one unit of work | Prioritizes authored PR state before a new issue |
+| `fetch_next_work.py` | Resume or select one unit of work | Prioritizes authored PR state; only empty Ready snapshots may trigger one bounded Backlog recovery pass |
 | `claim_issue.py` | Acquire or release exclusive ownership | Re-reads state and fails on claim races |
 | `create_branch.py` | Create the issue branch and worktree | Requires In Progress plus the exact claimant |
 | `create_pr.py` | Open the governed PR | Requires published exact head and appends `Closes #N` |
