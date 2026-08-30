@@ -296,7 +296,11 @@ def _recovery_issue_record(number: int) -> dict:
     return record
 
 
-def _live_recovery_errors(record: dict) -> list[str]:
+def _live_recovery_errors(
+    record: dict,
+    *,
+    reserved_paths: list[list[str]] | None = None,
+) -> list[str]:
     errors: list[str] = []
     if str(record.get("state") or "").upper() != "OPEN":
         errors.append("issue is not open")
@@ -307,17 +311,30 @@ def _live_recovery_errors(record: dict) -> list[str]:
         )
     )
     errors.extend(_extra_backlog_errors(record))
+    if reserved_paths is not None:
+        touches = parse_touches(str(record.get("body") or ""))
+        if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
+            errors.append("touches conflict with active lane work")
     return errors
 
 
-def _promote_recovery_candidate(record: dict) -> dict:
+def _promote_recovery_candidate(
+    record: dict,
+    *,
+    reserved_paths: list[list[str]] | None = None,
+) -> tuple[dict, list[str]]:
     number = int(record["number"])
     live_record = record
+    live_touches = parse_touches(str(record.get("body") or ""))
 
     def _pre_mutation_check() -> None:
-        nonlocal live_record
+        nonlocal live_record, live_touches
         live_record = _recovery_issue_record(number)
-        live_errors = _live_recovery_errors(live_record)
+        live_touches = parse_touches(str(live_record.get("body") or ""))
+        live_errors = _live_recovery_errors(
+            live_record,
+            reserved_paths=reserved_paths,
+        )
         if live_errors:
             raise _RecoveryDriftError("; ".join(live_errors))
 
@@ -327,7 +344,7 @@ def _promote_recovery_candidate(record: dict) -> dict:
         if "expected 'Backlog'" in str(exc):
             raise _RecoveryDriftError(str(exc)) from exc
         raise
-    return live_record
+    return live_record, live_touches
 
 
 def _recover_single_issue() -> dict[str, object] | None:
@@ -340,7 +357,7 @@ def _recover_single_issue() -> dict[str, object] | None:
     record = candidates[0][1]
     number = int(record["number"])
     try:
-        live_record = _promote_recovery_candidate(record)
+        live_record, _live_touches = _promote_recovery_candidate(record)
     except _RecoveryDriftError as exc:
         diagnostics.extend(
             f"Backlog issue #{number} {error}; skipped"
@@ -638,7 +655,10 @@ def _recover_batch_candidates(
             "malformed": 0,
         }
     try:
-        live_record = _promote_recovery_candidate(record)
+        live_record, live_touches = _promote_recovery_candidate(
+            record,
+            reserved_paths=reserved_paths,
+        )
     except _RecoveryDriftError as exc:
         diagnostics.extend(
             f"Backlog issue #{number} {error}; skipped"
@@ -658,7 +678,7 @@ def _recover_batch_candidates(
         priority,
         number,
         live_record,
-        touches,
+        live_touches,
     )], diagnostics, {
         "total_ready": 0,
         "executable_ready": 0,

@@ -146,6 +146,22 @@ def test_promote_issue_requires_transactional_set_status_api(monkeypatch):
         triage_backlog.promote_issue(15)
 
 
+def test_promote_issue_propagates_runtime_typeerror_from_transactional_setter(monkeypatch):
+    def transactional_set_status(
+        number,
+        status,
+        *,
+        expected_current=None,
+        pre_mutation_check=None,
+    ):
+        raise TypeError("internal callback failure")
+
+    monkeypatch.setattr(triage_backlog, "set_status", transactional_set_status)
+
+    with pytest.raises(TypeError, match="internal callback failure"):
+        triage_backlog.promote_issue(15)
+
+
 def test_promote_issue_avoids_signature_introspection_on_setter(monkeypatch):
     calls = []
 

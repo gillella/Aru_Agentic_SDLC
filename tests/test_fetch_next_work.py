@@ -693,6 +693,8 @@ def test_batch_classification_is_deterministic_for_mixed_ready_cards(monkeypatch
     classification = result["ready_classification"]
     assert classification == ready_counts(5, 1, 1, 1, 1, 1)
     assert sum(classification.values()) == 2 * classification["total_ready"]
+
+
 def test_batch_claim_stops_after_first_failure_and_prints_partial_json(
     monkeypatch, capsys
 ):

@@ -115,9 +115,12 @@ def promote_issue(
             pre_mutation_check=pre_mutation_check,
         )
     except TypeError as exc:
-        raise KernelError(
-            "transactional set_status API is required for Backlog promotion"
-        ) from exc
+        traceback = exc.__traceback__
+        if traceback is not None and traceback.tb_next is None:
+            raise KernelError(
+                "transactional set_status API is required for Backlog promotion"
+            ) from exc
+        raise
 
 
 def triage(*, promote_all: bool = False) -> dict[str, object]:
