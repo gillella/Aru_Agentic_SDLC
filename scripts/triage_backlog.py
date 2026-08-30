@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 from typing import Callable
 
 from common import (
@@ -87,7 +88,11 @@ def backlog_candidates(
     rejected: dict[int, list[str]] = {}
     for record in snapshot:
         number = int(record["number"])
-        errors = evaluate_with_states(record, issue_states)
+        errors = (
+            evaluate(record)
+            if issue_states is None
+            else evaluate_with_states(record, issue_states)
+        )
         if extra_errors is not None:
             errors.extend(extra_errors(record))
         if errors:
@@ -99,7 +104,16 @@ def backlog_candidates(
 
 
 def promote_issue(number: int) -> None:
-    set_status(number, "Ready", expected_current="Backlog")
+    signature = inspect.signature(set_status)
+    supports_expected_current = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or name == "expected_current"
+        for name, parameter in signature.parameters.items()
+    )
+    if supports_expected_current:
+        set_status(number, "Ready", expected_current="Backlog")
+        return
+    set_status(number, "Ready")
 
 
 def triage(*, promote_all: bool = False) -> dict[str, object]:

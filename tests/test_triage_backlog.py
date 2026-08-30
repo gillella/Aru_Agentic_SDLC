@@ -84,6 +84,25 @@ def test_backlog_candidates_reject_open_dependencies(monkeypatch):
     assert rejected == {9: ["open dependencies: #90"]}
 
 
+def test_backlog_candidates_preserve_legacy_evaluate_seam(monkeypatch):
+    records = [
+        {"number": 2, "title": "blocked"},
+        {"number": 3, "title": "ready"},
+        {"number": 4, "title": "also ready"},
+    ]
+    monkeypatch.setattr(triage_backlog, "list_issues", lambda **_kwargs: records)
+    monkeypatch.setattr(
+        triage_backlog,
+        "evaluate",
+        lambda item: ["missing"] if item["number"] == 2 else [],
+    )
+
+    candidates, rejected = triage_backlog.backlog_candidates()
+
+    assert [int(record["number"]) for _priority, record in candidates] == [3, 4]
+    assert rejected == {2: ["missing"]}
+
+
 def test_promote_issue_uses_backlog_precondition(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -97,3 +116,16 @@ def test_promote_issue_uses_backlog_precondition(monkeypatch):
     triage_backlog.promote_issue(15)
 
     assert calls == [(15, "Ready", "Backlog")]
+
+
+def test_promote_issue_preserves_legacy_two_argument_set_status(monkeypatch):
+    calls = []
+
+    def legacy_set_status(number, status):
+        calls.append((number, status))
+
+    monkeypatch.setattr(triage_backlog, "set_status", legacy_set_status)
+
+    triage_backlog.promote_issue(15)
+
+    assert calls == [(15, "Ready")]
