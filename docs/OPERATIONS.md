@@ -637,6 +637,21 @@ priority. Missing priority defaults to `P2`. An issue with contradictory or
 unsupported priority metadata is skipped with a diagnostic, so it cannot block
 other valid Ready work.
 
+If that Ready snapshot is empty, the same invocation may perform one bounded
+idle-recovery pass: fetch one Backlog snapshot, evaluate mechanical eligibility
+once, promote at most the highest-priority eligible issue in single-agent mode
+or at most one eligible issue per still-idle lane in batch mode, then fetch one
+post-promotion Ready snapshot and select from it. This recovery path does not
+run when Ready is non-empty, even if every visible Ready card is human-gated,
+epic, malformed, or dependency-blocked. It never polls, retries, loops over the
+whole board again, or persists state. GraphQL partials, quota errors, status
+drift, and promotion write failures remain terminal.
+
+When idle recovery runs, diagnostics add deterministic `Backlog issue #N ...;
+skipped` messages for rejected Backlog cards and `Promoted Backlog issue #N to
+Ready` for each successful promotion. If no Backlog issue is mechanically
+eligible, the invocation returns idle after that one bounded pass.
+
 You may claim a known issue explicitly:
 
 ```bash
@@ -791,7 +806,7 @@ create a scheduler, autonomous loop, or second work queue.
 | `init_project.py` | Generate a minimal consumer scaffold | Refuses conflicting overwrites |
 | `update_issue_status.py` | Move one issue between the five states or reconcile one epic | Updates status label and Project field together; epic mode checks or applies bounded child-only closure |
 | `triage_backlog.py` | Validate and promote Backlog issues | Rejects incomplete contracts and open dependencies |
-| `fetch_next_work.py` | Resume or select one unit of work | Prioritizes authored PR state before a new issue |
+| `fetch_next_work.py` | Resume or select one unit of work | Prioritizes authored PR state; only empty Ready snapshots may trigger one bounded Backlog recovery pass |
 | `claim_issue.py` | Acquire or release exclusive ownership | Re-reads state and fails on claim races |
 | `create_branch.py` | Create the issue branch and worktree | Requires In Progress plus the exact claimant |
 | `create_pr.py` | Open the governed PR | Requires published exact head and appends `Closes #N` |

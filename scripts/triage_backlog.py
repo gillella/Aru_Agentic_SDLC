@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+from typing import Callable
 
 from common import (
     KernelError,
     contract_errors,
+    dependencies,
     json_print,
     label_names,
     list_issues,
@@ -16,43 +18,96 @@ from common import (
 )
 
 
+def _priority(record: dict) -> int:
+    priorities = {f"priority:p{value}": value for value in range(4)}
+    labels = label_names(record)
+    priority_labels = [name for name in labels if name.startswith("priority:")]
+    if len(priority_labels) > 1 or any(
+        name not in priorities for name in priority_labels
+    ):
+        raise KernelError(
+            "issue may have at most one supported priority:p0..p3 label"
+        )
+    return priorities[priority_labels[0]] if priority_labels else 2
+
+
 def evaluate(record: dict) -> list[str]:
+    return evaluate_with_states(record)
+
+
+def evaluate_with_states(
+    record: dict,
+    issue_states: dict[int, str] | None = None,
+) -> list[str]:
     errors = contract_errors(record)
     labels = label_names(record)
     if "needs-human" in labels:
         errors.append("needs-human issues cannot enter Ready")
     if "type:epic" in labels:
         errors.append("type:epic issues cannot enter Ready")
-    priorities = {f"priority:p{value}" for value in range(4)}
-    priority_labels = [
-        name for name in labels if name.startswith("priority:")
-    ]
-    if len(priority_labels) > 1 or any(
-        name not in priorities for name in priority_labels
-    ):
-        errors.append(
-            "issue may have at most one supported priority:p0..p3 label"
-        )
-    blocked = unresolved_dependencies(record)
+    try:
+        _priority(record)
+    except KernelError as exc:
+        errors.append(str(exc))
+    blocked = (
+        [
+            number
+            for number in unresolved_dependencies(record)
+        ]
+        if issue_states is None
+        else [
+            number
+            for number in unresolved_dependencies_from_states(record, issue_states)
+        ]
+    )
     if blocked:
         errors.append("open dependencies: " + ", ".join(f"#{number}" for number in blocked))
     return errors
 
 
-def triage(*, promote_all: bool = False) -> dict[str, object]:
-    candidates = sorted(
-        list_issues(label="status:backlog"),
-        key=lambda item: int(item["number"]),
-    )
-    promoted: list[int] = []
+def unresolved_dependencies_from_states(
+    record: dict,
+    issue_states: dict[int, str],
+) -> list[int]:
+    return [
+        number
+        for number in dependencies(str(record.get("body") or ""))
+        if issue_states.get(number) != "closed"
+    ]
+
+
+def backlog_candidates(
+    records: list[dict] | None = None,
+    *,
+    extra_errors: Callable[[dict], list[str]] | None = None,
+    issue_states: dict[int, str] | None = None,
+) -> tuple[list[tuple[int, dict]], dict[int, list[str]]]:
+    snapshot = list_issues(label="status:backlog") if records is None else records
+    candidates: list[tuple[int, dict]] = []
     rejected: dict[int, list[str]] = {}
-    for record in candidates:
+    for record in snapshot:
         number = int(record["number"])
-        errors = evaluate(record)
+        errors = evaluate_with_states(record, issue_states)
+        if extra_errors is not None:
+            errors.extend(extra_errors(record))
         if errors:
             rejected[number] = errors
             continue
-        set_status(number, "Ready")
+        candidates.append((_priority(record), record))
+    candidates.sort(key=lambda item: (item[0], int(item[1]["number"])))
+    return candidates, rejected
+
+
+def promote_issue(number: int) -> None:
+    set_status(number, "Ready", expected_current="Backlog")
+
+
+def triage(*, promote_all: bool = False) -> dict[str, object]:
+    candidates, rejected = backlog_candidates()
+    promoted: list[int] = []
+    for _priority, record in candidates:
+        number = int(record["number"])
+        promote_issue(number)
         promoted.append(number)
         if not promote_all:
             break

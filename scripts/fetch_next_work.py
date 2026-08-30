@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 from pathlib import PurePosixPath
 
+import triage_backlog
 from check_ci import ci_verdict
 from claim_issue import claim, safe_agent
 from common import (
+    AGENT_PREFIX,
     REPOSITORY_AUTH,
     KernelError,
     dependencies,
@@ -56,6 +58,26 @@ def ready_issues() -> list[dict]:
     return [record for record in records if "pull_request" not in record]
 
 
+def backlog_issues() -> list[dict]:
+    return sorted(
+        gh_json(
+            [
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--limit",
+                "200",
+                "--label",
+                "status:backlog",
+                "--json",
+                "number,title,body,state,labels,assignees,url",
+            ]
+        ),
+        key=lambda item: int(item["number"]),
+    )
+
+
 def _pre_dependency_category(labels: list[str]) -> str | None:
     if "needs-human" in labels:
         return "human_gated"
@@ -65,6 +87,14 @@ def _pre_dependency_category(labels: list[str]) -> str | None:
 
 
 def dependency_states(records: list[dict]) -> dict[int, str]:
+    return _dependency_states(records, inventory_name="Ready")
+
+
+def backlog_dependency_states(records: list[dict]) -> dict[int, str]:
+    return _dependency_states(records, inventory_name="Backlog")
+
+
+def _dependency_states(records: list[dict], *, inventory_name: str) -> dict[int, str]:
     numbers = sorted(
         {
             number
@@ -75,7 +105,7 @@ def dependency_states(records: list[dict]) -> dict[int, str]:
     )
     if len(numbers) > MAX_DEPENDENCY_REFERENCES:
         raise KernelError(
-            f"Ready dependency inventory exceeds {MAX_DEPENDENCY_REFERENCES} references"
+            f"{inventory_name} dependency inventory exceeds {MAX_DEPENDENCY_REFERENCES} references"
         )
     if not numbers:
         return {}
@@ -104,25 +134,25 @@ def dependency_states(records: list[dict]) -> dict[int, str]:
         auth=REPOSITORY_AUTH,
     )
     if not isinstance(data, dict) or data.get("errors"):
-        raise KernelError("Ready dependency inventory is incomplete")
+        raise KernelError(f"{inventory_name} dependency inventory is incomplete")
     root = data.get("data")
     repository = root.get("repository") if isinstance(root, dict) else None
     if not isinstance(repository, dict):
-        raise KernelError("Ready dependency inventory is incomplete")
+        raise KernelError(f"{inventory_name} dependency inventory is incomplete")
 
     states: dict[int, str] = {}
     for number in numbers:
         alias = f"issue_{number}"
         if alias not in repository:
-            raise KernelError("Ready dependency inventory is incomplete")
+            raise KernelError(f"{inventory_name} dependency inventory is incomplete")
         record = repository[alias]
         if record is None:
             continue
         if not isinstance(record, dict):
-            raise KernelError("Ready dependency inventory is malformed")
+            raise KernelError(f"{inventory_name} dependency inventory is malformed")
         state = record.get("state")
         if record.get("number") != number or state not in {"OPEN", "CLOSED"}:
-            raise KernelError("Ready dependency inventory is malformed")
+            raise KernelError(f"{inventory_name} dependency inventory is malformed")
         states[number] = state.lower()
     return states
 
@@ -162,10 +192,19 @@ def select(agent: str) -> dict[str, object]:
         return _open_pr_work(authored[0])
 
     issues_snapshot = ready_issues()
-    candidates, diagnostics, classification = _ready_candidates(
-        issues_snapshot,
-        dependency_states(issues_snapshot),
-    )
+    result = _select_ready_issue(issues_snapshot)
+    if result["type"] != "idle":
+        return result
+    if issues_snapshot:
+        return result
+    recovered = _recover_single_issue()
+    if recovered is not None:
+        return recovered
+    return result
+
+
+def _select_ready_issue(records: list[dict]) -> dict[str, object]:
+    candidates, diagnostics, classification = _ready_candidates(records, dependency_states(records))
     if candidates:
         record = candidates[0][2]
         result: dict[str, object] = {
@@ -182,6 +221,48 @@ def select(agent: str) -> dict[str, object]:
     if diagnostics:
         result["diagnostics"] = diagnostics
     return result
+
+
+def _extra_backlog_errors(record: dict) -> list[str]:
+    labels = label_names(record)
+    if any(name.startswith(AGENT_PREFIX) for name in labels):
+        return ["issue is already claimed"]
+    return []
+
+
+def _recoverable_backlog(records: list[dict]) -> tuple[list[tuple[int, dict]], dict[int, list[str]]]:
+    return triage_backlog.backlog_candidates(
+        records,
+        extra_errors=_extra_backlog_errors,
+        issue_states=backlog_dependency_states(records),
+    )
+
+
+def _recover_single_issue() -> dict[str, object] | None:
+    candidates, rejected = _recoverable_backlog(backlog_issues())
+    diagnostics = ["Ready idle; evaluated Backlog once"]
+    if rejected:
+        diagnostics.extend(_backlog_diagnostics(rejected))
+    if not candidates:
+        return {"type": "idle", "diagnostics": diagnostics}
+    number = int(candidates[0][1]["number"])
+    triage_backlog.promote_issue(number)
+    diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
+    result = _select_ready_issue(ready_issues())
+    if "diagnostics" in result:
+        result["diagnostics"] = diagnostics + list(result["diagnostics"])
+    else:
+        result["diagnostics"] = diagnostics
+    return result
+
+
+def _backlog_diagnostics(rejected: dict[int, list[str]]) -> list[str]:
+    messages: list[str] = []
+    for number in sorted(rejected):
+        messages.extend(
+            f"Backlog issue #{number} {error}; skipped" for error in rejected[number]
+        )
+    return messages
 
 
 def _batch_agents(agents: list[str]) -> list[str]:
@@ -369,6 +450,10 @@ def select_batch(agents: list[str]) -> dict[str, object]:
         issues_snapshot,
         dependency_states(issues_snapshot),
     )
+    if not candidates and free_lanes and not issues_snapshot:
+        candidates, diagnostics, classification = _recover_batch_candidates(
+            len(free_lanes)
+        )
     reserved_paths: list[list[str]] = []
     candidate_index = 0
     for lane in free_lanes:
@@ -396,6 +481,25 @@ def select_batch(agents: list[str]) -> dict[str, object]:
     if _classification_summary(classification):
         result["ready_classification"] = classification
     return result
+
+
+def _recover_batch_candidates(
+    lane_count: int,
+) -> tuple[list[tuple[int, int, dict, list[str]]], list[str], dict[str, int]]:
+    candidates, rejected = _recoverable_backlog(backlog_issues())
+    diagnostics = ["Ready idle; evaluated Backlog once"]
+    if rejected:
+        diagnostics.extend(_backlog_diagnostics(rejected))
+    for _priority, record in candidates[:lane_count]:
+        number = int(record["number"])
+        triage_backlog.promote_issue(number)
+        diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
+    refreshed = ready_issues()
+    ready, refreshed_diagnostics, classification = _batch_ready_candidates(
+        refreshed,
+        dependency_states(refreshed),
+    )
+    return ready, diagnostics + refreshed_diagnostics, classification
 
 
 def _claim_batch(result: dict[str, object]) -> int:

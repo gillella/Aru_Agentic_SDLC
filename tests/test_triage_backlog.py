@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import pytest
+
+import triage_backlog
+
+
+def backlog_issue(number: int, *labels: str, body: str | None = None) -> dict:
+    return {
+        "number": number,
+        "title": f"issue {number}",
+        "body": body if body is not None else (
+            "## Acceptance Criteria\n"
+            "- [ ] Promote only mechanically eligible backlog work\n\n"
+            f"touches: src/{number}.py"
+        ),
+        "state": "OPEN",
+        "labels": [{"name": "status:backlog"}, *({"name": label} for label in labels)],
+    }
+
+
+def test_backlog_candidates_sort_by_priority_then_issue_number(monkeypatch):
+    monkeypatch.setattr(
+        triage_backlog,
+        "list_issues",
+        lambda **_kwargs: [
+            backlog_issue(50, "priority:p1"),
+            backlog_issue(7, "priority:p0"),
+            backlog_issue(8),
+            backlog_issue(6, "priority:p0"),
+        ],
+    )
+    monkeypatch.setattr(triage_backlog, "unresolved_dependencies", lambda _record: [])
+
+    candidates, rejected = triage_backlog.backlog_candidates()
+
+    assert [int(record["number"]) for _priority, record in candidates] == [6, 7, 50, 8]
+    assert rejected == {}
+
+
+@pytest.mark.parametrize(
+    ("record", "message"),
+        [
+            (backlog_issue(1, "needs-human"), "needs-human issues cannot enter Ready"),
+            (backlog_issue(2, "type:epic"), "type:epic issues cannot enter Ready"),
+            (
+                backlog_issue(
+                    3,
+                    body="## Acceptance Criteria\n- [ ] Valid AC only\n",
+                ),
+                "issue must contain exactly one touches: declaration",
+            ),
+            (backlog_issue(4, "priority:urgent"), "issue may have at most one supported priority:p0..p3 label"),
+        ],
+)
+def test_backlog_candidates_reject_mechanically_ineligible_records(
+    monkeypatch, record, message
+):
+    monkeypatch.setattr(triage_backlog, "list_issues", lambda **_kwargs: [record])
+    monkeypatch.setattr(triage_backlog, "unresolved_dependencies", lambda _record: [])
+
+    candidates, rejected = triage_backlog.backlog_candidates()
+
+    assert candidates == []
+    assert rejected == {int(record["number"]): [message]}
+
+
+def test_backlog_candidates_reject_open_dependencies(monkeypatch):
+    record = backlog_issue(
+        9,
+        body=(
+            "## Acceptance Criteria\n"
+            "- [ ] Dependency still open\n\n"
+            "depends-on: #90\n"
+            "touches: src/9.py"
+        ),
+    )
+    monkeypatch.setattr(triage_backlog, "list_issues", lambda **_kwargs: [record])
+    monkeypatch.setattr(triage_backlog, "unresolved_dependencies", lambda _record: [90])
+
+    candidates, rejected = triage_backlog.backlog_candidates()
+
+    assert candidates == []
+    assert rejected == {9: ["open dependencies: #90"]}
+
+
+def test_promote_issue_uses_backlog_precondition(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        triage_backlog,
+        "set_status",
+        lambda number, status, expected_current=None: calls.append(
+            (number, status, expected_current)
+        ),
+    )
+
+    triage_backlog.promote_issue(15)
+
+    assert calls == [(15, "Ready", "Backlog")]
