@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import triage_backlog
+from common import KernelError
 
 
 def backlog_issue(number: int, *labels: str, body: str | None = None) -> dict:
@@ -108,24 +109,63 @@ def test_promote_issue_uses_backlog_precondition(monkeypatch):
     monkeypatch.setattr(
         triage_backlog,
         "set_status",
-        lambda number, status, expected_current=None: calls.append(
-            (number, status, expected_current)
+        lambda number, status, expected_current=None, pre_mutation_check=None: calls.append(
+            (number, status, expected_current, pre_mutation_check)
         ),
     )
 
     triage_backlog.promote_issue(15)
 
-    assert calls == [(15, "Ready", "Backlog")]
+    assert calls == [(15, "Ready", "Backlog", None)]
 
 
-def test_promote_issue_preserves_legacy_two_argument_set_status(monkeypatch):
+def test_promote_issue_forwards_pre_mutation_check(monkeypatch):
     calls = []
+    sentinel = object()
+    monkeypatch.setattr(
+        triage_backlog,
+        "set_status",
+        lambda number, status, expected_current=None, pre_mutation_check=None: calls.append(
+            (number, status, expected_current, pre_mutation_check)
+        ),
+    )
 
+    triage_backlog.promote_issue(15, pre_mutation_check=lambda: sentinel)
+
+    assert calls[0][:3] == (15, "Ready", "Backlog")
+    assert callable(calls[0][3])
+
+
+def test_promote_issue_requires_transactional_set_status_api(monkeypatch):
     def legacy_set_status(number, status):
-        calls.append((number, status))
+        raise AssertionError((number, status))
 
     monkeypatch.setattr(triage_backlog, "set_status", legacy_set_status)
 
+    with pytest.raises(KernelError, match="transactional set_status API"):
+        triage_backlog.promote_issue(15)
+
+
+def test_promote_issue_avoids_signature_introspection_on_setter(monkeypatch):
+    calls = []
+
+    class SignatureTrap:
+        @property
+        def __signature__(self):
+            raise AssertionError("promote_issue must not inspect runtime signatures")
+
+        def __call__(
+            self,
+            number,
+            status,
+            *,
+            expected_current=None,
+            pre_mutation_check=None,
+        ):
+            calls.append((number, status, expected_current, pre_mutation_check))
+
+    monkeypatch.setattr(triage_backlog, "set_status", SignatureTrap())
+
     triage_backlog.promote_issue(15)
 
-    assert calls == [(15, "Ready")]
+    assert calls == [(15, "Ready", "Backlog", None)]

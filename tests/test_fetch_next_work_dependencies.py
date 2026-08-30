@@ -279,6 +279,108 @@ def test_select_idle_recovery_runs_one_backlog_pass_without_ready_refresh(monkey
     assert calls == ["ready", "backlog", ("promote", 41)]
 
 
+def test_select_idle_recovery_rereads_chosen_issue_and_rejects_new_claim(monkeypatch):
+    promoted = []
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [backlog_issue(41, "priority:p0")],
+    )
+    monkeypatch.setattr(fetch_next_work, "repo_slug", lambda: "owner/repository")
+    monkeypatch.setattr(
+        fetch_next_work,
+        "gh_json",
+        lambda args, **_kwargs: backlog_issue(41, "priority:p0", "agent:other-worker")
+        if args == ["api", "repos/owner/repository/issues/41"]
+        else (_ for _ in ()).throw(AssertionError(args)),
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, pre_mutation_check=None, **_kwargs: (
+            pre_mutation_check() if pre_mutation_check is not None else None,
+            promoted.append(number),
+        )[-1],
+    )
+
+    result = fetch_next_work.select("codex-sol56-issue535")
+
+    assert result == {
+        "type": "idle",
+        "diagnostics": [
+            "Ready idle; evaluated Backlog once",
+            "Backlog issue #41 issue is already claimed; skipped",
+        ],
+    }
+    assert promoted == []
+
+
+def test_select_idle_recovery_rereads_dependency_state_before_promotion(monkeypatch):
+    dependency_states = iter([{90: "closed"}, {90: "open"}])
+    promoted = []
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [
+            backlog_issue(
+                41,
+                "priority:p0",
+                body=(
+                    "## Acceptance Criteria\n"
+                    "- [ ] Dependency can race\n\n"
+                    "depends-on: #90\n"
+                    "touches: src/41.py"
+                ),
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_dependency_states",
+        lambda _records: next(dependency_states),
+    )
+    monkeypatch.setattr(fetch_next_work, "repo_slug", lambda: "owner/repository")
+    monkeypatch.setattr(
+        fetch_next_work,
+        "gh_json",
+        lambda args, **_kwargs: backlog_issue(
+            41,
+            "priority:p0",
+            body=(
+                "## Acceptance Criteria\n"
+                "- [ ] Dependency can race\n\n"
+                "depends-on: #90\n"
+                "touches: src/41.py"
+            ),
+        )
+        if args == ["api", "repos/owner/repository/issues/41"]
+        else (_ for _ in ()).throw(AssertionError(args)),
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, pre_mutation_check=None, **_kwargs: (
+            pre_mutation_check() if pre_mutation_check is not None else None,
+            promoted.append(number),
+        )[-1],
+    )
+
+    result = fetch_next_work.select("codex-sol56-issue535")
+
+    assert result == {
+        "type": "idle",
+        "diagnostics": [
+            "Ready idle; evaluated Backlog once",
+            "Backlog issue #41 open dependencies: #90; skipped",
+        ],
+    }
+    assert promoted == []
+
+
 @pytest.mark.parametrize("payload", [{}, [None], [{"number": "7"}], [{"number": 7}]])
 def test_backlog_issues_rejects_malformed_inventory(monkeypatch, payload):
     monkeypatch.setattr(fetch_next_work, "gh_json", lambda *_args, **_kwargs: payload)
@@ -388,8 +490,10 @@ def test_batch_idle_recovery_uses_one_backlog_snapshot_and_single_safe_promotion
     ]
     assert result["diagnostics"] == [
         "Ready idle; evaluated Backlog once",
+        "Ready snapshot empty; recovered 1 Backlog candidate",
         "Promoted Backlog issue #12 to Ready",
     ]
+    assert "ready_classification" not in result
     assert calls == ["prs", "ready", "backlog", ("promote", 12)]
 
 
@@ -416,8 +520,10 @@ def test_batch_idle_recovery_promotes_only_one_issue_to_avoid_partial_mutation(m
     ]
     assert result["diagnostics"] == [
         "Ready idle; evaluated Backlog once",
+        "Ready snapshot empty; recovered 1 Backlog candidate",
         "Promoted Backlog issue #12 to Ready",
     ]
+    assert "ready_classification" not in result
     assert calls == [12]
 
 
@@ -460,3 +566,71 @@ def test_batch_idle_recovery_does_not_promote_overlapping_backlog_candidates(mon
         {"agent": "agent-c", "work": {"type": "idle"}},
     ]
     assert promoted == [12]
+
+
+def test_batch_idle_recovery_rejects_candidate_that_conflicts_with_open_lane_work(
+    monkeypatch,
+):
+    promoted = []
+    monkeypatch.setattr(
+        fetch_next_work,
+        "open_prs",
+        lambda: [
+            {
+                "number": 500,
+                "body": "Closes #80",
+                "labels": [{"name": "author:agent-a"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [
+            backlog_issue(
+                12,
+                "priority:p0",
+                body=(
+                    "## Acceptance Criteria\n"
+                    "- [ ] Conflicts with active lane\n\n"
+                    "touches: src/a.py"
+                ),
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "_open_pr_work",
+        lambda pr: {"type": "wait", "pr": pr["number"], "head": "head", "ci": "pending"},
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "issue",
+        lambda number: {
+            "number": number,
+            "title": f"issue {number}",
+            "body": "touches: src/a.py",
+            "labels": [{"name": "status:in-progress"}],
+        },
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, **_kwargs: promoted.append(number),
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert result["lanes"] == [
+        {
+            "agent": "agent-a",
+            "work": {"type": "wait", "pr": 500, "head": "head", "ci": "pending"},
+        },
+        {"agent": "agent-b", "work": {"type": "idle"}},
+    ]
+    assert result["diagnostics"] == [
+        "Ready idle; evaluated Backlog once",
+        "Backlog issue #12 touches conflict with active lane work; skipped",
+    ]
+    assert promoted == []

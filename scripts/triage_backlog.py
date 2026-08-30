@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import inspect
 from typing import Callable
 
 from common import (
@@ -103,17 +102,22 @@ def backlog_candidates(
     return candidates, rejected
 
 
-def promote_issue(number: int) -> None:
-    signature = inspect.signature(set_status)
-    supports_expected_current = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        or name == "expected_current"
-        for name, parameter in signature.parameters.items()
-    )
-    if supports_expected_current:
-        set_status(number, "Ready", expected_current="Backlog")
-        return
-    set_status(number, "Ready")
+def promote_issue(
+    number: int,
+    *,
+    pre_mutation_check: Callable[[], None] | None = None,
+) -> None:
+    try:
+        set_status(
+            number,
+            "Ready",
+            expected_current="Backlog",
+            pre_mutation_check=pre_mutation_check,
+        )
+    except TypeError as exc:
+        raise KernelError(
+            "transactional set_status API is required for Backlog promotion"
+        ) from exc
 
 
 def triage(*, promote_all: bool = False) -> dict[str, object]:

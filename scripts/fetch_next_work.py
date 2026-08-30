@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import PurePosixPath
 
 import triage_backlog
@@ -17,6 +18,7 @@ from common import (
     dependencies,
     gh_json,
     gh_paginated,
+    issue,
     json_print,
     label_names,
     parse_touches,
@@ -26,6 +28,9 @@ from fetch_pr_feedback import fetch_feedback
 from merge_pr import evaluate
 
 MAX_DEPENDENCY_REFERENCES = 100
+_RECOVERY_CANDIDATE_PATTERN = (
+    r"(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\s*$"
+)
 
 
 def authored_prs(agent: str) -> list[dict]:
@@ -269,6 +274,57 @@ def _recoverable_backlog(records: list[dict]) -> tuple[list[tuple[int, dict]], d
     )
 
 
+def _recovery_issue_record(number: int) -> dict:
+    record = gh_json(["api", f"repos/{repo_slug()}/issues/{number}"])
+    state = str(record.get("state") or "")
+    if (
+        not isinstance(record, dict)
+        or record.get("number") != number
+        or not isinstance(record.get("title"), str)
+        or not record["title"]
+        or not isinstance(record.get("body"), str)
+        or "pull_request" in record
+        or state.upper() not in {"OPEN", "CLOSED"}
+    ):
+        raise KernelError(f"issue #{number} is unavailable")
+    return record
+
+
+def _live_recovery_errors(record: dict) -> list[str]:
+    errors: list[str] = []
+    if str(record.get("state") or "").upper() != "OPEN":
+        errors.append("issue is not open")
+    errors.extend(
+        triage_backlog.evaluate_with_states(
+            record,
+            backlog_dependency_states(_backlog_dependency_records([record])),
+        )
+    )
+    errors.extend(_extra_backlog_errors(record))
+    return errors
+
+
+def _promote_recovery_candidate(record: dict) -> dict:
+    number = int(record["number"])
+    live_record = record
+    live_errors: list[str] = []
+
+    def _pre_mutation_check() -> None:
+        nonlocal live_record, live_errors
+        live_record = _recovery_issue_record(number)
+        live_errors = _live_recovery_errors(live_record)
+        if live_errors:
+            raise KernelError("; ".join(live_errors))
+
+    try:
+        triage_backlog.promote_issue(number, pre_mutation_check=_pre_mutation_check)
+    except KernelError:
+        if live_errors:
+            raise KernelError("; ".join(live_errors))
+        raise
+    return live_record
+
+
 def _recover_single_issue() -> dict[str, object] | None:
     candidates, rejected = _recoverable_backlog(backlog_issues())
     diagnostics = ["Ready idle; evaluated Backlog once"]
@@ -278,12 +334,19 @@ def _recover_single_issue() -> dict[str, object] | None:
         return {"type": "idle", "diagnostics": diagnostics}
     record = candidates[0][1]
     number = int(record["number"])
-    triage_backlog.promote_issue(number)
+    try:
+        live_record = _promote_recovery_candidate(record)
+    except KernelError as exc:
+        diagnostics.extend(
+            f"Backlog issue #{number} {error}; skipped"
+            for error in str(exc).split("; ")
+        )
+        return {"type": "idle", "diagnostics": diagnostics}
     diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
     return {
         "type": "issue",
         "issue": number,
-        "title": record["title"],
+        "title": str(live_record["title"]),
         "diagnostics": diagnostics,
     }
 
@@ -304,6 +367,26 @@ def _batch_agents(agents: list[str]) -> list[str]:
     if len(set(validated)) != len(validated):
         raise KernelError("batch agent ids must be distinct")
     return validated
+
+
+def _linked_issue_numbers(body: str) -> list[int]:
+    return sorted({int(value) for value in re.findall(_RECOVERY_CANDIDATE_PATTERN, body or "")})
+
+
+def _active_lane_reserved_paths(prs_by_author: dict[str, list[dict]], agents: list[str]) -> list[list[str]]:
+    reserved: list[list[str]] = []
+    for agent in agents:
+        prs = prs_by_author[agent]
+        if not prs:
+            continue
+        linked = _linked_issue_numbers(str(prs[0].get("body") or ""))
+        if len(linked) != 1:
+            continue
+        try:
+            reserved.append(parse_touches(str(issue(linked[0]).get("body") or "")))
+        except KernelError:
+            continue
+    return reserved
 
 
 def _batch_number(record: dict, kind: str) -> int:
@@ -478,13 +561,15 @@ def select_batch(agents: list[str]) -> dict[str, object]:
             free_lanes.append(lane)
         lanes.append(lane)
 
+    active_reserved_paths = _active_lane_reserved_paths(prs_by_author, agents)
     candidates, diagnostics, classification = _batch_ready_candidates(
         issues_snapshot,
         dependency_states(issues_snapshot),
     )
     if not candidates and free_lanes and not issues_snapshot:
         candidates, diagnostics, classification = _recover_batch_candidates(
-            len(free_lanes)
+            len(free_lanes),
+            active_reserved_paths,
         )
     reserved_paths: list[list[str]] = []
     candidate_index = 0
@@ -517,6 +602,7 @@ def select_batch(agents: list[str]) -> dict[str, object]:
 
 def _recover_batch_candidates(
     lane_count: int,
+    reserved_paths: list[list[str]],
 ) -> tuple[list[tuple[int, int, dict, list[str]]], list[str], dict[str, int]]:
     candidates, rejected = _recoverable_backlog(backlog_issues())
     diagnostics = ["Ready idle; evaluated Backlog once"]
@@ -533,16 +619,30 @@ def _recover_batch_candidates(
         }
     priority, record = candidates[0]
     number = int(record["number"])
-    triage_backlog.promote_issue(number)
+    touches = parse_touches(str(record.get("body") or ""))
+    if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
+        diagnostics.append(
+            f"Backlog issue #{number} touches conflict with active lane work; skipped"
+        )
+        return [], diagnostics, {
+            "total_ready": 0,
+            "executable_ready": 0,
+            "human_gated": 0,
+            "epics": 0,
+            "dependency_blocked": 0,
+            "malformed": 0,
+        }
+    live_record = _promote_recovery_candidate(record)
+    diagnostics.append("Ready snapshot empty; recovered 1 Backlog candidate")
     diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
     return [(
         priority,
         number,
-        record,
-        parse_touches(str(record.get("body") or "")),
+        live_record,
+        touches,
     )], diagnostics, {
-        "total_ready": 1,
-        "executable_ready": 1,
+        "total_ready": 0,
+        "executable_ready": 0,
         "human_gated": 0,
         "epics": 0,
         "dependency_blocked": 0,
