@@ -639,13 +639,15 @@ other valid Ready work.
 
 If that Ready snapshot is empty, the same invocation may perform one bounded
 idle-recovery pass: fetch one Backlog snapshot, evaluate mechanical eligibility
-once, promote at most the highest-priority eligible issue in single-agent mode
-or at most one eligible issue per still-idle lane in batch mode, then fetch one
-post-promotion Ready snapshot and select from it. This recovery path does not
-run when Ready is non-empty, even if every visible Ready card is human-gated,
-epic, malformed, or dependency-blocked. It never polls, retries, loops over the
-whole board again, or persists state. GraphQL partials, quota errors, status
-drift, and promotion write failures remain terminal.
+once, and promote at most one highest-priority eligible Backlog issue before
+returning that exact issue as the recovery result. Batch mode preserves its lane
+schema but also fails closed by promoting at most one issue per invocation,
+leaving remaining lanes idle rather than risking overlapping or partial
+promotions. This recovery path does not run when Ready is non-empty, even if
+every visible Ready card is human-gated, epic, malformed, or
+dependency-blocked. It never polls, retries, loops over the whole board again,
+refreshes a second Backlog snapshot, or persists state. GraphQL partials, quota
+errors, status drift, and promotion write failures remain terminal.
 
 When idle recovery runs, diagnostics add deterministic `Backlog issue #N ...;
 skipped` messages for rejected Backlog cards and `Promoted Backlog issue #N to

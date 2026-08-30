@@ -207,14 +207,13 @@ def test_select_ready_fast_path_never_reads_or_mutates_backlog(monkeypatch):
     assert calls == ["ready"]
 
 
-def test_select_idle_recovery_runs_one_backlog_pass_then_one_ready_refresh(monkeypatch):
+def test_select_idle_recovery_runs_one_backlog_pass_without_ready_refresh(monkeypatch):
     calls = []
-    ready_snapshots = [[], [ready_issue(41, "priority:p0")]]
     monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
     monkeypatch.setattr(
         fetch_next_work,
         "ready_issues",
-        lambda: calls.append("ready") or ready_snapshots.pop(0),
+        lambda: calls.append("ready") or [],
     )
     monkeypatch.setattr(
         fetch_next_work,
@@ -238,13 +237,49 @@ def test_select_idle_recovery_runs_one_backlog_pass_then_one_ready_refresh(monke
             "Promoted Backlog issue #41 to Ready",
         ],
     }
-    assert calls == ["ready", "backlog", ("promote", 41), "ready"]
+    assert calls == ["ready", "backlog", ("promote", 41)]
+
+
+@pytest.mark.parametrize("payload", [{}, [None], [{"number": "7"}]])
+def test_backlog_issues_rejects_malformed_inventory(monkeypatch, payload):
+    monkeypatch.setattr(fetch_next_work, "gh_json", lambda *_args, **_kwargs: payload)
+
+    with pytest.raises(common.KernelError, match="GitHub returned malformed Backlog issue inventory"):
+        fetch_next_work.backlog_issues()
+
+
+def test_select_idle_recovery_returns_promoted_issue_without_ready_refresh(monkeypatch):
+    calls = []
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: calls.append("ready") or [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: calls.append("backlog") or [backlog_issue(41, "priority:p0")],
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, **_kwargs: calls.append(("promote", number)),
+    )
+
+    result = fetch_next_work.select("codex-sol56-issue535")
+
+    assert result == {
+        "type": "issue",
+        "issue": 41,
+        "title": "issue 41",
+        "diagnostics": [
+            "Ready idle; evaluated Backlog once",
+            "Promoted Backlog issue #41 to Ready",
+        ],
+    }
+    assert calls == ["ready", "backlog", ("promote", 41)]
 
 
 def test_select_claim_after_idle_recovery_uses_same_invocation(monkeypatch, capsys):
-    ready_snapshots = [[], [ready_issue(41, "priority:p0")]]
     monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
-    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: ready_snapshots.pop(0))
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
     monkeypatch.setattr(
         fetch_next_work,
         "backlog_issues",
@@ -283,20 +318,15 @@ def test_select_claim_after_idle_recovery_uses_same_invocation(monkeypatch, caps
     }
 
 
-def test_batch_idle_recovery_uses_one_backlog_snapshot_and_refreshed_ready_selection(
+def test_batch_idle_recovery_uses_one_backlog_snapshot_and_single_safe_promotion(
     monkeypatch,
 ):
     calls = []
-    ready_snapshots = [[], [
-        ready_issue(12, "priority:p0", body="touches: src/a.py"),
-        ready_issue(13, "priority:p0", body="touches: docs/b.py"),
-        ready_issue(14, "priority:p1", body="touches: src/a.py"),
-    ]]
     monkeypatch.setattr(fetch_next_work, "open_prs", lambda: calls.append("prs") or [])
     monkeypatch.setattr(
         fetch_next_work,
         "ready_issues",
-        lambda: calls.append("ready") or ready_snapshots.pop(0),
+        lambda: calls.append("ready") or [],
     )
     monkeypatch.setattr(
         fetch_next_work,
@@ -314,12 +344,80 @@ def test_batch_idle_recovery_uses_one_backlog_snapshot_and_refreshed_ready_selec
 
     assert result["lanes"] == [
         {"agent": "agent-a", "work": {"type": "issue", "issue": 12, "title": "issue 12"}},
-        {"agent": "agent-b", "work": {"type": "issue", "issue": 13, "title": "issue 13"}},
+        {"agent": "agent-b", "work": {"type": "idle"}},
         {"agent": "agent-c", "work": {"type": "idle"}},
     ]
     assert result["diagnostics"] == [
         "Ready idle; evaluated Backlog once",
         "Promoted Backlog issue #12 to Ready",
-        "Promoted Backlog issue #13 to Ready",
     ]
-    assert calls == ["prs", "ready", "backlog", ("promote", 12), ("promote", 13), "ready"]
+    assert calls == ["prs", "ready", "backlog", ("promote", 12)]
+
+
+def test_batch_idle_recovery_promotes_only_one_issue_to_avoid_partial_mutation(monkeypatch):
+    calls = []
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [backlog_issue(12, "priority:p0"), backlog_issue(13, "priority:p0")],
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, **_kwargs: calls.append(number),
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert result["lanes"] == [
+        {"agent": "agent-a", "work": {"type": "issue", "issue": 12, "title": "issue 12"}},
+        {"agent": "agent-b", "work": {"type": "idle"}},
+    ]
+    assert result["diagnostics"] == [
+        "Ready idle; evaluated Backlog once",
+        "Promoted Backlog issue #12 to Ready",
+    ]
+    assert calls == [12]
+
+
+def test_batch_idle_recovery_does_not_promote_overlapping_backlog_candidates(monkeypatch):
+    promoted = []
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [
+            backlog_issue(12, "priority:p0", body=(
+                "## Acceptance Criteria\n"
+                "- [ ] First lane\n\n"
+                "touches: src/a.py"
+            )),
+            backlog_issue(13, "priority:p0", body=(
+                "## Acceptance Criteria\n"
+                "- [ ] Conflicts with first\n\n"
+                "touches: src/a.py"
+            )),
+            backlog_issue(14, "priority:p1", body=(
+                "## Acceptance Criteria\n"
+                "- [ ] Different path\n\n"
+                "touches: docs/b.md"
+            )),
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, **_kwargs: promoted.append(number),
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b", "agent-c"])
+
+    assert result["lanes"] == [
+        {"agent": "agent-a", "work": {"type": "issue", "issue": 12, "title": "issue 12"}},
+        {"agent": "agent-b", "work": {"type": "idle"}},
+        {"agent": "agent-c", "work": {"type": "idle"}},
+    ]
+    assert promoted == [12]

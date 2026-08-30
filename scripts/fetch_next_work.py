@@ -59,23 +59,29 @@ def ready_issues() -> list[dict]:
 
 
 def backlog_issues() -> list[dict]:
-    return sorted(
-        gh_json(
-            [
-                "issue",
-                "list",
-                "--state",
-                "open",
-                "--limit",
-                "200",
-                "--label",
-                "status:backlog",
-                "--json",
-                "number,title,body,state,labels,assignees,url",
-            ]
-        ),
-        key=lambda item: int(item["number"]),
+    records = gh_json(
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "200",
+            "--label",
+            "status:backlog",
+            "--json",
+            "number,title,body,state,labels,assignees,url",
+        ]
     )
+    if not isinstance(records, list) or any(
+        not isinstance(record, dict)
+        or not isinstance(record.get("number"), int)
+        or isinstance(record.get("number"), bool)
+        or int(record["number"]) <= 0
+        for record in records
+    ):
+        raise KernelError("GitHub returned malformed Backlog issue inventory")
+    return sorted(records, key=lambda item: int(item["number"]))
 
 
 def _pre_dependency_category(labels: list[str]) -> str | None:
@@ -245,15 +251,16 @@ def _recover_single_issue() -> dict[str, object] | None:
         diagnostics.extend(_backlog_diagnostics(rejected))
     if not candidates:
         return {"type": "idle", "diagnostics": diagnostics}
-    number = int(candidates[0][1]["number"])
+    record = candidates[0][1]
+    number = int(record["number"])
     triage_backlog.promote_issue(number)
     diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
-    result = _select_ready_issue(ready_issues())
-    if "diagnostics" in result:
-        result["diagnostics"] = diagnostics + list(result["diagnostics"])
-    else:
-        result["diagnostics"] = diagnostics
-    return result
+    return {
+        "type": "issue",
+        "issue": number,
+        "title": record["title"],
+        "diagnostics": diagnostics,
+    }
 
 
 def _backlog_diagnostics(rejected: dict[int, list[str]]) -> list[str]:
@@ -490,16 +497,32 @@ def _recover_batch_candidates(
     diagnostics = ["Ready idle; evaluated Backlog once"]
     if rejected:
         diagnostics.extend(_backlog_diagnostics(rejected))
-    for _priority, record in candidates[:lane_count]:
-        number = int(record["number"])
-        triage_backlog.promote_issue(number)
-        diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
-    refreshed = ready_issues()
-    ready, refreshed_diagnostics, classification = _batch_ready_candidates(
-        refreshed,
-        dependency_states(refreshed),
-    )
-    return ready, diagnostics + refreshed_diagnostics, classification
+    if lane_count <= 0 or not candidates:
+        return [], diagnostics, {
+            "total_ready": 0,
+            "executable_ready": 0,
+            "human_gated": 0,
+            "epics": 0,
+            "dependency_blocked": 0,
+            "malformed": 0,
+        }
+    priority, record = candidates[0]
+    number = int(record["number"])
+    triage_backlog.promote_issue(number)
+    diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
+    return [(
+        priority,
+        number,
+        record,
+        parse_touches(str(record.get("body") or "")),
+    )], diagnostics, {
+        "total_ready": 1,
+        "executable_ready": 1,
+        "human_gated": 0,
+        "epics": 0,
+        "dependency_blocked": 0,
+        "malformed": 0,
+    }
 
 
 def _claim_batch(result: dict[str, object]) -> int:
