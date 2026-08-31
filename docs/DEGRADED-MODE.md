@@ -1,7 +1,8 @@
 # Degraded Mode
 
-GitHub is the only coordination authority. If issue, board, pull-request, CI,
-review, identity, or merge state cannot be read completely:
+GitHub is the only coordination authority. If issue, board, pull-request,
+exact-head verification evidence, review, identity, or merge state cannot be
+read completely:
 
 1. do not claim, reassign, promote, merge, or close work;
 2. keep already-claimed local work in its existing worktree;

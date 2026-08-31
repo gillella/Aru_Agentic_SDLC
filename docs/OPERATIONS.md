@@ -26,10 +26,10 @@ agents using Aru to guide another software project.
 
 ## 1. What Aru is
 
-Aru is a compact governance layer around GitHub, Git, CI, and authoritative code
-review. It supplies rules and small mechanical helpers for moving one approved
-issue to one merged pull request without losing ownership, scope, or exact-head
-verification.
+Aru is a compact governance layer around GitHub, Git, exact-head local
+verification, and authoritative code review. It supplies rules and small
+mechanical helpers for moving one approved issue to one merged pull request
+without losing ownership, scope, or exact-head verification.
 
 The kernel is useful when a team wants coding agents and human developers to
 follow the same visible process without introducing another project database or
@@ -44,7 +44,7 @@ flowchart LR
     APPROVED[Approved issue] --> OWNED[One owner]
     OWNED --> BOUNDED[Declared paths]
     BOUNDED --> ISOLATED[Isolated worktree]
-    ISOLATED --> VERIFIED[Exact-head CI]
+    ISOLATED --> VERIFIED[Exact-head local verification]
     VERIFIED --> REVIEWED[One authoritative reviewer]
     REVIEWED --> MERGED[Mechanical merge]
     MERGED --> CLOSED[Done and cleaned]
@@ -102,9 +102,9 @@ flowchart TB
     TOUCHES[touches: paths] -->|limits writes| WORKTREE[Git worktree]
     CLAIM --> WORKTREE
     WORKTREE --> CHANGE[Implementation]
-    CHANGE --> CI[Exact-head CI]
+    CHANGE --> VERIFY[Exact-head local verification]
     CHANGE --> REVIEW[One external or coding-agent authority]
-    CI --> GATE[merge_pr.py]
+    VERIFY --> GATE[merge_pr.py]
     REVIEW --> GATE
     GATE --> MAIN[Default branch]
     MAIN --> CONSUMER[Consumer-owned deploy and production]
@@ -117,17 +117,18 @@ flowchart TB
 | Who owns the edit? | Exactly one `agent:<id>` label and assignee |
 | Which files may change? | The issue's single `touches:` declaration |
 | Where may implementation happen? | The issue's `.worktrees/<branch>` checkout |
-| Did tests pass for this code? | CI attached to the exact current PR head |
+| Did tests pass for this code? | Focused local verification evidence attached to the exact current PR head |
 | Who reviewed it? | The external service or coding family named by the only `review:<authority>` label |
 | May it merge? | `merge_pr.py --expected-head` succeeds |
 | May it deploy? | Only the consumer project's own policy answers this |
 
 ### Fail-closed means stop, not guess
 
-If an issue, board, claim, path boundary, PR head, CI result, review verdict, or
-Git identity is missing, stale, partial, contradictory, or unauthenticated, the
-next transition is blocked. The developer fixes the evidence or waits for the
-authority to return; they do not invent fallback state.
+If an issue, board, claim, path boundary, PR head, local verification evidence,
+review verdict, or Git identity is missing, stale, partial, contradictory, or
+unauthenticated, the next transition is blocked. The developer fixes the
+evidence or waits for the authority to return; they do not invent fallback
+state.
 
 ## 4. Prerequisites
 
@@ -157,7 +158,7 @@ The consumer repository needs:
 - one Project `Status` field with the five exact lifecycle options;
 - the Aru `status:*`, `type:*`, `priority:*`, `agent:*`, `author:*`,
   `author-family:*`, `review:*`, and fallback `reviewer:*` labels;
-- a pull-request CI workflow;
+- exact-head focused local verification refreshed in the PR body;
 - at least one registered external reviewer or one distinct coding-agent
   reviewer whose capacity probe succeeds.
 
@@ -192,7 +193,7 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr 123 --json
 ```
 
 If `ARU_GITHUB_APP_RUNNER` is unset, repository commands use ordinary `gh`.
-This is the portable behavior for CI and consumer repositories where the local
+This is the portable behavior for automation and consumer repositories where the local
 wrapper is absent. If the variable is set but the path is missing or not
 executable, Aru stops instead of silently changing identity.
 
@@ -326,8 +327,7 @@ example-app/
 │   └── pre-push
 ├── .github/
 │   ├── ISSUE_TEMPLATE/governed-task.yml
-│   ├── PULL_REQUEST_TEMPLATE.md
-│   └── workflows/ci.yml
+│   └── PULL_REQUEST_TEMPLATE.md
 ├── .git/hooks/
 ├── .gitignore
 └── AGENTS.md
@@ -357,7 +357,7 @@ The helper intentionally does not:
 - commit or push the generated files;
 - establish an initial remote default-branch baseline;
 - configure branch rulesets;
-- tailor CI to the project's language and test suite;
+- choose any separate release-only full-suite activity the project wants;
 - install an external reviewer or coding-agent provider;
 - add existing issues to the new Project.
 
@@ -374,9 +374,11 @@ feature, not a migration engine.
 
 1. Start from a clean project branch or worktree.
 2. Generate the minimal scaffold outside the project.
-3. Compare each generated file with the project's current governance and CI.
+3. Compare each generated file with the project's current governance and local
+   verification policy.
 4. Merge only the rules and hooks the project can actually support.
-5. Run the project's full relevant verification before merging the adoption.
+5. Run focused local verification for the migrated governance surfaces before
+   merging the adoption.
 
 Generate the comparison scaffold:
 
@@ -393,8 +395,7 @@ Reconcile these surfaces deliberately:
 | --- | --- |
 | `AGENTS.md` | Preserve stricter local safety and product rules |
 | Issue template | Keep required acceptance criteria and `touches:` input |
-| PR template | Keep `Closes #N`, verification, and surface-change evidence |
-| CI workflow | Replace the sample compilation step with real project checks |
+| PR template | Keep `Closes #N`, focused verification commands, and surface-change evidence |
 | `.gitignore` | Merge entries; do not overwrite project-specific ignores |
 | `.aru/hooks/` | Retain versioned hook sources for the consumer project |
 | `.git/hooks/` | Install after reviewing any existing user-owned hooks |
@@ -436,19 +437,23 @@ and can consume the shared GraphQL allowance after only a few transitions.
 Missing, duplicated, malformed, or truncated targeted evidence still blocks
 the update.
 
-### CI
+### Local verification
 
-The generated workflow only compiles Python files. Replace or extend it with
-the consumer project's real focused checks, for example:
+The scaffold does not generate a repository workflow. Record focused local
+verification for each PR head in the PR body, for example:
 
-- unit or integration tests related to the issue;
+- issue acceptance predicates;
+- unit or integration tests directly affected by the issue;
 - lint and formatting validation;
 - type checking;
-- application build;
-- schema or migration validation when relevant.
+- changed-path compile or build checks;
+- schema, migration, invariant, or secret validation when relevant.
 
-The required CI result must be attached to the exact current PR head. A green
-result from an earlier commit becomes historical after any new push.
+Do not use a repository-wide test suite as a normal issue or PR merge gate.
+If operators want a full suite for a release or milestone, run it separately as
+an explicit local activity outside the per-issue merge authority. After any new
+push or verification edit, refresh the exact-head PR-body evidence with
+`create_pr.py --refresh-verification`.
 
 ### Reviewer providers
 
@@ -564,7 +569,8 @@ sequenceDiagram
     participant GH as GitHub issue/project
     participant A as Developer or agent
     participant WT as Git worktree
-    participant CI as CI + reviewer
+    participant LV as Local verification
+    participant R as Independent reviewer
     participant M as merge_pr.py
 
     O->>GH: Approve complete Backlog issue
@@ -573,8 +579,10 @@ sequenceDiagram
     A->>WT: Create isolated issue branch
     A->>WT: Implement within touches and test
     A->>GH: Push branch and open PR
-    GH->>CI: Verify exact current head
-    CI-->>GH: Green CI and authoritative verdict
+    A->>LV: Run focused commands in exact-head worktree
+    LV-->>GH: create_pr.py binds exact-head evidence
+    GH->>R: Request review for the current head
+    R-->>GH: Authoritative verdict for the exact head
     A->>M: Merge PR with expected head
     M->>GH: Recheck gates, merge, mark Done
     A->>WT: Remove only safe closed worktree
@@ -629,13 +637,13 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
   --json
 ```
 
-The picker first resumes that agent's open feedback, CI failure, merge-ready PR,
-or waiting PR. Only then does it fetch every page of Ready issues. It excludes
-issues labeled `needs-human` or `type:epic`, then orders eligible work by
-priority (`P0` → `P1` → `P2` → `P3`) and ascending issue number within each
-priority. Missing priority defaults to `P2`. An issue with contradictory or
-unsupported priority metadata is skipped with a diagnostic, so it cannot block
-other valid Ready work.
+The picker first resumes that agent's open feedback, failed exact-head local
+verification, merge-ready PR, or waiting PR. Only then does it fetch every page
+of Ready issues. It excludes issues labeled `needs-human` or `type:epic`, then
+orders eligible work by priority (`P0` → `P1` → `P2` → `P3`) and ascending
+issue number within each priority. Missing priority defaults to `P2`. An issue
+with contradictory or unsupported priority metadata is skipped with a
+diagnostic, so it cannot block other valid Ready work.
 
 If that Ready snapshot is empty, the same invocation may perform one bounded
 idle-recovery pass: fetch one Backlog snapshot, evaluate mechanical eligibility
@@ -705,7 +713,7 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
   --issue 42 \
   --agent "$agent_id" \
   --title "feat: export monthly statements" \
-  --body "Implements the approved statement export and focused coverage."
+  --body-file /path/to/pr-body.md
 ```
 
 The helper:
@@ -713,6 +721,8 @@ The helper:
 - verifies issue ownership and branch identity;
 - confirms the published remote head equals local `HEAD`;
 - appends `Closes #42`;
+- validates the `## Verification` section, rejects broad or full-suite
+  commands, and binds the focused command list to the exact head;
 - adds `author:<agent>` and `author-family:<family>`;
 - assigns the first explicitly registered available external
   `review:<authority>` label,
@@ -720,16 +730,30 @@ The helper:
   available;
 - moves the issue to `In Review`.
 
-### Step 7: wait for current-head evidence
+### Step 7: wait for exact-head evidence
 
 ```bash
-python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr 123 --wait --json
+python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr 123 --json
 python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr 123 --json
 ```
 
-If CI fails, diagnose the complete current-head logs and make the smallest
-repair. If review findings exist, address every unresolved finding. Any new push
-requires fresh current-head CI and review evidence.
+If local verification is stale or malformed, rerun only the focused commands
+needed for the current head and refresh the PR body; waiting does not create
+verification evidence. If review findings exist, address every unresolved
+finding. Any new push requires fresh exact-head local verification and review
+evidence.
+
+Refresh local verification after each push or verification edit:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+  --refresh-verification 123 \
+  --body-file /path/to/pr-body.md
+```
+
+The refresh flow revalidates the allowlisted commands, executes them locally
+in the current exact-head worktree, stops on the first nonzero exit, and only
+then binds the PR body marker.
 
 Refresh the authority after an explicit provider failure or while waiting:
 
@@ -772,9 +796,10 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
   --json
 ```
 
-The merge helper re-reads the PR, exact head, CI, authoritative verdict, unresolved
-threads, base state, linked issue state, and acceptance criteria immediately
-before merging. It then marks the linked issue Done.
+The merge helper re-reads the PR, exact head, exact-head local verification,
+authoritative verdict, unresolved threads, base state, linked issue state, and
+acceptance criteria immediately before merging. It then marks the linked issue
+Done.
 
 ### Step 9: clean safely
 
@@ -800,7 +825,7 @@ Dirty, unregistered, open-PR, and user-created worktrees are retained.
 | `create-github-issue` | Filing one issue with the Ready contract |
 | `triage-backlog` | Validating Backlog and promoting complete work |
 | `implement-next-issue` | Claiming and implementing one Ready issue |
-| `remediate-ci-failure` | Current-head CI fails on an authored PR |
+| `remediate-ci-failure` | Exact-head focused local verification failed on an authored PR |
 | `address-pr-feedback` | An authored PR has unresolved review findings |
 
 The skills guide agents through the same helpers described here. They do not
@@ -819,9 +844,9 @@ create a scheduler, autonomous loop, or second work queue.
 | `claim_issue.py` | Acquire or release exclusive ownership | Re-reads state and fails on claim races |
 | `create_branch.py` | Create the issue branch and worktree | Requires In Progress plus the exact claimant |
 | `create_pr.py` | Open the governed PR | Requires published exact head and appends `Closes #N` |
-| `check_ci.py` | Read or wait for current-head CI | Fails closed on incomplete or ambiguous check data |
+| `check_ci.py` | Read exact-head local verification state | Fails closed on stale, malformed, or broad verification evidence |
 | `fetch_pr_feedback.py` | Read unresolved review findings | Rejects truncated review-thread inventory |
-| `merge_pr.py` | Evaluate and perform the only sanctioned merge | Requires expected head, green CI, review, and clean threads |
+| `merge_pr.py` | Evaluate and perform the only sanctioned merge | Requires expected head, exact-head local verification, review, and clean threads |
 | `cleanup_worktrees.py` | Remove eligible Factory worktrees | Retains dirty, open, and ambiguous worktrees |
 | `revert_merge.py` | Create governed reverse gear | Requires a separate approved revert issue |
 
@@ -959,7 +984,8 @@ python3 "$ARU_SDLC_HOME/scripts/revert_merge.py" \
   --agent codex-local
 ```
 
-The reverse change follows the normal PR, CI, external-review, and merge path.
+The reverse change follows the normal PR, exact-head local verification,
+external-review, and merge path.
 Never rewrite shared default-branch history.
 
 ### Recover the pre-reset framework
@@ -986,7 +1012,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 | Push says a path is outside `touches:` | Diff exceeds the declared write boundary | Stop, update the approved issue, then retry |
 | Direct push to main/master is refused | Local Aru hook is working | Push an issue branch and merge a PR |
 | PR creation says exact head is unpublished | Local `HEAD` differs from the remote branch | Push the current issue branch, then retry |
-| CI was green before the latest push | Evidence belongs to an older SHA | Wait for current-head CI |
+| Local verification was valid before the latest push | Evidence belongs to an older SHA | Re-run focused checks and refresh the PR body for the new head |
 | Merge reports zero or multiple reviewers | Review-label authority is ambiguous | Leave exactly one supported review label |
 | External reviewer is unavailable | Cost, quota, rate, outage, unsupported PR, or explicit error evidence exists | Run `create_pr.py --refresh-reviewer <PR>` immediately |
 | External reviewer is still pending | It has not produced a verdict | Wait until 15 minutes; then run the reviewer refresh |
@@ -1005,7 +1031,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 - issue-contract validation;
 - exclusive claims and path boundaries;
 - worktree isolation;
-- exact-head CI and one external-or-coding authoritative review gate;
+- exact-head focused local verification and one external-or-coding authoritative review gate;
 - mechanical merge and safe worktree cleanup;
 - governed revert creation.
 
@@ -1065,8 +1091,8 @@ true.
 
 ### Verification and review
 
-- [ ] Consumer-specific CI runs the real focused checks.
-- [ ] CI results are attached to the exact PR head.
+- [ ] Operators know the focused local verification commands for each PR type.
+- [ ] Exact-head local verification is refreshed in the PR body after each push.
 - [ ] At least one external reviewer is registered or one distinct coding-agent
       capacity probe succeeds.
 - [ ] Operators know the immediate-unavailability and exact 15-minute reviewer
@@ -1079,7 +1105,7 @@ true.
 - [ ] One agent claimed it and created an isolated worktree.
 - [ ] The path hook rejected a deliberate out-of-budget test change.
 - [ ] The PR received `Closes #N` and exactly one authoritative reviewer label.
-- [ ] Current-head CI and review completed.
+- [ ] Exact-head local verification and review completed.
 - [ ] `merge_pr.py --dry-run` passed before the real merge.
 - [ ] The issue reached Done and cleanup retained nothing unsafe.
 

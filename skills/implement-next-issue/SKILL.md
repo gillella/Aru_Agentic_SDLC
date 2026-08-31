@@ -10,10 +10,16 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
 3. If it returns a Ready issue, claim it with `claim_issue.py`.
 4. Create the isolated worktree with `create_branch.py` and work only there.
 5. Make the smallest change inside the declared `touches:` paths.
-6. Run the focused verification named by the issue.
+6. Run only focused verification for the issue: acceptance predicates,
+   changed-path lint/type/compile checks, directly affected tests, and
+   invariant or secret gates. Do not run a repository-wide suite.
 7. Commit and push the branch.
-8. Open the PR with `create_pr.py`; its body must contain `Closes #N`.
-9. Wait for current-head CI and the single assigned authoritative reviewer.
+8. Open the PR with `create_pr.py`; its body must contain `Closes #N` and a
+   `## Verification` section listing only those focused commands.
+9. After each push or edit to the verification section, refresh the exact-head
+   PR-body evidence with `create_pr.py --refresh-verification <PR>`.
+10. Wait for that exact-head local verification and the single assigned
+    authoritative reviewer.
    Initial authority rotates deterministically across registered external
    services and locally configured, bound coding identities while excluding the
    author. If the assigned external service explicitly fails or remains pending
@@ -26,7 +32,8 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    `family:identity` and `claude-code:identity@subscription` entries. Missing,
    malformed, duplicate, or unbound configuration fails closed; subscriptions
    may be added or removed without changing code.
-10. If feedback exists, use the feedback skill. If CI fails, use the CI skill.
+11. If feedback exists, use the feedback skill. If local verification is stale
+    or invalid, use the CI skill.
 
 A coding agent may review another agent's code. Never authoritatively review
 your own PR. A coding-agent review must read the issue and acceptance criteria,

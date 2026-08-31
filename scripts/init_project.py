@@ -89,9 +89,6 @@ def scaffold(name: str, directory: Path) -> list[str]:
         ".github/PULL_REQUEST_TEMPLATE.md": (
             framework / "templates" / "pull_request.md"
         ).read_text(encoding="utf-8"),
-        ".github/workflows/ci.yml": (
-            framework / "templates" / "ci.yml"
-        ).read_text(encoding="utf-8"),
         ".gitignore": "__pycache__/\n*.py[cod]\n.venv/\n.env\n.worktrees/\n",
     }
     written: list[str] = []

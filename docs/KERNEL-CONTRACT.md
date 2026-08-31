@@ -8,8 +8,8 @@ merged pull request.
 ## Lifecycle
 
 Requirement -> issue contract -> Ready -> claim -> isolated worktree -> focused
-implementation -> PR -> exact-head CI and one authoritative review ->
-mechanical merge -> Done and cleanup.
+implementation -> PR -> exact-head focused local verification and one
+authoritative review -> mechanical merge -> Done and cleanup.
 
 ## Authority map
 
@@ -18,7 +18,7 @@ mechanical merge -> Done and cleanup.
 | work exists and is approved | GitHub issue and Project Board |
 | who may write | exclusive claim plus `touches:` |
 | where work occurs | isolated Git worktree |
-| code is verified | exact-current-head CI |
+| code is verified | exact-current-head focused local verification evidence |
 | code is reviewed | one `review:<authority>` for the exact current head |
 | code may merge | `scripts/merge_pr.py` |
 | code may deploy | consumer repository |

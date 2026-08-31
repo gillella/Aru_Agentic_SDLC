@@ -4,8 +4,9 @@ Use the canonical Aru commands from `$ARU_SDLC_HOME/scripts`.
 GitHub Issues and the linked Project Board are the only lifecycle state.
 Require an issue contract, Ready status, exclusive claim, declared
 `touches:`, isolated worktree, focused tests, a PR with `Closes #N`,
-current-head CI, exactly one authoritative reviewer distinct from the author,
-and merge through
+exact-head focused local verification evidence refreshed through
+`create_pr.py --refresh-verification`, exactly one authoritative reviewer
+distinct from the author, and merge through
 `merge_pr.py --expected-head`.
 
 Prefer CodeRabbit, then Sourcery, then CodeAnt. On explicit unavailability or

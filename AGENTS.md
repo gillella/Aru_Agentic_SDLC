@@ -15,7 +15,7 @@ deploys software, sends notifications, or owns consumer runtime.
 - GitHub issue plus Project Board: lifecycle state.
 - `touches:`: write boundary.
 - Git worktree: implementation isolation.
-- exact-head CI: verification authority.
+- exact-head focused local verification evidence: verification authority.
 - exactly one `review:<authority>` label: external-service or independent
   coding-agent review authority for the current PR head.
 - `scripts/merge_pr.py`: only merge authority.
@@ -39,8 +39,10 @@ Done. Do not create another lifecycle store.
 3. Claim it before editing.
 4. Create one `.worktrees/<branch>` checkout.
 5. Make the smallest change and run focused tests.
-6. Open a PR containing `Closes #N`; wait for current-head CI and the one
-   assigned authoritative reviewer.
+6. Open a PR containing `Closes #N`, record only focused local verification
+   commands in the PR body, and bind them to the exact head with
+   `create_pr.py --refresh-verification`; wait only for that exact-head local
+   verification evidence and the one assigned authoritative reviewer.
 7. Resolve every finding and merge only with `merge_pr.py --expected-head`.
 8. Verify Done and remove only clean, closed Factory worktrees.
 
@@ -90,10 +92,10 @@ or multiple authorities blocks merge.
 
 ## Failure behavior
 
-Missing, partial, stale, contradictory, or unauthenticated issue, CI, review,
-identity, board, or Git data blocks the transition. During a GitHub outage,
-preserve already-claimed local work and stop coordination. Never invent
-fallback state.
+Missing, partial, stale, contradictory, or unauthenticated issue, pull-request
+verification evidence, review, identity, board, or Git data blocks the
+transition. During a GitHub outage, preserve already-claimed local work and
+stop coordination. Never invent fallback state.
 
 ## Scope boundary
 

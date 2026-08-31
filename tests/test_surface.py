@@ -58,21 +58,31 @@ def test_hard_surface_budgets_deny_over_limit():
 
 
 def test_supported_command_and_skill_budgets():
-    tracked = tracked_paths()
-    commands = [
-        path
-        for path in tracked
-        if path.parent.name == "scripts"
-        and path.name != "common.py"
-        and path.suffix in {".py", ".sh"}
-    ]
+    commands = supported_command_paths()
     skills = [
         path
-        for path in tracked
+        for path in tracked_paths()
         if path.name == "SKILL.md" and path.parent.parent.name == "skills"
     ]
     assert 12 <= len(commands) <= 14
     assert len(skills) == 6
+
+
+def supported_command_paths() -> list[Path]:
+    return [
+        path
+        for path in tracked_paths()
+        if path.parent.name == "scripts"
+        and path.name not in {"common.py", "local_verification.py"}
+        and path.suffix in {".py", ".sh"}
+    ]
+
+
+def test_local_verification_helper_does_not_count_as_supported_command():
+    helper = ROOT / "scripts" / "local_verification.py"
+    assert helper.exists()
+    assert helper not in supported_command_paths()
+    assert len(supported_command_paths()) <= 14
 
 
 OPERATING_DOCUMENTS = {
@@ -141,7 +151,7 @@ def test_wrong_layer_surfaces_are_absent():
     }
     present = {path.name for path in tracked_paths()}
     assert forbidden.isdisjoint(present)
-    assert "schedule:" not in (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert not (ROOT / ".github/workflows").exists()
 
 
 def test_one_state_authority_no_tracked_runtime_ledgers():

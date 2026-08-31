@@ -62,6 +62,17 @@ def test_evaluate_blocks_missing_review(monkeypatch):
         merge_pr.evaluate(10, "a" * 40)
 
 
+def test_evaluate_blocks_stale_local_verification(monkeypatch):
+    install_happy_gate(monkeypatch)
+    monkeypatch.setattr(
+        merge_pr,
+        "ci_verdict",
+        lambda _number: {"head": "a" * 40, "state": "pending", "checks": []},
+    )
+    with pytest.raises(merge_pr.KernelError, match="focused local verification"):
+        merge_pr.evaluate(10, "a" * 40)
+
+
 def test_merge_rechecks_head_and_base(monkeypatch):
     pr = install_happy_gate(monkeypatch)
     monkeypatch.setattr(

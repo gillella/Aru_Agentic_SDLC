@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Removed the repository workflow file and stopped scaffolding one for adopted
+  repositories.
+- Replaced the repository-hosted merge gate with exact-head focused local
+  verification evidence stored in the PR body and refreshed through
+  `create_pr.py --refresh-verification`.
+- Made `check_ci.py` and `merge_pr.py` fail closed on missing, stale,
+  malformed, no-execution, or broad/full-suite verification evidence.
+- Updated active operating docs, templates, and runtime skills to require
+  exact-head focused local verification with honest project-specific commands
+  and to reserve any full suite for separate explicit release activity.
+
 ## v0.2.2 - Consumer Adoption Ready - 2026-08-27
 
 - Expanded the README into a user-friendly adoption entry point.

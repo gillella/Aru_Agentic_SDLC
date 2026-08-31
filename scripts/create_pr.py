@@ -46,6 +46,7 @@ from common import (
     set_status,
     status_of,
 )
+from local_verification import bind_local_verification, refresh_verification
 
 AVAILABLE = "available"
 PENDING = "pending"
@@ -58,13 +59,11 @@ EXTERNAL_ACTORS = {
 }
 ProbeRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
-
 def current_branch() -> str:
     branch = git(["branch", "--show-current"])
     if not branch or branch in {"main", "master"}:
         raise KernelError("pull requests must be opened from a feature branch")
     return branch
-
 
 def current_agent(record: dict[str, Any]) -> str:
     values = [
@@ -76,7 +75,6 @@ def current_agent(record: dict[str, Any]) -> str:
         raise KernelError("issue must have exactly one claimant")
     return values[0]
 
-
 def require_published_head(branch: str) -> str:
     head = git(["rev-parse", "HEAD"])
     result = run(
@@ -87,7 +85,6 @@ def require_published_head(branch: str) -> str:
     if result.returncode or len(fields) != 2 or fields[0] != head:
         raise KernelError("push the exact current head before creating the PR")
     return head
-
 
 def registered_external_states() -> dict[str, str]:
     records = gh_json(["label", "list", "--limit", "1000", "--json", "name"])
@@ -101,7 +98,6 @@ def registered_external_states() -> dict[str, str]:
         for service in EXTERNAL_REVIEWERS
     }
 
-
 def initial_external(states: dict[str, str]) -> str | None:
     if any(state not in {AVAILABLE, PENDING, UNAVAILABLE} for state in states.values()):
         raise KernelError("external reviewer availability is malformed")
@@ -113,14 +109,12 @@ def initial_external(states: dict[str, str]) -> str | None:
             return service
     return None
 
-
 def current_github_actor() -> str:
     record = gh_json(["api", "user"])
     login = str(record.get("login") or "").lower() if isinstance(record, dict) else ""
     if not login:
         raise KernelError("current GitHub author identity is unavailable")
     return login
-
 
 def _default_probe(argv: list[str]) -> subprocess.CompletedProcess[str]:
     try:
@@ -134,14 +128,11 @@ def _default_probe(argv: list[str]) -> subprocess.CompletedProcess[str]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return subprocess.CompletedProcess(argv, 1, "", str(exc))
 
-
 def _probe_ok(result: subprocess.CompletedProcess[str]) -> bool:
     return result.returncode == 0 and result.stdout.strip() == "OK"
 
-
 def _command(name: str) -> str | None:
     return shutil.which(name)
-
 
 def probe_coding_reviewer(
     *,
@@ -203,7 +194,6 @@ def probe_coding_reviewer(
             return family, identity, actor
     return None
 
-
 def choose_initial_reviewer(
     number: int,
     author_identity: str,
@@ -233,13 +223,11 @@ def choose_initial_reviewer(
         return authority, identity, actor
     raise KernelError("no external or distinct coding-agent reviewer is available")
 
-
 def _trusted_external_actor(record: dict[str, Any], service: str) -> bool:
     actor = record.get("user") or record.get("author") or {}
     login = str(actor.get("login") or "").lower()
     actor_type = str(actor.get("type") or actor.get("__typename") or "")
     return login in EXTERNAL_ACTORS[service] and actor_type in {"", "Bot"}
-
 
 def _check_service(record: dict[str, Any], service: str) -> bool:
     name = str(record.get("name") or record.get("context") or "")
@@ -251,7 +239,6 @@ def _check_service(record: dict[str, Any], service: str) -> bool:
     }[service]
     return normalized in aliases
 
-
 def _parse_time(value: str, *, subject: str = "review assignment") -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -260,7 +247,6 @@ def _parse_time(value: str, *, subject: str = "review assignment") -> datetime:
     if parsed.tzinfo is None:
         raise KernelError(f"{subject} timestamp has no timezone")
     return parsed
-
 
 def _evidence_time(record: dict[str, Any], *, subject: str) -> datetime:
     keys = (
@@ -273,16 +259,13 @@ def _evidence_time(record: dict[str, Any], *, subject: str) -> datetime:
             return _parse_time(str(value), subject=subject)
     raise KernelError(f"{subject} timestamp is missing")
 
-
 def _latest_state(evidence: list[tuple[datetime, str]], *, subject: str) -> str | None:
     if not evidence:
         return None
     latest_at = max(observed_at for observed_at, _state in evidence)
-    states = {state for observed_at, state in evidence if observed_at == latest_at}
-    if len(states) != 1:
+    if len(states := {state for observed_at, state in evidence if observed_at == latest_at}) != 1:
         raise KernelError(f"{subject} evidence conflicts at the latest timestamp")
     return states.pop()
-
 
 def _external_evidence(records: list[dict[str, Any]], service: str) -> list[tuple[datetime, str]]:
     evidence: list[tuple[datetime, str]] = []
@@ -302,7 +285,6 @@ def _external_evidence(records: list[dict[str, Any]], service: str) -> list[tupl
         evidence.append((_evidence_time(record, subject="external reviewer evidence"), state))
     return evidence
 
-
 def external_state(
     pr: dict[str, Any],
     service: str,
@@ -319,11 +301,7 @@ def external_state(
     matching = [item for item in checks if isinstance(item, dict) and _check_service(item, service)]
     if len(matching) > 1:
         raise KernelError("external reviewer returned ambiguous checks")
-    detailed = [
-        item
-        for item in statuses or []
-        if isinstance(item, dict) and _check_service(item, service)
-    ]
+    detailed = [item for item in statuses or [] if isinstance(item, dict) and _check_service(item, service)]
     for check in detailed or matching:
         state = str(check.get("conclusion") or check.get("state") or "").upper()
         status = str(check.get("status") or "").upper()
@@ -343,7 +321,6 @@ def external_state(
             evidence.append((_evidence_time(check, subject="external reviewer check"), check_state))
     return _latest_state(evidence, subject="external reviewer") or PENDING
 
-
 def _authority_assigned_at(
     pr: dict[str, Any], events: list[dict[str, Any]], authority: str
 ) -> datetime:
@@ -361,7 +338,6 @@ def _authority_assigned_at(
         if label.get("name") == expected_label:
             assignments.append(_evidence_time(event, subject="review assignment"))
     return max(assignments, default=created_at)
-
 
 def _external_decision(
     number: int, pr: dict[str, Any], authority: str, observed_at: datetime
@@ -397,7 +373,6 @@ def _external_decision(
     reason = "external-unavailable" if state == UNAVAILABLE else "external-pending-15m"
     return reason, None
 
-
 def _one_authority(pr: dict[str, Any]) -> str:
     authorities = [
         name[len(REVIEW_PREFIX) :]
@@ -420,13 +395,11 @@ def _one_authority(pr: dict[str, Any]) -> str:
         raise KernelError("external authority conflicts with coding reviewer metadata")
     return authorities[0]
 
-
 def _one_label_value(pr: dict[str, Any], prefix: str) -> str:
     values = [name[len(prefix) :] for name in label_names(pr) if name.startswith(prefix)]
     if len(values) != 1:
         raise KernelError(f"PR must have exactly one {prefix} identity label")
     return values[0]
-
 
 def _same_assignment(reference: dict[str, Any], live: dict[str, Any]) -> bool:
     return bool(
@@ -438,7 +411,6 @@ def _same_assignment(reference: dict[str, Any], live: dict[str, Any]) -> bool:
         and _one_label_value(live, AUTHOR_FAMILY_PREFIX)
         == _one_label_value(reference, AUTHOR_FAMILY_PREFIX)
     )
-
 
 def replace_authority(
     number: int,
@@ -495,7 +467,6 @@ def replace_authority(
         arguments.extend(["--remove-label", ",".join(removed)])
     run(arguments)
 
-
 def recover_coding_authority(
     number: int,
     pr: dict[str, Any],
@@ -535,7 +506,6 @@ def recover_coding_authority(
         "action": "fallback",
         "reason": "coding-reviewer-unavailable",
     }
-
 
 def refresh_assignment(
     number: int,
@@ -642,12 +612,10 @@ def refresh_assignment(
         "reason": reason,
     }
 
-
 def require_current_owner(number: int, owner: str) -> None:
     live_issue = issue(number)
     if status_of(live_issue) != "In Progress" or current_agent(live_issue) != owner:
         raise KernelError("issue ownership changed before PR creation")
-
 
 def create(
     number: int,
@@ -673,6 +641,10 @@ def create(
     if f"issue-{number}-" not in branch:
         raise KernelError("current branch does not belong to the issue")
     head = require_published_head(branch)
+    final_body, _checks = bind_local_verification(
+        body.rstrip() + f"\n\nCloses #{number}\n",
+        head,
+    )
     owner_identity = normalized_identity(owner)
     family = normalized_identity(author_family) if author_family else agent_family(owner_identity)
     authority, reviewer_identity, reviewer_actor = choose_initial_reviewer(
@@ -701,7 +673,6 @@ def create(
         labels.extend([reviewer_label, actor_label])
     for label, (color, description) in label_metadata.items():
         ensure_label(label, color=color, description=description)
-    final_body = body.rstrip() + f"\n\nCloses #{number}\n"
     arguments = ["gh", "pr", "create", "--title", title, "--body", final_body]
     for label in labels:
         arguments.extend(["--label", label])
@@ -726,45 +697,84 @@ def create(
         "reviewer_actor": reviewer_actor,
     }
 
-
-def main() -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--issue", type=int)
-    parser.add_argument("--title")
-    parser.add_argument("--body")
-    parser.add_argument("--agent")
-    parser.add_argument("--author-family")
-    parser.add_argument("--author-github-login")
+    for name in ("--title", "--body", "--body-file", "--agent", "--author-family", "--author-github-login"):
+        parser.add_argument(name)
     parser.add_argument("--refresh-reviewer", type=int, metavar="PR")
+    parser.add_argument("--refresh-verification", type=int, metavar="PR")
     parser.add_argument("--coding-reviewer-unavailable")
     parser.add_argument("--json", action="store_true")
+    return parser
+
+
+def _resolve_body_argument(args: argparse.Namespace) -> str | None:
+    if args.body and args.body_file:
+        raise KernelError("provide exactly one of --body or --body-file")
+    if args.body_file:
+        return Path(args.body_file).read_text(encoding="utf-8")
+    return args.body
+
+
+def _reject_unexpected_args(args: argparse.Namespace, message: str, names: tuple[str, ...]) -> None:
+    if any(getattr(args, name) for name in names):
+        raise KernelError(message)
+
+
+def main() -> int:
+    parser = _parser()
     args = parser.parse_args()
     try:
         if args.refresh_reviewer:
-            if any(
+            _reject_unexpected_args(
+                args,
+                "review refresh cannot include PR creation arguments",
                 (
-                    args.issue,
-                    args.title,
-                    args.body,
-                    args.agent,
-                    args.author_family,
-                    args.author_github_login,
-                )
-            ):
-                raise KernelError("review refresh cannot include PR creation arguments")
+                    "issue",
+                    "title",
+                    "body",
+                    "body_file",
+                    "agent",
+                    "author_family",
+                    "author_github_login",
+                    "refresh_verification",
+                ),
+            )
             result = refresh_assignment(
                 args.refresh_reviewer,
                 coding_unavailable_reason=args.coding_reviewer_unavailable,
             )
+        elif args.refresh_verification:
+            _reject_unexpected_args(
+                args,
+                "verification refresh cannot include PR creation arguments",
+                (
+                    "issue",
+                    "title",
+                    "agent",
+                    "author_family",
+                    "author_github_login",
+                    "refresh_reviewer",
+                    "coding_reviewer_unavailable",
+                ),
+            )
+            body = _resolve_body_argument(args)
+            if body is None:
+                raise KernelError("--body or --body-file is required for verification refresh")
+            result = refresh_verification(args.refresh_verification, body)
         else:
             if args.coding_reviewer_unavailable:
                 raise KernelError("coding reviewer unavailability requires --refresh-reviewer")
-            if args.issue is None or args.title is None or args.body is None:
-                raise KernelError("--issue, --title, and --body are required for PR creation")
+            body = _resolve_body_argument(args)
+            if args.issue is None or args.title is None or body is None:
+                raise KernelError(
+                    "--issue, --title, and exactly one of --body or --body-file are required for PR creation"
+                )
             result = create(
                 args.issue,
                 args.title,
-                args.body,
+                body,
                 args.agent,
                 author_family=args.author_family,
                 author_actor=args.author_github_login or "",
@@ -775,10 +785,11 @@ def main() -> int:
         json_print(result)
     elif args.refresh_reviewer:
         print(f"review authority: {result['authority']} ({result['reason']})")
+    elif args.refresh_verification:
+        print(f"verification refreshed for PR #{result['pr']}")
     else:
         print(result["url"])
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

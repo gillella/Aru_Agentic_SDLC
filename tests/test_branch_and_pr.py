@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 
@@ -7,6 +8,7 @@ import pytest
 
 import create_branch
 import create_pr
+import local_verification
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +18,7 @@ def configured_reviewers(monkeypatch):
         "claude-code:m1@1,claude-code:m2@2,claude-code:m3@3,"
         "openai-codex:mo,xai-cursor:mx,google-antigravity:mg",
     )
+    monkeypatch.setattr(local_verification, "run", lambda argv, **_kwargs: result(argv))
 
 
 def result(argv, *, ok=True, output="OK"):
@@ -26,6 +29,14 @@ def external_states(**overrides):
     states = {service: create_pr.UNAVAILABLE for service in create_pr.EXTERNAL_REVIEWERS}
     states.update(overrides)
     return states
+
+
+def verification_body(*commands: str) -> str:
+    return (
+        "## Summary\n\nSummary\n\n"
+        "## Verification\n\n"
+        + "\n".join(f"- `{command}`" for command in commands)
+    )
 
 
 def assignment_pr(*, created_at: datetime, state="pending"):
@@ -651,7 +662,7 @@ def test_create_pr_binds_head_and_exactly_one_reviewer(monkeypatch):
     outcome = create_pr.create(
         6,
         "feat: small",
-        "Summary",
+        verification_body("python3 -m pytest tests/test_branch_and_pr.py -q"),
         "codex-1",
         external_states=external_states(coderabbit=create_pr.AVAILABLE),
         reviewer_actors={},
@@ -662,6 +673,18 @@ def test_create_pr_binds_head_and_exactly_one_reviewer(monkeypatch):
     assert statuses == [(6, "In Review")]
     body = commands[0][commands[0].index("--body") + 1]
     assert body.count("Closes #6") == 1
+    payload = json.loads(body.split("<!-- aru-local-verification:v1 ", 1)[1].split(" -->", 1)[0])
+    assert payload == {
+        "commands": ["python3 -m pytest tests/test_branch_and_pr.py -q"],
+        "head": "a" * 40,
+        "results": [
+            {
+                "command": "python3 -m pytest tests/test_branch_and_pr.py -q",
+                "argv": ["python3", "-m", "pytest", "tests/test_branch_and_pr.py", "-q"],
+                "returncode": 0,
+            }
+        ],
+    }
 
 
 def test_create_pr_rejects_caller_closing_directive(monkeypatch):
@@ -670,6 +693,56 @@ def test_create_pr_rejects_caller_closing_directive(monkeypatch):
     monkeypatch.setattr(create_pr, "status_of", lambda _record: "In Progress")
     with pytest.raises(create_pr.KernelError, match="closing directive"):
         create_pr.create(1, "feat: bad", "Closes #99", "codex-1")
+
+
+def test_create_pr_rejects_missing_verification_section(monkeypatch):
+    record = {"number": 1, "labels": [{"name": "agent:codex-1"}]}
+    monkeypatch.setattr(create_pr, "issue", lambda _number: record)
+    monkeypatch.setattr(create_pr, "status_of", lambda _record: "In Progress")
+    monkeypatch.setattr(create_pr, "current_branch", lambda: "feat/issue-1-small-change")
+    monkeypatch.setattr(create_pr, "require_published_head", lambda _branch: "a" * 40)
+    with pytest.raises(create_pr.KernelError, match="Verification section"):
+        create_pr.create(1, "feat: bad", "Summary only", "codex-1")
+
+
+def test_refresh_verification_rebinds_current_head(monkeypatch):
+    commands = []
+    monkeypatch.setattr(
+        local_verification,
+        "gh_json",
+        lambda _argv: {
+            "number": 12,
+            "headRefOid": "b" * 40,
+            "body": "## Summary\n\nLive\n\nCloses #12\n",
+        },
+    )
+    monkeypatch.setattr(local_verification, "run", lambda argv, **_kwargs: commands.append(argv))
+    outcome = create_pr.refresh_verification(
+        12,
+        "## Summary\n\nUpdated\n\n## Verification\n\n- `python3 -m pytest tests/test_branch_and_pr.py -q`\n",
+        runner=lambda argv: result(argv),
+    )
+    assert outcome == {
+        "pr": 12,
+        "head": "b" * 40,
+        "checks": ["python3 -m pytest tests/test_branch_and_pr.py -q"],
+    }
+    body = commands[-1][commands[-1].index("--body") + 1]
+    payload = json.loads(body.split("<!-- aru-local-verification:v1 ", 1)[1].split(" -->", 1)[0])
+    assert payload["head"] == "b" * 40
+
+def test_refresh_verification_rejects_broad_suite_command(monkeypatch):
+    monkeypatch.setattr(
+        local_verification,
+        "gh_json",
+        lambda _argv: {
+            "number": 12,
+            "headRefOid": "b" * 40,
+            "body": "## Summary\n\nLive\n\nCloses #12\n",
+        },
+    )
+    with pytest.raises(create_pr.KernelError, match="broad or full-suite"):
+        create_pr.refresh_verification(12, verification_body("python3 -m pytest -q"))
 
 
 def test_create_pr_revalidates_ownership_after_reviewer_selection(monkeypatch):
@@ -704,7 +777,7 @@ def test_create_pr_revalidates_ownership_after_reviewer_selection(monkeypatch):
         create_pr.create(
             6,
             "feat: small",
-            "Summary",
+            verification_body("python3 -m pytest tests/test_branch_and_pr.py -q"),
             "codex-1",
             external_states=external_states(coderabbit=create_pr.AVAILABLE),
             reviewer_actors={},
