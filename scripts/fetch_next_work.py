@@ -299,7 +299,8 @@ def _recovery_issue_record(number: int) -> dict:
 def _live_recovery_errors(
     record: dict,
     *,
-    reserved_paths: list[list[str]] | None = None,
+    active_reserved_paths: list[list[str]] | None = None,
+    selected_reserved_paths: list[list[str]] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     if str(record.get("state") or "").upper() != "OPEN":
@@ -311,17 +312,23 @@ def _live_recovery_errors(
         )
     )
     errors.extend(_extra_backlog_errors(record))
-    if reserved_paths is not None:
+    if active_reserved_paths is not None or selected_reserved_paths is not None:
         touches = parse_touches(str(record.get("body") or ""))
-        if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
-            errors.append("touches conflict with active lane work")
+        conflict = _touches_conflict_error(
+            touches,
+            active_reserved_paths=active_reserved_paths,
+            selected_reserved_paths=selected_reserved_paths,
+        )
+        if conflict is not None:
+            errors.append(conflict)
     return errors
 
 
 def _promote_recovery_candidate(
     record: dict,
     *,
-    reserved_paths: list[list[str]] | None = None,
+    active_reserved_paths: list[list[str]] | None = None,
+    selected_reserved_paths: list[list[str]] | None = None,
 ) -> tuple[dict, list[str]]:
     number = int(record["number"])
     live_record = record
@@ -333,7 +340,8 @@ def _promote_recovery_candidate(
         live_touches = parse_touches(str(live_record.get("body") or ""))
         live_errors = _live_recovery_errors(
             live_record,
-            reserved_paths=reserved_paths,
+            active_reserved_paths=active_reserved_paths,
+            selected_reserved_paths=selected_reserved_paths,
         )
         if live_errors:
             raise _RecoveryDriftError("; ".join(live_errors))
@@ -460,6 +468,23 @@ def _touches_overlap(left: list[str], right: list[str]) -> bool:
             if right_recursive and left_path.startswith(right_path + "/"):
                 return True
     return False
+
+
+def _touches_conflict_error(
+    touches: list[str],
+    *,
+    active_reserved_paths: list[list[str]] | None = None,
+    selected_reserved_paths: list[list[str]] | None = None,
+) -> str | None:
+    if active_reserved_paths and any(
+        _touches_overlap(touches, reserved) for reserved in active_reserved_paths
+    ):
+        return "touches conflict with active lane work"
+    if selected_reserved_paths and any(
+        _touches_overlap(touches, reserved) for reserved in selected_reserved_paths
+    ):
+        return "touches conflict with earlier selected recovery candidate"
+    return None
 
 
 def _ready_candidates(
@@ -593,7 +618,7 @@ def select_batch(agents: list[str]) -> dict[str, object]:
             len(free_lanes),
             active_reserved_paths,
         )
-    reserved_paths: list[list[str]] = []
+    reserved_paths: list[list[str]] = list(active_reserved_paths)
     candidate_index = 0
     for lane in free_lanes:
         while candidate_index < len(candidates):
@@ -639,47 +664,45 @@ def _recover_batch_candidates(
             "dependency_blocked": 0,
             "malformed": 0,
         }
-    priority, record = candidates[0]
-    number = int(record["number"])
-    touches = parse_touches(str(record.get("body") or ""))
-    if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
-        diagnostics.append(
-            f"Backlog issue #{number} touches conflict with active lane work; skipped"
+    selected: list[tuple[int, int, dict, list[str]]] = []
+    selected_reserved_paths: list[list[str]] = []
+    for priority, record in candidates:
+        if len(selected) >= lane_count:
+            break
+        number = int(record["number"])
+        touches = parse_touches(str(record.get("body") or ""))
+        conflict = _touches_conflict_error(
+            touches,
+            active_reserved_paths=reserved_paths,
+            selected_reserved_paths=selected_reserved_paths,
         )
-        return [], diagnostics, {
-            "total_ready": 0,
-            "executable_ready": 0,
-            "human_gated": 0,
-            "epics": 0,
-            "dependency_blocked": 0,
-            "malformed": 0,
-        }
-    try:
-        live_record, live_touches = _promote_recovery_candidate(
-            record,
-            reserved_paths=reserved_paths,
-        )
-    except _RecoveryDriftError as exc:
+        if conflict is not None:
+            diagnostics.append(f"Backlog issue #{number} {conflict}; skipped")
+            continue
+        try:
+            live_record, live_touches = _promote_recovery_candidate(
+                record,
+                active_reserved_paths=reserved_paths,
+                selected_reserved_paths=selected_reserved_paths,
+            )
+        except _RecoveryDriftError as exc:
+            diagnostics.extend(
+                f"Backlog issue #{number} {error}; skipped"
+                for error in str(exc).split("; ")
+            )
+            continue
+        selected.append((priority, number, live_record, live_touches))
+        selected_reserved_paths.append(live_touches)
+
+    if selected:
+        count = len(selected)
+        noun = "candidate" if count == 1 else "candidates"
+        diagnostics.append(f"Ready snapshot empty; recovered {count} Backlog {noun}")
         diagnostics.extend(
-            f"Backlog issue #{number} {error}; skipped"
-            for error in str(exc).split("; ")
+            f"Promoted Backlog issue #{number} to Ready"
+            for _priority, number, _record, _touches in selected
         )
-        return [], diagnostics, {
-            "total_ready": 0,
-            "executable_ready": 0,
-            "human_gated": 0,
-            "epics": 0,
-            "dependency_blocked": 0,
-            "malformed": 0,
-        }
-    diagnostics.append("Ready snapshot empty; recovered 1 Backlog candidate")
-    diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
-    return [(
-        priority,
-        number,
-        live_record,
-        live_touches,
-    )], diagnostics, {
+    return selected, diagnostics, {
         "total_ready": 0,
         "executable_ready": 0,
         "human_gated": 0,

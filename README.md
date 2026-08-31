@@ -166,6 +166,11 @@ single-shot picker call, not a scheduler, daemon, worker handoff or presence
 registry, queue, capacity store, or polling loop; a later invocation reads a
 new authoritative snapshot.
 
+An authored open PR reserves only that author's remediation lane. Other
+explicit lanes may still receive independent Ready or safely recovered Backlog
+work in the same invocation when `touches:` paths, dependencies, claims, and
+review-authority constraints stay conflict-free.
+
 Board Ready count is lifecycle state, not executable capacity. One activation
 snapshot comprises the complete paginated open-Ready inventory and, when that
 inventory contains dependency references, one capped bulk GraphQL read for all

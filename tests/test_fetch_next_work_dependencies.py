@@ -488,7 +488,7 @@ def test_select_claim_after_idle_recovery_uses_same_invocation(monkeypatch, caps
     }
 
 
-def test_batch_idle_recovery_uses_one_backlog_snapshot_and_single_safe_promotion(
+def test_batch_idle_recovery_uses_one_backlog_snapshot_and_recovers_up_to_free_capacity(
     monkeypatch,
 ):
     calls = []
@@ -514,26 +514,31 @@ def test_batch_idle_recovery_uses_one_backlog_snapshot_and_single_safe_promotion
 
     assert result["lanes"] == [
         {"agent": "agent-a", "work": {"type": "issue", "issue": 12, "title": "issue 12"}},
-        {"agent": "agent-b", "work": {"type": "idle"}},
+        {"agent": "agent-b", "work": {"type": "issue", "issue": 13, "title": "issue 13"}},
         {"agent": "agent-c", "work": {"type": "idle"}},
     ]
     assert result["diagnostics"] == [
         "Ready idle; evaluated Backlog once",
-        "Ready snapshot empty; recovered 1 Backlog candidate",
+        "Ready snapshot empty; recovered 2 Backlog candidates",
         "Promoted Backlog issue #12 to Ready",
+        "Promoted Backlog issue #13 to Ready",
     ]
     assert "ready_classification" not in result
-    assert calls == ["prs", "ready", "backlog", ("promote", 12)]
+    assert calls == ["prs", "ready", "backlog", ("promote", 12), ("promote", 13)]
 
 
-def test_batch_idle_recovery_promotes_only_one_issue_to_avoid_partial_mutation(monkeypatch):
+def test_batch_idle_recovery_stops_at_free_capacity(monkeypatch):
     calls = []
     monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
     monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
     monkeypatch.setattr(
         fetch_next_work,
         "backlog_issues",
-        lambda: [backlog_issue(12, "priority:p0"), backlog_issue(13, "priority:p0")],
+        lambda: [
+            backlog_issue(12, "priority:p0"),
+            backlog_issue(13, "priority:p0"),
+            backlog_issue(14, "priority:p0"),
+        ],
     )
     monkeypatch.setattr(
         fetch_next_work.triage_backlog,
@@ -545,15 +550,16 @@ def test_batch_idle_recovery_promotes_only_one_issue_to_avoid_partial_mutation(m
 
     assert result["lanes"] == [
         {"agent": "agent-a", "work": {"type": "issue", "issue": 12, "title": "issue 12"}},
-        {"agent": "agent-b", "work": {"type": "idle"}},
+        {"agent": "agent-b", "work": {"type": "issue", "issue": 13, "title": "issue 13"}},
     ]
     assert result["diagnostics"] == [
         "Ready idle; evaluated Backlog once",
-        "Ready snapshot empty; recovered 1 Backlog candidate",
+        "Ready snapshot empty; recovered 2 Backlog candidates",
         "Promoted Backlog issue #12 to Ready",
+        "Promoted Backlog issue #13 to Ready",
     ]
     assert "ready_classification" not in result
-    assert calls == [12]
+    assert calls == [12, 13]
 
 
 def test_batch_idle_recovery_does_not_promote_overlapping_backlog_candidates(monkeypatch):
@@ -591,10 +597,17 @@ def test_batch_idle_recovery_does_not_promote_overlapping_backlog_candidates(mon
 
     assert result["lanes"] == [
         {"agent": "agent-a", "work": {"type": "issue", "issue": 12, "title": "issue 12"}},
-        {"agent": "agent-b", "work": {"type": "idle"}},
+        {"agent": "agent-b", "work": {"type": "issue", "issue": 14, "title": "issue 14"}},
         {"agent": "agent-c", "work": {"type": "idle"}},
     ]
-    assert promoted == [12]
+    assert result["diagnostics"] == [
+        "Ready idle; evaluated Backlog once",
+        "Backlog issue #13 touches conflict with earlier selected recovery candidate; skipped",
+        "Ready snapshot empty; recovered 2 Backlog candidates",
+        "Promoted Backlog issue #12 to Ready",
+        "Promoted Backlog issue #14 to Ready",
+    ]
+    assert promoted == [12, 14]
 
 
 def test_batch_idle_recovery_rejects_candidate_that_conflicts_with_open_lane_work(
@@ -673,15 +686,19 @@ def test_batch_idle_recovery_leaves_lane_idle_when_chosen_issue_drifted_before_p
     monkeypatch.setattr(
         fetch_next_work,
         "backlog_issues",
-        lambda: [backlog_issue(12, "priority:p0")],
+        lambda: [backlog_issue(12, "priority:p0"), backlog_issue(13, "priority:p1")],
     )
     monkeypatch.setattr(fetch_next_work, "repo_slug", lambda: "owner/repository")
     monkeypatch.setattr(
         fetch_next_work,
         "gh_json",
-        lambda args, **_kwargs: backlog_issue(12, "priority:p0", "agent:other-worker")
-        if args == ["api", "repos/owner/repository/issues/12"]
-        else (_ for _ in ()).throw(AssertionError(args)),
+        lambda args, **_kwargs: (
+            backlog_issue(12, "priority:p0", "agent:other-worker")
+            if args == ["api", "repos/owner/repository/issues/12"]
+            else backlog_issue(13, "priority:p1")
+            if args == ["api", "repos/owner/repository/issues/13"]
+            else (_ for _ in ()).throw(AssertionError(args))
+        ),
     )
     monkeypatch.setattr(
         fetch_next_work.triage_backlog,
@@ -692,12 +709,14 @@ def test_batch_idle_recovery_leaves_lane_idle_when_chosen_issue_drifted_before_p
     result = fetch_next_work.select_batch(["agent-a", "agent-b"])
 
     assert result["lanes"] == [
-        {"agent": "agent-a", "work": {"type": "idle"}},
+        {"agent": "agent-a", "work": {"type": "issue", "issue": 13, "title": "issue 13"}},
         {"agent": "agent-b", "work": {"type": "idle"}},
     ]
     assert result["diagnostics"] == [
         "Ready idle; evaluated Backlog once",
         "Backlog issue #12 issue is already claimed; skipped",
+        "Ready snapshot empty; recovered 1 Backlog candidate",
+        "Promoted Backlog issue #13 to Ready",
     ]
     assert "ready_classification" not in result
 
@@ -744,3 +763,28 @@ def test_batch_idle_recovery_keeps_terminal_promotion_failures_terminal(monkeypa
 
     with pytest.raises(common.KernelError, match="GitHub API rate limit exceeded"):
         fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+
+def test_batch_idle_recovery_stops_on_terminal_failure_after_partial_promotion(
+    monkeypatch,
+):
+    promoted = []
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: [backlog_issue(12, "priority:p0"), backlog_issue(13, "priority:p0")],
+    )
+
+    def fake_promote(number, **_kwargs):
+        promoted.append(number)
+        if number == 13:
+            raise common.KernelError("GitHub API rate limit exceeded")
+
+    monkeypatch.setattr(fetch_next_work.triage_backlog, "promote_issue", fake_promote)
+
+    with pytest.raises(common.KernelError, match="GitHub API rate limit exceeded"):
+        fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert promoted == [12, 13]

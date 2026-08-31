@@ -7,7 +7,7 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
 
 1. Read current Git, worktree, PR, and board state.
 2. Run `fetch_next_work.py --agent <id> --json`.
-3. If it returns a Ready issue, claim it with `claim_issue.py`.
+3. If it returns a Ready issue for that lane, claim it with `claim_issue.py`.
 4. Create the isolated worktree with `create_branch.py` and work only there.
 5. Make the smallest change inside the declared `touches:` paths.
 6. Run only focused verification for the issue: acceptance predicates,
@@ -41,5 +41,6 @@ inspect the exact diff and surrounding code, run focused verification, and
 submit a substantive full-current-head `APPROVE` or `REQUEST_CHANGES`
 attestation with severity and `file:line` findings.
 
-Stop after one unit. Do not start a scheduler, fleet, background loop, private
-queue, or second lifecycle.
+Stop after one claimed issue in this worktree. Another free operator-approved
+lane may independently run the same bounded picker flow in parallel, but do not
+start a scheduler, fleet, background loop, private queue, or second lifecycle.

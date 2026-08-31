@@ -414,6 +414,56 @@ def test_batch_reads_each_inventory_once_and_preserves_lane_pr_precedence(monkey
     assert calls == ["prs", "issues"]
 
 
+def test_batch_waiting_review_lane_does_not_block_free_lane_ready_work(monkeypatch):
+    monkeypatch.setattr(
+        fetch_next_work,
+        "open_prs",
+        lambda: [
+            {
+                "number": 500,
+                "body": "Closes #80",
+                "labels": [{"name": "author:agent-a"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [ready_issue(10, "priority:p0", body="touches: src/free.py")],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "_open_pr_work",
+        lambda pr: {"type": "wait", "pr": pr["number"], "head": "head", "ci": "pending"},
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "issue",
+        lambda number: {
+            "number": number,
+            "title": f"issue {number}",
+            "body": "touches: docs/reserved.md",
+            "labels": [{"name": "status:in-progress"}],
+        },
+    )
+
+    assert fetch_next_work.select_batch(["agent-a", "agent-b"]) == {
+        "schema": "aru.fetch-next-work.batch/v1",
+        "lanes": [
+            {
+                "agent": "agent-a",
+                "work": {"type": "wait", "pr": 500, "head": "head", "ci": "pending"},
+            },
+            {
+                "agent": "agent-b",
+                "work": {"type": "issue", "issue": 10, "title": "issue 10"},
+            },
+        ],
+        "diagnostics": [],
+        "claim_status": "not-requested",
+    }
+
+
 def test_batch_ignores_unrelated_pr_without_author_label(monkeypatch):
     monkeypatch.setattr(
         fetch_next_work,
@@ -557,6 +607,55 @@ def test_batch_deterministically_fills_lanes_with_path_disjoint_issues(monkeypat
     result = fetch_next_work.select_batch(["agent-a", "agent-b", "agent-c"])
 
     assert [lane["work"].get("issue") for lane in result["lanes"]] == [10, 12, 13]
+
+
+def test_batch_ready_candidates_respect_active_lane_reserved_paths(monkeypatch):
+    monkeypatch.setattr(
+        fetch_next_work,
+        "open_prs",
+        lambda: [
+            {
+                "number": 500,
+                "body": "Closes #80",
+                "labels": [{"name": "author:agent-a"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(10, "priority:p0", body="touches: docs/**"),
+            ready_issue(11, "priority:p0", body="touches: src/free.py"),
+            ready_issue(12, "priority:p0", body="touches: src/other.py"),
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "_open_pr_work",
+        lambda pr: {"type": "wait", "pr": pr["number"], "head": "head", "ci": "pending"},
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "issue",
+        lambda number: {
+            "number": number,
+            "title": f"issue {number}",
+            "body": "touches: docs/guide.md",
+            "labels": [{"name": "status:in-progress"}],
+        },
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b", "agent-c"])
+
+    assert result["lanes"] == [
+        {
+            "agent": "agent-a",
+            "work": {"type": "wait", "pr": 500, "head": "head", "ci": "pending"},
+        },
+        {"agent": "agent-b", "work": {"type": "issue", "issue": 11, "title": "issue 11"}},
+        {"agent": "agent-c", "work": {"type": "issue", "issue": 12, "title": "issue 12"}},
+    ]
 
 
 def test_batch_exact_paths_only_conflict_when_equal(monkeypatch):

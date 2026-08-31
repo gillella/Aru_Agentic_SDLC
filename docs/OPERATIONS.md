@@ -637,37 +637,49 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
   --json
 ```
 
-The picker first resumes that agent's open feedback, failed exact-head local
-verification, merge-ready PR, or waiting PR. Only then does it fetch every page
-of Ready issues. It excludes issues labeled `needs-human` or `type:epic`, then
-orders eligible work by priority (`P0` → `P1` → `P2` → `P3`) and ascending
-issue number within each priority. Missing priority defaults to `P2`. An issue
-with contradictory or unsupported priority metadata is skipped with a
-diagnostic, so it cannot block other valid Ready work.
+For a single agent, the picker first resumes that agent's open feedback, failed
+exact-head local verification, merge-ready PR, or waiting PR. Only then does
+it fetch every page of Ready issues. It excludes issues labeled `needs-human`
+or `type:epic`, then orders eligible work by priority (`P0` → `P1` → `P2` →
+`P3`) and ascending issue number within each priority. Missing priority
+defaults to `P2`. An issue with contradictory or unsupported priority metadata
+is skipped with a diagnostic, so it cannot block other valid Ready work.
+
+For multiple explicit agents in one JSON batch, an authored open PR occupies
+only that author's lane. Other free lanes continue from the same shared Ready
+snapshot and may receive independent conflict-free work in the same invocation.
+Free-lane selection fails closed on contradictory authorship, dependency
+inventory drift, malformed `touches:` metadata, active-lane `touches:` overlap,
+and candidate-candidate `touches:` overlap.
 
 If that Ready snapshot is empty, the same invocation may perform one bounded
 idle-recovery pass: fetch one Backlog snapshot, evaluate mechanical eligibility
-once, then narrow its pre-promotion recheck to the one chosen Backlog issue and
-its declared dependencies before promoting at most one highest-priority
-eligible issue. Promotion requires the transactional `set_status(...,
-expected_current="Backlog")` API and fails closed on any drift. Batch mode
-preserves its lane schema but also fails closed by promoting at most one issue
-per invocation, leaving remaining lanes idle rather than risking overlapping or
-partial promotions; if the chosen recovery issue's `touches:` overlap active
-lane work that the current open PR state can prove, recovery rejects that issue
-instead of promoting it. This recovery path does not run when Ready is
-non-empty, even if every visible Ready card is human-gated, epic, malformed,
+once, then narrow each pre-promotion recheck to the chosen Backlog issue and
+its declared dependencies before promoting as many highest-priority eligible
+independent issues as free capacity allows from that one snapshot. Promotion
+requires the transactional `set_status(..., expected_current="Backlog")` API
+and fails closed on any drift. Batch mode preserves its lane schema, skips
+snapshot candidates whose `touches:` overlap active lane work or earlier
+selected recovery candidates, and stops terminally on reread or promotion write
+failures instead of masking partial mutation. If a later recovery reread or
+promotion write fails after earlier promotions succeeded, the invocation raises
+before returning JSON diagnostics; the already-promoted cards remain `Ready`
+and a later invocation will see them, and no claims occur after that
+exception. This recovery path does not run when Ready is non-empty, even if
+every visible Ready card is human-gated, epic, malformed,
 or dependency-blocked. It never polls, retries, loops over the whole board
 again, refreshes a second Backlog snapshot, or persists state. GraphQL
 partials, quota errors, status drift, eligibility drift, and promotion write
 failures remain terminal.
 
 When idle recovery runs, diagnostics add deterministic `Backlog issue #N ...;
-skipped` messages for rejected Backlog cards and `Promoted Backlog issue #N to
-Ready` for each successful promotion. Batch recovery keeps `ready_classification`
-bound to the original Ready snapshot and reports any recovered Backlog work only
-through additive diagnostics. If no Backlog issue is mechanically eligible, the
-invocation returns idle after that one bounded pass.
+skipped` messages for rejected Backlog cards, one `Ready snapshot empty;
+recovered N Backlog candidate(s)` summary, and `Promoted Backlog issue #N to
+Ready` for each successful promotion. Batch recovery keeps
+`ready_classification` bound to the original Ready snapshot and reports any
+recovered Backlog work only through additive diagnostics when the invocation
+returns normally. If no Backlog issue is mechanically eligible, the invocation
+returns idle after that one bounded pass.
 
 You may claim a known issue explicitly:
 
@@ -840,7 +852,7 @@ create a scheduler, autonomous loop, or second work queue.
 | `init_project.py` | Generate a minimal consumer scaffold | Refuses conflicting overwrites |
 | `update_issue_status.py` | Move one issue between the five states or reconcile one epic | Updates status label and Project field together; epic mode checks or applies bounded child-only closure |
 | `triage_backlog.py` | Validate and promote Backlog issues | Rejects incomplete contracts and open dependencies |
-| `fetch_next_work.py` | Resume or select one unit of work | Prioritizes authored PR state; only empty Ready snapshots may trigger one bounded Backlog recovery pass |
+| `fetch_next_work.py` | Resume or select bounded lane work | In batch mode, authored PRs occupy only their own lanes; only empty Ready snapshots may trigger one bounded Backlog recovery pass that can fill multiple free lanes from one safe snapshot |
 | `claim_issue.py` | Acquire or release exclusive ownership | Re-reads state and fails on claim races |
 | `create_branch.py` | Create the issue branch and worktree | Requires In Progress plus the exact claimant |
 | `create_pr.py` | Open the governed PR | Requires published exact head and appends `Closes #N` |

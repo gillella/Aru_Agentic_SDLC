@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Made `fetch_next_work.py` capacity-aware across explicit lanes so an authored
+  open PR reserves only its own remediation lane, Ready selection respects
+  active-lane `touches:` reservations, and empty-Ready recovery can promote
+  multiple independent Backlog issues from one shared snapshot while still
+  failing closed on drift or terminal promotion errors.
 - Removed the repository workflow file and stopped scaffolding one for adopted
   repositories.
 - Replaced the repository-hosted merge gate with exact-head focused local
