@@ -230,12 +230,14 @@ The bootstrap `review:*` authority labels do not register providers.
 `create_pr.py` combines registered external services with locally configured,
 bound coding identities in one stable pool. The issue number rotates the first
 slot. A selected coding identity is assigned only after its bounded probe
-returns exactly `OK`; an unavailable candidate advances to the next slot. The
-author identity and GitHub actor are excluded. This needs no scheduler, private
-queue, or capacity ledger. The assigned authority must produce verifiable
-current-head evidence. On explicit
+returns exactly `OK` (which verifies liveness only); an unavailable candidate
+advances to the next slot. The author identity and GitHub actor are excluded.
+This needs no scheduler, private queue, or capacity ledger. The assigned
+authority must produce verifiable current-head evidence. On explicit
 unavailability it falls back immediately; while merely pending it retains the
-service for less than 15 minutes and falls back at 15 minutes.
+service for less than 15 minutes and becomes eligible for fallback at 15
+minutes. Because the kernel itself has no scheduler, an external event or timer
+must invoke `create_pr.py --refresh-reviewer <PR>`.
 
 If reviewer bindings exist but `ARU_CODING_REVIEWERS` is missing, assignment
 fails visibly rather than silently collapsing the pool to external services.
@@ -646,11 +648,12 @@ defaults to `P2`. An issue with contradictory or unsupported priority metadata
 is skipped with a diagnostic, so it cannot block other valid Ready work.
 
 For multiple explicit agents in one JSON batch, an authored open PR occupies
-only that author's lane. Other free lanes continue from the same shared Ready
-snapshot and may receive independent conflict-free work in the same invocation.
-Free-lane selection fails closed on contradictory authorship, dependency
-inventory drift, malformed `touches:` metadata, active-lane `touches:` overlap,
-and candidate-candidate `touches:` overlap.
+only that author's remediation lane, but its `touches:` reserve globally
+against free-lane assignment. Other free lanes continue from the same shared
+Ready snapshot and may receive independent conflict-free work in the same
+invocation. Free-lane selection fails closed on contradictory authorship,
+dependency inventory drift, malformed `touches:` metadata, active-PR `touches:`
+overlap, and candidate-candidate `touches:` overlap.
 
 If that Ready snapshot is empty, the same invocation may perform one bounded
 idle-recovery pass: fetch one Backlog snapshot, evaluate mechanical eligibility
@@ -752,7 +755,11 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr 123 --json
 If local verification is stale or malformed, rerun only the focused commands
 needed for the current head and refresh the PR body; waiting does not create
 verification evidence. If review findings exist, address every unresolved
-finding. Any new push requires fresh exact-head local verification and review
+finding. If the PR has mergeStateStatus `DIRTY` (a merge conflict with base
+branch `main`), merge `origin/main` into the feature branch within the claimed
+worktree (never rebase or force push), resolve conflicts within declared
+`touches:` boundaries, rerun focused verification, and refresh exact-head
+evidence. Any new push requires fresh exact-head local verification and review
 evidence.
 
 Refresh local verification after each push or verification edit:
@@ -774,12 +781,13 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
   --refresh-reviewer 123 --json
 ```
 
-Pending for less than 15 minutes retains the external authority. At exactly 15
-minutes the helper probes the distinct coding-agent pool and, only after a
-successful capacity test, replaces the one authority and records the exact head,
-old authority, reviewer identity, timestamp, and fallback reason on the PR.
-The timeout is measured from the latest persisted label-assignment event for
-the current authority.
+Pending for less than 15 minutes retains the external authority. At 15 minutes,
+an external event or timer invoking `create_pr.py --refresh-reviewer <PR>`
+probes the distinct coding-agent pool (verifying liveness only) and, only after
+a successful capacity test, replaces the one authority and records the exact
+head, old authority, reviewer identity, timestamp, and fallback reason on the
+PR. The kernel itself has no scheduler. The timeout is measured from the latest
+persisted label-assignment event for the current authority.
 
 ### Step 8: dry-run and merge
 
@@ -838,7 +846,7 @@ Dirty, unregistered, open-PR, and user-created worktrees are retained.
 | `triage-backlog` | Validating Backlog and promoting complete work |
 | `implement-next-issue` | Claiming and implementing one Ready issue |
 | `remediate-ci-failure` | Exact-head focused local verification failed on an authored PR |
-| `address-pr-feedback` | An authored PR has unresolved review findings |
+| `address-pr-feedback` | An authored PR has unresolved review findings or DIRTY merge conflicts |
 
 The skills guide agents through the same helpers described here. They do not
 create a scheduler, autonomous loop, or second work queue.
@@ -852,7 +860,7 @@ create a scheduler, autonomous loop, or second work queue.
 | `init_project.py` | Generate a minimal consumer scaffold | Refuses conflicting overwrites |
 | `update_issue_status.py` | Move one issue between the five states or reconcile one epic | Updates status label and Project field together; epic mode checks or applies bounded child-only closure |
 | `triage_backlog.py` | Validate and promote Backlog issues | Rejects incomplete contracts and open dependencies |
-| `fetch_next_work.py` | Resume or select bounded lane work | In batch mode, authored PRs occupy only their own lanes; only empty Ready snapshots may trigger one bounded Backlog recovery pass that can fill multiple free lanes from one safe snapshot |
+| `fetch_next_work.py` | Resume or select bounded lane work | In batch mode, authored PRs occupy only their own remediation lanes while their touches reserve globally against free-lane assignment; only empty Ready snapshots may trigger one bounded Backlog recovery pass that can fill multiple free lanes from one safe snapshot |
 | `claim_issue.py` | Acquire or release exclusive ownership | Re-reads state and fails on claim races |
 | `create_branch.py` | Create the issue branch and worktree | Requires In Progress plus the exact claimant |
 | `create_pr.py` | Open the governed PR | Requires published exact head and appends `Closes #N` |
@@ -887,22 +895,25 @@ The state machine is deterministic:
 | Rotated coding candidate fails its bounded probe | any | Advance to the next candidate without recording private state |
 | Assigned external is available or has completed review | any | Retain external |
 | Assigned external is pending | `< 15m` | Retain external; no fallback |
-| Assigned external is pending | `>= 15m` | Probe and assign a distinct coding agent |
+| Assigned external is pending | `>= 15m` | External event/timer invokes refresh; probe and assign a distinct coding agent |
 | Assigned external explicitly reports unavailable/error | any | Probe and assign a distinct coding agent immediately |
 | No distinct coding agent answers exactly `OK` | any | Keep authority unchanged and fail closed |
-| Assigned coding reviewer explicitly aborts or becomes unavailable | any | Audit and recover to first registered external authority |
+| Assigned coding reviewer explicitly aborts, hits quota, or becomes unavailable | any | Audit and recover immediately to first registered external authority |
 
 Paused reviews, cost or quota exhaustion, rate limiting, provider outage,
 unsupported bot-authored PRs, and explicit unavailable/error responses are
 unavailable. A successful status whose detail reports one of those no-op states
 cannot satisfy exact-head review.
 Coding probes run in Claude Code, OpenAI Codex, xAI Cursor, Google Antigravity
-order after moving the author's model family behind other families. Claude
-executes every `claude-sub` probe declared in `ARU_CODING_REVIEWERS`, then
-rotates deterministically across the successful bound subscriptions. An
-identity is eligible only when
-its `reviewer-binding:<identity>=<github-login>` exists and the bound actor is
-not the PR author.
+order after moving the author's model family behind other families. The probe
+tests liveness only and does not guarantee that full review execution will not
+hit quota or rate limits. If substantive review execution later hits quota, cost
+limits, or errors, recover immediately with
+`--coding-reviewer-unavailable <reason>`. Claude executes every `claude-sub`
+probe declared in `ARU_CODING_REVIEWERS`, then rotates deterministically across
+the successful bound subscriptions. An identity is eligible only when its
+`reviewer-binding:<identity>=<github-login>` exists and the bound actor is not
+the PR author.
 
 The helper replaces the authority label as one labels update and then verifies
 that exactly one supported `review:*` label remains. A fallback PR comment
@@ -1026,8 +1037,10 @@ Use it for history and recovery evidence, not as a second active kernel.
 | PR creation says exact head is unpublished | Local `HEAD` differs from the remote branch | Push the current issue branch, then retry |
 | Local verification was valid before the latest push | Evidence belongs to an older SHA | Re-run focused checks and refresh the PR body for the new head |
 | Merge reports zero or multiple reviewers | Review-label authority is ambiguous | Leave exactly one supported review label |
+| `PR merge state is DIRTY` / conflict | Feature branch conflicts with base branch | Merge `origin/main` into the feature branch (never rebase/force push), rerun focused checks, and refresh exact-head evidence |
 | External reviewer is unavailable | Cost, quota, rate, outage, unsupported PR, or explicit error evidence exists | Run `create_pr.py --refresh-reviewer <PR>` immediately |
-| External reviewer is still pending | It has not produced a verdict | Wait until 15 minutes; then run the reviewer refresh |
+| External reviewer is still pending | It has not produced a verdict | Wait until 15 minutes; then an external event/timer runs the reviewer refresh (kernel has no scheduler) |
+| Coding reviewer hits quota during review | Substantive review execution exhausted capacity | Run `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable "quota exhausted"` immediately |
 | Coding fallback has no capacity | Every distinct smoke test failed | Keep the existing authority and stop; do not fabricate a reviewer |
 | Coding review is rejected | Identity, actor, payload, head, verdict, or findings are invalid | Obtain one fresh formal attestation from the assigned non-author reviewer |
 | Review thread inventory is truncated | GitHub did not return complete evidence | Stop and retry when complete data is available |

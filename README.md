@@ -166,9 +166,10 @@ single-shot picker call, not a scheduler, daemon, worker handoff or presence
 registry, queue, capacity store, or polling loop; a later invocation reads a
 new authoritative snapshot.
 
-An authored open PR reserves only that author's remediation lane. Other
-explicit lanes may still receive independent Ready or safely recovered Backlog
-work in the same invocation when `touches:` paths, dependencies, claims, and
+An authored open PR occupies only that author's remediation lane, but its
+`touches:` paths reserve globally against free-lane assignment. Other explicit
+lanes may still receive independent Ready or safely recovered Backlog work in
+the same invocation when `touches:` paths, dependencies, claims, and
 review-authority constraints stay conflict-free.
 
 Board Ready count is lifecycle state, not executable capacity. One activation
@@ -212,12 +213,13 @@ installed external provider with `reviewer-registered:<service>`; ordinary
 bootstrap `review:*` labels are not registrations. At creation, `create_pr.py`
 combines registered external services and bound identities from the local
 `ARU_CODING_REVIEWERS` pool in a stable order. The issue number rotates the
-starting slot. A selected coding identity must pass its bounded capacity probe;
-an unavailable candidate advances to the next slot. This distributes
-consecutive PRs without a queue or capacity ledger. An explicit external
-unavailable/error response causes immediate fallback. A pending service retains
-authority for 14 minutes 59 seconds; at 15 minutes it becomes eligible for
-immediate fallback through:
+starting slot. A selected coding identity must pass its bounded capacity probe
+(verifying liveness only); an unavailable candidate advances to the next slot.
+This distributes consecutive PRs without a queue or capacity ledger. An explicit
+external unavailable/error response causes immediate fallback. A pending service
+retains authority for 14 minutes 59 seconds; at 15 minutes it becomes eligible
+for fallback. Because the kernel itself has no scheduler, an external event or
+timer must invoke:
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
@@ -228,26 +230,27 @@ The helper evaluates the newest trusted, timestamped provider evidence. The
 clock starts at the current authority's latest GitHub label-assignment event,
 so a governed recovery receives its own complete 15-minute pending window.
 
-Coding fallback smoke-tests Claude Code, OpenAI Codex, xAI Cursor, then Google
-Antigravity; it excludes the author identity and prefers another model family.
-Each identity must have a `reviewer-binding:<identity>=<github-login>` label,
-and that GitHub actor must differ from the PR author. Each machine declares its
-local pool in `ARU_CODING_REVIEWERS`. Entries use `family:identity`; Claude
-entries add the subscription argument as `claude-code:identity@subscription`.
-The current MacBook identities are `m1/m2/m3/mo/mx/mg`; the Mac mini uses
-`n1/n2/n3/no/nx/ng`. Adding or removing a Claude subscription changes only this
-configuration and its binding label. Missing, malformed, or duplicate
-configuration blocks coding fallback. Every configured Claude subscription is
-probed and successful bound subscriptions rotate deterministically. Paused
-reviews, cost or quota exhaustion, rate limiting, provider outage, unsupported
-bot-authored PRs, and explicit unavailable/error responses all count as
-unavailable. A successful check whose detail says it performed no review does
-not satisfy the exact-head gate. If no distinct coding
-agent has capacity, assignment does not change and the transition fails closed.
-Registered coding bindings with a missing local pool also fail visibly instead
-of silently degrading every assignment to external-only selection.
-If an assigned coding reviewer later aborts or explicitly becomes unavailable,
-recover through the same helper with `--coding-reviewer-unavailable <reason>`;
+Coding fallback smoke-tests liveness in Claude Code, OpenAI Codex, xAI Cursor,
+then Google Antigravity; it excludes the author identity and prefers another
+model family. Each identity must have a `reviewer-binding:<identity>=<github-login>`
+label, and that GitHub actor must differ from the PR author. Each machine
+declares its local pool in `ARU_CODING_REVIEWERS`. Entries use `family:identity`;
+Claude entries add the subscription argument as
+`claude-code:identity@subscription`. The current MacBook identities are
+`m1/m2/m3/mo/mx/mg`; the Mac mini uses `n1/n2/n3/no/nx/ng`. Adding or removing a
+Claude subscription changes only this configuration and its binding label.
+Missing, malformed, or duplicate configuration blocks coding fallback. Every
+configured Claude subscription is probed and successful bound subscriptions
+rotate deterministically. Paused reviews, cost or quota exhaustion, rate
+limiting, provider outage, unsupported bot-authored PRs, and explicit
+unavailable/error responses all count as unavailable. A successful check whose
+detail says it performed no review does not satisfy the exact-head gate. If no
+distinct coding agent has capacity, assignment does not change and the
+transition fails closed. Registered coding bindings with a missing local pool
+also fail visibly instead of silently degrading every assignment to
+external-only selection. If an assigned coding reviewer later aborts, hits
+quota, or explicitly becomes unavailable during substantive execution, recover
+immediately through the same helper with `--coding-reviewer-unavailable <reason>`;
 it audits and restores the first registered external authority without leaving
 coding identity metadata behind.
 

@@ -2,11 +2,19 @@
 
 ## Unreleased
 
-- Made `fetch_next_work.py` capacity-aware across explicit lanes so an authored
-  open PR reserves only its own remediation lane, Ready selection respects
-  active-lane `touches:` reservations, and empty-Ready recovery can promote
-  multiple independent Backlog issues from one shared snapshot while still
-  failing closed on drift or terminal promotion errors.
+- Made `fetch_next_work.py` batch selection reserve touches from every open
+  governed PR across all authors globally and fail closed on unreadable,
+  missing, or ambiguous reservations.
+- Made `fetch_next_work.py` return an actionable conflict remediation work
+  result carrying PR number, head, and reason when an authored open PR has
+  `mergeStateStatus: DIRTY`.
+- Updated `address-pr-feedback` and operational docs to instruct merging
+  `origin/main` into the feature branch (never rebase/force push), rerunning
+  focused verification, and refreshing exact-head evidence on DIRTY conflicts.
+- Clarified that the kernel has no scheduler so external reviewer 15-minute
+  fallback requires an external event/timer invoking `create_pr.py --refresh-reviewer`,
+  coding reviewer probes test liveness only, and substantive review execution
+  hitting quota triggers immediate governed unavailable recovery.
 - Removed the repository workflow file and stopped scaffolding one for adopted
   repositories.
 - Replaced the repository-hosted merge gate with exact-head focused local

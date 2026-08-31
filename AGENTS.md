@@ -52,35 +52,39 @@ Done. Do not create another lifecycle store.
 registered by `reviewer-registered:<service>` labels and locally configured,
 bound coding-reviewer identities. The issue number rotates the starting slot,
 so consecutive PRs distribute across eligible authorities without stored
-capacity state. A coding slot must pass its bounded probe; an unavailable slot
-advances to the next candidate. The author identity and GitHub actor are never
-eligible. Authority labels provisioned by bootstrap do not register providers.
-Exactly one authority label remains.
+capacity state. A coding slot must pass its bounded probe (which verifies
+liveness only); an unavailable slot advances to the next candidate. The author
+identity and GitHub actor are never eligible. Authority labels provisioned by
+bootstrap do not register providers. Exactly one authority label remains.
 An explicit unavailable/error response causes immediate fallback; a merely
 pending external assignment is retained until 15 minutes after assignment, then
-falls back. Paused reviews, cost or quota exhaustion, rate limiting, provider
-outage, unsupported bot-authored PRs, and explicit unavailable/error responses
-are unavailable and cannot satisfy the merge gate through a nominally
-successful no-op status.
-The newest trusted, timestamped provider evidence determines availability. A
-governed authority-label transition starts a new 15-minute pending window.
+becomes eligible for fallback. Because the kernel itself has no scheduler, an
+external event or timer must invoke `create_pr.py --refresh-reviewer <PR>`.
+Paused reviews, cost or quota exhaustion, rate limiting, provider outage,
+unsupported bot-authored PRs, and explicit unavailable/error responses are
+unavailable and cannot satisfy the merge gate through a nominally successful
+no-op status. The newest trusted, timestamped provider evidence determines
+availability. A governed authority-label transition starts a new 15-minute
+pending window.
 
-For coding assignment, smoke-test actual capacity in `claude-code`, `openai-codex`,
-`xai-cursor`, `google-antigravity` order, excluding the author identity and
-preferring a different model family. Claude selection probes every configured
-`claude-sub` subscription. A candidate also requires one explicit
-`reviewer-binding:<identity>=<github-login>` registration whose actor differs
-from the PR author. `ARU_CODING_REVIEWERS` is the local allowlist using
-`family:identity` entries and `claude-code:identity@subscription` for each
-Claude subscription. Only configured identities are probed; subscription
-additions and removals are configuration changes. Missing, malformed,
-duplicate, or unbound configuration, or no distinct reviewer responding
-exactly `OK`, keeps the existing authority and fails closed.
+For coding assignment, smoke-test actual capacity (verifying liveness only) in
+`claude-code`, `openai-codex`, `xai-cursor`, `google-antigravity` order,
+excluding the author identity and preferring a different model family. Claude
+selection probes every configured `claude-sub` subscription. A candidate also
+requires one explicit `reviewer-binding:<identity>=<github-login>` registration
+whose actor differs from the PR author. `ARU_CODING_REVIEWERS` is the local
+allowlist using `family:identity` entries and
+`claude-code:identity@subscription` for each Claude subscription. Only
+configured identities are probed; subscription additions and removals are
+configuration changes. Missing, malformed, duplicate, or unbound configuration,
+or no distinct reviewer responding exactly `OK`, keeps the existing authority
+and fails closed.
 
 If an assigned coding reviewer later returns an explicit unavailable/error
-state or aborts without a verdict, use `create_pr.py --refresh-reviewer <PR>
---coding-reviewer-unavailable <reason>` to audit and recover to the first
-registered external authority. Do not edit authority labels by hand.
+state, aborts without a verdict, or hits quota during substantive execution,
+use `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`
+to audit and recover immediately to the first registered external authority. Do
+not edit authority labels by hand.
 
 A coding agent may author or remediate code and may authoritatively review code
 written by a different agent. It must never review its own PR under normal

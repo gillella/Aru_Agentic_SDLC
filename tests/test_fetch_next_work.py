@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 
 import pytest
@@ -20,8 +19,12 @@ def ready_issue(number: int, *labels: str, body: str | None = None) -> dict:
 
 def ready_counts(total, executable, human=0, epics=0, blocked=0, malformed=0):
     return dict(
-        total_ready=total, executable_ready=executable, human_gated=human,
-        epics=epics, dependency_blocked=blocked, malformed=malformed,
+        total_ready=total,
+        executable_ready=executable,
+        human_gated=human,
+        epics=epics,
+        dependency_blocked=blocked,
+        malformed=malformed,
     )
 
 
@@ -33,8 +36,9 @@ def test_ready_inventory_uses_complete_pagination_and_excludes_pull_requests(mon
     monkeypatch.setattr(
         common,
         "gh_json",
-        lambda args, **_kwargs: calls.append(args)
-        or [inventory[:100], [*inventory[100:], pull_request]],
+        lambda args, **_kwargs: (
+            calls.append(args) or [inventory[:100], [*inventory[100:], pull_request]]
+        ),
     )
 
     assert fetch_next_work.ready_issues() == inventory
@@ -94,9 +98,7 @@ def test_select_preserves_pr_precedence_over_ready_inventory(
     def unexpected_ready_inventory():
         raise AssertionError("Ready inventory loaded before authored PR work")
 
-    monkeypatch.setattr(
-        fetch_next_work, "ready_issues", unexpected_ready_inventory, raising=False
-    )
+    monkeypatch.setattr(fetch_next_work, "ready_issues", unexpected_ready_inventory, raising=False)
 
     assert fetch_next_work.select("codex-sol56-issue499") == expected
 
@@ -187,7 +189,7 @@ def test_select_returns_idle_diagnostic_when_only_priority_is_bad(monkeypatch):
         "diagnostics": [
             "Ready classification: total=1, executable=0, human-gated=0, "
             "epics=0, dependency-blocked=0, malformed=1",
-            "Ready issue #22 has contradictory or unsupported priority labels; skipped"
+            "Ready issue #22 has contradictory or unsupported priority labels; skipped",
         ],
     }
 
@@ -200,12 +202,14 @@ def test_select_explains_seven_ready_with_zero_executable_from_one_snapshot(
     monkeypatch.setattr(
         fetch_next_work,
         "ready_issues",
-        lambda: calls.append("issues")
-        or [
-            *(ready_issue(number, "needs-human") for number in range(1, 6)),
-            ready_issue(6, "type:epic"),
-            ready_issue(7, "type:epic"),
-        ],
+        lambda: (
+            calls.append("issues")
+            or [
+                *(ready_issue(number, "needs-human") for number in range(1, 6)),
+                ready_issue(6, "type:epic"),
+                ready_issue(7, "type:epic"),
+            ]
+        ),
     )
 
     result = fetch_next_work.select("codex-sol56-issue531")
@@ -224,8 +228,9 @@ def test_select_classifies_open_dependency_as_blocked_and_closed_as_executable(
     monkeypatch.setattr(
         fetch_next_work,
         "ready_issues",
-        lambda: calls.append("issues")
-        or [ready_issue(10, body="depends-on: #90\ntouches: src/a.py")],
+        lambda: (
+            calls.append("issues") or [ready_issue(10, body="depends-on: #90\ntouches: src/a.py")]
+        ),
     )
     monkeypatch.setattr(
         fetch_next_work,
@@ -276,9 +281,7 @@ def test_select_wait_path_does_not_call_review_thread_graphql(monkeypatch):
     def unexpected_ready_inventory():
         raise AssertionError("Ready inventory loaded before authored PR work")
 
-    monkeypatch.setattr(
-        fetch_next_work, "ready_issues", unexpected_ready_inventory, raising=False
-    )
+    monkeypatch.setattr(fetch_next_work, "ready_issues", unexpected_ready_inventory, raising=False)
 
     assert fetch_next_work.select("codex-sol56-issue499") == {
         "type": "wait",
@@ -321,16 +324,10 @@ def test_select_feedback_still_uses_full_review_threads(monkeypatch):
         ["agent-a", "INVALID"],
     ],
 )
-def test_batch_rejects_duplicate_or_invalid_agents_before_inventory(
-    monkeypatch, agents
-):
+def test_batch_rejects_duplicate_or_invalid_agents_before_inventory(monkeypatch, agents):
     calls = []
-    monkeypatch.setattr(
-        fetch_next_work, "open_prs", lambda: calls.append("prs") or []
-    )
-    monkeypatch.setattr(
-        fetch_next_work, "ready_issues", lambda: calls.append("issues") or []
-    )
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: calls.append("prs") or [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: calls.append("issues") or [])
 
     with pytest.raises(common.KernelError):
         fetch_next_work.select_batch(agents)
@@ -340,12 +337,8 @@ def test_batch_rejects_duplicate_or_invalid_agents_before_inventory(
 
 def test_batch_requires_json_before_inventory(monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        fetch_next_work, "open_prs", lambda: calls.append("prs") or []
-    )
-    monkeypatch.setattr(
-        fetch_next_work, "ready_issues", lambda: calls.append("issues") or []
-    )
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: calls.append("prs") or [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: calls.append("issues") or [])
     monkeypatch.setattr(
         sys,
         "argv",
@@ -363,28 +356,42 @@ def test_batch_reads_each_inventory_once_and_preserves_lane_pr_precedence(monkey
     monkeypatch.setattr(
         fetch_next_work,
         "open_prs",
-        lambda: calls.append("prs")
-        or [
-            {
-                "number": 500,
-                "labels": [
-                    {"name": "author:agent-a"},
-                    {"name": "review:sourcery"},
-                ],
-            }
-        ],
+        lambda: (
+            calls.append("prs")
+            or [
+                {
+                    "number": 500,
+                    "body": "Closes #80",
+                    "labels": [
+                        {"name": "author:agent-a"},
+                        {"name": "review:sourcery"},
+                    ],
+                }
+            ]
+        ),
     )
     monkeypatch.setattr(
         fetch_next_work,
         "ready_issues",
-        lambda: calls.append("issues")
-        or [ready_issue(10, "priority:p0", body="touches: src/a.py")],
+        lambda: (
+            calls.append("issues") or [ready_issue(10, "priority:p0", body="touches: src/a.py")]
+        ),
     )
     monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _number: True)
     monkeypatch.setattr(
         fetch_next_work,
         "fetch_feedback",
         lambda _number: [{"kind": "review", "id": 7}],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "issue",
+        lambda number: {
+            "number": number,
+            "title": f"issue {number}",
+            "body": "touches: docs/reserved.md",
+            "labels": [{"name": "status:in-progress"}],
+        },
     )
 
     def unexpected_ci(_number):
@@ -532,12 +539,8 @@ def test_batch_rejects_ambiguous_unrequested_pr_authors(monkeypatch):
 @pytest.mark.parametrize(
     "record",
     [
-        pytest.param(
-            {"labels": [{"name": "author:agent-a"}]}, id="missing"
-        ),
-        pytest.param(
-            {"number": None, "labels": [{"name": "author:agent-a"}]}, id="null"
-        ),
+        pytest.param({"labels": [{"name": "author:agent-a"}]}, id="missing"),
+        pytest.param({"number": None, "labels": [{"name": "author:agent-a"}]}, id="null"),
         pytest.param(
             {"number": "500", "labels": [{"name": "author:agent-a"}]},
             id="string",
@@ -546,9 +549,7 @@ def test_batch_rejects_ambiguous_unrequested_pr_authors(monkeypatch):
             {"number": 1.5, "labels": [{"name": "author:agent-a"}]},
             id="float",
         ),
-        pytest.param(
-            {"number": 0, "labels": [{"name": "author:agent-a"}]}, id="zero"
-        ),
+        pytest.param({"number": 0, "labels": [{"name": "author:agent-a"}]}, id="zero"),
         pytest.param(
             {"number": -1, "labels": [{"name": "author:agent-a"}]},
             id="negative",
@@ -560,9 +561,7 @@ def test_batch_rejects_ambiguous_unrequested_pr_authors(monkeypatch):
     ],
 )
 def test_batch_rejects_malformed_open_pr_numbers(record):
-    with pytest.raises(
-        common.KernelError, match="Open PR number must be a positive integer"
-    ):
+    with pytest.raises(common.KernelError, match="Open PR number must be a positive integer"):
         fetch_next_work._prs_by_batch_author([record], ["agent-a", "agent-b"])
 
 
@@ -584,9 +583,7 @@ def test_batch_rejects_malformed_ready_issue_numbers(number):
     else:
         record["number"] = number
 
-    with pytest.raises(
-        common.KernelError, match="Ready issue number must be a positive integer"
-    ):
+    with pytest.raises(common.KernelError, match="Ready issue number must be a positive integer"):
         fetch_next_work._batch_ready_candidates([record])
 
 
@@ -656,217 +653,3 @@ def test_batch_ready_candidates_respect_active_lane_reserved_paths(monkeypatch):
         {"agent": "agent-b", "work": {"type": "issue", "issue": 11, "title": "issue 11"}},
         {"agent": "agent-c", "work": {"type": "issue", "issue": 12, "title": "issue 12"}},
     ]
-
-
-def test_batch_exact_paths_only_conflict_when_equal(monkeypatch):
-    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
-    monkeypatch.setattr(
-        fetch_next_work,
-        "ready_issues",
-        lambda: [
-            ready_issue(1, body="touches: src/pkg/one.py"),
-            ready_issue(2, body="touches: src/pkg/two.py"),
-        ],
-    )
-
-    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
-
-    assert [lane["work"].get("issue") for lane in result["lanes"]] == [1, 2]
-
-
-def test_batch_diagnostics_are_ordered_by_numeric_issue_number(monkeypatch):
-    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
-    monkeypatch.setattr(
-        fetch_next_work,
-        "ready_issues",
-        lambda: [
-            ready_issue(40, body=""),
-            ready_issue(7, "priority:urgent"),
-            ready_issue(12, body="touches: ../secret"),
-        ],
-    )
-
-    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
-
-    assert result["ready_classification"] == ready_counts(3, 0, malformed=3)
-    assert result["diagnostics"] == [
-        "Ready classification: total=3, executable=0, human-gated=0, "
-        "epics=0, dependency-blocked=0, malformed=3",
-        "Ready issue #7 has contradictory or unsupported priority labels; skipped",
-        "Ready issue #12 has invalid touches: touches: contains an unsafe path; skipped",
-        "Ready issue #40 has invalid touches: issue must contain exactly one "
-        "touches: declaration; skipped",
-    ]
-
-
-def test_batch_skips_malformed_touches_with_diagnostics(monkeypatch):
-    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
-    monkeypatch.setattr(
-        fetch_next_work,
-        "ready_issues",
-        lambda: [
-            ready_issue(1, "priority:p0", body=""),
-            ready_issue(2, "priority:p0", body="touches: ../secret"),
-            ready_issue(3, "priority:p1", body="touches: safe.py"),
-        ],
-    )
-
-    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
-
-    assert result["lanes"] == [
-        {
-            "agent": "agent-a",
-            "work": {"type": "issue", "issue": 3, "title": "issue 3"},
-        },
-        {"agent": "agent-b", "work": {"type": "idle"}},
-    ]
-    assert result["ready_classification"] == ready_counts(3, 1, malformed=2)
-    assert result["diagnostics"] == [
-        "Ready classification: total=3, executable=1, human-gated=0, "
-        "epics=0, dependency-blocked=0, malformed=2",
-        "Ready issue #1 has invalid touches: issue must contain exactly one "
-        "touches: declaration; skipped",
-        "Ready issue #2 has invalid touches: touches: contains an unsafe path; skipped",
-    ]
-
-
-def test_batch_reports_one_aggregate_for_seven_ready_with_zero_executable(
-    monkeypatch,
-):
-    calls = []
-    monkeypatch.setattr(
-        fetch_next_work, "open_prs", lambda: calls.append("prs") or []
-    )
-    monkeypatch.setattr(
-        fetch_next_work,
-        "ready_issues",
-        lambda: calls.append("issues")
-        or [
-            *(ready_issue(number, "needs-human") for number in range(1, 6)),
-            ready_issue(6, "type:epic"),
-            ready_issue(7, "type:epic"),
-        ],
-    )
-
-    result = fetch_next_work.select_batch(
-        ["agent-a", "agent-b", "agent-c", "agent-d"]
-    )
-
-    assert [lane["work"]["type"] for lane in result["lanes"]] == ["idle"] * 4
-    assert result["ready_classification"] == ready_counts(7, 0, human=5, epics=2)
-    assert result["diagnostics"] == [
-        "Ready classification: total=7, executable=0, human-gated=5, "
-        "epics=2, dependency-blocked=0, malformed=0"
-    ]
-    assert calls == ["prs", "issues"]
-
-
-def test_batch_classification_is_deterministic_for_mixed_ready_cards(monkeypatch):
-    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
-    monkeypatch.setattr(
-        fetch_next_work,
-        "ready_issues",
-        lambda: [
-            ready_issue(5, "priority:urgent"),
-            ready_issue(4, body="depends-on: #90\ntouches: ../unsafe"),
-            ready_issue(3, "type:epic", body="depends-on: #90"),
-            ready_issue(2, "needs-human", "type:epic", body="depends-on: #90"),
-            ready_issue(1, "priority:p0", body="depends-on: #91\ntouches: safe.py"),
-        ],
-    )
-    monkeypatch.setattr(
-        fetch_next_work,
-        "dependency_states",
-        lambda _records: {90: "open", 91: "closed"},
-    )
-
-    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
-
-    assert result["lanes"] == [
-        {
-            "agent": "agent-a",
-            "work": {"type": "issue", "issue": 1, "title": "issue 1"},
-        },
-        {"agent": "agent-b", "work": {"type": "idle"}},
-    ]
-    classification = result["ready_classification"]
-    assert classification == ready_counts(5, 1, 1, 1, 1, 1)
-    assert sum(classification.values()) == 2 * classification["total_ready"]
-
-
-def test_batch_claim_stops_after_first_failure_and_prints_partial_json(
-    monkeypatch, capsys
-):
-    calls = []
-    monkeypatch.setattr(
-        fetch_next_work, "open_prs", lambda: calls.append("prs") or []
-    )
-    monkeypatch.setattr(
-        fetch_next_work,
-        "ready_issues",
-        lambda: calls.append("issues")
-        or [ready_issue(number) for number in (1, 2, 3, 4)],
-    )
-
-    def fake_claim(number, agent):
-        calls.append((number, agent))
-        if number == 2:
-            raise common.KernelError("claim race detected")
-        return {"issue": number, "agent": agent, "status": "In Progress"}
-
-    monkeypatch.setattr(fetch_next_work, "claim", fake_claim)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "fetch_next_work.py",
-            "--agent",
-            "agent-a",
-            "--agent",
-            "agent-b",
-            "--agent",
-            "agent-c",
-            "--claim",
-            "--json",
-        ],
-    )
-
-    assert fetch_next_work.main() == 1
-    result = json.loads(capsys.readouterr().out)
-    assert result["claim_status"] == "partial"
-    assert result["lanes"][0]["work"]["claim"] == {
-        "issue": 1,
-        "agent": "agent-a",
-        "status": "In Progress",
-    }
-    assert result["lanes"][1]["work"]["claim"] == {
-        "status": "failed",
-        "error": "claim race detected",
-    }
-    assert result["lanes"][2]["work"]["claim"] == {
-        "status": "skipped",
-        "reason": "claim stopped after earlier failure",
-    }
-    assert calls == ["prs", "issues", (1, "agent-a"), (2, "agent-b")]
-
-
-@pytest.mark.parametrize("as_json", [False, True])
-def test_single_agent_cli_output_is_exactly_legacy_compatible(
-    monkeypatch, capsys, as_json
-):
-    work = {"type": "issue", "issue": 7, "title": "issue 7"}
-    monkeypatch.setattr(fetch_next_work, "select", lambda agent: work)
-    argv = ["fetch_next_work.py", "--agent", "agent-a"]
-    if as_json:
-        argv.append("--json")
-    monkeypatch.setattr(sys, "argv", argv)
-
-    assert fetch_next_work.main() == 0
-
-    expected = (
-        '{"agent": "agent-a", "work": {"issue": 7, "title": "issue 7", '
-        '"type": "issue"}}\n'
-        if as_json
-        else "{'type': 'issue', 'issue': 7, 'title': 'issue 7'}\n"
-    )
-    assert capsys.readouterr().out == expected

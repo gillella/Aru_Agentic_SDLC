@@ -23,10 +23,12 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    Initial authority rotates deterministically across registered external
    services and locally configured, bound coding identities while excluding the
    author. If the assigned external service explicitly fails or remains pending
-   for 15 minutes, run
-   `create_pr.py --refresh-reviewer <PR>`; it smoke-tests capacity and may assign
-   a coding agent other than the author. Only
-   `reviewer-registered:<service>` external providers and coding identities with
+   for 15 minutes, an external event or timer must invoke
+   `create_pr.py --refresh-reviewer <PR>` (the kernel itself has no scheduler);
+   it smoke-tests capacity (verifying liveness only) and may assign a coding agent
+   other than the author. If substantive review execution hits quota, recover
+   immediately with `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`.
+   Only `reviewer-registered:<service>` external providers and coding identities with
    `reviewer-binding:<identity>=<github-login>` are eligible. Before coding
    fallback, require a strict local `ARU_CODING_REVIEWERS` allowlist using
    `family:identity` and `claude-code:identity@subscription` entries. Missing,
