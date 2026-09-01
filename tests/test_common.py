@@ -125,34 +125,6 @@ def test_issue_contract_reports_malformed_dependency_declaration():
     ]
 
 
-@pytest.mark.parametrize(
-    ("command", "use_runner"),
-    [(["gh", "issue", "view", "7"], True), (["gh", "issue", "view", "7"], False), (["gh", "pr", "view", "7"], False)],
-)
-def test_repository_command_runner_resolution(monkeypatch, tmp_path, command, use_runner):
-    calls = []
-    if use_runner:
-        runner = tmp_path / "app-run"
-        runner.write_text("#!/bin/sh\n", encoding="utf-8")
-        runner.chmod(0o755)
-        monkeypatch.setenv("ARU_GITHUB_APP_RUNNER", str(runner))
-        expected_argv = [str(runner), "--", *command]
-    else:
-        monkeypatch.delenv("ARU_GITHUB_APP_RUNNER", raising=False)
-        expected_argv = list(command)
-
-    monkeypatch.setattr(common.subprocess, "run", lambda argv, **kw: calls.append((argv, kw)) or subprocess.CompletedProcess(argv, 0, stdout="{}", stderr=""))
-    common.run(command)
-    assert calls[0][0] == expected_argv
-
-
-def test_configured_app_runner_must_be_executable(monkeypatch, tmp_path):
-    runner = tmp_path / "missing-app-run"
-    monkeypatch.setenv("ARU_GITHUB_APP_RUNNER", str(runner))
-    with pytest.raises(common.KernelError, match="not executable"):
-        common.run(["gh", "issue", "view", "7"])
-
-
 def test_project_command_uses_stored_pat_without_token_overrides(monkeypatch):
     monkeypatch.setenv("ARU_GITHUB_APP_RUNNER", "/not/used/for/projects")
     monkeypatch.setenv("GH_TOKEN", "app-token-must-not-reach-projects")

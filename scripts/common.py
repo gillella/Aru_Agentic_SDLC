@@ -52,6 +52,12 @@ _QUOTA_RE = re.compile(
 _LINKED_PROJECT_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _GH_TOKEN_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 _REPOSITORY_COMMANDS = {"api", "issue", "label", "pr", "repo"}
+_REMOTE_URL_RE = re.compile(r"^remote\.(.+)\.url (.+)$", re.MULTILINE)
+_GITHUB_REMOTE_RE = re.compile(
+    r"\A(?:[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]*@)?github\.com(?::\d+)?/|(?:[^@/]*@)?github\.com:)"
+    r"(?P<slug>[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}?)(?:\.git)?/?\Z",
+    re.IGNORECASE,
+)
 
 
 class KernelError(RuntimeError):
@@ -235,9 +241,7 @@ def _github_authority(args: list[str], auth: str | None) -> str:
             raise KernelError("GraphQL authority is ambiguous; declare repository or project")
         query = _graphql_query(args)
         has_project = bool(re.search(r"\b(?:projectsV2|ProjectV2|projectV2)\b", query))
-        has_repository_data = bool(
-            re.search(r"\b(?:pullRequest|reviewThreads|issues|refs|commit)\b", query)
-        )
+        has_repository_data = bool(re.search(r"\b(?:pullRequest|reviewThreads|issues|refs|commit)\b", query))
         if has_project and has_repository_data:
             raise KernelError("GraphQL query mixes repository and Project V2 authority")
         if auth == REPOSITORY_AUTH and has_project:
@@ -253,9 +257,30 @@ def _github_authority(args: list[str], auth: str | None) -> str:
     return inferred
 
 
-def _github_command(
-    args: list[str], auth: str | None
-) -> tuple[list[str], dict[str, str] | None]:
+def checkout_repository(cwd: str | Path | None = None) -> str:
+    """Return the governed OWNER/REPO this checkout speaks for, or fail closed.
+
+    Remote URLs can embed credentials, so no remote value reaches a diagnostic.
+    """
+    try:
+        listing = git(["config", "--get-regexp", r"^remote\..*\.url$"], cwd=cwd)
+    except KernelError:
+        listing = ""
+    remotes = dict(_REMOTE_URL_RE.findall(listing))
+    urls = [remotes["origin"]] if "origin" in remotes else list(remotes.values())
+    slugs = set()
+    for match in filter(None, (_GITHUB_REMOTE_RE.match(url.strip()) for url in urls)):
+        slug = match.group("slug")
+        if ".." not in slug and not slug.endswith("/."):
+            slugs.add(slug)
+    if len(slugs) > 1:
+        raise KernelError("governed repository identity is ambiguous across checkout remotes")
+    if not slugs:
+        raise KernelError("unable to resolve the governed repository identity from the checkout")
+    return slugs.pop()
+
+
+def _github_command(args: list[str], auth: str | None, cwd: str | Path | None = None) -> tuple[list[str], dict[str, str] | None]:
     authority = _github_authority(args, auth)
     if authority == PROJECT_AUTH:
         environment = os.environ.copy()
@@ -268,7 +293,7 @@ def _github_command(
     runner_path = Path(runner).expanduser()
     if not runner_path.is_file() or not os.access(runner_path, os.X_OK):
         raise KernelError("configured GitHub App runner is not executable")
-    return [str(runner_path), "--", "gh", *args], None
+    return [str(runner_path), "--repo", checkout_repository(cwd), "--", "gh", *args], None
 
 
 def _redact_diagnostic(value: str) -> str:
@@ -277,34 +302,22 @@ def _redact_diagnostic(value: str) -> str:
         secret = os.environ.get(name)
         if secret:
             redacted = redacted.replace(secret, "[REDACTED]")
-    redacted = re.sub(
-        r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+)\b",
-        "[REDACTED]",
-        redacted,
-    )
+    redacted = re.sub(r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+)\b", "[REDACTED]", redacted)
     return redacted
 
 
 def run(
-    argv: Iterable[str],
-    *,
-    cwd: str | Path | None = None,
-    check: bool = True,
-    input_text: str | None = None,
-    auth: str | None = None,
+    argv: Iterable[str], *, cwd: str | Path | None = None, check: bool = True,
+    input_text: str | None = None, auth: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [str(part) for part in argv]
     environment = None
     if command and command[0] == "gh":
-        command, environment = _github_command(command[1:], auth)
+        command, environment = _github_command(command[1:], auth, cwd)
     elif auth is not None:
         raise KernelError("GitHub authority was provided for a non-GitHub command")
-    result = subprocess.run(
-        command, cwd=cwd, env=environment, input=input_text, text=True, capture_output=True, check=False
-    )
-    result = subprocess.CompletedProcess(
-        result.args, result.returncode, _redact_diagnostic(result.stdout or ""), _redact_diagnostic(result.stderr or "")
-    )
+    result = subprocess.run(command, cwd=cwd, env=environment, input=input_text, text=True, capture_output=True, check=False)
+    result = subprocess.CompletedProcess(result.args, result.returncode, _redact_diagnostic(result.stdout or ""), _redact_diagnostic(result.stderr or ""))
     if result.returncode:
         _raise_if_quota(result.stdout, result.stderr)
     if check and result.returncode:
@@ -331,12 +344,7 @@ def _raise_if_graphql_quota(data: Any) -> None:
     _raise_if_quota(*blobs)
 
 
-def gh_json(
-    args: Iterable[str],
-    *,
-    cwd: str | Path | None = None,
-    auth: str | None = None,
-) -> Any:
+def gh_json(args: Iterable[str], *, cwd: str | Path | None = None, auth: str | None = None) -> Any:
     result = run(["gh", *args], cwd=cwd, auth=auth)
     try:
         data = json.loads(result.stdout)
@@ -404,12 +412,7 @@ def issue(number: int, *, cwd: str | Path | None = None) -> dict[str, Any]:
     return data
 
 
-def list_issues(
-    *,
-    state: str = "open",
-    label: str | None = None,
-    cwd: str | Path | None = None,
-) -> list[dict[str, Any]]:
+def list_issues(*, state: str = "open", label: str | None = None, cwd: str | Path | None = None) -> list[dict[str, Any]]:
     args = ["issue", "list", "--state", state, "--limit", "200", "--json", "number,title,body,state,labels,assignees,url"]
     if label:
         args.extend(["--label", label])
@@ -517,13 +520,7 @@ def unresolved_dependencies(record: dict[str, Any], *, cwd: str | Path | None = 
             unresolved.append(number)
     return unresolved
 
-def ensure_label(
-    name: str,
-    *,
-    color: str = "5319e7",
-    description: str = "",
-    cwd: str | Path | None = None,
-) -> None:
+def ensure_label(name: str, *, color: str = "5319e7", description: str = "", cwd: str | Path | None = None) -> None:
     run(["gh", "label", "create", name, "--color", color, "--description", description, "--force"], cwd=cwd)
 
 
