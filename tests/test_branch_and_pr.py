@@ -459,6 +459,37 @@ def test_recovered_external_gets_full_timeout_from_assignment(monkeypatch):
     assert outcome["next_action"] == "refresh-reviewer"
 
 
+def test_refresh_with_supplied_policy_does_not_reload_labels_while_pending(monkeypatch):
+    created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    pr = assignment_pr(created_at=created)
+    install_refresh(monkeypatch, pr)
+    monkeypatch.setattr(
+        create_pr,
+        "load_repository_review_policy",
+        lambda: pytest.fail("supplied policy must not reload repository labels"),
+    )
+    monkeypatch.setattr(
+        create_pr,
+        "registered_external_states",
+        lambda *_args: pytest.fail("pending authority does not need fallback inventory"),
+    )
+    policy = review_policy.ReviewPolicy(
+        primary="coderabbit",
+        fallbacks=("claude-code",),
+        timeout_seconds=120,
+        sources={},
+    )
+
+    outcome = create_pr.refresh_assignment(
+        42,
+        now=created + timedelta(seconds=1),
+        policy=policy,
+    )
+
+    assert outcome["authority"] == "coderabbit"
+    assert outcome["reason"] == "external-pending"
+
+
 def test_refresh_assigns_first_authority_when_current_diff_fails_up(monkeypatch):
     observed = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=observed)

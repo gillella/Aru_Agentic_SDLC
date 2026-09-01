@@ -230,7 +230,7 @@ def review_policy_from_labels(names: Iterable[str]) -> ReviewPolicy:
     primary_value = _one_value(names, PRIMARY_PREFIX, "primary")
     fallback_values = _configured_fallbacks(names)
     timeout_value = _one_value(names, TIMEOUT_PREFIX, "timeout")
-    primary = primary_value or default.primary
+    primary = default.primary if primary_value is None else primary_value
     fallbacks = fallback_values if fallback_values is not None else default.fallbacks
     timeout = default.timeout_seconds
     if timeout_value is not None:

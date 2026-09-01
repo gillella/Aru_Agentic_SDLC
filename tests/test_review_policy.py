@@ -77,6 +77,7 @@ def test_repository_labels_configure_primary_fallbacks_and_timeout():
             "duplicate authorities",
         ),
         (("review-policy:primary=unknown",), "unsupported authority"),
+        (("review-policy:primary=",), "unsupported authority"),
         (("review-policy:primary=sourcery",), "unregistered external"),
         (("review-policy:timeout=fast",), "integer number"),
         (("review-policy:timeout=30",), "60-86400"),
@@ -190,6 +191,38 @@ def test_configured_timeout_is_used_by_external_decision(monkeypatch):
         timeout_seconds=600,
     )
     assert decision == ("external-pending-timeout", None)
+
+
+def test_check_run_pagination_accepts_repeated_overall_total(monkeypatch):
+    observed = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    pr = {
+        "createdAt": observed.isoformat(),
+        "headRefOid": "a" * 40,
+        "statusCheckRollup": [],
+    }
+    monkeypatch.setattr(
+        review_policy,
+        "gh_json",
+        lambda _argv: [
+            {"total_count": 2, "check_runs": [{"name": "first"}]},
+            {"total_count": 2, "check_runs": [{"name": "second"}]},
+        ],
+    )
+    monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(review_policy, "gh_paginated", lambda _endpoint: [])
+    monkeypatch.setattr(
+        review_policy,
+        "external_state",
+        lambda *_args, **_kwargs: review_policy.PENDING,
+    )
+    decision = create_pr._external_decision(
+        42,
+        pr,
+        "coderabbit",
+        observed + timedelta(seconds=1),
+        timeout_seconds=120,
+    )
+    assert decision == ("external-pending", 119)
 
 
 def test_reviewer_status_reports_sources_bindings_probes_and_unused_trials(monkeypatch):

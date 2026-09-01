@@ -335,7 +335,6 @@ def _refresh_external_authority(
     external_states: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     effective = policy or load_repository_review_policy()[0]
-    states = external_states if external_states is not None else registered_external_states()
     reason, remaining = _external_decision(
         number, pr, authority, observed_at, effective.timeout_seconds
     )
@@ -353,6 +352,7 @@ def _refresh_external_authority(
             result["next_action"] = "refresh-reviewer"
         return result
 
+    states = external_states if external_states is not None else registered_external_states()
     author_identity = _one_label_value(pr, AUTHOR_PREFIX)
     author_family = _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
     selected = select_reviewer_from_order(
@@ -494,10 +494,8 @@ def refresh_assignment(
     if not isinstance(pr, dict) or pr.get("number") != number:
         raise KernelError(f"pull request #{number} is unavailable")
     observed_at = now or datetime.now(timezone.utc)
-    if policy is None or external_states is None:
-        loaded_policy, names = load_repository_review_policy()
-        if policy is None:
-            policy = loaded_policy
+    if policy is None:
+        policy, names = load_repository_review_policy()
         if external_states is None:
             external_states = registered_external_states(names)
     authority = _optional_authority(pr)
