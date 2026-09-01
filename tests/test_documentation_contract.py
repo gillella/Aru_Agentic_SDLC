@@ -81,5 +81,6 @@ def test_governed_workflows_use_only_budget_free_self_hosted_macs():
         assert "macos-latest" not in workflow
         assert "windows-latest" not in workflow
         assert "actions/upload-artifact" not in workflow
+        assert "actions/setup-python" not in workflow
         assert "cache:" not in workflow
         assert "pull_request_target" not in workflow

@@ -75,6 +75,7 @@ def test_kernel_workflow_is_read_only_exact_head_and_immutable():
     assert "pull_request_target" not in raw
     assert "ubuntu-latest" not in raw
     assert "actions/upload-artifact" not in raw
+    assert "actions/setup-python" not in raw
     assert "cache:" not in raw
 
 
