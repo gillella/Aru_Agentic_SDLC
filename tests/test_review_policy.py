@@ -234,6 +234,28 @@ def test_reviewer_status_reports_sources_bindings_probes_and_unused_trials(monke
     assert status["configuration_sources"]["runtime_availability"] == "bounded on-demand probe"
 
 
+def test_pure_external_status_does_not_require_unused_coding_configuration(
+    monkeypatch,
+):
+    policy = review_policy.ReviewPolicy(
+        primary="coderabbit",
+        fallbacks=(),
+        timeout_seconds=120,
+        sources={},
+    )
+    monkeypatch.delenv("ARU_CODING_REVIEWERS", raising=False)
+    monkeypatch.setattr(
+        review_policy,
+        "load_repository_review_policy",
+        lambda: (policy, ("reviewer-registered:coderabbit",)),
+    )
+    monkeypatch.setattr(review_policy, "registered_coding_actors", lambda: {})
+    status = review_policy.reviewer_status()
+    assert status["valid"] is True
+    assert status["errors"] == []
+    assert status["coding_reviewers"] == []
+
+
 def test_policy_label_names_fit_github_limit():
     assert all(len(name) <= 50 for name in configured_policy_labels())
 

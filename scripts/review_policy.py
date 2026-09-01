@@ -399,11 +399,15 @@ def reviewer_status(
     registered = registered_external_reviewers(names)
     errors: list[str] = []
     warnings: list[str] = []
-    try:
-        configured = configured_coding_reviewers()
-    except KernelError as exc:
-        configured = {}
-        errors.append(str(exc))
+    required_families = set(policy.authorities).intersection(CODING_REVIEWERS)
+    configured = {}
+    if os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
+        try:
+            configured = configured_coding_reviewers()
+        except KernelError as exc:
+            errors.append(str(exc))
+    elif required_families:
+        errors.append(f"{REVIEWER_CONFIG_ENV} is missing")
     try:
         actors = registered_coding_actors()
     except KernelError as exc:
@@ -442,7 +446,6 @@ def reviewer_status(
                 }
             )
     configured_families = {str(item["family"]) for item in coding}
-    required_families = set(policy.authorities).intersection(CODING_REVIEWERS)
     for family in sorted(required_families - configured_families):
         errors.append(f"policy coding authority {family} has no local configured identity")
     unused_external = set(registered) - set(policy.authorities)
