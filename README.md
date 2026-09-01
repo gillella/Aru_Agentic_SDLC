@@ -220,24 +220,21 @@ review. Tier 2 sensitive/contract and Tier 3 production/destructive changes
 require one current-head authority distinct from the author. Unknown or
 unrecognized safe paths fail upward to Tier 2; malformed or unsafe paths fail
 to Tier 3. Installed external providers require
-`reviewer-registered:<service>`; eligible coding identities require a binding
-to a distinct GitHub actor. Optional repository label definitions configure the
-shared Tier 2-3 policy without adding a state store:
+`reviewer-registered:<service>`; every registered external provider is an equal
+member of the specialized-review pool. Eligible coding identities require a
+binding to a distinct GitHub actor. The only optional repository policy setting
+is the pending timeout:
 
 ```text
-review-policy:primary=coderabbit
-review-policy:fallback-1=claude-code
-review-policy:fallback-2=openai-codex
-review-policy:fallback-3=xai-cursor
-review-policy:fallback-4=google-antigravity
 review-policy:timeout=120
 ```
 
-Fallback ranks must be contiguous, authorities unique and supported, and each
-referenced external authority registered. Without policy labels, the first
-registered external service is primary, the four coding families are ordered
-fallbacks, and the timeout is 120 seconds. Remove
-`reviewer-registered:<service>` when access expires or is uninstalled.
+The issue number rotates initial assignments across the registered external
+pool. A service that is unavailable, rate-limited, or timed out is not retried
+on the same head; after all registered external services are attempted, one
+distinct available coding identity may be borrowed. Ranked primary/fallback
+labels are invalid. Remove `reviewer-registered:<service>` only when access
+expires or the integration is uninstalled.
 
 Inspect the effective policy and configuration sources without mutation with
 `create_pr.py --reviewer-status --json`; add `--probe-reviewers` only for

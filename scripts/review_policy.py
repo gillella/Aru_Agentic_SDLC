@@ -3,17 +3,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Callable, Iterable
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Iterable
 
 from common import (
     CODING_REVIEWERS,
     EXTERNAL_REVIEWERS,
     REVIEWER_CONFIG_ENV,
-    REVIEW_AUTHORITIES,
     REVIEW_BINDING_PREFIX,
     REVIEW_REGISTRATION_PREFIX,
     KernelError,
@@ -21,6 +21,7 @@ from common import (
     configured_coding_reviewers,
     gh_json,
     gh_paginated,
+    label_names,
     normalized_identity,
     registered_coding_actors,
     repo_slug,
@@ -40,43 +41,39 @@ from reviewer_probe import (
     available_coding_reviewers,
 )
 
-PRIMARY_PREFIX = "review-policy:primary="
-FALLBACK_PREFIX = "review-policy:fallback-"
 TIMEOUT_PREFIX = "review-policy:timeout="
 POLICY_PREFIX = "review-policy:"
 DEFAULT_TIMEOUT_SECONDS = 2 * 60
 MIN_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
-_FALLBACK_RE = re.compile(r"review-policy:fallback-([1-9][0-9]*)=(.+)")
+ASSIGNMENT_AUDIT_PREFIXES = (
+    "## Aru authoritative reviewer fallback",
+    "## Aru authoritative reviewer recovery",
+)
+ASSIGNMENT_MARKER = re.compile(
+    r"(?m)^<!-- aru-review-assignment:v1 (\{[^\n]+\}) -->$"
+)
 
 
 @dataclass(frozen=True)
 class ReviewPolicy:
-    primary: str
-    fallbacks: tuple[str, ...]
+    external_reviewers: tuple[str, ...]
+    coding_fallbacks: tuple[str, ...]
     timeout_seconds: int
     sources: dict[str, str]
 
     @property
     def authorities(self) -> tuple[str, ...]:
-        return (self.primary, *self.fallbacks)
+        return (*self.external_reviewers, *self.coding_fallbacks)
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "primary": self.primary,
-            "fallbacks": list(self.fallbacks),
+            "selection": "equal-external-pool",
+            "external_reviewers": list(self.external_reviewers),
+            "coding_fallbacks": list(self.coding_fallbacks),
             "timeout_seconds": self.timeout_seconds,
             "sources": dict(self.sources),
         }
-
-    def after(self, authority: str) -> tuple[str, ...]:
-        try:
-            index = self.authorities.index(authority)
-        except ValueError as exc:
-            raise KernelError(
-                "assigned authority is absent from the effective review policy"
-            ) from exc
-        return self.authorities[index + 1 :]
 
 
 def repository_label_names() -> tuple[str, ...]:
@@ -166,17 +163,13 @@ def external_decision(
 def default_review_policy(registered: Iterable[str]) -> ReviewPolicy:
     registered = set(registered)
     installed = tuple(service for service in EXTERNAL_REVIEWERS if service in registered)
-    primary = installed[0] if installed else CODING_REVIEWERS[0]
-    fallbacks = tuple(family for family in CODING_REVIEWERS if family != primary)
-    if primary in CODING_REVIEWERS and installed:
-        fallbacks = (*fallbacks, installed[0])
     return ReviewPolicy(
-        primary=primary,
-        fallbacks=fallbacks,
+        external_reviewers=installed,
+        coding_fallbacks=CODING_REVIEWERS,
         timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
         sources={
-            "primary": "kernel-default",
-            "fallbacks": "kernel-default",
+            "external_reviewers": "registration-labels",
+            "coding_fallbacks": REVIEWER_CONFIG_ENV,
             "timeout_seconds": "kernel-default",
         },
     )
@@ -189,49 +182,19 @@ def _one_value(names: Iterable[str], prefix: str, subject: str) -> str | None:
     return values[0] if values else None
 
 
-def _configured_fallbacks(names: Iterable[str]) -> tuple[str, ...] | None:
-    ranks: dict[int, str] = {}
-    found = False
-    for name in names:
-        if not name.startswith(FALLBACK_PREFIX):
-            continue
-        found = True
-        match = _FALLBACK_RE.fullmatch(name)
-        if match is None:
-            raise KernelError("review policy fallback declaration is malformed")
-        rank = int(match.group(1))
-        if rank in ranks:
-            raise KernelError("review policy fallback rank is ambiguous")
-        ranks[rank] = match.group(2)
-    if not found:
-        return None
-    expected = list(range(1, len(ranks) + 1))
-    if sorted(ranks) != expected:
-        raise KernelError("review policy fallback ranks must be contiguous from 1")
-    return tuple(ranks[rank] for rank in expected)
-
-
 def review_policy_from_labels(names: Iterable[str]) -> ReviewPolicy:
     names = tuple(names)
     unknown = [
         name
         for name in names
         if name.startswith(POLICY_PREFIX)
-        and not (
-            name.startswith(PRIMARY_PREFIX)
-            or name.startswith(FALLBACK_PREFIX)
-            or name.startswith(TIMEOUT_PREFIX)
-        )
+        and not name.startswith(TIMEOUT_PREFIX)
     ]
     if unknown:
         raise KernelError("review policy contains unsupported declarations")
     registered = registered_external_reviewers(names)
     default = default_review_policy(registered)
-    primary_value = _one_value(names, PRIMARY_PREFIX, "primary")
-    fallback_values = _configured_fallbacks(names)
     timeout_value = _one_value(names, TIMEOUT_PREFIX, "timeout")
-    primary = default.primary if primary_value is None else primary_value
-    fallbacks = fallback_values if fallback_values is not None else default.fallbacks
     timeout = default.timeout_seconds
     if timeout_value is not None:
         if not timeout_value.isdigit():
@@ -241,31 +204,13 @@ def review_policy_from_labels(names: Iterable[str]) -> ReviewPolicy:
             raise KernelError(
                 f"review policy timeout must be {MIN_TIMEOUT_SECONDS}-{MAX_TIMEOUT_SECONDS} seconds"
             )
-    authorities = (primary, *fallbacks)
-    if any(authority not in REVIEW_AUTHORITIES for authority in authorities):
-        raise KernelError("review policy contains an unsupported authority")
-    if len(authorities) != len(set(authorities)):
-        raise KernelError("review policy contains duplicate authorities")
-    registered_set = set(registered)
-    missing_external = [
-        authority
-        for authority in authorities
-        if authority in EXTERNAL_REVIEWERS and authority not in registered_set
-    ]
-    if missing_external:
-        raise KernelError(
-            "review policy references unregistered external authority: "
-            + ", ".join(missing_external)
-        )
     return ReviewPolicy(
-        primary=primary,
-        fallbacks=fallbacks,
+        external_reviewers=default.external_reviewers,
+        coding_fallbacks=default.coding_fallbacks,
         timeout_seconds=timeout,
         sources={
-            "primary": "repository-label" if primary_value is not None else "kernel-default",
-            "fallbacks": (
-                "repository-labels" if fallback_values is not None else "kernel-default"
-            ),
+            "external_reviewers": "registration-labels",
+            "coding_fallbacks": REVIEWER_CONFIG_ENV,
             "timeout_seconds": (
                 "repository-label" if timeout_value is not None else "kernel-default"
             ),
@@ -276,6 +221,44 @@ def review_policy_from_labels(names: Iterable[str]) -> ReviewPolicy:
 def load_repository_review_policy() -> tuple[ReviewPolicy, tuple[str, ...]]:
     names = repository_label_names()
     return review_policy_from_labels(names), names
+
+
+def reviewer_continuation(
+    number: int, *, now: datetime | None = None
+) -> dict[str, object]:
+    pr = gh_json(
+        [
+            "pr", "view", str(number), "--json",
+            "number,url,createdAt,headRefOid,labels,author,statusCheckRollup",
+        ]
+    )
+    if not isinstance(pr, dict) or pr.get("number") != number:
+        raise KernelError(f"pull request #{number} is unavailable")
+    authorities = [
+        name.removeprefix("review:")
+        for name in label_names(pr)
+        if name.startswith("review:")
+        and name.removeprefix("review:") in (*EXTERNAL_REVIEWERS, *CODING_REVIEWERS)
+    ]
+    if len(authorities) > 1:
+        raise KernelError("pull request has multiple authoritative reviewers")
+    authority = authorities[0] if authorities else None
+    observed_at = now or datetime.now(timezone.utc)
+    if authority is None:
+        return {"authority": None, "next_action": "refresh-reviewer", "retry_at": observed_at.isoformat()}
+    if authority in CODING_REVIEWERS:
+        return {"authority": authority, "next_action": "await-authoritative-review", "retry_at": None}
+    policy = load_repository_review_policy()[0]
+    reason, remaining = external_decision(number, pr, authority, observed_at, policy.timeout_seconds)
+    if reason == "external-pending" and remaining is not None:
+        return {
+            "authority": authority,
+            "next_action": "refresh-reviewer",
+            "retry_at": (observed_at + timedelta(seconds=remaining)).isoformat(),
+        }
+    if reason == "external-available":
+        return {"authority": authority, "next_action": "await-authoritative-review", "retry_at": None}
+    return {"authority": authority, "next_action": "refresh-reviewer", "retry_at": observed_at.isoformat()}
 
 
 def effective_review_policy(
@@ -321,6 +304,7 @@ def probe_coding_reviewer(
     author_actor: str = "",
     rotation_key: int,
     family_order: Iterable[str] = CODING_REVIEWERS,
+    excluded_identities: Iterable[str] = (),
     reviewer_actors: dict[str, str] | None = None,
     runner: ProbeRunner = _default_probe,
 ) -> tuple[str, str, str] | None:
@@ -331,6 +315,7 @@ def probe_coding_reviewer(
     actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
     author_identity = normalized_identity(author_identity)
     author_actor = canonical_github_actor(author_actor)
+    excluded = {normalized_identity(identity) for identity in excluded_identities}
     for family in order:
         candidates: list[CodingCandidate] = []
         for identity, subscription in configured.get(family, ()):
@@ -338,6 +323,7 @@ def probe_coding_reviewer(
             candidate: CodingCandidate = (family, identity, actor, subscription)
             if (
                 identity != author_identity
+                and identity not in excluded
                 and actor
                 and not same_github_actor(actor, author_actor)
             ):
@@ -349,8 +335,55 @@ def probe_coding_reviewer(
     return None
 
 
-def select_reviewer_from_order(
-    authorities: Iterable[str],
+def reviewer_candidate_key(authority: str, identity: str | None = None) -> str:
+    if authority in EXTERNAL_REVIEWERS and identity is None:
+        return f"external:{authority}"
+    if authority in CODING_REVIEWERS and identity:
+        return f"coding:{normalized_identity(identity)}"
+    raise KernelError("reviewer candidate is malformed")
+
+
+def _previous_audit_candidate_key(payload: dict[str, Any]) -> str | None:
+    authority = payload.get("previous_authority")
+    identity = payload.get("previous_reviewer")
+    if authority in EXTERNAL_REVIEWERS and identity is None:
+        return reviewer_candidate_key(str(authority))
+    if authority in CODING_REVIEWERS and isinstance(identity, str) and identity.strip():
+        return reviewer_candidate_key(str(authority), identity)
+    return None
+
+
+def attempted_reviewer_keys(
+    number: int,
+    *,
+    head: str,
+    authority: str,
+    identity: str | None,
+) -> set[str]:
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise KernelError("review assignment head is malformed")
+    attempted = {reviewer_candidate_key(authority, identity)}
+    comments = gh_paginated(f"repos/{repo_slug()}/issues/{number}/comments?per_page=100")
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if not body.startswith(ASSIGNMENT_AUDIT_PREFIXES):
+            continue
+        matches = ASSIGNMENT_MARKER.findall(body)
+        if len(matches) != 1:
+            raise KernelError("review assignment audit marker is malformed or ambiguous")
+        try:
+            payload = json.loads(matches[0])
+        except json.JSONDecodeError as exc:
+            raise KernelError("review assignment audit marker is invalid JSON") from exc
+        if not isinstance(payload, dict) or payload.get("head") != head:
+            continue
+        if key := _previous_audit_candidate_key(payload):
+            attempted.add(key)
+    return attempted
+
+
+def select_reviewer_from_pool(
+    policy: ReviewPolicy,
     *,
     number: int,
     author_identity: str,
@@ -359,33 +392,39 @@ def select_reviewer_from_order(
     external_states: dict[str, str],
     reviewer_actors: dict[str, str] | None,
     probe_runner: ProbeRunner,
+    excluded: Iterable[str] = (),
     coding_probe: Callable[..., tuple[str, str, str] | None] = probe_coding_reviewer,
 ) -> tuple[str, str | None, str | None] | None:
-    authorities = tuple(authorities)
-    for authority in authority_order_for_author(authorities, author_family):
-        if authority in EXTERNAL_REVIEWERS:
-            if external_states.get(authority) in {"available", "pending"}:
-                return authority, None, None
-            continue
-        if not os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
-            continue
+    excluded = set(excluded)
+    external_pool = [
+        (service, None, None)
+        for service in policy.external_reviewers
+        if external_states.get(service) in {AVAILABLE, PENDING}
+        and reviewer_candidate_key(service) not in excluded
+    ]
+    if external_pool:
+        return external_pool[number % len(external_pool)]
+    if not os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
+        return None
+    if not author_actor:
+        record = gh_json(["api", "user"])
+        author_actor = str(record.get("login") or "") if isinstance(record, dict) else ""
         if not author_actor:
-            record = gh_json(["api", "user"])
-            author_actor = str(record.get("login") or "") if isinstance(record, dict) else ""
-            if not author_actor:
-                raise KernelError("current GitHub author identity is unavailable")
-        coding = coding_probe(
-            author_identity=author_identity,
-            author_family=author_family,
-            author_actor=author_actor,
-            rotation_key=number,
-            family_order=(authority,),
-            reviewer_actors=reviewer_actors,
-            runner=probe_runner,
-        )
-        if coding is not None:
-            return coding
-    return None
+            raise KernelError("current GitHub author identity is unavailable")
+    return coding_probe(
+        author_identity=author_identity,
+        author_family=author_family,
+        author_actor=author_actor,
+        rotation_key=number,
+        family_order=policy.coding_fallbacks,
+        excluded_identities=(
+            key.removeprefix("coding:")
+            for key in excluded
+            if key.startswith("coding:")
+        ),
+        reviewer_actors=reviewer_actors,
+        runner=probe_runner,
+    )
 
 
 def reviewer_status(
@@ -399,7 +438,7 @@ def reviewer_status(
     registered = registered_external_reviewers(names)
     errors: list[str] = []
     warnings: list[str] = []
-    required_families = set(policy.authorities).intersection(CODING_REVIEWERS)
+    required_families = set(policy.coding_fallbacks)
     configured = {}
     if os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
         try:
@@ -448,24 +487,15 @@ def reviewer_status(
     configured_families = {str(item["family"]) for item in coding}
     for family in sorted(required_families - configured_families):
         errors.append(f"policy coding authority {family} has no local configured identity")
-    unused_external = set(registered) - set(policy.authorities)
-    for service in sorted(unused_external):
-        warnings.append(f"registered external reviewer {service} is not used by the policy")
     return {
-        "schema": "aru.reviewer-status/v1",
+        "schema": "aru.reviewer-status/v2",
         "valid": not errors,
         "policy": policy.as_dict(),
         "external_reviewers": [
             {
                 "service": service,
                 "registered": service in registered,
-                "policy_role": (
-                    "primary"
-                    if service == policy.primary
-                    else "fallback"
-                    if service in policy.fallbacks
-                    else "unused"
-                ),
+                "policy_role": "equal" if service in policy.external_reviewers else "unregistered",
                 "availability": "observed-on-pr" if service in registered else "unregistered",
             }
             for service in EXTERNAL_REVIEWERS
@@ -476,8 +506,8 @@ def reviewer_status(
             "author_actor": normalized_author_actor or None,
         },
         "configuration_sources": {
-            "repository_policy": "GitHub review-policy:* label definitions",
-            "external_registration": "GitHub reviewer-registered:* label definitions",
+            "repository_policy": "equal pool plus optional GitHub review-policy:timeout label",
+            "external_registration": "GitHub reviewer-registered:* labels define the equal pool",
             "coding_inventory": REVIEWER_CONFIG_ENV,
             "reviewer_bindings": f"GitHub {REVIEW_BINDING_PREFIX}* label definitions",
             "runtime_availability": "bounded on-demand probe" if probe else "not probed",

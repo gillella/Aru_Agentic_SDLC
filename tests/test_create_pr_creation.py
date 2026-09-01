@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import create_pr
+import review_policy
 
 
 def external_states(**overrides):
@@ -82,7 +83,7 @@ def test_create_pr_rejects_caller_closing_directive(monkeypatch):
 
 def test_missing_authority_continuation_is_read_only(monkeypatch):
     monkeypatch.setattr(
-        create_pr,
+        review_policy,
         "gh_json",
         lambda _argv: {
             "number": 12,

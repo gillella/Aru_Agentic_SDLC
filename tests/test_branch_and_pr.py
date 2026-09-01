@@ -24,6 +24,13 @@ def configured_reviewers(monkeypatch):
         "load_repository_review_policy",
         lambda: (policy, ("reviewer-registered:coderabbit",)),
     )
+    monkeypatch.setattr(
+        create_pr,
+        "attempted_reviewer_keys",
+        lambda _number, *, head, authority, identity: {
+            review_policy.reviewer_candidate_key(authority, identity)
+        },
+    )
 
 def result(argv, *, ok=True, output="OK"):
     return subprocess.CompletedProcess(argv, 0 if ok else 1, output if ok else "", "")
@@ -73,8 +80,6 @@ def assignment_pr(*, created_at: datetime, state="pending"):
         ],
         "statusCheckRollup": check,
     }
-
-
 def provider_checks(pr):
     return [
         {
@@ -84,8 +89,6 @@ def provider_checks(pr):
         }
         for check in pr["statusCheckRollup"]
     ]
-
-
 def external_state(pr, *, reviews=None, comments=None, checks=None, since=None):
     return create_pr.external_state(
         "coderabbit",
@@ -95,8 +98,6 @@ def external_state(pr, *, reviews=None, comments=None, checks=None, since=None):
         head=pr["headRefOid"],
         since=since or datetime.fromisoformat(pr["createdAt"]),
     )
-
-
 def install_refresh(
     monkeypatch,
     pr,
@@ -145,6 +146,7 @@ def test_authority_labels_alone_do_not_register_external_providers(monkeypatch):
     )
     assert set(create_pr.registered_external_states().values()) == {create_pr.UNAVAILABLE}
 
+
 def test_author_family_is_deprioritized_and_author_identity_excluded(monkeypatch):
     monkeypatch.setattr(reviewer_probe, "_command", lambda name: f"/bin/{name}")
     calls = []
@@ -187,18 +189,11 @@ def test_pending_external_at_two_minutes_falls_back(monkeypatch):
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=created)
     updated = [
-        {"name": "review:claude-code"},
-        {"name": "reviewer:claude-code-sub-1"},
-        {"name": "reviewer-actor:claude-reviewer"},
+        {"name": "review:sourcery"},
         {"name": "author:codex-author"},
         {"name": "author-family:openai-codex"},
     ]
     install_refresh(monkeypatch, pr, updated_labels=updated)
-    monkeypatch.setattr(
-        create_pr,
-        "probe_coding_reviewer",
-        lambda **_kwargs: ("claude-code", "claude-code-sub-1", "claude-reviewer"),
-    )
     events = []
     monkeypatch.setattr(create_pr, "run", lambda _argv: events.append("audit"))
     monkeypatch.setattr(
@@ -206,11 +201,18 @@ def test_pending_external_at_two_minutes_falls_back(monkeypatch):
         "replace_authority",
         lambda *_args: events.append("replace"),
     )
-    outcome = create_pr.refresh_assignment(42, now=created + timedelta(minutes=2))
+    outcome = create_pr.refresh_assignment(
+        42,
+        now=created + timedelta(minutes=2),
+        policy=review_policy.default_review_policy(("coderabbit", "sourcery")),
+        external_states=external_states(
+            coderabbit=create_pr.AVAILABLE,
+            sourcery=create_pr.AVAILABLE,
+        ),
+    )
     assert outcome == {
         "pr": 42,
-        "authority": "claude-code",
-        "reviewer": "claude-code-sub-1",
+        "authority": "sourcery",
         "action": "fallback",
         "reason": "external-pending-timeout",
     }
@@ -474,8 +476,8 @@ def test_refresh_with_supplied_policy_does_not_reload_labels_while_pending(monke
         lambda *_args: pytest.fail("pending authority does not need fallback inventory"),
     )
     policy = review_policy.ReviewPolicy(
-        primary="coderabbit",
-        fallbacks=("claude-code",),
+        external_reviewers=("coderabbit",),
+        coding_fallbacks=("claude-code",),
         timeout_seconds=120,
         sources={},
     )
@@ -679,7 +681,7 @@ def test_refresh_with_no_coding_capacity_preserves_external_authority(monkeypatc
         "replace_authority",
         lambda *_args: pytest.fail("authority must not change without capacity"),
     )
-    with pytest.raises(create_pr.KernelError, match="no configured fallback reviewer"):
+    with pytest.raises(create_pr.KernelError, match="no untried reviewer"):
         create_pr.refresh_assignment(42, now=created + timedelta(seconds=1))
 
 

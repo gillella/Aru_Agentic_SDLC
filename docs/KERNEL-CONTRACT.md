@@ -77,13 +77,12 @@ review labels.
 ## Review and continuation
 
 Tier 0-1 changes do not wait for an authoritative review. Tier 2-3 changes use
-one authority selected by a validated repository policy declared through
-optional `review-policy:primary=<authority>`, contiguous
-`review-policy:fallback-N=<authority>`, and
-`review-policy:timeout=<seconds>` label definitions. Missing declarations use
-the compatible default: the first registered external provider, then the four
-coding families, with a 120-second timeout. Duplicate, unsupported,
-non-contiguous, contradictory, or unregistered-external declarations fail
+one authority selected from the equal pool defined by
+`reviewer-registered:<service>` labels. The issue number rotates the initial
+external assignment. Unavailable external services are not retried on the same
+head; only after that pool is exhausted may the four coding families be
+borrowed. The optional `review-policy:timeout=<seconds>` label defaults to 120
+seconds. Ranked primary/fallback or otherwise unsupported declarations fail
 closed. Bootstrap `review:*` labels do not register a provider. A coding
 reviewer must be bound to a GitHub actor distinct from the PR author and submit
 the required
@@ -101,7 +100,8 @@ assignment, the external Driver owns exactly one continuation event:
 
 Before invoking, the Driver rereads the PR head and authority. It cancels stale
 events after a head or authority change and stops after the bounded refresh.
-The helper alone decides whether to retain or change authority. If substantive
+The helper alone decides whether to retain or change authority and excludes
+reviewers already attempted on the exact head. If substantive
 coding review aborts or loses capacity, the same event invokes
 `--coding-reviewer-unavailable <reason>`. A later transition receives a new
 single event; the Driver does not create another lifecycle store.
