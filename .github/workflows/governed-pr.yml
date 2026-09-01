@@ -29,13 +29,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install verification dependencies
-        run: python3 -m pip install -r requirements-dev.txt
+      - name: Prepare isolated verification environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/aru-ci-venv"
+          "$RUNNER_TEMP/aru-ci-venv/bin/python" -m pip install -r requirements-dev.txt
 
       - name: Run deterministic verification
         run: |
-          python3 -m ruff check scripts hooks tests
-          python3 -m pytest -q
+          "$RUNNER_TEMP/aru-ci-venv/bin/python" -m ruff check scripts hooks tests
+          "$RUNNER_TEMP/aru-ci-venv/bin/python" -m pytest -q
 
       - name: Enforce the issue write boundary against the actual diff
         if: ${{ github.event_name == 'pull_request' }}
@@ -44,5 +46,5 @@ jobs:
           ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
           ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: >-
-          python3 hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
+          "$RUNNER_TEMP/aru-ci-venv/bin/python" hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
           --expected-head "$ARU_EXPECTED_HEAD"
