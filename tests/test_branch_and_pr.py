@@ -8,7 +8,9 @@ import pytest
 
 import create_branch
 import create_pr
+import common
 import local_verification
+import review_policy
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +21,10 @@ def configured_reviewers(monkeypatch):
         "openai-codex:mo,xai-cursor:mx,google-antigravity:mg",
     )
     monkeypatch.setattr(local_verification, "run", lambda argv, **_kwargs: result(argv))
+    policy = review_policy.default_review_policy(("coderabbit",))
+    monkeypatch.setattr(create_pr, "load_repository_review_policy", lambda: (policy, (
+        "reviewer-registered:coderabbit",
+    )))
 
 
 def result(argv, *, ok=True, output="OK"):
@@ -118,7 +124,7 @@ def test_authority_labels_alone_do_not_register_external_providers(monkeypatch):
 
 
 def test_author_family_is_deprioritized_and_author_identity_excluded(monkeypatch):
-    monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
     calls = []
 
     def probe(argv):
@@ -181,7 +187,7 @@ def test_pending_external_at_15_minutes_falls_back(monkeypatch):
         "authority": "claude-code",
         "reviewer": "claude-code-sub-1",
         "action": "fallback",
-        "reason": "external-pending-15m",
+        "reason": "external-pending-timeout",
     }
     assert events == ["audit", "replace"]
 
@@ -430,7 +436,7 @@ def test_recovered_external_gets_full_timeout_from_assignment(monkeypatch):
 
 
 def test_no_external_or_coding_reviewer_fails_closed(monkeypatch):
-    monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
     with pytest.raises(create_pr.KernelError, match="no external or distinct coding-agent"):
         create_pr.choose_initial_reviewer(
             9,
@@ -482,7 +488,7 @@ def test_mac_mini_uses_only_its_local_reviewer_pool(monkeypatch):
         "claude-code:n1@1,claude-code:n2@2,claude-code:n3@3,"
         "openai-codex:no,xai-cursor:nx,google-antigravity:ng",
     )
-    monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
     reviewer = create_pr.probe_coding_reviewer(
         author_identity="n1",
         author_family="claude-code",
@@ -549,16 +555,13 @@ def test_new_claude_subscription_is_added_by_configuration_only(monkeypatch):
 
 def test_all_twelve_binding_labels_fit_github_limit():
     actor = "aru-code-factory-gillella[bot]"
-    identities = (
-        "m1", "m2", "m3", "mo", "mx", "mg",
-        "n1", "n2", "n3", "no", "nx", "ng",
-    )
+    identities = ("m1", "m2", "m3", "mo", "mx", "mg", "n1", "n2", "n3", "no", "nx", "ng")
     labels = [f"reviewer-binding:{identity}={actor}" for identity in identities]
     assert all(len(label) <= 50 for label in labels)
 
 
 def test_author_actor_canonicalization_excludes_equivalent_github_app_binding(monkeypatch):
-    monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
 
     reviewer = create_pr.probe_coding_reviewer(
         author_identity="author",
@@ -585,7 +588,7 @@ def test_refresh_with_no_coding_capacity_preserves_external_authority(monkeypatc
         "replace_authority",
         lambda *_args: pytest.fail("authority must not change without capacity"),
     )
-    with pytest.raises(create_pr.KernelError, match="no distinct coding-agent"):
+    with pytest.raises(create_pr.KernelError, match="no configured fallback reviewer"):
         create_pr.refresh_assignment(42, now=created + timedelta(seconds=1))
 
 
@@ -611,11 +614,6 @@ def test_explicit_coding_reviewer_unavailability_recovers_to_registered_external
     }
     responses = [pr, updated]
     monkeypatch.setattr(create_pr, "gh_json", lambda _argv: responses.pop(0))
-    monkeypatch.setattr(
-        create_pr,
-        "registered_external_states",
-        lambda: external_states(codeant=create_pr.AVAILABLE),
-    )
     events = []
     monkeypatch.setattr(create_pr, "run", lambda _argv: events.append("audit"))
     monkeypatch.setattr(create_pr, "replace_authority", lambda *_args: events.append("replace"))
@@ -623,6 +621,8 @@ def test_explicit_coding_reviewer_unavailability_recovers_to_registered_external
         42,
         now=created + timedelta(minutes=3),
         coding_unavailable_reason="full review aborted without a verdict",
+        policy=review_policy.default_review_policy(("codeant",)),
+        external_states=external_states(codeant=create_pr.AVAILABLE),
     )
     assert outcome == {
         "pr": 42,

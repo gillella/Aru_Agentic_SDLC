@@ -48,24 +48,31 @@ Done. Do not create another lifecycle store.
 
 ## Reviewer assignment
 
-`create_pr.py` builds one stable pool from external reviewers explicitly
-registered by `reviewer-registered:<service>` labels and locally configured,
-bound coding-reviewer identities. The issue number rotates the starting slot,
-so consecutive PRs distribute across eligible authorities without stored
-capacity state. A coding slot must pass its bounded probe (which verifies
-liveness only); an unavailable slot advances to the next candidate. The author
-identity and GitHub actor are never eligible. Authority labels provisioned by
-bootstrap do not register providers. Exactly one authority label remains.
+`create_pr.py` reads one validated repository policy from optional
+`review-policy:primary=<authority>`, contiguous
+`review-policy:fallback-N=<authority>`, and
+`review-policy:timeout=<seconds>` label definitions. Without them, the first
+registered external provider is primary, the four coding families are ordered
+fallbacks, and timeout is 900 seconds. Referenced external reviewers require
+`reviewer-registered:<service>`; coding identities remain machine-local and
+bound. A coding slot must pass its bounded probe (which verifies liveness only);
+an unavailable slot advances. The author identity and GitHub actor are never
+eligible. Authority labels provisioned by bootstrap do not register providers.
+Exactly one authority label remains. Inspect the effective configuration with
+`create_pr.py --reviewer-status --json`; `--probe-reviewers` adds bounded local
+coding probes without writing lifecycle state.
 An explicit unavailable/error response causes immediate fallback; a merely
-pending external assignment is retained until 15 minutes after assignment, then
+pending external assignment is retained until the configured timeout, then
 becomes eligible for fallback. Because the kernel itself has no scheduler, an
 external event or timer must invoke `create_pr.py --refresh-reviewer <PR>`.
 Paused reviews, cost or quota exhaustion, rate limiting, provider outage,
 unsupported bot-authored PRs, and explicit unavailable/error responses are
 unavailable and cannot satisfy the merge gate through a nominally successful
 no-op status. The newest trusted, timestamped provider evidence determines
-availability. A governed authority-label transition starts a new 15-minute
-pending window.
+availability. A governed authority-label transition starts a new configured
+pending window. Remove `reviewer-registered:<service>` when an external service
+expires or is uninstalled; registration is an operator assertion, not a live
+subscription probe.
 
 For coding assignment, smoke-test actual capacity (verifying liveness only) in
 `claude-code`, `openai-codex`, `xai-cursor`, `google-antigravity` order,
@@ -83,8 +90,8 @@ and fails closed.
 If an assigned coding reviewer later returns an explicit unavailable/error
 state, aborts without a verdict, or hits quota during substantive execution,
 use `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`
-to audit and recover immediately to the first registered external authority. Do
-not edit authority labels by hand.
+to audit and recover immediately to the first policy-listed registered external
+authority. Do not edit authority labels by hand.
 
 A coding agent may author or remediate code and may authoritatively review code
 written by a different agent. It must never review its own PR under normal

@@ -210,16 +210,40 @@ verification and the assigned authoritative review are complete.
 
 Every PR current head has exactly one authority label. Operators register an
 installed external provider with `reviewer-registered:<service>`; ordinary
-bootstrap `review:*` labels are not registrations. At creation, `create_pr.py`
-combines registered external services and bound identities from the local
-`ARU_CODING_REVIEWERS` pool in a stable order. The issue number rotates the
-starting slot. A selected coding identity must pass its bounded capacity probe
-(verifying liveness only); an unavailable candidate advances to the next slot.
-This distributes consecutive PRs without a queue or capacity ledger. An explicit
-external unavailable/error response causes immediate fallback. A pending service
-retains authority for 14 minutes 59 seconds; at 15 minutes it becomes eligible
-for fallback. Because the kernel itself has no scheduler, an external event or
-timer must invoke:
+bootstrap `review:*` labels are not registrations. Repository label definitions
+may declare one shared policy without a new state store:
+
+```text
+review-policy:primary=coderabbit
+review-policy:fallback-1=claude-code
+review-policy:fallback-2=openai-codex
+review-policy:fallback-3=xai-cursor
+review-policy:fallback-4=google-antigravity
+review-policy:timeout=900
+```
+
+Fallback ranks must be contiguous, authorities must be unique and supported,
+and every referenced external authority must be registered. Missing policy
+labels preserve the compatible default: the first registered external service
+is primary, the four coding families are ordered fallbacks, and timeout is 900
+seconds. Policy declarations, external registrations, and reviewer bindings are
+repository-shared; `ARU_CODING_REVIEWERS` remains machine-local.
+
+Inspect the effective sources and inventory without mutation; add the probe flag
+only when bounded local provider checks are desired:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --reviewer-status --json
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+  --reviewer-status --probe-reviewers \
+  --agent <author-identity> --author-github-login <author-login> --json
+```
+
+External availability is observed on a PR, not guessed during status. Remove an
+expired or uninstalled service's `reviewer-registered:<service>` label. An
+explicit external unavailable/error response causes immediate fallback. A
+pending service retains authority until the configured timeout. Because the
+kernel itself has no scheduler, an external event or timer must invoke:
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
@@ -228,7 +252,7 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
 
 The helper evaluates the newest trusted, timestamped provider evidence. The
 clock starts at the current authority's latest GitHub label-assignment event,
-so a governed recovery receives its own complete 15-minute pending window.
+so a governed recovery receives its own complete configured pending window.
 
 Coding fallback smoke-tests liveness in Claude Code, OpenAI Codex, xAI Cursor,
 then Google Antigravity; it excludes the author identity and prefers another
@@ -251,8 +275,8 @@ also fail visibly instead of silently degrading every assignment to
 external-only selection. If an assigned coding reviewer later aborts, hits
 quota, or explicitly becomes unavailable during substantive execution, recover
 immediately through the same helper with `--coding-reviewer-unavailable <reason>`;
-it audits and restores the first registered external authority without leaving
-coding identity metadata behind.
+it audits and restores the first policy-listed registered external authority
+without leaving coding identity metadata behind.
 
 A coding-agent review is authoritative only when a formal GitHub Review from a
 GitHub actor other than the PR author contains the strict `aru-coding-review:v1`

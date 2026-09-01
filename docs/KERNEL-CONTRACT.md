@@ -40,14 +40,17 @@ preview, deployment, release, smoke, incident, or second state store.
 
 ## Reviewer state machine
 
-Initial authority uses one deterministic rotation over registered external
-providers and the locally configured, bound coding identities. Bootstrap
-authority labels do not register providers. The issue number selects the first
-slot; unavailable candidates advance without a queue, ledger, or persistent
-state. A coding slot must pass its bounded probe (verifying liveness only), and
-the author identity and GitHub actor are excluded. Explicit external
-unavailability falls back immediately; pending external work retains authority
-for less than 15 minutes and becomes eligible for fallback at 15 minutes.
+Initial authority follows a validated repository policy declared by optional
+`review-policy:primary=<authority>`, contiguous
+`review-policy:fallback-N=<authority>`, and
+`review-policy:timeout=<seconds>` label definitions. Missing declarations use
+the compatible default: first registered external provider, then the four
+coding families, with a 900-second timeout. Bootstrap authority labels do not
+register providers. Unsupported, duplicate, non-contiguous, contradictory, or
+unregistered external declarations fail closed. A coding slot must pass its
+bounded probe (verifying liveness only), and the author identity and GitHub
+actor are excluded. Explicit external unavailability falls back immediately;
+pending external work retains authority until the configured timeout.
 Because the kernel itself has no scheduler, an external event or timer must
 invoke `create_pr.py --refresh-reviewer <PR>`. Unavailability includes paused
 reviews, cost or quota exhaustion, rate limiting, provider outage, unsupported
@@ -55,7 +58,11 @@ bot-authored PRs, and explicit unavailable/error responses. A nominally
 successful no-op status does not satisfy exact-head review. Availability uses
 the newest trusted, timestamped provider evidence. The current authority's
 latest GitHub label-assignment event starts the clock, and each governed
-authority transition receives a fresh 15-minute pending window.
+authority transition receives a fresh configured pending window. Policy and
+external registration are repository-shared GitHub configuration; coding
+subscriptions remain machine-local. `create_pr.py --reviewer-status --json`
+reports the effective policy and sources without mutation, while
+`--probe-reviewers` adds bounded local coding-provider observations.
 
 Fallback probes actual capacity (verifying liveness only) in Claude Code, OpenAI
 Codex, xAI Cursor, Google Antigravity order. Every candidate must have one
@@ -71,8 +78,8 @@ membership is configuration, so changing it does not require a code change.
 If an assigned coding reviewer later returns an explicit unavailable/error
 state, aborts without a verdict, or hits quota during substantive execution,
 use `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`
-to audit and recover immediately to the first registered external authority;
-hand-editing authority labels is not a state transition.
+to audit and recover immediately to the first policy-listed registered external
+authority; hand-editing authority labels is not a state transition.
 
 A coding agent may author or remediate code and may review a different agent's
 code. It may not authoritatively review its own PR under normal conditions. Its

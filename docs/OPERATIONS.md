@@ -212,7 +212,8 @@ then use the App route.
 
 ### Reviewer readiness
 
-External reviewers are considered in this order:
+The compatible default considers external reviewers in this order and uses the
+first registered service as primary:
 
 - `coderabbit`
 - `sourcery`
@@ -227,24 +228,40 @@ reviewer-registered:codeant
 ```
 
 The bootstrap `review:*` authority labels do not register providers.
-`create_pr.py` combines registered external services with locally configured,
-bound coding identities in one stable pool. The issue number rotates the first
-slot. A selected coding identity is assigned only after its bounded probe
-returns exactly `OK` (which verifies liveness only); an unavailable candidate
-advances to the next slot. The author identity and GitHub actor are excluded.
-This needs no scheduler, private queue, or capacity ledger. The assigned
-authority must produce verifiable current-head evidence. On explicit
+Remove `reviewer-registered:<service>` when a trial expires or a provider is
+uninstalled. Registration is an operator assertion; status cannot infer a live
+external subscription without PR evidence.
+
+Optionally configure the repository-shared authority policy through label
+definitions:
+
+```text
+review-policy:primary=coderabbit
+review-policy:fallback-1=claude-code
+review-policy:fallback-2=openai-codex
+review-policy:fallback-3=xai-cursor
+review-policy:fallback-4=google-antigravity
+review-policy:timeout=900
+```
+
+Fallback ranks are contiguous from 1. Authorities are unique and supported;
+referenced external authorities must be registered. Missing declarations keep
+the default shown above, followed by the four coding families and a 900-second
+timeout. Malformed or contradictory policy fails closed. A selected coding
+identity is assigned only after its bounded probe returns exactly `OK`
+(verifying liveness only); the author identity and GitHub actor are excluded.
+This needs no scheduler, private queue, or capacity ledger. On explicit
 unavailability it falls back immediately; while merely pending it retains the
-service for less than 15 minutes and becomes eligible for fallback at 15
-minutes. Because the kernel itself has no scheduler, an external event or timer
-must invoke `create_pr.py --refresh-reviewer <PR>`.
+service until the configured timeout. Because the kernel itself has no
+scheduler, an external event or timer must invoke
+`create_pr.py --refresh-reviewer <PR>`.
 
 If reviewer bindings exist but `ARU_CODING_REVIEWERS` is missing, assignment
 fails visibly rather than silently collapsing the pool to external services.
 
 The newest trusted, timestamped provider evidence wins. Measure the pending
 window from the current authority's latest GitHub label-assignment event, not
-from PR creation; a governed recovery starts a fresh 15-minute window.
+from PR creation; a governed recovery starts a fresh configured window.
 
 The fallback pool is Claude Code, OpenAI Codex, xAI Cursor, and Google
 Antigravity. Capacity must answer the exact smoke-test prompt with `OK`; Claude
@@ -298,6 +315,27 @@ label. The wrapper subscription appears after `@`; the identity before it is
 the stable audit name. Non-Claude families currently allow one local identity
 each. Missing, malformed, repeated identities, repeated Claude subscriptions,
 or multiple non-Claude identities fail closed.
+
+Inspect the effective repository policy, external registrations, local coding
+inventory, bindings, exclusions, and configuration sources without mutation:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --reviewer-status --json
+```
+
+Probe bounded local coding-provider liveness only when explicitly needed. Pass
+the author identity and actor to show self-review exclusions:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+  --reviewer-status --probe-reviewers \
+  --agent codex-local --author-github-login gillella --json
+```
+
+The status reports external providers as registered or unregistered; their live
+availability remains `observed-on-pr`. It warns about registered services unused
+by the effective policy and sets `valid` false when a policy coding family has
+no local identity or a configured identity lacks a binding.
 
 The installer creates symlinks for exactly six skills under supported local
 agent skill directories. It does not copy the kernel into every consumer
@@ -781,13 +819,14 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
   --refresh-reviewer 123 --json
 ```
 
-Pending for less than 15 minutes retains the external authority. At 15 minutes,
-an external event or timer invoking `create_pr.py --refresh-reviewer <PR>`
-probes the distinct coding-agent pool (verifying liveness only) and, only after
-a successful capacity test, replaces the one authority and records the exact
-head, old authority, reviewer identity, timestamp, and fallback reason on the
-PR. The kernel itself has no scheduler. The timeout is measured from the latest
-persisted label-assignment event for the current authority.
+Pending for less than the effective policy timeout retains the external
+authority. At timeout, an external event or timer invoking
+`create_pr.py --refresh-reviewer <PR>` evaluates the configured fallbacks and
+probes a coding identity when that slot is reached (verifying liveness only).
+After successful selection it replaces the one authority and records the exact
+head, old authority, reviewer identity when applicable, timestamp, and fallback
+reason on the PR. The kernel itself has no scheduler. The timeout is measured
+from the latest persisted label-assignment event for the current authority.
 
 ### Step 8: dry-run and merge
 
@@ -891,21 +930,21 @@ The state machine is deterministic:
 
 | Current observation | Age | Transition |
 | --- | ---: | --- |
-| New PR with eligible external and coding candidates | any | Rotate by issue number and assign the first available candidate |
-| Rotated coding candidate fails its bounded probe | any | Advance to the next candidate without recording private state |
+| New PR with eligible external and coding candidates | any | Walk the effective primary/fallback policy and assign the first available authority |
+| Configured coding candidate fails its bounded probe | any | Advance to the next configured authority without recording private state |
 | Assigned external is available or has completed review | any | Retain external |
-| Assigned external is pending | `< 15m` | Retain external; no fallback |
-| Assigned external is pending | `>= 15m` | External event/timer invokes refresh; probe and assign a distinct coding agent |
-| Assigned external explicitly reports unavailable/error | any | Probe and assign a distinct coding agent immediately |
-| No distinct coding agent answers exactly `OK` | any | Keep authority unchanged and fail closed |
-| Assigned coding reviewer explicitly aborts, hits quota, or becomes unavailable | any | Audit and recover immediately to first registered external authority |
+| Assigned external is pending | `< policy timeout` | Retain external; no fallback |
+| Assigned external is pending | `>= policy timeout` | External event/timer invokes refresh and evaluates configured fallbacks |
+| Assigned external explicitly reports unavailable/error | any | Evaluate configured fallbacks immediately |
+| No configured fallback is available | any | Keep authority unchanged and fail closed |
+| Assigned coding reviewer explicitly aborts, hits quota, or becomes unavailable | any | Audit and recover immediately to the first policy-listed registered external authority |
 
 Paused reviews, cost or quota exhaustion, rate limiting, provider outage,
 unsupported bot-authored PRs, and explicit unavailable/error responses are
 unavailable. A successful status whose detail reports one of those no-op states
 cannot satisfy exact-head review.
-Coding probes run in Claude Code, OpenAI Codex, xAI Cursor, Google Antigravity
-order after moving the author's model family behind other families. The probe
+Coding probes follow the configured fallback order after moving the author's
+model family behind other coding families. The probe
 tests liveness only and does not guarantee that full review execution will not
 hit quota or rate limits. If substantive review execution later hits quota, cost
 limits, or errors, recover immediately with
@@ -930,9 +969,9 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
 ```
 
 The helper writes the attempted recovery audit first, revalidates the live head
-and authority, restores the first registered external authority, removes coding
-identity/actor metadata, and verifies the result. Without a substantive reason
-or registered external authority, it fails closed.
+and authority, restores the first policy-listed registered external authority,
+removes coding identity/actor metadata, and verifies the result. Without a
+substantive reason or registered external authority, it fails closed.
 
 ### Coding-agent attestation
 
@@ -1039,7 +1078,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 | Merge reports zero or multiple reviewers | Review-label authority is ambiguous | Leave exactly one supported review label |
 | `PR merge state is DIRTY` / conflict | Feature branch conflicts with base branch | Merge `origin/main` into the feature branch (never rebase/force push), rerun focused checks, and refresh exact-head evidence |
 | External reviewer is unavailable | Cost, quota, rate, outage, unsupported PR, or explicit error evidence exists | Run `create_pr.py --refresh-reviewer <PR>` immediately |
-| External reviewer is still pending | It has not produced a verdict | Wait until 15 minutes; then an external event/timer runs the reviewer refresh (kernel has no scheduler) |
+| External reviewer is still pending | It has not produced a verdict | Wait until the effective policy timeout; then an external event/timer runs the reviewer refresh (kernel has no scheduler) |
 | Coding reviewer hits quota during review | Substantive review execution exhausted capacity | Run `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable "quota exhausted"` immediately |
 | Coding fallback has no capacity | Every distinct smoke test failed | Keep the existing authority and stop; do not fabricate a reviewer |
 | Coding review is rejected | Identity, actor, payload, head, verdict, or findings are invalid | Obtain one fresh formal attestation from the assigned non-author reviewer |
@@ -1109,6 +1148,9 @@ true.
       can create issue-specific agent and author labels.
 - [ ] Each installed external provider has exactly one corresponding
       `reviewer-registered:<service>` label; uninstalled providers do not.
+- [ ] Optional `review-policy:*` labels have one supported primary, contiguous
+      unique fallbacks, and a 60-86400 second timeout; reviewer status reports
+      the expected effective sources and no configuration errors.
 - [ ] Each coding fallback identity has one
       `reviewer-binding:<identity>=<github-login>` and the actor is not an
       implementation author account.
@@ -1120,8 +1162,8 @@ true.
 - [ ] Exact-head local verification is refreshed in the PR body after each push.
 - [ ] At least one external reviewer is registered or one distinct coding-agent
       capacity probe succeeds.
-- [ ] Operators know the immediate-unavailability and exact 15-minute reviewer
-      refresh procedure.
+- [ ] Operators know the immediate-unavailability and configured-timeout
+      reviewer refresh procedure.
 - [ ] Server-side branch rules complement the local hook.
 
 ### Pilot

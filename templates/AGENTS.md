@@ -9,11 +9,15 @@ exact-head focused local verification evidence refreshed through
 distinct from the author, and merge through
 `merge_pr.py --expected-head`.
 
-Prefer CodeRabbit, then Sourcery, then CodeAnt. On explicit unavailability or
-15 minutes pending, invoke `create_pr.py --refresh-reviewer <PR>` (the kernel
-itself has no scheduler) to smoke-test capacity (verifying liveness only) and
-assign a distinct Claude Code, OpenAI Codex, xAI Cursor, or Google Antigravity
-reviewer. If substantive review execution hits quota, recover immediately with
+Follow the validated repository `review-policy:primary=<authority>`, contiguous
+`review-policy:fallback-N=<authority>`, and
+`review-policy:timeout=<seconds>` label definitions. Without them, use the first
+registered external provider, then Claude Code, OpenAI Codex, xAI Cursor, and
+Google Antigravity with a 900-second timeout. Inspect the effective policy with
+`create_pr.py --reviewer-status --json`. On explicit unavailability or timeout,
+invoke `create_pr.py --refresh-reviewer <PR>` (the kernel itself has no
+scheduler) to evaluate fallbacks and smoke-test coding capacity (verifying
+liveness only). If substantive review execution hits quota, recover with
 `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`.
 External providers require `reviewer-registered:<service>`; coding
 identities require `reviewer-binding:<identity>=<github-login>` with an actor

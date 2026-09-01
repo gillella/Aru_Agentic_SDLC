@@ -108,7 +108,7 @@ def test_initial_assignment_prefers_a_different_author_family(monkeypatch):
         "ARU_CODING_REVIEWERS",
         "openai-codex:mo,xai-cursor:mx",
     )
-    monkeypatch.setattr(create_pr, "_command", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
     reviewer = create_pr.choose_initial_reviewer(
         0,
         "codex-author",
