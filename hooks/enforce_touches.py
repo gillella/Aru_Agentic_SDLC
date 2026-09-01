@@ -196,13 +196,22 @@ def changed_paths(diff_range: str) -> list[str]:
             "-c",
             "core.fsmonitor=false",
             "diff",
-            "--name-only",
-            "--diff-filter=ACDMR",
+            "--name-status",
+            "--find-renames",
+            "--diff-filter=ACDMRT",
             diff_range,
             "--",
         ]
     )
-    return [line for line in output.splitlines() if line]
+    paths: list[str] = []
+    for line in output.splitlines():
+        fields = line.split("\t")
+        status = fields[0][:1] if fields and fields[0] else ""
+        expected = 3 if status in {"R", "C"} else 2
+        if status not in {"A", "C", "D", "M", "R", "T"} or len(fields) != expected:
+            raise Refusal("changed-path evidence is malformed")
+        paths.extend(fields[1:])
+    return sorted(set(paths))
 
 
 def check(

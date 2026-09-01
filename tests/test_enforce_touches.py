@@ -187,3 +187,101 @@ def test_hook_refuses_out_of_scope_deleted_path(tmp_path, monkeypatch, capsys):
 
     assert HOOK.main() == 2
     assert capsys.readouterr().out == "refused: outside.txt is outside touches:\n"
+
+
+def test_range_changed_paths_include_both_rename_sides(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "old.py").write_text("print(1)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "old.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "add old"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "mv", "old.py", "new.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "rename to new"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.chdir(tmp_path)
+    paths = HOOK.changed_paths("HEAD~1..HEAD")
+    assert paths == ["new.py", "old.py"]
+
+
+def test_range_refuses_when_rename_source_is_outside_touches(tmp_path, monkeypatch, capsys):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "legacy.py").write_text("print(1)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "legacy.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "mv", "legacy.py", "renamed.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "rename"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: renamed.py")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "enforce_touches.py",
+            "--range",
+            "HEAD~1..HEAD",
+            "--issue",
+            "548",
+            "--branch",
+            "fix/issue-548-rename",
+            "--default-branch",
+            "main",
+        ],
+    )
+
+    assert HOOK.main() == 2
+    assert capsys.readouterr().out == "refused: legacy.py is outside touches:\n"
+
+
+def test_range_allows_when_both_rename_sides_are_within_touches(tmp_path, monkeypatch, capsys):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "legacy.py").write_text("print(1)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "legacy.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "mv", "legacy.py", "renamed.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "rename"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: legacy.py, renamed.py")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "enforce_touches.py",
+            "--range",
+            "HEAD~1..HEAD",
+            "--issue",
+            "548",
+            "--branch",
+            "fix/issue-548-rename",
+            "--default-branch",
+            "main",
+        ],
+    )
+
+    assert HOOK.main() == 0
+    assert capsys.readouterr().out == ""
