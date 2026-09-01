@@ -114,6 +114,32 @@ def test_configured_primary_overrides_static_external_order():
     assert selected == ("sourcery", None, None)
 
 
+def test_missing_coding_configuration_skips_to_ordered_external_fallback(
+    monkeypatch,
+):
+    monkeypatch.delenv("ARU_CODING_REVIEWERS", raising=False)
+    policy = review_policy.ReviewPolicy(
+        primary="claude-code",
+        fallbacks=("coderabbit",),
+        timeout_seconds=120,
+        sources={},
+    )
+    selected = create_pr.choose_initial_reviewer(
+        540,
+        "codex-author",
+        "openai-codex",
+        "author-login",
+        policy=policy,
+        external_states={
+            "coderabbit": create_pr.AVAILABLE,
+            "sourcery": create_pr.UNAVAILABLE,
+            "codeant": create_pr.UNAVAILABLE,
+        },
+        reviewer_actors={},
+    )
+    assert selected == ("coderabbit", None, None)
+
+
 def test_policy_order_still_prefers_a_non_author_coding_family(monkeypatch):
     monkeypatch.setenv("ARU_CODING_REVIEWERS", "openai-codex:mo,xai-cursor:mx")
     monkeypatch.setattr(review_policy, "registered_coding_actors", lambda: {

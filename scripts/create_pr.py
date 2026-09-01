@@ -102,8 +102,12 @@ def choose_initial_reviewer(
     reviewer_actors: dict[str, str] | None = None,
     probe_runner: ProbeRunner = _default_probe,
 ) -> tuple[str, str | None, str | None]:
-    states = external_states if external_states is not None else registered_external_states()
-    effective = effective_review_policy(policy, external_states)
+    if policy is None and external_states is None:
+        effective, names = load_repository_review_policy()
+        states = registered_external_states(names)
+    else:
+        states = external_states if external_states is not None else registered_external_states()
+        effective = effective_review_policy(policy, external_states)
     selected = select_reviewer_from_order(
         effective.authorities,
         number=number,

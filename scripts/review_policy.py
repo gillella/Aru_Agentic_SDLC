@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -365,6 +366,8 @@ def select_reviewer_from_order(
         if authority in EXTERNAL_REVIEWERS:
             if external_states.get(authority) in {"available", "pending"}:
                 return authority, None, None
+            continue
+        if not os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
             continue
         if not author_actor:
             record = gh_json(["api", "user"])
