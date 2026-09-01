@@ -1,9 +1,23 @@
 # Minimal Kernel Contract
 
-This is the canonical operating contract for the current Aru v0.2 line. The
-latest release is v0.2.8; changes after that tag remain listed under Unreleased
-in `CHANGELOG.md`. Other documentation, skills, and generated instructions
-summarize or explain this file; they do not add merge gates.
+This is the canonical operating contract for Aru v1.0.0. Other documentation,
+skills, and generated instructions summarize or explain this file; they do not
+add merge gates.
+
+## v1 public API and compatibility
+
+The stable v1 public API is the five lifecycle statuses, the issue contract,
+the `touches:` write boundary, the eleven supported lifecycle commands named
+below, the six installed skills, the `aru-governed-pr` check name and
+`[self-hosted, macOS, ARM64, aru-ci]` runner contract, the path-derived risk
+tiers, the `review-policy:*`, `reviewer-registered:*`, `reviewer-binding:*`,
+`review:*`, and `agent:*` label contracts, and the seven operating documents.
+
+Compatible v1.x releases may correct or extend those interfaces without
+weakening their fail-closed guarantees. Removing or incompatibly changing one
+requires a new major version. Private helper internals, evidence documents,
+consumer verification commands, external Driver cadence, and consumer release
+or deployment systems are not part of the public API.
 
 ## Three layers
 
