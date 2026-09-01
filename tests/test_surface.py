@@ -74,6 +74,7 @@ def supported_command_paths() -> list[Path]:
         path
         for path in tracked_paths()
         if path.parent.name == "scripts"
+        and path.name not in internal_helpers
         and path.suffix in {".py", ".sh"}
         and (
             path.suffix == ".sh"

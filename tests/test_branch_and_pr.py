@@ -7,6 +7,7 @@ import pytest
 
 import create_branch
 import create_pr
+import review_policy
 import reviewer_probe
 
 
@@ -16,6 +17,12 @@ def configured_reviewers(monkeypatch):
         "ARU_CODING_REVIEWERS",
         "claude-code:m1@1,claude-code:m2@2,claude-code:m3@3,"
         "openai-codex:mo,xai-cursor:mx,google-antigravity:mg",
+    )
+    policy = review_policy.default_review_policy(("coderabbit",))
+    monkeypatch.setattr(
+        create_pr,
+        "load_repository_review_policy",
+        lambda: (policy, ("reviewer-registered:coderabbit",)),
     )
 
 def result(argv, *, ok=True, output="OK"):
@@ -110,9 +117,10 @@ def install_refresh(
         return responses.pop(0)
 
     monkeypatch.setattr(create_pr, "gh_json", json_response)
-    monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(review_policy, "gh_json", json_response)
+    monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
     evidence = iter([[], comments or [], events or []])
-    monkeypatch.setattr(create_pr, "gh_paginated", lambda _endpoint: next(evidence))
+    monkeypatch.setattr(review_policy, "gh_paginated", lambda _endpoint: next(evidence))
     monkeypatch.setattr(create_pr, "run", lambda _argv: None)
 
 def test_external_registration_reads_beyond_first_hundred_labels(monkeypatch):
@@ -124,14 +132,14 @@ def test_external_registration_reads_beyond_first_hundred_labels(monkeypatch):
             {"name": "reviewer-registered:sourcery"}
         ]
 
-    monkeypatch.setattr(create_pr, "gh_json", labels)
+    monkeypatch.setattr(review_policy, "gh_json", labels)
     states = create_pr.registered_external_states()
     assert states["sourcery"] == create_pr.AVAILABLE
     assert commands[0][commands[0].index("--limit") + 1] == "1000"
 
 def test_authority_labels_alone_do_not_register_external_providers(monkeypatch):
     monkeypatch.setattr(
-        create_pr,
+        review_policy,
         "gh_json",
         lambda _argv: [{"name": "review:coderabbit"}, {"name": "review:sourcery"}],
     )
@@ -171,7 +179,7 @@ def test_pending_external_under_two_minutes_does_not_fallback(monkeypatch):
     assert outcome["action"] == "retained"
     assert outcome["reason"] == "external-pending"
     assert outcome["remaining_seconds"] == 1
-    assert outcome["retry_at"] == "2026-08-27T12:15:00+00:00"
+    assert outcome["retry_at"] == "2026-08-27T12:02:00+00:00"
     assert outcome["next_action"] == "refresh-reviewer"
 
 
@@ -355,7 +363,7 @@ def test_external_refresh_stops_when_check_run_inventory_is_unavailable(monkeypa
         "created_at": (created + timedelta(seconds=1)).isoformat(),
     }
     comments = [comment]
-    monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
 
     def evidence(endpoint):
         if endpoint.endswith("/reviews?per_page=100"):
@@ -366,9 +374,9 @@ def test_external_refresh_stops_when_check_run_inventory_is_unavailable(monkeypa
             return []
         raise create_pr.KernelError("commit status endpoint unavailable")
 
-    monkeypatch.setattr(create_pr, "gh_paginated", evidence)
+    monkeypatch.setattr(review_policy, "gh_paginated", evidence)
     monkeypatch.setattr(
-        create_pr,
+        review_policy,
         "gh_json",
         lambda _argv: (_ for _ in ()).throw(
             create_pr.KernelError("check-run endpoint unavailable")
@@ -447,7 +455,7 @@ def test_recovered_external_gets_full_timeout_from_assignment(monkeypatch):
     )
     assert outcome["reason"] == "external-pending"
     assert outcome["remaining_seconds"] == 1
-    assert outcome["retry_at"] == "2026-08-27T13:15:00+00:00"
+    assert outcome["retry_at"] == "2026-08-27T13:02:00+00:00"
     assert outcome["next_action"] == "refresh-reviewer"
 
 
@@ -484,7 +492,7 @@ def test_refresh_assigns_first_authority_when_current_diff_fails_up(monkeypatch)
     assert outcome["action"] == "assigned"
     assert outcome["authority"] == "coderabbit"
     assert outcome["risk_tier"] == 2
-    assert outcome["retry_at"] == "2026-08-27T12:15:00+00:00"
+    assert outcome["retry_at"] == "2026-08-27T12:02:00+00:00"
 
 
 def test_no_external_or_coding_reviewer_fails_closed(monkeypatch):

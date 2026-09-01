@@ -120,7 +120,11 @@ def test_policy_order_still_prefers_a_non_author_coding_family(monkeypatch):
         "mo": "codex-reviewer",
         "mx": "cursor-reviewer",
     })
-    monkeypatch.setattr(review_policy, "probe_coding_candidate", lambda candidate, _runner: True)
+    monkeypatch.setattr(
+        review_policy,
+        "available_coding_reviewers",
+        lambda candidates, **_kwargs: [candidate[:3] for candidate in candidates],
+    )
     policy = review_policy.ReviewPolicy(
         primary="openai-codex",
         fallbacks=("xai-cursor",),
@@ -145,8 +149,13 @@ def test_configured_timeout_is_used_by_external_decision(monkeypatch):
         "headRefOid": "a" * 40,
         "statusCheckRollup": [],
     }
-    monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
-    monkeypatch.setattr(create_pr, "gh_paginated", lambda _endpoint: [])
+    monkeypatch.setattr(
+        review_policy,
+        "gh_json",
+        lambda _argv: [{"total_count": 0, "check_runs": []}],
+    )
+    monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(review_policy, "gh_paginated", lambda _endpoint: [])
     decision = create_pr._external_decision(
         42,
         pr,
@@ -175,8 +184,10 @@ def test_reviewer_status_reports_sources_bindings_probes_and_unused_trials(monke
     })
     monkeypatch.setattr(
         review_policy,
-        "probe_coding_candidate",
-        lambda candidate, _runner: candidate[1] == "m1",
+        "available_coding_reviewers",
+        lambda candidates, **_kwargs: [
+            candidate[:3] for candidate in candidates if candidate[1] == "m1"
+        ],
     )
     status = review_policy.reviewer_status(
         probe=True,

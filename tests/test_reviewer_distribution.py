@@ -9,6 +9,7 @@ import pytest
 
 import common
 import create_pr
+import review_policy
 import reviewer_probe
 
 
@@ -31,7 +32,7 @@ def external_states(**overrides):
     return states
 
 
-def test_initial_assignment_rotates_all_available_authorities(monkeypatch):
+def test_initial_assignment_uses_stable_policy_primary(monkeypatch):
     monkeypatch.setenv(
         "ARU_CODING_REVIEWERS",
         "claude-code:m1@1,openai-codex:mo",
@@ -56,12 +57,7 @@ def test_initial_assignment_rotates_all_available_authorities(monkeypatch):
         for number in range(4)
     ]
 
-    assert assignments == [
-        ("coderabbit", None, None),
-        ("sourcery", None, None),
-        ("claude-code", "m1", "claude-reviewer"),
-        ("openai-codex", "mo", "codex-reviewer"),
-    ]
+    assert assignments == [("coderabbit", None, None)] * 4
 
 
 def test_initial_coding_assignment_uses_aggregate_capacity_probe():
@@ -142,7 +138,7 @@ def test_unavailable_coding_candidate_does_not_displace_external(monkeypatch):
         probe_runner=unavailable,
     )
     assert reviewer == ("coderabbit", None, None)
-    assert [call[1] for call in calls] == ["1"]
+    assert calls == []
 
 
 def test_initial_assignment_is_deterministic(monkeypatch):
@@ -246,11 +242,11 @@ def test_skipped_provider_is_immediately_fallback_eligible(monkeypatch):
         "body": "Skipping PR review because a bot author is detected.",
         "created_at": created.isoformat(),
     }
-    monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
     evidence = iter([[], [comment], []])
-    monkeypatch.setattr(create_pr, "gh_paginated", lambda _endpoint: next(evidence))
+    monkeypatch.setattr(review_policy, "gh_paginated", lambda _endpoint: next(evidence))
     monkeypatch.setattr(
-        create_pr,
+        review_policy,
         "gh_json",
         lambda _argv: [{"total_count": 0, "check_runs": []}],
     )
@@ -274,7 +270,7 @@ def test_coding_probes_run_concurrently(monkeypatch):
         assert both_started.wait(0.2)
         return result(argv)
 
-    reviewer = create_pr.probe_coding_reviewer(
+    reviewer = reviewer_probe.probe_coding_reviewer(
         author_identity="author",
         author_family="human-or-other",
         author_actor="author-login",
@@ -295,7 +291,7 @@ def test_coding_probe_has_short_aggregate_deadline(monkeypatch):
         return result(argv)
 
     started = time.monotonic()
-    reviewer = create_pr.probe_coding_reviewer(
+    reviewer = reviewer_probe.probe_coding_reviewer(
         author_identity="author",
         author_family="human-or-other",
         author_actor="author-login",

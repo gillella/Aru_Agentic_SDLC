@@ -24,6 +24,7 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
 
 Do not review your own work or poll reviewer state. For Tier 2-3, after the
 push, the external Driver owns the one review-continuation event defined in
-`docs/KERNEL-CONTRACT.md`. If substantive coding review aborts or loses
+`docs/KERNEL-CONTRACT.md`, including immediate explicit-unavailability handling
+or the configured policy timeout. If substantive coding review aborts or loses
 capacity, report the truthful reason through
 `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`.

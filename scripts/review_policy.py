@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Iterable
 
 from common import (
@@ -15,15 +15,28 @@ from common import (
     REVIEW_AUTHORITIES,
     REVIEW_BINDING_PREFIX,
     REVIEW_REGISTRATION_PREFIX,
-    CodingCandidate,
     KernelError,
     canonical_github_actor,
     configured_coding_reviewers,
     gh_json,
+    gh_paginated,
     normalized_identity,
-    probe_coding_candidate,
     registered_coding_actors,
+    repo_slug,
     same_github_actor,
+)
+from review_evidence import (
+    AVAILABLE,
+    PENDING,
+    UNAVAILABLE,
+    authority_assigned_at,
+    external_state,
+)
+from reviewer_probe import (
+    CodingCandidate,
+    ProbeRunner,
+    _default_probe,
+    available_coding_reviewers,
 )
 
 PRIMARY_PREFIX = "review-policy:primary="
@@ -34,7 +47,6 @@ DEFAULT_TIMEOUT_SECONDS = 2 * 60
 MIN_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 _FALLBACK_RE = re.compile(r"review-policy:fallback-([1-9][0-9]*)=(.+)")
-ProbeRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 
 @dataclass(frozen=True)
@@ -91,6 +103,63 @@ def registration_states(names: Iterable[str]) -> dict[str, str]:
         service: "available" if service in registered else "unavailable"
         for service in EXTERNAL_REVIEWERS
     }
+
+
+def registered_external_states(names: tuple[str, ...] | None = None) -> dict[str, str]:
+    if names is None:
+        names = repository_label_names()
+    states = registration_states(names)
+    return {
+        service: AVAILABLE if state == "available" else UNAVAILABLE
+        for service, state in states.items()
+    }
+
+
+def external_decision(
+    number: int,
+    pr: dict[str, object],
+    authority: str,
+    observed_at: datetime,
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[str, int | None]:
+    slug = repo_slug()
+    reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
+    comments = gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
+    events = gh_paginated(f"repos/{slug}/issues/{number}/events?per_page=100")
+    pages = gh_json([
+        "api", "--paginate", "--slurp",
+        f"repos/{slug}/commits/{pr['headRefOid']}/check-runs?per_page=100&filter=latest",
+    ])
+    if (
+        not isinstance(pages, list)
+        or any(not isinstance(page, dict) for page in pages)
+        or any(not isinstance(page.get("check_runs"), list) for page in pages)
+    ):
+        raise KernelError("external review check-run inventory is malformed")
+    checks = [record for page in pages for record in page["check_runs"]]
+    if any(not isinstance(record, dict) for record in checks):
+        raise KernelError("external review check-run inventory is malformed")
+    totals = {page.get("total_count") for page in pages}
+    if len(totals) != 1 or totals.pop() != len(checks):
+        raise KernelError("external review check-run inventory is incomplete")
+    assigned_at = authority_assigned_at(pr, events, authority)
+    state = external_state(
+        authority,
+        reviews=reviews,
+        comments=comments,
+        checks=checks,
+        head=str(pr["headRefOid"]),
+        since=assigned_at,
+    )
+    age = (observed_at - assigned_at).total_seconds()
+    if age < 0:
+        raise KernelError("review observation predates assignment")
+    if state == AVAILABLE:
+        return "external-available", None
+    if state == PENDING and age < timeout_seconds:
+        return "external-pending", timeout_seconds - int(age)
+    reason = "external-unavailable" if state == UNAVAILABLE else "external-pending-timeout"
+    return reason, None
 
 
 def default_review_policy(registered: Iterable[str]) -> ReviewPolicy:
@@ -208,17 +277,19 @@ def load_repository_review_policy() -> tuple[ReviewPolicy, tuple[str, ...]]:
     return review_policy_from_labels(names), names
 
 
-def _default_probe(argv: list[str]) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return subprocess.CompletedProcess(argv, 1, "", str(exc))
+def effective_review_policy(
+    policy: ReviewPolicy | None, external_states: dict[str, str] | None
+) -> ReviewPolicy:
+    if policy is not None:
+        return policy
+    if external_states is not None:
+        registered = [
+            service
+            for service, state in external_states.items()
+            if state in {AVAILABLE, PENDING}
+        ]
+        return default_review_policy(registered)
+    return load_repository_review_policy()[0]
 
 
 def ordered_coding_families(
@@ -257,23 +328,23 @@ def probe_coding_reviewer(
         return None
     configured = configured_coding_reviewers()
     actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
+    author_identity = normalized_identity(author_identity)
     author_actor = canonical_github_actor(author_actor)
     for family in order:
-        available: list[CodingCandidate] = []
+        candidates: list[CodingCandidate] = []
         for identity, subscription in configured.get(family, ()):
             actor = str(actors.get(identity) or "").lower()
             candidate: CodingCandidate = (family, identity, actor, subscription)
-            probe_ok = probe_coding_candidate(candidate, runner)
             if (
-                probe_ok
-                and identity != author_identity
+                identity != author_identity
                 and actor
                 and not same_github_actor(actor, author_actor)
             ):
-                available.append(candidate)
+                candidates.append(candidate)
+        available = available_coding_reviewers(candidates, runner=runner)
         if available:
-            candidate = available[rotation_key % len(available)]
-            return candidate[0], candidate[1], candidate[2]
+            family, identity, actor = available[rotation_key % len(available)]
+            return family, identity, actor
     return None
 
 
@@ -351,7 +422,8 @@ def reviewer_status(
             probe_state = "not-requested"
             if probe and eligible:
                 candidate: CodingCandidate = (family, identity, actor, subscription)
-                probe_state = "ok" if probe_coding_candidate(candidate, runner) else "failed"
+                available = available_coding_reviewers([candidate], runner=runner)
+                probe_state = "ok" if available else "failed"
             elif probe:
                 probe_state = "ineligible"
             if not actor:
