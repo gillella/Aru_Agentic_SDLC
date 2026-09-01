@@ -20,10 +20,10 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    PR-body evidence with `create_pr.py --refresh-verification <PR>`.
 10. Wait for that exact-head local verification and the single assigned
     authoritative reviewer.
-   Initial authority rotates deterministically across registered external
-   services and locally configured, bound coding identities while excluding the
-   author. If the assigned external service explicitly fails or remains pending
-   for 15 minutes, an external event or timer must invoke
+   Initial authority follows the validated repository review policy while
+   excluding the author. If the assigned external service explicitly fails or
+   remains pending for the effective policy timeout (120 seconds by default),
+   an external event or timer must invoke
    `create_pr.py --refresh-reviewer <PR>` (the kernel itself has no scheduler);
    it smoke-tests capacity (verifying liveness only) and may assign a coding agent
    other than the author. If substantive review execution hits quota, recover
