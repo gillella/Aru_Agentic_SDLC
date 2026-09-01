@@ -40,13 +40,14 @@ def test_operating_guidance_does_not_route_to_retired_surfaces():
         assert all(name not in content for name in retired), path
 
 
-def test_reviewer_timer_is_defined_only_in_the_canonical_contract():
+def test_reviewer_timer_is_configurable_not_hard_coded():
     timing_sources = [
         path
         for path in OPERATING_GUIDANCE
         if "15 minutes" in text(path) or "15-minute" in text(path)
     ]
-    assert timing_sources == [ROOT / "docs" / "KERNEL-CONTRACT.md"]
+    assert timing_sources == []
+    assert "configured timeout" in text(ROOT / "docs" / "KERNEL-CONTRACT.md")
 
 
 def test_version_and_layer_truth_are_explicit():

@@ -11,7 +11,6 @@ from common import KernelError, review_evidence_unavailable
 AVAILABLE = "available"
 PENDING = "pending"
 UNAVAILABLE = "unavailable"
-EXTERNAL_TIMEOUT_SECONDS = 15 * 60
 EXTERNAL_ACTORS = {
     "coderabbit": {"coderabbitai", "coderabbitai[bot]"},
     "sourcery": {"sourcery-ai", "sourcery-ai[bot]", "sourcery"},
@@ -172,7 +171,7 @@ def external_state(
 
 
 __all__ = [
-    "AVAILABLE", "EXTERNAL_ACTORS", "EXTERNAL_APP_SLUGS",
-    "EXTERNAL_TIMEOUT_SECONDS", "PENDING", "UNAVAILABLE", "check_service",
+    "AVAILABLE", "EXTERNAL_ACTORS", "EXTERNAL_APP_SLUGS", "PENDING",
+    "UNAVAILABLE", "check_service",
     "authority_assigned_at", "evidence_time", "external_state", "parse_time",
 ]

@@ -58,5 +58,18 @@ Do not turn consumer policy into universal kernel ceremony. Do not put a
 scheduler, daemon, queue, handoff system, dashboard, release/deploy system,
 provider fleet, or repository-owned runtime in this project.
 
+## Review policy
+
+For Tier 2-3, `create_pr.py` follows optional repository label definitions
+`review-policy:primary=<authority>`, contiguous
+`review-policy:fallback-N=<authority>`, and
+`review-policy:timeout=<seconds>`. Without them, the first registered external
+authority is primary, the four coding families are ordered fallbacks, and the
+timeout is 120 seconds. Invalid, duplicate, unsupported, non-contiguous, or
+unregistered-external declarations fail closed. Use
+`create_pr.py --reviewer-status --json` for read-only discovery. Remove an
+external service's `reviewer-registered:<service>` label when access ends;
+coding subscriptions remain machine-local.
+
 The v0.2 feature freeze lasts through 2026-09-26. During it, accept only
 security and correctness fixes.

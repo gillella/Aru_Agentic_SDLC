@@ -9,7 +9,7 @@
 | default-branch protection | direct push to the resolved remote default branch | `hooks/pre-push` |
 | worktree isolation | first implementation edit | `create_branch.py` |
 | closure link | PR creation | `create_pr.py` |
-| one current-head review authority plus governed refresh | Tier 2-3 review authority | `create_pr.py` |
+| policy-ordered current-head review authority plus configured-timeout refresh | Tier 2-3 review authority | `create_pr.py` |
 | exact-head consumer verification | merge | self-hosted `aru-governed-pr`, `.aru/verify.sh`, `check_ci.py`, `merge_pr.py` |
 | zero GitHub-hosted runner minutes | required verification dispatch | workflow/template `[self-hosted, macOS, ARM64, aru-ci]` labels and no fallback |
 | changed-path risk tier | whether authoritative review is required | `common.py`, `merge_pr.py` |

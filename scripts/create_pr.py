@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,46 +16,44 @@ from common import (
     AUTHOR_PREFIX,
     CODING_REVIEWERS,
     EXTERNAL_REVIEWERS,
-    REVIEW_REGISTRATION_PREFIX,
     REVIEWER_ACTOR_PREFIX,
     REVIEWER_PREFIX,
     REVIEW_AUTHORITIES,
-    REVIEWER_CONFIG_ENV,
     REVIEW_PREFIX,
     KernelError,
     agent_family,
     default_branch_name,
     ensure_label,
     gh_json,
-    gh_paginated,
     git,
     issue,
     json_print,
     label_names,
     normalized_identity,
     review_risk_tier,
-    repo_slug,
     run,
     set_status,
     status_of,
 )
-from review_evidence import (
+from review_evidence import (  # noqa: F401 -- compatibility exports
     AVAILABLE,
-    EXTERNAL_TIMEOUT_SECONDS,
     PENDING,
     UNAVAILABLE,
-    authority_assigned_at,
     external_state,
     parse_time as _parse_time,
 )
-from reviewer_probe import (
-    ProbeRunner,
-    _coding_candidates,
-    _default_probe,
-    available_coding_reviewers,
-    probe_coding_reviewer,
-)
+from reviewer_probe import ProbeRunner, _default_probe
 from merge_state import pull_changed_paths
+from review_policy import (
+    ReviewPolicy,
+    effective_review_policy,
+    external_decision as _external_decision,
+    load_repository_review_policy,
+    probe_coding_reviewer,
+    registered_external_states,
+    reviewer_status,
+    select_reviewer_from_order,
+)
 
 def current_branch() -> str:
     branch = git(["branch", "--show-current"])
@@ -98,93 +95,33 @@ def local_changed_paths() -> list[str]:
         raise KernelError("published branch has no changed files")
     return sorted(set(paths))
 
-def registered_external_states() -> dict[str, str]:
-    records = gh_json(["label", "list", "--limit", "1000", "--json", "name"])
-    if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
-        raise KernelError("reviewer registration labels are unavailable")
-    names = {str(item.get("name") or "") for item in records}
-    return {
-        service: AVAILABLE
-        if REVIEW_REGISTRATION_PREFIX + service in names
-        else UNAVAILABLE
-        for service in EXTERNAL_REVIEWERS
-    }
-
-def available_externals(states: dict[str, str]) -> list[str]:
-    if any(state not in {AVAILABLE, PENDING, UNAVAILABLE} for state in states.values()):
-        raise KernelError("external reviewer availability is malformed")
-    return [service for service in EXTERNAL_REVIEWERS if states.get(service) == AVAILABLE]
-
-def current_github_actor() -> str:
-    record = gh_json(["api", "user"])
-    login = str(record.get("login") or "").lower() if isinstance(record, dict) else ""
-    if not login:
-        raise KernelError("current GitHub author identity is unavailable")
-    return login
-
 def choose_initial_reviewer(
     number: int, author_identity: str, author_family: str, author_actor: str = "", *,
     external_states: dict[str, str] | None = None,
+    policy: ReviewPolicy | None = None,
     reviewer_actors: dict[str, str] | None = None,
     probe_runner: ProbeRunner = _default_probe,
 ) -> tuple[str, str | None, str | None]:
-    states = external_states if external_states is not None else registered_external_states()
-    candidates: list[tuple[str, str | None, str | None]] = [
-        (service, None, None) for service in available_externals(states)
-    ]
-    if os.environ.get(REVIEWER_CONFIG_ENV, "").strip() and not author_actor:
-        author_actor = current_github_actor()
-    if os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
-        coding = _coding_candidates(author_identity=author_identity, author_family=author_family,
-                                    author_actor=author_actor, reviewer_actors=reviewer_actors)
-        candidates.extend(available_coding_reviewers(coding, runner=probe_runner))
-    if not candidates:
+    if policy is None and external_states is None:
+        effective, names = load_repository_review_policy()
+        states = registered_external_states(names)
+    else:
+        states = external_states if external_states is not None else registered_external_states()
+        effective = effective_review_policy(policy, external_states)
+    selected = select_reviewer_from_order(
+        effective.authorities,
+        number=number,
+        author_identity=author_identity,
+        author_family=author_family,
+        author_actor=author_actor,
+        external_states=states,
+        reviewer_actors=reviewer_actors,
+        probe_runner=probe_runner,
+        coding_probe=probe_coding_reviewer,
+    )
+    if selected is None:
         raise KernelError("no external or distinct coding-agent reviewer is available")
-    return candidates[number % len(candidates)]
-
-def _external_decision(
-    number: int, pr: dict[str, Any], authority: str, observed_at: datetime
-) -> tuple[str, int | None]:
-    slug = repo_slug()
-    reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
-    comments = gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
-    events = gh_paginated(f"repos/{slug}/issues/{number}/events?per_page=100")
-    pages = gh_json(
-        [
-            "api", "--paginate", "--slurp",
-            f"repos/{slug}/commits/{pr['headRefOid']}/check-runs?per_page=100&filter=latest",
-        ]
-    )
-    if (
-        not isinstance(pages, list)
-        or any(not isinstance(page, dict) for page in pages)
-        or any(not isinstance(page.get("check_runs"), list) for page in pages)
-    ):
-        raise KernelError("external review check-run inventory is malformed")
-    checks = [record for page in pages for record in page["check_runs"]]
-    if any(not isinstance(record, dict) for record in checks):
-        raise KernelError("external review check-run inventory is malformed")
-    totals = {page.get("total_count") for page in pages}
-    if len(totals) != 1 or totals.pop() != len(checks):
-        raise KernelError("external review check-run inventory is incomplete")
-    assigned_at = authority_assigned_at(pr, events, authority)
-    state = external_state(
-        authority,
-        reviews=reviews,
-        comments=comments,
-        checks=checks,
-        head=str(pr["headRefOid"]),
-        since=assigned_at,
-    )
-    age = (observed_at - assigned_at).total_seconds()
-    if age < 0:
-        raise KernelError("review observation predates assignment")
-    if state == AVAILABLE:
-        return "external-available", None
-    if state == PENDING and age < EXTERNAL_TIMEOUT_SECONDS:
-        return "external-pending", EXTERNAL_TIMEOUT_SECONDS - int(age)
-    reason = "external-unavailable" if state == UNAVAILABLE else "external-pending-15m"
-    return reason, None
+    return selected
 
 def _optional_authority(pr: dict[str, Any]) -> str | None:
     authorities = [
@@ -297,14 +234,22 @@ def recover_coding_authority(
     authority: str,
     reason: str,
     observed_at: datetime,
+    policy: ReviewPolicy | None = None,
+    external_states: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     reason = reason.strip()
     if len(reason) < 10:
         raise KernelError("coding reviewer unavailability reason is too short")
-    externals = available_externals(registered_external_states())
+    effective = policy or load_repository_review_policy()[0]
+    states = external_states if external_states is not None else registered_external_states()
+    externals = [
+        candidate
+        for candidate in effective.authorities
+        if candidate in EXTERNAL_REVIEWERS and states.get(candidate) == AVAILABLE
+    ]
     if not externals:
         raise KernelError("no registered external reviewer is available")
-    external = externals[number % len(externals)]
+    external = externals[0]
     status = {
         "head": pr.get("headRefOid"),
         "observed_at": observed_at.isoformat(),
@@ -338,6 +283,9 @@ def assign_missing_authority(
     pr: dict[str, Any],
     observed_at: datetime,
     probe_runner: ProbeRunner,
+    *,
+    policy: ReviewPolicy | None = None,
+    external_states: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     risk_tier = review_risk_tier(pull_changed_paths(number))
     if risk_tier < 2:
@@ -348,11 +296,15 @@ def assign_missing_authority(
         }
     author_identity = _one_label_value(pr, AUTHOR_PREFIX)
     author_family = _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
+    effective = policy or load_repository_review_policy()[0]
+    states = external_states if external_states is not None else registered_external_states()
     authority, identity, actor = choose_initial_reviewer(
         number,
         author_identity,
         author_family,
         str((pr.get("author") or {}).get("login") or ""),
+        policy=effective,
+        external_states=states,
         probe_runner=probe_runner,
     )
     replace_authority(number, pr, authority, identity, actor)
@@ -365,7 +317,7 @@ def assign_missing_authority(
         "action": "assigned", "reason": "risk-tier-requires-review",
         "risk_tier": risk_tier,
         "retry_at": (
-            (observed_at + timedelta(seconds=EXTERNAL_TIMEOUT_SECONDS)).isoformat()
+            (observed_at + timedelta(seconds=effective.timeout_seconds)).isoformat()
             if external else None
         ),
         "next_action": "refresh-reviewer" if external else "await-authoritative-review",
@@ -378,8 +330,14 @@ def _refresh_external_authority(
     authority: str,
     observed_at: datetime,
     probe_runner: ProbeRunner,
+    *,
+    policy: ReviewPolicy | None = None,
+    external_states: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    reason, remaining = _external_decision(number, pr, authority, observed_at)
+    effective = policy or load_repository_review_policy()[0]
+    reason, remaining = _external_decision(
+        number, pr, authority, observed_at, effective.timeout_seconds
+    )
     if reason in {"external-available", "external-pending"}:
         result = {
             "pr": number, "authority": authority, "action": "retained",
@@ -394,32 +352,42 @@ def _refresh_external_authority(
             result["next_action"] = "refresh-reviewer"
         return result
 
+    states = external_states if external_states is not None else registered_external_states()
     author_identity = _one_label_value(pr, AUTHOR_PREFIX)
     author_family = _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
-    coding = probe_coding_reviewer(
+    selected = select_reviewer_from_order(
+        effective.after(authority),
+        number=number,
         author_identity=author_identity,
         author_family=author_family,
         author_actor=str((pr.get("author") or {}).get("login") or ""),
-        rotation_key=number,
-        runner=probe_runner,
+        external_states=states,
+        reviewer_actors=None,
+        probe_runner=probe_runner,
+        coding_probe=probe_coding_reviewer,
     )
-    if coding is None:
-        raise KernelError("no distinct coding-agent reviewer has available capacity")
-    coding_family, reviewer_identity, reviewer_actor = coding
+    if selected is None:
+        raise KernelError("no configured fallback reviewer has available capacity")
+    new_authority, reviewer_identity, reviewer_actor = selected
     status = {
         "head": pr.get("headRefOid"),
         "observed_at": observed_at.isoformat(),
         "previous_authority": authority,
         "reason": reason,
-        "new_authority": coding_family,
+        "new_authority": new_authority,
         "reviewer": reviewer_identity,
         "reviewer_actor": reviewer_actor,
-        "reviewer_family": coding_family,
+        "reviewer_family": new_authority if new_authority in CODING_REVIEWERS else None,
     }
+    reviewer_description = (
+        f"assign `{reviewer_identity}` ({new_authority}) through GitHub actor "
+        f"`{reviewer_actor}`"
+        if reviewer_identity and reviewer_actor
+        else f"assign registered external authority `{new_authority}`"
+    )
     body = (
         "## Aru authoritative reviewer fallback\n\n"
-        f"Fallback attempt: assign `{reviewer_identity}` ({coding_family}) through "
-        f"GitHub actor `{reviewer_actor}` because `{authority}` was "
+        f"Fallback attempt: {reviewer_description} because `{authority}` was "
         f"{reason.replace('-', ' ')}. The labels remain authoritative if this "
         "transition command fails.\n\n"
         f"<!-- aru-review-assignment:v1 {json.dumps(status, sort_keys=True)} -->"
@@ -428,26 +396,33 @@ def _refresh_external_authority(
 
     def confirm_external_fallback(live: dict[str, Any]) -> None:
         confirmed, _remaining = _external_decision(
-            number, live, authority, datetime.now(timezone.utc)
+            number,
+            live,
+            authority,
+            datetime.now(timezone.utc),
+            effective.timeout_seconds,
         )
-        if confirmed not in {"external-unavailable", "external-pending-15m"}:
+        if confirmed not in {"external-unavailable", "external-pending-timeout"}:
             raise KernelError(f"external reviewer recovered before fallback: {confirmed}")
 
     replace_authority(
-        number, pr, coding_family, reviewer_identity, reviewer_actor,
+        number, pr, new_authority, reviewer_identity, reviewer_actor,
         confirm_external_fallback,
     )
     updated = gh_json(["pr", "view", str(number), "--json", "number,labels"])
-    if _one_authority(updated) != coding_family:
+    if _one_authority(updated) != new_authority:
         raise KernelError("review authority replacement was not confirmed")
-    if _one_label_value(updated, REVIEWER_PREFIX) != reviewer_identity:
+    if reviewer_identity and _one_label_value(updated, REVIEWER_PREFIX) != reviewer_identity:
         raise KernelError("reviewer identity replacement was not confirmed")
-    if _one_label_value(updated, REVIEWER_ACTOR_PREFIX) != reviewer_actor:
+    if reviewer_actor and _one_label_value(updated, REVIEWER_ACTOR_PREFIX) != reviewer_actor:
         raise KernelError("reviewer actor replacement was not confirmed")
-    return {
-        "pr": number, "authority": coding_family, "reviewer": reviewer_identity,
+    result = {
+        "pr": number, "authority": new_authority,
         "action": "fallback", "reason": reason,
     }
+    if reviewer_identity:
+        result["reviewer"] = reviewer_identity
+    return result
 
 
 def reviewer_continuation(
@@ -476,7 +451,10 @@ def reviewer_continuation(
             "retry_at": None,
         }
     observed_at = now or datetime.now(timezone.utc)
-    reason, remaining = _external_decision(number, pr, authority, observed_at)
+    policy = load_repository_review_policy()[0]
+    reason, remaining = _external_decision(
+        number, pr, authority, observed_at, policy.timeout_seconds
+    )
     if reason == "external-pending" and remaining is not None:
         return {
             "authority": authority,
@@ -501,6 +479,8 @@ def refresh_assignment(
     now: datetime | None = None,
     coding_unavailable_reason: str | None = None,
     probe_runner: ProbeRunner = _default_probe,
+    policy: ReviewPolicy | None = None,
+    external_states: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     pr = gh_json(
         [
@@ -514,11 +494,22 @@ def refresh_assignment(
     if not isinstance(pr, dict) or pr.get("number") != number:
         raise KernelError(f"pull request #{number} is unavailable")
     observed_at = now or datetime.now(timezone.utc)
+    if policy is None:
+        policy, names = load_repository_review_policy()
+        if external_states is None:
+            external_states = registered_external_states(names)
     authority = _optional_authority(pr)
     if authority is None:
         if coding_unavailable_reason:
             raise KernelError("coding reviewer unavailability requires a coding authority")
-        return assign_missing_authority(number, pr, observed_at, probe_runner)
+        return assign_missing_authority(
+            number,
+            pr,
+            observed_at,
+            probe_runner,
+            policy=policy,
+            external_states=external_states,
+        )
     if authority in CODING_REVIEWERS:
         if not coding_unavailable_reason:
             return {
@@ -535,10 +526,18 @@ def refresh_assignment(
             authority,
             coding_unavailable_reason,
             observed_at,
+            policy,
+            external_states,
         )
 
     return _refresh_external_authority(
-        number, pr, authority, observed_at, probe_runner
+        number,
+        pr,
+        authority,
+        observed_at,
+        probe_runner,
+        policy=policy,
+        external_states=external_states,
     )
 
 def require_current_owner(number: int, owner: str, status: str = "In Progress") -> None:
@@ -577,13 +576,16 @@ def create(  # noqa: C901, PLR0912, PLR0915 -- one fail-closed creation transact
     authority: str | None = None
     reviewer_identity: str | None = None
     reviewer_actor: str | None = None
+    policy: ReviewPolicy | None = None
     if risk_tier >= 2:
+        policy = effective_review_policy(None, external_states)
         authority, reviewer_identity, reviewer_actor = choose_initial_reviewer(
             number,
             owner_identity,
             family,
             author_actor,
             external_states=external_states,
+            policy=policy,
             reviewer_actors=reviewer_actors,
             probe_runner=probe_runner,
         )
@@ -674,7 +676,7 @@ def create(  # noqa: C901, PLR0912, PLR0915 -- one fail-closed creation transact
         continuation = {
             "next_action": "refresh-reviewer",
             "retry_at": (
-                created_at + timedelta(seconds=EXTERNAL_TIMEOUT_SECONDS)
+                created_at + timedelta(seconds=policy.timeout_seconds)
             ).isoformat(),
         }
     elif authority in CODING_REVIEWERS:
@@ -698,6 +700,8 @@ def _parser() -> argparse.ArgumentParser:
         parser.add_argument(name)
     parser.add_argument("--refresh-reviewer", type=int, metavar="PR")
     parser.add_argument("--coding-reviewer-unavailable")
+    parser.add_argument("--reviewer-status", action="store_true")
+    parser.add_argument("--probe-reviewers", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -718,8 +722,34 @@ def _reject_unexpected_args(args: argparse.Namespace, message: str, names: tuple
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
+    plain_output = ""
     try:
-        if args.refresh_reviewer:
+        if args.reviewer_status:
+            _reject_unexpected_args(
+                args,
+                "reviewer status cannot include PR mutation arguments",
+                (
+                    "issue",
+                    "title",
+                    "body",
+                    "body_file",
+                    "author_family",
+                    "refresh_reviewer",
+                    "coding_reviewer_unavailable",
+                ),
+            )
+            result = reviewer_status(
+                probe=args.probe_reviewers,
+                author_identity=args.agent or "",
+                author_actor=args.author_github_login or "",
+            )
+            policy = result["policy"]
+            plain_output = (
+                f"review policy: {policy['primary']} -> "
+                f"{', '.join(policy['fallbacks']) or 'none'} "
+                f"({policy['timeout_seconds']}s timeout; valid={result['valid']})"
+            )
+        elif args.refresh_reviewer:
             _reject_unexpected_args(
                 args,
                 "review refresh cannot include PR creation arguments",
@@ -753,6 +783,7 @@ def main() -> int:
                 author_family=args.author_family,
                 author_actor=args.author_github_login or "",
             )
+            plain_output = str(result["url"])
     except KernelError as exc:
         parser.error(str(exc))
     if args.json:
@@ -760,7 +791,7 @@ def main() -> int:
     elif args.refresh_reviewer:
         print(f"review authority: {result['authority']} ({result['reason']})")
     else:
-        print(result["url"])
+        print(plain_output)
     return 0
 
 if __name__ == "__main__":

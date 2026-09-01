@@ -63,11 +63,16 @@ review labels.
 ## Review and continuation
 
 Tier 0-1 changes do not wait for an authoritative review. Tier 2-3 changes use
-one authority selected from registered external providers or locally
-configured, bound coding identities. Selection order is an implementation
-detail, not a fairness, speed, or capacity guarantee. Bootstrap `review:*`
-labels do not register a provider. A coding reviewer must be bound to a GitHub
-actor distinct from the PR author and must submit the required
+one authority selected by a validated repository policy declared through
+optional `review-policy:primary=<authority>`, contiguous
+`review-policy:fallback-N=<authority>`, and
+`review-policy:timeout=<seconds>` label definitions. Missing declarations use
+the compatible default: the first registered external provider, then the four
+coding families, with a 120-second timeout. Duplicate, unsupported,
+non-contiguous, contradictory, or unregistered-external declarations fail
+closed. Bootstrap `review:*` labels do not register a provider. A coding
+reviewer must be bound to a GitHub actor distinct from the PR author and submit
+the required
 full-current-head formal attestation. For a review-required change, self-review,
 stale verdicts, unresolved findings or threads, `REQUEST_CHANGES`, no-op
 provider results, and zero or multiple authorities block merge.
@@ -77,8 +82,8 @@ assignment, the external Driver owns exactly one continuation event:
 
 - invoke `create_pr.py --refresh-reviewer <PR>` immediately when trusted
   evidence says the authority is unavailable or errored; otherwise
-- invoke it once at 15 minutes from the current authority's latest governed
-  label-assignment event if a verdict is still pending.
+- invoke it once at the configured timeout from the current authority's latest
+  governed label-assignment event if a verdict is still pending.
 
 Before invoking, the Driver rereads the PR head and authority. It cancels stale
 events after a head or authority change and stops after the bounded refresh.
@@ -86,6 +91,13 @@ The helper alone decides whether to retain or change authority. If substantive
 coding review aborts or loses capacity, the same event invokes
 `--coding-reviewer-unavailable <reason>`. A later transition receives a new
 single event; the Driver does not create another lifecycle store.
+
+Policy and external registration are repository-shared GitHub configuration;
+coding identities and subscriptions remain machine-local.
+`create_pr.py --reviewer-status --json` reports the effective policy, sources,
+registrations, bindings, and exclusions without mutation. Optional
+`--probe-reviewers` adds bounded local liveness observations. Remove
+`reviewer-registered:<service>` when external access expires or is uninstalled.
 
 ## Risk-proportional consumer policy
 

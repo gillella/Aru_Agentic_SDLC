@@ -69,10 +69,12 @@ def test_supported_command_and_skill_budgets():
 
 
 def supported_command_paths() -> list[Path]:
+    internal_helpers = {"common.py", "local_verification.py", "review_policy.py"}
     return [
         path
         for path in tracked_paths()
         if path.parent.name == "scripts"
+        and path.name not in internal_helpers
         and path.suffix in {".py", ".sh"}
         and (
             path.suffix == ".sh"
@@ -91,6 +93,12 @@ def test_library_modules_do_not_count_as_supported_commands():
     assert all(helper.exists() for helper in helpers)
     assert helpers.isdisjoint(supported_command_paths())
     assert len(supported_command_paths()) <= 14
+
+
+def test_review_policy_helper_does_not_count_as_supported_command():
+    helper = ROOT / "scripts" / "review_policy.py"
+    assert helper.exists()
+    assert helper not in supported_command_paths()
 
 
 OPERATING_DOCUMENTS = {
