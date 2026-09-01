@@ -9,6 +9,16 @@ import common
 import fetch_next_work
 
 
+@pytest.fixture(autouse=True)
+def authoritative_backlog_project_status(monkeypatch):
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _number: "Backlog",
+        raising=False,
+    )
+
+
 def ready_issue(number: int, *labels: str, body: str | None = None) -> dict:
     return {
         "number": number,
@@ -54,6 +64,7 @@ def test_dependency_states_use_one_bounded_bulk_query(monkeypatch):
             fetch_next_work.dependency_states(records)
     body = "\n".join(f"depends-on: #{number}" for number in range(1, 102))
     assert fetch_next_work.dependency_states([ready_issue(1, "needs-human", body=body)]) == {}
+    assert fetch_next_work.dependency_states([ready_issue(1, body="depends-on: none")]) == {}
     with pytest.raises(common.KernelError, match="exceeds 100"):
         fetch_next_work.dependency_states([ready_issue(1, body=body)])
 
@@ -178,26 +189,29 @@ def test_select_idle_recovery_stops_on_partial_backlog_dependency_inventory(monk
         fetch_next_work.select("codex-sol56-issue535")
 
 
+def test_select_idle_recovery_keeps_project_evidence_failures_terminal(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: [])
+    monkeypatch.setattr(fetch_next_work, "backlog_issues", lambda: [backlog_issue(11)])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _number: (_ for _ in ()).throw(
+            common.KernelError("Project Board item inventory is truncated")
+        ),
+    )
+
+    with pytest.raises(common.KernelError, match="Project Board item inventory is truncated"):
+        fetch_next_work.select("codex-sol56-issue537")
+
+
 def test_select_ready_fast_path_never_reads_or_mutates_backlog(monkeypatch):
     calls = []
     monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
-    monkeypatch.setattr(
-        fetch_next_work,
-        "ready_issues",
-        lambda: calls.append("ready") or [ready_issue(7, "priority:p0")],
-    )
-    monkeypatch.setattr(
-        fetch_next_work,
-        "backlog_issues",
-        lambda: (_ for _ in ()).throw(AssertionError("Backlog inventory should not load")),
-    )
-    monkeypatch.setattr(
-        fetch_next_work.triage_backlog,
-        "promote_issue",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("Backlog mutation should not run")
-        ),
-    )
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: calls.append("ready") or [ready_issue(7, "priority:p0")])
+    monkeypatch.setattr(fetch_next_work, "backlog_issues", lambda: (_ for _ in ()).throw(AssertionError("Backlog inventory should not load")))
+    monkeypatch.setattr(fetch_next_work, "project_item_status", lambda _n: (_ for _ in ()).throw(AssertionError("Project recovery evidence should not load")))
+    monkeypatch.setattr(fetch_next_work.triage_backlog, "promote_issue", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Backlog mutation should not run")))
 
     assert fetch_next_work.select("codex-sol56-issue535") == {
         "type": "issue",
@@ -377,14 +391,8 @@ def test_select_idle_recovery_rereads_dependency_state_before_promotion(monkeypa
         fetch_next_work,
         "gh_json",
         lambda args, **_kwargs: backlog_issue(
-            41,
-            "priority:p0",
-            body=(
-                "## Acceptance Criteria\n"
-                "- [ ] Dependency can race\n\n"
-                "depends-on: #90\n"
-                "touches: src/41.py"
-            ),
+            41, "priority:p0",
+            body="## Acceptance Criteria\n- [ ] Dependency can race\n\ndepends-on: #90\ntouches: src/41.py",
         )
         if args == ["api", "repos/owner/repository/issues/41"]
         else (_ for _ in ()).throw(AssertionError(args)),
@@ -570,21 +578,9 @@ def test_batch_idle_recovery_does_not_promote_overlapping_backlog_candidates(mon
         fetch_next_work,
         "backlog_issues",
         lambda: [
-            backlog_issue(12, "priority:p0", body=(
-                "## Acceptance Criteria\n"
-                "- [ ] First lane\n\n"
-                "touches: src/a.py"
-            )),
-            backlog_issue(13, "priority:p0", body=(
-                "## Acceptance Criteria\n"
-                "- [ ] Conflicts with first\n\n"
-                "touches: src/a.py"
-            )),
-            backlog_issue(14, "priority:p1", body=(
-                "## Acceptance Criteria\n"
-                "- [ ] Different path\n\n"
-                "touches: docs/b.md"
-            )),
+            backlog_issue(12, "priority:p0", body="## Acceptance Criteria\n- [ ] First lane\n\ntouches: src/a.py"),
+            backlog_issue(13, "priority:p0", body="## Acceptance Criteria\n- [ ] Conflicts with first\n\ntouches: src/a.py"),
+            backlog_issue(14, "priority:p1", body="## Acceptance Criteria\n- [ ] Different path\n\ntouches: docs/b.md"),
         ],
     )
     monkeypatch.setattr(
@@ -631,13 +627,8 @@ def test_batch_idle_recovery_rejects_candidate_that_conflicts_with_open_lane_wor
         "backlog_issues",
         lambda: [
             backlog_issue(
-                12,
-                "priority:p0",
-                body=(
-                    "## Acceptance Criteria\n"
-                    "- [ ] Conflicts with active lane\n\n"
-                    "touches: src/a.py"
-                ),
+                12, "priority:p0",
+                body="## Acceptance Criteria\n- [ ] Conflicts with active lane\n\ntouches: src/a.py",
             )
         ],
     )

@@ -24,6 +24,7 @@ from common import (
     json_print,
     label_names,
     parse_touches,
+    project_item_status,
     repo_slug,
 )
 from fetch_pr_feedback import fetch_feedback
@@ -32,14 +33,7 @@ from merge_pr import evaluate
 MAX_DEPENDENCY_REFERENCES = 100
 _RECOVERY_CANDIDATE_PATTERN = r"(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\s*$"
 _MERGE_STATE_STATUSES = {
-    "BEHIND",
-    "BLOCKED",
-    "CLEAN",
-    "DIRTY",
-    "DRAFT",
-    "HAS_HOOKS",
-    "UNKNOWN",
-    "UNSTABLE",
+    "BEHIND", "BLOCKED", "CLEAN", "DIRTY", "DRAFT", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"
 }
 
 
@@ -98,15 +92,20 @@ def backlog_dependency_states(records: list[dict]) -> dict[int, str]:
     return _dependency_states(records, inventory_name="Backlog")
 
 
+def _referenced_dependencies(records: list[dict]) -> list[int]:
+    referenced: set[int] = set()
+    for record in records:
+        if _pre_dependency_category(label_names(record)) is not None:
+            continue
+        try:
+            referenced.update(dependencies(str(record.get("body") or "")))
+        except KernelError:
+            continue
+    return sorted(referenced)
+
+
 def _dependency_states(records: list[dict], *, inventory_name: str) -> dict[int, str]:
-    numbers = sorted(
-        {
-            number
-            for record in records
-            if _pre_dependency_category(label_names(record)) is None
-            for number in dependencies(str(record.get("body") or ""))
-        }
-    )
+    numbers = _referenced_dependencies(records)
     if len(numbers) > MAX_DEPENDENCY_REFERENCES:
         raise KernelError(
             f"{inventory_name} dependency inventory exceeds {MAX_DEPENDENCY_REFERENCES} references"
@@ -259,9 +258,12 @@ def _select_ready_issue(records: list[dict]) -> dict[str, object]:
 
 def _extra_backlog_errors(record: dict) -> list[str]:
     labels = label_names(record)
+    errors: list[str] = []
+    if [name for name in labels if name.startswith("status:")] != ["status:backlog"]:
+        errors.append("issue must have exactly one status:backlog label")
     if any(name.startswith(AGENT_PREFIX) for name in labels):
-        return ["issue is already claimed"]
-    return []
+        errors.append("issue is already claimed")
+    return errors
 
 
 def _backlog_pre_dependency_errors(record: dict) -> list[str]:
@@ -289,11 +291,27 @@ def _backlog_dependency_records(records: list[dict]) -> list[dict]:
 def _recoverable_backlog(
     records: list[dict],
 ) -> tuple[list[tuple[int, dict]], dict[int, list[str]]]:
-    return triage_backlog.backlog_candidates(
+    candidates, rejected = triage_backlog.backlog_candidates(
         records,
         extra_errors=_extra_backlog_errors,
         issue_states=backlog_dependency_states(_backlog_dependency_records(records)),
     )
+    authoritative: list[tuple[int, dict]] = []
+    for priority, record in candidates:
+        number = int(record["number"])
+        try:
+            project_status = project_item_status(number)
+        except KernelError as exc:
+            if str(exc) != f"issue #{number} is not a member of the linked Project Board":
+                raise
+            rejected[number] = ["issue is not a member of the linked Project Board"]
+            continue
+        if project_status != "Backlog":
+            detail = "is unset" if project_status is None else f"is {project_status!r}, expected 'Backlog'"
+            rejected[number] = [f"Project card status {detail}"]
+            continue
+        authoritative.append((priority, record))
+    return authoritative, rejected
 
 
 def _recovery_issue_record(number: int) -> dict:
@@ -377,24 +395,23 @@ def _recover_single_issue() -> dict[str, object] | None:
     diagnostics = ["Ready idle; evaluated Backlog once"]
     if rejected:
         diagnostics.extend(_backlog_diagnostics(rejected))
-    if not candidates:
-        return {"type": "idle", "diagnostics": diagnostics}
-    record = candidates[0][1]
-    number = int(record["number"])
-    try:
-        live_record, _live_touches = _promote_recovery_candidate(record)
-    except _RecoveryDriftError as exc:
-        diagnostics.extend(
-            f"Backlog issue #{number} {error}; skipped" for error in str(exc).split("; ")
-        )
-        return {"type": "idle", "diagnostics": diagnostics}
-    diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
-    return {
-        "type": "issue",
-        "issue": number,
-        "title": str(live_record["title"]),
-        "diagnostics": diagnostics,
-    }
+    for _priority, record in candidates:
+        number = int(record["number"])
+        try:
+            live_record, _live_touches = _promote_recovery_candidate(record)
+        except _RecoveryDriftError as exc:
+            diagnostics.extend(
+                f"Backlog issue #{number} {error}; skipped" for error in str(exc).split("; ")
+            )
+            continue
+        diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
+        return {
+            "type": "issue",
+            "issue": number,
+            "title": str(live_record["title"]),
+            "diagnostics": diagnostics,
+        }
+    return {"type": "idle", "diagnostics": diagnostics}
 
 
 def _backlog_diagnostics(rejected: dict[int, list[str]]) -> list[str]:
@@ -505,21 +522,13 @@ def _ready_candidates(
     issue_states: dict[int, str],
     *,
     batch: bool = False,
-) -> tuple[
-    list[tuple[int, int, dict, list[str]]],
-    list[str],
-    dict[str, int],
-]:
+) -> tuple[list[tuple[int, int, dict, list[str]]], list[str], dict[str, int]]:
     priorities = {f"priority:p{value}": value for value in range(4)}
     ready: list[tuple[int, int, dict, list[str]]] = []
     diagnostics: list[tuple[int, str]] = []
     classification = {
-        "total_ready": len(records),
-        "executable_ready": 0,
-        "human_gated": 0,
-        "epics": 0,
-        "dependency_blocked": 0,
-        "malformed": 0,
+        "total_ready": len(records), "executable_ready": 0, "human_gated": 0,
+        "epics": 0, "dependency_blocked": 0, "malformed": 0,
     }
     for record in records:
         number = _batch_number(record, "Ready issue") if batch else int(record["number"])
@@ -528,7 +537,17 @@ def _ready_candidates(
         if category:
             classification[category] += 1
             continue
-        dependency_numbers = dependencies(str(record.get("body") or ""))
+        try:
+            dependency_numbers = dependencies(str(record.get("body") or ""))
+        except KernelError as exc:
+            classification["malformed"] += 1
+            diagnostics.append(
+                (
+                    number,
+                    f"Ready issue #{number} has invalid dependencies: {exc}; skipped",
+                )
+            )
+            continue
         if any(issue_states.get(value) != "closed" for value in dependency_numbers):
             classification["dependency_blocked"] += 1
             continue
@@ -583,11 +602,7 @@ def _classification_summary(classification: dict[str, int]) -> str | None:
 def _batch_ready_candidates(
     records: list[dict],
     issue_states: dict[int, str] | None = None,
-) -> tuple[
-    list[tuple[int, int, dict, list[str]]],
-    list[str],
-    dict[str, int],
-]:
+) -> tuple[list[tuple[int, int, dict, list[str]]], list[str], dict[str, int]]:
     ready, diagnostics, classification = _ready_candidates(
         records,
         dependency_states(records) if issue_states is None else issue_states,
@@ -671,18 +686,10 @@ def _recover_batch_candidates(
     if rejected:
         diagnostics.extend(_backlog_diagnostics(rejected))
     if lane_count <= 0 or not candidates:
-        return (
-            [],
-            diagnostics,
-            {
-                "total_ready": 0,
-                "executable_ready": 0,
-                "human_gated": 0,
-                "epics": 0,
-                "dependency_blocked": 0,
-                "malformed": 0,
-            },
-        )
+        return [], diagnostics, {
+            "total_ready": 0, "executable_ready": 0, "human_gated": 0,
+            "epics": 0, "dependency_blocked": 0, "malformed": 0,
+        }
     selected: list[tuple[int, int, dict, list[str]]] = []
     selected_reserved_paths: list[list[str]] = []
     for priority, record in candidates:
@@ -720,18 +727,10 @@ def _recover_batch_candidates(
             f"Promoted Backlog issue #{number} to Ready"
             for _priority, number, _record, _touches in selected
         )
-    return (
-        selected,
-        diagnostics,
-        {
-            "total_ready": 0,
-            "executable_ready": 0,
-            "human_gated": 0,
-            "epics": 0,
-            "dependency_blocked": 0,
-            "malformed": 0,
-        },
-    )
+    return selected, diagnostics, {
+        "total_ready": 0, "executable_ready": 0, "human_gated": 0,
+        "epics": 0, "dependency_blocked": 0, "malformed": 0,
+    }
 
 
 def _claim_batch(result: dict[str, object]) -> int:

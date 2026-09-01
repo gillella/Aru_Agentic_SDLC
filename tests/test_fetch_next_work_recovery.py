@@ -2,12 +2,155 @@ from __future__ import annotations
 
 import json
 import sys
-
 import pytest
 
 import common
 import fetch_next_work
 from test_fetch_next_work import ready_counts, ready_issue
+
+
+@pytest.fixture(autouse=True)
+def authoritative_backlog_project_status(monkeypatch):
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _number: "Backlog",
+        raising=False,
+    )
+
+
+def backlog_issue(number: int, *labels: str) -> dict:
+    return {
+        "number": number,
+        "title": f"issue {number}",
+        "body": (
+            "## Acceptance Criteria\n"
+            "- [ ] Recover valid work\n\n"
+            f"touches: src/{number}.py"
+        ),
+        "state": "OPEN",
+        "labels": [{"name": "status:backlog"}, *({"name": label} for label in labels)],
+    }
+
+
+@pytest.mark.parametrize("status", [None, "Ready", "In Progress"])
+def test_single_recovery_skips_non_backlog_project_status_for_later_candidate(
+    monkeypatch, status
+):
+    promoted = []
+    records = [backlog_issue(12, "priority:p0"), backlog_issue(13, "priority:p1")]
+    monkeypatch.setattr(fetch_next_work, "backlog_issues", lambda: records)
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda number: status if number == 12 else "Backlog",
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, **_kwargs: promoted.append(number),
+    )
+
+    result = fetch_next_work._recover_single_issue()
+
+    assert result["issue"] == 13
+    assert promoted == [13]
+    expected = "is unset" if status is None else f"is {status!r}, expected 'Backlog'"
+    assert f"Backlog issue #12 Project card status {expected}; skipped" in result["diagnostics"]
+
+
+def test_single_recovery_requires_exactly_one_backlog_status_label(monkeypatch):
+    promoted = []
+    records = [
+        backlog_issue(12, "priority:p0", "status:ready"),
+        backlog_issue(13, "priority:p1"),
+    ]
+    monkeypatch.setattr(fetch_next_work, "backlog_issues", lambda: records)
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, **_kwargs: promoted.append(number),
+    )
+
+    result = fetch_next_work._recover_single_issue()
+
+    assert result["issue"] == 13
+    assert promoted == [13]
+    assert (
+        "Backlog issue #12 issue must have exactly one status:backlog label; skipped"
+        in result["diagnostics"]
+    )
+
+
+def test_single_recovery_skips_off_board_issue_for_later_candidate(monkeypatch):
+    promoted = []
+    records = [backlog_issue(12, "priority:p0"), backlog_issue(13, "priority:p1")]
+    monkeypatch.setattr(fetch_next_work, "backlog_issues", lambda: records)
+
+    def project_status(number):
+        if number == 12:
+            raise common.KernelError(
+                "issue #12 is not a member of the linked Project Board"
+            )
+        return "Backlog"
+
+    monkeypatch.setattr(fetch_next_work, "project_item_status", project_status)
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, **_kwargs: promoted.append(number),
+    )
+
+    result = fetch_next_work._recover_single_issue()
+
+    assert result["issue"] == 13
+    assert promoted == [13]
+    assert (
+        "Backlog issue #12 issue is not a member of the linked Project Board; skipped"
+        in result["diagnostics"]
+    )
+
+
+def test_single_recovery_skips_pre_mutation_drift_for_later_candidate(monkeypatch):
+    promoted = []
+    records = [backlog_issue(12, "priority:p0"), backlog_issue(13, "priority:p1")]
+    monkeypatch.setattr(fetch_next_work, "backlog_issues", lambda: records)
+
+    def promote(number, pre_mutation_check=None, **_kwargs):
+        if number == 12:
+            raise fetch_next_work._RecoveryDriftError("issue is already claimed")
+        promoted.append(number)
+
+    monkeypatch.setattr(fetch_next_work.triage_backlog, "promote_issue", promote)
+
+    result = fetch_next_work._recover_single_issue()
+
+    assert result["issue"] == 13
+    assert promoted == [13]
+    assert "Backlog issue #12 issue is already claimed; skipped" in result["diagnostics"]
+
+
+def test_batch_recovery_skips_conflict_for_later_candidate(monkeypatch):
+    promoted = []
+    records = [backlog_issue(12, "priority:p0"), backlog_issue(13, "priority:p1")]
+    monkeypatch.setattr(fetch_next_work, "backlog_issues", lambda: records)
+    records[0]["body"] = records[0]["body"].replace("src/12.py", "docs/active.md")
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda number, **_kwargs: promoted.append(number),
+    )
+
+    candidates, diagnostics, _classification = fetch_next_work._recover_batch_candidates(
+        1, [["docs/**"]]
+    )
+
+    assert candidates[0][1] == 13
+    assert promoted == [13]
+    assert (
+        "Backlog issue #12 touches conflict with active lane work; skipped"
+        in diagnostics
+    )
 
 
 def test_batch_idle_recovery_rechecks_live_touches_against_reserved_paths(monkeypatch):
@@ -214,6 +357,103 @@ def test_batch_skips_malformed_touches_with_diagnostics(monkeypatch):
         "touches: declaration; skipped",
         "Ready issue #2 has invalid touches: touches: contains an unsafe path; skipped",
     ]
+
+
+def test_select_ready_skips_malformed_dependencies_and_selects_valid_candidate(
+    monkeypatch,
+):
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(
+                10,
+                "priority:p0",
+                body="depends-on: none\ntouches: src/malformed.py",
+            ),
+            ready_issue(11, "priority:p0", body="touches: src/valid.py"),
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: (_ for _ in ()).throw(AssertionError("Backlog inventory should not load")),
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _n: (_ for _ in ()).throw(AssertionError("Project recovery evidence should not load")),
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Backlog mutation should not run")),
+    )
+
+    result = fetch_next_work.select("codex-sol56-issue537")
+
+    assert result == {
+        "type": "issue",
+        "issue": 11,
+        "title": "issue 11",
+        "diagnostics": [
+            "Ready issue #10 has invalid dependencies: "
+            "depends-on declarations must each match 'depends-on: #N'; skipped"
+        ],
+    }
+
+
+def test_batch_skips_malformed_dependencies_and_selects_valid_candidate(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(
+                10,
+                "priority:p0",
+                body="depends-on: none\ntouches: src/malformed.py",
+            ),
+            ready_issue(11, "priority:p0", body="touches: src/valid.py"),
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: (_ for _ in ()).throw(AssertionError("Backlog inventory should not load")),
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _n: (_ for _ in ()).throw(AssertionError("Project recovery evidence should not load")),
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Backlog mutation should not run")),
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert result == {
+        "schema": "aru.fetch-next-work.batch/v1",
+        "lanes": [
+            {
+                "agent": "agent-a",
+                "work": {"type": "issue", "issue": 11, "title": "issue 11"},
+            },
+            {"agent": "agent-b", "work": {"type": "idle"}},
+        ],
+        "diagnostics": [
+            "Ready classification: total=2, executable=1, human-gated=0, "
+            "epics=0, dependency-blocked=0, malformed=1",
+            "Ready issue #10 has invalid dependencies: "
+            "depends-on declarations must each match 'depends-on: #N'; skipped",
+        ],
+        "claim_status": "not-requested",
+        "ready_classification": ready_counts(2, 1, malformed=1),
+    }
 
 
 def test_batch_reports_one_aggregate_for_seven_ready_with_zero_executable(

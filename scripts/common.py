@@ -486,10 +486,12 @@ def acceptance_items(body: str) -> list[tuple[bool, str]]:
     items = re.findall(r"(?im)^\s*-\s*\[([ xX])\]\s*(\S.*)$", match.group(1))
     return [(mark.lower() == "x", text.strip()) for mark, text in items]
 
-
 def dependencies(body: str) -> list[int]:
-    return sorted({int(value) for value in re.findall(r"(?im)^\s*depends-on:\s*#(\d+)\s*$", body or "")})
-
+    declarations = [line for line in (body or "").splitlines() if re.match(r"(?i)^\s*depends-on\b", line)]
+    matches = [re.fullmatch(r"depends-on: #([1-9]\d*)", line) for line in declarations]
+    if any(match is None for match in matches):
+        raise KernelError("depends-on declarations must each match 'depends-on: #N'")
+    return sorted({int(match.group(1)) for match in matches if match is not None})
 
 def contract_errors(record: dict[str, Any]) -> list[str]:
     errors: list[str] = []
@@ -500,10 +502,13 @@ def contract_errors(record: dict[str, Any]) -> list[str]:
         parse_touches(str(record.get("body") or ""))
     except KernelError as exc:
         errors.append(str(exc))
+    try:
+        dependencies(str(record.get("body") or ""))
+    except KernelError as exc:
+        errors.append(str(exc))
     if record.get("state") != "OPEN":
         errors.append("issue is not open")
     return errors
-
 
 def unresolved_dependencies(record: dict[str, Any], *, cwd: str | Path | None = None) -> list[int]:
     unresolved: list[int] = []
@@ -511,7 +516,6 @@ def unresolved_dependencies(record: dict[str, Any], *, cwd: str | Path | None = 
         if issue(number, cwd=cwd).get("state") != "CLOSED":
             unresolved.append(number)
     return unresolved
-
 
 def ensure_label(
     name: str,
@@ -617,7 +621,6 @@ def _project_card_snapshot(
         raise KernelError("Project Board item inventory is malformed")
     if page_info.get("hasNextPage") is not False:
         raise KernelError("Project Board item inventory is truncated")
-
     matches: list[dict[str, Any]] = []
     for item in nodes:
         item_project = item.get("project") if isinstance(item, dict) else None
@@ -630,9 +633,10 @@ def _project_card_snapshot(
             raise KernelError("Project Board item inventory is malformed")
         if item_project["id"] == project_id:
             matches.append(item)
+    if not matches:
+        raise KernelError(f"issue #{number} is not a member of the linked Project Board")
     if len(matches) != 1:
         raise KernelError(f"issue #{number} Project Board card is ambiguous")
-
     status_field = project_node.get("field") if isinstance(project_node, dict) else None
     return project_id, matches[0], status_field if isinstance(status_field, dict) else None
 
