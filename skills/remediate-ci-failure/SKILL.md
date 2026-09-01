@@ -1,20 +1,21 @@
 ---
 name: remediate-ci-failure
-description: Repair stale or failing exact-head local verification on an authored PR.
+description: Repair a failing exact-head aru-governed-pr server check on an authored PR.
 ---
 
-# Remediate Local Verification
+# Remediate governed verification
 
 1. Confirm the PR head and that you own the implementation branch.
-2. Read the PR `## Verification` section and identify the stale, malformed, or
-   prohibited focused command entry.
-3. Re-run only the focused local verification needed for the current head.
-4. Apply the smallest fix inside the existing claimed worktree and
-   `touches:` budget.
-5. Commit and push if code changed, then refresh the PR-body evidence with
-   `create_pr.py --refresh-verification <PR> --body-file <file>`.
-6. Re-read the new head and wait for fresh exact-head local verification and a
-   fresh verdict from the one assigned external or distinct coding-agent
-   reviewer.
+2. Read the complete failing `aru-governed-pr` check logs. Identify whether
+   `.aru/verify.sh`, the actual-diff `touches:` check, or workflow setup failed.
+3. Reproduce `.aru/verify.sh` locally when useful, but treat that run as
+   preflight or audit evidence only; the exact-head server result is authority.
+4. Apply the smallest fix inside the existing claimed worktree and `touches:`
+   budget. Change `.aru/verify.sh` only when the consumer's required command is
+   itself wrong or incomplete.
+5. Commit and push. The workflow must run again on the new exact head.
+6. Wait for the fresh server check and, for a Tier 2-3 change, a fresh verdict
+   from the one assigned external or distinct coding-agent reviewer.
 
-Never treat stale or broad verification text as current-head evidence.
+Never dismiss a failing check, weaken `touches:`, or replace a risk-relevant
+consumer check merely to obtain green status.

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import copy
-import subprocess
 
 import claim_issue
 import create_pr
-import local_verification
 import merge_pr
+import merge_state
 import triage_backlog
 
 
@@ -78,6 +77,7 @@ def traverse(monkeypatch, number: int) -> dict:
 
     monkeypatch.setattr(claim_issue, "issue", current_issue)
     monkeypatch.setattr(claim_issue, "unresolved_dependencies", lambda _record: [])
+    monkeypatch.setattr(claim_issue, "other_active_claims", lambda *_args: [])
     monkeypatch.setattr(claim_issue, "ensure_label", lambda *_args, **_kwargs: None)
 
     def claim_command(argv, **_kwargs):
@@ -92,19 +92,17 @@ def traverse(monkeypatch, number: int) -> dict:
     monkeypatch.setattr(create_pr, "issue", current_issue)
     monkeypatch.setattr(create_pr, "current_branch", lambda: f"feat/issue-{number}-tiny")
     monkeypatch.setattr(create_pr, "require_published_head", lambda _branch: "a" * 40)
+    monkeypatch.setattr(create_pr, "local_changed_paths", lambda: ["src/auth/session.py"])
     monkeypatch.setattr(create_pr, "ensure_label", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(create_pr, "run", lambda _argv: None)
-    monkeypatch.setattr(
-        local_verification,
-        "run",
-        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, "", ""),
-    )
     reviewer = "coderabbit"
 
     def pr_snapshot(_argv):
         return {
             "number": number + 100,
             "url": f"https://example/pr/{number + 100}",
+            "state": "OPEN",
+            "createdAt": "2026-09-01T12:00:00+00:00",
             "headRefOid": "a" * 40,
             "labels": [{"name": "review:" + reviewer}],
         }
@@ -135,12 +133,19 @@ def traverse(monkeypatch, number: int) -> dict:
         "headRefOid": "a" * 40,
         "headRefName": f"feat/issue-{number}-tiny",
         "baseRefName": "main",
+        "baseRefOid": "b" * 40,
+        "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
         "labels": [{"name": "review:" + reviewer}],
         "statusCheckRollup": [{"name": reviewer, "status": "COMPLETED", "conclusion": "SUCCESS"}],
     }
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: copy.deepcopy(state["pr"]))
-    monkeypatch.setattr(merge_pr, "issue", current_issue)
+    monkeypatch.setattr(
+        merge_pr,
+        "pull_changed_paths",
+        lambda _number: ["app.py", "tests/test_app.py"],
+    )
+    monkeypatch.setattr(merge_state, "issue", current_issue)
     monkeypatch.setattr(
         merge_pr,
         "ci_verdict",
@@ -148,18 +153,25 @@ def traverse(monkeypatch, number: int) -> dict:
     )
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [])
     monkeypatch.setattr(merge_pr, "exact_head_review", lambda *_args: True)
-    monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: ("b" * 40, 0))
+    monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: "b" * 40)
+    monkeypatch.setattr(
+        merge_pr,
+        "merge_queue_snapshot",
+        lambda *_args: {"configured": False, "entry": None, "auto_merge": None},
+    )
 
     def merge_command(_argv):
+        state["pr"]["state"] = "MERGED"
         state["pr"]["mergedAt"] = "now"
         state["pr"]["mergeCommit"] = {"oid": "c" * 40}
 
     monkeypatch.setattr(merge_pr, "run", merge_command)
 
-    def close_out(numbers):
+    def close_out(numbers, _changed_paths):
         assert numbers == [number]
         move_status(number, "Done")
         state["issue"]["state"] = "CLOSED"
+        return [{"issue": number}]
 
     monkeypatch.setattr(merge_pr, "close_out", close_out)
     result = merge_pr.merge(number + 100, "a" * 40)

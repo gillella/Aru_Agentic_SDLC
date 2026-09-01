@@ -78,6 +78,7 @@ def _mock_claim_context(monkeypatch, snapshots, status="Ready"):
     monkeypatch.setattr(claim_issue, "contract_errors", lambda _rec: [])
     monkeypatch.setattr(claim_issue, "unresolved_dependencies", lambda _rec: [])
     monkeypatch.setattr(claim_issue, "ensure_label", lambda *_a, **_kw: None)
+    monkeypatch.setattr(claim_issue, "other_active_claims", lambda *_args: [])
 
 
 @pytest.mark.parametrize("race", [False, True])
@@ -85,12 +86,22 @@ def test_claim_settlement_and_race_rollback(monkeypatch, race):
     snapshots = [
         {"number": 7, "labels": [], "state": "OPEN"},
         {"number": 7, "labels": [{"name": "agent:codex-1"}] + ([{"name": "agent:codex-2"}] if race else []), "state": "OPEN"},
-        {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"},
+        ({"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"}
+         if race else {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"}),
+        ({"number": 7, "labels": [{"name": "agent:codex-2"}], "state": "OPEN"}
+         if race else {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"}),
     ]
-    _mock_claim_context(monkeypatch, snapshots, status=["Ready", "In Progress"])
+    statuses_live = ["Ready", "Ready"] if race else ["Ready", "Ready", "In Progress"]
+    _mock_claim_context(monkeypatch, snapshots, status=statuses_live)
     commands, statuses = [], []
     monkeypatch.setattr(claim_issue, "run", lambda argv, **_kwargs: commands.append(argv))
-    monkeypatch.setattr(claim_issue, "set_status", lambda number, status: statuses.append((number, status)))
+
+    def transition(number, status, **kwargs):
+        if kwargs.get("pre_mutation_check"):
+            kwargs["pre_mutation_check"]()
+        statuses.append((number, status, kwargs.get("expected_current")))
+
+    monkeypatch.setattr(claim_issue, "set_status", transition)
 
     if race:
         with pytest.raises(claim_issue.KernelError, match="race"):
@@ -99,13 +110,14 @@ def test_claim_settlement_and_race_rollback(monkeypatch, race):
     else:
         result = claim_issue.claim(7, "codex-1")
         assert result["status"] == "In Progress"
-        assert statuses == [(7, "In Progress")]
+        assert statuses == [(7, "In Progress", "Ready")]
         assert "--add-label" in commands[0]
 
 
 def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys):
     snapshots = [
         {"number": 7, "labels": [], "state": "OPEN"},
+        {"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"},
         {"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"},
     ]
     _mock_claim_context(monkeypatch, snapshots, status="Ready")
@@ -122,15 +134,118 @@ def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys):
         claim_issue.main()
     assert commands == [
         ["gh", "issue", "edit", "7", "--add-label", "agent:codex-1", "--add-assignee", "@me"],
-        ["gh", "issue", "edit", "7", "--remove-label", "agent:codex-1", "--remove-assignee", "@me"],
+        ["gh", "issue", "edit", "7", "--remove-label", "agent:codex-1"],
     ]
-    assert capsys.readouterr().err.endswith(
-        "claim_issue.py: error: GitHub GraphQL quota exhausted; stop and wait for the budget "
-        "to reset; original claim failure: claim race detected; no exclusive winner\n"
-    )
+    error = capsys.readouterr().err
+    assert "GitHub GraphQL quota exhausted; stop and wait for the budget to reset" in error
+    assert "original claim failure: claim race detected; no exclusive winner" in error
 
 
 @pytest.mark.parametrize("agent", ["A", "contains space", "x", "../agent"])
 def test_agent_ids_are_bounded(agent):
     with pytest.raises(claim_issue.KernelError):
         claim_issue.safe_agent(agent)
+
+
+def test_release_requires_in_progress_and_no_linked_open_pr(monkeypatch):
+    record = {
+        "number": 7,
+        "labels": [{"name": "agent:codex-1"}, {"name": "status:in-progress"}],
+    }
+    monkeypatch.setattr(claim_issue, "issue", lambda _number: record)
+    monkeypatch.setattr(claim_issue, "status_of", lambda _record: "In Progress")
+    monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: [44])
+    monkeypatch.setattr(
+        claim_issue,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("blocked release must not mutate")
+        ),
+    )
+
+    with pytest.raises(claim_issue.KernelError, match=r"linked open pull requests: \[44\]"):
+        claim_issue.release(7, "codex-1")
+
+
+def test_closed_stale_active_claim_blocks_a_second_claim(monkeypatch):
+    monkeypatch.setattr(claim_issue, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(
+        claim_issue,
+        "gh_paginated",
+        lambda _endpoint: [
+            {
+                "number": 3,
+                "state": "closed",
+                "labels": [
+                    {"name": "agent:codex-1"},
+                    {"name": "status:in-progress"},
+                ],
+            },
+            {
+                "number": 4,
+                "state": "closed",
+                "labels": [
+                    {"name": "agent:codex-1"},
+                    {"name": "status:done"},
+                ],
+            },
+        ],
+    )
+    assert claim_issue.other_active_claims(7, "codex-1") == [3]
+
+
+def test_release_rolls_back_status_when_claim_removal_fails(monkeypatch):
+    record = {
+        "number": 7,
+        "labels": [{"name": "agent:codex-1"}, {"name": "status:in-progress"}],
+    }
+    statuses = []
+    monkeypatch.setattr(claim_issue, "issue", lambda _number: record)
+    monkeypatch.setattr(claim_issue, "status_of", lambda _record: "In Progress")
+    monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: [])
+    monkeypatch.setattr(
+        claim_issue,
+        "set_status",
+        lambda number, status, *, expected_current, **_kwargs: statuses.append(
+            (number, status, expected_current)
+        ),
+    )
+    monkeypatch.setattr(
+        claim_issue,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            claim_issue.KernelError("claim removal failed")
+        ),
+    )
+
+    with pytest.raises(claim_issue.KernelError, match="claim removal failed"):
+        claim_issue.release(7, "codex-1")
+    assert statuses == [
+        (7, "Ready", "In Progress"),
+        (7, "In Progress", "Ready"),
+    ]
+
+
+def test_linked_open_pr_inventory_is_complete_and_bounded(monkeypatch):
+    monkeypatch.setattr(claim_issue, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(
+        claim_issue,
+        "gh_json",
+        lambda *_args, **_kwargs: {
+            "data": {
+                "repository": {
+                    "issue": {
+                        "closedByPullRequestsReferences": {
+                            "nodes": [
+                                {"number": 5, "state": "CLOSED"},
+                                {"number": 7, "state": "OPEN"},
+                            ],
+                            "pageInfo": {"hasNextPage": False},
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    assert claim_issue.linked_open_prs(3) == [7]

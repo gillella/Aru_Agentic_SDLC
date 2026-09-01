@@ -10,6 +10,7 @@ from claim_issue import safe_agent
 from common import (
     AGENT_PREFIX,
     KernelError,
+    default_branch_name,
     git,
     issue,
     label_names,
@@ -43,7 +44,8 @@ def create_worktree(number: int, kind: str, agent: str) -> dict[str, str]:
     existing = git(["branch", "--list", branch], cwd=root)
     if existing:
         raise KernelError(f"branch already exists: {branch}")
-    remote_main = run(
+    default_branch = default_branch_name(cwd=root)
+    remote_default = run(
         [
             "git",
             "-c",
@@ -51,12 +53,12 @@ def create_worktree(number: int, kind: str, agent: str) -> dict[str, str]:
             "show-ref",
             "--verify",
             "--quiet",
-            "refs/remotes/origin/main",
+            f"refs/remotes/origin/{default_branch}",
         ],
         cwd=root,
         check=False,
     )
-    base = "origin/main" if remote_main.returncode == 0 else "main"
+    base = f"origin/{default_branch}" if remote_default.returncode == 0 else default_branch
     path.parent.mkdir(parents=True, exist_ok=True)
     git(["worktree", "add", "-b", branch, str(path), base], cwd=root)
     return {"branch": branch, "path": str(path), "base": base}
