@@ -37,4 +37,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: python .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
+          ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
+          --expected-head "$ARU_EXPECTED_HEAD"

@@ -857,7 +857,9 @@ changes the exact head and makes all prior attestations historical immediately.
 
 The expected SHA prevents a time-of-check/time-of-use race. If another commit is
 pushed after review, the merge command refuses because the current PR head no
-longer matches the approved SHA.
+longer matches the approved SHA. The governed PR workflow applies the same rule
+to actual-diff `touches:` enforcement by passing the pull-request event head as
+`--expected-head`; the checked-out and remotely inspected revisions must match.
 
 ## 14. Failure and recovery
 

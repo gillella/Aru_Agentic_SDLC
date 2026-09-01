@@ -84,3 +84,25 @@ def test_installer_preserves_unmanaged_global_guidance(tmp_path):
     current = target.read_text(encoding="utf-8")
     assert current.startswith("# My instructions\n\nKeep this.\n")
     assert current.count("<!-- BEGIN ARU_SDLC_GOVERNANCE -->") == 1
+
+
+def test_installer_refuses_symlinked_global_guidance(tmp_path):
+    target = tmp_path / ".codex" / "AGENTS.md"
+    target.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("do not overwrite\n", encoding="utf-8")
+    target.symlink_to(outside)
+
+    result = subprocess.run(
+        ["bash", str(INSTALLER)],
+        cwd=ROOT,
+        env={**os.environ, "HOME": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "refusing symlinked global guidance path" in result.stderr
+    assert outside.read_text(encoding="utf-8") == "do not overwrite\n"
+    assert target.is_symlink()

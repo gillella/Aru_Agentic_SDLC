@@ -37,6 +37,10 @@ install_global_guidance() {
   local temporary
 
   target_dir="$(dirname "${target}")"
+  if [[ -L "${target_dir}" || -L "${target}" ]]; then
+    echo "error: refusing symlinked global guidance path ${target}" >&2
+    exit 1
+  fi
   mkdir -p "${target_dir}"
 
   if [[ ! -e "${target}" ]]; then

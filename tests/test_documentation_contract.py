@@ -58,3 +58,13 @@ def test_version_and_layer_truth_are_explicit():
     assert "## v0.2.8" in changelog
     assert all(name in contract for name in ("Kernel", "External Driver", "Consumer policy"))
     assert "Tier 0-1 changes do not wait for an authoritative review" in contract
+
+
+def test_governed_workflows_pin_touches_check_to_event_head():
+    for path in (
+        ROOT / ".github" / "workflows" / "governed-pr.yml",
+        ROOT / "templates" / "governed-pr.yml",
+    ):
+        workflow = text(path)
+        assert "ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}" in workflow
+        assert '--expected-head "$ARU_EXPECTED_HEAD"' in workflow
