@@ -61,6 +61,7 @@ def test_kernel_workflow_is_read_only_exact_head_and_immutable():
     }
     job = workflow["jobs"]["governed-pr"]
     assert job["name"] == "aru-governed-pr"
+    assert job["runs-on"] == ["self-hosted", "macOS", "ARM64", "aru-ci"]
     checkout = job["steps"][0]
     assert checkout["with"]["ref"] == (
         "${{ github.event.pull_request.head.sha || github.sha }}"
@@ -71,6 +72,10 @@ def test_kernel_workflow_is_read_only_exact_head_and_immutable():
     raw = path.read_text(encoding="utf-8")
     assert "merge_group:" in raw
     assert "github.event_name == 'pull_request'" in raw
+    assert "pull_request_target" not in raw
+    assert "ubuntu-latest" not in raw
+    assert "actions/upload-artifact" not in raw
+    assert "cache:" not in raw
 
 
 def test_scaffold_creates_only_minimal_governance(tmp_path):
@@ -94,6 +99,7 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
         encoding="utf-8"
     )
     assert "name: aru-governed-pr" in workflow
+    assert "runs-on: [self-hosted, macOS, ARM64, aru-ci]" in workflow
     assert "hooks/enforce_touches.py --pr" in workflow
     assert (target / ".aru/verify.sh").stat().st_mode & 0o111
     assert "class TouchesError" in (target / ".aru/lib/touches.py").read_text(

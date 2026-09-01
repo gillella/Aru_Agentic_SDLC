@@ -328,7 +328,9 @@ python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
 With `--github`, the helper creates the GitHub repository, labels, a linked
 Project, the five status choices, and a minimal default-branch ruleset with no
 configured bypass actors that requires `aru-governed-pr` from GitHub Actions.
-Omit `--private` only when the repository should be public.
+The generated workflow targets only repository-level Apple-silicon macOS
+runners labeled `aru-ci`; register at least one before admitting work. Omit
+`--private` only when the repository should be public.
 
 ### Inspect before declaring adoption complete
 
@@ -363,7 +365,8 @@ feature, not a migration engine.
    verification policy.
 4. Merge only the rules and hooks the project can actually support.
 5. Customize `.aru/verify.sh`, enable `aru-governed-pr` in branch rules, and
-   validate the adoption on a pull request.
+   register an `aru-ci` self-hosted runner before validating adoption on a pull
+   request.
 
 Generate the comparison scaffold:
 
@@ -381,7 +384,7 @@ Reconcile these surfaces deliberately:
 | `AGENTS.md` | Preserve stricter local safety and product rules |
 | Issue template | Keep required acceptance criteria and `touches:` input |
 | PR template | Keep `Closes #N`, the server-authority explanation, and surface-change evidence |
-| `.github/workflows/governed-pr.yml` | Keep exact-head checkout, `.aru/verify.sh`, and actual-diff `touches:` enforcement |
+| `.github/workflows/governed-pr.yml` | Keep `[self-hosted, macOS, ARM64, aru-ci]`, exact-head checkout, `.aru/verify.sh`, and actual-diff `touches:` enforcement |
 | `.aru/verify.sh` | Replace the fail-closed placeholder with risk-appropriate consumer commands |
 | `.aru/lib/touches.py` | Retain the shared parser used by the server and local hook |
 | `.gitignore` | Merge entries; do not overwrite project-specific ignores |
@@ -428,11 +431,22 @@ the update.
 ### Governed verification and risk tiers
 
 Bootstrap installs a consumer-owned `aru-governed-pr` workflow. On every PR
-head it runs the repository's `.aru/verify.sh` and checks the linked issue's
-`touches:` boundary against the actual diff. That server result is merge
-authority. Running the same commands locally is useful preflight or audit
-evidence, but it is optional. The workflow also handles `merge_group` so a
-GitHub merge queue reruns `.aru/verify.sh` on the combined queue revision.
+head GitHub Actions dispatches to `[self-hosted, macOS, ARM64, aru-ci]`, runs
+the repository's `.aru/verify.sh` on the operator-owned Mac, and checks the
+linked issue's `touches:` boundary against the actual diff. That exact-head
+server result is merge authority. Running the same commands outside Actions is
+useful preflight or audit evidence, but it is optional. The workflow also
+handles `merge_group` so a GitHub merge queue reruns `.aru/verify.sh` on the
+combined queue revision.
+
+Required Kernel jobs never use GitHub-hosted runner labels and never fall back
+when the self-hosted pool is offline. They do not upload artifacts or use
+Actions caches by default. This avoids billed runner minutes and optional
+storage consumption while retaining GitHub's orchestration, audit trail, and
+check identity. The operator owns runner patching, availability, electricity,
+disk capacity, and physical security. Use repository-level runners only for
+trusted governed repositories; keep workflow permissions read-only and never
+use `pull_request_target` for these persistent machines.
 
 Keep `.aru/verify.sh` proportional to consumer risk:
 
@@ -1020,6 +1034,9 @@ true.
 
 - [ ] `.aru/verify.sh` contains risk-appropriate consumer commands.
 - [ ] `aru-governed-pr` runs on every PR head and is required by branch rules.
+- [ ] At least one repository-level macOS arm64 runner labeled `aru-ci` is
+      online; no required job uses a GitHub-hosted label, artifact upload, or
+      Actions cache.
 - [ ] Before Tier 2-3 work is admitted, at least one external reviewer is
       registered or one distinct coding-agent capacity probe succeeds.
 - [ ] The external Driver implements the canonical single-event reviewer

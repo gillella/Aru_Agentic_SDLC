@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Required governed GitHub Actions jobs to run only on repository-level
+  Apple-silicon macOS self-hosted runners labeled `aru-ci`, with no
+  GitHub-hosted fallback.
+- Kept exact-head Actions verification as merge authority while avoiding
+  GitHub-hosted runner minutes and default artifact/cache storage; documented
+  that runner availability, maintenance, electricity, disk, and security are
+  operator-owned.
 - Installed a consumer-owned `aru-governed-pr` workflow that checks out the
   exact PR head, runs `.aru/verify.sh`, and enforces the linked issue's
   `touches:` boundary against the actual diff; merge queues rerun verification

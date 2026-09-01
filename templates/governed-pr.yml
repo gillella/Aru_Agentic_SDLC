@@ -19,7 +19,7 @@ jobs:
   governed-pr:
     name: aru-governed-pr
     if: ${{ github.event_name == 'merge_group' || !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, aru-ci]
     timeout-minutes: 20
     steps:
       - name: Check out the exact pull-request head

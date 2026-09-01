@@ -19,3 +19,8 @@ An external Driver must cancel or defer any scheduled continuation whose PR
 head or authority cannot be reread. Consumer deployment and incident policy
 remains consumer-owned; degraded Kernel state never authorizes production
 action.
+
+If every `aru-ci` self-hosted Mac is offline, leave `aru-governed-pr` queued and
+restore runner availability. Do not change the workflow to a GitHub-hosted
+label, waive the required check, or treat an ad hoc terminal run as server
+evidence.
