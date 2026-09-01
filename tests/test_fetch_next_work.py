@@ -82,6 +82,7 @@ def test_select_preserves_pr_precedence_over_ready_inventory(
         lambda _agent: [
             {
                 "number": 500,
+                "mergeStateStatus": "CLEAN",
                 "labels": [{"name": label} for label in labels],
             }
         ],
@@ -254,7 +255,7 @@ def test_select_wait_path_does_not_call_review_thread_graphql(monkeypatch):
     monkeypatch.setattr(
         fetch_next_work,
         "authored_prs",
-        lambda _agent: [{"number": 500, "labels": []}],
+        lambda _agent: [{"number": 500, "mergeStateStatus": "CLEAN", "labels": []}],
     )
 
     def fake_gh_json(args, **_kwargs):
@@ -653,3 +654,138 @@ def test_batch_ready_candidates_respect_active_lane_reserved_paths(monkeypatch):
         {"agent": "agent-b", "work": {"type": "issue", "issue": 11, "title": "issue 11"}},
         {"agent": "agent-c", "work": {"type": "issue", "issue": 12, "title": "issue 12"}},
     ]
+
+
+def test_batch_rest_shaped_active_pr_queries_live_merge_state_and_returns_conflict(monkeypatch):
+    calls = []
+    head_sha = "a" * 40
+    monkeypatch.setattr(fetch_next_work, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(
+        fetch_next_work,
+        "open_prs",
+        lambda: [
+            {
+                "number": 538,
+                "title": "Fix direct control plane",
+                "body": "Closes #80",
+                "labels": [{"name": "author:agent-a"}, {"name": "review:sourcery"}],
+            },
+            {
+                "number": 539,
+                "title": "Unrelated active PR",
+                "body": "Closes #90",
+                "labels": [{"name": "author:agent-c"}],
+            },
+        ],
+    )
+    monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _number: False)
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ci_verdict",
+        lambda _number: {"state": "failure", "head": head_sha, "checks": []},
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [ready_issue(10, "priority:p0", body="touches: src/free.py")],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "issue",
+        lambda number: {
+            "number": number,
+            "title": f"issue {number}",
+            "body": "touches: docs/reserved.md",
+            "labels": [{"name": "status:in-progress"}],
+        },
+    )
+
+    def fake_gh_json(args, **_kwargs):
+        calls.append(list(args))
+        if args == ["pr", "view", "538", "--json", "number,headRefOid,state,mergeStateStatus"]:
+            return {
+                "number": 538,
+                "headRefOid": head_sha,
+                "state": "OPEN",
+                "mergeStateStatus": "DIRTY",
+            }
+        raise AssertionError(f"unexpected gh_json call: {args}")
+
+    monkeypatch.setattr(fetch_next_work, "gh_json", fake_gh_json)
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert result["lanes"] == [
+        {
+            "agent": "agent-a",
+            "work": {
+                "type": "conflict",
+                "pr": 538,
+                "head": head_sha,
+                "reason": "PR merge state is DIRTY",
+            },
+        },
+        {"agent": "agent-b", "work": {"type": "issue", "issue": 10, "title": "issue 10"}},
+    ]
+    assert calls == [["pr", "view", "538", "--json", "number,headRefOid,state,mergeStateStatus"]]
+
+
+@pytest.mark.parametrize(
+    "bad_record",
+    [
+        {"number": 999, "headRefOid": "a" * 40, "state": "OPEN", "mergeStateStatus": "DIRTY"},
+        {"number": 538, "headRefOid": "b" * 40, "state": "OPEN", "mergeStateStatus": "DIRTY"},
+        {"number": 538, "headRefOid": "short", "state": "OPEN", "mergeStateStatus": "DIRTY"},
+        {"number": 538, "headRefOid": "a" * 40, "state": "CLOSED", "mergeStateStatus": "DIRTY"},
+        {"number": 538, "headRefOid": "a" * 40, "state": "OPEN", "mergeStateStatus": None},
+        {"number": 538, "headRefOid": "a" * 40, "state": "OPEN", "mergeStateStatus": ""},
+        {"number": 538, "headRefOid": "a" * 40, "state": "OPEN", "mergeStateStatus": "dirty"},
+        {"number": 538, "headRefOid": "a" * 40, "state": "OPEN", "mergeStateStatus": "BROKEN"},
+        [],
+    ],
+)
+def test_batch_live_merge_state_lookup_fails_closed_on_malformed_response(monkeypatch, bad_record):
+    head_sha = "a" * 40
+    monkeypatch.setattr(fetch_next_work, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(
+        fetch_next_work,
+        "open_prs",
+        lambda: [
+            {
+                "number": 538,
+                "body": "Closes #80",
+                "labels": [{"name": "author:agent-a"}, {"name": "review:sourcery"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _number: False)
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ci_verdict",
+        lambda _number: {"state": "failure", "head": head_sha, "checks": []},
+    )
+    monkeypatch.setattr(fetch_next_work, "gh_json", lambda _args, **_kw: bad_record)
+
+    with pytest.raises(
+        common.KernelError, match=r"GitHub returned malformed pull request reread for #538"
+    ):
+        fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+
+@pytest.mark.parametrize(
+    "valid_status",
+    ["BEHIND", "BLOCKED", "CLEAN", "DIRTY", "DRAFT", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"],
+)
+def test_pr_live_merge_state_accepts_valid_statuses(monkeypatch, valid_status):
+    head_sha = "a" * 40
+    monkeypatch.setattr(
+        fetch_next_work,
+        "gh_json",
+        lambda _args, **_kw: {
+            "number": 538,
+            "headRefOid": head_sha,
+            "state": "OPEN",
+            "mergeStateStatus": valid_status,
+        },
+    )
+    assert fetch_next_work._pr_live_merge_state(538, head_sha) == valid_status

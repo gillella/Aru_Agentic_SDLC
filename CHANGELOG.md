@@ -8,6 +8,10 @@
 - Made `fetch_next_work.py` return an actionable conflict remediation work
   result carrying PR number, head, and reason when an authored open PR has
   `mergeStateStatus: DIRTY`.
+- Made `fetch_next_work.py` obtain and validate live current-head
+  `mergeStateStatus` via a narrow repository read when active open PR records
+  lack merge state, classifying DIRTY conflicts before evaluating CI failure
+  while preserving snapshot-based reservations.
 - Updated `address-pr-feedback` and operational docs to instruct merging
   `origin/main` into the feature branch (never rebase/force push), rerunning
   focused verification, and refreshing exact-head evidence on DIRTY conflicts.

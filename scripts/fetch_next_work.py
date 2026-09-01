@@ -31,6 +31,16 @@ from merge_pr import evaluate
 
 MAX_DEPENDENCY_REFERENCES = 100
 _RECOVERY_CANDIDATE_PATTERN = r"(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\s*$"
+_MERGE_STATE_STATUSES = {
+    "BEHIND",
+    "BLOCKED",
+    "CLEAN",
+    "DIRTY",
+    "DRAFT",
+    "HAS_HOOKS",
+    "UNKNOWN",
+    "UNSTABLE",
+}
 
 
 class _RecoveryDriftError(KernelError):
@@ -38,20 +48,8 @@ class _RecoveryDriftError(KernelError):
 
 
 def authored_prs(agent: str) -> list[dict]:
-    data = gh_json(
-        [
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--search",
-            f"label:author:{agent}",
-            "--limit",
-            "100",
-            "--json",
-            "number,title,headRefOid,labels,isDraft,mergeStateStatus",
-        ]
-    )
+    query = ["pr", "list", "--state", "open", "--search", f"label:author:{agent}", "--limit", "100"]
+    data = gh_json([*query, "--json", "number,title,headRefOid,labels,isDraft,mergeStateStatus"])
     if not isinstance(data, list):
         raise KernelError("GitHub returned malformed pull-request inventory")
     return sorted(data, key=lambda item: int(item["number"]))
@@ -69,20 +67,8 @@ def ready_issues() -> list[dict]:
 
 
 def backlog_issues() -> list[dict]:
-    records = gh_json(
-        [
-            "issue",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            "200",
-            "--label",
-            "status:backlog",
-            "--json",
-            "number,title,body,state,labels,assignees,url",
-        ]
-    )
+    query = ["issue", "list", "--state", "open", "--limit", "200", "--label", "status:backlog"]
+    records = gh_json([*query, "--json", "number,title,body,state,labels,assignees,url"])
     if not isinstance(records, list) or any(
         not isinstance(record, dict)
         or not isinstance(record.get("number"), int)
@@ -179,6 +165,21 @@ def has_review_comments(number: int) -> bool:
     return bool(comments)
 
 
+def _pr_live_merge_state(number: int, head: str) -> str:
+    record = gh_json(
+        ["pr", "view", str(number), "--json", "number,headRefOid,state,mergeStateStatus"]
+    )
+    if (
+        not isinstance(record, dict)
+        or record.get("number") != number
+        or record.get("headRefOid") != head
+        or str(record.get("state") or "").upper() != "OPEN"
+        or record.get("mergeStateStatus") not in _MERGE_STATE_STATUSES
+    ):
+        raise KernelError(f"GitHub returned malformed pull request reread for #{number}")
+    return str(record["mergeStateStatus"])
+
+
 def _open_pr_work(pr: dict) -> dict[str, object]:
     number = int(pr["number"])
     if has_review_comments(number):
@@ -186,30 +187,36 @@ def _open_pr_work(pr: dict) -> dict[str, object]:
         if feedback:
             return {"type": "feedback", "pr": number, "items": feedback}
     ci = ci_verdict(number)
-    if pr.get("mergeStateStatus") == "DIRTY":
+    head = str(ci["head"])
+    merge_state = pr.get("mergeStateStatus")
+    if not isinstance(merge_state, str) or not merge_state:
+        merge_state = _pr_live_merge_state(number, head)
+    elif merge_state not in _MERGE_STATE_STATUSES:
+        raise KernelError(f"GitHub returned malformed pull request snapshot for #{number}")
+    if merge_state == "DIRTY":
         return {
             "type": "conflict",
             "pr": number,
-            "head": ci["head"],
+            "head": head,
             "reason": "PR merge state is DIRTY",
         }
     if ci["state"] == "failure":
-        return {"type": "ci", "pr": number, "head": ci["head"], "checks": ci["checks"]}
+        return {"type": "ci", "pr": number, "head": head, "checks": ci["checks"]}
     reviews = [name for name in label_names(pr) if name.startswith("review:")]
     if ci["state"] == "success" and len(reviews) == 1:
         try:
-            evaluate(number, str(ci["head"]))
+            evaluate(number, head)
         except KernelError as exc:
             if str(exc) == "PR merge state is DIRTY":
                 return {
                     "type": "conflict",
                     "pr": number,
-                    "head": ci["head"],
+                    "head": head,
                     "reason": str(exc),
                 }
-            return {"type": "wait", "pr": number, "head": ci["head"], "reason": str(exc)}
-        return {"type": "merge", "pr": number, "head": ci["head"]}
-    return {"type": "wait", "pr": number, "head": ci["head"], "ci": ci["state"]}
+            return {"type": "wait", "pr": number, "head": head, "reason": str(exc)}
+        return {"type": "merge", "pr": number, "head": head}
+    return {"type": "wait", "pr": number, "head": head, "ci": ci["state"]}
 
 
 def select(agent: str) -> dict[str, object]:
