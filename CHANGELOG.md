@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased
+## v1.0.0 - Governed, Risk-Proportional Delivery - 2026-09-01
+
+### Release summary
+
+- Promoted the existing GitHub-centered issue-to-safe-merge Kernel to its
+  stable v1 public contract without adding a release subsystem.
+- Since v0.2.8, exact-head self-hosted Actions is merge authority, review is
+  path-risk proportional, work selection is one read-only pick plus one claim,
+  and the installed integration contains exactly six skills.
+
+### Upgrade from v0.2.8
+
+Stage a fresh scaffold, reconcile `AGENTS.md`, `.github/`, `.aru/`, and
+`.gitignore`, configure the consumer verification script, register an
+Apple-silicon macOS `aru-ci` runner, and complete one governed pilot. Keep
+v0.2.8 as the rollback baseline; never move the v1.0.0 tag. Aru remains a
+governance Kernel, not a scheduler, release manager, or deploy platform.
+
+### Included changes
 
 - Required governed GitHub Actions jobs to run only on repository-level
   Apple-silicon macOS self-hosted runners labeled `aru-ci`, with no

@@ -3,8 +3,8 @@
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
 
-**Project status: Complete and ready for consumer adoption — v0.2.8
-(2026-08-31).** Future kernel improvements should originate in evidence from
+**Project status: Stable and ready for consumer adoption — v1.0.0
+(2026-09-01).** Future kernel improvements should originate in evidence from
 real governed consumer projects.
 
 Aru helps a developer or coding agent answer four questions before changing a
@@ -64,7 +64,7 @@ The source of truth stays deliberately small:
 
 ## Is it usable for another project?
 
-**Yes, with explicit prerequisites.** Version 0.2.8 can govern a new project or
+**Yes, with explicit prerequisites.** Version 1.0.0 can govern a new project or
 be migrated into an existing project when all of these are true:
 
 - Git, Python 3.11+, and an authenticated GitHub CLI are available.
@@ -85,7 +85,7 @@ install CodeRabbit, Sourcery, CodeAnt, or coding-agent providers, publish an
 initial default branch, or merge conflicting files into an existing repository.
 Those are deliberate operator-owned setup steps.
 
-> **Important:** v0.2.x installs only the six skills listed below. It has no
+> **Important:** v1.0.0 installs only the six skills listed below. It has no
 > command router or in-kernel loop; persistent continuation belongs to an
 > external Driver.
 
@@ -288,5 +288,8 @@ Read the **[complete developer use guide](docs/OPERATIONS.md)**. It covers:
 - recovery, rollback, and troubleshooting;
 - the boundary between Aru and the consumer project.
 
-The v0.2 feature freeze lasts through **2026-09-26**. During the freeze, the
-kernel accepts only security and correctness fixes.
+The v0.2 feature freeze remains in force through **2026-09-26**. Publishing
+v1.0.0 promotes the already-accepted minimal kernel contract; it does not admit
+new feature work during that interval. Compatible v1.x maintenance must retain
+the public interfaces in the Kernel contract. Breaking contract changes require
+a new major version.

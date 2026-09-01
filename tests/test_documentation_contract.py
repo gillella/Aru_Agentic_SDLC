@@ -54,9 +54,14 @@ def test_version_and_layer_truth_are_explicit():
     readme = text(ROOT / "README.md")
     changelog = text(ROOT / "CHANGELOG.md")
     contract = text(ROOT / "docs" / "KERNEL-CONTRACT.md")
+    enforcement = text(ROOT / "docs" / "ENFORCEMENT-REGISTER.md")
 
-    assert "v0.2.8" in readme
-    assert "## v0.2.8" in changelog
+    assert "**Project status: Stable and ready for consumer adoption — v1.0.0" in readme
+    assert "## v1.0.0 - Governed, Risk-Proportional Delivery" in changelog
+    assert "v1 public API" in contract
+    assert "Upgrade from v0.2.8" in changelog
+    assert "aru-governed-pr" in enforcement
+    assert "authenticated GitHub Actions App" in enforcement
     assert all(name in contract for name in ("Kernel", "External Driver", "Consumer policy"))
     assert "Tier 0-1 changes do not wait for an authoritative review" in contract
 

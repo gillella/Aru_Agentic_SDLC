@@ -24,3 +24,8 @@ Anything not listed here is guidance, not an authorization mechanism.
 External Driver timing and consumer risk policy are therefore coordination and
 product policy, respectively; neither is a second Kernel gate. Their boundary
 is defined once in `docs/KERNEL-CONTRACT.md`.
+
+For this repository, the live default-branch ruleset requires the
+`aru-governed-pr` context produced by the authenticated GitHub Actions App.
+The portable rule still cannot make `merge_pr.py` technically exclusive for a
+repository administrator; that stronger boundary remains consumer-owned.
