@@ -10,7 +10,8 @@
 | worktree isolation | first implementation edit | `create_branch.py` |
 | closure link | PR creation | `create_pr.py` |
 | policy-ordered current-head review authority plus configured-timeout refresh | Tier 2-3 review authority | `create_pr.py` |
-| exact-head consumer verification | merge | `aru-governed-pr`, `.aru/verify.sh`, `check_ci.py`, `merge_pr.py` |
+| exact-head consumer verification | merge | self-hosted `aru-governed-pr`, `.aru/verify.sh`, `check_ci.py`, `merge_pr.py` |
+| zero GitHub-hosted runner minutes | required verification dispatch | workflow/template `[self-hosted, macOS, ARM64, aru-ci]` labels and no fallback |
 | changed-path risk tier | whether authoritative review is required | `common.py`, `merge_pr.py` |
 | unresolved findings | merge | `fetch_pr_feedback.py`, `merge_pr.py` |
 | current-head external or coding-agent verdict | Tier 2-3 merge | `merge_pr.py` |

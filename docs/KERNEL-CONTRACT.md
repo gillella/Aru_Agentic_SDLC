@@ -23,8 +23,9 @@ presented as a universal Aru requirement.
 One open issue with a valid contract moves through `Backlog`, `Ready`,
 `In Progress`, `In Review`, and `Done`. It has one exclusive writer, one
 declared write boundary, one isolated worktree, one exact-current-head server
-verification check, risk-tiered independent review, and one governed mechanical
-merge through `scripts/merge_pr.py --expected-head`.
+verification check executed only by an operator-owned `aru-ci` self-hosted Mac,
+risk-tiered independent review, and one governed mechanical merge through
+`scripts/merge_pr.py --expected-head`.
 
 The issue contract is:
 
@@ -39,11 +40,14 @@ The issue contract is:
 3. Claim it before editing.
 4. Create and use one `.worktrees/<branch>` checkout.
 5. Make the smallest change inside `touches:`. Local focused checks are useful
-   preflight and audit evidence, but are not the merge authority.
+   preflight and audit evidence; the same local compute becomes merge authority
+   only when GitHub Actions dispatches the exact-head governed job to a
+   repository-level `[self-hosted, macOS, ARM64, aru-ci]` runner.
 6. Open a PR containing `Closes #N`. The consumer-owned `aru-governed-pr`
-   workflow checks out the exact PR head, runs the repository-defined
-   `.aru/verify.sh`, and validates `touches:` against the actual diff. A GitHub
-   merge queue reruns verification on its merge-group revision.
+   workflow checks out the exact PR head on that self-hosted pool, runs the
+   repository-defined `.aru/verify.sh`, and validates `touches:` against the
+   actual diff. It has no GitHub-hosted fallback. A GitHub merge queue reruns
+   verification on its merge-group revision.
 7. Require that exact-head server check and resolve every current-head finding.
    Tier 2-3 changes also require one assigned authoritative reviewer distinct
    from the author. A push invalidates earlier check and review evidence.
@@ -115,8 +119,26 @@ controls, but they do not rewrite the Kernel's path-derived tier. The Kernel
 requires at most one authoritative review and no serial review rounds.
 Deployment is never implied by merge.
 
+## Self-hosted verification budget and trust boundary
+
+GitHub Actions is the orchestration and check identity; operator-owned Macs
+supply the compute. Every required Kernel job targets exactly
+`[self-hosted, macOS, ARM64, aru-ci]`. A missing or offline runner leaves the
+check queued and blocks merge; it must never fall back to a GitHub-hosted
+runner. The default workflow does not upload artifacts or use Actions caches.
+Any storage-producing step is an explicit consumer policy choice.
+
+Runners are repository-level, maintained and patched by the operator, and used
+only for trusted governed repositories. Before checkout, every job rejects a
+cross-repository fork PR and proves that Python 3.11+, pip, and `gh` are on the
+runner. Workflows retain read-only permissions, never use
+`pull_request_target`, and do not expose deployment secrets. Machine
+availability, electricity, storage, operating-system maintenance, and physical
+security are operator-owned costs and responsibilities.
+
 The portable bootstrap ruleset has no configured bypass actors and requires
-the `aru-governed-pr` context from the GitHub Actions App. It does not make
+the `aru-governed-pr` context from the GitHub Actions App. That workflow is
+scaffolded for the dedicated self-hosted runner pool. It does not make
 `merge_pr.py` the only technically possible GitHub merge path, condition
 server-side review on a path tier, or pin the repository-owned workflow outside
 the repository. Helper-only merge is a Kernel process rule. Consumers needing

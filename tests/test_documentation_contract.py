@@ -69,3 +69,25 @@ def test_governed_workflows_pin_touches_check_to_event_head():
         workflow = text(path)
         assert "ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}" in workflow
         assert '--expected-head "$ARU_EXPECTED_HEAD"' in workflow
+
+
+def test_governed_workflows_use_only_budget_free_self_hosted_macs():
+    for path in (
+        ROOT / ".github" / "workflows" / "governed-pr.yml",
+        ROOT / "templates" / "governed-pr.yml",
+    ):
+        workflow = text(path)
+        assert "runs-on: [self-hosted, macOS, ARM64, aru-ci]" in workflow
+        assert "ubuntu-latest" not in workflow
+        assert "macos-latest" not in workflow
+        assert "windows-latest" not in workflow
+        assert "actions/upload-artifact" not in workflow
+        assert "actions/setup-python" not in workflow
+        assert "cache:" not in workflow
+        assert "pull_request_target" not in workflow
+        assert workflow.index("Validate self-hosted runner trust boundary") < workflow.index(
+            "Check out the exact pull-request head"
+        )
+        assert "Fork pull requests cannot execute" in workflow
+        assert "sys.version_info >= (3, 11)" in workflow
+        assert "command -v gh" in workflow

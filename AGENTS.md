@@ -13,8 +13,10 @@ agent-global instructions.
 3. Claim before editing and work only in the issue's isolated worktree.
 4. Keep the change inside `touches:` and run useful local preflight as needed.
 5. Open the PR through `create_pr.py` with `Closes #N`. Require the exact-head
-   `aru-governed-pr` server check: it runs the consumer's `.aru/verify.sh` and
-   validates `touches:` against the actual diff.
+   `aru-governed-pr` check: GitHub Actions orchestrates it exclusively on an
+   operator-owned `[self-hosted, macOS, ARM64, aru-ci]` runner, where it runs
+   the consumer's `.aru/verify.sh` and validates `touches:` against the actual
+   diff. Never fall back to a GitHub-hosted runner.
 6. Resolve every finding and thread. Tier 0 documentation and Tier 1 ordinary
    code do not wait for authoritative review; Tier 2 sensitive/contract and
    Tier 3 production/destructive changes require exactly one current-head
