@@ -24,8 +24,10 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    `touches:` boundary against the actual diff.
    For Tier 2-3, do not hand-pick or hand-edit authority. The external Driver
    owns the one continuation event in `docs/KERNEL-CONTRACT.md`;
-   `create_pr.py --refresh-reviewer <PR>` alone decides whether authority
-   changes. If substantive coding review aborts or loses capacity, pass the
+   `create_pr.py --refresh-reviewer <PR>` alone follows the validated repository
+   primary/fallback order and configured timeout (120 seconds by default) to
+   decide whether authority changes. If substantive coding review aborts or
+   loses capacity, pass the
    truthful reason through
    `--coding-reviewer-unavailable <reason>`.
 10. If feedback exists, use the feedback skill. If the server check fails, use

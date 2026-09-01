@@ -223,10 +223,24 @@ reviewer-registered:codeant
 ```
 
 The bootstrap `review:*` authority labels do not register providers. For Tier
-2-3, `create_pr.py` chooses one eligible authority from registered external
-services and locally configured, bound coding identities. Selection order is an
-implementation detail, not an operator promise. The author identity and GitHub
-actor are never eligible, and coding probes establish liveness only.
+2-3, `create_pr.py` follows optional repository label definitions:
+
+```text
+review-policy:primary=coderabbit
+review-policy:fallback-1=claude-code
+review-policy:fallback-2=openai-codex
+review-policy:fallback-3=xai-cursor
+review-policy:fallback-4=google-antigravity
+review-policy:timeout=120
+```
+
+Fallback ranks must be contiguous from 1, authorities unique and supported,
+and referenced external authorities registered. Missing declarations keep the
+compatible default: first registered external service, the four coding
+families, and a 120-second timeout. Malformed or contradictory declarations
+fail closed. Remove `reviewer-registered:<service>` when a trial expires or a
+provider is uninstalled. The author identity and GitHub actor are never
+eligible, and coding probes establish liveness only.
 
 Only locally configured identities are probed. If local coding-reviewer
 configuration is absent, registered external providers remain eligible; an
@@ -269,6 +283,27 @@ label. The wrapper subscription appears after `@`; the identity before it is
 the stable audit name. Non-Claude families currently allow one local identity
 each. Missing, malformed, repeated identities, repeated Claude subscriptions,
 or multiple non-Claude identities fail closed.
+
+Inspect the effective repository policy, external registrations, local coding
+inventory, bindings, exclusions, and configuration sources without mutation:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --reviewer-status --json
+```
+
+Probe bounded local coding-provider liveness only when explicitly needed. Pass
+the author identity and actor to show self-review exclusions:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+  --reviewer-status --probe-reviewers \
+  --agent codex-local --author-github-login gillella --json
+```
+
+The status reports external providers as registered or unregistered; their live
+availability remains `observed-on-pr`. It warns about registered services unused
+by the effective policy and sets `valid` false when a policy coding family has
+no local identity or a configured identity lacks a binding.
 
 The installer creates symlinks for exactly six skills under supported local
 agent skill directories and maintains the delimited Aru block in
@@ -703,8 +738,9 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
 ```
 
 Do not poll this command or hand-edit authority labels. The Driver follows the
-single-event rule in `docs/KERNEL-CONTRACT.md`, invokes once when due, and
-stops.
+single-event rule in `docs/KERNEL-CONTRACT.md`, invokes once at the configured
+timeout when due, and stops. Explicit unavailability is eligible immediately;
+each governed authority transition starts a fresh configured window.
 
 ### Step 8: merge the exact head
 
@@ -806,9 +842,9 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --help
 ### One authority and one continuation
 
 Tier 0-1 changes do not wait for review. For Tier 2-3, `create_pr.py` assigns
-the current-head authority and `merge_pr.py` validates its evidence. Do not
-encode provider preference or rotation in consumer rules; the helper's
-selection mechanics may change without changing the Kernel contract.
+the current-head authority from the validated primary/fallback policy and
+`merge_pr.py` validates its evidence. Do not duplicate that policy in consumer
+rules.
 
 No-op, paused, quota-limited, rate-limited, unsupported, unavailable, or errored
 review results cannot satisfy the gate. The external Driver responds through
@@ -1011,6 +1047,9 @@ true.
       can create issue-specific agent and author labels.
 - [ ] Each installed external provider has exactly one corresponding
       `reviewer-registered:<service>` label; uninstalled providers do not.
+- [ ] Optional `review-policy:*` labels declare one supported primary,
+      contiguous unique fallbacks, and a 60-86400 second timeout; reviewer
+      status reports the expected sources and no configuration errors.
 - [ ] Each coding reviewer identity has one
       `reviewer-binding:<identity>=<github-login>` and the actor is not an
       implementation author account.

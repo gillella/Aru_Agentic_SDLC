@@ -212,8 +212,28 @@ require one current-head authority distinct from the author. Unknown or
 unrecognized safe paths fail upward to Tier 2; malformed or unsafe paths fail
 to Tier 3. Installed external providers require
 `reviewer-registered:<service>`; eligible coding identities require a binding
-to a distinct GitHub actor. Authority selection order is an implementation
-detail, not a fairness, speed, or capacity promise.
+to a distinct GitHub actor. Optional repository label definitions configure the
+shared Tier 2-3 policy without adding a state store:
+
+```text
+review-policy:primary=coderabbit
+review-policy:fallback-1=claude-code
+review-policy:fallback-2=openai-codex
+review-policy:fallback-3=xai-cursor
+review-policy:fallback-4=google-antigravity
+review-policy:timeout=120
+```
+
+Fallback ranks must be contiguous, authorities unique and supported, and each
+referenced external authority registered. Without policy labels, the first
+registered external service is primary, the four coding families are ordered
+fallbacks, and the timeout is 120 seconds. Remove
+`reviewer-registered:<service>` when access expires or is uninstalled.
+
+Inspect the effective policy and configuration sources without mutation with
+`create_pr.py --reviewer-status --json`; add `--probe-reviewers` only for
+bounded local coding-provider liveness checks. Coding subscriptions remain in
+machine-local `ARU_CODING_REVIEWERS`.
 
 The Kernel never waits or polls. For each pending Tier 2-3 authority assignment,
 an external Driver owns the single continuation event defined in the
